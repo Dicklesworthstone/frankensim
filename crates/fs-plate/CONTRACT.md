@@ -40,13 +40,27 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   DKT element to independent Hessian projection/compliance energy; G3 checks
   half-turn periodicity, isotropic invariance and reciprocal quarter-turn
   equivalence. This is a homogeneous single-layer model, without laminate
-  extension/bending coupling or spatially varying grain.
+  extension/bending coupling. Piecewise grain is represented by independently
+  rotated element sections, not by interpolation within an element.
 - `PlateMesh::{rectangle, rectangle_boundary, from_unstructured, structured_equivalent, boundary_nodes, boundary_edges, total_area}` —
   structured and unstructured right-triangle and general 2D triangular meshes;
   `from_unstructured` validates quality, coordinate finiteness, connectivity, and positive
   signed area (`2A > 1e-15`). `structured_equivalent` reproduces `rectangle` bit-identically.
 - `PlateChart` and `PlateRegion` — mid-surface soundboard and plate chart representations
   binding geometry, thickness, material section, sub-regions, and boundary supports.
+  `with_element_sections` replaces the uniform section with one validated section
+  per triangle. `section_field` reports the active uniform/per-element field.
+  Region labels alone do not alter constitutive behavior; their triangle indices
+  can select entries of the section field. Changing mesh topology requires a
+  matching field; stale counts refuse at assembly.
+- `PlateSectionField` and `assemble_with_sections` use each triangle's full D,
+  thickness and density for both stiffness and translational/rotary mass in the
+  existing DKT assembler. Sections require finite positive thickness/density and
+  symmetric positive-definite D. The uniform assembler delegates to the same
+  kernel. Mesh admission is rechecked before indexing mutable chart data.
+  Interfaces coincide with triangle edges and share displacement/slope DOFs:
+  perfect bonding is assumed. Thickness is centered on the common mid-surface;
+  offsets, laminate coupling, interface slip and delamination are not modeled.
 - `triangulate_soundboard` — parametric guitar/instrument soundboard mesh generator.
 - `dkt_stiffness` — the 9×9 DKT bending stiffness. DOF convention per node:
   `(w, wx, wy)` with wx = ∂w/∂x, wy = ∂w/∂y (SLOPES; Batoz's published
@@ -65,7 +79,7 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   every frequency arrives as a certified eigenvalue interval and the
   in-window count is inertia-certified.
 - `PlateError` — typed refusals with stable `FS-PLATE-*` codes: bad
-  section, degenerate element (with the offending element id and 2A), bad
+  section, section count (expected and actual), degenerate element (with the offending element id and 2A), bad
   boundary (with out-of-bounds node index and node count), bad stiffener,
   forwarded modal refusals.
 
@@ -153,6 +167,12 @@ stiffened-panel literature case with a MAC mode-pairing table (two mesh
 densities, order-preserving pairing gate); named refusals (degenerate
 element, bad section, bad boundary, bad stiffener). All JSON-line evidence rows; all
 modal counts inertia-certified through fs-modal.
+Regional G1 integrates a manufactured constant-curvature field across two
+sections with different density, thickness and grain on three refinements;
+the global quadratic energy and translational/rotary mass match independent
+piecewise continuum integrals. G3 requires bit-identical pencils when a uniform
+section is repartitioned into equal element sections. G0 rejects wrong counts,
+nonphysical D/mass inputs, stale topology and invalid connectivity.
 
 ## No-claim boundaries
 - Bending only: NO membrane/in-plane DOFs, so no drilling stabilization is

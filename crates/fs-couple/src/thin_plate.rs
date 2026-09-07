@@ -18,7 +18,8 @@ use fs_material::visco::{RayleighDamping, ThermoelasticZener};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_plate::{
-    AssemblyOptions, EdgeSupport, PlateError, PlateMesh, PlateSection, assemble, modes,
+    AssemblyOptions, EdgeSupport, PlateChart, PlateError, PlateMesh, PlateModel, PlateRegion,
+    PlateSection, assemble, modes,
 };
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use fs_scenario::{IsotropicPlateThermal, RadiatingPlate, ThinPlate};
@@ -595,21 +596,97 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
     let omega11 = ss_omega11(&section, plate.length_m, plate.width_m);
     let lo = (0.25 * omega11).powi(2);
     let hi = (omega11 * (plate.n_modes as f64 + 2.0) * 4.0).powi(2);
-    let report = modes(&model, (lo, hi), &fs_modal::SliceOptions::default()).map_err(map_plate)?;
+    let projection = PlateProjection::new(&mesh, plate.length_m / nx as f64);
+    let mut out = harvest_radiators(
+        &model,
+        &projection,
+        (lo, hi),
+        plate.n_modes,
+        plate.damping_ratio,
+    )?;
+    if let Some(te) = thermoelastic {
+        for body in &mut out {
+            body.zeta += thermoelastic_zeta(te, body.omega, plate.thickness_m)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Mechanical and modal controls for an arbitrary, possibly heterogeneous chart.
+/// Regional materials do not imply a damping law: the scalar ratio here is
+/// authored separately. Thermal transport and nonlinear membranes are absent.
+#[derive(Debug, Clone)]
+pub struct PlateChartRadiation {
+    /// Uniform prestress and boundary support, applied to the chart boundary.
+    pub assembly: AssemblyOptions,
+    /// Eigenvalue search interval [(rad/s)²], not prescribed modal frequencies.
+    /// Only this interval is searched; it need not contain the fundamental.
+    pub eigenvalue_window: (f64, f64),
+    /// Maximum number of certified in-window modes to retain (at least one).
+    pub n_modes: usize,
+    /// Authored nonnegative viscous damping ratio at omega0 and 4 omega0.
+    pub damping_ratio: f64,
+    /// Nodal transverse forces per unit total drive force, in chart node order.
+    /// Finite signed weights must sum to one. Forces on supported w DOFs are
+    /// reacted by the support; they are not redistributed to free nodes.
+    pub unit_force_weights: Vec<f64>,
+}
+
+/// Derive radiators from the chart's actual element sections and geometry.
+/// Uses the same modal mass, signed area, force projection and piston model as
+/// [`certified_radiators`]. This is a perfectly bonded, flat linear plate with
+/// a compact baffled monopole observer, not a full acoustic field solution.
+///
+/// # Errors
+/// Invalid chart, force footprint, modal controls or eigenproblem refuse.
+pub fn certified_chart_radiators(
+    chart: &PlateChart,
+    options: &PlateChartRadiation,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    let model = chart.assemble(&[], &options.assembly).map_err(map_plate)?;
+    let projection = PlateProjection::with_force_weights(&chart.mesh, &options.unit_force_weights)?;
+    harvest_radiators(
+        &model,
+        &projection,
+        options.eigenvalue_window,
+        options.n_modes,
+        options.damping_ratio,
+    )
+}
+
+fn harvest_radiators(
+    model: &PlateModel,
+    projection: &PlateProjection,
+    window: (f64, f64),
+    n_modes: usize,
+    damping_ratio: f64,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    if n_modes == 0
+        || !damping_ratio.is_finite()
+        || damping_ratio < 0.0
+        || !window.0.is_finite()
+        || !window.1.is_finite()
+        || window.0 < 0.0
+        || window.1 <= window.0
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "plate needs positive modal budget, nonnegative finite damping and ordered nonnegative finite window",
+        });
+    }
+    let report = modes(model, window, &fs_modal::SliceOptions::default()).map_err(map_plate)?;
     if report.modes.is_empty() {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "plate modal window returned no certified modes",
         });
     }
-    let n_keep = plate.n_modes.min(report.modes.len());
-    let projection = PlateProjection::new(&mesh, plate.length_m / nx as f64);
+    let n_keep = n_modes.min(report.modes.len());
     let mut out = Vec::with_capacity(n_keep);
     for pair in report.modes.iter().take(n_keep) {
         let omega = pair.lambda.max(0.0).sqrt();
         if !(omega > 0.0) {
             continue;
         }
-        out.push(projection.mode(&model, &pair.phi, omega, plate.damping_ratio)?);
+        out.push(projection.mode(model, &pair.phi, omega, damping_ratio)?);
     }
     if out.len() >= 2 {
         let w0 = out[0].omega;
@@ -617,16 +694,11 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
         // splits the higher certified modes. Pinning at the first and
         // last kept frequencies would assign them identical zetas.
         if let Ok(rayleigh) =
-            RayleighDamping::from_two_points(w0, plate.damping_ratio, 4.0 * w0, plate.damping_ratio)
+            RayleighDamping::from_two_points(w0, damping_ratio, 4.0 * w0, damping_ratio)
         {
             for body in &mut out {
                 body.zeta = rayleigh.zeta_at(body.omega);
             }
-        }
-    }
-    if let Some(te) = thermoelastic {
-        for body in &mut out {
-            body.zeta += thermoelastic_zeta(te, body.omega, plate.thickness_m)?;
         }
     }
     if out.is_empty() {
@@ -648,6 +720,32 @@ struct PlateProjection {
 }
 
 impl PlateProjection {
+    fn with_force_weights(mesh: &PlateMesh, weights: &[f64]) -> Result<Self, AcousticRealizeError> {
+        let total: f64 = weights.iter().sum();
+        if weights.len() != mesh.node_count()
+            || weights.iter().any(|w| !w.is_finite())
+            || !total.is_finite()
+            || (total - 1.0).abs() > 1.0e-12
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "plate drive needs one finite force weight per node summing to one",
+            });
+        }
+        let mut nodal_area = vec![0.0; mesh.node_count()];
+        for &[i, j, k] in &mesh.tris {
+            let (a, b, c) = (mesh.nodes[i], mesh.nodes[j], mesh.nodes[k]);
+            let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0));
+            for node in [i, j, k] {
+                nodal_area[node] += area / 3.0;
+            }
+        }
+        Ok(Self {
+            area: nodal_area.iter().sum(),
+            nodal_area,
+            unit_force: weights.to_vec(),
+        })
+    }
+
     fn new(mesh: &PlateMesh, drive_strip_width: f64) -> Self {
         let mut nodal_area = vec![0.0; mesh.node_count()];
         let mut unit_force = vec![0.0; mesh.node_count()];
@@ -754,8 +852,294 @@ pub enum PlateMaterialModel {
 pub enum PlateThicknessConstraint {
     /// Current thickness [m] is fixed; mass changes with density.
     FixedThickness(f64),
-    /// Total mass [kg] is fixed; derive thickness as `m/(rho L W)`.
+    /// Assigned mass [kg] is fixed; derive thickness as `m/(rho area)`.
     FixedMass(f64),
+}
+
+/// A named, perfectly bonded plate region at one resolved material state.
+/// Its mass prescription applies to this region's actual triangles, not a
+/// bounding rectangle. Material state and authored mechanical choices remain
+/// separate; no thermal strain or history is inferred from a state-point query.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlateRegionMaterial {
+    /// Unique nonempty label and triangle indices, in the supplied mesh.
+    pub region: PlateRegion,
+    /// Exact resolved properties and their original source receipts.
+    pub material: ResolvedMaterialStatePoint,
+    /// Constitutive approximation and material-axis mapping.
+    pub model: PlateMaterialModel,
+    /// Fixed local thickness or fixed total mass of this region.
+    pub thickness_constraint: PlateThicknessConstraint,
+    /// Counterclockwise material-axis angle in the chart plane [rad].
+    pub material_angle_rad: f64,
+}
+
+/// One resolved region, exposed read-only by [`ResolvedPlateChart`].
+#[derive(Clone, Debug)]
+pub struct ResolvedPlateRegion {
+    /// Retained assignment, including source data and the original mass policy.
+    pub input: PlateRegionMaterial,
+    /// Sum of the assigned mid-surface triangle areas [m²].
+    pub area_m2: f64,
+    /// Mass derived from this region's section and area [kg].
+    pub mass_kg: f64,
+    /// Rotated section consumed by every triangle in this region.
+    pub section: PlateSection,
+}
+
+/// Compiled plate geometry and regional sources that cannot drift independently.
+/// All access is immutable; material substitution recompiles the same geometry
+/// and retained constraints. A cloned numerical chart is an authored copy and
+/// does not retain this binding's source authority automatically.
+#[derive(Clone, Debug)]
+pub struct ResolvedPlateChart {
+    chart: PlateChart,
+    regions: Vec<ResolvedPlateRegion>,
+    region_for_element: Vec<usize>,
+    mass_kg: f64,
+    identity: ContentHash,
+}
+
+impl ResolvedPlateChart {
+    /// Numerical chart accepted by the existing plate and acoustic operators.
+    #[must_use]
+    pub const fn chart(&self) -> &PlateChart {
+        &self.chart
+    }
+
+    /// Original assignments and their resolved section/area/mass.
+    #[must_use]
+    pub fn regions(&self) -> &[ResolvedPlateRegion] {
+        &self.regions
+    }
+
+    /// Exact material source for a triangle, or `None` for an invalid index.
+    #[must_use]
+    pub fn material_at_element(&self, element: usize) -> Option<&ResolvedMaterialStatePoint> {
+        self.region_for_element
+            .get(element)
+            .map(|&i| &self.regions[i].input.material)
+    }
+
+    /// Total mass integrated in mesh element order [kg].
+    #[must_use]
+    pub const fn mass_kg(&self) -> f64 {
+        self.mass_kg
+    }
+
+    /// Geometry, boundary-node set and resolved per-element material identity.
+    /// Region labels/order and repartitioning with identical resolved
+    /// per-element inputs do not affect it.
+    /// It excludes solver controls and unresolved state evolution; it is not
+    /// an identity for a complete acoustic scenario or the authored mass policy.
+    #[must_use]
+    pub const fn specimen_identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Replace one named region's material and rebuild geometry-derived inputs.
+    /// Other sources, triangle assignments, orientations and mass/thickness
+    /// prescriptions are retained. A failed rebind leaves `self` unchanged.
+    ///
+    /// # Errors
+    /// Unknown names or inadmissible replacement data refuse.
+    pub fn with_region_material(
+        &self,
+        name: &str,
+        material: &ResolvedMaterialStatePoint,
+    ) -> Result<Self, AcousticRealizeError> {
+        let i = self
+            .regions
+            .iter()
+            .position(|r| r.input.region.name == name)
+            .ok_or_else(|| plate_assignment_error(Some(name), None, "unknown material region"))?;
+        let mut inputs: Vec<_> = self.regions.iter().map(|r| r.input.clone()).collect();
+        inputs[i].material = material.clone();
+        compile_plate_material_chart(
+            self.chart.mesh.clone(),
+            self.chart.boundary_nodes.clone(),
+            inputs,
+        )
+    }
+}
+
+/// Compile complete, disjoint regional material assignments into the existing
+/// plate chart. Shared nodes bond regions perfectly. All local sections use the
+/// same plane-stress reduction as uniform specimens, with h = m/(rho A_region)
+/// for a fixed regional mass. No homogenization, interfacial law, thermal strain,
+/// nonlinear membrane, or continuous time evolution is synthesized.
+///
+/// # Errors
+/// Invalid geometry, duplicate/empty region labels, overlaps, gaps, invalid
+/// triangle indices or physical material/section inputs refuse. All triangles
+/// must be assigned exactly once; there is no fallback material.
+pub fn compile_plate_material_chart(
+    mesh: PlateMesh,
+    mut boundary_nodes: Vec<usize>,
+    inputs: Vec<PlateRegionMaterial>,
+) -> Result<ResolvedPlateChart, AcousticRealizeError> {
+    let mesh = PlateMesh::from_unstructured(mesh.nodes, mesh.tris).map_err(map_plate)?;
+    let mut assigned = vec![None; mesh.tris.len()];
+    let mut names = std::collections::BTreeSet::new();
+    for (r, input) in inputs.iter().enumerate() {
+        let name = input.region.name.as_str();
+        if name.trim().is_empty() || !names.insert(name) {
+            return Err(plate_assignment_error(
+                Some(name),
+                None,
+                "region labels must be nonempty and unique",
+            ));
+        }
+        if input.region.triangle_indices.is_empty() {
+            return Err(plate_assignment_error(
+                Some(name),
+                None,
+                "material region is empty",
+            ));
+        }
+        for &element in &input.region.triangle_indices {
+            let slot = assigned.get_mut(element).ok_or_else(|| {
+                plate_assignment_error(Some(name), Some(element), "triangle index outside mesh")
+            })?;
+            if slot.replace(r).is_some() {
+                return Err(plate_assignment_error(
+                    Some(name),
+                    Some(element),
+                    "triangle assigned more than once",
+                ));
+            }
+        }
+    }
+    let region_for_element: Vec<usize> = assigned
+        .into_iter()
+        .enumerate()
+        .map(|(e, r)| {
+            r.ok_or_else(|| {
+                plate_assignment_error(None, Some(e), "triangle has no material assignment")
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let mut areas = vec![0.0; inputs.len()];
+    let mut element_areas = Vec::with_capacity(mesh.tris.len());
+    // Fixed mesh order makes all regional integrals independent of the authored
+    // region order and of the order of triangle indices inside each region.
+    for (e, t) in mesh.tris.iter().enumerate() {
+        let (a, b, c) = (mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]]);
+        let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0));
+        areas[region_for_element[e]] += area;
+        element_areas.push(area);
+    }
+    let mut regions = Vec::with_capacity(inputs.len());
+    for (input, area_m2) in inputs.into_iter().zip(areas) {
+        if !area_m2.is_finite() || area_m2 <= 0.0 {
+            return Err(plate_assignment_error(
+                Some(&input.region.name),
+                None,
+                "region area is not finite and positive",
+            ));
+        }
+        let rho = plate_property(&input.material, DENSITY_PROPERTY, Density::DIMS)?;
+        let (e1, e2, nu, g) = plate_elasticity(&input.material, input.model)?;
+        let h = match input.thickness_constraint {
+            PlateThicknessConstraint::FixedThickness(h) => h,
+            PlateThicknessConstraint::FixedMass(m) => m / area_m2 / rho,
+        };
+        let section = PlateSection::orthotropic_plane_stress_at_angle(
+            e1,
+            e2,
+            nu,
+            g,
+            h,
+            rho,
+            input.material_angle_rad,
+        )
+        .map_err(map_plate)?;
+        let mass_kg = rho * h * area_m2;
+        if !mass_kg.is_finite() || mass_kg <= 0.0 {
+            return Err(plate_assignment_error(
+                Some(&input.region.name),
+                None,
+                "region mass overflows or underflows",
+            ));
+        }
+        regions.push(ResolvedPlateRegion {
+            input,
+            area_m2,
+            mass_kg,
+            section,
+        });
+    }
+    let sections: Vec<_> = region_for_element
+        .iter()
+        .map(|&r| regions[r].section)
+        .collect();
+    let mass_kg: f64 = sections
+        .iter()
+        .zip(element_areas)
+        .map(|(s, a)| s.density * s.thickness * a)
+        .sum();
+    if !mass_kg.is_finite() || mass_kg <= 0.0 {
+        return Err(plate_assignment_error(
+            None,
+            None,
+            "total plate mass overflows or underflows",
+        ));
+    }
+    boundary_nodes.sort_unstable();
+    boundary_nodes.dedup();
+    let chart = PlateChart::with_boundary_and_regions(
+        mesh,
+        sections[0],
+        boundary_nodes,
+        regions.iter().map(|r| r.input.region.clone()).collect(),
+    )
+    .map_err(map_plate)?
+    .with_element_sections(sections)
+    .map_err(map_plate)?;
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.regional-plate-specimen.v1");
+    identity.update(&(chart.mesh.nodes.len() as u64).to_le_bytes());
+    for &(x, y) in &chart.mesh.nodes {
+        identity.update(&x.to_bits().to_le_bytes());
+        identity.update(&y.to_bits().to_le_bytes());
+    }
+    identity.update(&(chart.mesh.tris.len() as u64).to_le_bytes());
+    for (t, &r) in chart.mesh.tris.iter().zip(&region_for_element) {
+        for &node in t {
+            identity.update(&(node as u64).to_le_bytes());
+        }
+        let region = &regions[r];
+        identity.update(region.input.material.identity().as_bytes());
+        identity.update(&[match region.input.model {
+            PlateMaterialModel::Isotropic => 0,
+            PlateMaterialModel::Orthotropic12 => 1,
+            PlateMaterialModel::Orthotropic21 => 2,
+        }]);
+        identity.update(&region.section.thickness.to_bits().to_le_bytes());
+        identity.update(&region.input.material_angle_rad.to_bits().to_le_bytes());
+    }
+    identity.update(&(chart.boundary_nodes.len() as u64).to_le_bytes());
+    for &node in &chart.boundary_nodes {
+        identity.update(&(node as u64).to_le_bytes());
+    }
+    Ok(ResolvedPlateChart {
+        chart,
+        regions,
+        region_for_element,
+        mass_kg,
+        identity: identity.finalize(),
+    })
+}
+
+fn plate_assignment_error(
+    region: Option<&str>,
+    element: Option<usize>,
+    what: &'static str,
+) -> AcousticRealizeError {
+    AcousticRealizeError::PlateAssignment {
+        region: region.map(str::to_owned),
+        element,
+        what,
+    }
 }
 
 /// Uniform material-bound plate with the original property-use receipts.
@@ -770,6 +1154,17 @@ pub struct ResolvedPlateSpecimen {
 }
 
 impl ResolvedPlateSpecimen {
+    /// Rotated constitutive section for an element or region of a plate chart.
+    /// This projection carries numeric operator inputs; retain this specimen
+    /// alongside the chart to retain its material receipts. Its full-rectangle
+    /// mass is not the mass of a region: assembly integrates the local rho*h.
+    ///
+    /// # Errors
+    /// Forwards section admission errors (the resolved specimen already passed it).
+    pub fn section(&self) -> Result<PlateSection, AcousticRealizeError> {
+        plane_stress_section(self.plate)
+    }
+
     /// Description consumed by the existing acoustic assembly and plate operators.
     #[must_use]
     pub const fn plate(&self) -> ThinPlate {
@@ -896,6 +1291,18 @@ fn bind_plate_elasticity(
     state: &ResolvedMaterialStatePoint,
     model: PlateMaterialModel,
 ) -> Result<(), AcousticRealizeError> {
+    let (e1, e2, nu12, g12) = plate_elasticity(state, model)?;
+    plate.e1_pa = e1;
+    plate.e2_pa = e2;
+    plate.nu12 = nu12;
+    plate.g12_pa = g12;
+    Ok(())
+}
+
+fn plate_elasticity(
+    state: &ResolvedMaterialStatePoint,
+    model: PlateMaterialModel,
+) -> Result<(f64, f64, f64, f64), AcousticRealizeError> {
     let (e1, e2, nu12, g12) = match model {
         PlateMaterialModel::Isotropic => {
             let e = plate_property(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
@@ -931,11 +1338,7 @@ fn bind_plate_elasticity(
             }
         }
     };
-    plate.e1_pa = e1;
-    plate.e2_pa = e2;
-    plate.nu12 = nu12;
-    plate.g12_pa = g12;
-    Ok(())
+    Ok((e1, e2, nu12, g12))
 }
 
 fn plate_property(
@@ -1166,10 +1569,8 @@ fn ss_omega11(section: &PlateSection, a: f64, b: f64) -> f64 {
         .sqrt()
 }
 
-fn map_plate(_err: PlateError) -> AcousticRealizeError {
-    AcousticRealizeError::InvalidDescription {
-        what: "thin-plate modal solve refused",
-    }
+fn map_plate(err: PlateError) -> AcousticRealizeError {
+    AcousticRealizeError::Plate(err)
 }
 
 #[cfg(test)]

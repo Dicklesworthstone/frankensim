@@ -21,8 +21,9 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use crate::elastic::OrthotropicElastic;
 
 pub use fs_matdb::{
-    ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
-    ElasticTensorSymmetry,
+    CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
+    ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
+    StrainTensorBasis, StrainTensorComponent,
 };
 
 /// Identity domain for a complete resolved material state-point bundle.
@@ -181,6 +182,7 @@ pub struct ScalarPropertyRequirement {
     quantity: QuantitySpec,
     hardness_test: Option<Box<fs_matdb::HardnessTestContext>>,
     elastic_component: Option<ElasticTensorComponent>,
+    strain_component: Option<StrainTensorComponent>,
     admissibility: ScalarAdmissibility,
 }
 
@@ -220,6 +222,7 @@ impl ScalarPropertyRequirement {
             quantity,
             hardness_test: None,
             elastic_component: None,
+            strain_component: None,
             admissibility,
         })
     }
@@ -233,6 +236,7 @@ impl ScalarPropertyRequirement {
         let mut requirement = Self::try_with_quantity(key.name(), key.quantity(), admissibility)?;
         requirement.hardness_test = key.hardness_test().cloned().map(Box::new);
         requirement.elastic_component = key.elastic_component();
+        requirement.strain_component = key.strain_component();
         Ok(requirement)
     }
 
@@ -248,11 +252,17 @@ impl ScalarPropertyRequirement {
         self.elastic_component
     }
 
+    #[must_use]
+    pub const fn strain_component(&self) -> Option<StrainTensorComponent> {
+        self.strain_component
+    }
+
     fn matches_key(&self, key: &PropertyKey) -> bool {
         self.name == key.name()
             && self.quantity == key.quantity()
             && self.hardness_test() == key.hardness_test()
             && self.elastic_component == key.elastic_component()
+            && self.strain_component == key.strain_component()
     }
 
     /// Exact property key queried from the material card.
@@ -575,6 +585,11 @@ fn resolve_scalar_property_set(
         if let Some(component) = requirement.elastic_component() {
             key = key
                 .with_elastic_component(component)
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.strain_component() {
+            key = key
+                .with_strain_component(component)
                 .map_err(context_error)?;
         }
         if queries.iter().any(|(_, prior)| *prior == key) {
@@ -1282,6 +1297,165 @@ pub fn resolve_elastic_tensor_state_point(
         resolved,
         stiffness_pa,
         descriptor,
+    })
+}
+
+/// Complete symmetric strain in its declared source coordinates. All six
+/// nominal values share one material card, query point and tensor declaration;
+/// individual uncertainties and source evidence remain in the resolved bundle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StrainTensorStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    strain: [f64; 6],
+    descriptor: StrainTensorComponent,
+}
+
+impl StrainTensorStatePoint {
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Dimensionless values in the declared order and shear convention.
+    #[must_use]
+    pub const fn strain(&self) -> &[f64; 6] {
+        &self.strain
+    }
+
+    #[must_use]
+    pub const fn basis(&self) -> StrainTensorBasis {
+        self.descriptor.basis()
+    }
+
+    #[must_use]
+    pub const fn source_tensor_identity(&self) -> ContentHash {
+        self.descriptor.source_tensor()
+    }
+}
+
+/// Resolve all six explicitly addressed symmetric strain components. Missing
+/// shear entries are not implicitly zero. This does not integrate a thermal
+/// expansion coefficient or infer a reference temperature or loading path.
+pub fn resolve_strain_tensor_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    components: &[PropertyKey; 6],
+    selection: MaterialPropertySelection,
+) -> Result<StrainTensorStatePoint, MaterialStatePointError> {
+    let descriptor = components[0].strain_component().ok_or_else(|| {
+        MaterialStatePointError::InvalidRequirement {
+            property: components[0].name().to_owned(),
+            reason: "every strain component requires explicit tensor coordinates",
+        }
+    })?;
+    let mut requirements = Vec::with_capacity(6);
+    for (index, key) in components.iter().enumerate() {
+        if !key.strain_component().is_some_and(|component| {
+            component.index() == index
+                && component.basis() == descriptor.basis()
+                && component.source_tensor() == descriptor.source_tensor()
+        }) {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: key.name().to_owned(),
+                reason: "strain components must address one complete tensor in one source basis",
+            });
+        }
+        requirements.push(ScalarPropertyRequirement::try_with_key(
+            key,
+            ScalarAdmissibility::Finite,
+        )?);
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let strain = core::array::from_fn(|index| {
+        resolved
+            .property_by_key(&components[index])
+            .expect("all strain component requirements were resolved")
+            .value_si()
+    });
+    Ok(StrainTensorStatePoint {
+        resolved,
+        strain,
+        descriptor,
+    })
+}
+
+/// Nominal strain and source joint statistics selected from the same immutable
+/// material-card pack. Private fields prevent a caller-supplied covariance from
+/// acquiring the authority of a queried source block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointStrainTensorStatePoint {
+    nominal: StrainTensorStatePoint,
+    joint: JointUsageReceipt,
+    identity: ContentHash,
+}
+
+impl JointStrainTensorStatePoint {
+    #[must_use]
+    pub const fn nominal(&self) -> &StrainTensorStatePoint {
+        &self.nominal
+    }
+
+    /// Covariance is packed in the six source-coordinate positions. An unknown
+    /// correlation never implies independence or a zero covariance.
+    #[must_use]
+    pub const fn joint_receipt(&self) -> &JointUsageReceipt {
+        &self.joint
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Resolve the six nominal components and their joint statistics together.
+/// The existing joint-query selection policies apply; this does not fabricate
+/// covariance from marginal widths, integrate a path or rotate a tensor.
+pub fn resolve_joint_strain_tensor_state_point(
+    pack: &fs_matdb::NormalizedMaterialCardPack,
+    point: &QueryPoint,
+    components: &[PropertyKey; 6],
+    selection: SelectionPolicy,
+) -> Result<JointStrainTensorStatePoint, MaterialStatePointError> {
+    let nominal = resolve_strain_tensor_state_point(
+        pack.card(),
+        point,
+        components,
+        match selection {
+            SelectionPolicy::SingleClaimOnly => MaterialPropertySelection::SingleClaimOnly,
+            SelectionPolicy::PreferObservationBacked => {
+                MaterialPropertySelection::PreferObservationBacked
+            }
+        },
+    )?;
+    let answer = pack
+        .claims_pack()
+        .query_joint_typed(components, point, selection)
+        .map_err(|source| MaterialStatePointError::Query {
+            property: "strain tensor joint statistics".into(),
+            source,
+        })?;
+    for (key, member) in components.iter().zip(&answer.members) {
+        let scalar = nominal
+            .resolved()
+            .property_by_key(key)
+            .expect("all nominal tensor components were resolved");
+        if scalar.answer().receipt != member.receipt {
+            return Err(MaterialStatePointError::Query {
+                property: key.name().to_owned(),
+                source: MatDbError::ReceiptMismatch {
+                    field: "joint strain member",
+                },
+            });
+        }
+    }
+    let mut identity = DomainHasher::new("org.frankensim.fs-material.joint-strain-state-point.v1");
+    identity.update(nominal.resolved().identity().as_bytes());
+    identity.update(answer.receipt.content_hash().as_bytes());
+    Ok(JointStrainTensorStatePoint {
+        nominal,
+        joint: answer.receipt,
+        identity: identity.finalize(),
     })
 }
 

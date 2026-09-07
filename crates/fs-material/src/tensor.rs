@@ -5,6 +5,10 @@
 
 use crate::Voigt;
 
+pub use fs_matdb::{
+    StrainTensorBasis, StrainTensorNotation, StressTensorBasis, StressTensorNotation,
+};
+
 /// Trace of a Voigt tensor.
 #[must_use]
 pub fn trace(v: &Voigt) -> f64 {

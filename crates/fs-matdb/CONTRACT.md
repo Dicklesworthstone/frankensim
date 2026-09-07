@@ -372,9 +372,50 @@ G0/G3 tests exercise source import in Pa/kPa, material/interface transport, all
 selection policies, exact-context replay, context tampering, missing components
 and unsupported points. The `fs-solid` test then uses the portable material card
 in an actual P1 tet assembly and checks forces/energy against direct contraction.
-These are synthetic software checks. Full rotated uncertainty/covariance
-propagation, arbitrary coupled tensor laws, and second-order tensor payloads are
-still absent; no observed material or calibrated frame is invented.
+These are synthetic software checks. Full uncertain-stiffness/frame covariance
+propagation and arbitrary coupled tensor laws remain absent; no observed
+material or calibrated frame is invented. Existing joint strain statistics can
+now feed fs-material's joint strain state and fs-solid's conditional covariance
+transform for fixed orientation and stiffness. L1 still performs no rotation
+and grants no new covariance authority.
+
+`StrainTensorBasis` / `StrainTensorNotation` declare symmetric second-order
+strain coordinates for numerical consumers. Physical tensor shear,
+engineering strain shear (`2 epsilon_ij`) and Mandel shear are distinct from
+elastic-matrix conventions; component ordering reuses the existing six-position
+order. `fs-material::tensor` re-exports these descriptors, and `fs-solid` uses
+them for the second-order thermal-strain transform feeding its tet operator.
+`StressTensorBasis` / `StressTensorNotation` separately declare small-strain
+Cauchy stress coordinates for computed observations. Tensor and engineering
+stress shear are physical `sigma_ij`; Mandel uses `sqrt(2) sigma_ij`. These
+descriptors are re-exported through fs-material and consumed by fs-solid's
+actual thermal stress recovery and frame transform. They do not yet add a
+stress-component PropertyKey context, portable pack encoding or source import.
+
+`StrainTensorComponent` attaches one of six explicit positions and a nonzero
+source tensor identity to a dimensionless `PropertyKey`. Its 67-byte canonical
+descriptor binds strain-specific notation, order, index and both identities;
+symmetry is inherent in this six-coordinate type. Expansion coefficients [1/K]
+and competing semantic dimensionless kinds refuse. Exact and pinned queries
+must match this context; name-only queries never erase it.
+
+Strain claims use `property-claim.v6`. Normalized-pack v6
+(`normalized-pack.v6`) adds an optional strain descriptor after the elastic
+component field. Existing claim/pack v1–v5 encodings remain frozen. The decoder
+refuses unknown tags, malformed indices/identities, changed claim identities,
+or a new payload relabeled as an older schema. Material/interface wrappers
+retain the complete nested pack and receipt replay rechecks the selected keys.
+
+Manifest v7 adds `strain-component <claim> <tensor|engineering|mandel>
+<xx-yy-zz-xy-yz-zx|xx-yy-zz-yz-zx-xy> <frame-hash> <source-tensor-hash>
+<index>` (tab separated, full 64-digit hex identities, index in 0..6).
+Compiler/source-envelope identities use v7 and include all declarations;
+older manifests refuse this record. Duplicate, unused and invalid declarations
+refuse. Partial tables may be imported as data, while the material resolver
+requires six compatible components at one supported point. The importer does
+not infer a thermal reference temperature or integrate a temperature path.
+G0/G3 covers every notation/order in material/interface import, complete-key
+selection under all policies, receipt replay and missing/mixed-context refusal.
 
 The offline compiler now admits a v2 manifest for material/interface sources:
 `property <source> <target> <kind|dimensional>` and `axis <source> <target>`

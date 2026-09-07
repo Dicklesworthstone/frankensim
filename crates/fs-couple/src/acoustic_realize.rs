@@ -11,7 +11,10 @@ use crate::modal_acoustic_time::{
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::{blowing_envelope, realize_reed_bore, reed_structural};
-use crate::thin_plate::{PlateBank, VkBody, certified_radiators, vk_plate_phs};
+use crate::thin_plate::{
+    PlateBank, PlateChartRadiation, VkBody, certified_chart_radiators, certified_radiators,
+    vk_plate_phs,
+};
 use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
     slit_lay,
@@ -58,6 +61,17 @@ pub enum AcousticRealizeError {
     Ambient(String),
     /// Modal time-stepper refusal.
     Modal(ModalAcousticTimeError),
+    /// Plate mesh, section, or eigenproblem refusal, retaining the owner diagnostic.
+    Plate(fs_plate::PlateError),
+    /// A named plate-material assignment cannot be compiled.
+    PlateAssignment {
+        /// Region label, when the failure belongs to a particular assignment.
+        region: Option<String>,
+        /// Mesh triangle index, when applicable.
+        element: Option<usize>,
+        /// Failed assignment condition.
+        what: &'static str,
+    },
     /// Waveguide TMM refusal.
     Duct(fs_duct::DuctError),
     /// Kirchhoff–Carrier / pHS refusal.
@@ -79,6 +93,15 @@ impl core::fmt::Display for AcousticRealizeError {
             }
             Self::Ambient(what) => write!(f, "FS-COUPLE-ASSEMBLY-GAS: {what}"),
             Self::Modal(e) => write!(f, "{e}"),
+            Self::Plate(e) => write!(f, "{e}"),
+            Self::PlateAssignment {
+                region,
+                element,
+                what,
+            } => write!(
+                f,
+                "FS-COUPLE-PLATE-ASSIGNMENT: region {region:?}, element {element:?}: {what}"
+            ),
             Self::Duct(e) => write!(f, "{e}"),
             Self::Nonlinear(e) => write!(f, "FS-COUPLE-ASSEMBLY-NL: {e}"),
             Self::Reed { what } => write!(f, "FS-COUPLE-REED: {what}"),
@@ -109,6 +132,35 @@ pub struct RealizedAssembly {
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
+    realize_assembly_inner(assembly, None)
+}
+
+/// Realize an assembly with a linear plate chart, including regional materials
+/// and an explicit force footprint. The chart replaces `assembly.plate`, which
+/// must be absent. It feeds the existing body ports for strings, ducts, cavities
+/// and the same pressure observer; extra authored lumped bodies still compose.
+///
+/// # Errors
+/// Conflicting plate descriptions, invalid chart/controls, or the ordinary
+/// assembly admission and stepping errors refuse.
+pub fn realize_assembly_with_plate_chart(
+    assembly: &AcousticAssembly,
+    chart: &fs_plate::PlateChart,
+    options: &PlateChartRadiation,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
+    if assembly.plate.is_some() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "chart assembly requires the uniform plate description to be absent",
+        });
+    }
+    realize_assembly_inner(assembly, Some((chart, options)))
+}
+
+#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
+fn realize_assembly_inner(
+    assembly: &AcousticAssembly,
+    chart: Option<(&fs_plate::PlateChart, &PlateChartRadiation)>,
+) -> Result<RealizedAssembly, AcousticRealizeError> {
     if assembly.string.is_none() && assembly.duct.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "assembly has neither a string nor a duct",
@@ -137,6 +189,11 @@ pub fn realize_assembly(
     let n = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
+    if let Some((chart, options)) = chart {
+        bodies
+            .linear
+            .extend(certified_chart_radiators(chart, options)?);
+    }
     bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz);
     let dirac_base = assembly.string.as_ref().is_some_and(|s| s.moving_end);
     let dirac_string_only = dirac_base && assembly.duct.is_none();

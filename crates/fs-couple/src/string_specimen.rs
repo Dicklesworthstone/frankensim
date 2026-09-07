@@ -7,12 +7,14 @@
 //! inputs. Rebinding can hold tension or axial extension fixed, or solve the
 //! tension for a declared undamped fundamental. At fixed loaded length, the
 //! cross-section can hold radius or total mass fixed during material comparison.
+//! An explicitly integrated thermal eigenstrain can set fixed-support prestress.
 //! These are independent specimen comparisons, not thermal evolution.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::EvaluationDecision;
 use fs_material::state_point::{
-    DENSITY_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
+    DENSITY_PROPERTY, IntegratedIsotropicThermalExpansion, ResolvedMaterialStatePoint,
+    YOUNG_MODULUS_PROPERTY,
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec, Time};
 use fs_scenario::PrestressedString;
@@ -61,6 +63,19 @@ pub enum StringPrestress {
         /// This is an applicability assumption, not a measured yield limit.
         linear_strain_limit: f64,
     },
+    /// Small-strain thermoelastic tension `EA * (epsilon_total - epsilon_th)`.
+    /// All strains refer to the same stress-free reference configuration.
+    /// Raw values are authored mechanical inputs; use the thermal binding below
+    /// to attach a sourced expansion path. Geometry describes the current state.
+    FixedThermalExtension {
+        /// Stress-free length [m] at the expansion path's reference temperature.
+        reference_stress_free_length_m: f64,
+        /// Signed integrated free linear thermal strain, not instantaneous alpha.
+        free_thermal_strain: f64,
+        /// Caller-declared bound on total, thermal and elastic strain magnitudes.
+        /// An applicability assumption, not a sourced yield limit.
+        linear_strain_limit: f64,
+    },
     /// Solve tension for the primary, undamped pinned-pinned bending mode [Hz].
     /// Includes bending stiffness. It does not tune a damped/nonlinear pressure
     /// waveform or the independently detuned second polarization.
@@ -74,6 +89,7 @@ pub struct ResolvedStringSpecimen {
     geometry_constraint: StringGeometryConstraint,
     prestress: StringPrestress,
     material: ResolvedMaterialStatePoint,
+    thermal_expansion: Option<IntegratedIsotropicThermalExpansion>,
     area_m2: f64,
     second_moment_m4: f64,
     mass_kg: f64,
@@ -103,6 +119,13 @@ impl ResolvedStringSpecimen {
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
         &self.material
+    }
+
+    /// Source path used by the thermal binding, separate from authored prestress.
+    /// `None` for nonthermal bindings and raw authored thermal strain.
+    #[must_use]
+    pub const fn thermal_expansion(&self) -> Option<&IntegratedIsotropicThermalExpansion> {
+        self.thermal_expansion.as_ref()
     }
 
     /// Uniform cross-sectional area [m²].
@@ -429,14 +452,62 @@ pub fn with_uniform_circular_material_and_prestress(
     )
 }
 
+/// Bind uniform temperature-induced prestress to the existing circular string.
+/// Uses `epsilon_elastic = (L-L_ref)/L_ref - integral(alpha(T) dT)` and
+/// the current resolved E and area. This is additive small-strain elasticity,
+/// as in MIT 16.20, section 3.7, equations (3.27)-(3.28):
+/// <https://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_no_solutions.pdf>.
+///
+/// Expansion and elasticity must share the exact current card, coordinates and
+/// axis quantity conventions; their independently resolved requirements may differ.
+/// Both receipts are retained. Current radius or mass is explicitly prescribed;
+/// transverse contraction and a thermal history during playback are not solved.
+/// A force-controlled comparison uses [`StringPrestress::FixedTension`] instead.
+///
+/// # Errors
+/// Mismatched source/state or invalid strain refuses, in addition to the usual
+/// specimen refusals. Slack/compression needs a buckling/contact solver; large
+/// thermal strain needs finite-deformation mechanics. Neither is clamped away.
+pub fn with_uniform_circular_thermal_extension(
+    string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
+    state: &ResolvedMaterialStatePoint,
+    expansion: &IntegratedIsotropicThermalExpansion,
+    reference_stress_free_length_m: f64,
+    linear_strain_limit: f64,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    let current = expansion.current().resolved();
+    if state.card_identity() != current.card_identity()
+        || state.query_point() != current.query_point()
+        || state.axis_quantities() != current.axis_quantities()
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "string elasticity and thermal expansion require the same current card and physical state",
+        });
+    }
+    let mut specimen = with_uniform_circular_material_and_constraints(
+        string,
+        geometry_constraint,
+        state,
+        StringPrestress::FixedThermalExtension {
+            reference_stress_free_length_m,
+            free_thermal_strain: expansion.free_linear_strain(),
+            linear_strain_limit,
+        },
+    )?;
+    specimen.thermal_expansion = Some(expansion.clone());
+    Ok(specimen)
+}
+
 /// Resolve independent cross-section and prestress constraints through the same
 /// material binding. The template always supplies the current loaded length.
 ///
 /// Fixed radius changes mass when density changes. Fixed mass changes radius,
 /// axial/bending stiffness and observer width coherently; linear density remains
 /// `m/L` to floating-point roundoff. All prestress policies apply to the resulting
-/// geometry. No conservation across time, transverse contraction, or thermal
-/// stress is inferred. The authored constraint is retained separately from the
+/// geometry. Thermal strain is supplied explicitly by its prestress prescription;
+/// it is never inferred from density. No conservation across time or transverse
+/// contraction is solved. The authored constraint is retained separately from the
 /// material receipts; specimen identity binds the resolved radius, not the choice
 /// of constraint that produced it.
 ///
@@ -518,6 +589,7 @@ pub fn with_uniform_circular_material_and_constraints(
         geometry_constraint,
         prestress,
         material: state.clone(),
+        thermal_expansion: None,
         area_m2,
         second_moment_m4,
         mass_kg,
@@ -572,6 +644,33 @@ fn resolve_prestress(
                 ));
             }
             string.axial_stiffness_n * strain
+        }
+        StringPrestress::FixedThermalExtension {
+            reference_stress_free_length_m,
+            free_thermal_strain,
+            linear_strain_limit,
+        } => {
+            if !positive(reference_stress_free_length_m)
+                || !positive(linear_strain_limit)
+                || !free_thermal_strain.is_finite()
+            {
+                return Err(refuse(
+                    "thermal extension requires positive reference length/limit and finite strain",
+                ));
+            }
+            let total_strain =
+                (string.length_m - reference_stress_free_length_m) / reference_stress_free_length_m;
+            let elastic_strain = total_strain - free_thermal_strain;
+            if !positive(elastic_strain)
+                || [total_strain, free_thermal_strain, elastic_strain]
+                    .iter()
+                    .any(|strain| !strain.is_finite() || strain.abs() > linear_strain_limit)
+            {
+                return Err(refuse(
+                    "thermal string strain exceeds its linear tensile domain; slack or finite deformation needs another solver",
+                ));
+            }
+            string.axial_stiffness_n * elastic_strain
         }
         StringPrestress::TargetFundamentalHz(frequency_hz) => {
             if !positive(frequency_hz) {

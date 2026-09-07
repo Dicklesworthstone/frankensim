@@ -86,6 +86,104 @@ updated fixed-topology chart.
 No material name, constant-alpha assumption, or Euler-disc geometry appears in
 this layer.
 
+`TetThermalStrainState::try_from_oriented_strain` connects a source-frame
+symmetric strain to that same thermal operator. `StrainTensorBasis` declares
+physical tensor shear, engineering strain shear (`2 epsilon_ij`), or Mandel
+shear and either existing six-component order. These are strain conventions,
+not stress-vector or elastic-matrix scaling. The numerical transform is the
+second-order law `epsilon' = Q epsilon Q^T`. The admitted
+`ElasticTensorTransformReceipt` supplies the target frame and elastic-state
+identity; a source frame mapped to itself requires identity rotation. Identity
+rotation preserves normalized Mandel bits. Nonfinite input, improper rotation,
+shear overflow, complete nonzero-to-zero rotation underflow, and target strains
+outside the declared Mandel component ceiling refuse.
+
+`ThermalStrainTransformReceipt` retains the source six-vector, basis, both
+frames, rotation and executable thermal state. State identity domain
+`org.frankensim.fs-solid.thermal-strain-frame-transform.v1` binds the ordinary
+thermal-state identity (temperatures, law, elastic state, target strain and
+validity ceiling) plus the source vector and complete transform. The existing
+constructor's identity preimage is unchanged. G1/G3 compares all six source
+conventions against independent second-order rotation, trace/Frobenius
+invariance, and four-index elastic stress contraction; actual thermal loads,
+constrained displacement and fixed-topology geometry reproduce affine
+anisotropic expansion. This is nominal, synthetic numerical evidence. The
+upstream law must supply the integrated strain and admit its temperature path;
+no coefficient integration, frame calibration, portable transform codec or
+uncertainty propagation is added here.
+
+`try_from_resolved_strain` connects the complete six-component
+`fs-material::StrainTensorStatePoint` (in its `state_point` module) to this same
+operator ingress. The selected card/claim/query-point bundle identity becomes
+the upstream thermal-strain identity; callers still declare the strain to be
+stress-free and integrated over the supplied temperature path. The G1/G3 test
+now loads every convention through a portable material card before checking
+the same independent stress, nodal force, displacement and geometry oracles.
+
+`try_from_joint_strain` additionally retains admitted source covariance or its
+exact unknown-correlation reason. With a fixed proper rotation Q and fixed
+admitted stiffness C, it computes `Sigma_e = A Sigma_source A^T` and
+`Sigma_stress = C Sigma_e C^T`, where A includes source shear scaling, order
+and the second-order frame transform. Both outputs use target Mandel order;
+strain covariance is dimensionless squared and free-stress covariance is Pa
+squared. No off-diagonal covariance is discarded. The fixed 6x6 calculations
+publish symmetric results or refuse nonfinite values, negative variances and
+complete loss of a nonzero covariance. No eigenvalue clipping manufactures
+positive semidefiniteness.
+
+`JointThermalStrainTransformReceipt` holds the executable nominal receipt,
+conditional covariance outcome and source joint-state identity. Domain
+`joint-thermal-strain-transform.v1` binds all of them and the output covariance
+bits. G3 compares all six conventions and both source policies with a correlated
+finite ensemble rotated by an independent full-tensor calculation, including
+covariance of actual thermal nodal loads. G0 retains NoBlock, PartialMembership
+and UnstatedMarginal outcomes and checks arithmetic loss/overflow. These are
+conditional linear second moments, not confidence intervals or guarantees that
+all realizations remain in the admitted small-strain/material domain. Uncertain
+stiffness, orientation, temperatures, their cross-correlations and nonlinear
+uncertainty propagation remain unsupported; unknown covariance is never zero.
+
+`recover_thermal_stress` consumes the accepted thermal displacement and its
+exact mesh, thermal field, material coefficients and constraints. It computes
+the actual P1 elastic strain `B u - epsilon_free`, Cauchy stress
+`C (B u - epsilon_free)`, stored elastic energy `V/2 epsilon_elastic:sigma`,
+and full nodal internal force `integral B^T sigma dV`. These forces are support
+reactions on fixed DOFs and equilibrium residuals on free DOFs; residual entries
+are retained. Free expansion produces zero stress up to numerical error, while
+constrained expansion produces the corresponding physical stress and energy.
+The caller names the reference mesh frame and supplies a finite positive
+ceiling applied to both total and elastic Mandel strains. This is a declared
+small-strain applicability bound, not a yield or material-validation certificate.
+
+Recovery rechecks the original thermal-load identity and the actual density
+and stiffness bits retained under `thermal-response-input.v1`; changing a law
+while reusing its caller-supplied material ID therefore refuses. Existing v1
+load and displacement identity formats are unchanged. The immutable
+`TetThermalStressReport` binds those inputs, solution, frame, strain ceiling,
+element outputs, nodal forces and energy under `thermal-stress-recovery.v1`.
+Cancellation is checked before allocation and at every element boundary; no
+partial field is published. Existing mesh/element budgets bound report storage.
+
+`stress_in_frame` expresses an element's recovered stress by `Q sigma Q^T`
+with an explicit `StressTensorBasis`. Physical and engineering stress shear
+are both `sigma_ij`; Mandel shear is `sqrt(2) sigma_ij`. Engineering-strain
+factor two must never be applied to stress. Both existing component orders
+are supported. Proper rotation and nonzero frames are required; a frame mapped
+to itself requires identity rotation. Nonfinite and complete nonzero-to-zero
+transforms refuse. `StressTensorTransformReceipt` retains source stress,
+report/element identity, both frames, target convention/order, rotation and
+output, binding them under `stress-frame-transform.v1`.
+
+G1/G3 checks free expansion and two supported bodies with distinct thermal
+strains/stiffness against closed-form displacement, stress, reaction and
+energy formulas. All six output conventions are compared with independent
+full-tensor rotation and stress/strain work conjugacy. G0/G4 checks reused
+material IDs with changed stiffness, changed thermal fields/constraints,
+strain bounds, invalid frames and pre-cancellation. This is nominal linear
+elastic recovery in the reference geometry, not stress-source pack import,
+finite-deformation/Piola stress, yield/buckling admission, evolved-state
+recoupling, propagated solved-stress uncertainty or measured validation.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1

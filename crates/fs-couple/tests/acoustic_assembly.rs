@@ -1385,8 +1385,18 @@ fn certified_plate_radiates_without_named_hertz() {
 
 mod material_plate_tests {
     use super::*;
+    use fs_couple::acoustic_realize::realize_assembly_with_plate_chart;
+    use fs_couple::material_assembly::{
+        AcousticMaterialBindings, CompiledMaterialPlate, MaterialAssemblyError, MaterialSource,
+        PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, compile_material_assembly,
+    };
+    use fs_couple::string_specimen::{
+        StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
+    };
     use fs_couple::thin_plate::{
-        PlateMaterialModel as Model, PlateThicknessConstraint as Thickness, certified_radiators,
+        PlateChartRadiation, PlateMaterialModel as Model, PlateRegionMaterial,
+        PlateThicknessConstraint as Thickness, ResolvedPlateSpecimen, certified_chart_radiators,
+        certified_radiators, compile_plate_material_chart,
         with_uniform_plate_material_state as bind,
     };
     use fs_evidence::ValidityDomain;
@@ -1398,12 +1408,15 @@ mod material_plate_tests {
         MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
         ScalarPropertyRequirement, resolve_material_state_point,
     };
+    use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateRegion};
     use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticType, ValueForm};
     use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
-    fn state(properties: &[(&str, QuantitySpec, f64)]) -> ResolvedMaterialStatePoint {
+    fn material_card(
+        properties: &[(&str, QuantitySpec, f64)],
+        validity: ValidityDomain,
+    ) -> MaterialCard {
         let mut claims = ClaimSet::new();
-        let mut requirements = Vec::new();
         for &(key, quantity, value) in properties {
             claims
                 .insert_claim(PropertyClaim {
@@ -1412,7 +1425,7 @@ mod material_plate_tests {
                         value,
                         dims: quantity.dims(),
                     },
-                    validity: ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+                    validity: validity.clone(),
                     interpolation: InterpolationPolicy::ConstantWithinValidity,
                     uncertainty: UncertaintyModel::Unstated,
                     provenance: Provenance {
@@ -1423,16 +1436,8 @@ mod material_plate_tests {
                     observations: vec![],
                 })
                 .unwrap();
-            requirements.push(
-                ScalarPropertyRequirement::try_with_quantity(
-                    key,
-                    quantity,
-                    ScalarAdmissibility::Finite,
-                )
-                .unwrap(),
-            );
         }
-        let card = MaterialCard::assemble(
+        MaterialCard::assemble(
             MaterialStateId {
                 chemistry: "synthetic-plate".into(),
                 phase: "solid".into(),
@@ -1442,7 +1447,25 @@ mod material_plate_tests {
             claims,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn state(properties: &[(&str, QuantitySpec, f64)]) -> ResolvedMaterialStatePoint {
+        let card = material_card(
+            properties,
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        );
+        let requirements: Vec<_> = properties
+            .iter()
+            .map(|&(key, quantity, _)| {
+                ScalarPropertyRequirement::try_with_quantity(
+                    key,
+                    quantity,
+                    ScalarAdmissibility::Finite,
+                )
+                .unwrap()
+            })
+            .collect();
         resolve_material_state_point(
             &card,
             &QueryPoint::new().with("T", 293.15).unwrap(),
@@ -1474,6 +1497,992 @@ mod material_plate_tests {
             n_modes: 1,
             damping_ratio: 0.002,
             ..steel_panel()
+        }
+    }
+
+    fn source<'a>(card: &'a MaterialCard, point: &'a QueryPoint) -> MaterialSource<'a> {
+        MaterialSource {
+            card,
+            point,
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        }
+    }
+
+    fn isotropic_card(rho: f64) -> MaterialCard {
+        material_card(
+            &[
+                ("density", QuantitySpec::dimensional(Density::DIMS), rho),
+                (
+                    "young_modulus",
+                    QuantitySpec::dimensional(Pressure::DIMS),
+                    12e9,
+                ),
+                ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+            ],
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        )
+    }
+
+    #[test]
+    fn g1_card_compiler_matches_explicit_binding_and_retains_only_required_sources() {
+        let card = isotropic_card(450.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.02;
+        input.plate = Some(template());
+        let original = input.clone();
+        let bindings = AcousticMaterialBindings {
+            string: Some(StringMaterialBinding {
+                source: source(&card, &point),
+                geometry: StringGeometryConstraint::FixedRadius(0.0008),
+                prestress: StringPrestress::FixedTension(20.0),
+            }),
+            plate: Some(PlateMaterialBinding::Uniform {
+                source: source(&card, &point),
+                model: Model::Isotropic,
+                thickness: Thickness::FixedThickness(0.003),
+            }),
+        };
+        let compiled = compile_material_assembly(&input, &bindings).unwrap();
+        let string = compiled.string().unwrap();
+        let Some(CompiledMaterialPlate::Uniform(plate)) = compiled.plate() else {
+            panic!("uniform plate");
+        };
+        assert_eq!(string.material().properties().len(), 2);
+        assert_eq!(plate.material().properties().len(), 3);
+        assert_eq!(string.material().card_identity(), card.content_hash());
+        assert_eq!(plate.material().card_identity(), card.content_hash());
+        assert!(string.material().property("poisson_ratio").is_none());
+        assert_eq!(
+            string.material().card_identity(),
+            plate.material().card_identity()
+        );
+        assert_eq!(string.material().state_coordinate("T"), Some(293.15));
+        assert_ne!(input.ambient.temperature_k, 293.15);
+        let area = core::f64::consts::PI * 0.0008_f64.powi(2);
+        assert!((string.mass_kg() / (450.0 * area * 0.65) - 1.0).abs() < 1e-13);
+        assert!((plate.mass_kg() / (450.0 * 0.6 * 0.35 * 0.003) - 1.0).abs() < 1e-13);
+        let mut explicit = input.clone();
+        explicit.string = Some(
+            with_uniform_circular_material_and_constraints(
+                input.string.clone().unwrap(),
+                bindings.string.as_ref().unwrap().geometry,
+                string.material(),
+                StringPrestress::FixedTension(20.0),
+            )
+            .unwrap()
+            .string(),
+        );
+        explicit.plate = Some(
+            bind(
+                input.plate.unwrap(),
+                plate.material(),
+                Model::Isotropic,
+                Thickness::FixedThickness(0.003),
+            )
+            .unwrap()
+            .plate(),
+        );
+        assert_eq!(compiled.assembly(), &explicit);
+        let result = compiled.realize().unwrap();
+        assert!(peak_abs(&result.pressure_pa) > 1e-7);
+        assert_eq!(result, realize_assembly(&explicit).unwrap());
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn g3_card_compiler_replaces_string_and_plate_material_at_fixed_mass() {
+        let cards = [isotropic_card(450.0), isotropic_card(1800.0)];
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.02;
+        input.plate = Some(template());
+        let mut results = Vec::new();
+        for card in &cards {
+            results.push(
+                compile_material_assembly(
+                    &input,
+                    &AcousticMaterialBindings {
+                        string: Some(StringMaterialBinding {
+                            source: source(card, &point),
+                            geometry: StringGeometryConstraint::FixedMass(0.001),
+                            prestress: StringPrestress::FixedTension(20.0),
+                        }),
+                        plate: Some(PlateMaterialBinding::Uniform {
+                            source: source(card, &point),
+                            model: Model::Isotropic,
+                            thickness: Thickness::FixedMass(0.2835),
+                        }),
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        let (a, b) = (&results[0], &results[1]);
+        let (sa, sb) = (a.string().unwrap(), b.string().unwrap());
+        assert!((sa.mass_kg() / sb.mass_kg() - 1.0).abs() < 1e-13);
+        assert!((sb.string().width_m / sa.string().width_m - 0.5).abs() < 1e-13);
+        assert!(
+            (sb.string().bending_stiffness_n_m2 / sa.string().bending_stiffness_n_m2 - 1.0 / 16.0)
+                .abs()
+                < 1e-13
+        );
+        assert_ne!(sa.material().card_identity(), sb.material().card_identity());
+        let (Some(CompiledMaterialPlate::Uniform(pa)), Some(CompiledMaterialPlate::Uniform(pb))) =
+            (a.plate(), b.plate())
+        else {
+            panic!("uniform plates");
+        };
+        assert!((pa.mass_kg() / pb.mass_kg() - 1.0).abs() < 1e-13);
+        assert!((pb.plate().thickness_m / pa.plate().thickness_m - 0.25).abs() < 1e-13);
+        assert!(
+            (pb.section().unwrap().d[0] / pa.section().unwrap().d[0] - 1.0 / 64.0).abs() < 1e-13
+        );
+        let p = a.realize().unwrap().pressure_pa;
+        let q = b.realize().unwrap().pressure_pa;
+        let difference: Vec<_> = p.iter().zip(q).map(|(x, y)| x - y).collect();
+        assert!(
+            peak_abs(&difference) > 1e-7,
+            "card replacement reaches actual coupled pressure"
+        );
+    }
+
+    #[test]
+    fn g3_card_compiler_regional_chart_matches_explicit_path_and_rebinds_pressure() {
+        let material = orthotropic(450.0, 1.0);
+        let uniform = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, radiation) = chart_input(&uniform);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let a = isotropic_card(450.0);
+        let b = isotropic_card(1800.0);
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.02;
+        input.string.as_mut().unwrap().moving_end = true;
+        input.cavity = Some(HelmholtzCavity {
+            volume_m3: 0.016,
+            neck_radius_m: 0.02,
+            neck_length_m: 0.03,
+        });
+        let regions: Vec<_> =
+            regional_inputs(&chart.mesh, &material, Thickness::FixedThickness(0.003))
+                .into_iter()
+                .map(|r| PlateRegionSource {
+                    region: r.region,
+                    source: source(&a, &point),
+                    model: Model::Isotropic,
+                    thickness: r.thickness_constraint,
+                    material_angle_rad: 0.0,
+                })
+                .collect();
+        let mut bindings = AcousticMaterialBindings {
+            string: None,
+            plate: Some(PlateMaterialBinding::Regional {
+                mesh: chart.mesh,
+                boundary_nodes: chart.boundary_nodes,
+                regions,
+                radiation,
+            }),
+        };
+        let first = compile_material_assembly(&input, &bindings).unwrap();
+        assert!(first.string().is_none(), "unbound string stays authored");
+        assert_eq!(first.assembly(), &input);
+        let Some(CompiledMaterialPlate::Regional { chart, radiation }) = first.plate() else {
+            panic!("regional plate");
+        };
+        assert_eq!(chart.regions()[0].input.material.properties().len(), 3);
+        let direct = realize_assembly_with_plate_chart(&input, chart.chart(), radiation).unwrap();
+        assert_eq!(first.realize().unwrap(), direct);
+        let Some(PlateMaterialBinding::Regional { regions, .. }) = bindings.plate.as_mut() else {
+            unreachable!();
+        };
+        regions[1].source.card = &b;
+        let second = compile_material_assembly(&input, &bindings).unwrap();
+        let Some(CompiledMaterialPlate::Regional { chart: changed, .. }) = second.plate() else {
+            unreachable!();
+        };
+        assert_eq!(
+            chart.regions()[0].input.material,
+            changed.regions()[0].input.material
+        );
+        assert_ne!(
+            chart.regions()[1].input.material.card_identity(),
+            changed.regions()[1].input.material.card_identity()
+        );
+        assert!((changed.mass_kg() / chart.mass_kg() - 2.5).abs() < 1e-13);
+        let p = second.realize().unwrap().pressure_pa;
+        let delta: Vec<_> = direct
+            .pressure_pa
+            .iter()
+            .zip(p)
+            .map(|(a, b)| a - b)
+            .collect();
+        assert!(peak_abs(&delta) > 1e-7);
+    }
+
+    #[test]
+    fn g0_card_compiler_refuses_missing_properties_members_and_out_of_domain_states() {
+        use fs_material::state_point::MaterialStatePointError;
+        let card = isotropic_card(450.0);
+        let incomplete = material_card(
+            &[("density", QuantitySpec::dimensional(Density::DIMS), 450.0)],
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        );
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let hot = QueryPoint::new().with("T", 500.0).unwrap();
+        let input = plucked(20.0, 0.006, 1e-5);
+        let original = input.clone();
+        let mut bindings = AcousticMaterialBindings {
+            string: Some(StringMaterialBinding {
+                source: source(&card, &point),
+                geometry: StringGeometryConstraint::FixedRadius(0.0008),
+                prestress: StringPrestress::FixedTension(20.0),
+            }),
+            plate: None,
+        };
+        let compiled = compile_material_assembly(&input, &bindings).unwrap();
+        let expected = compiled.realize().unwrap();
+        bindings.string.as_mut().unwrap().source.card = &incomplete;
+        assert!(
+            matches!(compile_material_assembly(&input, &bindings), Err(MaterialAssemblyError::Resolution {
+            component, source: MaterialStatePointError::Query { property, .. }
+        }) if component == "string" && property == "young_modulus")
+        );
+        bindings.string.as_mut().unwrap().source = source(&card, &hot);
+        assert!(
+            matches!(compile_material_assembly(&input, &bindings), Err(MaterialAssemblyError::Resolution {
+            component, source: MaterialStatePointError::Query { .. }
+        }) if component == "string")
+        );
+        bindings.string.as_mut().unwrap().source = source(&card, &point);
+        assert!(
+            matches!(compile_material_assembly(&empty_base(), &bindings), Err(MaterialAssemblyError::Binding {
+            component, source: AcousticRealizeError::InvalidDescription {
+                what: "material binding requires a string description"
+            }
+        }) if component == "string")
+        );
+        bindings.plate = Some(PlateMaterialBinding::Uniform {
+            source: source(&card, &point),
+            model: Model::Orthotropic12,
+            thickness: Thickness::FixedThickness(0.003),
+        });
+        let mut with_plate = input.clone();
+        with_plate.plate = Some(template());
+        assert!(
+            matches!(compile_material_assembly(&with_plate, &bindings), Err(MaterialAssemblyError::Resolution {
+            component, source: MaterialStatePointError::Query { property, .. }
+        }) if component == "plate" && property == "young_modulus_1")
+        );
+        assert_eq!(input, original);
+        assert_eq!(compiled.realize().unwrap(), expected);
+    }
+
+    #[test]
+    fn g1_card_compiler_resolves_active_string_loss_without_stale_coefficients() {
+        use fs_qty::{DynViscosity, Time};
+        use fs_scenario::acoustic::{
+            BendingRelaxationBranch, BendingRelaxationProperties, KelvinVoigtBending, PronyBending,
+        };
+        let props = [
+            ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            (
+                "equilibrium_young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            (
+                "arm_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                3e9,
+            ),
+            ("arm_time", QuantitySpec::dimensional(Time::DIMS), 0.01),
+            (
+                "kelvin_voigt_bending_viscosity",
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                3e7,
+            ),
+        ];
+        let card = material_card(
+            &props,
+            ValidityDomain::unconstrained()
+                .with("T", 293.15, 293.15)
+                .with("omega", 1.0, 1e6),
+        );
+        let point = QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.02;
+        input.string.as_mut().unwrap().damping_ratio = 0.0;
+        let bindings = AcousticMaterialBindings {
+            string: Some(StringMaterialBinding {
+                source: source(&card, &point),
+                geometry: StringGeometryConstraint::FixedRadius(0.0008),
+                prestress: StringPrestress::FixedTension(20.0),
+            }),
+            plate: None,
+        };
+        let elastic = compile_material_assembly(&input, &bindings).unwrap();
+        assert_eq!(elastic.string().unwrap().material().properties().len(), 2);
+        let baseline = elastic.realize().unwrap().pressure_pa;
+        for prony in [false, true] {
+            let string = input.string.as_mut().unwrap();
+            string.kelvin_voigt_bending = (!prony).then_some(KelvinVoigtBending {
+                viscous_stiffness_n_m2_s: 999.0,
+                omega_band_rad_s: (1.0, 2.0),
+                material_state_identity: None,
+            });
+            string.relaxation_bending = prony.then_some(PronyBending {
+                branches: vec![BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: 999.0,
+                    relaxation_time_s: 999.0,
+                }],
+                omega_band_rad_s: (1.0, 2.0),
+                material_state_identity: None,
+                source_properties: Some(vec![BendingRelaxationProperties {
+                    modulus: "arm_modulus".into(),
+                    relaxation_time: "arm_time".into(),
+                }]),
+            });
+            let result = compile_material_assembly(&input, &bindings).unwrap();
+            let specimen = result.string().unwrap();
+            let compiled = specimen.string();
+            if prony {
+                assert_eq!(specimen.material().properties().len(), 5);
+                let loss = compiled.relaxation_bending.unwrap();
+                assert_eq!(
+                    loss.material_state_identity,
+                    Some(specimen.material().identity())
+                );
+                assert_eq!(loss.branches[0].relaxation_time_s, 0.01);
+                assert!(
+                    (loss.branches[0].relaxing_stiffness_n_m2
+                        / (3e9 * specimen.second_moment_m4())
+                        - 1.0)
+                        .abs()
+                        < 1e-13
+                );
+            } else {
+                assert_eq!(specimen.material().properties().len(), 3);
+                let loss = compiled.kelvin_voigt_bending.unwrap();
+                assert_eq!(
+                    loss.material_state_identity,
+                    Some(specimen.material().identity())
+                );
+                assert!(
+                    (loss.viscous_stiffness_n_m2_s / (3e7 * specimen.second_moment_m4()) - 1.0)
+                        .abs()
+                        < 1e-13
+                );
+            }
+            let pressure = result.realize().unwrap().pressure_pa;
+            let difference: Vec<_> = baseline.iter().zip(pressure).map(|(a, b)| a - b).collect();
+            assert!(
+                peak_abs(&difference) > 1e-8,
+                "selected sourced loss changes actual pressure"
+            );
+        }
+        input
+            .string
+            .as_mut()
+            .unwrap()
+            .relaxation_bending
+            .as_mut()
+            .unwrap()
+            .source_properties = None;
+        assert!(matches!(
+            compile_material_assembly(&input, &bindings),
+            Err(MaterialAssemblyError::Resolution { .. })
+        ));
+    }
+
+    fn chart_input(specimen: &ResolvedPlateSpecimen) -> (PlateChart, PlateChartRadiation) {
+        let p = specimen.plate();
+        let mesh = PlateMesh::rectangle(p.length_m, p.width_m, 5, 4);
+        let mut weights = vec![0.0; mesh.nodes.len()];
+        let mut driven_area = 0.0;
+        for t in &mesh.tris {
+            let (a, b, c) = (mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]]);
+            if (a.0 + b.0 + c.0) / 3.0 < p.length_m / 5.0 {
+                let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0));
+                driven_area += area;
+                for &i in t {
+                    weights[i] += area / 3.0;
+                }
+            }
+        }
+        for w in &mut weights {
+            *w /= driven_area;
+        }
+        let section = specimen.section().unwrap();
+        let (kx, ky) = (
+            core::f64::consts::PI / p.length_m,
+            core::f64::consts::PI / p.width_m,
+        );
+        let omega = ((section.d[0] * kx.powi(4)
+            + 2.0 * (section.d[1] + 2.0 * section.d[8]) * kx.powi(2) * ky.powi(2)
+            + section.d[4] * ky.powi(4))
+            / (section.density * section.thickness))
+            .sqrt();
+        (
+            PlateChart::from_mesh(mesh, section).unwrap(),
+            PlateChartRadiation {
+                assembly: AssemblyOptions {
+                    pretension: p.pretension_n_m,
+                    support: EdgeSupport::SimplySupported,
+                },
+                eigenvalue_window: (
+                    (0.25 * omega).powi(2),
+                    (omega * (p.n_modes as f64 + 2.0) * 4.0).powi(2),
+                ),
+                n_modes: p.n_modes,
+                damping_ratio: p.damping_ratio,
+                unit_force_weights: weights,
+            },
+        )
+    }
+
+    fn regional_inputs(
+        mesh: &PlateMesh,
+        material: &ResolvedMaterialStatePoint,
+        right_thickness: Thickness,
+    ) -> Vec<PlateRegionMaterial> {
+        ["left", "right"]
+            .into_iter()
+            .enumerate()
+            .map(|(r, name)| PlateRegionMaterial {
+                region: PlateRegion {
+                    name: name.into(),
+                    triangle_indices: mesh
+                        .tris
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(e, t)| {
+                            let right = t.iter().map(|&i| mesh.nodes[i].0).sum::<f64>() / 3.0 > 0.3;
+                            (right == (r == 1)).then_some(e)
+                        })
+                        .collect(),
+                },
+                material: material.clone(),
+                model: Model::Orthotropic12,
+                thickness_constraint: if r == 0 {
+                    Thickness::FixedThickness(0.003)
+                } else {
+                    right_thickness
+                },
+                material_angle_rad: 0.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn g1_bound_regions_integrate_actual_area_mass_and_retain_sources() {
+        let material = orthotropic(450.0, 1.0);
+        let uniform = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, _) = chart_input(&uniform);
+        let mut inputs = regional_inputs(&chart.mesh, &material, Thickness::FixedMass(0.2));
+        inputs[1].material = orthotropic(1800.0, 2.0);
+        inputs[1].material_angle_rad = 0.37;
+        let expected = inputs.clone();
+        let resolved =
+            compile_plate_material_chart(chart.mesh, chart.boundary_nodes, inputs).unwrap();
+        // The 0.6 x 0.35 rectangle is partitioned into equal-area triangle sets,
+        // even though their common boundary follows a zig-zag element edge.
+        for (region, input) in resolved.regions().iter().zip(&expected) {
+            assert_eq!(&region.input, input);
+            assert!((region.area_m2 / 0.105 - 1.0).abs() < 1e-13);
+            for &e in &input.region.triangle_indices {
+                assert_eq!(resolved.material_at_element(e), Some(&input.material));
+            }
+        }
+        let right = &resolved.regions()[1];
+        assert!((right.section.thickness / (0.2 / 1800.0 / 0.105) - 1.0).abs() < 1e-13);
+        assert!((right.mass_kg / 0.2 - 1.0).abs() < 1e-13);
+        assert!((resolved.mass_kg() / (450.0 * 0.003 * 0.105 + 0.2) - 1.0).abs() < 1e-13);
+        assert!(
+            right.section.d[2].abs() > 0.0,
+            "regional grain reaches the bending tensor"
+        );
+        assert!(resolved.material_at_element(usize::MAX).is_none());
+        let fs_plate::PlateSectionField::PerElement(sections) = resolved.chart().section_field()
+        else {
+            panic!("regional field required");
+        };
+        for (e, section) in sections.iter().enumerate() {
+            let index = if expected[0].region.triangle_indices.contains(&e) {
+                0
+            } else {
+                1
+            };
+            let region = &resolved.regions()[index];
+            assert_eq!(
+                section.d.map(f64::to_bits),
+                region.section.d.map(f64::to_bits)
+            );
+            assert_eq!(section.density.to_bits(), region.section.density.to_bits());
+            assert_eq!(
+                section.thickness.to_bits(),
+                region.section.thickness.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn g3_bound_region_order_and_equivalent_partition_preserve_identity_and_pressure() {
+        let material = orthotropic(450.0, 1.0);
+        let uniform = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, opts) = chart_input(&uniform);
+        let mut inputs = regional_inputs(&chart.mesh, &material, Thickness::FixedThickness(0.004));
+        inputs[1].material = orthotropic(800.0, 2.0);
+        inputs[1].material_angle_rad = 0.37;
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for input in &mut reversed {
+            input.region.triangle_indices.reverse();
+        }
+        let mut split = Vec::new();
+        for input in &inputs {
+            for (part, triangles) in input
+                .region
+                .triangle_indices
+                .chunks(input.region.triangle_indices.len() / 2)
+                .enumerate()
+            {
+                let mut piece = input.clone();
+                piece.region.name = format!("{}-{part}", input.region.name);
+                piece.region.triangle_indices = triangles.to_vec();
+                split.push(piece);
+            }
+        }
+        let mut outputs = Vec::new();
+        let mut ids = Vec::new();
+        let mut masses = Vec::new();
+        let mut assembly = plucked(20.0, 0.006, 1e-5);
+        assembly.duration_s = 0.02;
+        assembly.string.as_mut().unwrap().moving_end = true;
+        assembly.cavity = Some(HelmholtzCavity {
+            volume_m3: 0.016,
+            neck_radius_m: 0.02,
+            neck_length_m: 0.03,
+        });
+        for input in [inputs, reversed, split] {
+            let resolved = compile_plate_material_chart(
+                chart.mesh.clone(),
+                chart.boundary_nodes.clone(),
+                input,
+            )
+            .unwrap();
+            ids.push(resolved.specimen_identity());
+            masses.push(resolved.mass_kg().to_bits());
+            outputs.push(
+                realize_assembly_with_plate_chart(&assembly, resolved.chart(), &opts)
+                    .unwrap()
+                    .pressure_pa,
+            );
+        }
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(masses[0], masses[1]);
+        assert_eq!(masses[0], masses[2]);
+        assert!(peak_abs(&outputs[0]) > 1e-7);
+        for output in &outputs[1..] {
+            assert_eq!(
+                outputs[0].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                output.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn g3_named_region_material_swap_rebuilds_mass_geometry_and_actual_pressure() {
+        let material = orthotropic(450.0, 1.0);
+        let dense = orthotropic(1800.0, 1.0);
+        let uniform = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, opts) = chart_input(&uniform);
+        let mut assembly = plucked(20.0, 0.006, 1e-5);
+        assembly.duration_s = 0.02;
+        let mut swapped_omegas = Vec::new();
+        for fixed_mass in [false, true] {
+            let policy = if fixed_mass {
+                Thickness::FixedMass(450.0 * 0.003 * 0.105)
+            } else {
+                Thickness::FixedThickness(0.003)
+            };
+            let original = compile_plate_material_chart(
+                chart.mesh.clone(),
+                chart.boundary_nodes.clone(),
+                regional_inputs(&chart.mesh, &material, policy),
+            )
+            .unwrap();
+            let before_id = original.specimen_identity();
+            let replaced = original.with_region_material("right", &dense).unwrap();
+            let (a, b) = (&original.regions()[1], &replaced.regions()[1]);
+            assert_eq!(replaced.regions()[0].input, original.regions()[0].input);
+            assert_eq!(
+                replaced.regions()[0].section.d,
+                original.regions()[0].section.d
+            );
+            assert_eq!(b.input.material, dense);
+            assert_eq!(b.input.thickness_constraint, policy);
+            assert_eq!(original.specimen_identity(), before_id);
+            assert_ne!(before_id, replaced.specimen_identity());
+            if fixed_mass {
+                assert!((replaced.mass_kg() / original.mass_kg() - 1.0).abs() < 1e-13);
+                assert!((b.mass_kg / a.mass_kg - 1.0).abs() < 1e-13);
+                assert!((b.section.thickness / a.section.thickness - 0.25).abs() < 1e-14);
+                for (before, after) in a.section.d.iter().zip(b.section.d) {
+                    assert!((after - before / 64.0).abs() <= 1e-13 * before.abs());
+                }
+            } else {
+                assert_eq!(a.section.thickness.to_bits(), b.section.thickness.to_bits());
+                assert_eq!(a.section.d.map(f64::to_bits), b.section.d.map(f64::to_bits));
+                assert!((replaced.mass_kg() / original.mass_kg() - 2.5).abs() < 1e-13);
+            }
+            let baseline = realize_assembly_with_plate_chart(&assembly, original.chart(), &opts)
+                .unwrap()
+                .pressure_pa;
+            let changed = realize_assembly_with_plate_chart(&assembly, replaced.chart(), &opts)
+                .unwrap()
+                .pressure_pa;
+            let delta: Vec<_> = baseline.iter().zip(changed).map(|(a, b)| a - b).collect();
+            assert!(
+                peak_abs(&delta) > 1e-7,
+                "named material replacement must affect emitted pressure"
+            );
+            let omega = certified_chart_radiators(replaced.chart(), &opts).unwrap()[0].omega;
+            swapped_omegas.push(omega);
+            assert!(
+                omega < 0.9 * certified_chart_radiators(original.chart(), &opts).unwrap()[0].omega
+            );
+        }
+        assert!(
+            (swapped_omegas[0] / swapped_omegas[1] - 1.0).abs() > 0.1,
+            "holding mass differs from holding thickness"
+        );
+        eprintln!(
+            "G3 regional density x4 fixed-thickness/fixed-mass omega: {swapped_omegas:?} rad/s"
+        );
+    }
+
+    #[test]
+    fn g0_bound_region_gaps_overlaps_names_geometry_and_failed_rebind_refuse() {
+        let material = orthotropic(450.0, 1.0);
+        let uniform = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, _) = chart_input(&uniform);
+        let good = regional_inputs(&chart.mesh, &material, Thickness::FixedThickness(0.003));
+        let first = good[0].region.triangle_indices[0];
+        for defect in 0..6 {
+            let mut bad = good.clone();
+            let (region, element, what) = match defect {
+                0 => {
+                    bad[0].region.name.clear();
+                    (Some(""), None, "region labels must be nonempty and unique")
+                }
+                1 => {
+                    bad[1].region.name = "left".into();
+                    (
+                        Some("left"),
+                        None,
+                        "region labels must be nonempty and unique",
+                    )
+                }
+                2 => {
+                    bad[1].region.triangle_indices.push(first);
+                    (
+                        Some("right"),
+                        Some(first),
+                        "triangle assigned more than once",
+                    )
+                }
+                3 => {
+                    bad[0].region.triangle_indices.remove(0);
+                    (None, Some(first), "triangle has no material assignment")
+                }
+                4 => {
+                    bad[0].region.triangle_indices[0] = usize::MAX;
+                    (
+                        Some("left"),
+                        Some(usize::MAX),
+                        "triangle index outside mesh",
+                    )
+                }
+                _ => {
+                    bad[0].region.triangle_indices.clear();
+                    (Some("left"), None, "material region is empty")
+                }
+            };
+            let err =
+                compile_plate_material_chart(chart.mesh.clone(), chart.boundary_nodes.clone(), bad)
+                    .unwrap_err();
+            assert_eq!(
+                err,
+                AcousticRealizeError::PlateAssignment {
+                    region: region.map(str::to_owned),
+                    element,
+                    what
+                }
+            );
+        }
+        let original = compile_plate_material_chart(
+            chart.mesh.clone(),
+            chart.boundary_nodes.clone(),
+            good.clone(),
+        )
+        .unwrap();
+        let id = original.specimen_identity();
+        let mass = original.mass_kg().to_bits();
+        assert!(matches!(
+            original.with_region_material("missing", &material),
+            Err(AcousticRealizeError::PlateAssignment {
+                what: "unknown material region",
+                ..
+            })
+        ));
+        assert!(matches!(
+            original.with_region_material("right", &orthotropic(-450.0, 1.0)),
+            Err(AcousticRealizeError::Plate(
+                fs_plate::PlateError::BadSection { .. }
+            ))
+        ));
+        for m in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut bad = good.clone();
+            bad[1].thickness_constraint = Thickness::FixedMass(m);
+            assert!(matches!(
+                compile_plate_material_chart(chart.mesh.clone(), chart.boundary_nodes.clone(), bad),
+                Err(AcousticRealizeError::Plate(
+                    fs_plate::PlateError::BadSection { .. }
+                ))
+            ));
+        }
+        let mut broken_mesh = chart.mesh;
+        broken_mesh.tris[0][0] = usize::MAX;
+        assert!(matches!(
+            compile_plate_material_chart(broken_mesh, chart.boundary_nodes, good),
+            Err(AcousticRealizeError::Plate(
+                fs_plate::PlateError::BadBoundary { .. }
+            ))
+        ));
+        assert_eq!(original.specimen_identity(), id);
+        assert_eq!(original.mass_kg().to_bits(), mass);
+        assert_eq!(original.regions()[1].input.material, material);
+    }
+
+    #[test]
+    fn g3_chart_partitions_preserve_existing_acoustic_assembly_and_cavity() {
+        let specimen = bind(
+            template(),
+            &orthotropic(450.0, 1.0),
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, opts) = chart_input(&specimen);
+        let partitioned = chart
+            .clone()
+            .with_element_sections(vec![specimen.section().unwrap(); chart.mesh.tris.len()])
+            .unwrap();
+        for moving_end in [false, true] {
+            let mut assembly = plucked(20.0, 0.006, 1e-5);
+            assembly.duration_s = 0.02;
+            assembly.string.as_mut().unwrap().moving_end = moving_end;
+            if moving_end {
+                assembly.cavity = Some(HelmholtzCavity {
+                    volume_m3: 0.016,
+                    neck_radius_m: 0.02,
+                    neck_length_m: 0.03,
+                });
+            }
+            assembly.plate = Some(specimen.plate());
+            let original = realize_assembly(&assembly).unwrap().pressure_pa;
+            assembly.plate = None;
+            let uniform = realize_assembly_with_plate_chart(&assembly, &chart, &opts)
+                .unwrap()
+                .pressure_pa;
+            let piecewise = realize_assembly_with_plate_chart(&assembly, &partitioned, &opts)
+                .unwrap()
+                .pressure_pa;
+            assert!(peak_abs(&original) > 1e-7);
+            let delta: Vec<_> = original.iter().zip(&uniform).map(|(a, b)| a - b).collect();
+            assert!(
+                peak_abs(&delta) < 1e-8 * peak_abs(&original),
+                "existing path parity, moving_end={moving_end}"
+            );
+            assert_eq!(
+                uniform.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                piecewise.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn g3_regional_materials_change_actual_chart_modes_and_pressure() {
+        let state = orthotropic(450.0, 1.0);
+        let specimen = bind(
+            template(),
+            &state,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (mut chart, opts) = chart_input(&specimen);
+        // An interior node perturbation exercises an unstructured chart, while
+        // keeping the outer supports and declared force footprint fixed.
+        chart.mesh.nodes[14].0 += 0.013;
+        chart.mesh.nodes[14].1 -= 0.009;
+        let mut frequencies = Vec::new();
+        let mut pressures = Vec::new();
+        let mut assembly = plucked(20.0, 0.006, 1e-5);
+        assembly.duration_s = 0.02;
+        assembly.string.as_mut().unwrap().moving_end = true;
+        assembly.cavity = Some(HelmholtzCavity {
+            volume_m3: 0.016,
+            neck_radius_m: 0.02,
+            neck_length_m: 0.03,
+        });
+        for variant in 0..5 {
+            let material = match variant {
+                1 => orthotropic(1800.0, 1.0),
+                2 => orthotropic(450.0, 4.0),
+                _ => state.clone(),
+            };
+            let mut p = template();
+            if variant == 3 {
+                p.material_angle_rad = 0.7;
+            }
+            let local = bind(
+                p,
+                &material,
+                Model::Orthotropic12,
+                Thickness::FixedThickness(if variant == 4 { 0.006 } else { 0.003 }),
+            )
+            .unwrap();
+            assert_eq!(
+                local.material(),
+                &material,
+                "regional section extraction does not rewrite source receipts"
+            );
+            let sections = chart
+                .mesh
+                .tris
+                .iter()
+                .map(|t| {
+                    if t.iter().map(|&i| chart.mesh.nodes[i].0).sum::<f64>() / 3.0 > 0.3 {
+                        local.section().unwrap()
+                    } else {
+                        specimen.section().unwrap()
+                    }
+                })
+                .collect();
+            let regional = chart.clone().with_element_sections(sections).unwrap();
+            frequencies.push(certified_chart_radiators(&regional, &opts).unwrap()[0].omega);
+            let result = realize_assembly_with_plate_chart(&assembly, &regional, &opts).unwrap();
+            assert!(result.pressure_pa.iter().all(|p| p.is_finite()));
+            pressures.push(result.pressure_pa);
+        }
+        assert!(
+            frequencies[1] < 0.9 * frequencies[0],
+            "local added mass lowers frequency"
+        );
+        assert!(
+            frequencies[2] > 1.1 * frequencies[0],
+            "local stiffness raises frequency"
+        );
+        assert!(
+            (frequencies[3] / frequencies[0] - 1.0).abs() > 0.01,
+            "local grain rotation reaches stiffness"
+        );
+        assert!(
+            (frequencies[4] / frequencies[0] - 1.0).abs() > 0.01,
+            "local thickness reaches stiffness and inertia"
+        );
+        for other in &pressures[1..] {
+            let delta: Vec<_> = pressures[0].iter().zip(other).map(|(a, b)| a - b).collect();
+            assert!(
+                peak_abs(&delta) > 1e-7,
+                "regional material must reach coupled pressure"
+            );
+        }
+        eprintln!(
+            "G3 regional base/density/stiffness/grain/thickness omega: {frequencies:?} rad/s"
+        );
+    }
+
+    #[test]
+    fn g0_chart_force_controls_and_description_conflicts_refuse() {
+        let specimen = bind(
+            template(),
+            &orthotropic(450.0, 1.0),
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let (chart, opts) = chart_input(&specimen);
+        let mut assembly = plucked(20.0, 0.006, 1e-5);
+        assembly.plate = Some(specimen.plate());
+        assert!(matches!(
+            realize_assembly_with_plate_chart(&assembly, &chart, &opts),
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "chart assembly requires the uniform plate description to be absent"
+            })
+        ));
+        for defect in 0..8 {
+            let mut bad = opts.clone();
+            match defect {
+                0 => {
+                    bad.unit_force_weights.pop();
+                }
+                1 => bad.unit_force_weights[0] = f64::NAN,
+                2 => bad.unit_force_weights.fill(0.0),
+                3 => bad.n_modes = 0,
+                4 => bad.damping_ratio = -0.1,
+                5 => bad.eigenvalue_window = (100.0, 10.0),
+                6 => bad.eigenvalue_window.1 = f64::INFINITY,
+                _ => bad.damping_ratio = f64::NAN,
+            }
+            assert!(
+                matches!(
+                    certified_chart_radiators(&chart, &bad),
+                    Err(AcousticRealizeError::InvalidDescription { .. })
+                ),
+                "defect {defect}"
+            );
         }
     }
 

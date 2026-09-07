@@ -57,6 +57,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Typed refusals. Display strings carry stable `FS-PLATE-*` codes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlateError {
+    /// A piecewise section field does not cover exactly the mesh elements.
+    SectionCount {
+        /// Required number of sections.
+        expected: usize,
+        /// Supplied number of sections.
+        actual: usize,
+    },
     /// A material/section parameter is non-positive or non-finite.
     BadSection {
         /// Which parameter refused.
@@ -89,6 +96,10 @@ pub enum PlateError {
 impl core::fmt::Display for PlateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            PlateError::SectionCount { expected, actual } => write!(
+                f,
+                "FS-PLATE-SECTION-COUNT: expected {expected} element sections, got {actual}"
+            ),
             PlateError::BadSection { what } => write!(f, "FS-PLATE-BAD-SECTION: {what}"),
             PlateError::DegenerateElement {
                 element,
@@ -136,6 +147,43 @@ pub struct PlateSection {
 }
 
 impl PlateSection {
+    fn validate(&self) -> Result<(), PlateError> {
+        let bad = || PlateError::BadSection {
+            what: "section needs finite positive thickness/density and symmetric positive-definite D",
+        };
+        if [
+            self.thickness,
+            self.density,
+            self.d[0],
+            self.d[4],
+            self.d[8],
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+            || self.d.iter().any(|v| !v.is_finite())
+            || self.d[1] != self.d[3]
+            || self.d[2] != self.d[6]
+            || self.d[5] != self.d[7]
+        {
+            return Err(bad());
+        }
+        // Cholesky after diagonal congruence scaling, avoiding products of
+        // dimensional stiffnesses that can overflow despite admissible D.
+        let s = [self.d[0].sqrt(), self.d[4].sqrt(), self.d[8].sqrt()];
+        let a = self.d[1] / s[0] / s[1];
+        let b = self.d[2] / s[0] / s[2];
+        let c = self.d[5] / s[1] / s[2];
+        let pivot = 1.0 - a * a;
+        if !(pivot > 0.0) {
+            return Err(bad());
+        }
+        let l = (c - a * b) / pivot.sqrt();
+        if !(1.0 - b * b - l * l > 0.0) {
+            return Err(bad());
+        }
+        Ok(())
+    }
+
     /// Orthotropic section with material axes 1,2 aligned to the plate x,y
     /// axes: `D11 = E1h³/12(1−ν12ν21)`, `D22 = E2h³/…`, `D12 = ν12E2h³/…`
     /// (symmetric since `ν21E1 = ν12E2`), `D33 = G12h³/12`. The grain axis
@@ -369,13 +417,19 @@ impl PlateMesh {
         nodes: Vec<(f64, f64)>,
         tris: Vec<[usize; 3]>,
     ) -> Result<PlateMesh, PlateError> {
-        if nodes.len() < 3 || tris.is_empty() {
+        let mesh = PlateMesh { nodes, tris };
+        mesh.validate()?;
+        Ok(mesh)
+    }
+
+    fn validate(&self) -> Result<(), PlateError> {
+        if self.nodes.len() < 3 || self.tris.is_empty() {
             return Err(PlateError::DegenerateElement {
                 element: 0,
                 twice_area: 0.0,
             });
         }
-        for &(x, y) in &nodes {
+        for &(x, y) in &self.nodes {
             if !x.is_finite() || !y.is_finite() {
                 return Err(PlateError::DegenerateElement {
                     element: 0,
@@ -383,8 +437,8 @@ impl PlateMesh {
                 });
             }
         }
-        let nn = nodes.len();
-        for (eidx, tri) in tris.iter().enumerate() {
+        let nn = self.nodes.len();
+        for (eidx, tri) in self.tris.iter().enumerate() {
             if tri[0] >= nn || tri[1] >= nn || tri[2] >= nn {
                 return Err(PlateError::BadBoundary {
                     node: tri[0].max(tri[1]).max(tri[2]),
@@ -397,9 +451,9 @@ impl PlateMesh {
                     twice_area: 0.0,
                 });
             }
-            let (x0, y0) = nodes[tri[0]];
-            let (x1, y1) = nodes[tri[1]];
-            let (x2, y2) = nodes[tri[2]];
+            let (x0, y0) = self.nodes[tri[0]];
+            let (x1, y1) = self.nodes[tri[1]];
+            let (x2, y2) = self.nodes[tri[2]];
             let twice_area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
             if !twice_area.is_finite() || twice_area <= 1e-15 {
                 return Err(PlateError::DegenerateElement {
@@ -408,7 +462,7 @@ impl PlateMesh {
                 });
             }
         }
-        Ok(PlateMesh { nodes, tris })
+        Ok(())
     }
 
     /// Structured right-triangle mesh validated through unstructured admission.
@@ -533,8 +587,9 @@ pub struct PlateRegion {
 pub struct PlateChart {
     /// Mid-surface mesh geometry.
     pub mesh: PlateMesh,
-    /// Material and thickness section.
+    /// Uniform material and thickness section, used when no element field is set.
     pub section: PlateSection,
+    element_sections: Option<Vec<PlateSection>>,
     /// Labeled sub-regions (e.g., soundboard, bridge, braces, rim).
     pub regions: Vec<PlateRegion>,
     /// Boundary nodes identified for support.
@@ -547,10 +602,13 @@ impl PlateChart {
     /// # Errors
     /// Returns [`PlateError`] if section or mesh is invalid.
     pub fn from_mesh(mesh: PlateMesh, section: PlateSection) -> Result<PlateChart, PlateError> {
+        mesh.validate()?;
+        section.validate()?;
         let boundary_nodes = mesh.boundary_nodes();
         Ok(PlateChart {
             mesh,
             section,
+            element_sections: None,
             regions: Vec::new(),
             boundary_nodes,
         })
@@ -566,6 +624,8 @@ impl PlateChart {
         boundary_nodes: Vec<usize>,
         regions: Vec<PlateRegion>,
     ) -> Result<PlateChart, PlateError> {
+        mesh.validate()?;
+        section.validate()?;
         let nn = mesh.node_count();
         for &b in &boundary_nodes {
             if b >= nn {
@@ -578,6 +638,7 @@ impl PlateChart {
         Ok(PlateChart {
             mesh,
             section,
+            element_sections: None,
             regions,
             boundary_nodes,
         })
@@ -589,6 +650,33 @@ impl PlateChart {
         self.mesh.total_area()
     }
 
+    /// Replace the uniform section by one section per triangle, in mesh order.
+    /// Thickness is centered on the shared mid-surface. Each D is already in
+    /// mesh coordinates, so material and grain may vary independently by element.
+    /// Shared nodes impose a perfectly bonded interface; no laminate offsets,
+    /// interfacial slip, delamination or sub-element homogenization are inferred.
+    ///
+    /// # Errors
+    /// Missing/extra sections or nonphysical section data refuse.
+    pub fn with_element_sections(
+        mut self,
+        sections: Vec<PlateSection>,
+    ) -> Result<Self, PlateError> {
+        PlateSectionField::PerElement(&sections).validate(self.mesh.tris.len())?;
+        self.element_sections = Some(sections);
+        Ok(self)
+    }
+
+    /// Constitutive field actually consumed by assembly. Region labels alone
+    /// do not alter physics; their triangle indices can be used to build this field.
+    #[must_use]
+    pub fn section_field(&self) -> PlateSectionField<'_> {
+        self.element_sections.as_deref().map_or(
+            PlateSectionField::Uniform(&self.section),
+            PlateSectionField::PerElement,
+        )
+    }
+
     /// Assemble the reduced (K, M) pencil using this chart's geometry, section, and boundary.
     ///
     /// # Errors
@@ -598,13 +686,46 @@ impl PlateChart {
         stiffeners: &[Stiffener],
         opts: &AssemblyOptions,
     ) -> Result<PlateModel, PlateError> {
-        assemble(
+        assemble_with_sections(
             &self.mesh,
-            &self.section,
+            self.section_field(),
             &self.boundary_nodes,
             stiffeners,
             opts,
         )
+    }
+}
+
+/// A uniform or piecewise-constant material/thickness field on plate triangles.
+#[derive(Debug, Clone, Copy)]
+pub enum PlateSectionField<'a> {
+    /// One section for the entire plate.
+    Uniform(&'a PlateSection),
+    /// Exactly one section per triangle, in mesh element order.
+    PerElement(&'a [PlateSection]),
+}
+
+impl<'a> PlateSectionField<'a> {
+    fn validate(self, elements: usize) -> Result<(), PlateError> {
+        match self {
+            Self::Uniform(section) => section.validate(),
+            Self::PerElement(sections) => {
+                if sections.len() != elements {
+                    return Err(PlateError::SectionCount {
+                        expected: elements,
+                        actual: sections.len(),
+                    });
+                }
+                sections.iter().try_for_each(PlateSection::validate)
+            }
+        }
+    }
+
+    fn at(self, element: usize) -> &'a PlateSection {
+        match self {
+            Self::Uniform(section) => section,
+            Self::PerElement(sections) => &sections[element],
+        }
     }
 }
 
@@ -913,6 +1034,36 @@ pub fn assemble(
     stiffeners: &[Stiffener],
     opts: &AssemblyOptions,
 ) -> Result<PlateModel, PlateError> {
+    assemble_with_sections(
+        mesh,
+        PlateSectionField::Uniform(section),
+        boundary,
+        stiffeners,
+        opts,
+    )
+}
+
+/// Assemble the same DKT pencil with a material/thickness section per triangle.
+/// Both bending stiffness and translational/rotary mass use that element's
+/// section. Uniform prestress and stiffeners retain their existing semantics.
+///
+/// # Errors
+/// Invalid mesh/section data, section counts, supports, or stiffeners refuse.
+#[allow(clippy::too_many_lines)] // one coherent assembly pipeline
+pub fn assemble_with_sections(
+    mesh: &PlateMesh,
+    sections: PlateSectionField<'_>,
+    boundary: &[usize],
+    stiffeners: &[Stiffener],
+    opts: &AssemblyOptions,
+) -> Result<PlateModel, PlateError> {
+    mesh.validate()?;
+    sections.validate(mesh.tris.len())?;
+    if !opts.pretension.is_finite() {
+        return Err(PlateError::BadSection {
+            what: "plate pretension must be finite",
+        });
+    }
     let nn = mesh.node_count();
     let ndof = 3 * nn;
     // DOF elimination map. Out-of-range boundary nodes refuse BY NAME
@@ -954,6 +1105,7 @@ pub fn assemble(
     };
 
     for (eidx, tri) in mesh.tris.iter().enumerate() {
+        let section = sections.at(eidx);
         let x = [
             mesh.nodes[tri[0]].0,
             mesh.nodes[tri[1]].0,
@@ -1117,6 +1269,167 @@ mod tests {
 
     fn steel_section() -> PlateSection {
         PlateSection::isotropic(200e9, 0.3, 0.002, 7800.0).expect("steel")
+    }
+
+    #[test]
+    fn g1_piecewise_sections_preserve_energy_and_mass_under_refinement() {
+        let left = steel_section();
+        let right = PlateSection::orthotropic_plane_stress_at_angle(
+            12e9, 0.9e9, 0.3, 0.75e9, 0.004, 450.0, 0.37,
+        )
+        .unwrap();
+        let kappa = [0.7, -0.4, 0.6];
+        let density_energy = |s: PlateSection| -> f64 {
+            (0..3)
+                .flat_map(|i| (0..3).map(move |j| kappa[i] * s.d[3 * i + j] * kappa[j]))
+                .sum()
+        };
+        // Each material occupies half a 1 x 0.7 rectangle. This continuum
+        // integral is independent of triangulation and includes twisting D16/26.
+        let want_energy = 0.35 * (density_energy(left) + density_energy(right));
+        let want_mass = 0.35 * (left.density * left.thickness + right.density * right.thickness);
+        let want_rotary = 0.35 / 12.0
+            * (left.density * left.thickness.powi(3) + right.density * right.thickness.powi(3));
+        for n in [2, 4, 8] {
+            let mesh = PlateMesh::rectangle(1.0, 0.7, n, n);
+            let sections: Vec<_> = mesh
+                .tris
+                .iter()
+                .map(|t| {
+                    if t.iter().map(|&i| mesh.nodes[i].0).sum::<f64>() / 3.0 < 0.5 {
+                        left
+                    } else {
+                        right
+                    }
+                })
+                .collect();
+            let chart = PlateChart::with_boundary_and_regions(mesh, left, vec![], vec![])
+                .unwrap()
+                .with_element_sections(sections)
+                .unwrap();
+            let model = chart
+                .assemble(
+                    &[],
+                    &AssemblyOptions {
+                        support: EdgeSupport::SimplySupported,
+                        pretension: 0.0,
+                    },
+                )
+                .unwrap();
+            let mut displacement = Vec::new();
+            for &(x, y) in &chart.mesh.nodes {
+                displacement.extend([
+                    0.5 * (kappa[0] * x * x + kappa[1] * y * y + kappa[2] * x * y),
+                    kappa[0] * x + 0.5 * kappa[2] * y,
+                    kappa[1] * y + 0.5 * kappa[2] * x,
+                ]);
+            }
+            let quadratic = |matrix: &Csr, u: &[f64]| {
+                let mut out = vec![0.0; u.len()];
+                matrix.spmv(u, &mut out);
+                u.iter().zip(out).map(|(a, b)| a * b).sum::<f64>()
+            };
+            assert!((quadratic(&model.k, &displacement) / want_energy - 1.0).abs() < 1e-9);
+            for (dof, want) in [(0, want_mass), (1, want_rotary), (2, want_rotary)] {
+                let rigid: Vec<_> = (0..model.free)
+                    .map(|i| if i % 3 == dof { 1.0 } else { 0.0 })
+                    .collect();
+                assert!((quadratic(&model.m, &rigid) / want - 1.0).abs() < 1e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_piecewise_uniform_sections_are_bit_identical() {
+        let mesh = PlateMesh::rectangle(0.6, 0.35, 5, 4);
+        let chart = PlateChart::from_mesh(mesh, steel_section()).unwrap();
+        let piecewise = chart
+            .clone()
+            .with_element_sections(vec![chart.section; chart.mesh.tris.len()])
+            .unwrap();
+        let opts = AssemblyOptions {
+            support: EdgeSupport::Clamped,
+            pretension: 200.0,
+        };
+        let a = chart.assemble(&[], &opts).unwrap();
+        let b = piecewise.assemble(&[], &opts).unwrap();
+        assert_eq!(a.dof_map, b.dof_map);
+        for (x, y) in [(&a.k, &b.k), (&a.m, &b.m)] {
+            for i in 0..a.free {
+                let (xc, xv) = x.row(i);
+                let (yc, yv) = y.row(i);
+                assert_eq!(xc, yc);
+                assert_eq!(
+                    xv.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    yv.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_piecewise_section_and_mutated_chart_refusals() {
+        let chart =
+            PlateChart::from_mesh(PlateMesh::rectangle(1.0, 1.0, 2, 2), steel_section()).unwrap();
+        let opts = AssemblyOptions {
+            support: EdgeSupport::SimplySupported,
+            pretension: 0.0,
+        };
+        assert!(matches!(
+            chart.clone().with_element_sections(vec![]),
+            Err(PlateError::SectionCount {
+                expected: 8,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            chart
+                .clone()
+                .with_element_sections(vec![steel_section(); 9]),
+            Err(PlateError::SectionCount {
+                expected: 8,
+                actual: 9
+            })
+        ));
+        for defect in 0..6 {
+            let mut sections = vec![steel_section(); 8];
+            match defect {
+                0 => sections[7].density = f64::NAN,
+                1 => sections[7].thickness = 0.0,
+                2 => sections[7].d[0] = -1.0,
+                3 => sections[7].d[1] = sections[7].d[3] + 1.0,
+                4 => {
+                    sections[7].d[1] = 2.0 * sections[7].d[0];
+                    sections[7].d[3] = sections[7].d[1];
+                }
+                _ => {
+                    sections[7].d[2] = 2.0 * sections[7].d[0];
+                    sections[7].d[6] = sections[7].d[2];
+                }
+            }
+            assert!(matches!(
+                chart.clone().with_element_sections(sections),
+                Err(PlateError::BadSection { .. })
+            ));
+        }
+        let mut stale = chart
+            .clone()
+            .with_element_sections(vec![steel_section(); 8])
+            .unwrap();
+        stale.mesh.tris.pop();
+        assert!(matches!(
+            stale.assemble(&[], &opts),
+            Err(PlateError::SectionCount {
+                expected: 7,
+                actual: 8
+            })
+        ));
+        let mut broken = chart;
+        broken.mesh.tris[0][0] = usize::MAX;
+        assert!(matches!(
+            broken.assemble(&[], &opts),
+            Err(PlateError::BadBoundary { .. })
+        ));
     }
 
     /// Analytic SS isotropic plate: ω_mn = π²(m²/a² + n²/b²)·√(D/ρh).

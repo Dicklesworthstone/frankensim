@@ -386,6 +386,27 @@ width. Geometry and prestress constraints are independent and both remain
 available on the result, separate from material authority. The specimen hash
 binds resolved geometry, not the authored comparison policy.
 
+`with_uniform_circular_thermal_extension` consumes the existing
+`IntegratedIsotropicThermalExpansion` and current elastic resolution from the
+same exact card, query coordinates and axis conventions. It computes the
+small-strain eigenstrain relation `T = EA * ((L-L_ref)/L_ref - integral(alpha dT))`,
+using one reference configuration, as in
+[MIT 16.20, section 3.7](https://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_no_solutions.pdf).
+The current geometry/mass constraint remains explicit; both elastic and expansion
+receipts survive in the result. `FixedThermalExtension` records the mechanical
+prescription, while `thermal_expansion()` distinguishes the sourced path from
+raw authored eigenstrain. A subsequent ordinary binding requires the thermal
+path to be supplied again; it cannot silently retain old thermal evidence.
+Total, thermal and positive elastic strains must stay within the authored limit.
+Slack, compression and domain exit refuse; no buckling solver is implied.
+Fixed tension remains a separate force-controlled prescription. G1/G3 check a
+piecewise-linear expansion curve across temperature knots, heating/cooling force
+changes, mass and receipt retention, and pitch from the real pressure solver.
+G0 checks current-state/source mismatch, invalid reference length, unsupported
+moving supports and strain-domain refusals. This initializes independent uniform
+specimens; it does not evolve temperature, exchange heat, transport strain or
+solve lateral contraction during playback.
+
 All policies preserve the selected loss law, supports, and modal budget. These compare
 specimens at resolved states; thermal evolution, transverse contraction,
 yielding, anisotropy, or melting are not solved. Target pitch describes an undamped
@@ -587,6 +608,30 @@ clarinet is one filling of those objects.
   type. There is no one-pole `TravelingWaveLine` fallback on those
   paths. Unflanged-open Nyquist `ka > 1` is refused; a
   flanged mouth uses the Rayleigh piston and is not.
+- Card-driven acoustic compilation: `material_assembly::compile_material_assembly`
+  resolves exact `MaterialCard`/`QueryPoint` inputs with explicit claim selection,
+  then calls the existing circular-string, uniform-plate and regional-chart
+  specimen binders. Only consumer-needed scalar properties are resolved: rho/E
+  for elastic strings, the selected in-plane plate constants, and additional
+  viscosity or equilibrium/modulus/time fields for explicitly selected sourced
+  string bending loss. Inactive property families are not queried. Loss selectors
+  are retained; old numerical loss coefficients and citations are rebuilt.
+  `CompiledMaterialAssembly` keeps the numeric assembly and source-bound specimens
+  immutable, and its `realize` method calls the existing ordinary/chart dispatcher.
+  Unbound components remain authored. Material conditions remain separate from
+  ambient-gas conditions; this compiler does not infer thermal equilibrium or
+  upgrade the authority of the whole assembly. Geometry, constraints, forcing,
+  supports, damping choices and solver controls retain their existing meanings.
+  Resolution/binding errors preserve component context and the owning diagnostic;
+  failure leaves the input and prior compiled specimens intact. Unsupported plate
+  thermal-loss rebinding still refuses through its existing owner. Compilation is
+  synchronous with no cancellation guarantee; ordinary runtime admission runs at
+  realization. This is a Rust description API, without a new wire format, global
+  scenario identity, optical binding or conservative material evolution.
+  G0/G1/G3 exercise explicit-binding pressure parity, consumer-minimal exact-source
+  retention, simultaneous string/plate card substitution at fixed mass, regional
+  chart substitution through moving-end string/cavity pressure, active Kelvin–Voigt
+  and Prony coefficient rebuilding, and missing-member/property/domain/law refusals.
 - Uniform plate material binding: `with_uniform_plate_material_state` consumes
   the same `ResolvedMaterialStatePoint` carrier as the circular-string and
   disc adapters. Isotropic elasticity requires rho/E/nu; principal-axis
@@ -604,8 +649,8 @@ clarinet is one filling of those objects.
   not a conservative thermal evolution. Stale thermoelastic addends refuse on
   elastic rebinding. The source-bound orthotropic adapter also refuses geometric
   nonlinearity: the existing sampled nonlinear plate's isotropic membrane
-  approximation is not a resolved orthotropic membrane law. Regional fields,
-  anisotropic thermal loss and phase changes remain unavailable here. The raw
+  approximation is not a resolved orthotropic membrane law. Anisotropic thermal
+  loss and phase changes remain unavailable here. The raw
   nonlinear path checks E, nu and G before selecting isotropic sine modes.
   Its rotated FE bending still uses the documented isotropic membrane
   approximation. The modal search uses a sine trial Rayleigh quotient;
@@ -615,6 +660,49 @@ clarinet is one filling of those objects.
   and axis swaps, with aligned eigenfrequencies checked against Navier theory.
   An arbitrary angle changes actual assembly pressure; a quarter-turn recovers
   the pressure and eigenfrequency of reciprocal axis exchange.
+- Regional linear plates: `ResolvedPlateSpecimen::section` exposes the rotated
+  numerical section for assignment to `PlateChart` elements. The caller retains
+  the resolved specimens for source receipts; a numerical chart does not mint
+  material authority or a regional provenance identity. The full-rectangle
+  specimen mass is not reused as regional mass: fs-plate integrates local rho*h
+  and rotary inertia from each actual section.
+  `compile_plate_material_chart` additionally binds disjoint named regions to
+  exact resolved material states, constitutive/axis choices and fixed-thickness
+  or fixed-region-mass prescriptions. The immutable `ResolvedPlateChart` retains
+  these inputs alongside its numerical chart. It integrates actual triangle
+  areas to derive h = m/(rho A_region); `with_region_material` rebuilds sections,
+  mass and identity using the retained constraints. Failure leaves the original
+  binding unchanged. Empty/duplicate names, overlapping or missing assignments
+  and out-of-range triangles return `PlateAssignment`; geometry and section
+  refusals preserve the owning `PlateError`. No fallback material is inserted.
+  The specimen identity includes mesh geometry/connectivity, boundary-node set
+  and per-element source/model/thickness/angle in mesh order. Names, assignment
+  order and repartitioning with identical resolved per-element inputs do not
+  alter it. It is not a complete acoustic-scenario or authored-constraint identity.
+  Compilation is synchronous, with no cancellation guarantee or material-state
+  evolution; cloned numerical charts do not automatically retain source authority.
+  `certified_chart_radiators` consumes that chart with `PlateChartRadiation`
+  (explicit eigenvalue search interval, mode budget, support/prestress, authored
+  damping and nodal unit-force footprint). All force weights must be finite
+  and sum to one; supported forces react into the support without redistribution.
+  `realize_assembly_with_plate_chart` feeds the resulting modes into the same
+  assembly dispatcher, body ports, piston loads, string/cavity/duct coupling
+  and pressure observer as uniform plates. A simultaneous `assembly.plate`
+  refuses. Extra authored lumped bodies still compose. The modal interval
+  need not include the fundamental; certification applies only in that window.
+  It does not certify stability or exclude buckling modes outside that window.
+  No spatial thermal-loss law, nonlinear membrane, remeshing, phase evolution
+  or full-wave radiation is claimed. Interfaces are perfectly bonded, with
+  thickness centered on one flat mid-surface as specified by fs-plate.
+  G3 checks uniform/element partition pressure equivalence, legacy uniform
+  path parity including moving-end/cavity ports, and pressure/mode changes
+  from local density, stiffness, thickness and grain on an unstructured chart.
+  G0/G1/G3 additionally check assignment refusals, exact source retention,
+  integrated regional mass, region-order/partition pressure equivalence and
+  actual pressure changes after named material replacement under both mass
+  and thickness constraints. These use synthetic materials, not experimentally
+  validated material data or measured sound.
+  G0 checks force footprints, modal controls and conflicting descriptions.
 - Linear plate projection: the eigenvector, its modal mass `phi^T M phi`,
   signed radiating area `integral(phi dA)`, and signed bridge-force projection
   remain in one basis. Surface integrals use triangle-area P1 nodal quadrature;
