@@ -1633,6 +1633,13 @@ mod schema_two_wasm {
         pub fn export_weights(&mut self) -> Vec<u8> {
             self.inner.export_weights()
         }
+
+        /// A packed G1 trace of the best policy (`use_best`) or of the tuned
+        /// controller it started from, for playback on the existing stage.
+        #[must_use]
+        pub fn trace_packet(&mut self, use_best: bool) -> Vec<f64> {
+            self.inner.trace_packet(use_best)
+        }
     }
 
     /// Stateful schema-2 browser session. Construction never throws; inspect

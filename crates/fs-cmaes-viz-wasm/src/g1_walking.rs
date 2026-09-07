@@ -950,6 +950,20 @@ impl G1WalkingEvaluator {
         self.rollout_inner(&parameters, false, Some(policy), Some(trace))
     }
 
+    /// Same rollout, retaining the pose samples the browser renders.
+    ///
+    /// The search itself must NOT do this — retaining 720 whole-body poses per
+    /// candidate would dominate both time and memory for a run that only reads
+    /// one scalar. This is for showing a finished policy walking.
+    pub fn rollout_learned_traced(
+        &self,
+        policy: &mut dyn LearnedG1Policy,
+        trace: &mut EpisodeTrace,
+    ) -> Result<G1WalkingReceipt, G1WalkingError> {
+        let parameters = g1_stabilizing_policy_mean();
+        self.rollout_inner(&parameters, true, Some(policy), Some(trace))
+    }
+
     fn rollout_inner(
         &self,
         parameters: &[f64],

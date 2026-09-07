@@ -550,6 +550,44 @@ impl G1TransformerTrainer {
         self.best.clone()
     }
 
+    /// A renderable trace of the best policy so far, or of the tuned
+    /// controller it started from, in the same packed G1 trace format the
+    /// flagship already decodes and plays back.
+    ///
+    /// This is what closes the loop for someone who has just spent an hour
+    /// training: a falling number is not a walking robot, and until now the
+    /// only way to see what the search produced was to download a weights file
+    /// nothing on the page could open.
+    ///
+    /// Uses the FIRST configured challenge so the trace is a single rollout
+    /// rather than an average, which is the only thing that can be played back.
+    pub fn trace_packet(&mut self, use_best: bool) -> Vec<f64> {
+        let head: Vec<f64> = if use_best {
+            self.best.clone()
+        } else {
+            vec![0.0; self.best.len()]
+        };
+        debug_assert_eq!(head.len(), self.policy.model.policy_head.params.len());
+        for (slot, value) in self.policy.model.policy_head.params.iter_mut().zip(&head) {
+            *slot = *value as f32;
+        }
+        let Some(evaluator) = self.evaluators.first() else {
+            return Vec::new();
+        };
+        self.policy.begin_episode();
+        let mut episode = EpisodeTrace::default();
+        let receipt = evaluator.rollout_learned_traced(&mut self.policy, &mut episode);
+        let _ = self.policy.take_collected();
+        match receipt {
+            Ok(receipt) => {
+                crate::g1_receipt_packet(crate::G1_PACKET_KIND_TRACE, &receipt, true)
+            }
+            // An empty packet is a refusal the caller can detect by length; the
+            // decoder rejects it rather than rendering a half-trace.
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// The best policy found so far, in the FSGT layout, ready to download.
     #[must_use]
     pub fn export_weights(&mut self) -> Vec<u8> {
@@ -636,6 +674,56 @@ mod trainer_tests {
         assert!(
             generations_checked > 0,
             "no non-improving generation occurred, so the counter was never exercised"
+        );
+    }
+
+    /// The playback trace must be a real, decodable rollout of the policy the
+    /// panel claims to be showing — not an empty packet, and not the
+    /// baseline's trace relabelled.
+    #[test]
+    fn trace_packet_renders_the_trained_policy() {
+        let mut trainer = G1TransformerTrainer::new(0, 1.5, 0.002, 7);
+        // Pump until the search actually holds something better than the
+        // controller. Comparing traces before that proves nothing: `best` is
+        // still the zero head, so the two rollouts SHOULD be identical.
+        let baseline_objective = trainer.progress()[5];
+        let mut improved = false;
+        for _ in 0..400 {
+            trainer.pump();
+            if trainer.progress()[3] < baseline_objective {
+                improved = true;
+                break;
+            }
+        }
+        assert!(improved, "search found no improvement to render");
+        let baseline = trainer.trace_packet(false);
+        let best = trainer.trace_packet(true);
+        assert!(baseline.len() > 16, "baseline trace packet is empty");
+        assert!(best.len() > 16, "best trace packet is empty");
+        // Header is [magic, schema, status, kind, wordCount]: a refusal would
+        // carry a non-OK status and the decoder would reject it.
+        assert_eq!(baseline[2], 0.0, "packet must report success, not a refusal");
+        assert_eq!(
+            baseline[3] as u32,
+            crate::G1_PACKET_KIND_TRACE,
+            "packet must declare the trace kind the browser decoder expects"
+        );
+        assert!(
+            baseline[4] > 100.0,
+            "a 1.5 s rollout must carry real samples, got wordCount {}",
+            baseline[4]
+        );
+        assert_eq!(
+            baseline.len(),
+            best.len(),
+            "same rollout length, so any difference is the policy"
+        );
+        // If the head never reached the rollout, the two traces would be
+        // identical and the panel would be showing the tuned controller while
+        // claiming to show the trained policy.
+        assert!(
+            baseline != best,
+            "trained trace is identical to the baseline trace"
         );
     }
 
