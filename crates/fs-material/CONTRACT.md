@@ -50,6 +50,27 @@ homogenization, the P2 milestone.
   order cannot alter the result. `property(name)` returns `None` for an ambiguous
   name; `property_by_key` requires the complete quantity/test/tensor context.
   The elastic resolver uses that exact lookup for all 36 matrix coefficients.
+  `ResolvedScalarProperty::is_constant_at_fixed_temperature` retains the exact
+  selected claim's curve axis and admits either validity-wide scalar constants
+  or T-only curves evaluated at positive absolute temperature. Frequency curves,
+  other state axes and temperature-difference coordinates refuse. Legacy T
+  remains kelvin; typed coordinates must be dimensional temperature or static
+  absolute temperature. The original interpolation decision, evidence and
+  identities remain unchanged. This classifies a declared source model;
+  consumers must still check every operating frequency against its validity.
+  G0 tests cover axis semantics, identical values from differently pinned
+  curves, and unchanged source receipts. It does not establish measured accuracy
+  or admit a changing-temperature constitutive history.
+  `ResolvedScalarProperty::angular_frequency_band_rad_s` reads one unambiguous
+  frequency coordinate from the exact query and converts its selected-claim
+  applicability to rad/s. Static cyclic frequency is multiplied by 2*pi;
+  static angular frequency and legacy `omega` retain their values. Semantic
+  descriptors take precedence over axis names. Multiple frequency coordinates,
+  incompatible `omega` semantics, negative or overflowing bounds refuse;
+  inverse-time dimensions alone do not identify an unrelated axis as frequency.
+  Absent source bounds remain unconstrained. This nominal unit conversion does
+  not modify receipts, extend source support or freeze a sampled frequency curve.
+  G0 tests cover conversions, source preservation, ambiguity and invalid bounds.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for

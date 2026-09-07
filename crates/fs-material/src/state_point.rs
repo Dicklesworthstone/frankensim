@@ -320,6 +320,9 @@ pub enum MaterialPropertySelection {
 pub struct ResolvedScalarProperty {
     requirement: ScalarPropertyRequirement,
     answer: MaterialAnswer,
+    // Derived only from the exact selected claim, already bound by the receipt
+    // and card identities. A sampled value alone cannot establish this axis.
+    source_curve_axis: Option<(String, Dims)>,
 }
 
 impl ResolvedScalarProperty {
@@ -339,6 +342,115 @@ impl ResolvedScalarProperty {
     #[must_use]
     pub const fn answer(&self) -> &MaterialAnswer {
         &self.answer
+    }
+
+    /// Whether this source supplies a constant coefficient when temperature is
+    /// held at the resolved state. Accepts validity-wide scalar constants or
+    /// curves depending only on positive absolute `T` [K]. Other curves,
+    /// including angular/cyclic frequency under any axis name, are not frozen.
+    ///
+    /// This classifies the declared source model, not its physical accuracy.
+    /// The consumer must still intersect all coefficient applicability domains
+    /// and check its actual frequencies. Receipts retain the original sampled
+    /// or interpolated decision; no broadband measurement is inferred.
+    #[must_use]
+    pub fn is_constant_at_fixed_temperature(&self) -> bool {
+        use fs_matdb::EvaluationDecision;
+        let Some((axis, dims)) = &self.source_curve_axis else {
+            return self.answer.receipt.decision == EvaluationDecision::ConstantWithinValidity;
+        };
+        if axis != "T"
+            || *dims != fs_qty::Temperature::DIMS
+            || !matches!(
+                self.answer.receipt.decision,
+                EvaluationDecision::ExactTabulated { .. } | EvaluationDecision::LinearInside { .. }
+            )
+        {
+            return false;
+        }
+        let receipt = &self.answer.receipt;
+        receipt
+            .query_point
+            .iter()
+            .any(|(name, value)| name == "T" && value.is_finite() && *value > 0.0)
+            && receipt.axis_quantities.get("T").is_none_or(|quantity| {
+                *quantity == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+                    || *quantity
+                        == QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::AbsoluteTemperature,
+                            ValueForm::Static,
+                        ))
+            })
+    }
+
+    /// Frequency applicability of the selected claim, expressed in rad/s.
+    ///
+    /// The query must identify at most one frequency coordinate: a semantic
+    /// `Frequency/Static` axis under any name, or legacy `omega` [rad/s]. Cyclic
+    /// frequency is converted with `omega = 2*pi*f`; source receipts and domains
+    /// are unchanged. Other state coordinates remain at the resolved point.
+    /// `None` means the claim does not constrain that frequency coordinate.
+    ///
+    /// # Errors
+    /// Multiple frequency coordinates are ambiguous without a consumer-owned
+    /// axis mapping. Non-frequency semantics on `omega`, unsupported value forms,
+    /// negative bounds or unrepresentable converted bounds also refuse. This is
+    /// a nominal SI conversion, not an interval enclosure or physical validation.
+    pub fn angular_frequency_band_rad_s(
+        &self,
+    ) -> Result<Option<(f64, f64)>, MaterialStatePointError> {
+        use fs_qty::semantic::FrequencyConvention;
+        let receipt = &self.answer.receipt;
+        let mut frequency_axis = None;
+        for (axis, _) in &receipt.query_point {
+            let quantity = receipt.axis_quantities.get(axis).copied();
+            let semantic = quantity.and_then(QuantitySpec::semantic_type);
+            let convention = match semantic.map(|ty| ty.kind()) {
+                Some(QuantityKind::Frequency(convention)) => {
+                    if semantic.is_some_and(|ty| ty.form() != ValueForm::Static) {
+                        return Err(MaterialStatePointError::InvalidDerived {
+                            quantity: "frequency applicability requires a static frequency coordinate",
+                        });
+                    }
+                    convention
+                }
+                _ if axis == "omega"
+                    && quantity.is_none_or(|q| {
+                        q == QuantitySpec::dimensional(fs_qty::Frequency::DIMS)
+                    }) =>
+                {
+                    FrequencyConvention::Angular
+                }
+                _ if axis == "omega" => {
+                    return Err(MaterialStatePointError::InvalidDerived {
+                        quantity: "omega applicability has incompatible quantity semantics",
+                    });
+                }
+                _ => continue,
+            };
+            if frequency_axis.replace((axis, convention)).is_some() {
+                return Err(MaterialStatePointError::InvalidDerived {
+                    quantity: "loss applicability requires one unambiguous frequency coordinate",
+                });
+            }
+        }
+        let Some((axis, convention)) = frequency_axis else {
+            return Ok(None);
+        };
+        let Some((lo, hi)) = self.answer.evidence.model.validity.bound(axis) else {
+            return Ok(None);
+        };
+        let scale = match convention {
+            FrequencyConvention::Angular => 1.0,
+            FrequencyConvention::Cyclic => core::f64::consts::TAU,
+        };
+        let (lo, hi) = (scale * lo, scale * hi);
+        if !(lo.is_finite() && hi.is_finite() && lo >= 0.0 && hi >= lo) {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "frequency applicability cannot form a finite nonnegative rad/s band",
+            });
+        }
+        Ok(Some((lo, hi)))
     }
 }
 
@@ -693,9 +805,22 @@ fn resolve_scalar_property_set(
                 property: requirement.name.clone(),
                 source,
             })?;
+        let source_curve_axis = match &claims
+            .claim(answer.receipt.selected)
+            .expect("successful query selected a claim from this immutable set")
+            .value
+        {
+            fs_matdb::PropertyValue::Scalar { .. } => None,
+            fs_matdb::PropertyValue::Curve {
+                abscissa,
+                abscissa_dims,
+                ..
+            } => Some((abscissa.clone(), *abscissa_dims)),
+        };
         properties.push(ResolvedScalarProperty {
             requirement,
             answer,
+            source_curve_axis,
         });
     }
     properties.sort_by(|left, right| {
@@ -2304,6 +2429,350 @@ mod tests {
                 license: "CC0-1.0".to_owned(),
                 artifact: None,
             },
+        }
+    }
+
+    #[test]
+    fn g0_frequency_applicability_converts_semantics_and_preserves_sources() {
+        use fs_qty::semantic::FrequencyConvention::{Angular, Cyclic};
+        let resolve = |axis: &str, quantity: Option<QuantitySpec>, band: Option<(f64, f64)>| {
+            let mut claim = claim(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, vec![], 400.0);
+            claim.value = fs_matdb::PropertyValue::Scalar {
+                value: 2e9,
+                dims: Pressure::DIMS,
+            };
+            claim.interpolation = fs_matdb::InterpolationPolicy::ConstantWithinValidity;
+            claim.validity = match (quantity, band) {
+                (Some(q), Some((lo, hi))) => {
+                    ValidityDomain::unconstrained().with_quantity(axis, q, lo, hi)
+                }
+                (None, Some((lo, hi))) => ValidityDomain::unconstrained().with(axis, lo, hi),
+                (_, None) => ValidityDomain::unconstrained(),
+            };
+            let point = match quantity {
+                Some(q) => QueryPoint::new().with_quantity(axis, q, 20.0).unwrap(),
+                None => QueryPoint::new().with(axis, 20.0).unwrap(),
+            };
+            let mut claims = ClaimSet::new();
+            claims.insert_claim(claim).unwrap();
+            let card = MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "synthetic frequency applicability".into(),
+                    phase: "solid".into(),
+                    process: "synthetic".into(),
+                    revision: 0,
+                },
+                claims,
+                vec![],
+            )
+            .unwrap();
+            resolve_material_state_point(
+                &card,
+                &point,
+                &[ScalarPropertyRequirement::try_new(
+                    YOUNG_MODULUS_PROPERTY,
+                    Pressure::DIMS,
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap()],
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap()
+        };
+        let frequency = |convention| {
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Frequency(convention),
+                ValueForm::Static,
+            ))
+        };
+        for (axis, quantity, scale) in [
+            ("omega", None, 1.0),
+            (
+                "omega",
+                Some(QuantitySpec::dimensional(fs_qty::Frequency::DIMS)),
+                1.0,
+            ),
+            ("response", Some(frequency(Angular)), 1.0),
+            ("frequency", Some(frequency(Cyclic)), core::f64::consts::TAU),
+            ("omega", Some(frequency(Cyclic)), core::f64::consts::TAU),
+        ] {
+            let state = resolve(axis, quantity, Some((10.0, 100.0)));
+            let property = state.property(YOUNG_MODULUS_PROPERTY).unwrap();
+            let before = property.answer().clone();
+            assert_eq!(
+                property.angular_frequency_band_rad_s().unwrap(),
+                Some((10.0 * scale, 100.0 * scale))
+            );
+            assert_eq!(
+                property.answer(),
+                &before,
+                "unit conversion cannot rewrite the source"
+            );
+        }
+        for (axis, quantity) in [
+            ("T", None),
+            (
+                "strain_rate",
+                Some(QuantitySpec::dimensional(fs_qty::Frequency::DIMS)),
+            ),
+        ] {
+            assert_eq!(
+                resolve(axis, quantity, Some((10.0, 100.0)))
+                    .property(YOUNG_MODULUS_PROPERTY)
+                    .unwrap()
+                    .angular_frequency_band_rad_s()
+                    .unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            resolve("frequency", Some(frequency(Cyclic)), None)
+                .property(YOUNG_MODULUS_PROPERTY)
+                .unwrap()
+                .angular_frequency_band_rad_s()
+                .unwrap(),
+            None
+        );
+        for (quantity, band) in [
+            (
+                Some(QuantitySpec::dimensional(Pressure::DIMS)),
+                (10.0, 100.0),
+            ),
+            (None, (-10.0, 100.0)),
+            (Some(frequency(Cyclic)), (10.0, f64::MAX)),
+        ] {
+            assert!(
+                resolve("omega", quantity, Some(band))
+                    .property(YOUNG_MODULUS_PROPERTY)
+                    .unwrap()
+                    .angular_frequency_band_rad_s()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn g0_frequency_applicability_refuses_independent_frequency_coordinates() {
+        use fs_qty::semantic::FrequencyConvention::Cyclic;
+        let frequency = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(Cyclic),
+            ValueForm::Static,
+        ));
+        let mut source = claim(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, vec![], 400.0);
+        source.value = fs_matdb::PropertyValue::Scalar {
+            value: 2e9,
+            dims: Pressure::DIMS,
+        };
+        source.interpolation = fs_matdb::InterpolationPolicy::ConstantWithinValidity;
+        source.validity = ValidityDomain::unconstrained().with("omega", 1.0, 1000.0);
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(source).unwrap();
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic frequency ambiguity".into(),
+                phase: "solid".into(),
+                process: "synthetic".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap();
+        // Even if a claim bounds only one axis, the consumer cannot presume
+        // that a separate pump frequency names the same physical variable.
+        let point = QueryPoint::new()
+            .with("omega", 100.0)
+            .unwrap()
+            .with_quantity("pump_frequency", frequency, 100.0)
+            .unwrap();
+        let state = resolve_material_state_point(
+            &card,
+            &point,
+            &[ScalarPropertyRequirement::try_new(
+                YOUNG_MODULUS_PROPERTY,
+                Pressure::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap()],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            state
+                .property(YOUNG_MODULUS_PROPERTY)
+                .unwrap()
+                .angular_frequency_band_rad_s(),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "loss applicability requires one unambiguous frequency coordinate",
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_fixed_temperature_coefficients_respect_source_axes_and_temperature_kinds() {
+        let temperature = fs_qty::Temperature::DIMS;
+        let frequency = fs_qty::Frequency::DIMS;
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let difference = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::TemperatureDifference,
+            ValueForm::Static,
+        ));
+        let angular = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(fs_qty::semantic::FrequencyConvention::Angular),
+            ValueForm::Static,
+        ));
+        let cyclic = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(fs_qty::semantic::FrequencyConvention::Cyclic),
+            ValueForm::Static,
+        ));
+        for (axis, dims, quantity, lo, at, expected) in [
+            ("T", temperature, Some(absolute), 300.0, 325.0, true),
+            ("T", temperature, Some(absolute), 300.0, 300.0, true),
+            ("T", temperature, None, 300.0, 325.0, true),
+            (
+                "T",
+                temperature,
+                Some(QuantitySpec::dimensional(temperature)),
+                300.0,
+                325.0,
+                true,
+            ),
+            ("T", temperature, Some(difference), 300.0, 325.0, false),
+            ("omega", frequency, Some(angular), 300.0, 325.0, false),
+            ("frequency", frequency, Some(cyclic), 300.0, 325.0, false),
+            ("T", frequency, Some(angular), 300.0, 325.0, false),
+            ("moisture", Dims::NONE, None, 300.0, 325.0, false),
+            ("T", temperature, None, 0.0, 0.0, false),
+            ("T", temperature, None, -400.0, -325.0, false),
+        ] {
+            let mut property = claim(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, vec![], lo + 100.0);
+            property.value = PropertyValue::Curve {
+                abscissa: axis.into(),
+                abscissa_dims: dims,
+                knots: vec![(lo, 2e9), (lo + 100.0, 4e9)],
+                dims: Pressure::DIMS,
+            };
+            property.validity = match quantity {
+                Some(quantity) => {
+                    ValidityDomain::unconstrained().with_quantity(axis, quantity, lo, lo + 100.0)
+                }
+                None => ValidityDomain::unconstrained().with(axis, lo, lo + 100.0),
+            };
+            let point = match quantity {
+                Some(quantity) => QueryPoint::new().with_quantity(axis, quantity, at).unwrap(),
+                None => QueryPoint::new().with(axis, at).unwrap(),
+            };
+            let mut claims = ClaimSet::new();
+            let id = claims.insert_claim(property).unwrap();
+            let card = MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "synthetic axis classification".into(),
+                    phase: "solid".into(),
+                    process: "synthetic".into(),
+                    revision: 0,
+                },
+                claims,
+                vec![],
+            )
+            .unwrap();
+            let requirement = ScalarPropertyRequirement::try_new(
+                YOUNG_MODULUS_PROPERTY,
+                Pressure::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap();
+            let state = resolve_material_state_point(
+                &card,
+                &point,
+                &[requirement],
+                MaterialPropertySelection::PinnedByProperty(vec![(
+                    YOUNG_MODULUS_PROPERTY.into(),
+                    id,
+                )]),
+            )
+            .unwrap();
+            let resolved = state.property(YOUNG_MODULUS_PROPERTY).unwrap();
+            assert_eq!(
+                resolved.is_constant_at_fixed_temperature(),
+                expected,
+                "{axis}/{quantity:?} at {at}"
+            );
+            let original = card
+                .claims()
+                .query_pinned(YOUNG_MODULUS_PROPERTY, &point, id)
+                .unwrap();
+            assert_eq!(
+                resolved.answer(),
+                &original,
+                "classification cannot rewrite evidence"
+            );
+            assert_ne!(
+                resolved.answer().receipt.decision,
+                fs_matdb::EvaluationDecision::ConstantWithinValidity
+            );
+        }
+    }
+
+    #[test]
+    fn g0_fixed_temperature_coefficients_follow_the_selected_claim() {
+        let mut claims = ClaimSet::new();
+        let mut ids = Vec::new();
+        for (axis, dims) in [
+            ("T", fs_qty::Temperature::DIMS),
+            ("omega", fs_qty::Frequency::DIMS),
+        ] {
+            let mut property = claim(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, vec![], 400.0);
+            property.value = PropertyValue::Curve {
+                abscissa: axis.into(),
+                abscissa_dims: dims,
+                knots: vec![(300.0, 2e9), (400.0, 4e9)],
+                dims: Pressure::DIMS,
+            };
+            property.validity = ValidityDomain::unconstrained()
+                .with("T", 300.0, 400.0)
+                .with("omega", 300.0, 400.0);
+            ids.push(claims.insert_claim(property).unwrap());
+        }
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic axis selection".into(),
+                phase: "solid".into(),
+                process: "synthetic".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap();
+        let point = QueryPoint::new()
+            .with("T", 325.0)
+            .unwrap()
+            .with("omega", 325.0)
+            .unwrap();
+        for (id, expected) in ids.into_iter().zip([true, false]) {
+            let requirement = ScalarPropertyRequirement::try_new(
+                YOUNG_MODULUS_PROPERTY,
+                Pressure::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap();
+            let state = resolve_material_state_point(
+                &card,
+                &point,
+                &[requirement],
+                MaterialPropertySelection::PinnedByProperty(vec![(
+                    YOUNG_MODULUS_PROPERTY.into(),
+                    id,
+                )]),
+            )
+            .unwrap();
+            let property = state.property(YOUNG_MODULUS_PROPERTY).unwrap();
+            assert_eq!(property.value_si(), 2.5e9);
+            assert_eq!(property.is_constant_at_fixed_temperature(), expected);
+            assert_eq!(property.answer().receipt.selected, id);
         }
     }
 
