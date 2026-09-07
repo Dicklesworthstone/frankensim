@@ -550,6 +550,34 @@ impl G1TransformerTrainer {
         self.best.clone()
     }
 
+    /// Resume from a head found earlier, scoring it so the reported best is
+    /// this policy's real objective rather than an inherited claim.
+    ///
+    /// A browser tab is not a safe place to keep an hour of work: the page
+    /// invites long runs and a refresh would otherwise discard all of it. The
+    /// head is the whole learned part — the trunk is deterministic in
+    /// `MODEL_SEED` — so it is sufficient to restore a run.
+    ///
+    /// Returns false and changes nothing if the width does not match.
+    pub fn seed_head(&mut self, head: &[f64]) -> bool {
+        if head.len() != self.best.len() {
+            return false;
+        }
+        let (objective, distance, _) = self.score(head);
+        // Only adopt it if it actually beats the controller; a corrupted or
+        // stale head must not install itself as "best" and hide the real
+        // baseline behind a number nothing can reproduce.
+        if !objective.is_finite() || objective >= self.baseline_objective {
+            return false;
+        }
+        self.best.copy_from_slice(head);
+        self.best_objective = objective;
+        self.best_distance = distance;
+        self.restarts = 0;
+        self.start_run();
+        true
+    }
+
     /// A renderable trace of the best policy so far, or of the tuned
     /// controller it started from, in the same packed G1 trace format the
     /// flagship already decodes and plays back.
@@ -568,16 +596,22 @@ impl G1TransformerTrainer {
             vec![0.0; self.best.len()]
         };
         debug_assert_eq!(head.len(), self.policy.model.policy_head.params.len());
+        // Restore afterwards. Every scoring path writes the head before use, so
+        // nothing is broken today, but leaving the model holding a policy the
+        // caller did not ask for is a trap for whatever reads it next.
+        let restore: Vec<f32> = self.policy.model.policy_head.params.clone();
         for (slot, value) in self.policy.model.policy_head.params.iter_mut().zip(&head) {
             *slot = *value as f32;
         }
         let Some(evaluator) = self.evaluators.first() else {
+            self.policy.model.policy_head.params.copy_from_slice(&restore);
             return Vec::new();
         };
         self.policy.begin_episode();
         let mut episode = EpisodeTrace::default();
         let receipt = evaluator.rollout_learned_traced(&mut self.policy, &mut episode);
         let _ = self.policy.take_collected();
+        self.policy.model.policy_head.params.copy_from_slice(&restore);
         match receipt {
             Ok(receipt) => {
                 crate::g1_receipt_packet(crate::G1_PACKET_KIND_TRACE, &receipt, true)
@@ -725,6 +759,44 @@ mod trainer_tests {
             baseline != best,
             "trained trace is identical to the baseline trace"
         );
+    }
+
+    /// A saved head must restore a run, and a bad one must be refused rather
+    /// than installed as a "best" the search can never reproduce.
+    #[test]
+    fn seeding_restores_a_run_and_refuses_a_worse_head() {
+        let mut source = G1TransformerTrainer::new(0, 1.5, 0.002, 7);
+        let baseline = source.progress()[5];
+        let mut improved = false;
+        for _ in 0..400 {
+            source.pump();
+            if source.progress()[3] < baseline {
+                improved = true;
+                break;
+            }
+        }
+        assert!(improved, "search found nothing to save");
+        let saved = source.best_head();
+        let saved_objective = source.progress()[3];
+
+        let mut resumed = G1TransformerTrainer::new(0, 1.5, 0.002, 7);
+        assert!(resumed.seed_head(&saved), "a better head must be adopted");
+        // Re-scored, not trusted: the resumed objective is measured here.
+        assert!(
+            (resumed.progress()[3] - saved_objective).abs() < 1e-9,
+            "resumed best {} should reproduce the saved {saved_objective}",
+            resumed.progress()[3]
+        );
+
+        // The zero head is exactly the baseline, so it is not an improvement
+        // and must be refused.
+        let zeros = vec![0.0; saved.len()];
+        assert!(!resumed.seed_head(&zeros), "baseline head must be refused");
+        assert!(
+            (resumed.progress()[3] - saved_objective).abs() < 1e-9,
+            "a refused seed must not disturb the incumbent"
+        );
+        assert!(!resumed.seed_head(&[0.0; 3]), "wrong width must be refused");
     }
 
     /// Pumping must actually search: the best objective has to fall below the

@@ -1634,6 +1634,12 @@ mod schema_two_wasm {
             self.inner.export_weights()
         }
 
+        /// Resume from a head saved earlier. Returns false if the width is
+        /// wrong or the head does not beat the tuned controller.
+        pub fn seed_head(&mut self, head: &[f64]) -> bool {
+            self.inner.seed_head(head)
+        }
+
         /// A packed G1 trace of the best policy (`use_best`) or of the tuned
         /// controller it started from, for playback on the existing stage.
         #[must_use]
