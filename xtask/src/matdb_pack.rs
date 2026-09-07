@@ -77,6 +77,8 @@ const TENSOR_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-comp
 // v7 carries six-component strain context without changing older manifests.
 const STRAIN_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v7";
 const STRAIN_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v7";
+const STRESS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v8";
+const STRESS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v8";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -85,7 +87,7 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 10;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 11;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
@@ -93,6 +95,7 @@ const HARDNESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v4";
 const SAMPLE_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v5";
 const TENSOR_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v6";
 const STRAIN_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v7";
+const STRESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v8";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const SAMPLE_SOURCE_HEADER: &str = "frankensim.matdb-source.v2";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
@@ -401,6 +404,7 @@ struct Manifest {
     hardness_tests: BTreeMap<String, HardnessSourceTest>,
     elastic_components: BTreeMap<String, fs_matdb::ElasticTensorComponent>,
     strain_components: BTreeMap<String, fs_matdb::StrainTensorComponent>,
+    stress_components: BTreeMap<String, fs_matdb::StressTensorComponent>,
 }
 
 #[derive(Debug)]
@@ -851,12 +855,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         Some(SAMPLE_MANIFEST_HEADER) => 5,
         Some(TENSOR_MANIFEST_HEADER) => 6,
         Some(STRAIN_MANIFEST_HEADER) => 7,
+        Some(STRESS_MANIFEST_HEADER) => 8,
         _ => {
             return Err(CompileError::new(
                 "unsupported_manifest_schema",
                 "manifest",
                 format!(
-                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, {SAMPLE_MANIFEST_HEADER:?}, {TENSOR_MANIFEST_HEADER:?}, or {STRAIN_MANIFEST_HEADER:?}"
+                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, {SAMPLE_MANIFEST_HEADER:?}, {TENSOR_MANIFEST_HEADER:?}, {STRAIN_MANIFEST_HEADER:?}, or {STRESS_MANIFEST_HEADER:?}"
                 ),
             ));
         }
@@ -872,6 +877,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
     let mut hardness_tests: BTreeMap<String, HardnessSourceTest> = BTreeMap::new();
     let mut elastic_components = BTreeMap::new();
     let mut strain_components = BTreeMap::new();
+    let mut stress_components = BTreeMap::new();
     for (offset, line) in lines.enumerate() {
         let line_number = offset + 2;
         if line.len() > MAX_LINE_BYTES {
@@ -890,6 +896,18 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.first().copied() {
+            Some("stress-component") if version >= 8 => {
+                require_field_count(&fields, 7, "manifest", line_number)?;
+                let claim = require_identifier(fields[1], "stress claim", "manifest")?;
+                let component = parse_stress_component(&fields)?;
+                if stress_components.insert(claim, component).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_stress_component",
+                        "manifest",
+                        "one claim may declare only one stress component",
+                    ));
+                }
+            }
             Some("strain-component") if version >= 7 => {
                 require_field_count(&fields, 7, "manifest", line_number)?;
                 let claim = require_identifier(fields[1], "strain claim", "manifest")?;
@@ -1114,6 +1132,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         hardness_tests,
         elastic_components,
         strain_components,
+        stress_components,
     })
 }
 
@@ -1193,6 +1212,42 @@ fn parse_strain_component(
         fields[6].parse().map_err(|_| invalid())?,
     )
     .map_err(|error| CompileError::new("invalid_strain_component", "manifest", error.to_string()))
+}
+
+fn parse_stress_component(
+    fields: &[&str],
+) -> Result<fs_matdb::StressTensorComponent, CompileError> {
+    use fs_matdb::{
+        ElasticTensorOrder, StressTensorBasis, StressTensorComponent, StressTensorNotation,
+    };
+    let invalid = || {
+        CompileError::new(
+            "invalid_stress_component",
+            "manifest",
+            "expected claim, tensor|engineering|mandel, xx-yy-zz-xy-yz-zx|xx-yy-zz-yz-zx-xy, frame hash, tensor hash and index in 0..6",
+        )
+    };
+    let notation = match fields[2] {
+        "tensor" => StressTensorNotation::Tensor,
+        "engineering" => StressTensorNotation::Engineering,
+        "mandel" => StressTensorNotation::Mandel,
+        _ => return Err(invalid()),
+    };
+    let order = match fields[3] {
+        "xx-yy-zz-xy-yz-zx" => ElasticTensorOrder::XxYyZzXyYzZx,
+        "xx-yy-zz-yz-zx-xy" => ElasticTensorOrder::XxYyZzYzZxXy,
+        _ => return Err(invalid()),
+    };
+    StressTensorComponent::new(
+        StressTensorBasis {
+            notation,
+            order,
+            frame: ContentHash::from_hex(fields[4]).ok_or_else(invalid)?,
+        },
+        ContentHash::from_hex(fields[5]).ok_or_else(invalid)?,
+        fields[6].parse().map_err(|_| invalid())?,
+    )
+    .map_err(|error| CompileError::new("invalid_stress_component", "manifest", error.to_string()))
 }
 
 fn manifest_quantity_kind(name: &str) -> Result<Option<QuantityKind>, CompileError> {
@@ -3945,6 +4000,8 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let compiler_id = match (manifest.version, profile) {
+        (8, SourceProfile::Material) => STRESS_COMPILER_ID,
+        (8, SourceProfile::Interface) => STRESS_INTERFACE_COMPILER_ID,
         (7, SourceProfile::Material) => STRAIN_COMPILER_ID,
         (7, SourceProfile::Interface) => STRAIN_INTERFACE_COMPILER_ID,
         (6, SourceProfile::Material) => TENSOR_COMPILER_ID,
@@ -4175,6 +4232,15 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 key = key.with_strain_component(*component).map_err(|error| {
                     CompileError::new(
                         "invalid_strain_component",
+                        format!("claim:{local_id}"),
+                        error.to_string(),
+                    )
+                })?;
+            }
+            if let Some(component) = manifest.stress_components.get(local_id) {
+                key = key.with_stress_component(*component).map_err(|error| {
+                    CompileError::new(
+                        "invalid_stress_component",
                         format!("claim:{local_id}"),
                         error.to_string(),
                     )
@@ -4544,8 +4610,20 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
                 push_part(&mut payload, &component.canonical_bytes());
             }
         }
+        if manifest.version >= 8 {
+            push_part(
+                &mut payload,
+                &(manifest.stress_components.len() as u64).to_le_bytes(),
+            );
+            for (claim, component) in &manifest.stress_components {
+                push_part(&mut payload, claim.as_bytes());
+                push_part(&mut payload, &component.canonical_bytes());
+            }
+        }
         hash_domain(
-            if manifest.version >= 7 {
+            if manifest.version >= 8 {
+                "org.frankensim.xtask.matdb-pack.source-envelope.v8"
+            } else if manifest.version >= 7 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v7"
             } else if manifest.version >= 6 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v6"
@@ -4566,6 +4644,15 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
 }
 
 fn validate_name_mappings(manifest: &Manifest, raw: &RawDatabase) -> Result<(), CompileError> {
+    for claim in manifest.stress_components.keys() {
+        if !raw.claims.contains_key(claim) {
+            return Err(CompileError::new(
+                "unused_stress_component",
+                format!("claim:{claim}"),
+                "stress component must refer to an imported claim",
+            ));
+        }
+    }
     for claim in manifest.strain_components.keys() {
         if !raw.claims.contains_key(claim) {
             return Err(CompileError::new(
@@ -5752,6 +5839,376 @@ mod tests {
     fn sample_manifest(profile: &str) -> String {
         manifest(profile, true).replacen(MANIFEST_HEADER, SAMPLE_MANIFEST_HEADER, 1)
             + "axis\ttemperature\tT\tabsolute-temperature\naxis\tfrequency\tf\tcyclic-frequency\n"
+    }
+
+    fn stress_fixture(
+        profile: &str,
+        notation: &str,
+        order: &str,
+        unit: &str,
+    ) -> (String, String, [PropertyKey; 6]) {
+        let mut manifest =
+            manifest(profile, true).replacen(MANIFEST_HEADER, STRESS_MANIFEST_HEADER, 1)
+                + "axis\tT\tT\tabsolute-temperature\n";
+        let mut source = concat!("frankensim.matdb-source.v1\n",
+            "observation\ttest\tsynthetic specimen\tsynthetic clamped thermal stress\tno empirical validation claim\n").to_owned();
+        // Independent closed-form stress: E=1200 Pa, nu=1/4,
+        // elastic strain [-.01,-.02,-.03,-.004,.006,-.008], rotated
+        // about z with cos=3/5, sin=4/5. Physical tensor shear here.
+        let physical = [-40.8576, -45.5424, -57.6, 5.6832, -2.688, -9.216];
+        let positions = if order == "xx-yy-zz-xy-yz-zx" {
+            [0, 1, 2, 3, 4, 5]
+        } else {
+            [0, 1, 2, 4, 5, 3]
+        };
+        let unit_scale = if unit == "Pa" { 1.0 } else { 1000.0 };
+        let keys = core::array::from_fn(|index| {
+            let record = format!(
+                "stress-component\ts{index}\t{notation}\t{order}\t{}\t{}\t{index}",
+                ContentHash([1; 32]).to_hex(),
+                ContentHash([2; 32]).to_hex()
+            );
+            let component =
+                parse_stress_component(&record.split('\t').collect::<Vec<_>>()).unwrap();
+            manifest.push_str(&record);
+            manifest.push('\n');
+            let shear_scale = if notation == "mandel" && index >= 3 {
+                core::f64::consts::SQRT_2
+            } else {
+                1.0
+            };
+            let value = physical[positions[index]] * shear_scale / unit_scale;
+            let uncertainty = 0.5 / unit_scale;
+            source.push_str(&format!(
+                "scalar\ts{index}\ttest\tstress\t{value}\t{unit}\tconstant\n\
+                 uncertainty\ts{index}\tabsolute\t{uncertainty}\t{unit}\t0.95\t1\n\
+                 validity\ts{index}\tT\t300\t300\tK\n"
+            ));
+            PropertyKey::new("stress", fs_qty::Pressure::DIMS)
+                .with_stress_component(component)
+                .unwrap()
+        });
+        if profile == INTERFACE_PROFILE {
+            source.push_str(concat!(
+                "surface_a\tsynthetic-a\tsolid\tfixture\t0\tframe-a\n",
+                "surface_b\tsynthetic-b\tsolid\tfixture\t0\tframe-b\n",
+                "context\tdry\t-\tsynthetic environment\tsynthetic history\n"
+            ));
+        }
+        (manifest, source, keys)
+    }
+
+    #[test]
+    fn g1_g3_stress_source_units_contexts_and_state_match_constitutive_response() {
+        use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_interface_state_point, resolve_stress_tensor_state_point,
+        };
+        use fs_material::{SmallStrainLaw, elastic::IsotropicElastic, tensor};
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let point = QueryPoint::new()
+            .with_quantity("T", temperature, 300.0)
+            .unwrap();
+        let law = IsotropicElastic::new(1200.0, 0.25, 0.1).unwrap();
+        let stress = law.stress(&[-0.01, -0.02, -0.03, -0.004, 0.006, -0.008], &());
+        let q = [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]];
+        let rotated = tensor::rotate(&stress, &q);
+        for profile in [MATERIAL_PROFILE, INTERFACE_PROFILE] {
+            for notation in ["tensor", "engineering", "mandel"] {
+                for order in ["xx-yy-zz-xy-yz-zx", "xx-yy-zz-yz-zx-xy"] {
+                    let mut source_hashes = BTreeSet::new();
+                    for unit in ["Pa", "kPa"] {
+                        let (manifest, source, keys) =
+                            stress_fixture(profile, notation, order, unit);
+                        let (path, _) = write_fixture(&manifest, &source);
+                        let output = compile_manifest(&path).unwrap();
+                        let interface = (profile == INTERFACE_PROFILE)
+                            .then(|| NormalizedInterfacePack::from_bytes(&output.bytes).unwrap());
+                        let pack = match &interface {
+                            Some(value) => {
+                                assert_eq!(value.compiler(), STRESS_INTERFACE_COMPILER_ID);
+                                value.claims_pack().clone()
+                            }
+                            None => {
+                                let value = NormalizedPack::from_bytes(&output.bytes).unwrap();
+                                assert_eq!(value.compiler(), STRESS_COMPILER_ID);
+                                value
+                            }
+                        };
+                        assert_eq!(pack.schema_version(), 7);
+                        assert!(
+                            source_hashes.insert(pack.content_hash()),
+                            "source unit spelling retains distinct provenance"
+                        );
+                        let material = NormalizedMaterialCardPack::new(
+                            MaterialStateId {
+                                chemistry: "synthetic".into(),
+                                phase: "solid".into(),
+                                process: "clamped thermal stress fixture".into(),
+                                revision: 0,
+                            },
+                            pack.clone(),
+                        )
+                        .unwrap();
+                        let material = NormalizedMaterialCardPack::from_bytes_verified(
+                            material.content_hash(),
+                            &material.to_bytes(),
+                        )
+                        .unwrap();
+                        let pins = pack
+                            .claims()
+                            .claims_ordered()
+                            .map(|(id, claim)| (claim.key.name().to_owned(), id))
+                            .collect();
+                        for selection in [
+                            MaterialPropertySelection::SingleClaimOnly,
+                            MaterialPropertySelection::PreferObservationBacked,
+                            MaterialPropertySelection::PinnedByProperty(pins),
+                        ] {
+                            let state = resolve_stress_tensor_state_point(
+                                material.card(),
+                                &point,
+                                &keys,
+                                selection.clone(),
+                            )
+                            .unwrap();
+                            assert_eq!(state.basis(), keys[0].stress_component().unwrap().basis());
+                            assert_eq!(state.source_tensor_identity(), ContentHash([2; 32]));
+                            assert!(state.resolved().property("stress").is_none());
+                            let positions = if order == "xx-yy-zz-xy-yz-zx" {
+                                [0, 1, 2, 3, 4, 5]
+                            } else {
+                                [0, 1, 2, 4, 5, 3]
+                            };
+                            for (i, key) in keys.iter().enumerate() {
+                                let scale = if notation == "mandel" && i >= 3 {
+                                    core::f64::consts::SQRT_2
+                                } else {
+                                    1.0
+                                };
+                                assert!(
+                                    (state.stress_pa()[i] - rotated[positions[i]] * scale).abs()
+                                        < 1e-11
+                                );
+                                let selected = state.resolved().property_by_key(key).unwrap();
+                                assert_eq!(
+                                    selected.requirement().stress_component(),
+                                    key.stress_component()
+                                );
+                                let claim = pack
+                                    .claims()
+                                    .claim(selected.answer().receipt.selected)
+                                    .unwrap();
+                                assert_eq!(
+                                    claim.uncertainty,
+                                    UncertaintyModel::HalfWidth {
+                                        half_width: 0.5,
+                                        confidence: 0.95
+                                    }
+                                );
+                                pack.claims()
+                                    .verify_receipt(&selected.answer().receipt)
+                                    .unwrap();
+                            }
+                            if let Some(interface) = &interface {
+                                let mut requirements: Vec<_> = keys
+                                    .iter()
+                                    .map(|key| {
+                                        ScalarPropertyRequirement::try_with_key(
+                                            key,
+                                            ScalarAdmissibility::Finite,
+                                        )
+                                        .unwrap()
+                                    })
+                                    .collect();
+                                let first = resolve_interface_state_point(
+                                    interface.card(),
+                                    &point,
+                                    &requirements,
+                                    selection.clone(),
+                                )
+                                .unwrap();
+                                requirements.reverse();
+                                assert_eq!(
+                                    first,
+                                    resolve_interface_state_point(
+                                        interface.card(),
+                                        &point,
+                                        &requirements,
+                                        selection.clone()
+                                    )
+                                    .unwrap()
+                                );
+                                for (i, key) in keys.iter().enumerate() {
+                                    assert_eq!(
+                                        first.property_by_key(key).unwrap().value_si(),
+                                        state.stress_pa()[i]
+                                    );
+                                }
+                            }
+                        }
+                        let mut mixed = keys.clone();
+                        let descriptor = keys[2].stress_component().unwrap();
+                        for bad in [
+                            fs_matdb::StressTensorComponent::new(
+                                descriptor.basis(),
+                                ContentHash([9; 32]),
+                                2,
+                            )
+                            .unwrap(),
+                            fs_matdb::StressTensorComponent::new(
+                                fs_matdb::StressTensorBasis {
+                                    frame: ContentHash([9; 32]),
+                                    ..descriptor.basis()
+                                },
+                                descriptor.source_tensor(),
+                                2,
+                            )
+                            .unwrap(),
+                            fs_matdb::StressTensorComponent::new(
+                                fs_matdb::StressTensorBasis {
+                                    notation: if notation == "tensor" {
+                                        fs_matdb::StressTensorNotation::Mandel
+                                    } else {
+                                        fs_matdb::StressTensorNotation::Tensor
+                                    },
+                                    ..descriptor.basis()
+                                },
+                                descriptor.source_tensor(),
+                                2,
+                            )
+                            .unwrap(),
+                            keys[1].stress_component().unwrap(),
+                        ] {
+                            mixed[2] = PropertyKey::new("stress", fs_qty::Pressure::DIMS)
+                                .with_stress_component(bad)
+                                .unwrap();
+                            assert!(matches!(resolve_stress_tensor_state_point(material.card(), &point, &mixed, MaterialPropertySelection::SingleClaimOnly), Err(fs_material::state_point::MaterialStatePointError::InvalidRequirement { .. })));
+                        }
+                        assert!(
+                            resolve_stress_tensor_state_point(
+                                material.card(),
+                                &QueryPoint::new()
+                                    .with_quantity("T", temperature, 301.0)
+                                    .unwrap(),
+                                &keys,
+                                MaterialPropertySelection::SingleClaimOnly
+                            )
+                            .is_err()
+                        );
+                        let bare = core::array::from_fn(|_| {
+                            PropertyKey::new("stress", fs_qty::Pressure::DIMS)
+                        });
+                        assert!(matches!(resolve_stress_tensor_state_point(material.card(), &point, &bare, MaterialPropertySelection::SingleClaimOnly), Err(fs_material::state_point::MaterialStatePointError::InvalidRequirement { .. })));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_stress_source_refuses_wrong_schema_units_context_and_missing_coordinates() {
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_stress_tensor_state_point,
+        };
+        let (manifest, source, keys) =
+            stress_fixture(MATERIAL_PROFILE, "engineering", "xx-yy-zz-xy-yz-zx", "Pa");
+        let first = manifest
+            .lines()
+            .find(|line| line.starts_with("stress-component"))
+            .unwrap();
+        for (bad, code) in [
+            (
+                manifest.replacen(STRESS_MANIFEST_HEADER, STRAIN_MANIFEST_HEADER, 1),
+                "unknown_manifest_record",
+            ),
+            (
+                manifest.replacen("\tengineering\t", "\tunknown\t", 1),
+                "invalid_stress_component",
+            ),
+            (
+                manifest.replacen("stress-component\ts0", "stress-component\tmissing", 1),
+                "unused_stress_component",
+            ),
+            (
+                manifest.clone() + first + "\n",
+                "duplicate_stress_component",
+            ),
+            (
+                manifest.replacen(
+                    &ContentHash([1; 32]).to_hex(),
+                    &ContentHash([0; 32]).to_hex(),
+                    1,
+                ),
+                "invalid_stress_component",
+            ),
+        ] {
+            let (path, _) = write_fixture(&bad, &source);
+            assert_eq!(compile_manifest(&path).unwrap_err().code, code);
+        }
+        let (path, _) = write_fixture(&manifest, &source.replace("\tPa\t", "\t1\t"));
+        assert_eq!(
+            compile_manifest(&path).unwrap_err().code,
+            "invalid_stress_component"
+        );
+        let collision = manifest.clone()
+            + &format!(
+                "elastic-component\ts0\tengineering\txx-yy-zz-xy-yz-zx\tmajor-minor\t{}\t{}\t0\t0\n",
+                ContentHash([1; 32]).to_hex(),
+                ContentHash([2; 32]).to_hex()
+            );
+        let (path, _) = write_fixture(&collision, &source);
+        assert_eq!(
+            compile_manifest(&path).unwrap_err().code,
+            "invalid_stress_component"
+        );
+        let missing_source = source
+            .lines()
+            .filter(|line| line.split('\t').nth(1) != Some("s5"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let partial = manifest
+            .lines()
+            .filter(|line| !line.starts_with("stress-component\ts5\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let (path, _) = write_fixture(&partial, &missing_source);
+        let pack = NormalizedPack::from_bytes(&compile_manifest(&path).unwrap().bytes).unwrap();
+        let card = fs_matdb::NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "partial".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let point = fs_matdb::QueryPoint::new()
+            .with_quantity("T", temperature, 300.0)
+            .unwrap();
+        assert!(matches!(
+            resolve_stress_tensor_state_point(
+                card.card(),
+                &point,
+                &keys,
+                MaterialPropertySelection::SingleClaimOnly
+            ),
+            Err(fs_material::state_point::MaterialStatePointError::Query {
+                source: fs_matdb::MatDbError::TensorContextMismatch { .. },
+                ..
+            })
+        ));
     }
 
     fn strain_fixture(
@@ -7942,6 +8399,7 @@ mod tests {
             hardness_tests: BTreeMap::new(),
             elastic_components: BTreeMap::new(),
             strain_components: BTreeMap::new(),
+            stress_components: BTreeMap::new(),
             pack_id: "fixture".to_string(),
             redistribution_terms: "permitted".to_string(),
             citation: "x".repeat(1_048_000),

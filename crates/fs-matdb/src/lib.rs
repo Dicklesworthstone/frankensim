@@ -46,7 +46,7 @@ mod tensor;
 pub use tensor::{
     ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
     ElasticTensorSymmetry, StrainTensorBasis, StrainTensorComponent, StrainTensorNotation,
-    StressTensorBasis, StressTensorNotation,
+    StressTensorBasis, StressTensorComponent, StressTensorNotation,
 };
 
 pub use cards::{
@@ -72,10 +72,10 @@ pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
-    MATDB_PACK_TARGET_BASIS, MATDB_STRAIN_PACK_SCHEMA_VERSION, MATDB_TENSOR_PACK_SCHEMA_VERSION,
-    MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
-    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
-    ValidityBoundSide,
+    MATDB_PACK_TARGET_BASIS, MATDB_STRAIN_PACK_SCHEMA_VERSION, MATDB_STRESS_PACK_SCHEMA_VERSION,
+    MATDB_TENSOR_PACK_SCHEMA_VERSION, MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION,
+    MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt, NormalizationTarget, NormalizedPack,
+    PackError, StatisticComponent, StatisticMember, ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -546,6 +546,7 @@ pub struct PropertyKey {
     hardness_test: Option<Box<HardnessTestContext>>,
     elastic_component: Option<ElasticTensorComponent>,
     strain_component: Option<StrainTensorComponent>,
+    stress_component: Option<StressTensorComponent>,
 }
 
 impl PropertyKey {
@@ -558,6 +559,7 @@ impl PropertyKey {
             hardness_test: None,
             elastic_component: None,
             strain_component: None,
+            stress_component: None,
         }
     }
 
@@ -571,6 +573,7 @@ impl PropertyKey {
             hardness_test: None,
             elastic_component: None,
             strain_component: None,
+            stress_component: None,
         }
     }
 
@@ -599,9 +602,11 @@ impl PropertyKey {
         mut self,
         component: ElasticTensorComponent,
     ) -> Result<Self, MatDbError> {
-        if self.quantity != QuantitySpec::dimensional(fs_qty::Pressure::DIMS) {
+        if self.quantity != QuantitySpec::dimensional(fs_qty::Pressure::DIMS)
+            || self.stress_component.is_some()
+        {
             return Err(MatDbError::InvalidTensorContext {
-                reason: "elastic coefficients require dimensional pressure values",
+                reason: "elastic coefficients require dimensional pressure values without stress context",
             });
         }
         self.elastic_component = Some(component);
@@ -633,6 +638,29 @@ impl PropertyKey {
     #[must_use]
     pub const fn strain_component(&self) -> Option<StrainTensorComponent> {
         self.strain_component
+    }
+
+    /// Bind a symmetric Cauchy stress coordinate. Equal pressure dimensions
+    /// do not make a stiffness coefficient interchangeable with stress.
+    pub fn with_stress_component(
+        mut self,
+        component: StressTensorComponent,
+    ) -> Result<Self, MatDbError> {
+        if self.quantity != QuantitySpec::dimensional(fs_qty::Pressure::DIMS)
+            || self.elastic_component.is_some()
+        {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "stress components require dimensional pressure values without stiffness context",
+            });
+        }
+        self.stress_component = Some(component);
+        Ok(self)
+    }
+
+    /// Exact stress context; absence is not a wildcard.
+    #[must_use]
+    pub const fn stress_component(&self) -> Option<StressTensorComponent> {
+        self.stress_component
     }
 
     pub(crate) fn is_hardness(&self) -> bool {
@@ -1004,6 +1032,7 @@ impl PropertyClaim {
             || self.key.hardness_test().is_some()
             || self.key.elastic_component().is_some()
             || self.key.strain_component().is_some()
+            || self.key.stress_component().is_some()
         {
             push(&self.key.quantity().canonical_bytes());
             push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
@@ -1011,7 +1040,10 @@ impl PropertyClaim {
                 push(axis.as_bytes());
                 push(&quantity.canonical_bytes());
             }
-            if let Some(component) = self.key.strain_component() {
+            if let Some(component) = self.key.stress_component() {
+                push(&component.canonical_bytes());
+                hash_domain("org.frankensim.fs-matdb.property-claim.v7", &payload)
+            } else if let Some(component) = self.key.strain_component() {
                 push(&component.canonical_bytes());
                 hash_domain("org.frankensim.fs-matdb.property-claim.v6", &payload)
             } else if let Some(component) = self.key.elastic_component() {

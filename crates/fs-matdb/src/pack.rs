@@ -28,6 +28,8 @@ pub const MATDB_HARDNESS_PACK_SCHEMA_VERSION: u32 = 4;
 pub const MATDB_TENSOR_PACK_SCHEMA_VERSION: u32 = 5;
 /// Preserves symmetric second-order strain component context.
 pub const MATDB_STRAIN_PACK_SCHEMA_VERSION: u32 = 6;
+/// Preserves symmetric Cauchy stress coordinates separately from stiffness.
+pub const MATDB_STRESS_PACK_SCHEMA_VERSION: u32 = 7;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
@@ -545,6 +547,13 @@ impl NormalizedPack {
         if self
             .claims
             .claims_ordered()
+            .any(|(_, claim)| claim.key.stress_component().is_some())
+        {
+            return MATDB_STRESS_PACK_SCHEMA_VERSION;
+        }
+        if self
+            .claims
+            .claims_ordered()
             .any(|(_, claim)| claim.key.strain_component().is_some())
         {
             return MATDB_STRAIN_PACK_SCHEMA_VERSION;
@@ -696,7 +705,7 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_STRAIN_PACK_SCHEMA_VERSION).contains(&version) {
+        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_STRESS_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
                 "unsupported schema version {version}; expected 1, 2, 3 (typed axes), 4 (hardness test), or 5 (elastic tensor context)"
             )));
@@ -814,7 +823,9 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_STRAIN_PACK_SCHEMA_VERSION {
+    if version == MATDB_STRESS_PACK_SCHEMA_VERSION {
+        "org.frankensim.fs-matdb.normalized-pack.v7"
+    } else if version == MATDB_STRAIN_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v6"
     } else if version == MATDB_TENSOR_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v5"
@@ -2152,6 +2163,15 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
             }
         }
     }
+    if version >= MATDB_STRESS_PACK_SCHEMA_VERSION {
+        match claim.key.stress_component() {
+            None => writer.u8(0),
+            Some(component) => {
+                writer.u8(1);
+                writer.bytes.extend_from_slice(&component.canonical_bytes());
+            }
+        }
+    }
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
             writer.u8(0);
@@ -2286,6 +2306,18 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
                 key = key.with_strain_component(component)?;
             }
             tag => return Err(reader.malformed(format!("unknown strain component tag {tag}"))),
+        }
+    }
+    if version >= MATDB_STRESS_PACK_SCHEMA_VERSION {
+        match reader.u8()? {
+            0 => {}
+            1 => {
+                let component = crate::StressTensorComponent::from_canonical_bytes(
+                    reader.take(crate::StressTensorComponent::ENCODED_LEN)?,
+                )?;
+                key = key.with_stress_component(component)?;
+            }
+            tag => return Err(reader.malformed(format!("unknown stress component tag {tag}"))),
         }
     }
     let value = match reader.u8()? {

@@ -23,7 +23,7 @@ use crate::elastic::OrthotropicElastic;
 pub use fs_matdb::{
     CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
     ElasticTensorOrder, ElasticTensorSymmetry, JointCorrelation, JointUsageReceipt,
-    StrainTensorBasis, StrainTensorComponent,
+    StrainTensorBasis, StrainTensorComponent, StressTensorBasis, StressTensorComponent,
 };
 
 /// Identity domain for a complete resolved material state-point bundle.
@@ -183,6 +183,7 @@ pub struct ScalarPropertyRequirement {
     hardness_test: Option<Box<fs_matdb::HardnessTestContext>>,
     elastic_component: Option<ElasticTensorComponent>,
     strain_component: Option<StrainTensorComponent>,
+    stress_component: Option<StressTensorComponent>,
     admissibility: ScalarAdmissibility,
 }
 
@@ -223,6 +224,7 @@ impl ScalarPropertyRequirement {
             hardness_test: None,
             elastic_component: None,
             strain_component: None,
+            stress_component: None,
             admissibility,
         })
     }
@@ -237,6 +239,7 @@ impl ScalarPropertyRequirement {
         requirement.hardness_test = key.hardness_test().cloned().map(Box::new);
         requirement.elastic_component = key.elastic_component();
         requirement.strain_component = key.strain_component();
+        requirement.stress_component = key.stress_component();
         Ok(requirement)
     }
 
@@ -257,12 +260,19 @@ impl ScalarPropertyRequirement {
         self.strain_component
     }
 
+    /// Exact symmetric stress coordinate requested by the consumer.
+    #[must_use]
+    pub const fn stress_component(&self) -> Option<StressTensorComponent> {
+        self.stress_component
+    }
+
     fn matches_key(&self, key: &PropertyKey) -> bool {
         self.name == key.name()
             && self.quantity == key.quantity()
             && self.hardness_test() == key.hardness_test()
             && self.elastic_component == key.elastic_component()
             && self.strain_component == key.strain_component()
+            && self.stress_component == key.stress_component()
     }
 
     /// Exact property key queried from the material card.
@@ -590,6 +600,11 @@ fn resolve_scalar_property_set(
         if let Some(component) = requirement.strain_component() {
             key = key
                 .with_strain_component(component)
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.stress_component() {
+            key = key
+                .with_stress_component(component)
                 .map_err(context_error)?;
         }
         if queries.iter().any(|(_, prior)| *prior == key) {
@@ -1375,6 +1390,87 @@ pub fn resolve_strain_tensor_state_point(
     Ok(StrainTensorStatePoint {
         resolved,
         strain,
+        descriptor,
+    })
+}
+
+/// Six source-declared symmetric Cauchy stress components at one material
+/// state point. This is observed/source data, not a solved equilibrium field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StressTensorStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    stress_pa: [f64; 6],
+    descriptor: StressTensorComponent,
+}
+
+impl StressTensorStatePoint {
+    /// Selected claims, marginal uncertainties and source receipts.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Values in pascals in the declared stress notation and order.
+    #[must_use]
+    pub const fn stress_pa(&self) -> &[f64; 6] {
+        &self.stress_pa
+    }
+
+    /// Exact source coordinates, with engineering stress shear undoubled.
+    #[must_use]
+    pub const fn basis(&self) -> StressTensorBasis {
+        self.descriptor.basis()
+    }
+
+    /// Source-declared identity shared by all six components.
+    #[must_use]
+    pub const fn source_tensor_identity(&self) -> ContentHash {
+        self.descriptor.source_tensor()
+    }
+}
+
+/// Resolve all six explicit stress coordinates from one card and query point.
+/// Missing shear values never imply zero; mixed frames, orders and source
+/// tensors refuse. This performs no constitutive solve or covariance inference.
+pub fn resolve_stress_tensor_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    components: &[PropertyKey; 6],
+    selection: MaterialPropertySelection,
+) -> Result<StressTensorStatePoint, MaterialStatePointError> {
+    let descriptor = components[0].stress_component().ok_or_else(|| {
+        MaterialStatePointError::InvalidRequirement {
+            property: components[0].name().to_owned(),
+            reason: "every stress component requires explicit tensor coordinates",
+        }
+    })?;
+    let mut requirements = Vec::with_capacity(6);
+    for (index, key) in components.iter().enumerate() {
+        if !key.stress_component().is_some_and(|component| {
+            component.index() == index
+                && component.basis() == descriptor.basis()
+                && component.source_tensor() == descriptor.source_tensor()
+        }) {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: key.name().to_owned(),
+                reason: "stress components must address one complete tensor in one source basis",
+            });
+        }
+        requirements.push(ScalarPropertyRequirement::try_with_key(
+            key,
+            ScalarAdmissibility::Finite,
+        )?);
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let stress_pa = core::array::from_fn(|index| {
+        resolved
+            .property_by_key(&components[index])
+            .expect("all stress component requirements were resolved")
+            .value_si()
+    });
+    Ok(StressTensorStatePoint {
+        resolved,
+        stress_pa,
         descriptor,
     })
 }

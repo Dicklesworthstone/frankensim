@@ -1475,9 +1475,12 @@ mod material_plate_tests {
         .unwrap()
     }
 
-    fn orthotropic(rho: f64, stiffness_scale: f64) -> ResolvedMaterialStatePoint {
+    fn orthotropic_properties(
+        rho: f64,
+        stiffness_scale: f64,
+    ) -> [(&'static str, QuantitySpec, f64); 5] {
         let pressure = QuantitySpec::dimensional(Pressure::DIMS);
-        state(&[
+        [
             ("density", QuantitySpec::dimensional(Density::DIMS), rho),
             ("young_modulus_1", pressure, 12e9 * stiffness_scale),
             ("young_modulus_2", pressure, 0.9e9 * stiffness_scale),
@@ -1487,7 +1490,11 @@ mod material_plate_tests {
                 1.2,
             ),
             ("shear_modulus_12", pressure, 0.75e9 * stiffness_scale),
-        ])
+        ]
+    }
+
+    fn orthotropic(rho: f64, stiffness_scale: f64) -> ResolvedMaterialStatePoint {
+        state(&orthotropic_properties(rho, stiffness_scale))
     }
 
     fn template() -> ThinPlate {
@@ -1557,7 +1564,7 @@ mod material_plate_tests {
             string.material().card_identity(),
             plate.material().card_identity()
         );
-        assert_eq!(string.material().state_coordinate("T"), Some(293.15));
+        assert_eq!(string.material().query_point(), &[("T".to_owned(), 293.15)]);
         assert_ne!(input.ambient.temperature_k, 293.15);
         let area = core::f64::consts::PI * 0.0008_f64.powi(2);
         assert!((string.mass_kg() / (450.0 * area * 0.65) - 1.0).abs() < 1e-13);
@@ -1659,8 +1666,14 @@ mod material_plate_tests {
         .unwrap();
         let (chart, radiation) = chart_input(&uniform);
         let point = QueryPoint::new().with("T", 293.15).unwrap();
-        let a = isotropic_card(450.0);
-        let b = isotropic_card(1800.0);
+        let a = material_card(
+            &orthotropic_properties(450.0, 1.0),
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        );
+        let b = material_card(
+            &orthotropic_properties(1800.0, 1.0),
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        );
         let mut input = plucked(20.0, 0.006, 1e-5);
         input.duration_s = 0.02;
         input.string.as_mut().unwrap().moving_end = true;
@@ -1675,7 +1688,7 @@ mod material_plate_tests {
                 .map(|r| PlateRegionSource {
                     region: r.region,
                     source: source(&a, &point),
-                    model: Model::Isotropic,
+                    model: Model::Orthotropic12,
                     thickness: r.thickness_constraint,
                     material_angle_rad: 0.0,
                 })
@@ -1695,7 +1708,7 @@ mod material_plate_tests {
         let Some(CompiledMaterialPlate::Regional { chart, radiation }) = first.plate() else {
             panic!("regional plate");
         };
-        assert_eq!(chart.regions()[0].input.material.properties().len(), 3);
+        assert_eq!(chart.regions()[0].input.material.properties().len(), 5);
         let direct = realize_assembly_with_plate_chart(&input, chart.chart(), radiation).unwrap();
         assert_eq!(first.realize().unwrap(), direct);
         let Some(PlateMaterialBinding::Regional { regions, .. }) = bindings.plate.as_mut() else {
@@ -1767,8 +1780,15 @@ mod material_plate_tests {
             }
         }) if component == "string")
         );
+        let incomplete_plate = material_card(
+            &orthotropic_properties(450.0, 1.0)
+                .into_iter()
+                .filter(|(key, _, _)| *key != "young_modulus_1")
+                .collect::<Vec<_>>(),
+            ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+        );
         bindings.plate = Some(PlateMaterialBinding::Uniform {
-            source: source(&card, &point),
+            source: source(&incomplete_plate, &point),
             model: Model::Orthotropic12,
             thickness: Thickness::FixedThickness(0.003),
         });
@@ -1826,6 +1846,8 @@ mod material_plate_tests {
             .unwrap();
         let mut input = plucked(20.0, 0.006, 1e-5);
         input.duration_s = 0.02;
+        // Resolve the highest instantaneous bending mode under the phase admission.
+        input.sample_rate_hz = 48_000;
         input.string.as_mut().unwrap().damping_ratio = 0.0;
         let bindings = AcousticMaterialBindings {
             string: Some(StringMaterialBinding {
