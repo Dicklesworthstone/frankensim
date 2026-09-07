@@ -389,8 +389,37 @@ them for the second-order thermal-strain transform feeding its tet operator.
 Cauchy stress coordinates for computed observations. Tensor and engineering
 stress shear are physical `sigma_ij`; Mandel uses `sqrt(2) sigma_ij`. These
 descriptors are re-exported through fs-material and consumed by fs-solid's
-actual thermal stress recovery and frame transform. They do not yet add a
-stress-component PropertyKey context, portable pack encoding or source import.
+actual thermal stress recovery and frame transform.
+
+`StressTensorComponent` binds a pressure-valued PropertyKey to one of six
+symmetric Cauchy stress positions, notation/order, nonzero frame and source
+tensor identity. Its 67-byte descriptor is distinct from strain and stiffness
+through the enclosing field and claim domain. Stress and stiffness contexts
+cannot attach to the same key, although exact claims of either kind may coexist
+under the same name and pressure schema. Context-free queries refuse; exact,
+pinned and joint queries match the complete context and retain it in replay.
+No finite-deformation/Piola stress or correlation is inferred.
+
+Stress claims use `property-claim.v7`. Normalized-pack v7 adds an optional
+stress descriptor after the strain field and uses `normalized-pack.v7`.
+Existing claim/pack v1-v6 encodings and identities remain frozen. The decoder
+refuses malformed descriptors, conflicting tensor kinds, changed claim IDs and
+new payloads relabeled as old schemas. Material/interface wrappers retain the
+complete nested pack.
+
+Manifest v8 adds `stress-component <claim> <tensor|engineering|mandel>
+<xx-yy-zz-xy-yz-zx|xx-yy-zz-yz-zx-xy> <frame-hash> <source-tensor-hash>
+<index>` with tab separators, complete 64-digit hashes and an index in 0..6.
+Compiler/source-envelope v8 bind those declarations. Ordinary pressure-value
+and uncertainty unit normalization remains in use; engineering stress shear
+is never doubled. Old manifests, duplicate/unused declarations, incompatible
+units and simultaneous stress/stiffness declarations refuse. Partial tables
+remain representable as data; the material-state resolver requires all six
+compatible components at a supported point. G0/G1/G3 synthetic tests compare
+Pa/kPa source data in every notation/order against a rotated constitutive
+thermal-stress calculation and exercise exact selection, replay and refusals.
+This is numerical transport evidence, not measured validation or a new
+constitutive/initial-stress loading model.
 
 `StrainTensorComponent` attaches one of six explicit positions and a nonzero
 source tensor identity to a dimensionless `PropertyKey`. Its 67-byte canonical

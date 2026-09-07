@@ -275,6 +275,234 @@ fn g3_strain_context_pack_queries_and_receipts_preserve_all_coordinates() {
     assert!(StrainTensorComponent::from_canonical_bytes(&encoded[..66]).is_err());
 }
 
+#[test]
+fn g0_g3_stress_pack_preserves_context_and_does_not_alias_stiffness() {
+    use fs_blake3::ContentHash;
+    use fs_matdb::{
+        ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
+        ElasticTensorSymmetry, MatDbError, QueryPoint, SelectionPolicy, StressTensorBasis,
+        StressTensorComponent, StressTensorNotation,
+    };
+    let basis = StressTensorBasis {
+        notation: StressTensorNotation::Engineering,
+        order: ElasticTensorOrder::XxYyZzXyYzZx,
+        frame: ContentHash([1; 32]),
+    };
+    let component = StressTensorComponent::new(basis, ContentHash([2; 32]), 3).unwrap();
+    let contexts = [
+        component,
+        StressTensorComponent::new(
+            StressTensorBasis {
+                notation: StressTensorNotation::Tensor,
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StressTensorComponent::new(
+            StressTensorBasis {
+                notation: StressTensorNotation::Mandel,
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StressTensorComponent::new(
+            StressTensorBasis {
+                order: ElasticTensorOrder::XxYyZzYzZxXy,
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StressTensorComponent::new(
+            StressTensorBasis {
+                frame: ContentHash([3; 32]),
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StressTensorComponent::new(basis, ContentHash([3; 32]), 3).unwrap(),
+        StressTensorComponent::new(basis, ContentHash([2; 32]), 4).unwrap(),
+    ];
+    assert!(StressTensorComponent::new(basis, ContentHash([0; 32]), 0).is_err());
+    assert!(StressTensorComponent::new(basis, ContentHash([2; 32]), 6).is_err());
+    assert!(
+        StressTensorComponent::new(
+            StressTensorBasis {
+                frame: ContentHash([0; 32]),
+                ..basis
+            },
+            ContentHash([2; 32]),
+            0
+        )
+        .is_err()
+    );
+    assert!(
+        PropertyKey::new("bad", Dims::NONE)
+            .with_stress_component(component)
+            .is_err()
+    );
+    let bare = PropertyKey::new("response", fs_qty::Pressure::DIMS);
+    let elastic = ElasticTensorComponent::new(
+        ElasticTensorBasis {
+            notation: ElasticTensorNotation::Engineering,
+            order: basis.order,
+            frame: basis.frame,
+        },
+        ElasticTensorSymmetry::MajorMinor,
+        ContentHash([2; 32]),
+        3,
+        3,
+    )
+    .unwrap();
+    assert!(
+        bare.clone()
+            .with_elastic_component(elastic)
+            .unwrap()
+            .with_stress_component(component)
+            .is_err()
+    );
+    assert!(
+        bare.clone()
+            .with_stress_component(component)
+            .unwrap()
+            .with_elastic_component(elastic)
+            .is_err()
+    );
+
+    let (mut claims, observation, _) = sample_claims();
+    let mut keys = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for context in contexts {
+        assert_eq!(
+            StressTensorComponent::from_canonical_bytes(&context.canonical_bytes()).unwrap(),
+            context
+        );
+        keys.push(bare.clone().with_stress_component(context).unwrap());
+    }
+    // Both tensor kinds may coexist under one name and pressure schema.
+    keys.push(bare.clone().with_elastic_component(elastic).unwrap());
+    let mut pins = Vec::new();
+    for key in &keys {
+        let id = claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value: PropertyValue::Scalar {
+                    value: -16.0,
+                    dims: fs_qty::Pressure::DIMS,
+                },
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 300.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::TabulatedOnly,
+                observations: vec![observation],
+                provenance: provenance(),
+            })
+            .unwrap();
+        assert!(
+            ids.insert(id),
+            "each stress coordinate field and tensor kind binds identity"
+        );
+        pins.push(id);
+    }
+    let pack = NormalizedPack::new(
+        "synthetic-stress",
+        "fixture-v7",
+        ContentHash([4; 32]),
+        "synthetic redistribution permitted",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(pack.schema_version(), 7);
+    let bytes = pack.to_bytes();
+    let decoded = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded.to_bytes(), bytes);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    for answer in [
+        decoded
+            .claims()
+            .query("response", &point, SelectionPolicy::SingleClaimOnly),
+        decoded
+            .claims()
+            .query_typed(&bare, &point, SelectionPolicy::SingleClaimOnly),
+    ] {
+        assert!(matches!(
+            answer,
+            Err(MatDbError::TensorContextMismatch { .. })
+        ));
+    }
+    for (key, pin) in keys.iter().zip(&pins) {
+        for answer in [
+            decoded
+                .claims()
+                .query_typed(key, &point, SelectionPolicy::SingleClaimOnly)
+                .unwrap(),
+            decoded
+                .claims()
+                .query_typed(key, &point, SelectionPolicy::PreferObservationBacked)
+                .unwrap(),
+            decoded
+                .claims()
+                .query_pinned_typed(key, &point, *pin)
+                .unwrap(),
+        ] {
+            assert_eq!(answer.evidence.value.value, -16.0);
+            assert_eq!(answer.receipt.selected, *pin);
+            assert_eq!(decoded.claims().claim(*pin).unwrap().key, *key);
+            decoded.claims().verify_receipt(&answer.receipt).unwrap();
+        }
+        assert!(
+            decoded
+                .claims()
+                .query_typed(
+                    key,
+                    &QueryPoint::new().with("T", 301.0).unwrap(),
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        decoded
+            .claims()
+            .query_pinned_typed(&keys[0], &point, *pins.last().unwrap())
+            .is_err()
+    );
+    for selection in [
+        SelectionPolicy::SingleClaimOnly,
+        SelectionPolicy::PreferObservationBacked,
+    ] {
+        let joint = decoded.query_joint_typed(&keys, &point, selection).unwrap();
+        for (member, pin) in joint.members.iter().zip(&pins) {
+            assert_eq!(member.receipt.selected, *pin);
+        }
+        decoded.verify_joint_receipt(&joint.receipt).unwrap();
+    }
+    let encoded = component.canonical_bytes();
+    let offset = bytes
+        .windows(encoded.len())
+        .position(|part| part == encoded)
+        .unwrap();
+    for (index, value) in [(0, 255), (1, 255), (2, 6), (3, 9)] {
+        let mut tampered = bytes.clone();
+        tampered[offset + index] = value;
+        assert!(NormalizedPack::from_bytes(&tampered).is_err());
+    }
+    for version in 1u32..=6 {
+        let mut downgraded = bytes.clone();
+        downgraded[8..12].copy_from_slice(&version.to_le_bytes());
+        assert!(NormalizedPack::from_bytes(&downgraded).is_err());
+    }
+    assert!(StressTensorComponent::from_canonical_bytes(&encoded[..66]).is_err());
+}
+
 fn sample_pack() -> NormalizedPack {
     let (claims, observation, members) = sample_claims();
     let density = claims.claims_for("density")[0].0;
