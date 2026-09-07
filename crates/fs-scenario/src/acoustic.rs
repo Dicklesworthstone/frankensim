@@ -45,17 +45,19 @@ pub struct PrestressedString {
     pub width_m: f64,
     /// Retained sine modes.
     pub n_modes: usize,
-    /// Authored loss at the fundamental, used by the legacy Prony approximation
-    /// when Rayleigh and Kelvin–Voigt bending are absent.
+    /// Authored nonnegative constant modal damping ratio, added to air drag
+    /// when no other loss law is selected. This is a reduced-model input,
+    /// not a measured material spectrum. Zero assumes no internal loss;
+    /// elastic bending stiffness alone introduces no damping.
     pub damping_ratio: f64,
     /// Optional Rayleigh `ζ(ω) = α/(2ω) + βω/2` (air + internal).
     pub rayleigh: Option<RayleighParams>,
     /// Bending stiffness `E I` [N m²]. Zero is the ideal flexible string.
     /// Nonzero gives Fletcher inharmonicity `ω_n = n ω_1 √(1 + B n²)`.
     pub bending_stiffness_n_m2: f64,
-    /// Explicit viscous bending law, replacing legacy internal/bending loss.
+    /// Explicit viscous bending law, replacing authored modal internal loss.
     /// Requires zero `damping_ratio` and no Rayleigh override. Air drag remains
-    /// separate. `None` retains the authored legacy loss path.
+    /// separate. `None` leaves the authored ratio or explicit Prony law active.
     pub kelvin_voigt_bending: Option<KelvinVoigtBending>,
     /// Causal Prony bending. `bending_stiffness_n_m2` is the
     /// equilibrium EI; the relaxing increment below is additional storage.

@@ -12,7 +12,8 @@ use fs_material::state_point::{
     ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
     ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
-    resolve_material_state_point,
+    integrate_isotropic_thermal_expansion,
+    resolve_isotropic_thermoelastic_state_point_with_requirements, resolve_material_state_point,
 };
 use fs_plate::{PlateMesh, PlateRegion};
 use fs_qty::{Density, Dims, DynViscosity, Pressure, Time};
@@ -25,11 +26,12 @@ use crate::string_specimen::{
     EQUILIBRIUM_YOUNG_MODULUS_PROPERTY, KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
     ResolvedStringSpecimen, StringGeometryConstraint, StringPrestress,
     with_uniform_circular_material_and_constraints,
+    with_uniform_circular_thermal_extension,
 };
 use crate::thin_plate::{
     PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial, PlateThicknessConstraint,
     ResolvedPlateChart, ResolvedPlateSpecimen, compile_plate_material_chart,
-    with_uniform_plate_material_state,
+    with_uniform_isotropic_thermoelastic_material_state, with_uniform_plate_material_state,
 };
 
 /// Exact material data and query conditions, independent of the ambient gas.
@@ -50,8 +52,29 @@ pub struct StringMaterialBinding<'a> {
     pub source: MaterialSource<'a>,
     /// Current circular radius or total specimen mass.
     pub geometry: StringGeometryConstraint,
-    /// Tension, extension or target-frequency prescription.
-    pub prestress: StringPrestress,
+    /// Mechanical prescription or expansion from the same card and current state.
+    pub prestress: StringPrestressBinding<'a>,
+}
+
+/// How the described supports establish string tension at the resolved state.
+#[derive(Clone, Debug)]
+pub enum StringPrestressBinding<'a> {
+    /// Explicit mechanical constraint; any raw thermal strain remains authored.
+    Prescribed(StringPrestress),
+    /// Fixed supports with free strain integrated from the card's alpha(T).
+    /// The source card and current point come from `StringMaterialBinding::source`.
+    /// This selects frozen small-strain states, not a heat-transport history.
+    ThermalExtension {
+        /// State where the reference stress-free length is specified. All other
+        /// coordinates and quantity conventions must match the current point.
+        reference_point: &'a QueryPoint,
+        /// Select only the expansion claim; mechanical/loss pins stay in `source`.
+        expansion_selection: MaterialPropertySelection,
+        /// Stress-free length at the reference temperature [m].
+        reference_stress_free_length_m: f64,
+        /// Declared small-strain limit; slack/compression is unsupported.
+        linear_strain_limit: f64,
+    },
 }
 
 /// One plate region before material-property resolution.
@@ -225,12 +248,38 @@ pub fn compile_material_assembly(
         let requirements =
             string_requirements(input).map_err(|source| resolution("string", source))?;
         let state = resolve(&binding.source, &requirements, "string")?;
-        let specimen = with_uniform_circular_material_and_constraints(
-            input.clone(),
-            binding.geometry,
-            &state,
-            binding.prestress,
-        )
+        let specimen = match &binding.prestress {
+            StringPrestressBinding::Prescribed(prestress) => {
+                with_uniform_circular_material_and_constraints(
+                    input.clone(),
+                    binding.geometry,
+                    &state,
+                    *prestress,
+                )
+            }
+            StringPrestressBinding::ThermalExtension {
+                reference_point,
+                expansion_selection,
+                reference_stress_free_length_m,
+                linear_strain_limit,
+            } => {
+                let expansion = integrate_isotropic_thermal_expansion(
+                    binding.source.card,
+                    reference_point,
+                    binding.source.point,
+                    expansion_selection.clone(),
+                )
+                .map_err(|source| resolution("string", source))?;
+                with_uniform_circular_thermal_extension(
+                    input.clone(),
+                    binding.geometry,
+                    &state,
+                    &expansion,
+                    *reference_stress_free_length_m,
+                    *linear_strain_limit,
+                )
+            }
+        }
         .map_err(|source| physical("string", source))?;
         assembly.string = Some(specimen.string());
         Some(specimen)
@@ -265,14 +314,43 @@ fn compile_plate(
                     "uniform material binding requires a plate description",
                 )
             })?;
-            let state = resolve_plate(
-                source,
-                *model,
-                input.kelvin_voigt_bending.is_some(),
-                "plate",
-            )?;
-            let specimen = with_uniform_plate_material_state(input, &state, *model, *thickness)
-                .map_err(|source| physical("plate", source))?;
+            let specimen = if input.thermoelastic.is_some() {
+                if *model != PlateMaterialModel::Isotropic {
+                    return Err(missing(
+                        "plate",
+                        "sourced thermal plate loss requires the isotropic material model",
+                    ));
+                }
+                let additional = if input.kelvin_voigt_bending.is_some() {
+                    vec![
+                        ScalarPropertyRequirement::try_new(
+                            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+                            DynViscosity::DIMS,
+                            ScalarAdmissibility::NonNegative,
+                        )
+                        .map_err(|source| resolution("plate", source))?,
+                    ]
+                } else {
+                    Vec::new()
+                };
+                let state = resolve_isotropic_thermoelastic_state_point_with_requirements(
+                    source.card,
+                    source.point,
+                    source.selection.clone(),
+                    &additional,
+                )
+                .map_err(|source| resolution("plate", source))?;
+                with_uniform_isotropic_thermoelastic_material_state(input, &state, *thickness)
+            } else {
+                let state = resolve_plate(
+                    source,
+                    *model,
+                    input.kelvin_voigt_bending.is_some(),
+                    "plate",
+                )?;
+                with_uniform_plate_material_state(input, &state, *model, *thickness)
+            }
+            .map_err(|source| physical("plate", source))?;
             assembly.plate = Some(specimen.plate());
             Ok(CompiledMaterialPlate::Uniform(specimen))
         }

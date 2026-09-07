@@ -24,7 +24,7 @@ const SECTION_BUDGET: f64 = 8.0;
 
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::GasState;
-use fs_material::visco::{GeneralizedMaxwell, RayleighDamping};
+use fs_material::visco::RayleighDamping;
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_nlmodal::{
@@ -1143,28 +1143,11 @@ fn mode_zeta(
         // The memory arms supply their own storage and dissipation in pHS.
         return Ok(stokes);
     }
-    // This legacy bending coefficient is a heuristic pending material-loss
-    // resolution under MR03; it is not source-backed constitutive data.
-    let bend = if string.bending_stiffness_n_m2 > 0.0 {
-        2.0e-7 * omega
-    } else {
-        0.0
-    };
-    let internal = prony_internal_zeta(string, omega);
-    Ok(internal + stokes + bend)
-}
-
-/// Authored `ζ` at the fundamental becomes one Prony branch; higher
-/// modes see `η(ω)/2` from that branch, not a constant ratio.
-fn prony_internal_zeta(string: &PrestressedString, omega: f64) -> f64 {
-    let z0 = string.damping_ratio;
-    if !(z0 > 0.0 && z0 < 0.49) {
-        return z0.max(0.0);
-    }
-    let omega1 = string_mode_omega(string, 1);
-    let eta0 = (2.0 * z0).min(0.99);
-    GeneralizedMaxwell::matching_loss(1.0, omega1.max(1.0), eta0)
-        .map_or(z0, |gm| 0.5 * gm.loss_factor(omega))
+    // A caller-authored modal ratio is an explicit reduced model. Elastic EI
+    // supplies storage, not an additional dissipation law, and one ratio does
+    // not identify a relaxation spectrum. Physical bending loss must select
+    // the Kelvin-Voigt or causal memory path above.
+    Ok(string.damping_ratio + stokes)
 }
 
 fn relaxing_mode_stiffness(string: &PrestressedString, stiffness_n_m2: f64, k: usize) -> f64 {
@@ -1883,13 +1866,17 @@ fn validate_string(
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
 ) -> Result<(), AcousticRealizeError> {
+    if !(string.damping_ratio.is_finite() && string.damping_ratio >= 0.0) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "authored string modal damping ratio must be finite and nonnegative",
+        });
+    }
     if !(string.length_m > 0.0
         && string.tension_n > 0.0
         && string.lin_density_kg_m > 0.0
         && string.axial_stiffness_n >= 0.0
         && string.width_m > 0.0
         && string.n_modes > 0
-        && string.damping_ratio >= 0.0
         && string.bending_stiffness_n_m2 >= 0.0
         && string.polarization_detune >= 0.0
         && string.length_m.is_finite()

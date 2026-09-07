@@ -166,6 +166,110 @@ fn g1_string_observer_matches_damped_acceleration_in_pascals() {
 }
 
 #[test]
+fn g1_authored_string_loss_matches_higher_mode_pressure_without_inferred_spectrum() {
+    let pi = core::f64::consts::PI;
+    for authored in [0.0, 0.03] {
+        for bending in [0.0, 0.03] {
+            let mut assembly = plucked(20.0, 0.006, 0.003);
+            assembly.sample_rate_hz = 16_000;
+            // Two samples bypass the unrelated block absorption operator.
+            assembly.duration_s = 2.0 / f64::from(assembly.sample_rate_hz);
+            let string = assembly.string.as_mut().unwrap();
+            string.width_m = 0.001;
+            string.n_modes = 2;
+            string.damping_ratio = authored;
+            string.bending_stiffness_n_m2 = bending;
+            let first_two = realize_assembly(&assembly).unwrap();
+            assembly.string.as_mut().unwrap().n_modes = 3;
+            let first_three = realize_assembly(&assembly).unwrap();
+            let string = assembly.string.as_ref().unwrap();
+            let pluck = assembly.pluck.unwrap();
+            let k = 3.0 * pi / string.length_m;
+            let omega = ((string.tension_n * k.powi(2) + bending * k.powi(4))
+                / string.lin_density_kg_m)
+                .sqrt();
+            let gas = first_three.gas;
+            // Independent frequency form of cylinder resistance [N s/m²].
+            let resistance = 2.0 * pi * gas.dynamic_viscosity
+                + 2.0
+                    * pi
+                    * string.width_m
+                    * (0.5 * gas.dynamic_viscosity * gas.density * omega).sqrt();
+            // q'' + 2 decay q' + omega² q = 0. Authored zeta is constant,
+            // while physical air resistance supplies its own modal scaling.
+            let decay = authored * omega + resistance / (2.0 * string.lin_density_kg_m);
+            let wd = (omega * omega - decay * decay).sqrt();
+            let q0 = 2.0 * pluck.height_m * (3.0 * pi * pluck.station_frac).sin()
+                / ((3.0 * pi).powi(2) * pluck.station_frac * (1.0 - pluck.station_frac));
+            let area = 2.0 * string.width_m / k;
+            for i in 0..2 {
+                let t = (i + 1) as f64 / f64::from(assembly.sample_rate_hz);
+                let acceleration = -q0
+                    * omega.powi(2)
+                    * (-decay * t).exp()
+                    * ((wd * t).cos() - decay / wd * (wd * t).sin());
+                let expected =
+                    gas.density * area * acceleration / (4.0 * pi * assembly.listener.distance_m);
+                // The third sine mode is odd, so subtraction isolates its
+                // monopole without an even-mode jerk approximation.
+                let actual = first_three.pressure_pa[i] - first_two.pressure_pa[i];
+                assert!(
+                    (actual / expected - 1.0).abs() < 1e-10,
+                    "third-mode pressure {actual} vs {expected} Pa; zeta={authored}, EI={bending}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_elastic_string_matches_explicit_zero_viscosity_in_all_solver_paths() {
+    for (axial_stiffness, moving_end) in [(0.0, false), (50.0, false), (50.0, true)] {
+        let mut assembly = plucked(20.0, 0.006, 1e-5);
+        assembly.duration_s = 0.02;
+        let string = assembly.string.as_mut().unwrap();
+        string.width_m = 0.001;
+        string.n_modes = 3;
+        string.axial_stiffness_n = axial_stiffness;
+        string.moving_end = moving_end;
+        string.bending_stiffness_n_m2 = 0.03;
+        string.damping_ratio = 0.0;
+        let elastic = realize_assembly(&assembly).unwrap();
+        assembly.string.as_mut().unwrap().kelvin_voigt_bending =
+            Some(fs_scenario::acoustic::KelvinVoigtBending {
+                viscous_stiffness_n_m2_s: 0.0,
+                omega_band_rad_s: (0.0, 1e6),
+                material_state_identity: None,
+            });
+        let zero_viscosity = realize_assembly(&assembly).unwrap();
+        assert!(peak_abs(&elastic.pressure_pa) > 1e-8);
+        assert_eq!(
+            elastic, zero_viscosity,
+            "elastic storage cannot add hidden loss; EA={axial_stiffness}, moving={moving_end}"
+        );
+    }
+}
+
+#[test]
+fn g0_authored_string_loss_refuses_invalid_ratios_in_all_solver_paths() {
+    for (axial_stiffness, moving_end) in [(0.0, false), (50.0, false), (50.0, true)] {
+        for ratio in [-f64::EPSILON, f64::NAN, f64::INFINITY] {
+            let mut assembly = plucked(20.0, 0.006, 1e-5);
+            let string = assembly.string.as_mut().unwrap();
+            string.axial_stiffness_n = axial_stiffness;
+            string.moving_end = moving_end;
+            string.damping_ratio = ratio;
+            let error = realize_assembly(&assembly).unwrap_err();
+            assert!(
+                matches!(error, AcousticRealizeError::InvalidDescription { what }
+                    if what == "authored string modal damping ratio must be finite and nonnegative"),
+                "wrong refusal for zeta={ratio}, EA={axial_stiffness}, moving={moving_end}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn g1_string_observer_even_mode_has_signed_jerk_and_refines() {
     let mut errors = Vec::new();
     for rate in [4_000, 8_000, 16_000] {
@@ -1390,6 +1494,7 @@ mod material_plate_tests {
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, CompiledMaterialPlate, MaterialAssemblyError, MaterialSource,
         PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, compile_material_assembly,
+        StringPrestressBinding,
     };
     use fs_couple::string_specimen::{
         StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
@@ -1406,13 +1511,16 @@ mod material_plate_tests {
         PropertyValue, Provenance, QueryPoint, UncertaintyModel,
     };
     use fs_material::state_point::{
-        MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
-        ScalarPropertyRequirement, resolve_material_state_point,
+        INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+        MaterialPropertySelection, ResolvedMaterialStatePoint, SPECIFIC_HEAT_CAPACITY_DIMS,
+        ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_isotropic_thermoelastic_state_point_with_requirements,
+        resolve_material_state_point,
     };
     use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateRegion};
     use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticType, ValueForm};
     use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
-    use fs_scenario::IsotropicPlateBendingViscosity;
+    use fs_scenario::{IsotropicPlateBendingViscosity, IsotropicPlateThermal};
 
     fn material_card(
         properties: &[(&str, QuantitySpec, f64)],
@@ -1637,6 +1745,399 @@ mod material_plate_tests {
         assert_eq!(input, original, "compilation must not mutate its template");
     }
 
+    fn thermal_card(rho: f64, viscosity: Option<f64>) -> MaterialCard {
+        let domain = ValidityDomain::unconstrained()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+                450.0,
+            )
+            .with("omega", 1.0, 10_000.0);
+        let mut properties = vec![
+            ("density", QuantitySpec::dimensional(Density::DIMS), rho),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+            (
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                QuantitySpec::dimensional(INVERSE_TEMPERATURE_DIMS),
+                1e-4,
+            ),
+        ];
+        if let Some(eta) = viscosity {
+            properties.push((
+                "kelvin_voigt_bending_viscosity",
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                eta,
+            ));
+        }
+        let base = material_card(&properties, domain.clone());
+        let mut claims = base.claims().clone();
+        for (name, quantity, low, high) in [
+            (
+                "specific_heat_capacity",
+                QuantitySpec::dimensional(SPECIFIC_HEAT_CAPACITY_DIMS),
+                500.0,
+                700.0,
+            ),
+            (
+                "thermal_conductivity",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::ThermalConductivity,
+                    ValueForm::Static,
+                )),
+                80.0,
+                40.0,
+            ),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(name, quantity),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(300.0, low), (450.0, high)],
+                        dims: quantity.dims(),
+                    },
+                    validity: domain.clone(),
+                    interpolation: InterpolationPolicy::LinearInside,
+                    uncertainty: UncertaintyModel::Unstated,
+                    provenance: Provenance {
+                        source: "synthetic thermal compiler fixture".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                    observations: vec![],
+                })
+                .unwrap();
+        }
+        MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+    }
+
+    fn thermal_point(temperature: f64) -> QueryPoint {
+        QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                temperature,
+            )
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap()
+    }
+
+    fn thermal_template(viscous: bool) -> ThinPlate {
+        ThinPlate {
+            damping_ratio: 0.0,
+            // Deliberately stale values: compilation must rebuild every field.
+            thermoelastic: Some(IsotropicPlateThermal {
+                temperature_k: 1.0,
+                linear_expansion_per_k: 1.0,
+                specific_heat_j_kg_k: 1.0,
+                conductivity_w_m_k: 1.0,
+                state_identity: None,
+            }),
+            kelvin_voigt_bending: viscous.then_some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 9e9,
+                omega_band_rad_s: (0.0, 1e6),
+                material_state_identity: None,
+            }),
+            ..template()
+        }
+    }
+
+    #[test]
+    fn g3_thermal_card_compiler_rebinds_temperature_and_changes_real_pressure() {
+        for viscous in [false, true] {
+            let card = thermal_card(450.0, viscous.then_some(3e6));
+            for (nonlinear, clamped) in [(false, false), (true, false), (true, true)] {
+                let mut input = plucked(20.0, 0.006, 1e-5);
+                input.duration_s = 0.06;
+                input.plate = Some(ThinPlate {
+                    geometric_nonlinearity: nonlinear,
+                    clamped,
+                    ..thermal_template(viscous)
+                });
+                let mut pressures = Vec::new();
+                let mut identities = Vec::new();
+                for (temperature, cp, conductivity) in [(300.0, 500.0, 80.0), (450.0, 700.0, 40.0)]
+                {
+                    let point = thermal_point(temperature);
+                    let compiled = compile_material_assembly(
+                        &input,
+                        &AcousticMaterialBindings {
+                            string: None,
+                            plate: Some(PlateMaterialBinding::Uniform {
+                                source: source(&card, &point),
+                                model: Model::Isotropic,
+                                thickness: Thickness::FixedThickness(0.002),
+                            }),
+                        },
+                    )
+                    .unwrap();
+                    let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                        panic!("uniform plate");
+                    };
+                    let plate = specimen.plate();
+                    let thermal = plate.thermoelastic.unwrap();
+                    assert_eq!(
+                        (plate.density_kg_m3, plate.e1_pa, plate.nu12),
+                        (450.0, 12e9, 0.3)
+                    );
+                    assert_eq!(
+                        (
+                            thermal.temperature_k,
+                            thermal.specific_heat_j_kg_k,
+                            thermal.conductivity_w_m_k
+                        ),
+                        (temperature, cp, conductivity)
+                    );
+                    assert_eq!(thermal.linear_expansion_per_k, 1e-4);
+                    assert_eq!(thermal.state_identity, Some(specimen.material().identity()));
+                    assert_eq!(
+                        specimen.material().properties().len(),
+                        if viscous { 7 } else { 6 }
+                    );
+                    let k = specimen
+                        .material()
+                        .property("thermal_conductivity")
+                        .unwrap();
+                    assert_eq!(
+                        k.requirement().quantity(),
+                        QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::ThermalConductivity,
+                            ValueForm::Static
+                        ))
+                    );
+                    if viscous {
+                        let loss = plate.kelvin_voigt_bending.unwrap();
+                        assert_eq!(loss.viscosity_pa_s, 3e6);
+                        assert_eq!(loss.material_state_identity, thermal.state_identity);
+                    }
+                    assert_eq!(
+                        compiled.assembly().ambient,
+                        input.ambient,
+                        "specimen T must not change gas T implicitly"
+                    );
+                    identities.push(specimen.material().identity());
+                    pressures.push(compiled.realize().unwrap().pressure_pa);
+                    input = compiled.assembly().clone(); // rebind an already thermal/viscous specimen
+                }
+                assert_ne!(identities[0], identities[1]);
+                let difference: Vec<_> = pressures[0]
+                    .iter()
+                    .zip(&pressures[1])
+                    .map(|(a, b)| a - b)
+                    .collect();
+                assert!(
+                    peak_abs(&difference) > 1e-7,
+                    "thermal state must change pressure: viscous={viscous}, nonlinear={nonlinear}, clamped={clamped}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_thermal_card_compiler_fixed_mass_and_pins_rebuild_both_loss_laws() {
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.plate = Some(thermal_template(true));
+        let point = thermal_point(375.0);
+        let mass = 0.6 * 0.35 * 0.002 * 450.0;
+        for (rho, eta, thickness) in [(450.0, 3e6, 0.002), (900.0, 6e6, 0.001)] {
+            let base = thermal_card(rho, Some(eta));
+            let mut claims = base.claims().clone();
+            let mut conflict = base.claims_for("specific_heat_capacity")[0].1.clone();
+            conflict.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(300.0, 1000.0), (450.0, 1400.0)],
+                dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+            };
+            claims.insert_claim(conflict).unwrap();
+            let card = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+            let pins = [
+                "density",
+                "young_modulus",
+                "poisson_ratio",
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                "specific_heat_capacity",
+                "thermal_conductivity",
+                "kelvin_voigt_bending_viscosity",
+            ]
+            .into_iter()
+            .map(|name| (name.to_owned(), base.claims_for(name)[0].0))
+            .collect();
+            let mut selected = source(&card, &point);
+            selected.selection = MaterialPropertySelection::PinnedByProperty(pins);
+            let compiled = compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: None,
+                    plate: Some(PlateMaterialBinding::Uniform {
+                        source: selected,
+                        model: Model::Isotropic,
+                        thickness: Thickness::FixedMass(mass),
+                    }),
+                },
+            )
+            .unwrap();
+            let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                panic!("uniform plate");
+            };
+            let plate = specimen.plate();
+            assert!((plate.thickness_m / thickness - 1.0).abs() < 1e-14);
+            assert!((specimen.mass_kg() / mass - 1.0).abs() < 1e-14);
+            assert_eq!(plate.kelvin_voigt_bending.unwrap().viscosity_pa_s, eta);
+            assert_eq!(
+                plate.thermoelastic.unwrap().state_identity,
+                plate.kelvin_voigt_bending.unwrap().material_state_identity
+            );
+            // Independent nominal Zener + Kelvin-Voigt expressions, at zero
+            // pretension, using the actual fixed-mass thickness and modal omega.
+            let body = &certified_radiators(plate).unwrap()[0];
+            let tau = thickness * thickness * rho * 600.0 / (core::f64::consts::PI.powi(2) * 60.0);
+            let delta = 12e9 * (1e-4_f64).powi(2) * 375.0 / (rho * 600.0);
+            let wt = body.omega * tau;
+            let expected = 0.5 * (delta * wt / (1.0 + wt * wt) + eta / 12e9 * body.omega);
+            assert!((body.zeta / expected - 1.0).abs() < 1e-12);
+            assert_eq!(specimen.material().card_identity(), card.content_hash());
+            input = compiled.assembly().clone();
+        }
+    }
+
+    #[test]
+    fn g0_thermal_card_compiler_refuses_missing_temperature_data_and_anisotropy() {
+        let card = thermal_card(450.0, Some(3e6));
+        let ordinary = thermal_point(300.0);
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.plate = Some(thermal_template(true));
+        for point in [
+            QueryPoint::new().with("omega", 100.0).unwrap(),
+            thermal_point(0.0),
+            thermal_point(700.0),
+            QueryPoint::new()
+                .with_quantity(
+                    "T",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::TemperatureDifference,
+                        ValueForm::Static,
+                    )),
+                    300.0,
+                )
+                .unwrap()
+                .with("omega", 100.0)
+                .unwrap(),
+        ] {
+            let original = input.clone();
+            assert!(
+                compile_material_assembly(
+                    &input,
+                    &AcousticMaterialBindings {
+                        string: None,
+                        plate: Some(PlateMaterialBinding::Uniform {
+                            source: source(&card, &point),
+                            model: Model::Isotropic,
+                            thickness: Thickness::FixedThickness(0.002)
+                        }),
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(input, original);
+        }
+        for (material, point, model, viscous, expected) in [
+            (
+                isotropic_card(450.0),
+                QueryPoint::new().with("T", 293.15).unwrap(),
+                Model::Isotropic,
+                false,
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            ),
+            (
+                thermal_card(450.0, None),
+                ordinary.clone(),
+                Model::Isotropic,
+                true,
+                "kelvin_voigt_bending_viscosity",
+            ),
+            (
+                card,
+                ordinary,
+                Model::Orthotropic12,
+                true,
+                "requires the isotropic material model",
+            ),
+        ] {
+            input.plate = Some(thermal_template(viscous));
+            let original = input.clone();
+            let error = compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: None,
+                    plate: Some(PlateMaterialBinding::Uniform {
+                        source: source(&material, &point),
+                        model,
+                        thickness: Thickness::FixedThickness(0.002),
+                    }),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "expected {expected}: {error}");
+            assert_eq!(input, original);
+        }
+    }
+
+    #[test]
+    fn g0_thermoelastic_auxiliary_requirements_cannot_shadow_required_properties() {
+        let card = thermal_card(450.0, Some(3e6));
+        let point = thermal_point(300.0);
+        let viscosity = ScalarPropertyRequirement::try_new(
+            "kelvin_voigt_bending_viscosity",
+            DynViscosity::DIMS,
+            ScalarAdmissibility::NonNegative,
+        )
+        .unwrap();
+        let oversized =
+            vec![viscosity.clone(); fs_material::state_point::MAX_MATERIAL_STATE_PROPERTIES];
+        assert!(matches!(
+            resolve_isotropic_thermoelastic_state_point_with_requirements(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+                &oversized,
+            ),
+            Err(fs_material::state_point::MaterialStatePointError::RequirementCount { .. })
+        ));
+        for extra in [
+            vec![
+                ScalarPropertyRequirement::try_new(
+                    "density",
+                    Dims::NONE,
+                    ScalarAdmissibility::Finite,
+                )
+                .unwrap(),
+            ],
+            vec![viscosity.clone(), viscosity],
+        ] {
+            assert!(
+                matches!(resolve_isotropic_thermoelastic_state_point_with_requirements(
+                &card, &point, MaterialPropertySelection::SingleClaimOnly, &extra,
+            ), Err(fs_material::state_point::MaterialStatePointError::InvalidRequirement { reason, .. }) if reason.contains("cannot be shadowed"))
+            );
+        }
+    }
+
     #[test]
     fn g0_material_plate_viscosity_requires_source_band_and_excludes_duplicate_loss() {
         let point = QueryPoint::new()
@@ -1698,7 +2199,7 @@ mod material_plate_tests {
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),
-                prestress: StringPrestress::FixedTension(20.0),
+                prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
             }),
             plate: Some(PlateMaterialBinding::Uniform {
                 source: source(&card, &point),
@@ -1779,7 +2280,7 @@ mod material_plate_tests {
                     string: Some(StringMaterialBinding {
                         source: source(card, &point),
                         geometry: StringGeometryConstraint::FixedRadius(0.0008),
-                        prestress: StringPrestress::FixedTension(20.0),
+                        prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
                     }),
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: source(card, &point),
@@ -1886,7 +2387,7 @@ mod material_plate_tests {
                                 radius,
                                 fs_qty::Length::DIMS,
                             )),
-                            prestress: StringPrestress::FixedTension(tension),
+                            prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(tension)),
                         }),
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(&card, &point),
@@ -1940,7 +2441,7 @@ mod material_plate_tests {
                         string: Some(StringMaterialBinding {
                             source: source(card, &point),
                             geometry: StringGeometryConstraint::FixedMass(0.001),
-                            prestress: StringPrestress::FixedTension(20.0),
+                            prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
                         }),
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(card, &point),
@@ -2081,7 +2582,7 @@ mod material_plate_tests {
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),
-                prestress: StringPrestress::FixedTension(20.0),
+                prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
             }),
             plate: None,
         };
@@ -2180,7 +2681,7 @@ mod material_plate_tests {
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),
-                prestress: StringPrestress::FixedTension(20.0),
+                prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
             }),
             plate: None,
         };
