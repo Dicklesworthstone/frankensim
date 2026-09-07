@@ -1092,6 +1092,8 @@ dependencies = [
  "fs-ledger",
  "fs-marquee",
  "fs-matdb",
+ "fs-matdb-store",
+ "fs-material",
  "fs-math",
  "fs-mbd",
  "fs-mesh",
@@ -1831,6 +1833,7 @@ dependencies = [
  "fs-blake3",
  "fs-evidence",
  "fs-matdb",
+ "fs-material",
  "fs-qty",
  "fsqlite",
 ]
@@ -4886,6 +4889,7 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-cli",
  "fs-evidence",
  "fs-govern",
  "fs-matdb",

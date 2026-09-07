@@ -34,11 +34,12 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimId, ClaimSelection, ClaimSet, InterpolationPolicy, MatDbError, MaterialAnswer,
-    MaterialStateId, NormalizedInterfacePack, NormalizedMaterialCardPack, NormalizedModelPack,
-    NormalizedPack, NormalizedSpeciesPack, PackError, PropertyClaim, PropertyKey, PropertyValue,
-    QueryPoint, SelectionPolicy,
+    ClaimId, ClaimSelection, ClaimSet, ConstitutiveModelCard, InterpolationPolicy, LawId,
+    MatDbError, MaterialAnswer, MaterialStateId, NormalizedInterfacePack,
+    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack,
+    PackError, PropertyClaim, PropertyKey, PropertyValue, QueryPoint, SelectionPolicy,
 };
+use fs_material::graph::{GraphError, LawRegistry};
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 
 /// Material-owned support refusals, shared with exact project binding.
@@ -199,6 +200,15 @@ impl CatalogPack {
         }
     }
 
+    fn models(&self) -> &[ConstitutiveModelCard] {
+        match self {
+            Self::MaterialCard(pack) => pack.card().models(),
+            Self::Interface(pack) => pack.card().models(),
+            Self::Model(pack) => pack.models(),
+            Self::Properties(_) | Self::Species(_) => &[],
+        }
+    }
+
     fn prepare(&self) -> PreparedPack<'_> {
         let (compiler, redistribution) = match self {
             Self::Properties(p) => (p.compiler(), p.redistribution_terms()),
@@ -256,6 +266,16 @@ pub enum DiscoveryDomain {
     },
 }
 
+impl DiscoveryDomain {
+    fn points(&self) -> impl Iterator<Item = &QueryPoint> {
+        let (lower, upper) = match self {
+            Self::LocalState(point) => (point, None),
+            Self::Envelope { lower, upper } => (lower, Some(upper)),
+        };
+        std::iter::once(lower).chain(upper)
+    }
+}
+
 /// The physical identity being searched. Interface order is significant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryTarget {
@@ -279,24 +299,96 @@ pub enum DiscoveryTarget {
 pub struct DiscoveryRequest {
     /// Material, unbound property, or ordered interface identity filter.
     pub target: DiscoveryTarget,
-    /// Nonempty, duplicate-free bundle; results preserve this order.
+    /// Duplicate-free property bundle; results preserve this order.
     pub properties: Vec<PropertyKey>,
+    /// Exact law identities and optional source selections. At least one
+    /// property or model is required; no model is inferred from a property.
+    pub models: Vec<ModelRequirement>,
     /// State support the caller needs before solving.
     pub domain: DiscoveryDomain,
     /// Existing evaluator policy; discovery never invents source selection.
     pub selection: SelectionPolicy,
 }
 
-/// Coverage of the requested property bundle, independent of evidence strength.
+/// An executable law the simulation needs from this particular material/system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRequirement {
+    /// Immutable law identity, without aliases or chemistry-name inference.
+    pub law: LawId,
+    /// Exact positive implementation version; newer is not an automatic match.
+    pub law_version: u32,
+    /// Optional exact member-card selection, never an out-of-domain waiver.
+    pub pin: Option<ContentHash>,
+}
+
+/// Missing model data, unresolved source selection, or executable admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelDiscoveryGap {
+    /// This candidate has no card of the requested law/version.
+    Missing {
+        /// Other versions of this same law actually associated with the card.
+        available_versions: Vec<u32>,
+    },
+    /// The pinned model is not an exact member of this candidate.
+    PinnedModelAbsent {
+        /// Caller-supplied exact model-card identity.
+        pin: ContentHash,
+    },
+    /// A member pin names a different law or version from the requirement.
+    PinnedModelMismatch {
+        /// Pinned card's declared law.
+        law: LawId,
+        /// Pinned card's declared version.
+        law_version: u32,
+    },
+    /// More than one member covers the domain; source selection is required.
+    Ambiguous {
+        /// Competing member-card identities requiring source selection.
+        models: Vec<ContentHash>,
+    },
+    /// No matching member covers the complete requested box and axis semantics.
+    UnsupportedDomain {
+        /// Each rejected card and its first unsupported requested corner.
+        models: Vec<(ContentHash, QueryPoint)>,
+    },
+    /// The existing executable registry refused the selected card.
+    Implementation {
+        /// Exact selected material member.
+        model: ContentHash,
+        /// Original registry/factory/admission refusal, unchanged.
+        error: GraphError,
+    },
+    /// The built node declares narrower or incompatible support than requested.
+    ImplementationDomain {
+        /// Exact selected material member.
+        model: ContentHash,
+        /// First unsupported requested corner, including exact axis quantities.
+        point: QueryPoint,
+    },
+}
+
+/// One requested law, retaining either its admitted source card or its gap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredModel {
+    /// Exact requested identity and caller pin.
+    pub requirement: ModelRequirement,
+    /// Successful registry admission and declared-domain coverage. The card
+    /// retains parameters, provenance and initial-state requirements. Consumers
+    /// must instantiate again when binding; this is not a serialized executable.
+    pub support: Result<ConstitutiveModelCard, ModelDiscoveryGap>,
+}
+
+/// Coverage of the requested property/model bundle, independent of evidence strength.
 /// `Complete` is relative to the report's local-state or envelope domain. It
-/// does not assert that an executable constitutive law or solver is available.
+/// includes registry admission for requested models, not an initialized solver,
+/// connected constitutive graph, or physical qualification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryStatus {
-    /// Every requested property has declared support over the requested domain.
+    /// Every requested property/model has support and requested models admit.
     Complete,
-    /// Some requested properties have support and others have named gaps.
+    /// Some requirements have support and others have named gaps.
     Partial,
-    /// No requested property has support over the requested domain.
+    /// No requested requirement has support over the requested domain.
     Unavailable,
 }
 
@@ -330,6 +422,8 @@ pub struct DiscoveryCandidate {
     pub status: DiscoveryStatus,
     /// One result for every requested property, including all missing ones.
     pub properties: Vec<DiscoveredProperty>,
+    /// One result for every requested executable law, including missing ones.
+    pub models: Vec<DiscoveredModel>,
 }
 
 /// Deterministic discovery results, never a substitute for solve-time queries.
@@ -340,6 +434,10 @@ pub struct DiscoveryReport {
     /// Names absent from every claims-bearing pack, distinct from known names
     /// that have no candidate for this target, quantity or state envelope.
     pub unknown_properties: Vec<PropertyKey>,
+    /// Requested law/version identities absent from all model-bearing packs.
+    /// A standalone model pack makes an identity known, but never associates it
+    /// with a material. Pins are checked only against exact candidate members.
+    pub unknown_models: Vec<ModelRequirement>,
     /// Canonical pack-id order, including partial and unavailable candidates.
     pub candidates: Vec<DiscoveryCandidate>,
 }
@@ -678,6 +776,104 @@ fn discover_property(
                 upper: Some(answer.upper),
             }),
     }
+}
+
+fn discover_model(
+    members: &[ConstitutiveModelCard],
+    requirement: &ModelRequirement,
+    domain: &DiscoveryDomain,
+    registry: &LawRegistry,
+    pack_id: &str,
+) -> Result<ConstitutiveModelCard, ModelDiscoveryGap> {
+    let matches_identity = |card: &&ConstitutiveModelCard| {
+        card.law == requirement.law && card.law_version == requirement.law_version
+    };
+    let matching: Vec<_> = if let Some(pin) = requirement.pin {
+        let card = members
+            .iter()
+            .find(|card| card.content_hash() == pin)
+            .ok_or(ModelDiscoveryGap::PinnedModelAbsent { pin })?;
+        if !matches_identity(&card) {
+            return Err(ModelDiscoveryGap::PinnedModelMismatch {
+                law: card.law.clone(),
+                law_version: card.law_version,
+            });
+        }
+        vec![card]
+    } else {
+        members.iter().filter(matches_identity).collect()
+    };
+    if matching.is_empty() {
+        let mut available_versions: Vec<_> = members
+            .iter()
+            .filter(|card| card.law == requirement.law)
+            .map(|card| card.law_version)
+            .collect();
+        available_versions.sort_unstable();
+        available_versions.dedup();
+        return Err(ModelDiscoveryGap::Missing { available_versions });
+    }
+    let mut supported = Vec::new();
+    let mut unsupported = Vec::new();
+    for card in &matching {
+        if let Some(point) = domain.points().find(|point| {
+            !card
+                .validity
+                .contains_typed(point.axes(), point.axis_quantities())
+        }) {
+            unsupported.push((card.content_hash(), point.clone()));
+        } else {
+            supported.push(*card);
+        }
+    }
+    if supported.is_empty() {
+        return Err(ModelDiscoveryGap::UnsupportedDomain {
+            models: unsupported,
+        });
+    }
+    // Even an interior-only competing calibration needs explicit source
+    // selection. A single full-range card must not silently win over it.
+    if requirement.pin.is_none() {
+        let competing: Vec<_> = matching
+            .iter()
+            .filter(|card| match domain {
+                DiscoveryDomain::LocalState(point) => card
+                    .validity
+                    .contains_typed(point.axes(), point.axis_quantities()),
+                DiscoveryDomain::Envelope { lower, upper } => {
+                    card.validity
+                        .axis_quantity_mismatch(lower.axis_quantities())
+                        .is_none()
+                        && card.validity.bounds().iter().all(|(axis, &(lo, hi))| {
+                            lower.axes().get(axis).is_some_and(|lower| {
+                                lo <= hi && lo <= upper.axes()[axis] && hi >= *lower
+                            })
+                        })
+                }
+            })
+            .map(|card| card.content_hash())
+            .collect();
+        if competing.len() > 1 {
+            return Err(ModelDiscoveryGap::Ambiguous { models: competing });
+        }
+    }
+    let card = supported[0];
+    let model = card.content_hash();
+    let node = registry
+        .instantiate(&format!("{pack_id}/{model}"), card)
+        .map_err(|error| ModelDiscoveryGap::Implementation { model, error })?;
+    if let Some(point) = domain.points().find(|point| {
+        !node
+            .declaration()
+            .calibration
+            .contains_typed(point.axes(), point.axis_quantities())
+    }) {
+        return Err(ModelDiscoveryGap::ImplementationDomain {
+            model,
+            point: point.clone(),
+        });
+    }
+    Ok(card.clone())
 }
 
 /// The queryable store.
@@ -1342,7 +1538,7 @@ impl MaterialStore {
         Ok(answer)
     }
 
-    /// Find packs that supply a complete typed property bundle at the same
+    /// Find packs that supply a complete typed property/model bundle at the same
     /// state or throughout a caller-declared conservative envelope. Each pack
     /// is decoded once; no requirements are fused across material conditions.
     ///
@@ -1350,14 +1546,35 @@ impl MaterialStore {
     /// existing single-property discovery methods retain their unknown-name
     /// error. Evidence weakness in an unrelated property cannot demote a bundle.
     ///
+    /// The supplied registry admits each selected model using its real factory.
+    /// Declared card and node domains must both cover the request. Initial state,
+    /// graph connections and numerical/physical qualification remain binding-time
+    /// obligations; returned cards retain their explicit state requirements.
+    ///
     /// # Errors
     /// Store integrity/SQL refusals, or [`StoreError::InvalidDiscoveryRequest`].
     /// Per-candidate evaluation refusals are retained in the report instead.
-    pub fn discover(&self, request: &DiscoveryRequest) -> Result<DiscoveryReport, StoreError> {
-        if request.properties.is_empty() {
+    pub fn discover(
+        &self,
+        request: &DiscoveryRequest,
+        registry: &LawRegistry,
+    ) -> Result<DiscoveryReport, StoreError> {
+        if request.properties.is_empty() && request.models.is_empty() {
             return Err(StoreError::InvalidDiscoveryRequest {
-                reason: "at least one property is required",
+                reason: "at least one property or model is required",
             });
+        }
+        for (i, model) in request.models.iter().enumerate() {
+            if model.law.0.trim().is_empty() || model.law_version == 0 {
+                return Err(StoreError::InvalidDiscoveryRequest {
+                    reason: "model requirements need a named law and positive version",
+                });
+            }
+            if request.models[..i].contains(model) {
+                return Err(StoreError::InvalidDiscoveryRequest {
+                    reason: "duplicate model requirement",
+                });
+            }
         }
         for (i, property) in request.properties.iter().enumerate() {
             if request.properties[..i].contains(property) {
@@ -1379,10 +1596,16 @@ impl MaterialStore {
             });
         }
         let mut known = vec![false; request.properties.len()];
+        let mut known_models = vec![false; request.models.len()];
         let mut candidates = Vec::new();
         // packs() enforces the seal before any canonical bytes are evaluated.
         for row in self.packs(None)? {
             let pack = self.load_catalog_pack_unchecked(&row.pack_id)?;
+            for (i, requirement) in request.models.iter().enumerate() {
+                known_models[i] |= pack.models().iter().any(|card| {
+                    card.law == requirement.law && card.law_version == requirement.law_version
+                });
+            }
             let Some(claims) = pack.claims_pack().map(NormalizedPack::claims) else {
                 continue;
             };
@@ -1415,8 +1638,23 @@ impl MaterialStore {
                     support: discover_property(claims, key, &request.domain, request.selection),
                 })
                 .collect();
-            let supported = properties.iter().filter(|p| p.support.is_ok()).count();
-            let status = if supported == properties.len() {
+            let models: Vec<_> = request
+                .models
+                .iter()
+                .map(|requirement| DiscoveredModel {
+                    requirement: requirement.clone(),
+                    support: discover_model(
+                        pack.models(),
+                        requirement,
+                        &request.domain,
+                        registry,
+                        &row.pack_id,
+                    ),
+                })
+                .collect();
+            let supported = properties.iter().filter(|p| p.support.is_ok()).count()
+                + models.iter().filter(|m| m.support.is_ok()).count();
+            let status = if supported == properties.len() + models.len() {
                 DiscoveryStatus::Complete
             } else if supported == 0 {
                 DiscoveryStatus::Unavailable
@@ -1427,6 +1665,7 @@ impl MaterialStore {
                 pack: row,
                 status,
                 properties,
+                models,
             });
         }
         Ok(DiscoveryReport {
@@ -1437,6 +1676,13 @@ impl MaterialStore {
                 .zip(known)
                 .filter(|(_, found)| !found)
                 .map(|(key, _)| key.clone())
+                .collect(),
+            unknown_models: request
+                .models
+                .iter()
+                .zip(known_models)
+                .filter(|(_, found)| !found)
+                .map(|(model, _)| model.clone())
                 .collect(),
             candidates,
         })

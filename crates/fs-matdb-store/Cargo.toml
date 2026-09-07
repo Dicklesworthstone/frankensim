@@ -13,6 +13,7 @@ layer = "L6"
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-matdb = { path = "../fs-matdb" }
+fs-material = { path = "../fs-material" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite", features = ["async-api"] }
 
 [dev-dependencies]

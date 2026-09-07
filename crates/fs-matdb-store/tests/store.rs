@@ -11,11 +11,15 @@ use fs_matdb::{
     PropertyKey, PropertyValue, Provenance, QueryPoint, SPECIES_MOLAR_MASS_DIMS,
     SPECIES_PACK_TARGET_BASIS, SPECIES_REFERENCE_PRESSURE_DIMS, SelectionPolicy,
     SpeciesAssociation, SpeciesNormalizationReceipt, SpeciesNormalizationTarget, SurfaceSpec,
-    SystemContext, UncertaintyModel,
+    SystemContext, UncertaintyModel, ValidityBoundSide,
 };
 use fs_matdb_store::{
     CatalogPack, DiscoveryDomain, DiscoveryGap, DiscoveryRequest, DiscoveryStatus, DiscoveryTarget,
-    MaterialStore, PackKind, STORE_SCHEMA_VERSION, StoreError,
+    MaterialStore, ModelDiscoveryGap, ModelRequirement, PackKind, STORE_SCHEMA_VERSION, StoreError,
+};
+use fs_material::graph::{
+    Differentiability, EnergyBehavior, GraphError, LawNode, LawRegistry, NodeDeclaration,
+    NodeOutput, NodeRole, Port, TimeParity,
 };
 use fs_qty::Dims;
 use fsqlite::{AsyncConnection, SqliteValue};
@@ -157,6 +161,7 @@ fn discovery_request(names: &[&str], lo: f64, hi: f64) -> DiscoveryRequest {
             .iter()
             .map(|name| PropertyKey::new(*name, Dims::NONE))
             .collect(),
+        models: Vec::new(),
         domain: DiscoveryDomain::Envelope {
             lower: QueryPoint::new().with("temperature", lo).unwrap(),
             upper: QueryPoint::new().with("temperature", hi).unwrap(),
@@ -198,7 +203,7 @@ fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_suppor
     }
     store.seal_corpus().unwrap();
     let mut request = discovery_request(&["density", "conductivity"], 300.0, 350.0);
-    let report = store.discover(&request).unwrap();
+    let report = store.discover(&request, &LawRegistry::new()).unwrap();
     assert!(report.unknown_properties.is_empty());
     assert_eq!(
         report
@@ -231,7 +236,7 @@ fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_suppor
         PropertyKey::new("latent-heat", Dims::NONE),
     ]);
     request.domain = discovery_request(&["unused"], 300.0, 650.0).domain;
-    let heating = store.discover(&request).unwrap();
+    let heating = store.discover(&request, &LawRegistry::new()).unwrap();
     assert_eq!(
         heating
             .unknown_properties
@@ -260,7 +265,7 @@ fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_suppor
     request.properties.truncate(2);
     request.domain =
         DiscoveryDomain::LocalState(QueryPoint::new().with("temperature", 300.0).unwrap());
-    let local = store.discover(&request).unwrap();
+    let local = store.discover(&request, &LawRegistry::new()).unwrap();
     assert_eq!(local.candidates[1].status, DiscoveryStatus::Complete);
     assert!(
         local.candidates[1]
@@ -273,14 +278,14 @@ fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_suppor
         surface_a: named_state("lead"),
         surface_b: named_state("air"),
     };
-    let empty = store.discover(&request).unwrap();
+    let empty = store.discover(&request, &LawRegistry::new()).unwrap();
     assert!(empty.candidates.is_empty());
     assert!(empty.unknown_properties.is_empty());
     store
         .ingest_pack(&test_pack("later", &[("density", 1.0)]))
         .unwrap();
     assert!(matches!(
-        store.discover(&request),
+        store.discover(&request, &LawRegistry::new()),
         Err(StoreError::CorpusChanged { .. })
     ));
 }
@@ -338,7 +343,7 @@ fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
     store.seal_corpus().unwrap();
     let mut request = discovery_request(&["conductivity"], 300.0, 400.0);
     request.target = DiscoveryTarget::Properties;
-    let report = store.discover(&request).unwrap();
+    let report = store.discover(&request, &LawRegistry::new()).unwrap();
     assert_eq!(report.candidates[1].status, DiscoveryStatus::Complete);
     // G3: adding unrelated weak evidence changes neither queried receipts nor
     // support. The catalog artifact identity changes, as it must.
@@ -352,12 +357,21 @@ fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
     // A single supported knot is a degenerate envelope, not a filled gap.
     request.domain = discovery_request(&["unused"], 350.0, 350.0).domain;
     assert_eq!(
-        store.discover(&request).unwrap().candidates[2].status,
+        store
+            .discover(&request, &LawRegistry::new())
+            .unwrap()
+            .candidates[2]
+            .status,
         DiscoveryStatus::Complete
     );
     request.domain = discovery_request(&["unused"], 250.0, 400.0).domain;
     assert!(matches!(
-        &store.discover(&request).unwrap().candidates[1].properties[0].support,
+        &store
+            .discover(&request, &LawRegistry::new())
+            .unwrap()
+            .candidates[1]
+            .properties[0]
+            .support,
         Err(DiscoveryGap::Evaluation {
             error: MatDbError::OutsideKnotSpan { .. },
             ..
@@ -365,7 +379,7 @@ fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
     ));
     request.properties = vec![PropertyKey::new("density", Dims::NONE)];
     request.domain = discovery_request(&["unused"], 300.0, 400.0).domain;
-    let conflict = store.discover(&request).unwrap();
+    let conflict = store.discover(&request, &LawRegistry::new()).unwrap();
     assert!(matches!(&conflict.candidates[0].properties[0].support,
         Err(DiscoveryGap::Evaluation { point, error: MatDbError::AmbiguousSelection { .. } })
         if point.axes()["temperature"] == 325.0));
@@ -373,7 +387,11 @@ fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
     // does not demote this supported bundle under the declared policy (G3).
     request.selection = SelectionPolicy::PreferObservationBacked;
     assert_eq!(
-        store.discover(&request).unwrap().candidates[0].status,
+        store
+            .discover(&request, &LawRegistry::new())
+            .unwrap()
+            .candidates[0]
+            .status,
         DiscoveryStatus::Complete
     );
 }
@@ -450,7 +468,7 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
         surface_a: a,
         surface_b: b,
     };
-    let wrong_axes = store.discover(&request).unwrap();
+    let wrong_axes = store.discover(&request, &LawRegistry::new()).unwrap();
     assert_eq!(wrong_axes.candidates.len(), 1);
     assert_eq!(wrong_axes.candidates[0].pack.pack_id, "ab");
     assert!(matches!(
@@ -469,12 +487,21 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
             .unwrap(),
     };
     assert_eq!(
-        store.discover(&request).unwrap().candidates[0].status,
+        store
+            .discover(&request, &LawRegistry::new())
+            .unwrap()
+            .candidates[0]
+            .status,
         DiscoveryStatus::Complete
     );
     request.properties[0] = PropertyKey::with_quantity("work", quantity(QuantityKind::Torque));
     assert!(matches!(
-        &store.discover(&request).unwrap().candidates[0].properties[0].support,
+        &store
+            .discover(&request, &LawRegistry::new())
+            .unwrap()
+            .candidates[0]
+            .properties[0]
+            .support,
         Err(DiscoveryGap::Evaluation {
             error: MatDbError::QuantityMismatch { .. },
             ..
@@ -482,7 +509,7 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
     ));
     request.domain = discovery_request(&["unused"], 400.0, 300.0).domain;
     assert!(matches!(
-        store.discover(&request),
+        store.discover(&request, &LawRegistry::new()),
         Err(StoreError::InvalidDiscoveryRequest { .. })
     ));
     request.domain = DiscoveryDomain::Envelope {
@@ -492,18 +519,18 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
         upper: QueryPoint::new().with("temperature", 400.0).unwrap(),
     };
     assert!(matches!(
-        store.discover(&request),
+        store.discover(&request, &LawRegistry::new()),
         Err(StoreError::InvalidDiscoveryRequest { .. })
     ));
     request.domain = discovery_request(&["unused"], 300.0, 400.0).domain;
     request.properties.push(request.properties[0].clone());
     assert!(matches!(
-        store.discover(&request),
+        store.discover(&request, &LawRegistry::new()),
         Err(StoreError::InvalidDiscoveryRequest { .. })
     ));
     request.properties.clear();
     assert!(matches!(
-        store.discover(&request),
+        store.discover(&request, &LawRegistry::new()),
         Err(StoreError::InvalidDiscoveryRequest { .. })
     ));
 }
@@ -1177,6 +1204,438 @@ fn model_and_species() -> (NormalizedModelPack, NormalizedSpeciesPack) {
     )
     .unwrap();
     (models, species)
+}
+
+fn discovery_model(stiffness: f64, lower: f64, upper: f64) -> ConstitutiveModelCard {
+    let (pack, _) = model_and_species();
+    let mut model = pack.models()[0].clone();
+    model.parameters.get_mut("stiffness").unwrap().value = stiffness;
+    model.validity = ValidityDomain::unconstrained().with("temperature", lower, upper);
+    model
+}
+
+fn discovery_model_pack(id: &str, models: Vec<ConstitutiveModelCard>) -> NormalizedModelPack {
+    let source = fs_blake3_hash(b"synthetic model discovery normalization");
+    let mut receipts = Vec::new();
+    for card in &models {
+        let model = card.content_hash();
+        for (name, parameter) in &card.parameters {
+            receipts.push(ModelNormalizationReceipt::new(
+                ModelNormalizationTarget::Parameter {
+                    model,
+                    parameter: name.clone(),
+                },
+                source,
+                parameter.dims,
+                1.0,
+                0.0,
+                "synthetic SI",
+                MODEL_PACK_TARGET_BASIS,
+                None,
+                None,
+            ));
+        }
+        for axis in card.validity.bounds().keys() {
+            for side in [ValidityBoundSide::Lower, ValidityBoundSide::Upper] {
+                receipts.push(ModelNormalizationReceipt::new(
+                    ModelNormalizationTarget::ValidityBound {
+                        model,
+                        axis: axis.clone(),
+                        side,
+                    },
+                    source,
+                    Dims([0, 0, 0, 1, 0, 0]),
+                    1.0,
+                    0.0,
+                    "K",
+                    MODEL_PACK_TARGET_BASIS,
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+    NormalizedModelPack::new(
+        id,
+        "test-compiler",
+        source,
+        "synthetic test redistribution",
+        models,
+        receipts,
+    )
+    .unwrap()
+}
+
+fn model_material(id: &str, models: Vec<ConstitutiveModelCard>) -> CatalogPack {
+    CatalogPack::MaterialCard(
+        NormalizedMaterialCardPack::new_with_models(
+            named_state(id),
+            test_pack(id, &[("density", 1.0)]),
+            discovery_model_pack(&format!("{id}-models"), models),
+        )
+        .unwrap(),
+    )
+}
+
+/// Authored law plugged into the real public registry, not a physical dataset.
+/// A declared rest displacement is required; discovery does not initialize it.
+struct DiscoverySpring {
+    declaration: NodeDeclaration,
+    stiffness: f64,
+}
+
+impl DiscoverySpring {
+    fn from_card(card: &ConstitutiveModelCard) -> Result<Self, GraphError> {
+        let stiffness = &card.parameters["stiffness"];
+        if stiffness.value <= 0.0 || stiffness.dims != Dims([0, 1, -2, 0, 0, 0]) {
+            return Err(GraphError::CardMismatch {
+                law: card.law.0.clone(),
+                obligation: "spring needs positive stiffness in N/m",
+            });
+        }
+        Ok(Self {
+            stiffness: stiffness.value,
+            declaration: NodeDeclaration {
+                law: card.law.clone(),
+                law_version: card.law_version,
+                role: NodeRole::BulkTransport,
+                inputs: vec![Port {
+                    name: "displacement".into(),
+                    dims: Dims([1, 0, 0, 0, 0, 0]),
+                    parity: TimeParity::Even,
+                }],
+                outputs: vec![Port {
+                    name: "force".into(),
+                    dims: Dims([1, 1, -2, 0, 0, 0]),
+                    parity: TimeParity::Even,
+                }],
+                state_slots: vec!["rest-displacement".into()],
+                state_schema_version: card.state_schema_version,
+                calibration: card.validity.clone(),
+                differentiability: Differentiability::Smooth,
+                energy: EnergyBehavior::Empirical,
+                tangent_claimed: true,
+            },
+        })
+    }
+}
+
+impl LawNode for DiscoverySpring {
+    fn declaration(&self) -> &NodeDeclaration {
+        &self.declaration
+    }
+    fn evaluate(&self, state: &[f64], inputs: &[f64]) -> Result<NodeOutput, GraphError> {
+        Ok(NodeOutput {
+            outputs: vec![self.stiffness * (inputs[0] - state[0])],
+            next_state: state.to_vec(),
+            dissipation_rate: None,
+        })
+    }
+    fn tangent(&self, _state: &[f64], _inputs: &[f64]) -> Option<Vec<f64>> {
+        Some(vec![self.stiffness])
+    }
+}
+
+fn discovery_registry() -> LawRegistry {
+    let mut registry = LawRegistry::new();
+    registry.register(&LawId("synthetic-law".into()), 7, |card| {
+        Ok(Box::new(DiscoverySpring::from_card(card)?))
+    });
+    registry
+}
+
+fn required_model(law: &str, law_version: u32) -> ModelRequirement {
+    ModelRequirement {
+        law: LawId(law.into()),
+        law_version,
+        pin: None,
+    }
+}
+
+#[test]
+fn g0_model_discovery_reports_membership_versions_and_actual_implementation_gaps() {
+    let store = MaterialStore::open(":memory:").unwrap();
+    let model = discovery_model(3.0, 250.0, 450.0);
+    let mut unassociated = model.clone();
+    unassociated.law = LawId("catalog-only".into());
+    store
+        .ingest_bundle(&[
+            model_material("a-bound", vec![model.clone()]),
+            CatalogPack::MaterialCard(
+                NormalizedMaterialCardPack::new(
+                    named_state("a-bound"),
+                    test_pack("b-unbound", &[("density", 1.0)]),
+                )
+                .unwrap(),
+            ),
+            CatalogPack::Model(discovery_model_pack("standalone", vec![unassociated])),
+        ])
+        .unwrap();
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&["density", "latent-heat"], 300.0, 350.0);
+    request.models = vec![
+        required_model("synthetic-law", 7),
+        required_model("synthetic-law", 8),
+        required_model("catalog-only", 7),
+        required_model("absent-law", 1),
+    ];
+    let report = store.discover(&request, &LawRegistry::new()).unwrap();
+    assert_eq!(
+        report.unknown_properties,
+        vec![PropertyKey::new("latent-heat", Dims::NONE)]
+    );
+    assert_eq!(
+        report.unknown_models,
+        vec![request.models[1].clone(), request.models[3].clone()]
+    );
+    let bound = &report.candidates[0];
+    assert_eq!(bound.models.len(), 4);
+    assert_eq!(bound.status, DiscoveryStatus::Partial);
+    assert!(matches!(
+        &bound.models[0].support,
+        Err(ModelDiscoveryGap::Implementation {
+            error: GraphError::UnknownLaw { version: 7, .. },
+            ..
+        })
+    ));
+    assert!(
+        matches!(&bound.models[1].support, Err(ModelDiscoveryGap::Missing {
+        available_versions }) if available_versions == &[7])
+    );
+    assert!(
+        matches!(&bound.models[2].support, Err(ModelDiscoveryGap::Missing {
+        available_versions }) if available_versions.is_empty())
+    );
+    assert!(
+        matches!(&report.candidates[1].models[0].support, Err(ModelDiscoveryGap::Missing {
+        available_versions }) if available_versions.is_empty())
+    );
+
+    request.properties.truncate(1);
+    request.models.truncate(1);
+    let registry = discovery_registry();
+    let report = store.discover(&request, &registry).unwrap();
+    assert_eq!(report.candidates[0].status, DiscoveryStatus::Complete);
+    assert_eq!(report.candidates[1].status, DiscoveryStatus::Partial);
+    let selected = report.candidates[0].models[0].support.as_ref().unwrap();
+    assert_eq!(selected, &model);
+    assert_eq!(
+        selected.initial_state,
+        InitialStatePolicy::RequiresDeclaredState
+    );
+    let node = registry.instantiate("actual-consumer", selected).unwrap();
+    assert_eq!(node.evaluate(&[0.5], &[2.0]).unwrap().outputs, vec![4.5]);
+    request.properties.clear();
+    let report = store.discover(&request, &registry).unwrap();
+    assert_eq!(report.candidates[0].status, DiscoveryStatus::Complete);
+    assert_eq!(report.candidates[1].status, DiscoveryStatus::Unavailable);
+}
+
+#[test]
+fn g0_model_discovery_enforces_pins_interior_conflicts_and_both_declared_domains() {
+    let store = MaterialStore::open(":memory:").unwrap();
+    let wide = discovery_model(3.0, 200.0, 500.0);
+    let interior = discovery_model(4.0, 325.0, 335.0);
+    let disjoint = discovery_model(5.0, 700.0, 800.0);
+    store
+        .ingest_bundle(&[model_material(
+            "body",
+            vec![wide.clone(), interior.clone(), disjoint],
+        )])
+        .unwrap();
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&[], 300.0, 400.0);
+    request.models = vec![required_model("synthetic-law", 7)];
+    let mut registry = discovery_registry();
+    let report = store.discover(&request, &registry).unwrap();
+    assert!(
+        matches!(&report.candidates[0].models[0].support, Err(ModelDiscoveryGap::Ambiguous { models })
+        if models.len() == 2 && models.contains(&wide.content_hash()) && models.contains(&interior.content_hash()))
+    );
+    request.domain =
+        DiscoveryDomain::LocalState(QueryPoint::new().with("temperature", 310.0).unwrap());
+    assert_eq!(
+        store.discover(&request, &registry).unwrap().candidates[0].status,
+        DiscoveryStatus::Complete
+    );
+    request.domain = discovery_request(&[], 300.0, 400.0).domain;
+    request.models[0].pin = Some(wide.content_hash());
+    assert_eq!(
+        store.discover(&request, &registry).unwrap().candidates[0].status,
+        DiscoveryStatus::Complete
+    );
+    request.models[0].pin = Some(interior.content_hash());
+    assert!(
+        matches!(&store.discover(&request, &registry).unwrap().candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::UnsupportedDomain { models })
+        if models.len() == 1 && models[0].0 == interior.content_hash() && models[0].1.axes()["temperature"] == 300.0)
+    );
+    request.models[0].pin = Some(fs_blake3_hash(b"foreign member"));
+    assert!(matches!(
+        &store.discover(&request, &registry).unwrap().candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::PinnedModelAbsent { .. })
+    ));
+    request.models[0].pin = Some(wide.content_hash());
+    request.models[0].law_version = 8;
+    assert!(matches!(
+        &store.discover(&request, &registry).unwrap().candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::PinnedModelMismatch { law_version: 7, .. })
+    ));
+    request.models[0].law_version = 7;
+    registry.register(&wide.law, 7, |card| {
+        let mut node = DiscoverySpring::from_card(card)?;
+        node.declaration.calibration =
+            ValidityDomain::unconstrained().with("temperature", 250.0, 350.0);
+        Ok(Box::new(node))
+    });
+    assert!(
+        matches!(&store.discover(&request, &registry).unwrap().candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::ImplementationDomain { point, .. }) if point.axes()["temperature"] == 400.0)
+    );
+    let registry = discovery_registry();
+    request.domain = DiscoveryDomain::LocalState(
+        QueryPoint::new()
+            .with_quantity(
+                "temperature",
+                fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+                    fs_qty::semantic::QuantityKind::AbsoluteTemperature,
+                    fs_qty::semantic::ValueForm::Static,
+                )),
+                310.0,
+            )
+            .unwrap(),
+    );
+    assert!(matches!(
+        &store.discover(&request, &registry).unwrap().candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::UnsupportedDomain { .. })
+    ));
+}
+
+#[test]
+fn g0_model_discovery_keeps_factory_refusals_and_validates_model_only_requests() {
+    let store = MaterialStore::open(":memory:").unwrap();
+    store
+        .ingest_bundle(&[model_material(
+            "invalid-spring",
+            vec![discovery_model(-3.0, 250.0, 450.0)],
+        )])
+        .unwrap();
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&[], 300.0, 350.0);
+    request.models = vec![required_model("synthetic-law", 7)];
+    let registry = discovery_registry();
+    let report = store.discover(&request, &registry).unwrap();
+    assert_eq!(report.candidates[0].status, DiscoveryStatus::Unavailable);
+    assert!(matches!(
+        &report.candidates[0].models[0].support,
+        Err(ModelDiscoveryGap::Implementation {
+            error: GraphError::CardMismatch {
+                obligation: "spring needs positive stiffness in N/m",
+                ..
+            },
+            ..
+        })
+    ));
+    request.models.push(request.models[0].clone());
+    assert!(matches!(
+        store.discover(&request, &registry),
+        Err(StoreError::InvalidDiscoveryRequest {
+            reason: "duplicate model requirement"
+        })
+    ));
+    request.models.pop();
+    request.models[0].law_version = 0;
+    assert!(matches!(
+        store.discover(&request, &registry),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
+    request.models[0] = required_model(" ", 7);
+    assert!(matches!(
+        store.discover(&request, &registry),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
+}
+
+#[test]
+fn g0_material_model_membership_survives_storage_without_name_inference() {
+    let path = scratch_path("material-model-membership");
+    let (models, _) = model_and_species();
+    let material = NormalizedMaterialCardPack::new_with_models(
+        named_state("body"),
+        test_pack("body-with-model", &[("young_modulus", 2.0e9)]),
+        models.clone(),
+    )
+    .unwrap();
+    let unbound = NormalizedMaterialCardPack::new(
+        named_state("body"),
+        test_pack("body-without-model", &[("young_modulus", 2.0e9)]),
+    )
+    .unwrap();
+    {
+        let store = MaterialStore::open(&path).unwrap();
+        store
+            .ingest_bundle(&[
+                CatalogPack::MaterialCard(material.clone()),
+                CatalogPack::MaterialCard(unbound.clone()),
+                CatalogPack::Model(models.clone()),
+            ])
+            .unwrap();
+        store.seal_corpus().unwrap();
+    }
+    let store = MaterialStore::open(&path).unwrap();
+    let CatalogPack::MaterialCard(loaded) = store
+        .load_by_hash(PackKind::MaterialCard, material.content_hash())
+        .unwrap()
+    else {
+        panic!("material family")
+    };
+    assert_eq!(loaded, material);
+    assert_eq!(loaded.card().models(), models.models());
+    assert_eq!(loaded.model_pack(), Some(&models));
+    assert_eq!(
+        store
+            .load_by_hash(PackKind::Model, models.content_hash())
+            .unwrap(),
+        CatalogPack::Model(models)
+    );
+    let CatalogPack::MaterialCard(without_models) =
+        store.load_catalog_pack(unbound.pack_id()).unwrap()
+    else {
+        panic!("material family")
+    };
+    assert_eq!(without_models.card().id(), loaded.card().id());
+    assert!(without_models.card().models().is_empty());
+    assert!(without_models.model_pack().is_none());
+    assert_ne!(
+        without_models.card().content_hash(),
+        loaded.card().content_hash()
+    );
+    store.verify_index(loaded.pack_id()).unwrap();
+    let point = QueryPoint::new().with("temperature", 300.0).unwrap();
+    let answer = store
+        .evaluate(
+            loaded.pack_id(),
+            "young_modulus",
+            &point,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    loaded
+        .card()
+        .claims()
+        .verify_receipt(&answer.receipt)
+        .unwrap();
+    assert_eq!(answer.evidence.value.value, 2.0e9);
+    // A model parameter is still not a material property claim.
+    assert!(matches!(
+        store.evaluate(
+            loaded.pack_id(),
+            "stiffness",
+            &point,
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(StoreError::MatDb(MatDbError::UnknownProperty { .. }))
+    ));
 }
 
 fn assert_family_round_trip(store: &MaterialStore, pack: &CatalogPack, point: &QueryPoint) {
