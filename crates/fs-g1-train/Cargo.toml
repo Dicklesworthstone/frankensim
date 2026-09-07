@@ -20,6 +20,12 @@ train-io = []
 # standalone. Real owner-rollout training is integrated by the sibling
 # fs-cmaes-viz-wasm `g1-learned` feature so this crate does not duplicate the
 # 29-DoF dynamics owner.
+#
+# The one dependency exists to make this crate's arithmetic portable: std's
+# f32::exp/tanh/sin/cos/powf call the host's libm, which is a different
+# implementation on macOS than in the wasm build. See `portable` in
+# src/transformer.rs.
+libm = "0.2"
 
 [[example]]
 name = "train_ablation"

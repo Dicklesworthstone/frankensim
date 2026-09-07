@@ -262,8 +262,11 @@ fn main() {
         let (obj, dist, steps) = score(&mut policy, &evaluators, Scope::Head, &head);
         println!("artifact          : {path}");
         println!("head parameters   : {}", head.len());
-        println!("tuned controller  : objective {base:.4}  distance {base_d:.4} m");
-        println!("artifact policy   : objective {obj:.4}  distance {dist:.4} m  steps {steps}");
+        // Full precision: the point of this tool is comparing against another
+        // build of the same code, and four decimals hides exactly the
+        // disagreement worth finding.
+        println!("tuned controller  : objective {base:.17}  distance {base_d:.17} m");
+        println!("artifact policy   : objective {obj:.17}  distance {dist:.17} m  steps {steps}");
         println!(
             "improvement       : {:.1}% ({} challenges, {duration_s} s)",
             100.0 * (base - obj) / base.abs(),
