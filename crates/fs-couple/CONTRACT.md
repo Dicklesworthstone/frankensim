@@ -738,6 +738,16 @@ clarinet is one filling of those objects.
   mode of a homogeneous isotropic thin beam/plate; it does not solve a thermal
   field or establish an anisotropic loss law. Callers must exclude this addend
   when authored damping or resolved thermal transport already includes it.
+  With prestress, the thermal addend is weighted by the mode's bending/total
+  strain-energy ratio: `phi^T K_b phi / phi^T (K_b + K_G) phi` for DKT modes,
+  and `D k^2 / (D k^2 + T)` for the isotropic sine modes. Authored loss is
+  unchanged. The same projection reaches the sampled-FE von Karman bank.
+  This is weak-loss, diagonal modal bending damping about the prestressed
+  equilibrium; it does not model finite-amplitude membrane thermal loss or
+  off-diagonal thermal coupling. The energy separation follows
+  [Fedorov et al., Eq. (1) and Sec. II](https://arxiv.org/abs/1807.07086).
+  G1 tests independently integrate geometric energy and compare actual
+  unforced sine-mode ringdown to the analytic damped oscillator under refinement.
   G0/G1 tests inspect both assembled damping operators against independent
   Zener arithmetic, vary equal-density specimens and temperature, and cross
   the former density threshold without switching laws. Radiation
