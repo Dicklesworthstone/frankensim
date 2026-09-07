@@ -1448,25 +1448,26 @@ impl ClaimSet {
         let hardness_test = context_key.and_then(PropertyKey::hardness_test);
         let elastic_component = context_key.and_then(PropertyKey::elastic_component);
         let strain_component = context_key.and_then(PropertyKey::strain_component);
-        if (strain_component.is_none()
-            && considered_pairs
-                .iter()
-                .any(|(_, claim)| claim.key.strain_component().is_some()))
-            || !considered_pairs
-                .iter()
-                .any(|(_, claim)| claim.key.strain_component() == strain_component)
-        {
-            return Err(MatDbError::TensorContextMismatch {
-                property: property.to_owned(),
-            });
-        }
+        let stress_component = context_key.and_then(PropertyKey::stress_component);
+        let matches_tensor = |claim: &PropertyClaim| {
+            claim.key.elastic_component() == elastic_component
+                && claim.key.strain_component() == strain_component
+                && claim.key.stress_component() == stress_component
+        };
+        // Stress and stiffness may share pressure dimensions and a property
+        // name. An explicit complete context selects either without erasing
+        // its kind; a context-free query remains inadmissible.
         if (elastic_component.is_none()
-            && considered_pairs
-                .iter()
-                .any(|(_, claim)| claim.key.elastic_component().is_some()))
+            && strain_component.is_none()
+            && stress_component.is_none()
+            && considered_pairs.iter().any(|(_, claim)| {
+                claim.key.elastic_component().is_some()
+                    || claim.key.strain_component().is_some()
+                    || claim.key.stress_component().is_some()
+            }))
             || !considered_pairs
                 .iter()
-                .any(|(_, claim)| claim.key.elastic_component() == elastic_component)
+                .any(|(_, claim)| matches_tensor(claim))
         {
             return Err(MatDbError::TensorContextMismatch {
                 property: property.to_owned(),
@@ -1488,8 +1489,7 @@ impl ClaimSet {
         let in_domain_pairs: Vec<_> = considered_pairs
             .iter()
             .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
-            .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
-            .filter(|(_, claim)| claim.key.strain_component() == strain_component)
+            .filter(|(_, claim)| matches_tensor(claim))
             .filter(|(_, claim)| {
                 claim
                     .validity
@@ -1501,8 +1501,7 @@ impl ClaimSet {
             if let Some((claim, axis)) = considered_pairs
                 .iter()
                 .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
-                .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
-                .filter(|(_, claim)| claim.key.strain_component() == strain_component)
+                .filter(|(_, claim)| matches_tensor(claim))
                 .find_map(|(_, claim)| claim_axis_mismatch(claim, point).map(|axis| (*claim, axis)))
             {
                 return Err(MatDbError::AxisQuantityMismatch {

@@ -77,10 +77,117 @@ pub enum StressTensorNotation {
 /// describe first/second Piola stress or provide a finite-deformation mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StressTensorBasis {
+    /// Stress-specific shear scaling.
     pub notation: StressTensorNotation,
+    /// Order of the six symmetric stress coordinates.
     pub order: ElasticTensorOrder,
     /// Nonzero coordinate-frame identity, checked by the numerical consumer.
     pub frame: ContentHash,
+}
+
+/// One coordinate of a source-declared symmetric Cauchy stress [Pa]. Grouping
+/// six components does not establish their correlation or material calibration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StressTensorComponent {
+    basis: StressTensorBasis,
+    source_tensor: ContentHash,
+    index: u8,
+}
+
+impl StressTensorComponent {
+    /// Three convention/index bytes and two complete identities.
+    pub const ENCODED_LEN: usize = 67;
+
+    /// Declare a bounded coordinate with nonzero frame and source identities.
+    pub fn new(
+        basis: StressTensorBasis,
+        source_tensor: ContentHash,
+        index: u8,
+    ) -> Result<Self, MatDbError> {
+        if basis.frame == ContentHash([0; 32]) || source_tensor == ContentHash([0; 32]) {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "stress frame and source tensor identities must be nonzero",
+            });
+        }
+        if index >= 6 {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "stress component index must lie in 0..6",
+            });
+        }
+        Ok(Self {
+            basis,
+            source_tensor,
+            index,
+        })
+    }
+
+    /// Stress convention, coordinate order and source frame.
+    #[must_use]
+    pub const fn basis(self) -> StressTensorBasis {
+        self.basis
+    }
+
+    /// Source-declared tensor grouping, distinct from a component claim ID.
+    #[must_use]
+    pub const fn source_tensor(self) -> ContentHash {
+        self.source_tensor
+    }
+
+    /// Position in the explicitly declared order.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.index as usize
+    }
+
+    /// Canonical coordinates; the enclosing claim/pack owns versioning and
+    /// distinguishes this descriptor from strain or stiffness descriptors.
+    #[must_use]
+    pub fn canonical_bytes(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0] = match self.basis.notation {
+            StressTensorNotation::Tensor => 0,
+            StressTensorNotation::Engineering => 1,
+            StressTensorNotation::Mandel => 2,
+        };
+        bytes[1] = match self.basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => 0,
+            ElasticTensorOrder::XxYyZzYzZxXy => 1,
+        };
+        bytes[2] = self.index;
+        bytes[3..35].copy_from_slice(self.basis.frame.as_bytes());
+        bytes[35..].copy_from_slice(self.source_tensor.as_bytes());
+        bytes
+    }
+
+    /// Decode exact-length bytes, refusing unknown conventions and identities.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, MatDbError> {
+        let invalid = || MatDbError::InvalidTensorContext {
+            reason: "invalid stress component descriptor length or convention tag",
+        };
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(invalid());
+        }
+        let notation = match bytes[0] {
+            0 => StressTensorNotation::Tensor,
+            1 => StressTensorNotation::Engineering,
+            2 => StressTensorNotation::Mandel,
+            _ => return Err(invalid()),
+        };
+        let order = match bytes[1] {
+            0 => ElasticTensorOrder::XxYyZzXyYzZx,
+            1 => ElasticTensorOrder::XxYyZzYzZxXy,
+            _ => return Err(invalid()),
+        };
+        Self::new(
+            StressTensorBasis {
+                notation,
+                order,
+                frame: ContentHash(bytes[3..35].try_into().map_err(|_| invalid())?),
+            },
+            ContentHash(bytes[35..].try_into().map_err(|_| invalid())?),
+            bytes[2],
+        )
+    }
 }
 
 /// One of six explicitly supplied symmetric strain coordinates. The source
