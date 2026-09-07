@@ -101,7 +101,7 @@ impl MaterialOpticalBinding {
         }
         let source = ConductorSource::try_new(
             optical.resolved().identity(),
-            ConductorDataStatus::CallerAssertedMeasured,
+            ConductorDataStatus::MaterialStateClaims,
         )?;
         Ok(Self::new(
             mechanical,

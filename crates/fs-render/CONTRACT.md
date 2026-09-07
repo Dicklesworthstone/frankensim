@@ -51,8 +51,9 @@ differentiable lift). Pure Rust throughout.
   to nine optical knots, safe Rust, and does not mutate accepted physical or
   scene state. Underlying optical model refusals remain structured errors.
   Binding identities establish replay consistency, not measurement authority;
-  conductor source status remains a caller assertion and dielectric RGB lifting
-  remains an approximation. No thermal emission, birefringence, phase evolution,
+  conductor source status is `MaterialStateClaims`, preserving query identity
+  without labeling authored or unmeasured inputs as measured. Dielectric RGB
+  lifting remains an approximation. No thermal emission, birefringence, phase evolution,
   or measured-spectrum validation is added. Focused G0/G1 regressions in the
   existing Euler scene-adapter unit seam exercise both generic optical families,
   minimal string versus disc mechanical requirements, Fresnel and absorption

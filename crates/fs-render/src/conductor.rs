@@ -65,8 +65,7 @@ impl core::fmt::Display for ConductorError {
 
 impl core::error::Error for ConductorError {}
 
-/// Whether a table is an artistic representative or a caller-retained claim
-/// of measurement.  The latter is metadata only; this module does not verify
+/// Declared origin of the optical table. This module does not verify
 /// calibration, licensing, specimen identity, or measurement uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConductorDataStatus {
@@ -74,6 +73,9 @@ pub enum ConductorDataStatus {
     Representative,
     /// Caller assertion that the source contains measured optical constants.
     CallerAssertedMeasured,
+    /// Resolved material claims, which may include authored research inputs.
+    /// The source identity binds their query receipts without asserting measurement.
+    MaterialStateClaims,
 }
 
 /// Caller-supplied source identifier and declared status of admitted optical
@@ -105,7 +107,7 @@ impl ConductorSource {
         self.identity
     }
 
-    /// Declared representative-versus-measured status.
+    /// Declared origin, without upgrading the source's evidence.
     #[must_use]
     pub const fn status(self) -> ConductorDataStatus {
         self.status
@@ -323,6 +325,7 @@ impl ConductorOptics {
         hasher.update(&[match self.source.status {
             ConductorDataStatus::Representative => 0,
             ConductorDataStatus::CallerAssertedMeasured => 1,
+            ConductorDataStatus::MaterialStateClaims => 2,
         }]);
         hasher.update(self.source.identity.as_bytes());
         hasher.update(&LAMBDA_MIN.to_bits().to_le_bytes());

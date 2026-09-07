@@ -87,7 +87,8 @@ pub const MAX_PROPERTY_USAGE_SOURCE_HASHES: usize = 8_192;
 
 /// The query evaluator's semantic version (recorded in every receipt;
 /// bumped when selection or evaluation semantics change).
-pub const MATDB_EVALUATOR_VERSION: u32 = 1;
+/// Version 2 refuses interval support for exact-only scalar claims.
+pub const MATDB_EVALUATOR_VERSION: u32 = 2;
 
 /// A fail-closed refusal at the portable property-usage receipt boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1525,7 +1526,7 @@ impl ClaimSet {
             });
         }
         let (selected_id, claim) = selected_pairs[0];
-        let (value, decision) = evaluate(&claim.value, claim.interpolation, point)?;
+        let (value, decision) = evaluate(claim, point)?;
 
         let mut source_hashes = vec![selected_id.0];
         for observation in &claim.observations {
@@ -1740,15 +1741,22 @@ fn evaluation_decision_exact_eq(left: &EvaluationDecision, right: &EvaluationDec
 
 /// Evaluate a claim payload at a point under its interpolation policy.
 fn evaluate(
-    value: &PropertyValue,
-    policy: InterpolationPolicy,
+    claim: &PropertyClaim,
     point: &QueryPoint,
 ) -> Result<(f64, EvaluationDecision), MatDbError> {
-    match (value, policy) {
+    match (&claim.value, claim.interpolation) {
         (PropertyValue::Scalar { value, .. }, InterpolationPolicy::ConstantWithinValidity) => {
             Ok((*value, EvaluationDecision::ConstantWithinValidity))
         }
         (PropertyValue::Scalar { value, .. }, InterpolationPolicy::TabulatedOnly) => {
+            // A scalar has no stored sample coordinates beyond its validity
+            // bounds. A non-point bound cannot identify an exact sample;
+            // treating it as support would silently invent a plateau.
+            if claim.validity.bounds().values().any(|&(lo, hi)| lo != hi) {
+                return Err(MatDbError::UnsupportedEvaluation {
+                    reason: "an exact-only scalar requires point bounds on every declared axis; use ConstantWithinValidity for a plateau claim",
+                });
+            }
             Ok((*value, EvaluationDecision::ExactScalar))
         }
         (PropertyValue::Scalar { .. }, InterpolationPolicy::LinearInside) => {

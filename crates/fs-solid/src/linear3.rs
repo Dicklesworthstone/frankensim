@@ -3481,7 +3481,7 @@ mod tests {
             ),
         ] {
             let (pack, keys) =
-                portable_stress_pack(basis, [1.0, -2.0, 3.0, -0.0, 0.0, 0.0], uncertainty, block);
+                portable_stress_pack(basis, [1.0, -2.0, 3.0, 0.0, 0.0, 0.0], uncertainty, block);
             let state = resolve_joint_stress_tensor_state_point(
                 &pack,
                 &point,

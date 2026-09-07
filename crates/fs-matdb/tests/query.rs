@@ -54,6 +54,95 @@ fn room() -> QueryPoint {
 }
 
 #[test]
+fn g0_exact_only_scalar_refuses_interval_support_and_preserves_point_samples() {
+    let mut claim = density(2700.0, "synthetic exact-support fixture", stated());
+    claim.interpolation = InterpolationPolicy::TabulatedOnly;
+    for validity in [
+        ValidityDomain::unconstrained().with("T", 250.0, 400.0),
+        ValidityDomain::unconstrained()
+            .with("T", 293.15, 293.15)
+            .with("frequency", 2.0, 4.0),
+    ] {
+        claim.validity = validity;
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(claim.clone()).unwrap();
+        // Even interval endpoints have no distinguished sample coordinate.
+        for fraction in [0.0, 0.5, 1.0] {
+            let mut point = QueryPoint::new();
+            for (axis, &(lo, hi)) in claim.validity.bounds() {
+                point = point.with(axis, lo + fraction * (hi - lo)).unwrap();
+            }
+            for policy in [
+                SelectionPolicy::SingleClaimOnly,
+                SelectionPolicy::PreferObservationBacked,
+            ] {
+                assert!(matches!(
+                    claims.query("density", &point, policy),
+                    Err(MatDbError::UnsupportedEvaluation { .. })
+                ));
+            }
+            assert!(matches!(
+                claims.query_pinned("density", &point, id),
+                Err(MatDbError::UnsupportedEvaluation { .. })
+            ));
+        }
+        let mut plateau = claim.clone();
+        plateau.interpolation = InterpolationPolicy::ConstantWithinValidity;
+        let plateau_id = claims.insert_claim(plateau).unwrap();
+        let mut point = QueryPoint::new();
+        for (axis, &(lo, hi)) in claim.validity.bounds() {
+            point = point.with(axis, lo + 0.5 * (hi - lo)).unwrap();
+        }
+        let answer = claims.query_pinned("density", &point, plateau_id).unwrap();
+        assert_eq!(answer.evidence.value.value, 2700.0);
+        assert_eq!(
+            answer.receipt.decision,
+            EvaluationDecision::ConstantWithinValidity
+        );
+        claims.verify_receipt(&answer.receipt).unwrap();
+    }
+
+    // No declared coordinate dependence remains a valid scalar. Declared
+    // coordinates, however, must select the complete point tuple.
+    for validity in [
+        ValidityDomain::unconstrained(),
+        ValidityDomain::unconstrained()
+            .with("T", 293.15, 293.15)
+            .with("frequency", 2.0, 2.0),
+    ] {
+        claim.validity = validity;
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(claim.clone()).unwrap();
+        let point = room().with("frequency", 2.0).unwrap();
+        let answer = claims.query_pinned("density", &point, id).unwrap();
+        assert_eq!(answer.evidence.value.value, 2700.0);
+        assert_eq!(answer.receipt.decision, EvaluationDecision::ExactScalar);
+        claims.verify_receipt(&answer.receipt).unwrap();
+        let mut stale = answer.receipt.clone();
+        stale.evaluator_version = 1;
+        assert!(matches!(
+            claims.verify_receipt(&stale),
+            Err(MatDbError::EvaluatorVersionDrift { .. })
+        ));
+        if !claim.validity.bounds().is_empty() {
+            for outside in [
+                room().with("frequency", 3.0).unwrap(),
+                QueryPoint::new()
+                    .with("T", 300.0)
+                    .unwrap()
+                    .with("frequency", 2.0)
+                    .unwrap(),
+            ] {
+                assert!(matches!(
+                    claims.query_pinned("density", &outside, id),
+                    Err(MatDbError::NoClaimInDomain { .. })
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_typed_axis_queries_and_receipts_preserve_equal_dimension_conventions() {
     use fs_qty::{
         QuantitySpec,
@@ -802,7 +891,7 @@ fn receipt_completeness_mutation_battery() {
         set.verify_receipt(&mutations[9].1),
         Err(MatDbError::EvaluatorVersionDrift {
             receipt: 999,
-            current: 1
+            current: MATDB_EVALUATOR_VERSION,
         })
     ));
     assert!(matches!(

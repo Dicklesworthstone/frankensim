@@ -1665,6 +1665,7 @@ mod material_plate_tests {
         let p = a.realize().unwrap().pressure_pa;
         let q = b.realize().unwrap().pressure_pa;
         assert!(peak_abs(&p) > 1e-7 && peak_abs(&q) > 1e-7);
+        assert!(p.iter().chain(&q).all(|sample| sample.is_finite()));
         let difference: Vec<_> = p.iter().zip(q).map(|(x, y)| x - y).collect();
         assert!(
             peak_abs(&difference) > 1e-7,
@@ -1672,6 +1673,99 @@ mod material_plate_tests {
         );
         assert_eq!(input, original);
         assert_eq!(base.content_hash(), isotropic_card(450.0).content_hash());
+    }
+
+    #[test]
+    fn g3_card_compiler_unit_rescaling_preserves_mass_stiffness_and_pressure() {
+        let value = |literal: &str, dims: Dims| {
+            let parsed = fs_qty::parse::parse_qty(literal).unwrap();
+            assert_eq!(parsed.dims, dims);
+            parsed.value
+        };
+        let mut results = Vec::new();
+        for (rho, young, radius, thickness, length, tension) in [
+            (
+                "450kg/m3",
+                "12000000000Pa",
+                "0.0008m",
+                "0.003m",
+                "0.6m",
+                "20N",
+            ),
+            ("450000g/m3", "12GPa", "0.8mm", "3mm", "600mm", "20000mN"),
+        ] {
+            let length = value(length, fs_qty::Length::DIMS);
+            let tension = value(tension, fs_qty::Force::DIMS);
+            let card = material_card(
+                &[
+                    (
+                        "density",
+                        QuantitySpec::dimensional(Density::DIMS),
+                        value(rho, Density::DIMS),
+                    ),
+                    (
+                        "young_modulus",
+                        QuantitySpec::dimensional(Pressure::DIMS),
+                        value(young, Pressure::DIMS),
+                    ),
+                    ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+                ],
+                ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+            );
+            let point = QueryPoint::new().with("T", 293.15).unwrap();
+            let mut input = plucked(tension, 0.006, 1e-5);
+            input.duration_s = 0.02;
+            input.string.as_mut().unwrap().length_m = length;
+            input.plate = Some(ThinPlate {
+                length_m: length,
+                ..template()
+            });
+            results.push(
+                compile_material_assembly(
+                    &input,
+                    &AcousticMaterialBindings {
+                        string: Some(StringMaterialBinding {
+                            source: source(&card, &point),
+                            geometry: StringGeometryConstraint::FixedRadius(value(
+                                radius,
+                                fs_qty::Length::DIMS,
+                            )),
+                            prestress: StringPrestress::FixedTension(tension),
+                        }),
+                        plate: Some(PlateMaterialBinding::Uniform {
+                            source: source(&card, &point),
+                            model: Model::Isotropic,
+                            thickness: Thickness::FixedThickness(value(
+                                thickness,
+                                fs_qty::Length::DIMS,
+                            )),
+                        }),
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        let (a, b) = (&results[0], &results[1]);
+        let close = |x: f64, y: f64| assert!((x - y).abs() <= 1e-12 * x.abs().max(y.abs()));
+        close(a.string().unwrap().mass_kg(), b.string().unwrap().mass_kg());
+        close(
+            a.string().unwrap().string().bending_stiffness_n_m2,
+            b.string().unwrap().string().bending_stiffness_n_m2,
+        );
+        let (Some(CompiledMaterialPlate::Uniform(pa)), Some(CompiledMaterialPlate::Uniform(pb))) =
+            (a.plate(), b.plate())
+        else {
+            panic!("uniform plates");
+        };
+        close(pa.mass_kg(), pb.mass_kg());
+        close(pa.section().unwrap().d[0], pb.section().unwrap().d[0]);
+        let p = a.realize().unwrap().pressure_pa;
+        let q = b.realize().unwrap().pressure_pa;
+        assert_eq!(p.len(), q.len());
+        assert!(peak_abs(&p) > 1e-7);
+        assert!(p.iter().chain(&q).all(|sample| sample.is_finite()));
+        let difference: Vec<_> = p.iter().zip(q).map(|(x, y)| x - y).collect();
+        assert!(peak_abs(&difference) < 1e-10 * peak_abs(&p));
     }
 
     #[test]

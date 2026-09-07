@@ -3818,12 +3818,24 @@ mod material_binding_tests {
         let point = QueryPoint::new().with("T", 293.15).unwrap();
         let mut reflectances = Vec::new();
         let mut identities = Vec::new();
-        for extinction in [2.0_f64, 4.0] {
-            let card = conductor_card(extinction);
+        let base = conductor_card(2.0);
+        let authored = base
+            .with_authored_scalar_overrides(
+                &VISIBLE_COMPLEX_IOR_K_PROPERTIES
+                    .map(|name| (PropertyKey::new(name, Dims::NONE), 4.0)),
+                ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+                Provenance {
+                    source: "authored extinction sensitivity".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            )
+            .unwrap();
+        for (card, extinction) in [(&base, 2.0_f64), (&authored, 4.0)] {
             // No Poisson-ratio/yield property exists on this card.
-            let mechanical = string_material(&card, &point);
+            let mechanical = string_material(card, &point);
             let optical = resolve_visible_optical_state_point(
-                &card,
+                card,
                 &point,
                 MaterialPropertySelection::SingleClaimOnly,
             )
@@ -3838,6 +3850,12 @@ mod material_binding_tests {
             let Material::Conductor { optics, surface } = binding.material() else {
                 panic!("conductor expected")
             };
+            assert_eq!(
+                optics.source().status(),
+                fs_render::conductor::ConductorDataStatus::MaterialStateClaims,
+                "resolving authored or unmeasured claims must not label them measured"
+            );
+            assert_eq!(optics.source().identity(), optical.resolved().identity());
             for (sample, source) in optics.samples().iter().zip(match &optical {
                 VisibleOpticalStatePoint::Conductor(state) => state.samples(),
                 _ => unreachable!(),
