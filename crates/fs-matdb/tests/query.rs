@@ -891,7 +891,7 @@ fn receipt_completeness_mutation_battery() {
         set.verify_receipt(&mutations[9].1),
         Err(MatDbError::EvaluatorVersionDrift {
             receipt: 999,
-            current: 1
+            current: MATDB_EVALUATOR_VERSION,
         })
     ));
     assert!(matches!(
