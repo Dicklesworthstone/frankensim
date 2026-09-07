@@ -3789,18 +3789,28 @@ mod material_binding_tests {
         let VisibleOpticalStatePoint::Dielectric(optical) = optical else {
             unreachable!()
         };
-        let polished =
+        let smooth =
             MaterialOpticalBinding::try_dielectric(&string, &optical, None, surface_id).unwrap();
         let Material::Dielectric {
-            glass: polished_glass,
+            glass: smooth_glass,
             surface,
-        } = polished.material()
+        } = smooth.material()
         else {
             unreachable!()
         };
-        assert_eq!(polished_glass, glass);
+        assert_eq!(smooth_glass, glass);
         assert!(surface.is_delta());
-        assert_ne!(polished.identity(), string_binding.identity());
+        assert_eq!(surface.roughness_alpha(), None);
+        assert_ne!(smooth.identity(), string_binding.identity());
+        let smooth_adapter = EulerDiscMaterialStateBinding::try_dielectric_elastic(
+            &disc, &optical, None, surface_id,
+        )
+        .unwrap();
+        assert_eq!(
+            smooth_adapter.appearance(),
+            EulerMaterialStyle::from(smooth.appearance())
+        );
+        assert_ne!(smooth_adapter.identity(), adapter.identity());
     }
 
     #[test]
