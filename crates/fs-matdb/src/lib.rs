@@ -110,6 +110,11 @@ const OBSERVATION_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.observation-datas
 /// typed: refusals teach, and nothing inserts partially.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatDbError {
+    /// An authored replacement is empty, ambiguous or outside the scalar API.
+    InvalidAuthoredOverride {
+        /// Required repair before deriving a research material card.
+        reason: &'static str,
+    },
     /// Missing or malformed source tensor coordinates.
     InvalidTensorContext {
         /// Required repair at the source/caller boundary.
@@ -354,6 +359,9 @@ impl fmt::Display for MatDbError {
     #[allow(clippy::too_many_lines)] // one arm per refusal: the exhaustive catalog is the point
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MatDbError::InvalidAuthoredOverride { reason } => {
+                write!(f, "invalid authored material override: {reason}")
+            }
             MatDbError::InvalidTensorContext { reason } => {
                 write!(f, "invalid tensor context: {reason}")
             }

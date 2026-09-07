@@ -9,8 +9,9 @@ use fs_blake3::{ContentHash, hash_bytes};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
-    MATDB_SCHEMA_VERSION, MatDbError, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, UncertaintyModel,
+    MATDB_SCHEMA_VERSION, MatDbError, MaterialCard, MaterialStateId, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    UncertaintyModel,
 };
 use fs_qty::Dims;
 
@@ -354,4 +355,224 @@ fn material_card_hash_binds_claims_models_and_lineage() {
         "{{\"suite\":\"fs-matdb\",\"case\":\"material-identity\",\"verdict\":\"pass\",\
          \"detail\":\"card hash binds claims, models, and the named-state id\"}}"
     );
+}
+
+#[test]
+fn g0_authored_scalars_preserve_sources_without_inheriting_measurements() {
+    let mut claims = density_claims();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic source specimen".into(),
+            method: "synthetic density and modulus measurement".into(),
+            artifact: hash_bytes(b"synthetic observation, not experimental validation"),
+            caveats: "test fixture".into(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    let mut observed = claims.claims_for("density")[0].1.clone();
+    observed.observations = vec![observation];
+    let measured_density = claims.insert_claim(observed.clone()).unwrap();
+    observed.key = PropertyKey::new("young_modulus", STRESS_DIMS);
+    observed.value = PropertyValue::Scalar {
+        value: 70e9,
+        dims: STRESS_DIMS,
+    };
+    let retained_modulus = claims.insert_claim(observed).unwrap();
+    let base = MaterialCard::assemble(genesis_id(), claims, vec![j2_card()]).unwrap();
+    let original = base.clone();
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    assert_eq!(
+        base.claims()
+            .query("density", &point, SelectionPolicy::PreferObservationBacked)
+            .unwrap()
+            .receipt
+            .selected,
+        measured_density
+    );
+
+    let author = Provenance {
+        source: "research notebook density sensitivity".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(hash_bytes(b"authored input, not acquired measurement")),
+    };
+    let replacement = [(PropertyKey::new("density", DENSITY_DIMS), 5400.0)];
+    let domain = ValidityDomain::unconstrained().with("T", 300.0, 300.0);
+    let derived = base
+        .with_authored_scalar_overrides(&replacement, domain.clone(), author.clone())
+        .unwrap();
+    assert_eq!(base, original);
+    assert_eq!(derived.supersedes(), Some(base.content_hash()));
+    assert_eq!(derived.id().revision, base.id().revision + 1);
+    assert_ne!(derived.content_hash(), base.content_hash());
+    assert!(
+        derived.models().is_empty(),
+        "calibration is not inherited by a modified material"
+    );
+    assert_eq!(derived.claims_for("density").len(), 1);
+    assert_eq!(
+        derived.claims().claim(retained_modulus),
+        base.claims().claim(retained_modulus)
+    );
+    assert_eq!(
+        derived.claims().observation(observation),
+        base.claims().observation(observation)
+    );
+    let answer = derived
+        .claims()
+        .query("density", &point, SelectionPolicy::PreferObservationBacked)
+        .unwrap();
+    assert_eq!(answer.evidence.value.value, 5400.0);
+    assert!(!answer.receipt.observation_backed);
+    let authored = derived.claims().claim(answer.receipt.selected).unwrap();
+    assert!(authored.observations.is_empty());
+    assert_eq!(authored.uncertainty, UncertaintyModel::Unstated);
+    assert_eq!(authored.validity, domain);
+    assert_eq!(
+        authored.provenance.source,
+        "authored scalar override: research notebook density sensitivity"
+    );
+    assert_eq!(authored.provenance.artifact, author.artifact);
+    assert_eq!(
+        answer.receipt.source_hashes,
+        vec![answer.receipt.selected.0]
+    );
+    derived.claims().verify_receipt(&answer.receipt).unwrap();
+    assert!(matches!(
+        derived.claims().query(
+            "density",
+            &QueryPoint::new().with("T", 301.0).unwrap(),
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(MatDbError::NoClaimInDomain { .. })
+    ));
+    assert!(
+        derived
+            .claims()
+            .query("young_modulus", &point, SelectionPolicy::SingleClaimOnly)
+            .unwrap()
+            .receipt
+            .observation_backed
+    );
+
+    let both = [
+        replacement[0].clone(),
+        (PropertyKey::new("young_modulus", STRESS_DIMS), 35e9),
+    ];
+    let a = base
+        .with_authored_scalar_overrides(&both, domain.clone(), author.clone())
+        .unwrap();
+    let mut reversed = both.clone();
+    reversed.reverse();
+    let b = base
+        .with_authored_scalar_overrides(&reversed, domain, author)
+        .unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.content_hash(), b.content_hash());
+    assert_eq!(
+        a.claims().observation_ids().count(),
+        0,
+        "unreferenced source observations stay only on the predecessor"
+    );
+}
+
+#[test]
+fn g0_authored_scalar_refusals_preserve_the_predecessor() {
+    let base = MaterialCard::assemble(genesis_id(), density_claims(), vec![j2_card()]).unwrap();
+    let original = base.clone();
+    let density = PropertyKey::new("density", DENSITY_DIMS);
+    let domain = ValidityDomain::unconstrained().with("T", 300.0, 300.0);
+    let derive = |values: &[(PropertyKey, f64)]| {
+        base.with_authored_scalar_overrides(values, domain.clone(), provenance())
+    };
+    assert!(derive(&[(density.clone(), 1000.0)]).is_ok());
+    for invalid in [
+        vec![],
+        vec![(density.clone(), 1000.0); 257],
+        vec![(density.clone(), 1000.0), (density.clone(), 2000.0)],
+        vec![(PropertyKey::new("densitty", DENSITY_DIMS), 1000.0)],
+        vec![(PropertyKey::new("density", STRESS_DIMS), 1000.0)],
+    ] {
+        assert!(matches!(
+            derive(&invalid),
+            Err(MatDbError::InvalidAuthoredOverride { .. })
+        ));
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            derive(&[(density.clone(), value)]),
+            Err(MatDbError::NonFinite { .. })
+        ));
+    }
+    let empty_domain = domain.intersect(&ValidityDomain::unconstrained().with("T", 301.0, 301.0));
+    assert!(matches!(
+        base.with_authored_scalar_overrides(
+            &[(density.clone(), 1000.0)],
+            empty_domain,
+            provenance()
+        ),
+        Err(MatDbError::InvalidAuthoredOverride { .. })
+    ));
+    let mut missing_source = provenance();
+    missing_source.source.clear();
+    assert!(matches!(
+        base.with_authored_scalar_overrides(
+            &[(density.clone(), 1000.0)],
+            domain.clone(),
+            missing_source
+        ),
+        Err(MatDbError::MissingSource)
+    ));
+    let mut missing_license = provenance();
+    missing_license.license.clear();
+    assert!(matches!(
+        base.with_authored_scalar_overrides(&[(density, 1000.0)], domain, missing_license),
+        Err(MatDbError::MissingLicense { .. })
+    ));
+    assert_eq!(base, original);
+}
+
+#[test]
+fn g0_authored_scalar_does_not_inherit_tensor_coordinates() {
+    use fs_matdb::{
+        ElasticTensorOrder, StressTensorBasis, StressTensorComponent, StressTensorNotation,
+    };
+    let component = StressTensorComponent::new(
+        StressTensorBasis {
+            notation: StressTensorNotation::Tensor,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: hash_bytes(b"source frame"),
+        },
+        hash_bytes(b"source stress tensor"),
+        0,
+    )
+    .unwrap();
+    let key = PropertyKey::new("initial_stress", STRESS_DIMS)
+        .with_stress_component(component)
+        .unwrap();
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value: 1e6,
+                dims: STRESS_DIMS,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let base = MaterialCard::assemble(genesis_id(), claims, vec![]).unwrap();
+    assert!(matches!(
+        base.with_authored_scalar_overrides(
+            &[(key, 2e6)],
+            ValidityDomain::unconstrained(),
+            provenance()
+        ),
+        Err(MatDbError::InvalidAuthoredOverride {
+            reason: "hardness and tensor contexts cannot inherit authored scalar values",
+        })
+    ));
 }
