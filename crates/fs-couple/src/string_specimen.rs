@@ -11,7 +11,6 @@
 //! These are independent specimen comparisons, not thermal evolution.
 
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::EvaluationDecision;
 use fs_material::state_point::{
     DENSITY_PROPERTY, IntegratedIsotropicThermalExpansion, ResolvedMaterialStatePoint,
     YOUNG_MODULUS_PROPERTY,
@@ -156,12 +155,14 @@ impl ResolvedStringSpecimen {
     /// Activate material-resolved Kelvin–Voigt bending loss on this specimen.
     ///
     /// Requires a nonnegative dimension-only `kelvin_voigt_bending_viscosity`
-    /// [Pa s] and an explicit `omega` validity interval [rad/s] in its retained
+    /// [Pa s] and an explicit frequency validity interval in its retained
     /// material claim. Density, E and viscosity must all be validity-wide scalar
-    /// constants; a sampled curve cannot silently become a broadband law.
+    /// constants or temperature-only curves evaluated at fixed positive absolute T.
+    /// A frequency-sampled curve cannot silently become a broadband law.
     /// Their frequency domains intersect. Other coordinates (T, moisture, etc.)
     /// stay at the already admitted state point; no thermal evolution is implied.
     /// The source uncertainty/observation status is retained without promotion.
+    /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
     ///
     /// This law replaces authored internal and heuristic bending loss, so the
     /// template must have no Rayleigh override and zero `damping_ratio`. Air
@@ -169,7 +170,7 @@ impl ResolvedStringSpecimen {
     /// nonlinear axial viscosity and amplitude-dependent loss are not supplied.
     ///
     /// # Errors
-    /// Missing/mismatched data, nonconstant claims, missing/empty frequency
+    /// Missing/mismatched data, unsupported source curves, missing/empty frequency
     /// applicability, duplicate loss prescriptions, and overflow refuse. The
     /// realizer also checks every actual retained reference-mode frequency.
     pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
@@ -196,32 +197,29 @@ impl ResolvedStringSpecimen {
             ));
         }
         let mut band = property
-            .answer()
-            .evidence
-            .model
-            .validity
-            .bound("omega")
+            .angular_frequency_band_rad_s()
+            .map_err(|_| refuse("material bending viscosity has invalid frequency-axis semantics or bounds"))?
             .ok_or_else(|| {
-                refuse("material bending viscosity needs an explicit omega validity band in rad/s")
+                refuse("material bending viscosity needs an explicit frequency validity band (typed Hz/rad/s or legacy omega)")
             })?;
         for key in [
             DENSITY_PROPERTY,
             YOUNG_MODULUS_PROPERTY,
             KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
         ] {
-            let answer = self
-                .material
-                .property(key)
-                .ok_or_else(|| {
-                    refuse("material bending loss needs density, modulus and viscosity")
-                })?
-                .answer();
-            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+            let coefficient = self.material.property(key).ok_or_else(|| {
+                refuse("material bending loss needs density, modulus and viscosity")
+            })?;
+            if !coefficient.is_constant_at_fixed_temperature() {
                 return Err(refuse(
-                    "Kelvin-Voigt string coefficients must be validity-wide scalar constants",
+                    "Kelvin-Voigt string coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
                 ));
             }
-            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
+                refuse(
+                    "material bending coefficient has invalid frequency-axis semantics or bounds",
+                )
+            })? {
                 band = (band.0.max(lo), band.1.min(hi));
             }
         }
@@ -247,8 +245,9 @@ impl ResolvedStringSpecimen {
     /// `relaxing_bending_modulus` [Pa] and `bending_relaxation_time` [s].
     /// Equilibrium E must equal the original `young_modulus` claim: a measured
     /// storage modulus at an arbitrary frequency cannot silently become E_inf.
-    /// All coefficients and density must be validity-wide constants. The
-    /// relaxation-time claim supplies an explicit omega band, intersected with
+    /// All coefficients and density must be validity-wide constants or
+    /// temperature-only curves evaluated at fixed positive absolute T. The
+    /// relaxation-time claim supplies an explicit frequency band, intersected with
     /// every coefficient's band. Source receipts and uncertainty are retained.
     ///
     /// The same equilibrium EA/EI and prestress remain; only bending has memory.
@@ -256,7 +255,7 @@ impl ResolvedStringSpecimen {
     /// axial creep, thermal evolution, or amplitude-dependent law is supplied.
     ///
     /// # Errors
-    /// Refuses missing/ambiguous coefficients, sampled curves, incompatible
+    /// Refuses missing/ambiguous coefficients, frequency/other-axis curves, incompatible
     /// quantities, duplicate loss laws and unrepresentable geometry products.
     pub fn with_standard_linear_solid_bending_loss(self) -> Result<Self, AcousticRealizeError> {
         self.with_prony_bending_loss(&[BendingRelaxationProperties {
@@ -266,14 +265,16 @@ impl ResolvedStringSpecimen {
     }
 
     /// Bind a generalized Maxwell bending spectrum from explicitly selected
-    /// scalar modulus/time properties. Each time constant declares an omega
-    /// band; every participating coefficient must be constant over its domain.
+    /// scalar modulus/time properties. Each time constant declares a frequency
+    /// band; every participating coefficient must be constant at the fixed
+    /// temperature, using scalars or temperature-only curves.
     /// An empty spectrum requires the equilibrium modulus to declare the band.
     /// Source pairs stay attached for later geometry/material rebinding.
+    /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
     ///
     /// # Errors
     /// Missing/invalid coefficients, repeated source pairs, conflicting loss
-    /// laws, sampled curves, incompatible bands or unrepresentable stiffness.
+    /// laws, frequency/other-axis curves, incompatible bands or unrepresentable stiffness.
     pub fn with_prony_bending_loss(
         mut self,
         properties: &[BendingRelaxationProperties],
@@ -336,19 +337,17 @@ impl ResolvedStringSpecimen {
             keys.extend([pair.modulus.as_str(), pair.relaxation_time.as_str()]);
         }
         for key in keys {
-            let answer = self
-                .material
-                .property(key)
-                .ok_or_else(|| {
-                    refuse("relaxation bending needs every selected material coefficient")
-                })?
-                .answer();
-            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+            let coefficient = self.material.property(key).ok_or_else(|| {
+                refuse("relaxation bending needs every selected material coefficient")
+            })?;
+            if !coefficient.is_constant_at_fixed_temperature() {
                 return Err(refuse(
-                    "relaxation bending coefficients must be validity-wide scalar constants",
+                    "relaxation bending coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
                 ));
             }
-            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
+                refuse("relaxation coefficient has invalid frequency-axis semantics or bounds")
+            })? {
                 band = Some(intersect_band(band, (lo, hi)));
             }
         }
@@ -700,9 +699,14 @@ fn required_omega_band(
 ) -> Result<(f64, f64), AcousticRealizeError> {
     state
         .property(key)
-        .and_then(|property| property.answer().evidence.model.validity.bound("omega"))
+        .map(|property| property.angular_frequency_band_rad_s())
+        .transpose()
+        .map_err(|_| AcousticRealizeError::InvalidDescription {
+            what: "selected relaxation coefficient has invalid frequency-axis semantics or bounds",
+        })?
+        .flatten()
         .ok_or(AcousticRealizeError::InvalidDescription {
-            what: "selected relaxation coefficient needs an explicit omega applicability band",
+            what: "selected relaxation coefficient needs an explicit frequency applicability band (typed Hz/rad/s or legacy omega)",
         })
 }
 

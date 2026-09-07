@@ -428,12 +428,23 @@ Synthetic data check numerical behavior, not physical validation of a measured m
 `ResolvedStringSpecimen::with_kelvin_voigt_bending_loss` selects a constant
 Kelvin–Voigt bending law using the retained `kelvin_voigt_bending_viscosity`
 property [Pa s]. Density, Young's modulus and viscosity must be dimension-only
-validity-wide scalar constants; sampled curves are not promoted to a broadband
-law. The viscosity must declare an `omega` domain [rad/s], intersected with any
+validity-wide scalar constants or temperature-only curves at fixed positive
+absolute T. Frequency samples are not promoted to a broadband law. The
+viscosity must declare a frequency domain, intersected with any
 frequency restrictions on density and modulus. Other state coordinates stay at
 their admitted query point. The descriptor carries `eta I`, the intersected band,
 and the material bundle identity. Rebinding an already viscous specimen recomputes
 all three from the new geometry and material. No source uncertainty is improved.
+
+All three material loss binders (Kelvin–Voigt string/plate and Prony string)
+use `ResolvedScalarProperty::angular_frequency_band_rad_s`. One static typed
+frequency coordinate can have any name and be expressed in Hz or rad/s;
+legacy untyped `omega` remains rad/s. The normalized band intersects every
+participating coefficient's applicability before the existing modal checks.
+Multiple frequency coordinates refuse because they may be independent physical
+variables. No source receipts or interpolation decisions are rewritten. G3
+tests compare actual pressure bit-for-bit across the two unit conventions and
+legacy inputs; narrowing only density support rejects an out-of-band string.
 
 The shared linear/Kirchhoff–Carrier/moving-end modal path projects
 `mu y_tt - T y_xx + EI y_xxxx + eta I y_xxxxt = 0`, giving
@@ -463,8 +474,9 @@ selects the single `relaxing_bending_modulus` / `bending_relaxation_time` pair
 through that same binding. The explicit equilibrium modulus must equal the
 Young's modulus used to derive EA/EI; a sampled dynamic modulus cannot silently
 be treated as an equilibrium value. All selected coefficients, including density,
-must be dimension-only validity-wide constants. Every relaxation-time claim must
-declare an `omega` band, intersected with all other coefficient bands. An empty
+must be dimension-only validity-wide constants or temperature-only curves at
+fixed positive absolute T. Every relaxation-time claim must
+declare a frequency band, intersected with all other coefficient bands. An empty
 spectrum is explicitly elastic and requires an equilibrium-modulus band. Geometry
 or material rebinding resolves every retained source pair again, recomputing
 each delta EI and replacing the source identity and time constants. Missing or
@@ -623,6 +635,21 @@ clarinet is one filling of those objects.
   string/plate bending loss and explicitly selected isotropic plate thermal loss.
   Inactive property families are not queried. Loss selectors
   are retained; old numerical loss coefficients and citations are rebuilt.
+  `StringPrestressBinding::ThermalExtension` selects the existing alpha(T)
+  integrator and sourced thermal string binder. Its reference point and alpha
+  claim selection are explicit; the immutable card and current point come from
+  the same string source as density, elasticity and selected loss properties.
+  Mechanical/loss pins and expansion pins cover their separate requirements.
+  Piecewise-linear expansion curves are integrated across all crossed knots;
+  current alpha times temperature change is not substituted for that integral.
+  Fixed supports use the reference stress-free length to derive elastic strain
+  and tension. Fixed mass or current radius remains an independent constraint.
+  The specimen retains both mechanical and integrated-expansion receipts, and
+  the ordinary acoustic realizer uses the resulting tension and rebuilt loss.
+  `Prescribed` keeps explicit force/extension/tuning constraints and raw authored
+  eigenstrain; it does not query or claim sourced expansion. Invalid paths,
+  missing/ambiguous data and slack/compressive states refuse through the existing
+  owners. No thermal transport, finite deformation or melting is added.
   `CompiledMaterialAssembly` keeps the numeric assembly and source-bound specimens
   immutable, and its `realize` method calls the existing ordinary/chart dispatcher.
   Unbound components remain authored. Material conditions remain separate from
@@ -652,6 +679,14 @@ clarinet is one filling of those objects.
   Kelvin–Voigt arithmetic; conflicting heat-capacity claims require the selected
   pin to survive compilation. These fixtures validate implementation, not an
   experiment or a transient heating simulation.
+  String thermal compiler tests independently calculate integrated strain,
+  fixed-mass area/inertia, tension and stiff-string frequency, then measure
+  emitted-pressure pitch at two temperatures with and without sourced viscosity.
+  The viscosity fixtures supply scalar coefficients at explicitly supported
+  temperature states, preserving the existing frequency-wide constant-law
+  requirement; sampled coefficients are not promoted to broadband loss laws.
+  They also check exact alpha selection independent of mechanical pins, force
+  control without alpha resolution, and unchanged inputs after path/slack refusals.
 - Uniform plate material binding: `with_uniform_plate_material_state` consumes
   the same `ResolvedMaterialStatePoint` carrier as the circular-string and
   disc adapters. Isotropic elasticity requires rho/E/nu; principal-axis
@@ -686,8 +721,9 @@ clarinet is one filling of those objects.
 - Uniform material-bound plate viscosity: `ResolvedPlateSpecimen::with_kelvin_voigt_bending_loss`
   selects proportional isotropic Kelvin–Voigt bending. The dimension-only
   `kelvin_voigt_bending_viscosity` [Pa s] claim must be nonnegative and carry an
-  explicit omega band [rad/s]. Rho, E, nu and eta must be validity-wide scalar
-  constants; their frequency bands intersect. Temperature, moisture and other
+  explicit frequency band. Rho, E, nu and eta must be validity-wide scalar
+  constants or temperature-only curves at fixed positive absolute T; their
+  frequency bands intersect. Temperature, moisture and other
   coordinates remain at the admitted state point, with original uncertainty
   and observation status retained. The assumed viscous plane-stress tensor has
   the same Poisson ratio as the elastic tensor: the moment law is
@@ -716,7 +752,13 @@ clarinet is one filling of those objects.
   geometric-energy integration checks prestressed DKT and sampled-FE damping,
   including additive thermal loss. G3 changes only viscosity through the card
   compiler, retaining elastic eigenfrequencies while changing actual assembly
-  pressure in all three plate paths. These synthetic implementation fixtures
+  pressure in all three plate paths. Fixed-temperature curve tests retain the
+  source interpolation receipts and compare plate frequencies/damping, every
+  Prony string branch and actual pressure against independently evaluated
+  coefficients. The thermal string compiler also exercises interior T values
+  with simultaneous integrated expansion and bending viscosity. These are
+  frozen-state calculations, not constitutive evolution during heating.
+  These synthetic implementation fixtures
   are not experimental material/ringdown validation.
 - Regional linear plates: `ResolvedPlateSpecimen::section` exposes the rotated
   numerical section for assignment to `PlateChart` elements. The caller retains

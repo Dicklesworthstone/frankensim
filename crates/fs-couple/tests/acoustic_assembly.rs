@@ -1493,8 +1493,8 @@ mod material_plate_tests {
     use fs_couple::acoustic_realize::realize_assembly_with_plate_chart;
     use fs_couple::material_assembly::{
         AcousticMaterialBindings, CompiledMaterialPlate, MaterialAssemblyError, MaterialSource,
-        PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, compile_material_assembly,
-        StringPrestressBinding,
+        PlateMaterialBinding, PlateRegionSource, StringMaterialBinding, StringPrestressBinding,
+        compile_material_assembly,
     };
     use fs_couple::string_specimen::{
         StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
@@ -1745,6 +1745,258 @@ mod material_plate_tests {
         assert_eq!(input, original, "compilation must not mutate its template");
     }
 
+    #[test]
+    fn g3_frequency_units_preserve_material_plate_loss_and_pressure() {
+        use fs_qty::semantic::FrequencyConvention::{Angular, Cyclic};
+        let frequency = |kind| {
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Frequency(kind),
+                ValueForm::Static,
+            ))
+        };
+        let properties = [
+            ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+            (
+                "kelvin_voigt_bending_viscosity",
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                3e6,
+            ),
+        ];
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.06;
+        input.plate = Some(ThinPlate {
+            damping_ratio: 0.0,
+            kelvin_voigt_bending: Some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 9e9,
+                omega_band_rad_s: (1.0, 10_000.0),
+                material_state_identity: None,
+            }),
+            ..template()
+        });
+        let mut reference = None;
+        for (axis, quantity, scale) in [
+            ("omega", None, core::f64::consts::TAU),
+            ("response", Some(frequency(Angular)), core::f64::consts::TAU),
+            ("frequency", Some(frequency(Cyclic)), 1.0),
+            ("omega", Some(frequency(Cyclic)), 1.0),
+        ] {
+            let (domain, point) = match quantity {
+                Some(q) => (
+                    ValidityDomain::unconstrained().with_quantity(
+                        axis,
+                        q,
+                        20.0 * scale,
+                        100.0 * scale,
+                    ),
+                    QueryPoint::new()
+                        .with_quantity(axis, q, 50.0 * scale)
+                        .unwrap(),
+                ),
+                None => (
+                    ValidityDomain::unconstrained().with(axis, 20.0 * scale, 100.0 * scale),
+                    QueryPoint::new().with(axis, 50.0 * scale).unwrap(),
+                ),
+            };
+            let card = material_card(&properties, domain);
+            let compiled = compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: None,
+                    plate: Some(PlateMaterialBinding::Uniform {
+                        source: source(&card, &point),
+                        model: Model::Isotropic,
+                        thickness: Thickness::FixedThickness(0.002),
+                    }),
+                },
+            )
+            .unwrap();
+            let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                panic!("uniform specimen");
+            };
+            assert_eq!(
+                specimen
+                    .plate()
+                    .kelvin_voigt_bending
+                    .unwrap()
+                    .omega_band_rad_s,
+                (
+                    20.0 * core::f64::consts::TAU,
+                    100.0 * core::f64::consts::TAU
+                )
+            );
+            let actual = compiled.realize().unwrap().pressure_pa;
+            assert!(peak_abs(&actual) > 0.0);
+            match &reference {
+                Some(expected) => assert_eq!(&actual, expected, "{axis}/{quantity:?}"),
+                None => reference = Some(actual),
+            }
+        }
+    }
+
+    #[test]
+    fn g1_temperature_curves_drive_plate_viscosity_modes_and_pressure() {
+        let quantity = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let domain = ValidityDomain::unconstrained()
+            .with_quantity("T", quantity, 300.0, 450.0)
+            .with("omega", 1.0, 10_000.0);
+        let properties = [
+            (
+                "density",
+                QuantitySpec::dimensional(Density::DIMS),
+                450.0,
+                600.0,
+            ),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+                6e9,
+            ),
+            (
+                "poisson_ratio",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.3,
+                0.25,
+            ),
+            (
+                "kelvin_voigt_bending_viscosity",
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                1e6,
+                3e6,
+            ),
+        ];
+        let base = material_card(&[], domain.clone());
+        let mut claims = ClaimSet::new();
+        for &(key, quantity, cold, hot) in &properties {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(key, quantity),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(300.0, cold), (450.0, hot)],
+                        dims: quantity.dims(),
+                    },
+                    validity: domain.clone(),
+                    interpolation: InterpolationPolicy::LinearInside,
+                    uncertainty: UncertaintyModel::Unstated,
+                    observations: vec![],
+                    provenance: Provenance {
+                        source: "synthetic thermal plate coefficients".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+        let card = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.06;
+        input.plate = Some(ThinPlate {
+            thermoelastic: None,
+            ..thermal_template(true)
+        });
+        let mut responses = Vec::new();
+        for temperature in [300.0, 375.0, 450.0] {
+            let point = thermal_point(temperature);
+            let fraction = (temperature - 300.0) / 150.0;
+            let expected: Vec<_> = properties
+                .iter()
+                .map(|&(key, quantity, cold, hot)| (key, quantity, cold + fraction * (hot - cold)))
+                .collect();
+            let compile = |card: &MaterialCard| {
+                compile_material_assembly(
+                    &input,
+                    &AcousticMaterialBindings {
+                        string: None,
+                        plate: Some(PlateMaterialBinding::Uniform {
+                            source: source(card, &point),
+                            model: Model::Isotropic,
+                            thickness: Thickness::FixedThickness(0.002),
+                        }),
+                    },
+                )
+                .unwrap()
+            };
+            let actual = compile(&card);
+            let Some(CompiledMaterialPlate::Uniform(specimen)) = actual.plate() else {
+                panic!("uniform specimen");
+            };
+            let plate = specimen.plate();
+            let law = plate.kelvin_voigt_bending.unwrap();
+            assert_eq!(law.viscosity_pa_s, expected[3].2);
+            assert_eq!(
+                law.material_state_identity,
+                Some(specimen.material().identity())
+            );
+            let mode = &certified_radiators(plate).unwrap()[0];
+            // Bypass material binding for the reference: all SI coefficients
+            // come from the independently interpolated source values. The DKT
+            // modes include discretization and rotary inertia, so a continuum
+            // Navier frequency would not be a roundoff-accurate oracle here.
+            let reference_plate = ThinPlate {
+                thickness_m: 0.002,
+                density_kg_m3: expected[0].2,
+                e1_pa: expected[1].2,
+                e2_pa: expected[1].2,
+                nu12: expected[2].2,
+                g12_pa: expected[1].2 / (2.0 * (1.0 + expected[2].2)),
+                kelvin_voigt_bending: Some(IsotropicPlateBendingViscosity {
+                    viscosity_pa_s: expected[3].2,
+                    omega_band_rad_s: (1.0, 10_000.0),
+                    material_state_identity: None,
+                }),
+                ..input.plate.unwrap()
+            };
+            let reference_mode = &certified_radiators(reference_plate).unwrap()[0];
+            assert!((mode.omega / reference_mode.omega - 1.0).abs() < 1e-12);
+            // Zero prestress: C_b = (eta/E) K and zeta = eta*omega/(2E).
+            assert!(
+                (mode.zeta / (0.5 * expected[3].2 / expected[1].2 * mode.omega) - 1.0).abs()
+                    < 1e-12
+            );
+            if temperature == 375.0 {
+                for &(key, _, _, _) in &properties {
+                    assert!(matches!(
+                        specimen
+                            .material()
+                            .property(key)
+                            .unwrap()
+                            .answer()
+                            .receipt
+                            .decision,
+                        fs_matdb::EvaluationDecision::LinearInside { .. }
+                    ));
+                }
+            }
+            let actual = actual.realize().unwrap().pressure_pa;
+            let mut reference = input.clone();
+            reference.plate = Some(reference_plate);
+            let expected = realize_assembly(&reference).unwrap().pressure_pa;
+            let peak = peak_abs(&expected);
+            assert!(peak > 0.0, "the pressure path must be live");
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, e)| (a - e).abs() < 1e-10 * peak)
+            );
+            responses.push(actual);
+        }
+        assert_ne!(responses[0], responses[1]);
+        assert_ne!(responses[1], responses[2]);
+    }
+
     fn thermal_card(rho: f64, viscosity: Option<f64>) -> MaterialCard {
         let domain = ValidityDomain::unconstrained()
             .with_quantity(
@@ -1854,6 +2106,332 @@ mod material_plate_tests {
             }),
             ..template()
         }
+    }
+
+    fn thermal_string_card() -> MaterialCard {
+        let domain = ValidityDomain::unconstrained()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+                500.0,
+            )
+            .with("omega", 1.0, 10_000.0);
+        let mut claims = ClaimSet::new();
+        for (name, dims, knots) in [
+            (
+                "density",
+                Density::DIMS,
+                vec![(300.0, 7800.0), (400.0, 7600.0), (500.0, 7400.0)],
+            ),
+            (
+                "young_modulus",
+                Pressure::DIMS,
+                vec![(300.0, 200e9), (400.0, 160e9), (500.0, 120e9)],
+            ),
+            (
+                "kelvin_voigt_bending_viscosity",
+                DynViscosity::DIMS,
+                vec![(300.0, 1e6), (400.0, 2e6), (500.0, 3e6)],
+            ),
+            (
+                LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                INVERSE_TEMPERATURE_DIMS,
+                // Crossing the middle knot distinguishes integration from either
+                // endpoint-alpha * delta-T or a single endpoint trapezoid.
+                vec![
+                    (300.0, 10e-6),
+                    (350.0, 30e-6),
+                    (400.0, 10e-6),
+                    (500.0, 50e-6),
+                ],
+            ),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::new(name, dims),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots,
+                        dims,
+                    },
+                    validity: domain.clone(),
+                    interpolation: InterpolationPolicy::LinearInside,
+                    uncertainty: UncertaintyModel::Unstated,
+                    provenance: Provenance {
+                        source: "synthetic thermal string compiler fixture".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                    observations: vec![],
+                })
+                .unwrap();
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic wire".into(),
+                phase: "solid".into(),
+                process: "synthetic".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap()
+    }
+
+    fn thermal_string_binding<'a>(
+        card: &'a MaterialCard,
+        point: &'a QueryPoint,
+        reference: &'a QueryPoint,
+    ) -> StringMaterialBinding<'a> {
+        StringMaterialBinding {
+            source: source(card, point),
+            geometry: StringGeometryConstraint::FixedMass(0.001),
+            prestress: StringPrestressBinding::ThermalExtension {
+                reference_point: reference,
+                expansion_selection: MaterialPropertySelection::SingleClaimOnly,
+                reference_stress_free_length_m: 0.5,
+                linear_strain_limit: 0.01,
+            },
+        }
+    }
+
+    #[test]
+    fn g1_thermal_string_compiler_integrates_source_strain_and_changes_pressure_pitch() {
+        use fs_scenario::acoustic::KelvinVoigtBending;
+        let card = thermal_string_card();
+        let reference = thermal_point(300.0);
+        let mut input = plucked(20.0, 0.006, 1e-6);
+        input.duration_s = 0.06;
+        input.sample_rate_hz = 48_000;
+        input.string.as_mut().unwrap().length_m = 0.502;
+        input.string.as_mut().unwrap().n_modes = 1;
+        input.string.as_mut().unwrap().damping_ratio = 0.0;
+        for viscous in [false, true] {
+            input.string.as_mut().unwrap().kelvin_voigt_bending =
+                viscous.then_some(KelvinVoigtBending {
+                    viscous_stiffness_n_m2_s: 999.0,
+                    omega_band_rad_s: (1.0, 2.0),
+                    material_state_identity: None,
+                });
+            let original = input.clone();
+            let mut pitches = Vec::new();
+            for (temperature, rho, young, strain, eta) in [
+                (300.0, 7800.0, 200e9, 0.0, 1e6),
+                (350.0, 7700.0, 180e9, 0.001, 1.5e6),
+                (400.0, 7600.0, 160e9, 0.002, 2e6),
+            ] {
+                let point = thermal_point(temperature);
+                let compiled = compile_material_assembly(
+                    &input,
+                    &AcousticMaterialBindings {
+                        string: Some(thermal_string_binding(&card, &point, &reference)),
+                        plate: None,
+                    },
+                )
+                .unwrap();
+                let specimen = compiled.string().unwrap();
+                let string = specimen.string();
+                for key in ["density", "young_modulus", "kelvin_voigt_bending_viscosity"] {
+                    if let Some(property) = specimen.material().property(key) {
+                        if temperature == 350.0 {
+                            assert!(matches!(
+                                property.answer().receipt.decision,
+                                fs_matdb::EvaluationDecision::LinearInside { .. }
+                            ));
+                        }
+                    }
+                }
+                let expansion = specimen.thermal_expansion().unwrap();
+                assert!((expansion.free_linear_strain() - strain).abs() < 1e-16);
+                assert_eq!(
+                    expansion.current().resolved().card_identity(),
+                    specimen.material().card_identity()
+                );
+                assert_eq!(
+                    expansion.current().resolved().query_point(),
+                    specimen.material().query_point()
+                );
+                assert_eq!(
+                    expansion.current().resolved().axis_quantities(),
+                    specimen.material().axis_quantities()
+                );
+                assert_eq!(
+                    specimen.material().properties().len(),
+                    if viscous { 3 } else { 2 }
+                );
+                assert_eq!(expansion.current().resolved().properties().len(), 1);
+                assert!((specimen.mass_kg() / 0.001 - 1.0).abs() < 1e-13);
+                let area = 0.001 / (rho * 0.502);
+                let inertia = area * area / (4.0 * core::f64::consts::PI);
+                let tension = young * area * ((0.502 - 0.5) / 0.5 - strain);
+                assert!((string.tension_n / tension - 1.0).abs() < 1e-13);
+                assert!((string.bending_stiffness_n_m2 / (young * inertia) - 1.0).abs() < 1e-13);
+                if viscous {
+                    let loss = string.kelvin_voigt_bending.unwrap();
+                    assert!((loss.viscous_stiffness_n_m2_s / (eta * inertia) - 1.0).abs() < 1e-13);
+                    assert_eq!(
+                        loss.material_state_identity,
+                        Some(specimen.material().identity())
+                    );
+                    assert_eq!(loss.omega_band_rad_s, (1.0, 10_000.0));
+                }
+                // Independent stiff-string dispersion using the prescribed
+                // mass/supports and the analytically integrated thermal strain.
+                let k = core::f64::consts::PI / 0.502;
+                let expected_hz =
+                    ((tension * k * k + young * inertia * k.powi(4)) / (0.001 / 0.502)).sqrt()
+                        / core::f64::consts::TAU;
+                let pressure = compiled.realize().unwrap().pressure_pa;
+                let measured_hz = 48_000.0 / zero_cross_period(&pressure[480..2400]);
+                assert!(
+                    (measured_hz / expected_hz - 1.0).abs() < 0.01,
+                    "T={temperature}: {measured_hz} vs {expected_hz}"
+                );
+                assert_eq!(compiled.assembly().ambient, input.ambient);
+                pitches.push(measured_hz);
+            }
+            assert!(
+                pitches[2] < 0.7 * pitches[0],
+                "thermal tension changes emitted pitch: {pitches:?}"
+            );
+            assert_eq!(input, original);
+        }
+    }
+
+    #[test]
+    fn g0_thermal_string_compiler_keeps_alpha_selection_explicit_and_consumer_local() {
+        let base = thermal_string_card();
+        let alpha_name = LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY;
+        let (alpha_id, alpha) = base.claims_for(alpha_name)[0];
+        let mut claims = base.claims().clone();
+        let mut conflict = alpha.clone();
+        conflict.value = PropertyValue::Scalar {
+            value: 1e-6,
+            dims: INVERSE_TEMPERATURE_DIMS,
+        };
+        conflict.interpolation = InterpolationPolicy::ConstantWithinValidity;
+        claims.insert_claim(conflict).unwrap();
+        let card = MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap();
+        let reference = thermal_point(300.0);
+        let point = thermal_point(400.0);
+        let mut input = plucked(20.0, 0.006, 1e-6);
+        input.string.as_mut().unwrap().length_m = 0.502;
+        let mut bindings = AcousticMaterialBindings {
+            string: Some(thermal_string_binding(&card, &point, &reference)),
+            plate: None,
+        };
+        let error = compile_material_assembly(&input, &bindings).unwrap_err();
+        assert!(
+            matches!(error, MaterialAssemblyError::Resolution { component, source: fs_material::state_point::MaterialStatePointError::Query { property, .. } } if component == "string" && property == alpha_name)
+        );
+        let binding = bindings.string.as_mut().unwrap();
+        binding.source.selection = MaterialPropertySelection::PinnedByProperty(
+            ["density", "young_modulus"]
+                .into_iter()
+                .map(|name| (name.into(), base.claims_for(name)[0].0))
+                .collect(),
+        );
+        let StringPrestressBinding::ThermalExtension {
+            expansion_selection,
+            ..
+        } = &mut binding.prestress
+        else {
+            panic!("thermal binding");
+        };
+        *expansion_selection =
+            MaterialPropertySelection::PinnedByProperty(vec![(alpha_name.into(), alpha_id)]);
+        let compiled = compile_material_assembly(&input, &bindings).unwrap();
+        let expansion = compiled.string().unwrap().thermal_expansion().unwrap();
+        assert_eq!(expansion.selected_claim(), alpha_id);
+        assert!((expansion.free_linear_strain() - 0.002).abs() < 1e-16);
+        // Explicit force control does not need an expansion claim, even if the
+        // card has ambiguous expansion data at the current temperature.
+        bindings.string.as_mut().unwrap().prestress =
+            StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0));
+        let forced = compile_material_assembly(&input, &bindings).unwrap();
+        assert_eq!(forced.string().unwrap().string().tension_n, 20.0);
+        assert!(forced.string().unwrap().thermal_expansion().is_none());
+    }
+
+    #[test]
+    fn g0_thermal_string_compiler_refuses_bad_paths_and_slack_without_mutation() {
+        let card = thermal_string_card();
+        let reference = thermal_point(300.0);
+        let point = thermal_point(400.0);
+        let mut input = plucked(20.0, 0.006, 1e-6);
+        input.string.as_mut().unwrap().length_m = 0.502;
+        let original = input.clone();
+        let compile = |current: &QueryPoint, reference: &QueryPoint| {
+            compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: Some(thermal_string_binding(&card, current, reference)),
+                    plate: None,
+                },
+            )
+        };
+        let previous = compile(&point, &reference).unwrap();
+        let previous_state = previous.assembly().clone();
+        for (current, start, expected) in [
+            (
+                point.clone(),
+                thermal_point(299.0),
+                "linear_thermal_expansion_coefficient",
+            ),
+            (thermal_point(501.0), reference.clone(), "density"),
+            (
+                point.clone(),
+                QueryPoint::new().with("T", 300.0).unwrap(),
+                "thermal path coordinate set",
+            ),
+            (
+                thermal_point(500.0),
+                reference.clone(),
+                "thermal string strain exceeds its linear tensile domain",
+            ),
+        ] {
+            let error = compile(&current, &start).unwrap_err().to_string();
+            assert!(error.contains(expected), "expected {expected}: {error}");
+            assert_eq!(input, original);
+            assert_eq!(previous.assembly(), &previous_state);
+        }
+        let no_alpha = material_card(
+            &[
+                ("density", QuantitySpec::dimensional(Density::DIMS), 7800.0),
+                (
+                    "young_modulus",
+                    QuantitySpec::dimensional(Pressure::DIMS),
+                    200e9,
+                ),
+            ],
+            ValidityDomain::unconstrained().with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+                500.0,
+            ),
+        );
+        let error = compile_material_assembly(
+            &input,
+            &AcousticMaterialBindings {
+                string: Some(thermal_string_binding(&no_alpha, &point, &reference)),
+                plate: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, MaterialAssemblyError::Resolution { component, source: fs_material::state_point::MaterialStatePointError::Query { property, .. } } if component == "string" && property == LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
+        );
+        assert_eq!(input, original);
     }
 
     #[test]
@@ -2280,7 +2858,9 @@ mod material_plate_tests {
                     string: Some(StringMaterialBinding {
                         source: source(card, &point),
                         geometry: StringGeometryConstraint::FixedRadius(0.0008),
-                        prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
+                        prestress: StringPrestressBinding::Prescribed(
+                            StringPrestress::FixedTension(20.0),
+                        ),
                     }),
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: source(card, &point),
@@ -2387,7 +2967,9 @@ mod material_plate_tests {
                                 radius,
                                 fs_qty::Length::DIMS,
                             )),
-                            prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(tension)),
+                            prestress: StringPrestressBinding::Prescribed(
+                                StringPrestress::FixedTension(tension),
+                            ),
                         }),
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(&card, &point),
@@ -2441,7 +3023,9 @@ mod material_plate_tests {
                         string: Some(StringMaterialBinding {
                             source: source(card, &point),
                             geometry: StringGeometryConstraint::FixedMass(0.001),
-                            prestress: StringPrestressBinding::Prescribed(StringPrestress::FixedTension(20.0)),
+                            prestress: StringPrestressBinding::Prescribed(
+                                StringPrestress::FixedTension(20.0),
+                            ),
                         }),
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(card, &point),

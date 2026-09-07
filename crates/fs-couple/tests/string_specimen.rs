@@ -790,6 +790,311 @@ fn prony_material(
 }
 
 #[test]
+fn g3_frequency_units_preserve_string_loss_bands_and_pressure() {
+    use fs_qty::semantic::FrequencyConvention::{Angular, Cyclic};
+    let frequency = |kind| {
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(kind),
+            ValueForm::Static,
+        ))
+    };
+    let (_, pairs) = prony_material(&[(1e10, 0.005), (5e9, 0.02)], None);
+    let modulus = QuantitySpec::dimensional(Pressure::DIMS);
+    let time = QuantitySpec::dimensional(Time::DIMS);
+    let rows = [
+        (
+            "density",
+            QuantitySpec::dimensional(Density::DIMS),
+            1000.0,
+            (1.0, 140.0),
+        ),
+        ("young_modulus", modulus, 2e9, (2.0, 130.0)),
+        (
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            modulus,
+            2e9,
+            (3.0, 120.0),
+        ),
+        (
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+            QuantitySpec::dimensional(DynViscosity::DIMS),
+            3e7,
+            (4.0, 90.0),
+        ),
+        (pairs[0].modulus.as_str(), modulus, 1e10, (5.0, 110.0)),
+        (pairs[0].relaxation_time.as_str(), time, 0.005, (6.0, 100.0)),
+        (pairs[1].modulus.as_str(), modulus, 5e9, (7.0, 80.0)),
+        (pairs[1].relaxation_time.as_str(), time, 0.02, (8.0, 60.0)),
+    ];
+    let properties: Vec<_> = rows
+        .iter()
+        .map(|&(key, quantity, value, _)| (key, quantity, value))
+        .collect();
+    let mut reference: [Option<Vec<f64>>; 2] = [None, None];
+    for (axis, quantity, scale) in [
+        ("omega", None, core::f64::consts::TAU),
+        ("response", Some(frequency(Angular)), core::f64::consts::TAU),
+        ("frequency", Some(frequency(Cyclic)), 1.0),
+        ("omega", Some(frequency(Cyclic)), 1.0),
+    ] {
+        let point = match quantity {
+            Some(q) => QueryPoint::new()
+                .with_quantity(axis, q, 50.0 * scale)
+                .unwrap(),
+            None => QueryPoint::new().with(axis, 50.0 * scale).unwrap(),
+        };
+        let state = state_with_property_domains(
+            "frequency-unit string",
+            &properties,
+            |key| {
+                let (_, _, _, (lo, hi)) = rows.iter().find(|row| row.0 == key).unwrap();
+                match quantity {
+                    Some(q) => ValidityDomain::unconstrained().with_quantity(
+                        axis,
+                        q,
+                        lo * scale,
+                        hi * scale,
+                    ),
+                    None => ValidityDomain::unconstrained().with(axis, lo * scale, hi * scale),
+                }
+            },
+            point,
+            None,
+        );
+        for (law, reference) in reference.iter_mut().enumerate() {
+            let specimen =
+                with_uniform_circular_material_state(loss_template(), 0.002, &state).unwrap();
+            let (string, expected_hz) = if law == 0 {
+                (
+                    specimen.with_kelvin_voigt_bending_loss().unwrap().string(),
+                    (4.0, 90.0),
+                )
+            } else {
+                (
+                    specimen.with_prony_bending_loss(&pairs).unwrap().string(),
+                    (8.0, 60.0),
+                )
+            };
+            let band = if law == 0 {
+                string
+                    .kelvin_voigt_bending
+                    .as_ref()
+                    .unwrap()
+                    .omega_band_rad_s
+            } else {
+                string.relaxation_bending.as_ref().unwrap().omega_band_rad_s
+            };
+            assert_eq!(
+                band,
+                (
+                    expected_hz.0 * core::f64::consts::TAU,
+                    expected_hz.1 * core::f64::consts::TAU
+                )
+            );
+            let actual = pressure(string);
+            assert!(actual.iter().any(|p| p.abs() > 0.0));
+            match reference {
+                Some(expected) => assert_eq!(
+                    actual.as_slice(),
+                    expected.as_slice(),
+                    "{axis}/{quantity:?}, law={law}"
+                ),
+                None => *reference = Some(actual),
+            }
+        }
+    }
+    // Narrow only the density source: it must constrain both loss laws, not
+    // just eta or the relaxation-time claims. The query remains in every band.
+    let state = state_with_property_domains(
+        "restricted density",
+        &properties,
+        |key| {
+            let band = if key == "density" {
+                (20.0, 30.0)
+            } else {
+                (1.0, 140.0)
+            };
+            ValidityDomain::unconstrained().with_quantity(
+                "frequency",
+                frequency(Cyclic),
+                band.0,
+                band.1,
+            )
+        },
+        QueryPoint::new()
+            .with_quantity("frequency", frequency(Cyclic), 25.0)
+            .unwrap(),
+        None,
+    );
+    for prony in [false, true] {
+        let specimen =
+            with_uniform_circular_material_state(loss_template(), 0.002, &state).unwrap();
+        let specimen = if prony {
+            specimen.with_prony_bending_loss(&pairs)
+        } else {
+            specimen.with_kelvin_voigt_bending_loss()
+        }
+        .unwrap();
+        let error = realize_assembly(&assembly(specimen.string())).unwrap_err();
+        assert!(error.to_string().contains("frequenc"), "{error}");
+    }
+}
+
+#[test]
+fn g1_temperature_curves_drive_every_prony_branch_and_emitted_pressure() {
+    let (_, pairs) = prony_material(&[(1e10, 0.004), (5e9, 0.02)], None);
+    let pressure_quantity = QuantitySpec::dimensional(Pressure::DIMS);
+    let time_quantity = QuantitySpec::dimensional(Time::DIMS);
+    let properties = [
+        (
+            "density",
+            QuantitySpec::dimensional(Density::DIMS),
+            1000.0,
+            1200.0,
+        ),
+        ("young_modulus", pressure_quantity, 2e9, 1e9),
+        (
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            pressure_quantity,
+            2e9,
+            1e9,
+        ),
+        (pairs[0].modulus.as_str(), pressure_quantity, 1e10, 5e9),
+        (
+            pairs[0].relaxation_time.as_str(),
+            time_quantity,
+            0.004,
+            0.008,
+        ),
+        (pairs[1].modulus.as_str(), pressure_quantity, 5e9, 7e9),
+        (pairs[1].relaxation_time.as_str(), time_quantity, 0.02, 0.01),
+    ];
+    let domain = ValidityDomain::unconstrained()
+        .with("T", 300.0, 400.0)
+        .with("omega", 1.0, 20_000.0);
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for &(key, quantity, cold, hot) in &properties {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::with_quantity(key, quantity),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(300.0, cold), (400.0, hot)],
+                    dims: quantity.dims(),
+                },
+                validity: domain.clone(),
+                interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic thermal Prony coefficients".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+        requirements.push(
+            ScalarPropertyRequirement::try_with_quantity(
+                key,
+                quantity,
+                ScalarAdmissibility::Finite,
+            )
+            .unwrap(),
+        );
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic thermal Prony solid".into(),
+            phase: "solid".into(),
+            process: "synthetic".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let mut responses = Vec::new();
+    for temperature in [300.0, 325.0, 400.0] {
+        let point = QueryPoint::new()
+            .with("T", temperature)
+            .unwrap()
+            .with("omega", 1000.0)
+            .unwrap();
+        let material = resolve_material_state_point(
+            &card,
+            &point,
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let fraction = (temperature - 300.0) / 100.0;
+        let expected: Vec<_> = properties
+            .iter()
+            .map(|&(key, quantity, cold, hot)| (key, quantity, cold + fraction * (hot - cold)))
+            .collect();
+        // Independent scalar source exercises the same solver with explicitly
+        // computed coefficients; the curve receipts must remain interpolated.
+        let reference = state_with_domain(
+            "thermal Prony scalar reference",
+            &expected,
+            domain.clone(),
+            point,
+            None,
+        );
+        let bound = with_uniform_circular_material_state(loss_template(), 0.002, &material)
+            .unwrap()
+            .with_prony_bending_loss(&pairs)
+            .unwrap();
+        let law = bound.string().relaxation_bending.unwrap();
+        assert_eq!(law.material_state_identity, Some(material.identity()));
+        let second_moment = core::f64::consts::PI * 0.004_f64.powi(4) / 64.0;
+        for (j, branch) in law.branches.iter().enumerate() {
+            close(
+                branch.relaxing_stiffness_n_m2,
+                expected[3 + 2 * j].2 * second_moment,
+            );
+            close(branch.relaxation_time_s, expected[4 + 2 * j].2);
+        }
+        for &(key, _, value) in &expected {
+            let property = material.property(key).unwrap();
+            close(property.value_si(), value);
+            if temperature == 325.0 {
+                assert!(matches!(
+                    property.answer().receipt.decision,
+                    fs_matdb::EvaluationDecision::LinearInside { .. }
+                ));
+            }
+        }
+        let reference = with_uniform_circular_material_state(loss_template(), 0.002, &reference)
+            .unwrap()
+            .with_prony_bending_loss(&pairs)
+            .unwrap();
+        let run = |string| {
+            let mut input = assembly(string);
+            input.sample_rate_hz = 48_000;
+            input.duration_s = 0.06;
+            realize_assembly(&input).unwrap().pressure_pa
+        };
+        let actual = run(bound.string());
+        let expected = run(reference.string());
+        let peak = expected.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+        assert!(peak > 0.0, "the pressure path must be live");
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, e)| (a - e).abs() < 1e-10 * peak)
+        );
+        responses.push(actual);
+    }
+    assert_ne!(responses[0], responses[1]);
+    assert_ne!(responses[1], responses[2]);
+}
+
+#[test]
 fn g1_prony_material_binding_rebinds_every_selected_branch() {
     let terms = [(1.0e10, 0.005), (0.0, 1.0e-9), (5.0e9, 0.02)];
     let (material, pairs) = prony_material(&terms, None);

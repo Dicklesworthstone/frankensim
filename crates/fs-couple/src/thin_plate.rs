@@ -9,7 +9,6 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::EvaluationDecision;
 use fs_material::gas::GasState;
 use fs_material::state_point::{
     DENSITY_PROPERTY, IsotropicThermoelasticStatePoint, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
@@ -1324,9 +1323,11 @@ pub struct ResolvedPlateSpecimen {
 
 impl ResolvedPlateSpecimen {
     /// Select proportional isotropic Kelvin–Voigt bending at the resolved state.
-    /// Requires `kelvin_voigt_bending_viscosity` [Pa s] and constant rho/E/nu
-    /// claims. The viscosity claim must declare an omega band [rad/s], intersected
+    /// Requires `kelvin_voigt_bending_viscosity` [Pa s] and rho/E/nu claims
+    /// constant at fixed positive absolute temperature (scalars or T-only curves).
+    /// The viscosity claim must declare a frequency band, intersected
     /// with every coefficient's band. Other state coordinates remain frozen.
+    /// One typed frequency axis admits Hz or rad/s; legacy `omega` is rad/s.
     /// The viscous tensor shares the elastic Poisson ratio; separate bulk/shear
     /// relaxation, nonlinear membrane viscosity and thermal evolution are absent.
     /// Original property receipts remain available through [`Self::material`].
@@ -1352,13 +1353,10 @@ impl ResolvedPlateSpecimen {
             DynViscosity::DIMS,
         )?;
         let mut band = property
-            .answer()
-            .evidence
-            .model
-            .validity
-            .bound("omega")
+            .angular_frequency_band_rad_s()
+            .map_err(|_| refuse("material plate viscosity has invalid frequency-axis semantics or bounds"))?
             .ok_or_else(|| {
-                refuse("material plate viscosity needs an explicit omega band in rad/s")
+                refuse("material plate viscosity needs an explicit omega band in rad/s or a typed frequency band")
             })?;
         for key in [
             DENSITY_PROPERTY,
@@ -1366,17 +1364,18 @@ impl ResolvedPlateSpecimen {
             POISSON_RATIO_PROPERTY,
             KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
         ] {
-            let answer = self
+            let coefficient = self
                 .material
                 .property(key)
-                .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?
-                .answer();
-            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+                .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?;
+            if !coefficient.is_constant_at_fixed_temperature() {
                 return Err(refuse(
-                    "Kelvin-Voigt plate coefficients must be validity-wide scalar constants",
+                    "Kelvin-Voigt plate coefficients must be validity-wide scalar constants or temperature-only curves at fixed positive absolute T",
                 ));
             }
-            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+            if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s().map_err(|_| {
+                refuse("material plate coefficient has invalid frequency-axis semantics or bounds")
+            })? {
                 band = (band.0.max(lo), band.1.min(hi));
             }
         }

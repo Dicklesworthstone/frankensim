@@ -25,8 +25,7 @@ use crate::acoustic_realize::{
 use crate::string_specimen::{
     EQUILIBRIUM_YOUNG_MODULUS_PROPERTY, KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
     ResolvedStringSpecimen, StringGeometryConstraint, StringPrestress,
-    with_uniform_circular_material_and_constraints,
-    with_uniform_circular_thermal_extension,
+    with_uniform_circular_material_and_constraints, with_uniform_circular_thermal_extension,
 };
 use crate::thin_plate::{
     PlateChartRadiation, PlateMaterialModel, PlateRegionMaterial, PlateThicknessConstraint,
