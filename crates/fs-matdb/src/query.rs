@@ -348,7 +348,7 @@ fn admitted_policy_tag(tag: &str) -> Option<&'static str> {
 /// How one query selects among in-domain candidates: a named policy or an
 /// explicit caller-supplied claim pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaimSelection {
+pub enum ClaimSelection {
     /// Selection under a named [`SelectionPolicy`].
     Policy(SelectionPolicy),
     /// Selection pinned to one exact claim id.
@@ -1235,6 +1235,54 @@ pub struct MaterialAnswer {
     pub receipt: PropertyUsageReceipt,
 }
 
+/// Evaluated corners of a conservative box covered by one selected claim.
+/// This establishes declared scalar/curve support, not physical qualification
+/// or finite solver results at every future state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvelopeAnswer {
+    /// Evidence and receipt at the inclusive lower corner.
+    pub lower: MaterialAnswer,
+    /// Evidence and receipt at the inclusive upper corner.
+    pub upper: MaterialAnswer,
+}
+
+/// A concrete obstruction to using a property throughout a requested box.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertySupportError {
+    /// Corners must have identical axes/descriptors and ordered coordinates.
+    InvalidEnvelope {
+        /// The malformed coordinate schema or ordering.
+        reason: String,
+    },
+    /// Original evaluator or receipt-verification refusal at a witness state.
+    Evaluation {
+        /// State where evaluation refused.
+        point: QueryPoint,
+        /// Unchanged underlying diagnosis.
+        error: MatDbError,
+    },
+    /// Sources cannot be silently stitched into one response.
+    ClaimChanges {
+        /// State selecting another claim.
+        point: QueryPoint,
+        /// Claim selected at the lower corner.
+        selected: ClaimId,
+        /// Claim selected at the witness.
+        other: ClaimId,
+    },
+    /// Exact samples do not cover a nondegenerate interval, even with a pin.
+    DiscreteSupport {
+        /// Curve's exact-sample coordinate.
+        axis: String,
+        /// Inclusive requested lower coordinate.
+        lower: f64,
+        /// Inclusive requested upper coordinate.
+        upper: f64,
+        /// Selected claim with discrete support.
+        claim: ClaimId,
+    },
+}
+
 /// Narrow the in-domain candidates under the caller's selection. Policy
 /// arms may keep several candidates (the caller refuses ambiguity); the
 /// pinned arm refuses here with the pin-specific diagnosis.
@@ -1322,6 +1370,146 @@ fn honest_certificates(
 }
 
 impl ClaimSet {
+    /// Check one dimension-only property over a caller-declared finite box.
+    /// Selection and explicit pins have exactly the ordinary query semantics.
+    /// Corners, continuous support and competing claim intersections are checked;
+    /// the claim must stay the same everywhere in the box.
+    ///
+    /// # Errors
+    /// [`PropertySupportError`] retains malformed boxes, original query refusals,
+    /// exact-sample gaps and source-selection changes with concrete witnesses.
+    pub fn query_envelope(
+        &self,
+        property: &str,
+        lower: &QueryPoint,
+        upper: &QueryPoint,
+        selection: ClaimSelection,
+    ) -> Result<EnvelopeAnswer, PropertySupportError> {
+        self.require_dimension_only_property(property)
+            .map_err(|error| PropertySupportError::Evaluation {
+                point: lower.clone(),
+                error,
+            })?;
+        self.query_envelope_selected(property, None, lower, upper, selection)
+    }
+
+    /// Exact-key counterpart of [`Self::query_envelope`], retaining quantity,
+    /// tensor and hardness context and every typed coordinate descriptor.
+    ///
+    /// # Errors
+    /// The same support errors, including the ordinary typed-query refusals.
+    pub fn query_envelope_typed(
+        &self,
+        property: &PropertyKey,
+        lower: &QueryPoint,
+        upper: &QueryPoint,
+        selection: ClaimSelection,
+    ) -> Result<EnvelopeAnswer, PropertySupportError> {
+        self.require_quantity(property)
+            .map_err(|error| PropertySupportError::Evaluation {
+                point: lower.clone(),
+                error,
+            })?;
+        self.query_envelope_selected(property.name(), Some(property), lower, upper, selection)
+    }
+
+    fn query_envelope_selected(
+        &self,
+        property: &str,
+        key: Option<&PropertyKey>,
+        lower: &QueryPoint,
+        upper: &QueryPoint,
+        selection: ClaimSelection,
+    ) -> Result<EnvelopeAnswer, PropertySupportError> {
+        if lower.axes.keys().ne(upper.axes.keys())
+            || lower.axis_quantities != upper.axis_quantities
+            || lower.axes.iter().any(|(axis, lo)| *lo > upper.axes[axis])
+        {
+            return Err(PropertySupportError::InvalidEnvelope {
+                reason: "corners require identical axes and quantities, with lower <= upper".into(),
+            });
+        }
+        let query = |point: &QueryPoint| {
+            self.query_selected(property, key, point, selection)
+                .and_then(|answer| {
+                    self.verify_receipt(&answer.receipt)?;
+                    Ok(answer)
+                })
+                .map_err(|error| PropertySupportError::Evaluation {
+                    point: point.clone(),
+                    error,
+                })
+        };
+        let low = query(lower)?;
+        let selected = low.receipt.selected;
+        let check_selection = |point: &QueryPoint| {
+            let answer = query(point)?;
+            if answer.receipt.selected != selected {
+                return Err(PropertySupportError::ClaimChanges {
+                    point: point.clone(),
+                    selected,
+                    other: answer.receipt.selected,
+                });
+            }
+            Ok(answer)
+        };
+        let high = check_selection(upper)?;
+        for (id, claim) in self.claims_for(property) {
+            if id == selected {
+                // Scalar policy and linear knot-span coverage were checked by
+                // both corner queries. Exact-only curves cover only knots.
+                if let PropertyValue::Curve { abscissa, .. } = &claim.value
+                    && claim.interpolation == InterpolationPolicy::TabulatedOnly
+                    && lower.axes[abscissa] < upper.axes[abscissa]
+                {
+                    return Err(PropertySupportError::DiscreteSupport {
+                        axis: abscissa.clone(),
+                        lower: lower.axes[abscissa],
+                        upper: upper.axes[abscissa],
+                        claim: id,
+                    });
+                }
+                continue;
+            }
+            if matches!(selection, ClaimSelection::Pinned(_))
+                || key.is_some_and(|key| claim.key != *key)
+                || claim.validity.is_empty()
+            {
+                continue;
+            }
+            // Selection can change only where another candidate's validity box
+            // intersects the request. Query one witness per intersection using
+            // the original policy, including observation-backed precedence.
+            let mut witness = lower.clone();
+            let mut intersects = true;
+            for (axis, &(lo, hi)) in claim.validity.bounds() {
+                let (Some(&a), Some(&b)) = (lower.axes.get(axis), upper.axes.get(axis)) else {
+                    intersects = false;
+                    break;
+                };
+                let x = a.max(lo);
+                if !lo.is_finite() || !hi.is_finite() || x > b.min(hi) {
+                    intersects = false;
+                    break;
+                }
+                witness =
+                    witness
+                        .with(axis, x)
+                        .map_err(|error| PropertySupportError::Evaluation {
+                            point: lower.clone(),
+                            error,
+                        })?;
+            }
+            if intersects {
+                check_selection(&witness)?;
+            }
+        }
+        Ok(EnvelopeAnswer {
+            lower: low,
+            upper: high,
+        })
+    }
+
     /// Answer a property query at a point under an explicit selection
     /// policy.
     ///
