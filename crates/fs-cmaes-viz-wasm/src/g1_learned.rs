@@ -558,24 +558,30 @@ impl G1TransformerTrainer {
     /// head is the whole learned part — the trunk is deterministic in
     /// `MODEL_SEED` — so it is sufficient to restore a run.
     ///
-    /// Returns false and changes nothing if the width does not match.
-    pub fn seed_head(&mut self, head: &[f64]) -> bool {
+    /// Returns the objective this head actually scored here, so a caller can
+    /// say why a head was refused rather than only that it was. `f64::MAX`
+    /// means the width was wrong or the rollout did not complete.
+    pub fn seed_head(&mut self, head: &[f64]) -> f64 {
         if head.len() != self.best.len() {
-            return false;
+            return f64::MAX;
         }
         let (objective, distance, _) = self.score(head);
-        // Only adopt it if it actually beats the controller; a corrupted or
-        // stale head must not install itself as "best" and hide the real
-        // baseline behind a number nothing can reproduce.
-        if !objective.is_finite() || objective >= self.baseline_objective {
-            return false;
+        if !objective.is_finite() {
+            return f64::MAX;
+        }
+        // Only adopt it if it actually beats the controller HERE. A head
+        // trained elsewhere is a claim about another machine until this owner
+        // has re-run it; adopting a worse one would hide the real baseline
+        // behind a number nothing on this machine can reproduce.
+        if objective >= self.baseline_objective {
+            return objective;
         }
         self.best.copy_from_slice(head);
         self.best_objective = objective;
         self.best_distance = distance;
         self.restarts = 0;
         self.start_run();
-        true
+        objective
     }
 
     /// A renderable trace of the best policy so far, or of the tuned
@@ -780,7 +786,10 @@ mod trainer_tests {
         let saved_objective = source.progress()[3];
 
         let mut resumed = G1TransformerTrainer::new(0, 1.5, 0.002, 7);
-        assert!(resumed.seed_head(&saved), "a better head must be adopted");
+        assert!(
+            resumed.seed_head(&saved) < baseline,
+            "a better head must be adopted and report its score"
+        );
         // Re-scored, not trusted: the resumed objective is measured here.
         assert!(
             (resumed.progress()[3] - saved_objective).abs() < 1e-9,
@@ -791,12 +800,20 @@ mod trainer_tests {
         // The zero head is exactly the baseline, so it is not an improvement
         // and must be refused.
         let zeros = vec![0.0; saved.len()];
-        assert!(!resumed.seed_head(&zeros), "baseline head must be refused");
+        let zero_score = resumed.seed_head(&zeros);
+        assert!(
+            zero_score >= baseline && zero_score < f64::MAX,
+            "the baseline head must be refused but still report its real score"
+        );
         assert!(
             (resumed.progress()[3] - saved_objective).abs() < 1e-9,
             "a refused seed must not disturb the incumbent"
         );
-        assert!(!resumed.seed_head(&[0.0; 3]), "wrong width must be refused");
+        assert_eq!(
+            resumed.seed_head(&[0.0; 3]),
+            f64::MAX,
+            "a wrong-width head is refused without a score"
+        );
     }
 
     /// Pumping must actually search: the best objective has to fall below the

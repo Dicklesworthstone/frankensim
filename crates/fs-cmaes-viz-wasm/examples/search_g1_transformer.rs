@@ -199,6 +199,37 @@ fn build_evaluators(challenges: &[G1Challenge], duration_s: f64) -> Vec<G1Walkin
         .collect()
 }
 
+/// Read the policy head out of an FSGT artifact written by this example.
+fn head_from_artifact(bytes: &[u8]) -> Vec<f64> {
+    let u32_at = |offset: usize| -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("u32"))
+    };
+    assert_eq!(&bytes[0..4], b"FSGT", "artifact magic");
+    assert_eq!(u32_at(4), 1, "artifact layout version");
+    let n_layers = u32_at(8 + 5 * 4) as usize;
+    let mut offset = 8 + 10 * 4;
+    let array_count = u32_at(offset) as usize;
+    offset += 4;
+    let head_index = 1 + n_layers * 9 + 1;
+    for index in 0..array_count {
+        let length = u32_at(offset) as usize;
+        offset += 4;
+        if index == head_index {
+            return (0..length)
+                .map(|i| {
+                    f64::from(f32::from_le_bytes(
+                        bytes[offset + i * 4..offset + i * 4 + 4]
+                            .try_into()
+                            .expect("f32"),
+                    ))
+                })
+                .collect();
+        }
+        offset += length * 4;
+    }
+    panic!("artifact carries no policy head");
+}
+
 fn main() {
     let scope = match std::env::var("SCOPE").as_deref() {
         Ok("block") => Scope::Block,
@@ -217,6 +248,29 @@ fn main() {
         "THREADS",
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
     );
+
+    // Score an artifact instead of searching. The published policy is a claim
+    // about a file; this re-measures that file against the same owner rather
+    // than trusting the receipt that shipped beside it.
+    if let Ok(path) = std::env::var("SCORE_HEAD_BIN") {
+        let bytes = std::fs::read(&path).expect("read artifact");
+        let head = head_from_artifact(&bytes);
+        let mut policy = build_policy();
+        let evaluators = build_evaluators(&challenges, duration_s);
+        let zero = vec![0.0f64; head.len()];
+        let (base, base_d, _) = score(&mut policy, &evaluators, Scope::Head, &zero);
+        let (obj, dist, steps) = score(&mut policy, &evaluators, Scope::Head, &head);
+        println!("artifact          : {path}");
+        println!("head parameters   : {}", head.len());
+        println!("tuned controller  : objective {base:.4}  distance {base_d:.4} m");
+        println!("artifact policy   : objective {obj:.4}  distance {dist:.4} m  steps {steps}");
+        println!(
+            "improvement       : {:.1}% ({} challenges, {duration_s} s)",
+            100.0 * (base - obj) / base.abs(),
+            challenges.len()
+        );
+        return;
+    }
 
     let dim = searchable_len(scope);
     let population = env_usize("POPULATION", 4 + (3.0 * (dim as f64).ln()) as usize);
