@@ -2090,7 +2090,7 @@ fn validate(
 }
 
 #[cfg(test)]
-mod tests {
+mod checkpoint_tests {
     use super::*;
 
     #[test]
