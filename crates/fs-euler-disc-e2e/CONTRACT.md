@@ -981,6 +981,15 @@ mechanics is evolved past that boundary. Restarting that terminal checkpoint
 publishes no duplicate sample. Profile-backed runs poll their execution scope
 before setup and immediately before each checkpoint/sample commit; cancellation
 at either boundary returns a typed refusal and publishes no partial `CoupledRun`.
+Final energy accounting and derived observation are prepared against a candidate
+checkpoint before that publication boundary. A late non-finite energy/base
+refusal returns the preceding accepted checkpoint and sample prefix, preserving
+disc/base state, time, event count and accumulated work together. The G4 unit
+regression injects finite cumulative history whose final sum overflows after
+real coupled stepping, checks unchanged checkpoint/history on repeated refusal,
+and pairs it with successful deterministic prefix/suffix replay. This numerical
+transaction test does not establish general evolving material-state epochs or
+experimental physics validation.
 
 The source-bound reduced-decay render bridge v2 retains its grounded no-slip
 kinematics and declares a separately available normal-load scalar while the

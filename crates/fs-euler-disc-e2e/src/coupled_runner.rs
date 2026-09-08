@@ -1337,46 +1337,43 @@ fn run_closed_with_geometry(
                 },
             ));
         };
-        // Publication is atomic with respect to the execution scope: a
-        // request observed here leaves the last accepted checkpoint/sample
-        // pair untouched and returns no falsely complete trajectory.
-        geometry_model.publication_checkpoint()?;
-        checkpoint.state = state;
-        checkpoint.base_deflection_m = base_deflection_m;
-        checkpoint.base_velocity_m_per_s = base_velocity_m_per_s;
-        checkpoint.time_s += elapsed_s;
-        checkpoint.was_in_contact = post_support_gap_m <= 0.0;
-        checkpoint.reimpact_count = updated_reimpact_count;
-        checkpoint.accumulated_channel_work_j[0] += channel_work_j[0];
-        checkpoint.accumulated_channel_work_j[1] += channel_work_j[1];
-        checkpoint.accumulated_channel_work_j[2] += channel_work_j[2];
-        checkpoint.accumulated_channel_work_j[3] += channel_work_j[3];
-        checkpoint.accumulated_channel_work_j[4] += channel_work_j[4];
+        // Final accounting and observation can still refuse this interval.
+        // Keep the accepted restart state intact until both are ready.
+        let mut candidate = checkpoint.clone();
+        candidate.state = state;
+        candidate.base_deflection_m = base_deflection_m;
+        candidate.base_velocity_m_per_s = base_velocity_m_per_s;
+        candidate.time_s += elapsed_s;
+        candidate.was_in_contact = post_support_gap_m <= 0.0;
+        candidate.reimpact_count = updated_reimpact_count;
+        candidate.accumulated_channel_work_j[0] += channel_work_j[0];
+        candidate.accumulated_channel_work_j[1] += channel_work_j[1];
+        candidate.accumulated_channel_work_j[2] += channel_work_j[2];
+        candidate.accumulated_channel_work_j[3] += channel_work_j[3];
+        candidate.accumulated_channel_work_j[4] += channel_work_j[4];
         let total_energy = total_energy(
             body_mechanical_energy_j,
             factors,
-            checkpoint.base_deflection_m,
-            checkpoint.base_velocity_m_per_s,
+            candidate.base_deflection_m,
+            candidate.base_velocity_m_per_s,
             (-post_support_gap_m).max(0.0),
         );
-        let defect = (total_energy - checkpoint.initial_total_energy_j)
-            - (checkpoint.accumulated_channel_work_j[1]
-                + checkpoint.accumulated_channel_work_j[2]
-                + checkpoint.accumulated_channel_work_j[3]
-                + checkpoint.accumulated_channel_work_j[4]);
-        checkpoint.accumulated_energy_defect_j = defect;
-        seal_checkpoint(&mut checkpoint);
-        let (sample_inclination, precession, spin) = qois(checkpoint.state, mass)?;
+        let defect = (total_energy - candidate.initial_total_energy_j)
+            - (candidate.accumulated_channel_work_j[1]
+                + candidate.accumulated_channel_work_j[2]
+                + candidate.accumulated_channel_work_j[3]
+                + candidate.accumulated_channel_work_j[4]);
+        candidate.accumulated_energy_defect_j = defect;
+        let (sample_inclination, precession, spin) = qois(candidate.state, mass)?;
         let precession_acceleration = (precession - previous_precession) / elapsed_s;
-        previous_precession = precession;
-        let center_of_mass_velocity_world_m_per_s = checkpoint
+        let center_of_mass_velocity_world_m_per_s = candidate
             .state
             .center_of_mass_velocity_world(mass)
             .map_err(|error| CoupledError::Dynamics(error.to_string()))?;
         if !defect.is_finite()
             || !total_energy.is_finite()
-            || !checkpoint.base_deflection_m.is_finite()
-            || !checkpoint.base_velocity_m_per_s.is_finite()
+            || !candidate.base_deflection_m.is_finite()
+            || !candidate.base_velocity_m_per_s.is_finite()
             || !center_of_mass_velocity_world_m_per_s.is_finite()
             || !post_support_gap_m.is_finite()
         {
@@ -1388,14 +1385,14 @@ fn run_closed_with_geometry(
                 },
             ));
         }
-        samples.push(CoupledSample {
+        let sample = CoupledSample {
             interval_start_time_s,
-            time_s: checkpoint.time_s,
-            state: checkpoint.state,
+            time_s: candidate.time_s,
+            state: candidate.state,
             center_of_mass_velocity_world_m_per_s,
-            base_deflection_m: checkpoint.base_deflection_m,
-            base_velocity_m_per_s: checkpoint.base_velocity_m_per_s,
-            contact_branch: if checkpoint.was_in_contact {
+            base_deflection_m: candidate.base_deflection_m,
+            base_velocity_m_per_s: candidate.base_velocity_m_per_s,
+            contact_branch: if candidate.was_in_contact {
                 CoupledContactBranch::Closed
             } else {
                 CoupledContactBranch::Open
@@ -1412,11 +1409,19 @@ fn run_closed_with_geometry(
             contact_transitions: localized_transitions,
             terminal_inclination_event,
             support_source_feature: post_support_source_feature,
-            reimpact_count: checkpoint.reimpact_count,
+            reimpact_count: candidate.reimpact_count,
             channels,
             mechanical_energy_j: total_energy,
             energy_defect_j: defect,
-        });
+        };
+        seal_checkpoint(&mut candidate);
+        // This is the only publication boundary: cancellation, final energy
+        // refusal or a derived-observation error cannot advance one consumer
+        // without the matching disc/base state, work ledger and sample.
+        geometry_model.publication_checkpoint()?;
+        checkpoint = candidate;
+        previous_precession = precession;
+        samples.push(sample);
         if let Some(reason) = numerical_refusal_reason {
             return Ok(finish_run(
                 samples,
@@ -2082,4 +2087,107 @@ fn validate(
         return Err(CoupledError::InvalidInput("out-of-domain factor"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g4_late_accounting_refusal_preserves_disc_base_history_and_retry() {
+        let factors = CoupledFactors {
+            mass_kg: 0.08,
+            radius_m: 0.038,
+            thickness_m: 0.006,
+            transverse_inertia_kg_m2: 3.0e-5,
+            axial_inertia_kg_m2: 6.0e-5,
+            gravity_m_per_s2: 9.806_65,
+            sliding_friction_coefficient: 0.42,
+            rolling_resistance_m: 4.0e-5,
+            contact_stiffness_n_per_m: 8.0e4,
+            contact_damping_n_s_per_m: 3.0,
+            base_effective_mass_kg: 0.25,
+            base_stiffness_n_per_m: 4.0e4,
+            base_damping_n_s_per_m: 4.0,
+            gas_rotational_damping_n_m_s: 2.0e-7,
+            gas_translation_damping_n_s_per_m: 4.0e-4,
+        };
+        let controls = CoupledControls {
+            timestep_s: 2.0e-5,
+            maximum_steps: 2,
+            terminal_inclination_rad: 0.002,
+            reimpact_limit: 32,
+        };
+        let initial = CoupledInitialState {
+            inclination_rad: 0.08,
+            precession_rad_per_s: 16.0,
+            spin_rad_per_s: 120.0,
+        };
+        let prefix = run_closed_reduced(factors, controls, initial, None).unwrap();
+        assert_eq!(prefix.terminal, CoupledTerminal::HorizonReached);
+        assert_eq!(prefix.samples.len(), 2);
+        let accepted = prefix.checkpoint;
+        let suffix =
+            run_closed_reduced(factors, controls, initial, Some(accepted.clone())).unwrap();
+        assert_eq!(suffix.terminal, CoupledTerminal::HorizonReached);
+        assert_eq!(suffix.samples.len(), 2);
+        assert_ne!(suffix.checkpoint.state, accepted.state);
+        assert_ne!(
+            suffix.checkpoint.base_deflection_m,
+            accepted.base_deflection_m
+        );
+
+        // Inject finite, extreme cumulative history to overflow only the final
+        // aggregate energy calculation, after real rigid/contact/base stepping.
+        // This tests numerical transaction semantics, not a physical material.
+        // Resealing is private to this unit test; edited public checkpoints
+        // remain forbidden by the production restart integrity check.
+        let mut faulted = accepted.clone();
+        faulted.accumulated_channel_work_j[1] = -f64::MAX;
+        faulted.accumulated_channel_work_j[2] = -f64::MAX;
+        assert!(
+            faulted
+                .accumulated_channel_work_j
+                .iter()
+                .all(|x| x.is_finite())
+        );
+        seal_checkpoint(&mut faulted);
+        for _ in 0..2 {
+            let refused =
+                run_closed_reduced(factors, controls, initial, Some(faulted.clone())).unwrap();
+            assert_eq!(
+                refused.terminal,
+                CoupledTerminal::NumericalRefusal {
+                    reason: CoupledNumericalRefusalReason::NonFiniteEnergyOrBaseState,
+                }
+            );
+            assert!(
+                refused.samples.is_empty(),
+                "no rejected observation escapes"
+            );
+            assert_eq!(refused.checkpoint, faulted, "no state or debit advances");
+            assert_eq!(
+                checkpoint_fingerprint(&refused.checkpoint),
+                faulted.checkpoint_fingerprint,
+                "all restart fields retain their original bit-pattern binding"
+            );
+        }
+
+        // The accepted physical prefix still resumes identically, including
+        // both consumers' state, accumulated work and emitted sample position.
+        let retry = run_closed_reduced(factors, controls, initial, Some(accepted)).unwrap();
+        assert_eq!(retry, suffix);
+        let uninterrupted = run_closed_reduced(
+            factors,
+            CoupledControls {
+                maximum_steps: 4,
+                ..controls
+            },
+            initial,
+            None,
+        )
+        .unwrap();
+        assert_eq!(suffix.samples, uninterrupted.samples[2..]);
+        assert_eq!(suffix.checkpoint, uninterrupted.checkpoint);
+    }
 }
