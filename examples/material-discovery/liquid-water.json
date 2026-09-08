@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "density", "unit": "kg/m3", "kind": "dimensional"},
+    {"name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "specific-enthalpy", "unit": "J/kg", "kind": "dimensional"},
+    {"name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
+    {"name": "dynamic-viscosity", "unit": "Pa*s", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "283.15 K", "upper": "353.15 K"},
+      {"name": "pressure", "kind": "pressure", "lower": "100000 Pa", "upper": "100000 Pa"},
+      {"name": "phase-liquid", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "enthalpy-reference-iapws-sr6-08-eq1", "kind": "dimensional", "lower": "1", "upper": "1"}
+    ]
+  },
+  "selection": "single-claim-only"
+}
