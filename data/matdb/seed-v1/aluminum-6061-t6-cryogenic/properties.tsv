@@ -1,22 +1,16 @@
 frankensim.matdb-source.v1
-observation	nist-k-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST thermal-conductivity polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=0.07918,1.0957,-0.07277,0.08084,0.02803,-0.09464,0.04179,-0.00571,0; data range 4-300 K; equation range 1-300 K; NIST reports 0.5 percent curve-fit error relative to data, without a confidence level or degrees of freedom
-observation	nist-cp-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST specific-heat polynomial evaluated into exact-temperature derived scalars	log10(y)=sum(a_i*log10(T)^i); a..i=46.6467,-314.292,866.662,-1298.3,1162.27,-637.795,210.351,-38.3094,2.96344; data and equation range 4-300 K; NIST reports 5 percent curve-fit error relative to data, without a confidence level or degrees of freedom
-observation	nist-e-fit	aluminum-6061-t6-uns-aa96061-temper-t6	NIST Young's-modulus polynomial evaluated into exact-temperature derived scalars	y=sum(a_i*T^i); a..e=77.71221,0.01030646,-0.0002924100,0.00000089936,-0.0000000010709; data range 0-299 K; equation range 2-295 K; NIST reports 1 percent curve-fit error relative to data, without a confidence level or degrees of freedom
-scalar	thermal-conductivity-77K	nist-k-fit	thermal_conductivity	83.5314419470723	W/m/K	constant
-uncertainty	thermal-conductivity-77K	unstated	-	-	-	-
-validity	thermal-conductivity-77K	temperature	77	77	K
-scalar	specific-heat-capacity-77K	nist-cp-fit	specific_heat_capacity	348.127924911502	J/kg/K	constant
-uncertainty	specific-heat-capacity-77K	unstated	-	-	-	-
-validity	specific-heat-capacity-77K	temperature	77	77	K
-scalar	young-modulus-77K	nist-e-fit	young_modulus	77.1450506572731	GPa	constant
-uncertainty	young-modulus-77K	unstated	-	-	-	-
-validity	young-modulus-77K	temperature	77	77	K
-scalar	thermal-conductivity-293K	nist-k-fit	thermal_conductivity	154.345205650720	W/m/K	constant
-uncertainty	thermal-conductivity-293K	unstated	-	-	-	-
-validity	thermal-conductivity-293K	temperature	293	293	K
-scalar	specific-heat-capacity-293K	nist-cp-fit	specific_heat_capacity	942.911235990911	J/kg/K	constant
-uncertainty	specific-heat-capacity-293K	unstated	-	-	-	-
-validity	specific-heat-capacity-293K	temperature	293	293	K
-scalar	young-modulus-293K	nist-e-fit	young_modulus	70.3585921827291	GPa	constant
-uncertainty	young-modulus-293K	unstated	-	-	-	-
-validity	young-modulus-293K	temperature	293	293	K
+observation	nist-k-fit	aluminum-6061-t6-uns-a96061-temper-t6	NIST thermal-conductivity polynomial sampled into a linear engineering curve	log10(y)=sum(a_i*log10(T)^i); a..i=0.07918,1.0957,-0.07277,0.08084,0.02803,-0.09464,0.04179,-0.00571,0; data range 4-300 K; equation range 1-300 K; NIST reports 0.5 percent curve-fit error relative to data, without a confidence level or degrees of freedom. The 24 knots over 77-293 K use 60-digit decimal evaluation rounded to 15 significant digits. Linear interpolation is an explicit approximation, not measured intermediate data; 99 interior probes per interval measured maximum relative discrepancy 0.0858 percent against the equation, not a certified global bound. Source pressure is unstated; source_pressure_known=0 does not mean vacuum.
+observation	nist-cp-fit	aluminum-6061-t6-uns-a96061-temper-t6	NIST specific-heat polynomial sampled into a linear engineering curve	log10(y)=sum(a_i*log10(T)^i); a..i=46.6467,-314.292,866.662,-1298.3,1162.27,-637.795,210.351,-38.3094,2.96344; data and equation range 4-300 K; NIST reports 5 percent curve-fit error relative to data, without a confidence level or degrees of freedom. The 24 knots over 77-293 K use 60-digit decimal evaluation rounded to 15 significant digits; tiny changes to the former endpoint values correct polynomial cancellation error. Linear interpolation is an explicit approximation, not measured intermediate data; 99 interior probes per interval measured maximum relative discrepancy 0.1840 percent against the equation, not a certified global bound. Source pressure is unstated; source_pressure_known=0 does not mean vacuum.
+observation	nist-e-fit	aluminum-6061-t6-uns-a96061-temper-t6	NIST Young's-modulus polynomial sampled into a linear engineering curve	y=sum(a_i*T^i); a..e=77.71221,0.01030646,-0.0002924100,0.00000089936,-0.0000000010709; data range 0-299 K; equation range 2-295 K; NIST reports 1 percent curve-fit error relative to data, without a confidence level or degrees of freedom. The 24 knots over 77-293 K use 60-digit decimal evaluation rounded to 15 significant digits. Linear interpolation is an explicit approximation, not measured intermediate data; 99 interior probes per interval measured maximum relative discrepancy 0.003558 percent against the equation, not a certified global bound. Source pressure is unstated; source_pressure_known=0 does not mean vacuum. Thermal-fit ranges do not widen this mechanical range.
+curve	thermal-conductivity-77-293k	nist-k-fit	thermal_conductivity	temperature	K	W/m/K	77:83.5314419470723,80:85.5611732859612,90:91.9142179727699,100:97.7012229674154,110:102.997819177952,120:107.865667768713,130:112.355508765723,140:116.509476848393,150:120.362866838684,160:123.945488814718,170:127.282716736412,180:130.396306911223,190:133.305042340668,200:136.025244260743,210:138.571181529217,220:140.955400776766,230:143.188994594400,240:145.281820882632,250:147.242683417599,260:149.079481398428,270:150.799334016885,280:152.408684784099,290:153.913389351290,293:154.345205650720	linear
+uncertainty	thermal-conductivity-77-293k	unstated	-	-	-	-
+validity	thermal-conductivity-77-293k	temperature	77	293	K
+validity	thermal-conductivity-77-293k	source_pressure_known	0	0	1
+curve	specific-heat-capacity-77-293k	nist-cp-fit	specific_heat_capacity	temperature	K	J/kg/K	77:348.127924910444,80:368.669173605989,90:433.333573999786,100:492.198176055888,110:545.646674374987,120:594.129237634481,130:638.017439242831,140:677.584015447519,150:713.031360211726,160:744.531960894153,170:772.264878973215,180:796.442622530301,190:817.327543680918,200:835.239019733624,210:850.553511221893,220:863.699782781810,230:875.151438774213,240:885.418629615695,250:895.040424397484,260:904.578983867749,270:914.616347574586,280:925.754396869470,290:938.618386672869,293:942.911235969257	linear
+uncertainty	specific-heat-capacity-77-293k	unstated	-	-	-	-
+validity	specific-heat-capacity-77-293k	temperature	77	293	K
+validity	specific-heat-capacity-77-293k	source_pressure_known	0	0	1
+curve	young-modulus-77-293k	nist-e-fit	young_modulus	temperature	K	GPa	77:77.1450506572731,80:77.0819110560000,90:76.8566420910000,100:76.6110260000000,110:76.3480172910000,120:76.0703134560000,130:75.7803549710000,140:75.4803252960000,150:75.1721508750000,160:74.8575011360000,170:74.5377884910000,180:74.2141683360000,190:73.8875390510000,200:73.5585420000000,210:73.2275615310000,220:72.8947249760000,230:72.5599026510000,240:72.2227078560000,250:71.8824968750000,260:71.5383689760000,270:71.1891664110000,280:70.8334744160000,290:70.4696212110000,293:70.3585921827291	linear
+uncertainty	young-modulus-77-293k	unstated	-	-	-	-
+validity	young-modulus-77-293k	temperature	77	293	K
+validity	young-modulus-77-293k	source_pressure_known	0	0	1

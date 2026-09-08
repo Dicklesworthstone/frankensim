@@ -1,6 +1,10 @@
-frankensim.matdb-manifest.v1
+frankensim.matdb-manifest.v3
 pack_id	ofhc-copper-cryogenic
 redistribution	permitted	NIST OFHC Copper material-property page is unmarked as copyrighted; NIST Copyrights & Disclaimers treats unmarked site information as public information that may be distributed or copied; NIST attribution retained
-citation	National Institute of Standards and Technology, Material Properties: OFHC Copper (UNS C10100/C10200), revision 1 dated 2010-02-03, cryogenic thermal-conductivity and specific-heat coefficients, ranges, and curve-fit errors
+citation	National Institute of Standards and Technology, Material Properties: OFHC Copper (UNS C10100/C10200), revision 1 dated 2010-02-03, cryogenic thermal-conductivity and specific-heat coefficients, ranges, and curve-fit errors; https://trc.nist.gov/cryogenics/materials/OFHC%20Copper/OFHC_Copper_rev1.htm
 license	NIST-Public-Information-Attribution-Requested
 source	nist-ofhc-fit	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_pressure_known	source-pressure-known	dimensional

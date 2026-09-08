@@ -31,10 +31,26 @@ temperature axes. Names such as `specific-heat-capacity` and
 is a source bundle with its own conditions; it is not automatically a complete
 material card or a qualified simulation.
 
+`water-liquid-iapws-sr6-08` supplies five liquid-water curves (density, isobaric
+heat capacity, specific enthalpy, conductivity and dynamic viscosity), each
+with 15 knots from 283.15 to 353.15 K at exactly 100000 Pa. The source is
+[IAPWS SR6-08(2011)](https://iapws.org/documents/release/LiquidWater.download),
+which permits republication with attribution. The enthalpy convention is
+inherited from its Gibbs-energy equation, with an explicit query flag; liquid
+phase and pressure are also required. The reusable discovery request is
+[`liquid-water.json`](../../../examples/material-discovery/liquid-water.json).
+Linear interpolation adds sampled relative discrepancies of approximately
+0.00393%, 0.00788%, 0.00796%, 0.01888% and 0.38335%, respectively, against
+the source equations. These are numerical sampling results, separate from
+source uncertainty and not certified bounds. Independently interpolated
+enthalpy and heat capacity differ by at most 1.100 J/kg per 5 K interval
+under the integral consistency check, and 3.519 J/(kg K) under the derivative
+check. This bounded dataset does not supply boiling, steam, ice or a fluid solve.
+
 | Source family | Material records | What the records support |
 | --- | --- | --- |
 | NASA-CR-71699 | Annealed pure aluminum and copper; pure iron, nickel and titanium; 7075-T6 aluminum; X-750; 304A and 347 stainless; titanium A-110AT | Selected temperature/conductivity tables with explicit linear engineering interpolation, excluding source-marked extrapolation and unrepresented phase discontinuities |
-| NIST cryogenic material pages | 304 and 316 stainless, C26000 brass, 1100 aluminum | Stainless conductivity, heat-capacity and relative-expansion interpolation over 77–300 K; modulus over 77–293 K (304) or 77–294 K (316). Other materials retain exact temperatures. Complete coefficients and source ranges remain in the observations |
+| NIST cryogenic material pages | 304 and 316 stainless, C26000 brass, 1100 aluminum | Stainless conductivity, heat-capacity, relative-expansion and model-derived instantaneous-expansion interpolation over 77–300 K; modulus over 77–293 K (304) or 77–294 K (316). Other materials retain exact temperatures. Complete coefficients, derivations and source ranges remain in the observations |
 | NASA/TP-3287/REV1 | Aluminum, copper, lead, tin and zinc crystalline, liquid and fusion records | Phase-specific heat capacity and enthalpy, plus fusion energy from paired rows at the same transition temperature and reference state |
 | NASA-CR-144016 | Elemental liquid lead | Compiled temperature-dependent density, conductivity, viscosity and surface-tension rows, retaining source pressure/purity/surface gaps and the explicit conductivity calorie conversion |
 | NBS RP500, Table 2 | Cast-lead sample 1144, 99.9% Pb, sand mold | Measured density at 25 °C and four mean linear-expansion coefficients from 20 °C to 60/100/200/300 °C on the first heating run; individual sample retained, without pooling heating/cooling histories |
@@ -66,8 +82,17 @@ non-knot temperatures check modulus against its published polynomial within
 0.04% and expansion within `1e-5` absolute strain. These are sampled
 approximation checks, not global bounds or measurement uncertainty.
 The source's small nonzero expansion fit residual at 293 K is preserved.
-Relative expansion remains dimensionless; it does not supply the instantaneous
-thermal-expansion coefficient or an executable thermal-strain law.
+Relative expansion remains dimensionless. A separate curve now supplies the
+model-derived instantaneous coefficient `alpha(T) = epsilon'(T)/(1+epsilon(T))`
+in `K^-1`, calculated from the source polynomial and represented by 11 knots
+over 77–300 K for each alloy. It is neither a relabeling of relative strain nor
+a range-mean coefficient. A 0.01 K sampling comparison found maximum relative
+interpolation discrepancy about 0.6981%. This is not a global bound; the source's
+5% relative-length fit error provides no derivative-error or statistical
+uncertainty bound. Both alloys publish the same expansion coefficients. The
+derived curves retain pressure-unknown context and the fitted 293 K residual;
+they do not supply missing density/Poisson ratio or qualify a thermal-strain,
+loss or heating model.
 Other NIST cryogenic point records still refuse temperatures between their
 retained points.
 The NASA iron conductivity curve stops before the source's duplicated
@@ -328,16 +353,18 @@ Reference-gas sources:
 - <https://tsapps.nist.gov/srmext/certificates/archives/>
 - <https://www.nist.gov/copyrights-disclaimers>
 
-## Aluminum 6061-T6 cryogenic exact-point tranche
+## Aluminum 6061-T6 cryogenic curves
 
 `aluminum-6061-t6-cryogenic/` is the first committed bulk-material tranche.
-It identifies the condition as Aluminum 6061-T6, UNS AA96061, and retains
-thermal conductivity, specific heat capacity, and Young's modulus at exactly
-`77 K` and `293 K`. Each value is an evaluation of the polynomial printed on
-NIST's Aluminum 6061-T6 material-property page, using the page's displayed
-coefficients and equation. The runtime claims have degenerate temperature
-validity intervals (`T_min = T_max`), so they do not imply interpolation or a
-continuous curve.
+It identifies the condition as Aluminum 6061-T6, UNS A96061, and retains
+thermal conductivity, specific heat capacity, and Young's modulus as three
+24-knot curves over `77–293 K`. Knots evaluate the polynomials printed on
+NIST's Aluminum 6061-T6 material-property page with 60-digit decimal arithmetic,
+rounded to 15 significant digits. The `77 K` and `293 K` anchors remain;
+tiny specific-heat endpoint corrections remove prior floating-point cancellation
+error. Between knots, the declared model is piecewise linear. The v3 manifest
+retains absolute-temperature semantics and requires `source-pressure-known=0`:
+the source did not specify pressure, which does not mean vacuum or atmosphere.
 
 NIST reports curve-fit errors relative to the underlying data of `0.5%` for
 thermal conductivity, `5%` for specific heat, and `1%` for Young's modulus.
@@ -345,6 +372,15 @@ Those figures do not state a confidence level or degrees of freedom, so the
 source records retain them as observation caveats and explicitly encode the
 runtime uncertainty as `Unstated`. They are not laundered into statistical
 confidence intervals.
+
+For the declared grid (`77`, every `10 K` from `80` through `290`, then `293 K`),
+99 interior probes per segment measured maximum relative interpolation
+discrepancies of `0.0858%` for conductivity, `0.1840%` for heat capacity and
+`0.003558%` for modulus against the published equations. These sampled
+discrepancies are separate from NIST's fit errors; they are not certified global
+bounds or new experimental data. The curves refuse outside `77–293 K` and do
+not provide the density, Poisson ratio or thermal expansion of a complete
+heating specimen.
 
 As independent G3 comparison evidence, the 1966 NASA thermophysical-property
 compilation tabulates 6061-T6 thermal conductivity as `82 W/(m K)` at `75 K`
@@ -368,7 +404,7 @@ Material references:
 - <https://ntrs.nasa.gov/api/citations/19660014513/downloads/19660014513.pdf>
 - <https://ntrs.nasa.gov/citations/19690000065>
 
-## OFHC Copper cryogenic exact-point tranche
+## OFHC Copper cryogenic curves
 
 `ofhc-copper-rrr100/` retains NIST's combined OFHC Copper scope, UNS
 C10100/C10200, without pretending that the two UNS designations are
@@ -380,8 +416,13 @@ condition, so its observation names that omission explicitly instead of
 silently borrowing the conductivity condition.
 
 The tranche evaluates the published RRR-100 conductivity correlation and
-specific-heat polynomial at exactly `77 K` and `293 K`. As with the Aluminum
-tranche, degenerate validity intervals prevent interpolation claims. NIST
+specific-heat polynomial at the same 24 temperatures over `77–293 K` as the
+aluminum curves, retaining both original endpoint temperatures and using
+60-digit decimal evaluation rounded to 15 significant digits. Its declared
+linear interpolant has sampled maximum discrepancies of `0.5555%` for
+conductivity and `0.2766%` for heat capacity (99 interior probes per segment).
+These are observed discrepancies from the equations, not global error bounds.
+The typed query also requires `source-pressure-known=0`. NIST
 reports `1%` curve-fit error for the RRR-100 conductivity correlation and `5%`
 for specific heat at these temperatures, but does not give confidence levels
 or degrees of freedom. The pack therefore retains the errors and complete
@@ -394,6 +435,13 @@ Both are within `2%` of the NIST-derived `293 K` values. That coarse G3 check
 is evidence only: it neither overwrites the NIST claims nor erases NASA's
 distinct material/processing context. The NTRS record marks the NASA report
 public and as a work of the U.S. Government whose public use is permitted.
+
+The [cryogenic aluminum/copper discovery request](../../../examples/material-discovery/cryogenic-aluminum-copper.json)
+asks for both conductivity and heat capacity over `90–290 K` with the source's
+pressure-unstated context. Compile these two manifests and pass both packs to
+`fsim --json discover <request.json> <aluminum.fsmatpk> <copper.fsmatpk>`.
+Complete property coverage remains unbound to a named specimen; it does not
+establish same-specimen compatibility or a transient thermal model.
 
 OFHC Copper references:
 
