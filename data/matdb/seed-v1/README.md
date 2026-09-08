@@ -23,6 +23,206 @@ infer symmetry, or turn a fixture claim into authority for either bulk material.
 The committed directories below remain bulk/species sources until separately
 identified, redistributable interface evidence is added.
 
+## Common material acquisition, September 2026
+
+New source packs use manifest v3 with explicit property-name mappings and typed
+temperature axes. Names such as `specific-heat-capacity` and
+`thermal-conductivity` therefore match current discovery requests. A directory
+is a source bundle with its own conditions; it is not automatically a complete
+material card or a qualified simulation.
+
+| Source family | Material records | What the records support |
+| --- | --- | --- |
+| NASA-CR-71699 | Annealed pure aluminum and copper; pure iron, nickel and titanium; 7075-T6 aluminum; X-750; 304A and 347 stainless; titanium A-110AT | Selected temperature/conductivity tables with explicit linear engineering interpolation, excluding source-marked extrapolation and unrepresented phase discontinuities |
+| NIST cryogenic material pages | 304 and 316 stainless, C26000 brass, 1100 aluminum | Stainless conductivity, heat-capacity and relative-expansion interpolation over 77–300 K; modulus over 77–293 K (304) or 77–294 K (316). Other materials retain exact temperatures. Complete coefficients and source ranges remain in the observations |
+| NASA/TP-3287/REV1 | Aluminum, copper, lead, tin and zinc crystalline, liquid and fusion records | Phase-specific heat capacity and enthalpy, plus fusion energy from paired rows at the same transition temperature and reference state |
+| NASA-CR-144016 | Elemental liquid lead | Compiled temperature-dependent density, conductivity, viscosity and surface-tension rows, retaining source pressure/purity/surface gaps and the explicit conductivity calorie conversion |
+| NBS RP500, Table 2 | Cast-lead sample 1144, 99.9% Pb, sand mold | Measured density at 25 °C and four mean linear-expansion coefficients from 20 °C to 60/100/200/300 °C on the first heating run; individual sample retained, without pooling heating/cooling histories |
+| NBS RP668, Table 5 | Lead conductivity reference standard L.S., cast in a bottom-feed cast-iron mold and machined | Published calibrated conductivity estimate over 0–300 °C, explicitly acknowledging the assumed absolute calibration; no numerical purity or pressure inferred |
+| NIST CFAST thermal library | Normal/lightweight concrete, cement mortar, clay/common brick, calcium-silicate board, cellulose/glass-fiber/urethane insulation, ordinary/Type X gypsum board | Named textbook/model inputs for conductivity, specific heat, density and layer/observer parameters; not specimen measurements or grade allowables |
+| NISTIR 6475 | Normal-strength concrete Mixture IV, cylinder ST-IV-25-1 | Measured room-temperature strength, dynamic and static modulus, plus explicitly derived apparent cylinder density; the mix and conditioning remain attached |
+| USDA FPL-GTR-282 | Southern Pine and Douglas-fir plywood; Southern Pine mill 1 and Aspen mill 7 OSB | Selected product bending, shear and internal-bond values with direction and source identity; unknown grade, moisture, layup and temperature remain explicit |
+| USDA FPL-GTR-282, Chapter 5 | Waterborne-preservative-treated lumber | Historical processing thresholds and named missing inputs; no treatment-specific strength or thermal-property correction is inferred |
+| NTRS 19860021558 | Duran borosilicate glass | Density, elasticity, heat capacity, conductivity, range-mean expansion and temperature ratings; conflicting tensile-strength columns are withheld |
+| NIST SRM 1826b | Named soda-lime glass density standard | Whole-specimen density at 20 °C with the certificate's expanded uncertainty; no microhomogeneity or generic-glass certification claim |
+| NIST PVC cryogenic page | Low-density PVC foam at three stated densities | Exact 300 K fit evaluations; air-filled and CO2-blown conductivity claims remain distinct from each other and from the specific-heat specimen |
+
+The NASA table curves are piecewise-linear approximations of published values,
+not reproductions of the authors' complete fitted laws. No interpolation error
+bound or statistical confidence is invented. The 304/316 stainless thermal
+curves use 11 fit evaluations over 77–300 K with linear interpolation between
+them. The knots were evaluated with 60-digit decimal arithmetic, then rounded
+to 15 significant digits. This corrects tiny cancellation errors in the earlier
+77/293 K floating-point evaluations (largest change about `4.43e-8 J/kg/K`).
+These curves approximate the published polynomial; they do not execute it.
+An independent 0.01 K sampling comparison found a largest relative deviation
+of about 1.374%, for 304 specific heat near 87.59 K. That is a sampled numerical
+discrepancy, not a global bound or additional physical uncertainty. The source
+fit-error notes remain separate from the `Unstated` statistical uncertainty.
+Stainless modulus now has separate linear approximations over 77–293 K (304)
+and 77–294 K (316); relative expansion covers 77–300 K for both. Their knots
+use the same high-precision evaluation method. Numerical comparisons at
+non-knot temperatures check modulus against its published polynomial within
+0.04% and expansion within `1e-5` absolute strain. These are sampled
+approximation checks, not global bounds or measurement uncertainty.
+The source's small nonzero expansion fit residual at 293 K is preserved.
+Relative expansion remains dimensionless; it does not supply the instantaneous
+thermal-expansion coefficient or an executable thermal-strain law.
+Other NIST cryogenic point records still refuse temperatures between their
+retained points.
+The NASA iron conductivity curve stops before the source's duplicated
+phase-transition temperature rather than joining two different phases.
+The elemental thermodynamic packs likewise keep their solid and liquid tables
+separate. Tin's crystalline table specifically describes the tetragonal state;
+the table-phase flag cannot automatically select between solid allotropes.
+
+The new pure-metal conductivity tables describe annealed aluminum of
+99.996+% purity over 200–930 K and annealed copper of 99.999+% purity over
+273–1350 K, with their stated residual resistivities. Their explicit solid
+endpoints stop before the separate liquid rows. Pressure remains unstated;
+these records cannot automatically join the 1-bar NASA thermodynamic tables
+into a condition-matched specimen. NASA-CR-71699 contains no lead conductivity
+table, so this tranche does not fill that gap.
+
+`lead-cast-expansion-nbs-rp500` adds five measurements for one named solid
+specimen: sample 1144, sand-cast 99.9% lead. Table 2 reports its density as
+`11.310 g/cm3` at 25 °C and its first-heating mean expansion coefficients as
+`28.3`, `28.6`, `29.5`, and `31.2` × `1e-6 K^-1` from 20 °C to 60, 100,
+200, and 300 °C, respectively. The query requires the actual sample, heating
+direction and both interval endpoints; it refuses cooling, another reference
+temperature, and unmeasured intervals. Density remains an exact-temperature
+record with no asserted before/after-heating condition. These are neither
+instantaneous expansion coefficients nor a continuous density law. Pressure
+remains unstated, and this specimen cannot automatically join the NASA
+standard-state thermodynamic records into a complete heating bundle.
+
+`lead-solid-conductivity-nbs-rp668` supplies the separate L.S. reference
+standard's published conductivity estimate over 273.15–573.15 K: 35.2, 33.2,
+31.2, and 29.2 W/(m K) at 0, 100, 200, and 300 °C with linear interpolation.
+The experiment measured temperature dependence against an **assumed absolute
+anchor** of 0.352 W/(cm K) at 0 °C. The source's illustrated measurement run
+only reaches down to 58 °C; the 0 °C entry is its adopted calibration value.
+Queries must acknowledge `source-calibration-assumed=1`. The reported roughly
+2% comparison consistency and estimated roughly 3% anchor accuracy remain
+source caveats, without statistical confidence semantics. The curve stops
+below melting and does not identify the RP500 specimen.
+
+After compiling the two stainless manifests to `304.fsmatpk` and `316.fsmatpk`,
+compare their thermal coverage with:
+
+```bash
+frankensim --json discover \
+  examples/material-discovery/stainless-thermal.json \
+  /path/to/304.fsmatpk /path/to/316.fsmatpk
+```
+
+Both source bundles supply conductivity and specific heat throughout the
+request's 90–297 K interval, with explicit acknowledgement of unknown source
+pressure. Missing density, specimen/process identity and executable evolving
+models still prevent a complete heating trajectory claim.
+
+Use `examples/material-discovery/stainless-thermomechanical.json` with the same
+command to request all four properties over 90–293 K. Both packs satisfy that
+declared subset. Extending the upper temperature to 294 K leaves only 316
+complete because 304's modulus fit stops at 293 K; at 295 K neither modulus
+is supported. The longer thermal range does not extend mechanical coverage.
+
+The CFAST records require explicit acknowledgement of missing source conditions.
+Their nominal layer thicknesses describe CFAST layers, and their emissivities
+describe model inputs; neither becomes an intrinsic, fully characterized bulk
+material property. The entire required [CFAST notice](CFAST_NOTICE.md) is also
+carried in the affected manifest license fields and compiled pack provenance.
+The original CSV is pinned to commit
+`d4a6e17c292851b80329581d0fb6018317ca3269` of `firemodels/cfast`.
+
+For the measured concrete, approximately six months of water curing and the
+final 24-hour drying condition are distinct from the 25 °C mechanical test
+state. Density is calculated from the reported mass and cylinder dimensions;
+its measurement temperature is not supplied. A single specimen does not define
+mixture-wide statistics, a moisture law, or a structural design allowable.
+
+The plywood table's proportional-limit SI header conflicts with its paired
+imperial values. These records disclose the conflict and use the paired psi
+values, rounded to the table's MPa precision. OSB parallel and perpendicular
+properties remain separate; neither panel family supplies a full elastic
+tensor. Specific gravity is retained without inventing a moisture-dependent
+density conversion. The treated-lumber records describe the 2021 handbook's
+retention and post-treatment redrying discussion, not current code compliance
+or a universal correction for ACQ, CCA, copper azole or other treatments.
+
+Duran's 250 °C thermal-shock rating is a **250 K temperature difference**.
+Its 20–300 °C expansion entry is a range mean. The source's tensile-strength
+columns disagree: 7.8 MPa is paired with 11,400 psi (about 78.6 MPa), and
+3.9 MPa with 5,700 psi (about 39.3 MPa), under a safety factor of five.
+Both conflicting pairs remain in the observation, but neither numerical
+strength claim is admitted pending corroboration. The SRM 1826b density
+interval is an expanded half-width at
+approximately 95% confidence, without an inferred probability distribution,
+coverage factor or degrees of freedom. Its temperature-correction coefficient
+has no supplied range and therefore cannot establish heating coverage.
+
+Lead's NASA records use pure crystalline/liquid standard states at 1 bar and
+the source's `207.2 g/mol` molar mass. The crystalline table is retained over
+`200..600.65 K` and the liquid table over `600.65..1300 K`. Both enthalpies use
+zero for crystalline lead at `298.15 K`; their paired values at `600.65 K`
+differ by `4.812 kJ/mol`, or about `23.224 kJ/kg`. Fusion is named
+`latent-heat-fusion`, distinct from vaporization or a liquid formation enthalpy.
+The phase flag selects a source table, not a mixture or melting-kinetics law.
+These independent heat-capacity and enthalpy interpolants are not an exactly
+thermodynamically consistent coupled constitutive model.
+
+The additional `lead-liquid-transport-nasa-cr144016` bundle retains density
+over 400–1000 °C, conductivity over 400–800 °C, viscosity over 441–844 °C,
+and surface tension over 350–500 °C. These are compiled source values with
+engineering linear interpolation. Pressure and specimen assay are unstated;
+the surface environment is also unstated. The conductivity's historical
+`Cal/(m sec °C)` unit has no identified calorie convention, so the pack
+explicitly selects 4.184 J/cal and retains that ambiguity in query context.
+These records do not supply solid-phase transport, across-melting coverage,
+or a condition-matched 1-bar specimen bundle.
+
+Compile and query the new liquid heat-capacity coverage with:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/lead-liquid-nasa-tp3287/manifest.tsv \
+  --out /path/to/lead-liquid.fsmatpk
+frankensim --json discover \
+  examples/material-discovery/lead-liquid-heat-capacity.json \
+  /path/to/lead-liquid.fsmatpk
+```
+
+This request concerns only heat capacity over `650..800 K`, at the source
+pressure and liquid phase. Heating/melting still needs condition-matched
+density, conductivity, evolving mechanical/liquid/interface properties and
+executable models. The older C447 seed and its original gap demonstration
+remain separate historical source records.
+
+Primary source corpus:
+
+- [NASA thermophysical tables, NASA-CR-71699](https://ntrs.nasa.gov/citations/19660014513)
+- [Thermodynamic Data for Fifty Reference Elements, NASA/TP-3287/REV1](https://ntrs.nasa.gov/citations/20010021116)
+- [Diffusion in Liquid Metal Systems, NASA-CR-144016](https://ntrs.nasa.gov/citations/19760003214)
+- [NIST cryogenic material-property index](https://trc.nist.gov/cryogenics/materials/materialproperties.htm)
+- [NBS RP500, cast-lead expansion and density](https://nvlpubs.nist.gov/nistpubs/jres/9/jresv9n5p703_A2b.pdf)
+- [NBS RP668, calibrated solid-lead conductivity](https://nvlpubs.nist.gov/nistpubs/jres/12/jresv12n4p429_A2b.pdf)
+- [NIST CFAST source thermal library at the retained commit](https://github.com/firemodels/cfast/blob/d4a6e17c292851b80329581d0fb6018317ca3269/Utilities/for_bundle/Bin/thermal.csv)
+- [NIST SP 1041, CFAST user's guide](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication1041.pdf)
+- [NISTIR 6475, concrete mechanical measurements](https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir6475.pdf)
+- [USDA Wood Handbook, FPL-GTR-282](https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/fpl_gtr282.pdf)
+- [NASA contractor fuel-flowmeter report, Duran glass table](https://ntrs.nasa.gov/citations/19860021558)
+- [NIST SRM 1826b density certificate](https://tsapps.nist.gov/srmext/certificates/archives/1826b.pdf)
+- [NIST PVC cryogenic fits](https://trc.nist.gov/cryogenics/materials/PVC/PVCrev.htm)
+
+Coverage remains incomplete. Missing grade/process, temperature, moisture,
+frequency, surface preparation, uncertainty or optical-band information must
+not be filled from a superficially similar material. Common-family coverage
+and complete condition-specific use cases are different acquisition targets.
+In particular, treated lumber still needs measured species/chemical/retention
+bundles, and the added PVC data do not describe ordinary solid PVC pipe.
+Broader alloy grades, glass optical spectra, plastic formulations and
+continuous temperature/moisture/frequency coverage remain acquisition work.
+
 ## Current species-association tranches
 
 | Directory | Species | NASA molecular weight | Program role |

@@ -1,0 +1,17 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "650 K", "upper": "800 K"},
+      {"name": "pressure", "kind": "pressure", "lower": "100000 Pa", "upper": "100000 Pa"},
+      {"name": "source_phase_liquid", "kind": "dimensional", "lower": "1", "upper": "1"}
+    ]
+  },
+  "selection": "single-claim-only"
+}

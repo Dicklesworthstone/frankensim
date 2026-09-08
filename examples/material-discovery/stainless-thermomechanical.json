@@ -1,0 +1,19 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
+    {"name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "young-modulus", "unit": "Pa", "kind": "dimensional"},
+    {"name": "linear-expansion-relative-to-293k", "unit": "1", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "90 K", "upper": "293 K"},
+      {"name": "source-pressure-known", "kind": "dimensional", "lower": "0", "upper": "0"}
+    ]
+  },
+  "selection": "single-claim-only"
+}

@@ -1255,6 +1255,7 @@ fn manifest_quantity_kind(name: &str) -> Result<Option<QuantityKind>, CompileErr
         "dimensional" => None,
         "absolute-temperature" => Some(QuantityKind::AbsoluteTemperature),
         "temperature-difference" => Some(QuantityKind::TemperatureDifference),
+        "pressure" => Some(QuantityKind::Pressure),
         "energy" => Some(QuantityKind::Energy),
         "torque" => Some(QuantityKind::Torque),
         name => Some(

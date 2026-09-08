@@ -14,6 +14,1064 @@ use fs_matdb::{
 };
 use fs_qty::Dims;
 
+/// Source acquisition checks exercise the real offline compiler and typed
+/// evaluator. They establish source transport, not experimental validation.
+mod common_material_acquisition {
+    use super::*;
+    use fs_matdb::{PropertyClaim, QueryPoint, SelectionPolicy};
+
+    fn compile(slug: &str) -> (NormalizedPack, PathBuf) {
+        let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
+        let path = fixture_dir().join(format!("{slug}.fsmatpk"));
+        let run = run_compiler(&manifest, &path);
+        assert!(
+            run.status.success(),
+            "{slug}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(&path).unwrap();
+        let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
+        let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
+        assert_eq!(
+            pack.schema_version(),
+            3,
+            "new sources must retain typed axes"
+        );
+        (pack, path)
+    }
+
+    fn point(claim: &PropertyClaim, overrides: &[(&str, f64)]) -> QueryPoint {
+        for (axis, _) in overrides {
+            assert!(
+                claim.validity.bound(axis).is_some(),
+                "query override {axis} is absent from {} validity",
+                claim.key.name()
+            );
+        }
+        let mut point = QueryPoint::new();
+        for (axis, &(lo, _)) in claim.validity.bounds() {
+            let value = overrides
+                .iter()
+                .find(|(name, _)| *name == axis)
+                .map_or(lo, |(_, value)| *value);
+            point = if let Some(quantity) = claim.validity.axis_quantities().get(axis) {
+                point.with_quantity(axis, *quantity, value)
+            } else {
+                point.with(axis, value)
+            }
+            .unwrap();
+        }
+        point
+    }
+
+    fn sample(pack: &NormalizedPack, name: &str, overrides: &[(&str, f64)]) -> f64 {
+        let claims = pack.claims().claims_for(name);
+        let claim = claims
+            .first()
+            .unwrap_or_else(|| panic!("missing canonical property {name}"))
+            .1;
+        pack.claims()
+            .query_typed(
+                &claim.key,
+                &point(claim, overrides),
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap_or_else(|error| panic!("{name} {overrides:?}: {error:?}"))
+            .evidence
+            .value
+            .value
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-10 * expected.abs().max(1.0),
+            "actual {actual}, source-derived expected {expected}"
+        );
+    }
+
+    fn check_claims(pack: &NormalizedPack) {
+        assert!(pack.claims().claims_ordered().next().is_some());
+        for (id, claim) in pack.claims().claims_ordered() {
+            assert!(!claim.observations.is_empty());
+            let samples = match &claim.value {
+                PropertyValue::Curve {
+                    abscissa, knots, ..
+                } => knots
+                    .iter()
+                    .map(|&(x, y)| (point(claim, &[(abscissa, x)]), y))
+                    .collect::<Vec<_>>(),
+                PropertyValue::Scalar { value, .. } => vec![(point(claim, &[]), *value)],
+            };
+            for (at, expected) in samples {
+                let answer = pack
+                    .claims()
+                    .query_pinned_typed(&claim.key, &at, id)
+                    .unwrap();
+                close(answer.evidence.value.value, expected);
+                pack.claims().verify_receipt(&answer.receipt).unwrap();
+            }
+            assert!(
+                pack.claims()
+                    .query_pinned_typed(&claim.key, &QueryPoint::new(), id)
+                    .is_err(),
+                "source context must not disappear for {}",
+                claim.key.name()
+            );
+            if let Some((_, hi)) = claim.validity.bound("temperature") {
+                let outside = point(claim, &[("temperature", hi + 1.0)]);
+                assert!(
+                    pack.claims()
+                        .query_pinned_typed(&claim.key, &outside, id)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_g3_liquid_lead_transport_source() {
+        let (pack, _) = compile("lead-liquid-transport-nasa-cr144016");
+        check_claims(&pack);
+        for (name, temperature, expected) in [
+            ("density", 773.15, 10390.0),
+            ("thermal-conductivity", 873.15, 3.8055 * 4.184),
+            ("dynamic-viscosity", 824.15, 1.700 * 0.001),
+            ("surface-tension", 673.15, 43800.0 * 0.00001),
+        ] {
+            close(
+                sample(&pack, name, &[("temperature", temperature)]),
+                expected,
+            );
+            let claim = pack.claims().claims_for(name)[0].1;
+            assert_eq!(
+                claim.validity.bound("source-pressure-known"),
+                Some((0.0, 0.0))
+            );
+            assert!(
+                pack.claims()
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &[("source_phase_liquid", 0.0)]),
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err()
+            );
+        }
+        let density = pack.claims().claims_for("density")[0].1;
+        assert!(
+            pack.claims()
+                .query_typed(
+                    &density.key,
+                    &point(density, &[("temperature", 650.0)]),
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn g0_g3_lead_phase_tables_and_actual_discovery() {
+        let (solid, _) = compile("lead-solid-nasa-tp3287");
+        let (liquid, liquid_path) = compile("lead-liquid-nasa-tp3287");
+        let (fusion, _) = compile("lead-fusion-nasa-tp3287");
+        for pack in [&solid, &liquid, &fusion] {
+            check_claims(pack);
+        }
+        close(
+            sample(&solid, "specific-heat-capacity", &[("temperature", 300.0)]),
+            26.673 / 0.2072,
+        );
+        close(
+            sample(&liquid, "specific-heat-capacity", &[("temperature", 700.0)]),
+            30.313 / 0.2072,
+        );
+        let at_melt = [("temperature", 600.65)];
+        let jump = sample(&liquid, "specific-enthalpy-reference-29815k", &at_melt)
+            - sample(&solid, "specific-enthalpy-reference-29815k", &at_melt);
+        close(jump, (13.361 - 8.549) * 1000.0 / 0.2072);
+        close(sample(&fusion, "latent-heat-fusion", &[]), jump);
+        close(sample(&fusion, "melting-point", &[]), 600.65);
+        // Independent columns of the printed source: trapezoidal cp integrates
+        // to tabulated h within 0.003 kJ/mol on this 50 K solid interval.
+        let cp_integral = 25.0
+            * (sample(&solid, "specific-heat-capacity", &[("temperature", 400.0)])
+                + sample(&solid, "specific-heat-capacity", &[("temperature", 450.0)]));
+        let dh = sample(
+            &solid,
+            "specific-enthalpy-reference-29815k",
+            &[("temperature", 450.0)],
+        ) - sample(
+            &solid,
+            "specific-enthalpy-reference-29815k",
+            &[("temperature", 400.0)],
+        );
+        assert!((cp_integral - dh).abs() < 3.0 / 0.2072);
+
+        let request = fixture_dir().join("liquid-heat-capacity.json");
+        fs::write(
+            &request,
+            include_str!("../../examples/material-discovery/lead-liquid-heat-capacity.json"),
+        )
+        .unwrap();
+        let run = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            request.to_str().unwrap().into(),
+            liquid_path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(run.exit_code, fs_cli::exit::SUCCESS, "{}", run.stderr);
+        assert!(
+            run.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("\"unknown_properties\":[]"),
+            "{}",
+            run.stdout
+        );
+        assert!(run.stdout.contains("\"claim\":"));
+        let cp = liquid.claims().claims_for("specific-heat-capacity")[0].1;
+        for overrides in [
+            vec![("temperature", 650.0), ("source_phase_liquid", 0.0)],
+            vec![("temperature", 650.0), ("pressure", 101325.0)],
+        ] {
+            assert!(
+                liquid
+                    .claims()
+                    .query_typed(
+                        &cp.key,
+                        &point(cp, &overrides),
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err()
+            );
+        }
+        println!("{}", run.stdout);
+    }
+
+    #[test]
+    fn g0_g3_common_element_phase_tables() {
+        // Cp anchors and fusion jumps are independent columns of NASA's
+        // printed selected-function tables III.2, III.15, III.42 and III.51.
+        for (element, mass, cp_molar, tm, fusion_molar) in [
+            ("aluminum", 0.026981539, 24.200, 933.61, 10700.0),
+            ("copper", 0.063546, 24.440, 1358.0, 13138.0),
+            ("tin", 0.118710, 27.112, 505.12, 7195.0),
+            ("zinc", 0.06539, 25.390, 692.73, 7300.0),
+        ] {
+            let (solid, _) = compile(&format!("{element}-solid-nasa-tp3287"));
+            let (liquid, _) = compile(&format!("{element}-liquid-nasa-tp3287"));
+            let (fusion, _) = compile(&format!("{element}-fusion-nasa-tp3287"));
+            for pack in [&solid, &liquid, &fusion] {
+                check_claims(pack);
+            }
+            close(
+                sample(&solid, "specific-heat-capacity", &[("temperature", 298.15)]),
+                cp_molar / mass,
+            );
+            close(
+                sample(
+                    &solid,
+                    "specific-enthalpy-reference-29815k",
+                    &[("temperature", 298.15)],
+                ),
+                0.0,
+            );
+            close(sample(&fusion, "melting-point", &[]), tm);
+            close(
+                sample(&fusion, "latent-heat-fusion", &[]),
+                fusion_molar / mass,
+            );
+            let jump = sample(
+                &liquid,
+                "specific-enthalpy-reference-29815k",
+                &[("temperature", tm)],
+            ) - sample(
+                &solid,
+                "specific-enthalpy-reference-29815k",
+                &[("temperature", tm)],
+            );
+            close(jump, fusion_molar / mass);
+            if element == "tin" {
+                // Table III.42: H(200)-H(298.15) = 3.740-6.323 kJ/mol.
+                close(
+                    sample(
+                        &solid,
+                        "specific-enthalpy-reference-29815k",
+                        &[("temperature", 200.0)],
+                    ),
+                    -2583.0 / mass,
+                );
+            }
+            println!(
+                "{element}: three phase packs, source Cp, reference enthalpy and fusion jump pass"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_g3_wood_glass_and_pvc_source_conditions() {
+        for (slug, name, temperature, expected) in [
+            (
+                "plywood-southern-pine-fpl-gtr282",
+                "bending-moe",
+                None,
+                7.70e9,
+            ),
+            (
+                "plywood-douglas-fir-fpl-gtr282",
+                "bending-mor",
+                None,
+                41.37e6,
+            ),
+            (
+                "osb-aspen-pu-1992-mill7-fpl-gtr282",
+                "bending-moe-perpendicular",
+                None,
+                2.03e9,
+            ),
+            (
+                "osb-southern-pine-biblis-1989-mill1-fpl-gtr282",
+                "bending-moe-parallel",
+                None,
+                4.41e9,
+            ),
+            (
+                "waterborne-preservative-treated-lumber-fpl-gtr282",
+                "post-treatment-redrying-standard-temperature-limit",
+                None,
+                347.15,
+            ),
+            (
+                "glass-borosilicate-duran-ntrs-19860021558",
+                "specific-heat-capacity",
+                Some(293.15),
+                0.18 * 4184.0,
+            ),
+            (
+                "glass-soda-lime-srm-1826b-nist",
+                "density",
+                Some(293.15),
+                2548.668,
+            ),
+            (
+                "pvc-cryogenic-nist",
+                "specific-heat-capacity",
+                Some(300.0),
+                1167.15580013972,
+            ),
+        ] {
+            let (pack, _) = compile(slug);
+            check_claims(&pack);
+            let at = temperature
+                .map(|t| ("temperature", t))
+                .into_iter()
+                .collect::<Vec<_>>();
+            close(sample(&pack, name, &at), expected);
+            if slug == "glass-borosilicate-duran-ntrs-19860021558" {
+                for strength in [
+                    "tensile-strength-fire-bright",
+                    "tensile-strength-cut-surface",
+                ] {
+                    assert!(
+                        pack.claims().claims_for(strength).is_empty(),
+                        "conflicting source unit columns cannot yield a strength claim"
+                    );
+                }
+                let observation = pack
+                    .claims()
+                    .observation(pack.claims().observation_ids().next().unwrap())
+                    .unwrap();
+                for retained in [
+                    "source unit conflict",
+                    "7.8 MPa",
+                    "11,400 psia",
+                    "3.9 MPa",
+                    "5,700 psia",
+                ] {
+                    assert!(observation.caveats.contains(retained));
+                }
+                let shock = pack
+                    .claims()
+                    .claims_for("thermal-shock-resistance-temperature-difference")[0]
+                    .1;
+                assert_eq!(
+                    shock.key.quantity().semantic_type().unwrap().kind(),
+                    fs_qty::semantic::QuantityKind::TemperatureDifference
+                );
+                close(sample(&pack, shock.key.name(), &[]), 250.0);
+                let transition = pack.claims().claims_for("glass-transition-temperature")[0].1;
+                assert_eq!(
+                    transition.key.quantity().semantic_type().unwrap().kind(),
+                    fs_qty::semantic::QuantityKind::AbsoluteTemperature
+                );
+                close(sample(&pack, transition.key.name(), &[]), 803.15);
+            }
+            if slug == "waterborne-preservative-treated-lumber-fpl-gtr282" {
+                let limit = pack.claims().claims_for(name)[0].1;
+                assert_eq!(
+                    limit.key.quantity().semantic_type().unwrap().kind(),
+                    fs_qty::semantic::QuantityKind::AbsoluteTemperature
+                );
+                assert!(
+                    pack.claims().claims_for("young-modulus").is_empty(),
+                    "process thresholds cannot manufacture a treated-wood modulus"
+                );
+            }
+            if slug == "glass-soda-lime-srm-1826b-nist" {
+                let density = pack.claims().claims_for("density")[0].1;
+                assert_eq!(
+                    density.uncertainty,
+                    UncertaintyModel::HalfWidth {
+                        half_width: 0.032,
+                        confidence: 0.95
+                    }
+                );
+            }
+            if slug == "pvc-cryogenic-nist" {
+                for (_, claim) in pack.claims().claims_ordered() {
+                    assert_eq!(
+                        claim.interpolation,
+                        InterpolationPolicy::ConstantWithinValidity
+                    );
+                    assert_eq!(claim.validity.bound("temperature"), Some((300.0, 300.0)));
+                    assert!(
+                        pack.claims()
+                            .query_typed(
+                                &claim.key,
+                                &point(claim, &[("temperature", 299.0)]),
+                                SelectionPolicy::SingleClaimOnly,
+                            )
+                            .is_err()
+                    );
+                }
+                let conductivity = pack.claims().claims_for("thermal-conductivity");
+                assert_eq!(conductivity.len(), 2);
+                // Different foam densities and fill gases must select their
+                // own claims without a pin or an arbitrary tie breaker.
+                for (_, claim) in conductivity {
+                    let answer = pack
+                        .claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[]),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .unwrap();
+                    let PropertyValue::Scalar { value, .. } = &claim.value else {
+                        panic!("NIST fit evaluations are exact points");
+                    };
+                    close(answer.evidence.value.value, *value);
+                }
+            }
+            println!("source pack {slug}: source value, typed context and query selection pass");
+        }
+    }
+
+    #[test]
+    fn g0_g3_stainless_thermal_envelope() {
+        let mut paths = Vec::new();
+        for (grade, cp_coefficients, cp_100, cp_300) in [
+            (
+                "304",
+                [
+                    22.0061, -127.5528, 303.647, -381.0098, 274.0328, -112.9212, 24.7593,
+                    -2.239153, 0.0,
+                ],
+                275.496445572426,
+                469.448840671653,
+            ),
+            (
+                "316",
+                [
+                    -1879.464, 3643.198, 76.70125, -6176.028, 7437.6247, -4305.7217, 1382.4627,
+                    -237.22704, 17.05262,
+                ],
+                273.023481294007,
+                490.213382301636,
+            ),
+        ] {
+            let (pack, path) = compile(&format!("stainless-{grade}-nist-cryogenic"));
+            paths.push(path);
+            check_claims(&pack);
+            close(
+                sample(&pack, "specific-heat-capacity", &[("temperature", 100.0)]),
+                cp_100,
+            );
+            close(
+                sample(&pack, "specific-heat-capacity", &[("temperature", 300.0)]),
+                cp_300,
+            );
+            for (name, coefficients) in [
+                ("specific-heat-capacity", cp_coefficients),
+                (
+                    "thermal-conductivity",
+                    [
+                        -1.4087, 1.3982, 0.2543, -0.6260, 0.2334, 0.4256, -0.4658, 0.1650, -0.0199,
+                    ],
+                ),
+            ] {
+                let claims = pack.claims().claims_for(name);
+                assert_eq!(
+                    claims.len(),
+                    1,
+                    "old point claims must not create ambiguous lookup"
+                );
+                let claim = claims[0].1;
+                assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
+                assert_eq!(claim.validity.bound("temperature"), Some((77.0, 300.0)));
+                assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                // Numerical approximation check against the published fit at
+                // 223 non-knot temperatures. This is neither a global error
+                // bound nor physical validation of the original measurements.
+                for integer in 77..300 {
+                    let temperature = f64::from(integer) + 0.5;
+                    let x = temperature.log10();
+                    let polynomial = coefficients.iter().rev().fold(0.0, |sum, a| sum * x + a);
+                    let source_fit = 10.0_f64.powf(polynomial);
+                    let interpolated = sample(&pack, name, &[("temperature", temperature)]);
+                    assert!(
+                        (interpolated / source_fit - 1.0).abs() < 0.015,
+                        "{grade} {name} at {temperature} K"
+                    );
+                }
+                for overrides in [
+                    vec![("temperature", 76.0)],
+                    vec![("temperature", 301.0)],
+                    vec![("temperature", 150.0), ("source-pressure-known", 1.0)],
+                ] {
+                    assert!(
+                        pack.claims()
+                            .query_typed(
+                                &claim.key,
+                                &point(claim, &overrides),
+                                SelectionPolicy::SingleClaimOnly
+                            )
+                            .is_err()
+                    );
+                }
+            }
+            // The longer thermal range cannot extend the source's shorter
+            // modulus fit or manufacture density for a heating trajectory.
+            let modulus = pack.claims().claims_for("young-modulus")[0].1;
+            assert!(
+                pack.claims()
+                    .query_typed(
+                        &modulus.key,
+                        &point(modulus, &[("temperature", 295.0)]),
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err()
+            );
+            assert!(pack.claims().claims_for("density").is_empty());
+        }
+        let request = fixture_dir().join("stainless-thermal.json");
+        fs::write(
+            &request,
+            include_str!("../../examples/material-discovery/stainless-thermal.json"),
+        )
+        .unwrap();
+        let run = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            request.to_str().unwrap().into(),
+            paths[0].to_str().unwrap().into(),
+            paths[1].to_str().unwrap().into(),
+        ]);
+        assert_eq!(run.exit_code, fs_cli::exit::SUCCESS, "{}", run.stderr);
+        assert_eq!(
+            run.stdout.matches("\"status\":\"complete\"").count(),
+            2,
+            "{}",
+            run.stdout
+        );
+        assert_eq!(
+            run.stdout.matches("\"status\":\"supported\"").count(),
+            4,
+            "{}",
+            run.stdout
+        );
+        for grade in ["304", "316"] {
+            assert!(
+                run.stdout
+                    .contains(&format!("\"pack\":\"stainless-{grade}-nist-cryogenic\""))
+            );
+        }
+        assert!(run.stdout.contains("\"unknown_properties\":[]"));
+        println!("{}", run.stdout);
+    }
+
+    #[test]
+    fn g0_g3_solid_lead_source_conditions() {
+        let (pack, _) = compile("lead-cast-expansion-nbs-rp500");
+        check_claims(&pack);
+        assert_eq!(pack.claims().claims_ordered().count(), 5);
+        let density = pack.claims().claims_for("density")[0].1;
+        close(
+            sample(&pack, "density", &[("temperature", 298.15)]),
+            11310.0,
+        );
+        assert!(density.validity.bound("source-heating").is_none());
+        assert!(
+            pack.claims()
+                .query_typed(
+                    &density.key,
+                    &point(density, &[("temperature", 299.15)]),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .is_err()
+        );
+        let name = "mean-linear-expansion-coefficient-from-20c";
+        let claims = pack.claims().claims_for(name);
+        assert_eq!(claims.len(), 4);
+        for (end, mean) in [
+            (333.15, 28.3e-6),
+            (373.15, 28.6e-6),
+            (473.15, 29.5e-6),
+            (573.15, 31.2e-6),
+        ] {
+            close(
+                sample(&pack, name, &[("source-range-end-temperature", end)]),
+                mean,
+            );
+        }
+        for (_, claim) in claims {
+            assert_eq!(claim.key.dims(), Dims([0, 0, 0, -1, 0, 0]));
+            assert_eq!(
+                claim.interpolation,
+                InterpolationPolicy::ConstantWithinValidity
+            );
+            assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+            assert_eq!(
+                claim.validity.bound("source-reference-temperature"),
+                Some((293.15, 293.15))
+            );
+            for axis in [
+                "source-reference-temperature",
+                "source-range-end-temperature",
+            ] {
+                assert_eq!(
+                    claim.validity.axis_quantities()[axis]
+                        .semantic_type()
+                        .unwrap()
+                        .kind(),
+                    fs_qty::semantic::QuantityKind::AbsoluteTemperature
+                );
+            }
+            for overrides in [
+                vec![("source-reference-temperature", 298.15)],
+                vec![("source-range-end-temperature", 400.0)],
+                vec![("source-sample-id", 1215.0)],
+                vec![("source-heating", 0.0)],
+                vec![("source-pressure-known", 1.0)],
+            ] {
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &overrides),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .is_err()
+                );
+            }
+        }
+        // The source's interval means cannot fill an instantaneous alpha law.
+        assert!(
+            pack.claims()
+                .claims_for("linear-thermal-expansion-coefficient")
+                .is_empty()
+        );
+        let (conductivity, _) = compile("lead-solid-conductivity-nbs-rp668");
+        check_claims(&conductivity);
+        let claim = conductivity.claims().claims_for("thermal-conductivity")[0].1;
+        for (temperature, expected) in [
+            (273.15, 35.2),
+            (373.15, 33.2),
+            (473.15, 31.2),
+            (573.15, 29.2),
+            (423.15, 32.2),
+        ] {
+            close(
+                sample(
+                    &conductivity,
+                    "thermal-conductivity",
+                    &[("temperature", temperature)],
+                ),
+                expected,
+            );
+        }
+        assert_eq!(claim.validity.bound("temperature"), Some((273.15, 573.15)));
+        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+        for overrides in [
+            vec![("temperature", 273.14)],
+            vec![("temperature", 573.16)],
+            vec![("source-calibration-assumed", 0.0)],
+            vec![("source_phase_liquid", 1.0)],
+            vec![("source-pressure-known", 1.0)],
+        ] {
+            assert!(
+                conductivity
+                    .claims()
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &overrides),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .is_err()
+            );
+        }
+        // A differently prepared conductivity standard supplies no density
+        // measurement for the RP500 specimen or for its own temperature range.
+        assert!(conductivity.claims().claims_for("density").is_empty());
+    }
+
+    #[test]
+    fn g0_g3_stainless_thermomechanical_envelope() {
+        let mut paths = Vec::new();
+        for (grade, upper, coefficients, e_150) in [
+            (
+                "304",
+                293,
+                [
+                    210.0593,
+                    0.1534883,
+                    -0.001617390,
+                    0.000005117060,
+                    -0.0000000061546,
+                ],
+                210.84558125e9,
+            ),
+            (
+                "316",
+                294,
+                [
+                    207.9488,
+                    0.07394241,
+                    -0.0009627200,
+                    0.000002845560,
+                    -0.0000000032408,
+                ],
+                205.3420715e9,
+            ),
+        ] {
+            let (pack, path) = compile(&format!("stainless-{grade}-nist-cryogenic"));
+            paths.push(path);
+            check_claims(&pack);
+            close(
+                sample(&pack, "young-modulus", &[("temperature", 150.0)]),
+                e_150,
+            );
+            for (name, high) in [
+                ("young-modulus", f64::from(upper)),
+                ("linear-expansion-relative-to-293k", 300.0),
+            ] {
+                let claims = pack.claims().claims_for(name);
+                assert_eq!(claims.len(), 1, "old points must not make lookup ambiguous");
+                let claim = claims[0].1;
+                assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
+                assert_eq!(claim.validity.bound("temperature"), Some((77.0, high)));
+                assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
+                for overrides in [
+                    vec![("temperature", 76.0)],
+                    vec![("temperature", high + 0.01)],
+                    vec![("temperature", 150.0), ("source-pressure-known", 1.0)],
+                ] {
+                    assert!(
+                        pack.claims()
+                            .query_typed(
+                                &claim.key,
+                                &point(claim, &overrides),
+                                SelectionPolicy::SingleClaimOnly,
+                            )
+                            .is_err()
+                    );
+                }
+            }
+            // Published polynomial evaluated separately from the tabulated
+            // curve. These sampled numerical checks are not physical bounds.
+            for integer in 77..upper {
+                let t = f64::from(integer) + 0.5;
+                let e_fit = coefficients
+                    .iter()
+                    .enumerate()
+                    .map(|(power, coefficient)| coefficient * t.powi(power as i32))
+                    .sum::<f64>()
+                    * 1e9;
+                let interpolated = sample(&pack, "young-modulus", &[("temperature", t)]);
+                assert!(
+                    (interpolated / e_fit - 1.0).abs() < 0.0004,
+                    "{grade} at {t} K"
+                );
+            }
+            for integer in 77..300 {
+                let t = f64::from(integer) + 0.5;
+                let expansion_fit = (-295.54 - 0.39811 * t + 0.0092683 * t.powi(2)
+                    - 0.000020261 * t.powi(3)
+                    + 0.000000017127 * t.powi(4))
+                    * 1e-5;
+                let interpolated = sample(
+                    &pack,
+                    "linear-expansion-relative-to-293k",
+                    &[("temperature", t)],
+                );
+                assert!(
+                    (interpolated - expansion_fit).abs() < 1e-5,
+                    "{grade} at {t} K"
+                );
+            }
+            let expansion = pack
+                .claims()
+                .claims_for("linear-expansion-relative-to-293k")[0]
+                .1;
+            assert_eq!(expansion.key.dims(), Dims::NONE);
+            close(
+                sample(&pack, expansion.key.name(), &[("temperature", 150.0)]),
+                -0.0020643008125,
+            );
+            close(
+                sample(&pack, expansion.key.name(), &[("temperature", 293.0)]),
+                7.4646191727e-7,
+            );
+            // Do not relabel the fitted total expansion as instantaneous alpha.
+            assert!(
+                pack.claims()
+                    .claims_for("linear-thermal-expansion-coefficient")
+                    .is_empty()
+            );
+            assert!(pack.claims().claims_for("density").is_empty());
+        }
+        let request = fixture_dir().join("stainless-thermomechanical.json");
+        let source =
+            include_str!("../../examples/material-discovery/stainless-thermomechanical.json");
+        for (upper, complete, supported) in [(293, 2, 8), (294, 1, 7), (295, 0, 6)] {
+            fs::write(&request, source.replace("293 K", &format!("{upper} K"))).unwrap();
+            let run = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                request.to_str().unwrap().into(),
+                paths[0].to_str().unwrap().into(),
+                paths[1].to_str().unwrap().into(),
+            ]);
+            assert_eq!(run.exit_code, fs_cli::exit::SUCCESS, "{}", run.stderr);
+            assert_eq!(
+                run.stdout.matches("\"status\":\"complete\"").count(),
+                complete,
+                "{}",
+                run.stdout
+            );
+            assert_eq!(
+                run.stdout.matches("\"status\":\"supported\"").count(),
+                supported,
+                "{}",
+                run.stdout
+            );
+            assert_eq!(
+                run.stdout.matches("\"status\":\"gap\"").count(),
+                8 - supported,
+                "{}",
+                run.stdout
+            );
+            assert!(
+                run.stdout.contains("\"unknown_properties\":[]"),
+                "{}",
+                run.stdout
+            );
+            println!("{upper} K envelope: {}", run.stdout);
+        }
+    }
+
+    #[test]
+    fn g0_g3_common_metals_and_construction_sources() {
+        // These expected SI values come from the independently reviewed source
+        // tables/equations, not a generated golden from the pack under test.
+        let cases = [
+            (
+                "aluminum-pure-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                237.0,
+            ),
+            (
+                "copper-pure-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                398.0,
+            ),
+            (
+                "iron-pure-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                80.0,
+            ),
+            (
+                "nickel-pure-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(350.0),
+                83.0,
+            ),
+            (
+                "titanium-pure-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                21.9,
+            ),
+            (
+                "aluminum-7075-t6-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(500.0),
+                178.0,
+            ),
+            (
+                "inconel-x750-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                11.7,
+            ),
+            (
+                "stainless-304a-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(500.0),
+                18.4,
+            ),
+            (
+                "stainless-347-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(300.0),
+                14.8,
+            ),
+            (
+                "titanium-a110at-nasa-cr-71699",
+                "thermal-conductivity",
+                Some(500.0),
+                9.8,
+            ),
+            (
+                "stainless-304-nist-cryogenic",
+                "thermal-conductivity",
+                Some(293.0),
+                15.1233439431416,
+            ),
+            (
+                "stainless-316-nist-cryogenic",
+                "specific-heat-capacity",
+                Some(293.0),
+                485.317885527169,
+            ),
+            (
+                "brass-c26000-nist-cryogenic",
+                "thermal-conductivity",
+                Some(77.0),
+                39.7957752285347,
+            ),
+            (
+                "aluminum-1100-nist-cryogenic",
+                "thermal-conductivity",
+                Some(293.0),
+                211.815871273228,
+            ),
+            (
+                "concrete-normalweight-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                1.75,
+            ),
+            (
+                "concrete-lightweight-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                0.125,
+            ),
+            (
+                "cement-mortar-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                0.72,
+            ),
+            ("brick-clay-cfast-sp1041", "thermal-conductivity", None, 1.5),
+            (
+                "brick-common-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                0.72,
+            ),
+            (
+                "calcium-silicate-board-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                0.18,
+            ),
+            (
+                "cellulose-insulation-cfast-sp1041",
+                "thermal-conductivity",
+                None,
+                0.039,
+            ),
+            (
+                "glass-fiber-insulation-cfast",
+                "thermal-conductivity",
+                None,
+                0.04,
+            ),
+            ("gypsum-board-5-8-cfast", "thermal-conductivity", None, 0.16),
+            (
+                "gypsum-board-type-x-5-8-cfast",
+                "thermal-conductivity",
+                None,
+                0.14,
+            ),
+            (
+                "urethane-rigid-foam-insulation-cfast",
+                "thermal-conductivity",
+                None,
+                0.026,
+            ),
+            (
+                "concrete-nsc-mix-iv-nistir6475",
+                "compressive-strength",
+                Some(298.15),
+                51.9e6,
+            ),
+        ];
+        for (slug, name, temperature, expected) in cases {
+            let (pack, _) = compile(slug);
+            check_claims(&pack);
+            let at = temperature
+                .map(|t| ("temperature", t))
+                .into_iter()
+                .collect::<Vec<_>>();
+            close(sample(&pack, name, &at), expected);
+            if matches!(
+                slug,
+                "aluminum-pure-nasa-cr-71699" | "copper-pure-nasa-cr-71699"
+            ) {
+                let claim = pack.claims().claims_for(name)[0].1;
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[("source_phase_liquid", 1.0)]),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+                let lo = claim.validity.bound("temperature").unwrap().0;
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[("temperature", lo - 1.0)]),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+            println!("source pack {slug}: compiler, typed query, context refusal, receipt pass");
+        }
+    }
+}
+
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 const PACK_BYTES_GOLDEN: usize = 3_177;
