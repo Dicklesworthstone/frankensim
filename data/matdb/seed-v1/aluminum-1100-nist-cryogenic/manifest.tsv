@@ -1,0 +1,9 @@
+frankensim.matdb-manifest.v3
+pack_id	aluminum-1100-nist-cryogenic
+redistribution	permitted	NIST material-property pages are unmarked as copyrighted; NIST Copyrights and Disclaimers says unmarked NIST-site information is public information that may be distributed or copied; retain NIST attribution and the named UNS condition
+citation	National Institute of Standards and Technology, Material Properties: 1100 Aluminum (UNS A91100), cryogenic thermal-conductivity polynomial coefficients, equation range, and curve-fit error; https://trc.nist.gov/cryogenics/materials/1100%20Aluminum/1100%20Aluminum_rev.htm
+license	NIST-Public-Information-Attribution-Requested
+source	nist-a91100-k-fit	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	source_pressure_known	source-pressure-known	dimensional

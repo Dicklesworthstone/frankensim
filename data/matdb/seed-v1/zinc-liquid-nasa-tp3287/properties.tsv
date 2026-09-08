@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-zn-liquid	pure liquid Zn in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.51 selected thermodynamic functions; Zn attribution is CODATA 1989 in Table I	Engineering piecewise-linear interpolation of printed liquid rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 65.39 g/mol: cp in J/mol/K divided by 0.06539 kg/mol; assigned h in kJ/mol multiplied by 1000/0.06539. Reference h=0 for crystalline Zn at 298.15 K, so liquid h includes fusion energy. Printed source pairs T:cp:h are 692.73:31.400:18.162,700:31.400:18.391,800:31.400:21.531,900:31.400:24.671,1000:31.400:27.811. This tranche stops at 1000 K and does not import the table's high-temperature continuation as stable liquid evidence. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, viscosity, surface tension, wetting or optical input is inferred.
+curve	cp-liquid	nasa-tp3287-zn-liquid	cp	temperature	K	J/kg/K	692.73:480.19574858541,700:480.19574858541,800:480.19574858541,900:480.19574858541,1000:480.19574858541	linear
+uncertainty	cp-liquid	unstated	-	-	-	-
+validity	cp-liquid	temperature	692.73	1000	K
+validity	cp-liquid	pressure	100000	100000	Pa
+validity	cp-liquid	source_phase_liquid	1	1	1
+curve	h-liquid	nasa-tp3287-zn-liquid	h	temperature	K	J/kg	692.73:277748.89126777794,700:281250.95580363966,800:329270.53066218074,900:377290.10552072182,1000:425309.68037926283	linear
+uncertainty	h-liquid	unstated	-	-	-	-
+validity	h-liquid	temperature	692.73	1000	K
+validity	h-liquid	pressure	100000	100000	Pa
+validity	h-liquid	source_phase_liquid	1	1	1

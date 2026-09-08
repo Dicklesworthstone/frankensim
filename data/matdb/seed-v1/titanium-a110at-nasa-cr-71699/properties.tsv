@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-21 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i21	extra-low-interstitial titanium alloy A-110AT: titanium balance, aluminum 4.75..5.75 percent, tin 2.20..2.80 percent, oxygen maximum 0.08 percent, nitrogen maximum 0.03 percent, hydrogen maximum 0.0125 percent, iron maximum 0.15 percent, carbon maximum 0.05 percent	NASA-CR-71699 Table I-21 thermal-conductivity selected values	Only one experimental set is reported; the table remarks identify 310..810 K as taken from that source. This curve retains only 350..800 K non-starred knots. Its explicit linear between-knot values are engineering interpolation estimates, not source measurements, and no interpolation-error or measurement-confidence claim is made. It does not claim that A-110AT is interchangeable with Ti-6Al-4V, or claim density, strength, phase, or elastic properties.
+curve	thermal-conductivity-350-800k	nasa-cr-71699-table-i21	thermal_conductivity	temperature	K	W/m/K	350:8.2,400:8.7,450:9.3,500:9.8,600:11,700:12.2,800:13.3	linear
+uncertainty	thermal-conductivity-350-800k	unstated	-	-	-	-
+validity	thermal-conductivity-350-800k	temperature	350	800	K
+validity	thermal-conductivity-350-800k	source_pressure_known	0	0	1

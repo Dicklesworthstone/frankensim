@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-12 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i12	annealed 99.99 percent pure titanium with residual electrical resistivity rho0 = 1.96e-6 ohm cm	NASA-CR-71699 Table I-12 thermal-conductivity selected values	The table remarks identify 300..1000 K as derived from the named experimental sources, but its 1000 K row is explicitly starred as extrapolated. This bounded curve therefore retains only the 300..900 K non-starred knots. Its explicit linear between-knot values are engineering interpolation estimates, not source measurements, and no interpolation-error or measurement-confidence claim is made. It does not claim density, phase, strength, or elastic properties.
+curve	thermal-conductivity-300-900k	nasa-cr-71699-table-i12	thermal_conductivity	temperature	K	W/m/K	300:21.9,350:21.1,400:20.5,450:20.1,500:19.9,600:19.6,700:19.5,800:19.8,900:20.2	linear
+uncertainty	thermal-conductivity-300-900k	unstated	-	-	-	-
+validity	thermal-conductivity-300-900k	temperature	300	900	K
+validity	thermal-conductivity-300-900k	source_pressure_known	0	0	1

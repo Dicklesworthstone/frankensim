@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	cfast-tsv-conversion-2026-09-07	FrankenSim CFAST thermal.csv SI typed-TSV conversion	FrankenSim conversion notice, 2026-09-07	On 2026-09-07, FrankenSim converted the CFAST thermal.csv record to SI typed TSV. The change is representation and units only; it does not change the source model-input status or assert a measured specimen property.
+observation	cfast-concrete-normalweight	Concrete, Normal Weight (6 in), CFAST record CONCRETE	NIST CFAST thermal.csv record CONCRETE, pinned source revision; SP 1041 supplies only general material-layer input context	Source row is a CFAST textbook/model input, not a measured specimen or design allowable. Its mixture, cement/aggregate type, water-cement ratio, curing age, moisture state, porosity, temperature, pressure, measurement method, replicates, and uncertainty are absent. CFAST thermal.csv records 1.75 W/(m K), 1000 J/(kg K), 2200 kg/m3, 0.15 m, and emissivity 0.94. The retained SP 1041 page 9 screenshot does not display the normal-weight CONCRETE row, so it is not used as a numeric transcription check.
+scalar	thermal-conductivity	cfast-concrete-normalweight	thermal_conductivity	1.75	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_mix_and_cure_known	0	0	1
+validity	thermal-conductivity	source_measurement_method_known	0	0	1
+scalar	specific-heat-capacity	cfast-concrete-normalweight	specific_heat_capacity	1000	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_mix_and_cure_known	0	0	1
+validity	specific-heat-capacity	source_measurement_method_known	0	0	1
+scalar	density	cfast-concrete-normalweight	density	2200	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_mix_and_cure_known	0	0	1
+validity	density	source_measurement_method_known	0	0	1
+scalar	nominal-thickness	cfast-concrete-normalweight	nominal_thickness	0.15	m	constant
+uncertainty	nominal-thickness	unstated	-	-	-	-
+validity	nominal-thickness	source_is_cfast_layer_input	1	1	1
+scalar	emissivity	cfast-concrete-normalweight	emissivity	0.94	1	constant
+uncertainty	emissivity	unstated	-	-	-	-
+validity	emissivity	source_is_cfast_layer_input	1	1	1

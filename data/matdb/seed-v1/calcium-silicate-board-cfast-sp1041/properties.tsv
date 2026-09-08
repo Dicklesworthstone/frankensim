@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	cfast-tsv-conversion-2026-09-07	FrankenSim CFAST thermal.csv SI typed-TSV conversion	FrankenSim conversion notice, 2026-09-07	On 2026-09-07, FrankenSim converted the CFAST thermal.csv record to SI typed TSV. The change is representation and units only; it does not change the source model-input status or assert a measured specimen property.
+observation	cfast-calcium-silicate-board	Calcium Silicate Board (1/2 in), CFAST record MARINITE	NIST CFAST model-input record; visual transcription check against NIST SP 1041 Chapter 3 page 9 thermal-properties screenshot	Source row is a CFAST textbook/model input, not a measured board specimen or design allowable. The generic source name does not identify product, formulation, density grade, moisture state, temperature, pressure, measurement method, replicates, or uncertainty. CFAST raw values are 0.18 W/(m K), 1293 J/(kg K), 737 kg/m3, 0.013 m, and emissivity 0.83; SP 1041 displays 0.00018 kW/(m K), so the checked conversion is 0.00018*1000 = 0.18 W/(m K).
+scalar	thermal-conductivity	cfast-calcium-silicate-board	thermal_conductivity	0.18	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_test_temperature_known	0	0	1
+validity	thermal-conductivity	source_moisture_condition_known	0	0	1
+validity	thermal-conductivity	source_product_and_formulation_known	0	0	1
+validity	thermal-conductivity	source_measurement_method_known	0	0	1
+scalar	specific-heat-capacity	cfast-calcium-silicate-board	specific_heat_capacity	1293	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	source_test_temperature_known	0	0	1
+validity	specific-heat-capacity	source_moisture_condition_known	0	0	1
+validity	specific-heat-capacity	source_product_and_formulation_known	0	0	1
+validity	specific-heat-capacity	source_measurement_method_known	0	0	1
+scalar	density	cfast-calcium-silicate-board	density	737	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_moisture_condition_known	0	0	1
+validity	density	source_product_and_formulation_known	0	0	1
+validity	density	source_measurement_method_known	0	0	1
+scalar	nominal-thickness	cfast-calcium-silicate-board	nominal_thickness	0.013	m	constant
+uncertainty	nominal-thickness	unstated	-	-	-	-
+validity	nominal-thickness	source_is_cfast_layer_input	1	1	1
+scalar	emissivity	cfast-calcium-silicate-board	emissivity	0.83	1	constant
+uncertainty	emissivity	unstated	-	-	-	-
+validity	emissivity	source_is_cfast_layer_input	1	1	1

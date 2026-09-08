@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-sn-crystal	pure tetragonal crystalline Sn in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.42 selected thermodynamic functions; Sn attribution is TPIS 1991 in Table I	Engineering piecewise-linear interpolation of the printed crystal rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 118.710 g/mol: cp in J/mol/K divided by 0.118710 kg/mol; assigned h in kJ/mol multiplied by 1000/0.118710. Reference h=0 for crystalline Sn at 298.15 K. Printed source pairs T:cp:h are 200:25.500:-2.583,298.15:27.112:0,300:27.147:0.051,350:28.025:1.431,400:28.903:2.853,450:29.887:4.323,500:31.003:5.845,505.12:31.160:6.004. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law and cannot select a stable solid tin allotrope automatically. No density, conductivity, strength, creep, wetting or optical input is inferred.
+curve	cp-crystal	nasa-tp3287-sn-crystal	cp	temperature	K	J/kg/K	200:214.80919888805,298.15:228.38850981383,300:228.68334596917,350:236.07952152304,400:243.47569707691,450:251.76480498694,500:261.1658663971,505.12:262.48841715104	linear
+uncertainty	cp-crystal	unstated	-	-	-	-
+validity	cp-crystal	temperature	200	505.12	K
+validity	cp-crystal	pressure	100000	100000	Pa
+validity	cp-crystal	source_phase_liquid	0	0	1
+curve	h-crystal	nasa-tp3287-sn-crystal	h	temperature	K	J/kg	200:-21758.90826383624,298.15:0,300:429.61839777609,350:12054.58680818802,400:24033.35860500379,450:36416.47712913823,500:49237.63794120125,505.12:50577.03647544437	linear
+uncertainty	h-crystal	unstated	-	-	-	-
+validity	h-crystal	temperature	200	505.12	K
+validity	h-crystal	pressure	100000	100000	Pa
+validity	h-crystal	source_phase_liquid	0	0	1

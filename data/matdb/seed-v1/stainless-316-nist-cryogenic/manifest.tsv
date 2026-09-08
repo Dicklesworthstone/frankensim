@@ -1,0 +1,12 @@
+frankensim.matdb-manifest.v3
+pack_id	stainless-316-nist-cryogenic
+redistribution	permitted	NIST material-property pages are unmarked as copyrighted; NIST Copyrights and Disclaimers says unmarked NIST-site information is public information that may be distributed or copied; retain NIST attribution and the named UNS condition
+citation	National Institute of Standards and Technology, Material Properties: 316 Stainless, indexed by NIST as UNS S31600, cryogenic thermal-conductivity, specific-heat, Young-modulus, and relative-linear-expansion coefficients, equation ranges, and curve-fit errors; https://trc.nist.gov/cryogenics/materials/316Stainless/316Stainless_rev.htm
+license	NIST-Public-Information-Attribution-Requested
+source	nist-316-cryogenic-fits	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	young_modulus	young-modulus	dimensional
+property	linear_expansion_relative_to_293k	linear-expansion-relative-to-293k	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_pressure_known	source-pressure-known	dimensional

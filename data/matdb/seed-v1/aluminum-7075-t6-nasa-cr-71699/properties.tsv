@@ -1,0 +1,7 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NASA-CR-71699 Table I-16 thermal-conductivity selected values	The published source does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nasa-cr-71699-table-i16	aluminum alloy 7075 in condition T6	NASA-CR-71699 Table I-16 thermal-conductivity selected values	The table remarks identify selected values through 600 K for the T6 condition as based on the named experimental sources. This curve selects only the 350..600 K non-starred T6 knots, excludes the distinct after-heating column and every extrapolated or estimated row. Its explicit linear between-knot values are engineering interpolation estimates, not source measurements, and no interpolation-error or measurement-confidence claim is made. It makes no claim about temper retention, density, strength, or elastic properties.
+curve	thermal-conductivity-350-600k	nasa-cr-71699-table-i16	thermal_conductivity	temperature	K	W/m/K	350:136,400:142,450:165,500:178,550:180,600:178	linear
+uncertainty	thermal-conductivity-350-600k	unstated	-	-	-	-
+validity	thermal-conductivity-350-600k	temperature	350	600	K
+validity	thermal-conductivity-350-600k	source_pressure_known	0	0	1

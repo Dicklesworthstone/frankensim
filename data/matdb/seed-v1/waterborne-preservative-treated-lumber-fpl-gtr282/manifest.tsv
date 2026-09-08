@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	waterborne-preservative-treated-lumber-fpl-gtr282
+redistribution	permitted	USDA Forest Products Laboratory government report; public use permitted; retain citation and URL
+citation	USDA Forest Products Laboratory (2021), Wood Handbook: Wood as an Engineering Material, General Technical Report FPL-GTR-282, Chapter 5 pp. 5-42 to 5-43 Chemical Treatment and Waterborne Preservatives, https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr282/fpl_gtr282.pdf
+license	Work-of-the-US-Government-Public-Use-Permitted
+source	primary	properties.tsv	material-tsv-v1
+property	waterborne_retention_low_threshold	waterborne-retention-low-threshold	dimensional
+property	waterborne_retention_high_reference	waterborne-retention-high-reference	dimensional
+property	post_treatment_redrying_standard_temperature_limit	post-treatment-redrying-standard-temperature-limit	absolute-temperature
+property	post_treatment_redrying_temperature_threshold	post-treatment-redrying-temperature-threshold	absolute-temperature
+axis	source_species_known	source-species-known	dimensional
+axis	preservative_chemical_known	preservative-chemical-known	dimensional
+axis	source_grade_known	source-grade-known	dimensional
+axis	source_moisture_condition_known	source-moisture-condition-known	dimensional
+axis	source_treatment_schedule_known	source-treatment-schedule-known	dimensional

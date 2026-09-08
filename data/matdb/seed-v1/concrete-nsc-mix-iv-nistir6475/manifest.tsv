@@ -1,0 +1,17 @@
+frankensim.matdb-manifest.v3
+pack_id	concrete-nsc-mix-iv-nistir6475
+redistribution	permitted	NISTIR 6475 is a NIST work; NIST states unmarked NIST information is public information that may be distributed or copied with appropriate credit. Retain report number, authors, tables, specimen identity, and source URL.
+citation	Lawson, J. R., Phan, L. T., and Davis, F. (2000), Mechanical Properties of High Performance Concrete After Exposure to Elevated Temperatures, NISTIR 6475, Table 1 p. 3, Table 3 p. 4, Table 4 p. 19, Sections 2.3 and 3.0-3.5; https://nvlpubs.nist.gov/nistpubs/Legacy/IR/nistir6475.pdf
+license	NIST-Unmarked-Public-Information-With-Attribution
+source	primary	properties.tsv	material-tsv-v1
+property	compressive_strength	compressive-strength	dimensional
+property	dynamic_youngs_modulus	dynamic-youngs-modulus	dimensional
+property	static_compressive_youngs_modulus	static-compressive-youngs-modulus	dimensional
+property	density	density	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	conditioning_temperature	conditioning-temperature	absolute-temperature
+axis	conditioning_relative_humidity	conditioning-relative-humidity	dimensional
+axis	source_water_cured_approximately_six_months	source-water-cured-approximately-six-months	dimensional
+axis	source_air_dried_24_hours	source-air-dried-24-hours	dimensional
+axis	source_specimen_is_st_iv_25_1	source-specimen-is-st-iv-25-1	dimensional
+axis	source_density_measurement_temperature_known	source-density-measurement-temperature-known	dimensional

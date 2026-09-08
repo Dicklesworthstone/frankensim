@@ -1,0 +1,12 @@
+frankensim.matdb-source.v1
+observation	nasa-tp3287-pb-liquid	pure liquid Pb in the thermodynamic standard state at 1 bar; evaluated element, no manufactured specimen or purity assay identified	NASA/TP-3287/REV1 Table III.38 selected thermodynamic functions; Pb attribution is TPIS 1991 in Table I	Engineering piecewise-linear interpolation of the printed liquid rows, not the separate NASA polynomial fit or new measurements. Source molar mass is 207.20000 g/mol: cp in J/mol/K divided by 0.2072 kg/mol; assigned h in kJ/mol multiplied by 1000/0.2072. Reference h=0 for crystalline Pb at 298.15 K, so liquid h includes fusion energy. Printed source pairs T:cp:h are 600.65:30.627:13.361,700:30.313:16.388,800:29.979:19.403,900:29.660:22.385,1000:29.369:25.336,1100:29.116:28.260,1200:28.903:31.160,1300:28.731:34.042. This tranche stops at 1300 K and does not import the table's high-temperature continuation as stable liquid evidence. Source uncertainty/covariance and interpolation error bounds are unstated. Interpolated cp and h are independent approximations, not an exactly thermodynamically consistent constitutive law. The source_phase_liquid flag identifies this table phase (0=crystal,1=liquid); it is not a phase-fraction mixture law. No density, conductivity, viscosity, surface tension, wetting or optical input is inferred.
+curve	cp-liquid	nasa-tp3287-pb-liquid	cp	temperature	K	J/kg/K	600.65:147.81370656371,700:146.29826254826,800:144.68629343629,900:143.14671814672,1000:141.74227799228,1100:140.52123552124,1200:139.49324324324,1300:138.66312741313	linear
+uncertainty	cp-liquid	unstated	-	-	-	-
+validity	cp-liquid	temperature	600.65	1300	K
+validity	cp-liquid	pressure	100000	100000	Pa
+validity	cp-liquid	source_phase_liquid	1	1	1
+curve	h-liquid	nasa-tp3287-pb-liquid	h	temperature	K	J/kg	600.65:64483.590733591,700:79092.664092664,800:93643.822393822,900:108035.71428571,1000:122277.99227799,1100:136389.96138996,1200:150386.10038610,1300:164295.36679537	linear
+uncertainty	h-liquid	unstated	-	-	-	-
+validity	h-liquid	temperature	600.65	1300	K
+validity	h-liquid	pressure	100000	100000	Pa
+validity	h-liquid	source_phase_liquid	1	1	1

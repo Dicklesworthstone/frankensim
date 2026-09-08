@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	source-pressure-unstated	source pressure is unstated	NIST Material Properties: 1100 Aluminum (UNS A91100)	The published material-property page does not state pressure; no atmospheric or standard-pressure inference is made.
+observation	nist-a91100-k-fit	1100 aluminum UNS A91100; source does not state temper, product form, composition limits, or processing history	NIST 1100 Aluminum thermal-conductivity coefficient table	log10(k)=sum(a_i log10(T)^i), a..i=23.39172,-148.5733,422.1917,-653.6664,607.0402,-346.152,118.4276,-22.2781,1.770187; data and equation 4..300 K, stated fit error 2 percent relative to data without confidence semantics. Exact-temperature scalars below evaluate the published polynomial; they do not expose it as a sparse curve.
+scalar	thermal-conductivity-77k	nist-a91100-k-fit	thermal_conductivity	290.174350838512	W/m/K	constant
+uncertainty	thermal-conductivity-77k	unstated	-	-	-	-
+validity	thermal-conductivity-77k	temperature	77	77	K
+validity	thermal-conductivity-77k	source_pressure_known	0	0	1
+scalar	thermal-conductivity-293k	nist-a91100-k-fit	thermal_conductivity	211.815871273228	W/m/K	constant
+uncertainty	thermal-conductivity-293k	unstated	-	-	-	-
+validity	thermal-conductivity-293k	temperature	293	293	K
+validity	thermal-conductivity-293k	source_pressure_known	0	0	1

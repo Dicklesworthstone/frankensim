@@ -1,0 +1,9 @@
+frankensim.matdb-manifest.v3
+pack_id	iron-pure-nasa-cr-71699
+redistribution	permitted	NASA NTRS record 19660014513 declares distribution PUBLIC and copyright determination GOV_PUBLIC_USE_PERMITTED; retain NASA-CR-71699, table number, material condition, and NASA attribution
+citation	Touloukian, Y. S., ed. (1966), Recommended Values of the Thermophysical Properties of Eight Alloys, Major Constituents and Their Oxides, NASA-CR-71699, NTRS 19660014513, Table I-5, printed p. 16; https://ntrs.nasa.gov/citations/19660014513
+license	NASA-NTRS-GOV_PUBLIC_USE_PERMITTED
+source	nasa-cr-71699-table-i5	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	temperature	temperature	absolute-temperature
+axis	source_pressure_known	source-pressure-known	dimensional

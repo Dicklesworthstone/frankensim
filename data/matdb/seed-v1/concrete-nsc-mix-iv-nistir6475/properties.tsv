@@ -1,0 +1,34 @@
+frankensim.matdb-source.v1
+observation	nistir6475-mix-iv-st-iv-25-1	NISTIR 6475 conventional normal-strength concrete, Mixture IV, specimen ST-IV-25-1	NISTIR 6475 Table 1 gives the Mixture IV formulation and Table 4 gives this individual room-temperature specimen's raw mass, dimensions, dynamic modulus, compressive strength, and static modulus	Mixture IV used Type I Portland cement 376 kg/m3, water 213 kg/m3, water-cement ratio 0.57, coarse limestone aggregate 854 kg/m3, SSD natural fine sand 868 kg/m3, with no silica fume or sulfonated-naphthalene water reducer. Cylinders were 102 mm nominal diameter by 204 mm nominal length; molds were removed after one day; specimens were water-cured at nominally 23 deg C for about six months, re-stored in water after end grinding, then air-dried 24 h at nominally 23 deg C and 50 percent RH. Those 23 deg C/50 percent RH values are the reported drying/conditioning conditions, not a claimed current state for every reported value. Table 4 is for room-temperature 25 deg C tests. ST-IV-25-1 raw values are mass 3808 g, length 0.202 m, diameter 0.102 m, dynamic Youngs modulus before heating 3.67e10 Pa, compressive strength 51.9 MPa, and static modulus 30169 MPa. Density is a derived apparent-cylinder value: 3.808 kg / (pi*(0.102 m/2)^2*0.202 m) = 2307.041173402 kg/m3; the report does not state the temperature at which its mass and dimensions were measured. The report gives instrument precision but not a statistical uncertainty for this individual reported strength/modulus/density; claims retain Unstated uncertainty. This is one water-cured and air-dried cylinder condition, not a thermal-conductivity measurement, mixture-wide law, design allowable, or generic normal-strength concrete card.
+scalar	compressive-strength-st-iv-25-1	nistir6475-mix-iv-st-iv-25-1	compressive_strength	51.9	MPa	constant
+uncertainty	compressive-strength-st-iv-25-1	unstated	-	-	-	-
+validity	compressive-strength-st-iv-25-1	temperature	298.15	298.15	K
+validity	compressive-strength-st-iv-25-1	conditioning_temperature	296.15	296.15	K
+validity	compressive-strength-st-iv-25-1	conditioning_relative_humidity	50	50	%
+validity	compressive-strength-st-iv-25-1	source_water_cured_approximately_six_months	1	1	1
+validity	compressive-strength-st-iv-25-1	source_air_dried_24_hours	1	1	1
+validity	compressive-strength-st-iv-25-1	source_specimen_is_st_iv_25_1	1	1	1
+scalar	dynamic-youngs-modulus-st-iv-25-1	nistir6475-mix-iv-st-iv-25-1	dynamic_youngs_modulus	3.67e10	Pa	constant
+uncertainty	dynamic-youngs-modulus-st-iv-25-1	unstated	-	-	-	-
+validity	dynamic-youngs-modulus-st-iv-25-1	temperature	298.15	298.15	K
+validity	dynamic-youngs-modulus-st-iv-25-1	conditioning_temperature	296.15	296.15	K
+validity	dynamic-youngs-modulus-st-iv-25-1	conditioning_relative_humidity	50	50	%
+validity	dynamic-youngs-modulus-st-iv-25-1	source_water_cured_approximately_six_months	1	1	1
+validity	dynamic-youngs-modulus-st-iv-25-1	source_air_dried_24_hours	1	1	1
+validity	dynamic-youngs-modulus-st-iv-25-1	source_specimen_is_st_iv_25_1	1	1	1
+scalar	derived-apparent-density-st-iv-25-1	nistir6475-mix-iv-st-iv-25-1	density	2307.041173402	kg/m3	constant
+uncertainty	derived-apparent-density-st-iv-25-1	unstated	-	-	-	-
+validity	derived-apparent-density-st-iv-25-1	conditioning_temperature	296.15	296.15	K
+validity	derived-apparent-density-st-iv-25-1	conditioning_relative_humidity	50	50	%
+validity	derived-apparent-density-st-iv-25-1	source_water_cured_approximately_six_months	1	1	1
+validity	derived-apparent-density-st-iv-25-1	source_air_dried_24_hours	1	1	1
+validity	derived-apparent-density-st-iv-25-1	source_specimen_is_st_iv_25_1	1	1	1
+validity	derived-apparent-density-st-iv-25-1	source_density_measurement_temperature_known	0	0	1
+scalar	static-compressive-youngs-modulus-st-iv-25-1	nistir6475-mix-iv-st-iv-25-1	static_compressive_youngs_modulus	30169	MPa	constant
+uncertainty	static-compressive-youngs-modulus-st-iv-25-1	unstated	-	-	-	-
+validity	static-compressive-youngs-modulus-st-iv-25-1	temperature	298.15	298.15	K
+validity	static-compressive-youngs-modulus-st-iv-25-1	conditioning_temperature	296.15	296.15	K
+validity	static-compressive-youngs-modulus-st-iv-25-1	conditioning_relative_humidity	50	50	%
+validity	static-compressive-youngs-modulus-st-iv-25-1	source_water_cured_approximately_six_months	1	1	1
+validity	static-compressive-youngs-modulus-st-iv-25-1	source_air_dried_24_hours	1	1	1
+validity	static-compressive-youngs-modulus-st-iv-25-1	source_specimen_is_st_iv_25_1	1	1	1

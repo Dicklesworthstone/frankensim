@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	gtr282-ch5-waterborne-treatment-bounds	Waterborne-preservative-treated wood process bounds	USDA FPL GTR-282 Chapter 5 pp. 5-42 to 5-43 Chemical Treatment and Waterborne Preservatives	This is a historical 2021 handbook discussion of treatment effects, not current compliance authority. Effects depend on species, property, chemistry/type, retention, initial kiln drying, post-treatment drying, incising, size, grade, product type, temperature, and moisture. Retention at or below 16 kg/m3 (1.0 lb/ft3) is described as having no effect on MOE or compression strength parallel to grain, with slight negative tensile/bending effects; 40 kg/m3 (2.5 lb/ft3) is a higher reference level where MOR and energy-related properties are further reduced. Post-treatment redrying above 75 deg C is critical; 74 deg C (165 deg F) is the post-treatment kiln-redrying limitation cited in treatment standards. These are source process thresholds and qualitative effects, not universal correction factors. No species, preservative chemical, treatment schedule, grade, moisture, or retention-specific correction row is asserted; these remain data gaps.
+scalar	waterborne-retention-low-threshold	gtr282-ch5-waterborne-treatment-bounds	waterborne_retention_low_threshold	16	kg/m3	constant
+uncertainty	waterborne-retention-low-threshold	unstated	-	-	-	-
+scalar	waterborne-retention-high-reference	gtr282-ch5-waterborne-treatment-bounds	waterborne_retention_high_reference	40	kg/m3	constant
+uncertainty	waterborne-retention-high-reference	unstated	-	-	-	-
+scalar	post-treatment-redrying-standard-temperature-limit	gtr282-ch5-waterborne-treatment-bounds	post_treatment_redrying_standard_temperature_limit	347.15	K	constant
+uncertainty	post-treatment-redrying-standard-temperature-limit	unstated	-	-	-	-
+scalar	post-treatment-redrying-temperature-threshold	gtr282-ch5-waterborne-treatment-bounds	post_treatment_redrying_temperature_threshold	348.15	K	constant
+uncertainty	post-treatment-redrying-temperature-threshold	unstated	-	-	-	-
+validity	waterborne-retention-low-threshold	source_species_known	0	0	1
+validity	waterborne-retention-low-threshold	preservative_chemical_known	0	0	1
+validity	waterborne-retention-low-threshold	source_grade_known	0	0	1
+validity	waterborne-retention-low-threshold	source_moisture_condition_known	0	0	1
+validity	waterborne-retention-low-threshold	source_treatment_schedule_known	0	0	1
+validity	waterborne-retention-high-reference	source_species_known	0	0	1
+validity	waterborne-retention-high-reference	preservative_chemical_known	0	0	1
+validity	waterborne-retention-high-reference	source_grade_known	0	0	1
+validity	waterborne-retention-high-reference	source_moisture_condition_known	0	0	1
+validity	waterborne-retention-high-reference	source_treatment_schedule_known	0	0	1
+validity	post-treatment-redrying-standard-temperature-limit	source_species_known	0	0	1
+validity	post-treatment-redrying-standard-temperature-limit	preservative_chemical_known	0	0	1
+validity	post-treatment-redrying-standard-temperature-limit	source_grade_known	0	0	1
+validity	post-treatment-redrying-standard-temperature-limit	source_moisture_condition_known	0	0	1
+validity	post-treatment-redrying-standard-temperature-limit	source_treatment_schedule_known	0	0	1
+validity	post-treatment-redrying-temperature-threshold	source_species_known	0	0	1
+validity	post-treatment-redrying-temperature-threshold	preservative_chemical_known	0	0	1
+validity	post-treatment-redrying-temperature-threshold	source_grade_known	0	0	1
+validity	post-treatment-redrying-temperature-threshold	source_moisture_condition_known	0	0	1
+validity	post-treatment-redrying-temperature-threshold	source_treatment_schedule_known	0	0	1

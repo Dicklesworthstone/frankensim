@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	glass-soda-lime-srm-1826b-nist
+redistribution	permitted	NIST Standard Reference Material certificate; public information with attribution; retain certificate number and URL
+citation	NIST SRM 1826b Certificate (December 1, 2006), Soda-Lime Silica Glass density, certified value at 20 deg C, https://tsapps.nist.gov/srmext/certificates/archives/1826b.pdf
+license	NIST-Public-Information-Attribution-Requested
+source	primary	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	linear_thermal_expansion_coefficient	linear-thermal-expansion-coefficient	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_temperature_range_known	source-temperature-range-known	dimensional
+axis	source_microhomogeneity_evaluated	source-microhomogeneity-evaluated	dimensional
