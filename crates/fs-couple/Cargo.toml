@@ -34,6 +34,7 @@ fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-conduction = { path = "../fs-conduction" }
 fs-contact = { path = "../fs-contact" }
 fs-geom = { path = "../fs-geom" }
 fs-orbit = { path = "../fs-orbit" }

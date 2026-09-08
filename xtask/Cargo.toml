@@ -25,6 +25,7 @@ fs-conduction = { path = "../crates/fs-conduction" }
 fs-exec = { path = "../crates/fs-exec" }
 fs-matdb-store = { path = "../crates/fs-matdb-store" }
 fs-material = { path = "../crates/fs-material" }
+fs-solid = { path = "../crates/fs-solid" }
 
 [lints]
 workspace = true

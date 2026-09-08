@@ -25,11 +25,61 @@ identified, redistributable interface evidence is added.
 
 ## Common material acquisition, September 2026
 
-New source packs use manifest v3 with explicit property-name mappings and typed
+Scalar/curve source packs use manifest v3 with explicit property-name mappings and typed
 temperature axes. Names such as `specific-heat-capacity` and
 `thermal-conductivity` therefore match current discovery requests. A directory
 is a source bundle with its own conditions; it is not automatically a complete
 material card or a qualified simulation.
+
+`air-dry-ussa1976` supplies five parameters for the existing calorically perfect
+gas model: molar mass, heat-capacity ratio, reference viscosity, its absolute
+reference temperature, and the Sutherland temperature interval. The static
+reference viscosity is evaluated from the source equation at 273.15 K;
+`fs_material::gas::resolve_sutherland_gas_state` recovers its coefficient and
+uses the existing `GasState` equations. The caller explicitly selects
+`ConductivityModel::Ussa1976AirFit`; the conductivity equation and historical
+gas constant remain in that existing code, rather than a duplicate EOS.
+The model then derives density, Cp/Cv, sound speed, viscosity, conductivity,
+Prandtl number and impedance at the requested temperature and pressure.
+Every selected parameter keeps its source receipt.
+
+The declared application range is 273.15–313.15 K, 80–110 kPa, exactly zero
+relative humidity, and the USSA-1976 reference composition. It is a bounded
+engineering model, not measured coverage of every ambient condition. The
+rounded composition list is retained without silently renormalizing it or
+identifying it as today's universal atmosphere. The source's p. 3 gas constant
+and p. 19 equations 51/53 take precedence over the errors in Table 2 and the
+printed conductivity column; these errors are also identified in the appended
+errata. Source use is permitted by the NTRS record. Discovery of the complete
+parameter set uses [`dry-air.json`](../../../examples/material-discovery/dry-air.json).
+Humidity transport, real-gas effects and experimental accuracy remain outside
+this profile. It does not claim nine independent measured output properties.
+
+`silicon-cubic-25c-nasa-rp1057` uses manifest v6 to carry all 36 explicitly
+addressed engineering stiffness entries in crystal axes `[100],[010],[001]`,
+order `xx,yy,zz,yz,zx,xy`, at exactly 298.15 K. They are a cubic-symmetry
+expansion of **three** handbook constants, not 36 independent measurements.
+The Mbar interpretation of the unlabeled stiffness table follows the chapter's
+pressure convention and is an explicit unit inference. Density comes from a
+separate pure-crystal reference at the same temperature. This combination is
+an engineering reference, with unknown pressure and stiffness specimen/doping;
+it does not qualify a particular wafer or supply thermal/electrical data.
+Sources and the NTRS `GOV_PUBLIC_USE_PERMITTED` decisions are in its manifest.
+Frame and tensor IDs are BLAKE3 hashes of these exact UTF-8 strings, without a
+trailing newline:
+
+```text
+frankensim silicon crystal axes 1=[100],2=[010],3=[001]; engineering xx,yy,zz,yz,zx,xy; NASA-CR-275 App A
+frankensim silicon cubic stiffness NASA RP-1057 p101 at25C; C11=165773MPa C12=63924MPa C44=79619MPa; explicit cubic expansion
+```
+
+The focused source-to-consumer suite is executable with
+`scripts/e2e/material_sources.sh --run` (required-remote RCH), or with an
+explicit `MATDB_PACK_TEST_BIN` from an existing native test build. `--list`
+lists exact cases and `--check` checks prerequisites without building.
+Each run retains command, stdout/stderr, physics diagnostics and exit status
+in the unique receipt directory printed at startup. This suite checks source
+transport and bounded numerical responses, not experimental qualification.
 
 `water-liquid-iapws-sr6-08` supplies five liquid-water curves (density, isobaric
 heat capacity, specific enthalpy, conductivity and dynamic viscosity), each

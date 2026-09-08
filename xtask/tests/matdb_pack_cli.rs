@@ -89,6 +89,252 @@ mod common_material_acquisition {
         );
     }
 
+    /// G1/G3: independently sourced cubic constants reach the actual oriented
+    /// tetrahedral operator. This is a cross-source engineering reference at
+    /// 25 C, not qualification of a particular silicon wafer or its doping.
+    #[test]
+    fn g1_g3_sourced_silicon_tensor_reaches_oriented_solid() {
+        use fs_alloc::{ArenaConfig, ArenaPool};
+        use fs_blake3::ContentHash;
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack, PropertyKey};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_elastic_tensor_state_point,
+        };
+        use fs_solid::{
+            TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
+        };
+
+        let manifest =
+            workspace_path("data/matdb/seed-v1/silicon-cubic-25c-nasa-rp1057/manifest.tsv");
+        let scratch = fixture_dir();
+        let output = scratch.join("silicon.fsmatpk");
+        let run = run_compiler(&manifest, &output);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let bytes = fs::read(output).unwrap();
+        let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
+        let pack = NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap();
+        assert_eq!(
+            pack.schema_version(),
+            5,
+            "tensor coordinates must survive compilation"
+        );
+        let card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "Si; stiffness dopant/purity unspecified".into(),
+                phase: "cubic crystal".into(),
+                process: "cross-source engineering reference: handbook stiffness and separate pure-crystal density; not a qualified wafer".into(),
+                revision: 0,
+            },
+            pack,
+        ).unwrap();
+        let database = scratch.join("silicon.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(card.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) = store.load_catalog_pack(card.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, card);
+        let claims = loaded.card().claims();
+        let mut entries: [[Option<PropertyKey>; 6]; 6] =
+            core::array::from_fn(|_| core::array::from_fn(|_| None));
+        for (_, claim) in claims.claims_ordered() {
+            if let Some(component) = claim.key.elastic_component() {
+                let (row, column) = component.indices();
+                assert!(entries[row][column].replace(claim.key.clone()).is_none());
+                assert!(matches!(claim.uncertainty, UncertaintyModel::Unstated));
+            }
+        }
+        let keys = entries
+            .map(|row| row.map(|entry| entry.expect("explicit tensor entry, including zeros")));
+        let density = claims.claims_for("density")[0].1;
+        let at = point(density, &[("T", 298.15)]);
+        let resolve = |at: &QueryPoint| {
+            resolve_elastic_tensor_state_point(
+                loaded.card(),
+                at,
+                &keys,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+        };
+        let state = resolve(&at).unwrap();
+        assert_eq!(state.resolved().properties().len(), 37);
+        close(state.density_kg_m3(), 2329.0);
+        for property in state.resolved().properties() {
+            claims.verify_receipt(&property.answer().receipt).unwrap();
+        }
+        // Independent printed constants, not values read back from the tested
+        // matrix. RP-1057's Mbar convention is checked by its 1.012/Mbar bulk
+        // compressibility on p.100; the paired compliances are rounded.
+        let (c11, c12, c44) = (165.773e9, 63.924e9, 79.619e9);
+        assert!((3.0e11 / (c11 + 2.0 * c12) - 1.012_f64).abs() < 0.011);
+        for row in 0..6 {
+            for column in 0..6 {
+                let expected = if row < 3 && column < 3 {
+                    if row == column { c11 } else { c12 }
+                } else if row == column {
+                    c44
+                } else {
+                    0.0
+                };
+                close(state.stiffness_pa()[row][column], expected);
+            }
+        }
+        for rejected in [
+            point(density, &[("T", 298.1501)]),
+            point(density, &[("source-pressure-known", 1.0)]),
+            QueryPoint::new()
+                .with_quantity("T", at.axis_quantities()["T"], 298.15)
+                .unwrap(),
+        ] {
+            assert!(
+                resolve(&rejected).is_err(),
+                "unsupported source state: {rejected:?}"
+            );
+        }
+        let mut misaddressed = keys.clone();
+        misaddressed[0][3] = keys[0][4].clone();
+        assert!(
+            resolve_elastic_tensor_state_point(
+                loaded.card(),
+                &at,
+                &misaddressed,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err(),
+            "zero-valued components still need their own coordinates"
+        );
+
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let epsilon = 1.0e-4;
+        let displacement = [
+            0.0, 0.0, 0.0, epsilon, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let gradients = [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let mut energies = Vec::new();
+        for angle in [0.0_f64, std::f64::consts::FRAC_PI_4] {
+            let (s, c) = angle.sin_cos();
+            let q = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];
+            let transformed = TetElasticMaterial::from_resolved_elastic_tensor(
+                &state,
+                ContentHash([0x51; 32]),
+                q,
+            )
+            .unwrap();
+            assert_eq!(
+                transformed.source_material_identity(),
+                state.resolved().identity()
+            );
+            let problem = TetLinearElasticProblem {
+                nodes_m: &nodes,
+                tetrahedra: &tets,
+                materials: TetMaterialField::Uniform(transformed.material()),
+                fixed_dofs: &[],
+                budget: TetAssemblyBudget::standard(),
+            };
+            let gate = CancelGate::new();
+            let pool = ArenaPool::new(ArenaConfig::default());
+            let assembly = pool.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 1,
+                        kernel_id: 10,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                );
+                let assembled = problem.assemble(&cx).unwrap();
+                assert_eq!(
+                    assembled.stiffness.to_dense(),
+                    problem.assemble(&cx).unwrap().stiffness.to_dense()
+                );
+                assembled
+            });
+            close(assembly.total_mass_kg, 2329.0 / 6.0);
+            // Independently rotate the imposed physical strain into crystal
+            // coordinates, apply the three-constant cubic law, rotate stress
+            // back, and integrate the P1 shape gradients over volume 1/6 m^3.
+            let local_stress: [[f64; 3]; 3] = core::array::from_fn(|i| {
+                core::array::from_fn(|j| {
+                    let strain = epsilon * q[0][i] * q[0][j];
+                    if i == j {
+                        c12 * epsilon + (c11 - c12) * strain
+                    } else {
+                        2.0 * c44 * strain
+                    }
+                })
+            });
+            let stress: [[f64; 3]; 3] = core::array::from_fn(|i| {
+                core::array::from_fn(|j| {
+                    (0..3)
+                        .flat_map(|a| (0..3).map(move |b| q[i][a] * local_stress[a][b] * q[j][b]))
+                        .sum()
+                })
+            });
+            let k = assembly.stiffness.to_dense();
+            let force: [f64; 12] =
+                core::array::from_fn(|i| (0..12).map(|j| k[i * 12 + j] * displacement[j]).sum());
+            for (node, gradient) in gradients.iter().enumerate() {
+                for component in 0..3 {
+                    let expected: f64 = (0..3)
+                        .map(|j| stress[component][j] * gradient[j] / 6.0)
+                        .sum();
+                    assert!(
+                        (force[3 * node + component] - expected).abs() < 1e-7,
+                        "angle={angle} node={node} component={component}: force={} expected={expected} N tolerance=1e-7 N",
+                        force[3 * node + component]
+                    );
+                }
+            }
+            let energy: f64 = displacement
+                .iter()
+                .zip(force)
+                .map(|(u, f)| 0.5 * u * f)
+                .sum();
+            let expected_energy = epsilon * stress[0][0] / 12.0;
+            close(energy, expected_energy);
+            assert!(energy > 0.0);
+            println!(
+                "silicon source={} state={} T=298.15 K pressure=unknown angle={angle} rad mass={} kg energy={energy} J expected={expected_energy} J force_tolerance=1e-7 N selected_claims=37 empirical_qualification=false",
+                loaded.pack_id(),
+                state.resolved().identity(),
+                assembly.total_mass_kg
+            );
+            energies.push(energy);
+        }
+        assert!(
+            energies[1] > 1.17 * energies[0],
+            "the actual oriented operator must change response"
+        );
+    }
+
     /// G1/G3: real source compilation and persistent transport reach the
     /// nonlinear heat solve. This qualifies the declared interpolant, not a
     /// physical stainless specimen or an unspecified pressure condition.
