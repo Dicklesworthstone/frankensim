@@ -1,0 +1,151 @@
+frankensim.matdb-source.v1
+observation	cubic	Silicon crystal; purity, dopant and physical specimen cut unspecified	NASA RP-1057 pp.100-101: three independent stiffness constants at 25 C; NASA CR-275 Appendix A defines the engineering crystal coordinates	Engineering reference, not a matched wafer measurement. RP-1057 prints C11=1.65773, C12=0.63924, C44=0.79619 without a table unit header; the chapter uses Mbar, explicitly interpreted here as 1e11 Pa. Its compressibility 1.012/Mbar independently agrees with 3/(C11+2*C12). All 36 entries below are the explicit cubic-symmetry expansion of those THREE inputs, including zero and duplicate entries; not 36 independent observations. Axes 1=[100],2=[010],3=[001], engineering strain shear, order xx,yy,zz,yz,zx,xy. Claim cIJ uses zero-based matrix indices, distinct from printed one-based Voigt symbols. Source-frame BLAKE3 preimage: frankenSim convention is documented in seed README. No temperature extrapolation, pressure-controlled condition, doping, covariance or physical cut inferred.
+observation	density-reference	Separate pure silicon crystal density reference	NASA CR-174869 (1986), High Accuracy Fuel Flowmeter, p.35, NBS portable reference densimeter crystal at 25 C	Source reports 2.32900 +/- 0.00002 g/cm3; SI center 2329 kg/m3, printed spread 0.02 kg/m3. No statistical confidence meaning is given here, so uncertainty remains Unstated. This is not the RP-1057 stiffness specimen. Combining the density and nominal silicon stiffness at their shared 25 C is an explicit cross-source engineering-reference assumption, not condition-matched wafer qualification; pressure/process/dopant remain unknown.
+scalar	rho	density-reference	density	2329	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	T	298.15	298.15	K
+validity	rho	source-pressure-known	0	0	1
+scalar	c00	cubic	stiffness	165773	MPa	constant
+uncertainty	c00	unstated	-	-	-	-
+validity	c00	T	298.15	298.15	K
+validity	c00	source-pressure-known	0	0	1
+scalar	c01	cubic	stiffness	63924	MPa	constant
+uncertainty	c01	unstated	-	-	-	-
+validity	c01	T	298.15	298.15	K
+validity	c01	source-pressure-known	0	0	1
+scalar	c02	cubic	stiffness	63924	MPa	constant
+uncertainty	c02	unstated	-	-	-	-
+validity	c02	T	298.15	298.15	K
+validity	c02	source-pressure-known	0	0	1
+scalar	c03	cubic	stiffness	0	MPa	constant
+uncertainty	c03	unstated	-	-	-	-
+validity	c03	T	298.15	298.15	K
+validity	c03	source-pressure-known	0	0	1
+scalar	c04	cubic	stiffness	0	MPa	constant
+uncertainty	c04	unstated	-	-	-	-
+validity	c04	T	298.15	298.15	K
+validity	c04	source-pressure-known	0	0	1
+scalar	c05	cubic	stiffness	0	MPa	constant
+uncertainty	c05	unstated	-	-	-	-
+validity	c05	T	298.15	298.15	K
+validity	c05	source-pressure-known	0	0	1
+scalar	c10	cubic	stiffness	63924	MPa	constant
+uncertainty	c10	unstated	-	-	-	-
+validity	c10	T	298.15	298.15	K
+validity	c10	source-pressure-known	0	0	1
+scalar	c11	cubic	stiffness	165773	MPa	constant
+uncertainty	c11	unstated	-	-	-	-
+validity	c11	T	298.15	298.15	K
+validity	c11	source-pressure-known	0	0	1
+scalar	c12	cubic	stiffness	63924	MPa	constant
+uncertainty	c12	unstated	-	-	-	-
+validity	c12	T	298.15	298.15	K
+validity	c12	source-pressure-known	0	0	1
+scalar	c13	cubic	stiffness	0	MPa	constant
+uncertainty	c13	unstated	-	-	-	-
+validity	c13	T	298.15	298.15	K
+validity	c13	source-pressure-known	0	0	1
+scalar	c14	cubic	stiffness	0	MPa	constant
+uncertainty	c14	unstated	-	-	-	-
+validity	c14	T	298.15	298.15	K
+validity	c14	source-pressure-known	0	0	1
+scalar	c15	cubic	stiffness	0	MPa	constant
+uncertainty	c15	unstated	-	-	-	-
+validity	c15	T	298.15	298.15	K
+validity	c15	source-pressure-known	0	0	1
+scalar	c20	cubic	stiffness	63924	MPa	constant
+uncertainty	c20	unstated	-	-	-	-
+validity	c20	T	298.15	298.15	K
+validity	c20	source-pressure-known	0	0	1
+scalar	c21	cubic	stiffness	63924	MPa	constant
+uncertainty	c21	unstated	-	-	-	-
+validity	c21	T	298.15	298.15	K
+validity	c21	source-pressure-known	0	0	1
+scalar	c22	cubic	stiffness	165773	MPa	constant
+uncertainty	c22	unstated	-	-	-	-
+validity	c22	T	298.15	298.15	K
+validity	c22	source-pressure-known	0	0	1
+scalar	c23	cubic	stiffness	0	MPa	constant
+uncertainty	c23	unstated	-	-	-	-
+validity	c23	T	298.15	298.15	K
+validity	c23	source-pressure-known	0	0	1
+scalar	c24	cubic	stiffness	0	MPa	constant
+uncertainty	c24	unstated	-	-	-	-
+validity	c24	T	298.15	298.15	K
+validity	c24	source-pressure-known	0	0	1
+scalar	c25	cubic	stiffness	0	MPa	constant
+uncertainty	c25	unstated	-	-	-	-
+validity	c25	T	298.15	298.15	K
+validity	c25	source-pressure-known	0	0	1
+scalar	c30	cubic	stiffness	0	MPa	constant
+uncertainty	c30	unstated	-	-	-	-
+validity	c30	T	298.15	298.15	K
+validity	c30	source-pressure-known	0	0	1
+scalar	c31	cubic	stiffness	0	MPa	constant
+uncertainty	c31	unstated	-	-	-	-
+validity	c31	T	298.15	298.15	K
+validity	c31	source-pressure-known	0	0	1
+scalar	c32	cubic	stiffness	0	MPa	constant
+uncertainty	c32	unstated	-	-	-	-
+validity	c32	T	298.15	298.15	K
+validity	c32	source-pressure-known	0	0	1
+scalar	c33	cubic	stiffness	79619	MPa	constant
+uncertainty	c33	unstated	-	-	-	-
+validity	c33	T	298.15	298.15	K
+validity	c33	source-pressure-known	0	0	1
+scalar	c34	cubic	stiffness	0	MPa	constant
+uncertainty	c34	unstated	-	-	-	-
+validity	c34	T	298.15	298.15	K
+validity	c34	source-pressure-known	0	0	1
+scalar	c35	cubic	stiffness	0	MPa	constant
+uncertainty	c35	unstated	-	-	-	-
+validity	c35	T	298.15	298.15	K
+validity	c35	source-pressure-known	0	0	1
+scalar	c40	cubic	stiffness	0	MPa	constant
+uncertainty	c40	unstated	-	-	-	-
+validity	c40	T	298.15	298.15	K
+validity	c40	source-pressure-known	0	0	1
+scalar	c41	cubic	stiffness	0	MPa	constant
+uncertainty	c41	unstated	-	-	-	-
+validity	c41	T	298.15	298.15	K
+validity	c41	source-pressure-known	0	0	1
+scalar	c42	cubic	stiffness	0	MPa	constant
+uncertainty	c42	unstated	-	-	-	-
+validity	c42	T	298.15	298.15	K
+validity	c42	source-pressure-known	0	0	1
+scalar	c43	cubic	stiffness	0	MPa	constant
+uncertainty	c43	unstated	-	-	-	-
+validity	c43	T	298.15	298.15	K
+validity	c43	source-pressure-known	0	0	1
+scalar	c44	cubic	stiffness	79619	MPa	constant
+uncertainty	c44	unstated	-	-	-	-
+validity	c44	T	298.15	298.15	K
+validity	c44	source-pressure-known	0	0	1
+scalar	c45	cubic	stiffness	0	MPa	constant
+uncertainty	c45	unstated	-	-	-	-
+validity	c45	T	298.15	298.15	K
+validity	c45	source-pressure-known	0	0	1
+scalar	c50	cubic	stiffness	0	MPa	constant
+uncertainty	c50	unstated	-	-	-	-
+validity	c50	T	298.15	298.15	K
+validity	c50	source-pressure-known	0	0	1
+scalar	c51	cubic	stiffness	0	MPa	constant
+uncertainty	c51	unstated	-	-	-	-
+validity	c51	T	298.15	298.15	K
+validity	c51	source-pressure-known	0	0	1
+scalar	c52	cubic	stiffness	0	MPa	constant
+uncertainty	c52	unstated	-	-	-	-
+validity	c52	T	298.15	298.15	K
+validity	c52	source-pressure-known	0	0	1
+scalar	c53	cubic	stiffness	0	MPa	constant
+uncertainty	c53	unstated	-	-	-	-
+validity	c53	T	298.15	298.15	K
+validity	c53	source-pressure-known	0	0	1
+scalar	c54	cubic	stiffness	0	MPa	constant
+uncertainty	c54	unstated	-	-	-	-
+validity	c54	T	298.15	298.15	K
+validity	c54	source-pressure-known	0	0	1
+scalar	c55	cubic	stiffness	79619	MPa	constant
+uncertainty	c55	unstated	-	-	-	-
+validity	c55	T	298.15	298.15	K
+validity	c55	source-pressure-known	0	0	1
