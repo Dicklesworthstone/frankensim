@@ -723,6 +723,90 @@ fn fourth_power(value: f64) -> f64 {
     square * square
 }
 
+/// Prescribed uniform fluid and enclosing radiation field at one temperature.
+/// The whole declared body boundary is exposed; there is no contact or finite
+/// reservoir debit. Transport may be declared or material-card-backed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LumpedThermalEnvironment {
+    /// Infinite reservoir temperature held constant during a step [K].
+    pub temperature_k: f64,
+    /// Declared whole-surface convection coefficient [W/(m2 K)].
+    pub convection_w_per_m2_k: f64,
+    /// Conductivity and total hemispherical emissivity authority.
+    pub transport: LumpedThermalTransport,
+    /// Specific-enthalpy bisection interval tolerance [J/kg].
+    pub enthalpy_tolerance_j_kg: f64,
+    /// Maximum accepted thermal balance residual [J], separate from time error.
+    pub maximum_thermal_residual_j: f64,
+}
+
+impl LumpedThermalEnvironment {
+    /// Propose one implicit thermal step for geometry supplied by a physical
+    /// owner. No state is published here: the owner accepts or rejects the
+    /// proposal together with its other physics and observations.
+    ///
+    /// Uses the fixed corpus Biot ceiling and geometric `V/A`. Initially uniform
+    /// temperature and homogenized internal heating remain caller assumptions;
+    /// a small Biot value alone does not justify a rapid local heat source.
+    pub fn advance(
+        &self,
+        cx: &Cx<'_>,
+        input: fs_material::phase::UniformEnthalpyStepInput<'_>,
+    ) -> Result<fs_material::phase::UniformEnthalpyStep<LumpedEnthalpyMarch>, ConductionError> {
+        if input.initial.phase_curve_identity() != input.curve.identity()
+            || !(input.duration_s.is_finite() && input.duration_s > 0.0)
+            || !(input.volume_m3.is_finite() && input.volume_m3 > 0.0)
+            || !(self.maximum_thermal_residual_j.is_finite()
+                && self.maximum_thermal_residual_j >= 0.0)
+        {
+            return Err(lumped_error("coupled uniform body",
+                "thermal proposal needs its initial chart, positive duration/volume and a finite nonnegative energy-residual budget".to_owned()));
+        }
+        let body = LumpedEnthalpyBody::try_new_with_transport(
+            "coupled uniform body",
+            input.mass_kg,
+            input.surface_area_m2,
+            self.convection_w_per_m2_k,
+            input.volume_m3 / input.surface_area_m2,
+            self.transport.clone(),
+            input.curve,
+        )?;
+        let report = solve_lumped_enthalpy(
+            cx,
+            &body,
+            BiotGate::corpus_default(),
+            LumpedEnthalpyMarchConfig {
+                initial_specific_enthalpy_j_kg: input.initial.specific_enthalpy_j_kg(),
+                ambient_temperature_k: self.temperature_k,
+                internal_power_w: input.internal_heat_j / input.duration_s,
+                duration_s: input.duration_s,
+                maximum_step_s: input.duration_s,
+                maximum_steps: 1,
+                enthalpy_tolerance_j_kg: self.enthalpy_tolerance_j_kg,
+            },
+        )?;
+        let endpoint = *report.samples().last().expect("one admitted thermal step");
+        if !endpoint.step_energy_residual_j.is_finite()
+            || endpoint.step_energy_residual_j.abs() > self.maximum_thermal_residual_j
+        {
+            return Err(lumped_error(
+                "coupled uniform body",
+                "ambient thermal solve exceeds its energy-residual budget".to_owned(),
+            ));
+        }
+        // Integrate actual boundary powers. Inferring this from delta enthalpy
+        // minus internal heat would silently relabel solver error as heat input.
+        let external_heat_j =
+            input.duration_s * (endpoint.convection_into_body_w + endpoint.radiation_into_body_w);
+        Ok(fs_material::phase::UniformEnthalpyStep {
+            state: endpoint.phase_state,
+            external_heat_j,
+            energy_residual_tolerance_j: self.maximum_thermal_residual_j,
+            report,
+        })
+    }
+}
+
 /// One lumped node: an isothermal body with a surface path to ambient.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LumpedNode {

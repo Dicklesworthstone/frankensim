@@ -19,6 +19,44 @@ const EQUILIBRIUM_ENTHALPY_PHASE_IDENTITY_DOMAIN: &str =
 const EQUILIBRIUM_PHASE_STATE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.equilibrium-phase-state.v1";
 
+/// Proposed uniform-body thermal step shared by transport and coupled owners.
+/// Geometry and mass belong to the specimen; this carrier does not justify
+/// lumping, solve transport, or mutate the accepted state.
+#[derive(Clone, Copy, Debug)]
+pub struct UniformEnthalpyStepInput<'a> {
+    /// Immutable equilibrium chart used by the accepted body.
+    pub curve: &'a EquilibriumEnthalpyPhaseCurve,
+    /// Accepted initial state on that chart.
+    pub initial: EquilibriumPhaseState,
+    /// Invariant specimen mass [kg].
+    pub mass_kg: f64,
+    /// Specimen volume [m3].
+    pub volume_m3: f64,
+    /// Whole exposed boundary area [m2].
+    pub surface_area_m2: f64,
+    /// Internally deposited heat over this step [J], counted exactly once.
+    pub internal_heat_j: f64,
+    /// Physical duration of this step [s].
+    pub duration_s: f64,
+}
+
+/// Proposed thermal state and boundary transfer, with a solver-owned report.
+/// The coupled owner must check the chart, energy balance and its own regime
+/// before publishing this proposal. A transport callback must not debit a
+/// mutable external reservoir before the coupled transaction accepts it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniformEnthalpyStep<R> {
+    /// Proposed state on the input equilibrium chart.
+    pub state: EquilibriumPhaseState,
+    /// Signed integrated boundary heat into the body [J].
+    pub external_heat_j: f64,
+    /// Declared transport solve residual allowance [J], separate from roundoff
+    /// and from temporal or constitutive-model error.
+    pub energy_residual_tolerance_j: f64,
+    /// Actual transport result retained without erasing its concrete type.
+    pub report: R,
+}
+
 /// One source-provided point on a solid-liquid equilibrium enthalpy curve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnthalpyPhaseKnot {

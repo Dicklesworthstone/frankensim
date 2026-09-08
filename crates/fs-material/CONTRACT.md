@@ -186,6 +186,14 @@ homogenization, the P2 milestone.
   latent-heat plateau. It contains no material-name presets and never
   extrapolates. It is not a heat-transfer, deformation, remeshing,
   free-surface, acoustic, or optical solver.
+  `UniformEnthalpyStepInput` and `UniformEnthalpyStep<R>` carry a proposed
+  uniform-body heat-transfer step between physical owners without a reverse
+  solver dependency. They include specimen mass/geometry, initial chart/state,
+  duration, internal heat, actual boundary heat, a distinct solve-residual
+  budget and the concrete solver report. They are data, not an admission or
+  transport solver. The transport must justify lumping; the coupled owner must
+  verify chart identity, energy balance and regime before publishing, and the
+  callback must not debit an external source before that commit.
 - `resolve_interface_state_point` applies the same atomic query contract to an
   ordered `InterfaceSystemCard`. Its identity therefore includes both surface
   material states and texture frames, medium, third body, environment,
@@ -262,6 +270,19 @@ vapor-pressure/melting taxonomy rows land. The Eucken 5/4 coefficient
 is pinned ABSOLUTELY by the monatomic identity Pr = 2/3 (exact,
 mu-independent), alongside the relative Eucken-vs-USSA divergence
 envelope.
+
+`resolve_sutherland_gas_state` connects a material card to this same evaluator.
+It resolves five exact parameter keys at a shared, explicitly typed temperature
+and pressure, retaining the complete source bundle and receipts. Reference
+viscosity is converted back to Sutherland beta; it is not mistaken for viscosity
+at the operating temperature. Reference temperature is absolute, Sutherland S
+is an interval, and conductivity model selection is explicit. The returned
+`ResolvedGasState` exposes the selected model separately; its parameter-bundle
+identity does not claim to bind that model choice. Missing, ambiguous, mistyped,
+out-of-source-domain or invalid parameters refuse atomically. The
+`air-dry-ussa1976` seed defines a narrower 273.15–313.15 K / 80–110 kPa dry
+engineering application range, with its 1976 composition and model limits.
+This is source-backed model evaluation, not real-gas or humidity qualification.
 
 ### `visco` — viscoelastic damping tiers (bead ybc75)
 

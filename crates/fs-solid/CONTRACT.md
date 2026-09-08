@@ -64,6 +64,17 @@ complete tensor, and reproduces the independently checked assembled operator.
 Coefficient uncertainties remain in the upstream receipts; no independent
 coefficient assumption, propagated tensor bound or empirical authority is added.
 
+The committed `silicon-cubic-25c-nasa-rp1057` source bundle now supplies a
+separate sourced witness in `xtask/tests/matdb_pack_cli.rs`. It compiles all
+36 explicit engineering coordinates, persists and reloads the material card,
+and resolves its density/tensor into the same oriented tetrahedral operator.
+The G1/G3 test checks mass, nodal forces and strain energy at zero and 45-degree
+orientations against an independent three-constant cubic stress calculation.
+The matrix entries derive from three handbook constants at 25 C; density is
+from a separate pure-crystal reference. This cross-source engineering example
+retains unknown pressure and specimen/dopant conditions. It neither qualifies
+a particular wafer nor supplies a thermal/electrical silicon model.
+
 `TetThermalStrainState` and `assemble_thermal_load` add the matching generic
 small-strain thermomechanical load boundary. An upstream material law supplies
 the already-integrated, possibly anisotropic Mandel thermal strain between an

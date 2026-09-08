@@ -151,6 +151,161 @@ impl GasSpec {
     }
 }
 
+/// A material-card gas evaluation, retaining all five selected parameter
+/// receipts and the caller's explicit conductivity model. The source bundle
+/// identity describes the parameters; it does not include that model choice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedGasState {
+    state: GasState,
+    parameters: crate::state_point::ResolvedMaterialStatePoint,
+    conductivity: ConductivityModel,
+}
+
+impl ResolvedGasState {
+    #[must_use]
+    pub const fn state(&self) -> &GasState {
+        &self.state
+    }
+
+    #[must_use]
+    pub const fn parameters(&self) -> &crate::state_point::ResolvedMaterialStatePoint {
+        &self.parameters
+    }
+
+    #[must_use]
+    pub const fn conductivity_model(&self) -> ConductivityModel {
+        self.conductivity
+    }
+}
+
+/// Resolve a calorically perfect, Sutherland gas from a material card and use
+/// the existing [`GasState::try_new`] equations. Canonical parameters are
+/// `molar_mass` [kg/mol], `heat_capacity_ratio` [1],
+/// `sutherland_reference_viscosity` [Pa s],
+/// `sutherland_reference_temperature` [absolute K], and
+/// `sutherland_temperature` [K interval]. The reference viscosity is a source
+/// model value, not a viscosity frozen at the requested operating temperature.
+///
+/// `temperature` and `pressure` must be explicitly typed absolute-temperature
+/// and pressure coordinates. All other source conditions (e.g. dry-air
+/// composition and zero humidity) remain mandatory through normal resolution.
+/// Conductivity is chosen explicitly, never inferred from a material name.
+/// USSA conductivity and the historical USSA gas constant retain the same
+/// approximation limits as the existing gas model; this is not a real-gas EOS.
+///
+/// # Errors
+/// Refuses incomplete, ambiguous, incompatible or unsupported source data,
+/// missing/mistyped state coordinates, and inadmissible gas model parameters.
+pub fn resolve_sutherland_gas_state(
+    card: &fs_matdb::MaterialCard,
+    point: &fs_matdb::QueryPoint,
+    conductivity: ConductivityModel,
+    selection: crate::state_point::MaterialPropertySelection,
+) -> Result<ResolvedGasState, crate::state_point::MaterialStatePointError> {
+    use crate::state_point::{
+        MaterialStatePointError, ScalarAdmissibility, ScalarPropertyRequirement,
+        resolve_material_state_point,
+    };
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    use fs_qty::{Dims, QuantitySpec};
+
+    let typed = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let coordinate =
+        |axis: &str, kind| {
+            if point.axis_quantities().get(axis) != Some(&typed(kind)) {
+                return Err(MaterialStatePointError::InvalidRequirement {
+                    property: axis.into(),
+                    reason: "gas state needs an explicitly typed absolute temperature and pressure",
+                });
+            }
+            point.axes().get(axis).copied().ok_or_else(|| {
+                MaterialStatePointError::InvalidRequirement {
+                    property: axis.into(),
+                    reason: "gas state coordinate is missing",
+                }
+            })
+        };
+    let temperature = coordinate("temperature", QuantityKind::AbsoluteTemperature)?;
+    let pressure = coordinate("pressure", QuantityKind::Pressure)?;
+    let requirements = [
+        (
+            "molar_mass",
+            QuantitySpec::dimensional(fs_matdb::SPECIES_MOLAR_MASS_DIMS),
+        ),
+        ("heat_capacity_ratio", QuantitySpec::dimensional(Dims::NONE)),
+        (
+            "sutherland_reference_viscosity",
+            QuantitySpec::dimensional(Dims([-1, 1, -1, 0, 0, 0])),
+        ),
+        (
+            "sutherland_reference_temperature",
+            typed(QuantityKind::AbsoluteTemperature),
+        ),
+        (
+            "sutherland_temperature",
+            typed(QuantityKind::TemperatureDifference),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, quantity)| {
+        ScalarPropertyRequirement::try_with_quantity(
+            name,
+            quantity,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let parameters = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name| {
+        parameters
+            .property(name)
+            .expect("required gas parameter resolved")
+            .value_si()
+    };
+    let reference_temperature = value("sutherland_reference_temperature");
+    let sutherland_s = value("sutherland_temperature");
+    // Invert the source's Sutherland reference value, preserving the existing
+    // beta-form evaluator and avoiding fractional dimensions in a stored key.
+    let sutherland_beta = value("sutherland_reference_viscosity")
+        * (reference_temperature + sutherland_s)
+        / reference_temperature
+        / reference_temperature.sqrt();
+    let spec = GasSpec {
+        molar_mass: value("molar_mass"),
+        gamma: value("heat_capacity_ratio"),
+        sutherland_beta,
+        sutherland_s,
+        conductivity,
+    };
+    let state = GasState::try_new(&spec, temperature, pressure).map_err(|_| {
+        MaterialStatePointError::InvalidDerived {
+            quantity: "source gas parameters or state outside the GasState model domain",
+        }
+    })?;
+    if [
+        state.density,
+        state.sound_speed,
+        state.dynamic_viscosity,
+        state.thermal_conductivity,
+        state.specific_gas_constant,
+        state.specific_heat_cp,
+        state.prandtl,
+        state.characteristic_impedance,
+    ]
+    .iter()
+    .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "finite positive derived gas properties",
+        });
+    }
+    Ok(ResolvedGasState {
+        state,
+        parameters,
+        conductivity,
+    })
+}
+
 /// Saturation vapor pressure of water over the LIQUID phase [Pa] —
 /// the Buck 1996 fit `e_s = 611.21 exp((18.678 - t/234.5) t /
 /// (257.14 + t))` with `t` in Celsius, quoted for −20..+50 °C

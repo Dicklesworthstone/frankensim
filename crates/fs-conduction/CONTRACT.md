@@ -862,6 +862,17 @@ authority.
   moving boundaries, free surfaces, fluid flow, ablation, or vaporization;
   those regimes require escalation to the corresponding spatial multiphysics
   solvers rather than reinterpretation of this trajectory.
+  `LumpedThermalEnvironment::advance` consumes the shared
+  `fs-material::phase::UniformEnthalpyStepInput` to propose one such step for
+  a coupled owner. Mass, exposed area and volume come from that owner; the
+  characteristic length is their `V/A`. Internal heat is converted once to
+  mean power. Boundary heat is integrated from the actual endpoint fluxes,
+  with a separately checked caller energy-residual budget and the complete
+  transport report retained. The environment is a prescribed infinite
+  uniform fluid/enclosure; it publishes no state and debits no finite source.
+  The Biot gate alone does not prove initially uniform temperature or the
+  validity of homogenizing a rapid local source. Cross-crate G1/G4 tests in
+  `fs-couple/tests/string_specimen.rs` consume this production path.
 - PCB HOMOGENIZATION IS CONSUMED, NOT REINTERPRETED. This crate uses the
   nominal tensor and retains its constituent property receipts. Coverage
   provenance, Reuss/Voigt structural bounds, propagated principal bounds,
