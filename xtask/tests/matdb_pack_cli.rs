@@ -40,7 +40,7 @@ mod common_material_acquisition {
         (pack, path)
     }
 
-    fn point(claim: &PropertyClaim, overrides: &[(&str, f64)]) -> QueryPoint {
+    pub(super) fn point(claim: &PropertyClaim, overrides: &[(&str, f64)]) -> QueryPoint {
         for (axis, _) in overrides {
             assert!(
                 claim.validity.bound(axis).is_some(),
@@ -64,7 +64,7 @@ mod common_material_acquisition {
         point
     }
 
-    fn sample(pack: &NormalizedPack, name: &str, overrides: &[(&str, f64)]) -> f64 {
+    pub(super) fn sample(pack: &NormalizedPack, name: &str, overrides: &[(&str, f64)]) -> f64 {
         let claims = pack.claims().claims_for(name);
         let claim = claims
             .first()
@@ -87,6 +87,514 @@ mod common_material_acquisition {
             (actual - expected).abs() <= 1.0e-10 * expected.abs().max(1.0),
             "actual {actual}, source-derived expected {expected}"
         );
+    }
+
+    /// G1/G3: real source compilation and persistent transport reach the
+    /// nonlinear heat solve. This qualifies the declared interpolant, not a
+    /// physical stainless specimen or an unspecified pressure condition.
+    #[test]
+    fn g1_g3_sourced_stainless_store_to_conduction() {
+        use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
+        use fs_conduction::field::ScalarField;
+        use fs_conduction::material::{ConductivityModel, ConductivityTable, ProvenanceClass};
+        use fs_conduction::mesh::ConductionMesh;
+        use fs_conduction::solve::{
+            ConductionProblem, InitialGuess, SolveConfig, StopRule, element_heat_flux, solve,
+        };
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+        use fs_qty::QuantitySpec;
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+        let database = fixture_dir().join("stainless-conduction.sqlite");
+        let packs: Vec<_> = [
+            (
+                "stainless-304-nist-cryogenic",
+                "UNS S30400",
+                "process unspecified",
+            ),
+            (
+                "stainless-316-nist-cryogenic",
+                "UNS S31600",
+                "process unspecified",
+            ),
+            ("aluminum-6061-t6-cryogenic", "UNS A96061", "T6 temper"),
+        ]
+        .into_iter()
+        .map(|(slug, chemistry, process)| {
+            let (pack, _) = compile(slug);
+            CatalogPack::MaterialCard(
+                NormalizedMaterialCardPack::new(
+                    MaterialStateId {
+                        chemistry: chemistry.into(),
+                        phase: "solid".into(),
+                        process: format!("NIST cryogenic compilation; {process}"),
+                        revision: 0,
+                    },
+                    pack,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store.ingest_bundle(&packs).unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let mut tables = Vec::new();
+        for original in &packs {
+            let CatalogPack::MaterialCard(original) = original else {
+                unreachable!()
+            };
+            let CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(original.pack_id()).unwrap()
+            else {
+                panic!("wrong stored family")
+            };
+            assert_eq!(loaded, *original);
+            let claims = loaded.card().claims();
+            let (pin, claim) = claims.claims_for("thermal-conductivity")[0];
+            let points = [250.0, 275.0].map(|t| point(claim, &[("temperature", t)]));
+            let table = ConductivityTable::from_claims_at_query_points(
+                claims,
+                &claim.key,
+                "temperature",
+                &points,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+            let pinned = ConductivityTable::from_claims_pinned_at_query_points(
+                claims,
+                &claim.key,
+                "temperature",
+                &points,
+                pin,
+            )
+            .unwrap();
+            assert_eq!(pinned.knots(), table.knots());
+            let requirement = ScalarPropertyRequirement::try_with_key(
+                &claim.key,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap();
+            for ((at, receipt), pinned_receipt) in
+                points.iter().zip(table.receipts()).zip(pinned.receipts())
+            {
+                let resolved = resolve_material_state_point(
+                    loaded.card(),
+                    at,
+                    std::slice::from_ref(&requirement),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap();
+                let property = resolved.property("thermal-conductivity").unwrap();
+                close(
+                    table.eval(at.axes()["temperature"]).unwrap(),
+                    property.value_si(),
+                );
+                assert_eq!(*receipt, property.answer().receipt);
+                assert_eq!(&receipt.axis_quantities, at.axis_quantities());
+                assert!(
+                    receipt
+                        .query_point
+                        .contains(&("source-pressure-known".into(), 0.0))
+                );
+                assert!(!receipt.source_hashes.is_empty());
+                claims.verify_receipt(receipt).unwrap();
+                claims.verify_receipt(pinned_receipt).unwrap();
+            }
+
+            // The original T-only constructor cannot silently drop the source
+            // axis spelling or turn unknown pressure into a declared pressure.
+            assert!(
+                ConductivityTable::from_claims(
+                    claims,
+                    "thermal-conductivity",
+                    &[250.0, 275.0],
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+            );
+            let absolute = claim.validity.axis_quantities()["temperature"];
+            let missing_pressure = [250.0, 275.0].map(|t| {
+                QueryPoint::new()
+                    .with_quantity("temperature", absolute, t)
+                    .unwrap()
+            });
+            let wrong_pressure = [250.0, 275.0]
+                .map(|t| point(claim, &[("temperature", t), ("source-pressure-known", 1.0)]));
+            let outside = [275.0, 301.0].map(|t| point(claim, &[("temperature", t)]));
+            let mut changing_context = points.clone();
+            changing_context[1] = wrong_pressure[1].clone();
+            let mut wrong_kind = points.clone();
+            for at in &mut wrong_kind {
+                *at = at
+                    .clone()
+                    .with_quantity(
+                        "temperature",
+                        QuantitySpec::semantic(SemanticType::new(
+                            QuantityKind::TemperatureDifference,
+                            ValueForm::Static,
+                        )),
+                        at.axes()["temperature"],
+                    )
+                    .unwrap();
+            }
+            for invalid in [
+                &missing_pressure,
+                &wrong_pressure,
+                &outside,
+                &changing_context,
+                &wrong_kind,
+            ] {
+                assert!(
+                    ConductivityTable::from_claims_at_query_points(
+                        claims,
+                        &claim.key,
+                        "temperature",
+                        invalid,
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err()
+                );
+            }
+            assert!(
+                ConductivityTable::from_claims_at_query_points(
+                    claims,
+                    &claim.key,
+                    "T",
+                    &points,
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+            );
+            assert!(table.eval(249.0).is_err());
+            assert!(table.eval(276.0).is_err());
+            tables.push(table);
+        }
+
+        // Source coefficients, independently evaluated at these NIST knots.
+        let k250 = 13.9812447520621;
+        let k275 = 14.6459875036829;
+        close(tables[0].eval(250.0).unwrap(), k250);
+        close(tables[0].eval(275.0).unwrap(), k275);
+        let slope = (k275 - k250) / 25.0;
+        // T = 250 + 25*x, k linear between these two knots, hence
+        // -div(k(T) grad T) = -k'(T)*25^2 W/m^3 on the unit cube.
+        let (complex, positions) = fs_conduction::fixtures::unit_cube(3);
+        let mesh = ConductionMesh::new(complex, positions).unwrap();
+        let reference: Vec<_> = mesh
+            .positions()
+            .iter()
+            .map(|p| 250.0 + 25.0 * p[0])
+            .collect();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "manufactured-temperature",
+                |_| true,
+                ThermalBc::Dirichlet {
+                    temperature: ScalarField::Nodal(reference.clone()),
+                },
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+        let source = ScalarField::Uniform(-slope * 25.0 * 25.0);
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let mut solutions = Vec::new();
+        for (index, table) in tables.into_iter().enumerate() {
+            let material = ConductivityModel::isotropic(table);
+            let solution = pool.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 0xC071,
+                        kernel_id: 51,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                );
+                solve(
+                    &cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material,
+                        element_materials: None,
+                        source: &source,
+                    },
+                    SolveConfig {
+                        initial: InitialGuess::Uniform(262.5),
+                        // The high-conductivity aluminum boundary loads are
+                        // much larger than the net source used by the energy
+                        // check; its relative closure needs a tighter solve.
+                        stop: StopRule {
+                            residual_rtol: 1.0e-13,
+                            ..StopRule::default()
+                        },
+                        ..SolveConfig::default()
+                    },
+                )
+                .unwrap()
+            });
+            assert_eq!(
+                solution.report.free_dofs, 8,
+                "must actually solve interior temperatures"
+            );
+            assert_eq!(
+                solution.report.material_provenance,
+                ProvenanceClass::MatdbReceipts
+            );
+            assert_eq!(solution.report.material_receipts, 2);
+            assert!(
+                solution.report.energy.relative_closure() < 1.0e-8,
+                "material {index}: {:?}",
+                solution.report.energy
+            );
+            if index <= 1 {
+                for (actual, expected) in solution.temperature.iter().zip(&reference) {
+                    assert!(
+                        (actual - expected).abs() < 1.0e-7,
+                        "temperature {actual}, reference {expected}"
+                    );
+                }
+                let fluxes = element_heat_flux(&mesh, &material, &solution.temperature).unwrap();
+                for (tet, flux) in mesh.complex().tets.iter().zip(fluxes) {
+                    let mean = tet.iter().map(|&v| reference[v as usize]).sum::<f64>() / 4.0;
+                    let expected = -25.0 * (k250 + slope * (mean - 250.0));
+                    assert!((flux[0] - expected).abs() < 1.0e-5);
+                    assert!(flux[1].abs().max(flux[2].abs()) < 1.0e-5);
+                }
+            }
+            solutions.push(solution.temperature);
+        }
+        // NIST publishes the same conductivity fit for these two grades.
+        // A material-name change alone must not invent a different response.
+        assert_eq!(solutions[0], solutions[1]);
+        let material_effect = solutions[0]
+            .iter()
+            .zip(&solutions[2])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            material_effect > 1.0e-5,
+            "substituting sourced 6061-T6 for 304 must affect the same thermal problem: {material_effect}"
+        );
+    }
+
+    /// G1/G3: conduction-only liquid water at a fixed pressure and phase.
+    /// This steady model needs k(T), not Cp or viscosity; it does not model
+    /// buoyancy, fluid motion, transient heating or phase change.
+    #[test]
+    fn g1_g3_sourced_water_conduction_at_two_states() {
+        use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
+        use fs_conduction::field::ScalarField;
+        use fs_conduction::material::{ConductivityModel, ConductivityTable, ProvenanceClass};
+        use fs_conduction::mesh::ConductionMesh;
+        use fs_conduction::solve::{
+            ConductionProblem, InitialGuess, SolveConfig, StopRule, element_heat_flux, solve,
+        };
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+
+        let (pack, _) = compile("water-liquid-iapws-sr6-08");
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "IAPWS ordinary water".into(),
+                phase: "liquid".into(),
+                process: "SR6-08(2011) correlation at 0.1 MPa".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let store = MaterialStore::open(":memory:").unwrap();
+        store
+            .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+            .unwrap();
+        store.seal_corpus().unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let claims = loaded.card().claims();
+        let claim = claims.claims_for("thermal-conductivity")[0].1;
+        let requirement = ScalarPropertyRequirement::try_with_key(
+            &claim.key,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap();
+        let (complex, positions) = fs_conduction::fixtures::unit_cube(3);
+        let mesh = ConductionMesh::new(complex, positions).unwrap();
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let mut mean_fluxes = Vec::new();
+        // Independently evaluated SR6-08 equation (8), at adjacent source knots.
+        for (lo, k_lo, k_hi) in [
+            (293.15, 0.598004651798403, 0.606502307735785),
+            (333.15, 0.651015542988153, 0.655588716984780),
+        ] {
+            let delta = 5.0;
+            let points = [lo, lo + delta].map(|t| point(claim, &[("temperature", t)]));
+            let table = ConductivityTable::from_claims_at_query_points(
+                claims,
+                &claim.key,
+                "temperature",
+                &points,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+            for ((at, expected), receipt) in points.iter().zip([k_lo, k_hi]).zip(table.receipts()) {
+                let state = resolve_material_state_point(
+                    loaded.card(),
+                    at,
+                    std::slice::from_ref(&requirement),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap();
+                let selected = state.property("thermal-conductivity").unwrap();
+                close(selected.value_si(), expected);
+                assert_eq!(&selected.answer().receipt, receipt);
+                assert!(receipt.query_point.contains(&("pressure".into(), 100000.0)));
+                assert!(receipt.query_point.contains(&("phase-liquid".into(), 1.0)));
+                claims.verify_receipt(receipt).unwrap();
+            }
+            let material = ConductivityModel::isotropic(table);
+            let reference: Vec<_> = mesh.positions().iter().map(|p| lo + delta * p[0]).collect();
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .region(
+                    "conduction-only-water",
+                    |_| true,
+                    ThermalBc::Dirichlet {
+                        temperature: ScalarField::Nodal(reference.clone()),
+                    },
+                )
+                .unwrap()
+                .finish()
+                .unwrap();
+            // For T=lo+delta*x and linear k(T), -div(k grad T)=-delta*(k_hi-k_lo).
+            let source = ScalarField::Uniform(-delta * (k_hi - k_lo));
+            let solution = pool.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 0xA91,
+                        kernel_id: 52,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                );
+                solve(
+                    &cx,
+                    ConductionProblem {
+                        mesh: &mesh,
+                        boundary: &boundary,
+                        material: &material,
+                        element_materials: None,
+                        source: &source,
+                    },
+                    SolveConfig {
+                        initial: InitialGuess::Uniform(lo + delta / 2.0),
+                        stop: StopRule {
+                            residual_rtol: 1e-13,
+                            ..StopRule::default()
+                        },
+                        ..SolveConfig::default()
+                    },
+                )
+                .unwrap()
+            });
+            assert_eq!(solution.report.free_dofs, 8);
+            assert_eq!(
+                solution.report.material_provenance,
+                ProvenanceClass::MatdbReceipts
+            );
+            assert_eq!(solution.report.material_receipts, 2);
+            assert!(
+                solution.report.energy.relative_closure() < 1e-8,
+                "{:?}",
+                solution.report.energy
+            );
+            for (actual, expected) in solution.temperature.iter().zip(&reference) {
+                assert!(
+                    (actual - expected).abs() < 1e-7,
+                    "T={actual}, expected={expected}"
+                );
+            }
+            let fluxes = element_heat_flux(&mesh, &material, &solution.temperature).unwrap();
+            for (tet, flux) in mesh.complex().tets.iter().zip(&fluxes) {
+                let mean = tet.iter().map(|&v| reference[v as usize]).sum::<f64>() / 4.0;
+                let expected = -delta * (k_lo + (k_hi - k_lo) * (mean - lo) / delta);
+                assert!((flux[0] - expected).abs() < 1e-5);
+                assert!(flux[1].abs().max(flux[2].abs()) < 1e-5);
+            }
+            let mean_flux = fluxes.iter().map(|q| q[0]).sum::<f64>() / fluxes.len() as f64;
+            println!(
+                "water conduction {lo}..{} K, 100000 Pa, liquid: mean x-flux={mean_flux} W/m2; relative energy closure={}",
+                lo + delta,
+                solution.report.energy.relative_closure()
+            );
+            mean_fluxes.push(mean_flux);
+        }
+        // The same 5 K/m gradient transfers more heat in the warmer source state.
+        assert!(mean_fluxes[1].abs() > 1.08 * mean_fluxes[0].abs());
+        for invalid in [
+            ("temperature", 273.15),
+            ("pressure", 101325.0),
+            ("phase-liquid", 0.0),
+        ] {
+            // Keep the grid increasing so an unsupported temperature is refused
+            // by source coverage rather than by duplicate-grid validation.
+            let points = [0.0, 5.0].map(|offset| {
+                if invalid.0 == "temperature" {
+                    point(claim, &[("temperature", invalid.1 + offset)])
+                } else {
+                    point(claim, &[("temperature", 293.15 + offset)])
+                        .with(invalid.0, invalid.1)
+                        .unwrap()
+                }
+            });
+            assert!(
+                ConductivityTable::from_claims_at_query_points(
+                    claims,
+                    &claim.key,
+                    "temperature",
+                    &points,
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+            );
+            assert!(
+                resolve_material_state_point(
+                    loaded.card(),
+                    &points[0],
+                    std::slice::from_ref(&requirement),
+                    MaterialPropertySelection::SingleClaimOnly
+                )
+                .is_err()
+            );
+        }
     }
 
     fn check_claims(pack: &NormalizedPack) {
@@ -126,6 +634,414 @@ mod common_material_acquisition {
                 );
             }
         }
+    }
+
+    #[test]
+    fn g0_g3_cryogenic_aluminum_copper_curves_and_discovery() {
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+
+        // Published NIST equations are independent of the retained TSV knots.
+        // Coefficients are in ascending polynomial order; E is in GPa.
+        let cases: [(&str, &str, &[f64], f64); 5] = [
+            (
+                "aluminum-6061-t6-cryogenic",
+                "thermal-conductivity",
+                &[
+                    0.07918, 1.0957, -0.07277, 0.08084, 0.02803, -0.09464, 0.04179, -0.00571, 0.0,
+                ],
+                0.00086,
+            ),
+            (
+                "aluminum-6061-t6-cryogenic",
+                "specific-heat-capacity",
+                &[
+                    46.6467, -314.292, 866.662, -1298.3, 1162.27, -637.795, 210.351, -38.3094,
+                    2.96344,
+                ],
+                0.00185,
+            ),
+            (
+                "aluminum-6061-t6-cryogenic",
+                "young-modulus",
+                &[
+                    77.71221,
+                    0.01030646,
+                    -0.0002924100,
+                    0.00000089936,
+                    -0.0000000010709,
+                ],
+                0.000036,
+            ),
+            (
+                "ofhc-copper-rrr100",
+                "thermal-conductivity",
+                &[
+                    2.2154, -0.47461, -0.88068, 0.13871, 0.29505, -0.02043, -0.04831, 0.001281,
+                    0.003207,
+                ],
+                0.00556,
+            ),
+            (
+                "ofhc-copper-rrr100",
+                "specific-heat-capacity",
+                &[
+                    -1.91844, -0.15973, 8.61013, -18.996, 21.9661, -12.7328, 3.54322, -0.3797, 0.0,
+                ],
+                0.00277,
+            ),
+        ];
+        let compiled = [
+            compile("aluminum-6061-t6-cryogenic"),
+            compile("ofhc-copper-rrr100"),
+        ];
+        let store = MaterialStore::open(":memory:").unwrap();
+        store
+            .ingest_bundle(
+                &compiled
+                    .iter()
+                    .map(|(pack, _)| CatalogPack::Properties(pack.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        store.seal_corpus().unwrap();
+        for (slug, name, coefficients, sampled_error_limit) in cases {
+            let original = &compiled[usize::from(slug.starts_with("ofhc"))].0;
+            let CatalogPack::Properties(pack) =
+                store.load_catalog_pack(original.pack_id()).unwrap()
+            else {
+                panic!("wrong property family")
+            };
+            assert_eq!(&pack, original);
+            check_claims(&pack);
+            let claim = pack.claims().claims_for(name)[0].1;
+            let PropertyValue::Curve { knots, .. } = &claim.value else {
+                panic!("missing {name} curve")
+            };
+            assert_eq!(knots.len(), 24);
+            assert_eq!(claim.validity.bound("temperature"), Some((77.0, 293.0)));
+            let equation = |t: f64| {
+                if slug.starts_with("ofhc") && name == "thermal-conductivity" {
+                    let a = coefficients;
+                    let s = t.sqrt();
+                    10.0f64.powf(
+                        (a[0] + a[2] * s + a[4] * t + a[6] * t * s + a[8] * t * t)
+                            / (1.0 + a[1] * s + a[3] * t + a[5] * t * s + a[7] * t * t),
+                    )
+                } else {
+                    let x = if name == "young-modulus" {
+                        t
+                    } else {
+                        t.log10()
+                    };
+                    let p = coefficients.iter().rev().fold(0.0, |p, a| p * x + a);
+                    if name == "young-modulus" {
+                        p * 1e9
+                    } else {
+                        10.0f64.powf(p)
+                    }
+                }
+            };
+            for &(t, value) in knots {
+                let expected = equation(t);
+                assert!(
+                    (value / expected - 1.0).abs() < 1.0e-8,
+                    "{slug} {name} at {t}: {value} != {expected}"
+                );
+            }
+            let mut maximum = 0.0f64;
+            for pair in knots.windows(2) {
+                for i in 1..100 {
+                    let t = pair[0].0 + (pair[1].0 - pair[0].0) * f64::from(i) / 100.0;
+                    let value = sample(&pack, name, &[("temperature", t)]);
+                    maximum = maximum.max((value / equation(t) - 1.0).abs());
+                }
+            }
+            assert!(
+                maximum <= sampled_error_limit,
+                "{slug} {name}: sampled interpolation discrepancy {maximum} exceeds {sampled_error_limit}"
+            );
+            println!(
+                "{slug} {name}: 24 source knots, sampled maximum relative interpolation discrepancy {maximum:.9}"
+            );
+            for overrides in [
+                vec![("temperature", 76.0)],
+                vec![("temperature", 294.0)],
+                vec![("temperature", 373.15)],
+                vec![("temperature", 150.0), ("source-pressure-known", 1.0)],
+            ] {
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &overrides),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+        }
+        let request = fixture_dir().join("cryogenic-aluminum-copper.json");
+        fs::write(
+            &request,
+            include_str!("../../examples/material-discovery/cryogenic-aluminum-copper.json"),
+        )
+        .unwrap();
+        let run = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            request.to_str().unwrap().into(),
+            compiled[0].1.to_str().unwrap().into(),
+            compiled[1].1.to_str().unwrap().into(),
+        ]);
+        assert_eq!(run.exit_code, fs_cli::exit::SUCCESS, "{}", run.stderr);
+        assert_eq!(
+            run.stdout.matches("\"status\":\"complete\"").count(),
+            2,
+            "{}",
+            run.stdout
+        );
+        assert_eq!(
+            run.stdout.matches("\"status\":\"supported\"").count(),
+            4,
+            "{}",
+            run.stdout
+        );
+        // Coverage of unbound property packs does not invent a coherent
+        // specimen or bind the RRR-unspecified heat capacity to RRR=100.
+        assert_eq!(
+            run.stdout
+                .matches("unbound to a named material state")
+                .count(),
+            2,
+            "{}",
+            run.stdout
+        );
+    }
+
+    /// Source equations and Table 8 are independent of the retained TSV values.
+    /// Linear engineering curves have the measured numerical discrepancies
+    /// below; this test does not establish a fluid solve or phase transition.
+    #[test]
+    fn g0_g3_iapws_liquid_water_curves_and_discovery() {
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+
+        let (original, path) = compile("water-liquid-iapws-sr6-08");
+        let (_, rebuilt) = compile("water-liquid-iapws-sr6-08");
+        assert_eq!(fs::read(&path).unwrap(), fs::read(rebuilt).unwrap());
+        let store = MaterialStore::open(":memory:").unwrap();
+        store
+            .ingest_bundle(&[CatalogPack::Properties(original.clone())])
+            .unwrap();
+        store.seal_corpus().unwrap();
+        let CatalogPack::Properties(pack) = store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong property family")
+        };
+        assert_eq!(pack, original);
+        assert_eq!(pack.claims().claims_ordered().count(), 5);
+        check_claims(&pack);
+
+        let equation = |t: f64| {
+            let r = 461.51805;
+            let tau = t / 10.0;
+            let alpha = 10.0 / (593.0 - t);
+            let beta = 10.0 / (t - 232.0);
+            let a = [(-1.661470539e5, 4), (2.708781640e6, 5), (-1.557191544e8, 7)];
+            let b = [
+                (-0.8237426256, 2),
+                (1.908956353, 3),
+                (-2.017597384, 4),
+                (0.8546361348, 5),
+            ];
+            let sum = |terms: &[(f64, i32)], x: f64, derivative: i32| {
+                terms
+                    .iter()
+                    .map(|&(c, n)| {
+                        let factor = match derivative {
+                            0 => 1.0,
+                            1 => f64::from(n),
+                            _ => f64::from(n * (n + 1)),
+                        };
+                        c * factor * x.powi(n + derivative)
+                    })
+                    .sum::<f64>()
+            };
+            let g = r
+                * 10.0
+                * (-245.2093414 + 38.69269598 * tau - 8.983025854 * tau * tau.ln()
+                    + sum(&a, alpha, 0)
+                    + sum(&b, beta, 0));
+            let s = -r
+                * (38.69269598 - 8.983025854 * (1.0 + tau.ln()) + sum(&a, alpha, 1)
+                    - sum(&b, beta, 1));
+            let cp = -r * (-8.983025854 + tau * (sum(&a, alpha, 2) + sum(&b, beta, 2)));
+            let volume = r * 10.0 / 100000.0
+                * (0.0193763157
+                    + sum(
+                        &[
+                            (6744.58446, 4),
+                            (-222521.604, 5),
+                            (100231247.0, 7),
+                            (-1635521180.0, 8),
+                            (8322996580.0, 9),
+                        ],
+                        alpha,
+                        0,
+                    )
+                    + sum(
+                        &[
+                            (0.00578545292, 1),
+                            (-0.0153195665, 2),
+                            (0.0311337859, 3),
+                            (-0.0423546241, 4),
+                            (0.0338713507, 5),
+                            (-0.0119946761, 6),
+                        ],
+                        beta,
+                        0,
+                    ));
+            let transport = |terms: &[(f64, f64)]| {
+                terms
+                    .iter()
+                    .map(|&(c, n)| c * (t / 300.0).powf(n))
+                    .sum::<f64>()
+            };
+            [
+                1.0 / volume,
+                cp,
+                g + t * s,
+                transport(&[
+                    (1.6630, -1.15),
+                    (-1.7781, -3.4),
+                    (1.1567, -6.0),
+                    (-0.432115, -7.6),
+                ]),
+                1e-6 * transport(&[
+                    (280.68, -1.9),
+                    (511.45, -7.7),
+                    (61.131, -19.6),
+                    (0.45903, -40.0),
+                ]),
+            ]
+        };
+        let cases = [
+            ("density", "kg/m3", 997.047013, 0.000039252),
+            ("specific-heat-capacity", "J/kg/K", 4181.44618, 0.000078733),
+            (
+                "specific-enthalpy",
+                "J/kg",
+                -4561.7537 + 298.15 * 367.20145,
+                0.000079557,
+            ),
+            ("thermal-conductivity", "W/m/K", 0.606502308, 0.000188763),
+            ("dynamic-viscosity", "Pa*s", 889.996774e-6, 0.003833467),
+        ];
+        for (index, (name, unit, table8, interpolation_limit)) in cases.into_iter().enumerate() {
+            let claim = pack.claims().claims_for(name)[0].1;
+            assert_eq!(
+                claim.key.dims(),
+                fs_qty::parse::parse_qty(&format!("1 {unit}")).unwrap().dims
+            );
+            assert_eq!(claim.validity.bound("temperature"), Some((283.15, 353.15)));
+            assert_eq!(claim.validity.bound("pressure"), Some((100000.0, 100000.0)));
+            let PropertyValue::Curve { knots, .. } = &claim.value else {
+                panic!("missing {name} curve")
+            };
+            assert_eq!(knots.len(), 15);
+            // Table 8 rounds printed values; h uses its separately rounded g,s.
+            assert!((sample(&pack, name, &[("temperature", 298.15)]) / table8 - 1.0).abs() < 2e-8);
+            for &(t, value) in knots {
+                assert!(value > 0.0);
+                assert!(
+                    (value / equation(t)[index] - 1.0).abs() < 1e-11,
+                    "{name} at {t}"
+                );
+            }
+            let mut maximum = 0.0_f64;
+            for pair in knots.windows(2) {
+                for i in 1..100 {
+                    let t = pair[0].0 + (pair[1].0 - pair[0].0) * f64::from(i) / 100.0;
+                    maximum = maximum.max(
+                        (sample(&pack, name, &[("temperature", t)]) / equation(t)[index] - 1.0)
+                            .abs(),
+                    );
+                }
+            }
+            assert!(maximum <= interpolation_limit, "{name}: {maximum}");
+            for override_value in [
+                ("temperature", 283.14),
+                ("temperature", 353.16),
+                ("pressure", 101325.0),
+                ("phase-liquid", 0.0),
+            ] {
+                assert!(
+                    pack.claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[override_value]),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+            println!(
+                "water {name}: 15 source knots, sampled relative interpolation discrepancy {maximum:.9}"
+            );
+        }
+        let enthalpy = pack.claims().claims_for("specific-enthalpy")[0].1;
+        assert!(
+            pack.claims()
+                .query_typed(
+                    &enthalpy.key,
+                    &point(enthalpy, &[("enthalpy-reference-iapws-sr6-08-eq1", 0.0)]),
+                    SelectionPolicy::SingleClaimOnly
+                )
+                .is_err()
+        );
+        let PropertyValue::Curve { knots, .. } = &enthalpy.value else {
+            unreachable!()
+        };
+        for pair in knots.windows(2) {
+            let dt = pair[1].0 - pair[0].0;
+            let dh = pair[1].1 - pair[0].1;
+            let cp0 = sample(
+                &pack,
+                "specific-heat-capacity",
+                &[("temperature", pair[0].0)],
+            );
+            let cp1 = sample(
+                &pack,
+                "specific-heat-capacity",
+                &[("temperature", pair[1].0)],
+            );
+            assert!((dh - dt * 0.5 * (cp0 + cp1)).abs() <= 1.100);
+            assert!((dh / dt - cp0).abs().max((dh / dt - cp1).abs()) <= 3.519);
+        }
+        let request = workspace_path("examples/material-discovery/liquid-water.json");
+        let run = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            request.to_str().unwrap().into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(run.exit_code, fs_cli::exit::SUCCESS, "{}", run.stderr);
+        assert_eq!(
+            run.stdout.matches("\"status\":\"complete\"").count(),
+            1,
+            "{}",
+            run.stdout
+        );
+        assert_eq!(
+            run.stdout.matches("\"status\":\"supported\"").count(),
+            5,
+            "{}",
+            run.stdout
+        );
+        assert!(
+            run.stdout.contains("unbound to a named material state"),
+            "{}",
+            run.stdout
+        );
     }
 
     #[test]
@@ -766,6 +1682,7 @@ mod common_material_acquisition {
             for (name, high) in [
                 ("young-modulus", f64::from(upper)),
                 ("linear-expansion-relative-to-293k", 300.0),
+                ("linear-thermal-expansion-coefficient", 300.0),
             ] {
                 let claims = pack.claims().claims_for(name);
                 assert_eq!(claims.len(), 1, "old points must not make lookup ambiguous");
@@ -834,18 +1751,98 @@ mod common_material_acquisition {
                 sample(&pack, expansion.key.name(), &[("temperature", 293.0)]),
                 7.4646191727e-7,
             );
-            // Do not relabel the fitted total expansion as instantaneous alpha.
+            // Alpha is the derivative of log length, not a relabeling of
+            // relative strain. NIST does not provide its uncertainty bound.
+            let alpha = pack
+                .claims()
+                .claims_for("linear-thermal-expansion-coefficient")[0]
+                .1;
+            assert_eq!(alpha.key.dims(), Dims([0, 0, 0, -1, 0, 0]));
+            let epsilon = |t: f64| {
+                (-295.54 - 0.39811 * t + 0.0092683 * t.powi(2) - 0.000020261 * t.powi(3)
+                    + 0.000000017127 * t.powi(4))
+                    * 1e-5
+            };
+            let instantaneous = |t: f64| {
+                (-0.39811 + 0.0185366 * t - 0.000060783 * t.powi(2) + 0.000000068508 * t.powi(3))
+                    * 1e-5
+                    / (1.0 + epsilon(t))
+            };
+            let PropertyValue::Curve { knots, .. } = &alpha.value else {
+                panic!("instantaneous expansion must be a bounded curve")
+            };
+            assert_eq!(knots.len(), 11);
+            for &(t, value) in knots {
+                assert!((value / instantaneous(t) - 1.0).abs() < 1e-12);
+                if t < 300.0 {
+                    let step = 1e-3;
+                    let derivative =
+                        (epsilon(t + step).ln_1p() - epsilon(t - step).ln_1p()) / (2.0 * step);
+                    assert!((value / derivative - 1.0).abs() < 2e-8);
+                }
+            }
+            let mut maximum = 0.0_f64;
+            for pair in knots.windows(2) {
+                for i in 1..100 {
+                    let t = pair[0].0 + (pair[1].0 - pair[0].0) * f64::from(i) / 100.0;
+                    let value = sample(&pack, alpha.key.name(), &[("temperature", t)]);
+                    maximum = maximum.max((value / instantaneous(t) - 1.0).abs());
+                }
+            }
             assert!(
-                pack.claims()
-                    .claims_for("linear-thermal-expansion-coefficient")
-                    .is_empty()
+                maximum < 0.007,
+                "{grade}: sampled alpha discrepancy {maximum}"
             );
+            // The real card/store/resolver preserves this derived claim and
+            // its source context; it does not invent the missing rho or nu.
+            let card = fs_matdb::NormalizedMaterialCardPack::new(
+                fs_matdb::MaterialStateId {
+                    chemistry: format!("UNS S{grade}00"),
+                    phase: "solid".into(),
+                    process: "NIST fit; product form and heat treatment unstated".into(),
+                    revision: 0,
+                },
+                pack.clone(),
+            )
+            .unwrap();
+            let store = fs_matdb_store::MaterialStore::open(":memory:").unwrap();
+            store
+                .ingest_bundle(&[fs_matdb_store::CatalogPack::MaterialCard(card.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+            let fs_matdb_store::CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(card.pack_id()).unwrap()
+            else {
+                panic!("wrong stored family")
+            };
+            assert_eq!(loaded, card);
+            let state = fs_material::state_point::resolve_material_state_point(
+                loaded.card(),
+                &point(alpha, &[("temperature", 150.0)]),
+                &[
+                    fs_material::state_point::ScalarPropertyRequirement::try_with_key(
+                        &alpha.key,
+                        fs_material::state_point::ScalarAdmissibility::StrictlyPositive,
+                    )
+                    .unwrap(),
+                ],
+                fs_material::state_point::MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let selected = state.property(alpha.key.name()).unwrap();
+            assert!((selected.value_si() / instantaneous(150.0) - 1.0).abs() < 1e-12);
+            loaded
+                .card()
+                .claims()
+                .verify_receipt(&selected.answer().receipt)
+                .unwrap();
+            println!("{grade}: 11 derived-alpha knots, sampled maximum discrepancy {maximum}");
             assert!(pack.claims().claims_for("density").is_empty());
         }
         let request = fixture_dir().join("stainless-thermomechanical.json");
         let source =
             include_str!("../../examples/material-discovery/stainless-thermomechanical.json");
-        for (upper, complete, supported) in [(293, 2, 8), (294, 1, 7), (295, 0, 6)] {
+        for (upper, complete, supported) in [(293, 2, 10), (294, 1, 9), (295, 0, 8)] {
             fs::write(&request, source.replace("293 K", &format!("{upper} K"))).unwrap();
             let run = fs_cli::run(vec![
                 "--json".into(),
@@ -869,7 +1866,7 @@ mod common_material_acquisition {
             );
             assert_eq!(
                 run.stdout.matches("\"status\":\"gap\"").count(),
-                8 - supported,
+                10 - supported,
                 "{}",
                 run.stdout
             );
@@ -1544,7 +2541,8 @@ fn g3_cli_compiles_handbook_bh_sn_and_lubricant_material_claims() {
 }
 
 #[test]
-fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
+fn g3_cli_compiles_committed_aluminum_6061_t6_curve_seed() {
+    let compiler_id = "frankensim-matdb-pack-compiler-v3";
     let manifest = workspace_path(ALUMINUM_6061_T6_SEED_MANIFEST);
     assert!(
         manifest.is_file(),
@@ -1570,7 +2568,7 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
         first.stdout, second.stdout,
         "Aluminum 6061-T6 decision stream moved"
     );
-    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+    assert_decision_compiler(&first, compiler_id);
 
     let first_bytes = fs::read(first_path).expect("read first Aluminum 6061-T6 pack");
     let second_bytes = fs::read(second_path).expect("read second Aluminum 6061-T6 pack");
@@ -1584,13 +2582,13 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
         .expect("verify Aluminum 6061-T6 pack identity");
 
     assert_eq!(decoded.pack_id(), "aluminum-6061-t6-cryogenic");
-    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert_eq!(decoded.compiler(), compiler_id);
     assert!(
         decoded
             .redistribution_terms()
             .contains("public information")
     );
-    assert_eq!(decoded.claims().claim_count(), 6);
+    assert_eq!(decoded.claims().claim_count(), 3);
     assert!(decoded.joint_statistics().is_empty());
 
     let expected = [
@@ -1613,7 +2611,7 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
         (
             "specific_heat_capacity",
             77.0,
-            348.127_924_911_502,
+            348.127_924_910_444,
             Dims([2, 0, -2, -1, 0, 0]),
             "5 percent curve-fit error",
             "a..i=46.6467,-314.292",
@@ -1621,7 +2619,7 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
         (
             "specific_heat_capacity",
             293.0,
-            942.911_235_990_911,
+            942.911_235_969_257,
             Dims([2, 0, -2, -1, 0, 0]),
             "5 percent curve-fit error",
             "a..i=46.6467,-314.292",
@@ -1647,28 +2645,26 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
     for (property, temperature, expected_value, expected_dims, fit_error_note, coefficient_note) in
         expected
     {
-        let (_, claim) = decoded
-            .claims()
-            .claims_for(property)
-            .into_iter()
-            .find(|(_, claim)| {
-                claim.validity.bound("temperature") == Some((temperature, temperature))
-            })
-            .unwrap_or_else(|| panic!("missing {property} claim at {temperature} K"));
-        let PropertyValue::Scalar { value, dims } = &claim.value else {
-            panic!("{property} at {temperature} K was not an exact-point scalar");
+        let canonical = property.replace('_', "-");
+        let (_, claim) = decoded.claims().claims_for(&canonical)[0];
+        let PropertyValue::Curve { knots, dims, .. } = &claim.value else {
+            panic!("{property} must carry a curve");
         };
+        assert_eq!(knots.len(), 24);
+        assert_eq!(claim.validity.bound("temperature"), Some((77.0, 293.0)));
+        let value = common_material_acquisition::sample(
+            &decoded,
+            &canonical,
+            &[("temperature", temperature)],
+        );
         assert_eq!(*dims, expected_dims, "{property} dimensions moved");
-        let relative_error = (*value - expected_value).abs() / expected_value;
+        let relative_error = (value - expected_value).abs() / expected_value;
         assert!(
             relative_error <= 2.0e-15,
             "{property} at {temperature} K moved by {relative_error:e} relative"
         );
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
-        assert_eq!(
-            claim.interpolation,
-            InterpolationPolicy::ConstantWithinValidity
-        );
+        assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
         assert_eq!(claim.observations.len(), 1);
         assert_eq!(claim.provenance.license, NIST_PUBLIC_INFORMATION_LICENSE);
         assert!(
@@ -1689,14 +2685,10 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
             .expect("claim observation remains linked");
         assert_eq!(
             observation.specimen,
-            "aluminum-6061-t6-uns-aa96061-temper-t6"
+            "aluminum-6061-t6-uns-a96061-temper-t6"
         );
         assert!(observation.method.contains("NIST"));
-        assert!(
-            observation
-                .method
-                .contains("exact-temperature derived scalars")
-        );
+        assert!(observation.method.contains("linear engineering curve"));
         assert!(observation.caveats.contains(fit_error_note));
         assert!(observation.caveats.contains(coefficient_note));
         assert!(
@@ -1712,19 +2704,13 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
     for (nist_temperature, nasa_temperature, nasa_value) in
         [(77.0, 75.0, 82.0), (293.0, 300.0, 155.0)]
     {
-        let (_, claim) = decoded
-            .claims()
-            .claims_for("thermal_conductivity")
-            .into_iter()
-            .find(|(_, claim)| {
-                claim.validity.bound("temperature") == Some((nist_temperature, nist_temperature))
-            })
-            .expect("thermal-conductivity comparison point");
-        let PropertyValue::Scalar { value, .. } = &claim.value else {
-            panic!("thermal-conductivity comparison point is scalar");
-        };
+        let value = common_material_acquisition::sample(
+            &decoded,
+            "thermal-conductivity",
+            &[("temperature", nist_temperature)],
+        );
         assert!((nist_temperature - nasa_temperature).abs() <= 7.0);
-        let relative_difference = (*value - nasa_value).abs() / nasa_value;
+        let relative_difference = (value - nasa_value).abs() / nasa_value;
         assert!(
             relative_difference <= 0.03,
             "NIST-derived {nist_temperature} K conductivity and NASA {nasa_temperature} K comparison differ by {relative_difference:e}"
@@ -1742,7 +2728,8 @@ fn g3_cli_compiles_committed_aluminum_6061_t6_exact_point_seed() {
 }
 
 #[test]
-fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
+fn g3_cli_compiles_committed_ofhc_copper_curve_seed() {
+    let compiler_id = "frankensim-matdb-pack-compiler-v3";
     let manifest = workspace_path(OFHC_COPPER_SEED_MANIFEST);
     assert!(
         manifest.is_file(),
@@ -1768,7 +2755,7 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         first.stdout, second.stdout,
         "OFHC Copper decision stream moved"
     );
-    assert_decision_compiler(&first, MATERIAL_COMPILER_ID);
+    assert_decision_compiler(&first, compiler_id);
 
     let first_bytes = fs::read(first_path).expect("read first OFHC Copper pack");
     let second_bytes = fs::read(second_path).expect("read second OFHC Copper pack");
@@ -1779,20 +2766,20 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         .expect("verify OFHC Copper pack identity");
 
     assert_eq!(decoded.pack_id(), "ofhc-copper-cryogenic");
-    assert_eq!(decoded.compiler(), MATERIAL_COMPILER_ID);
+    assert_eq!(decoded.compiler(), compiler_id);
     assert!(
         decoded
             .redistribution_terms()
             .contains("public information")
     );
-    assert_eq!(decoded.claims().claim_count(), 4);
+    assert_eq!(decoded.claims().claim_count(), 2);
     assert!(decoded.joint_statistics().is_empty());
 
     let expected = [
         (
             "thermal_conductivity",
             77.0,
-            547.199_698_079_367,
+            547.199_698_079_356,
             Dims([1, 1, -3, -1, 0, 0]),
             "1 percent curve-fit error",
             "a..i=2.2154,-0.47461",
@@ -1810,7 +2797,7 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         (
             "specific_heat_capacity",
             77.0,
-            195.920_875_203_329,
+            195.920_875_203_320,
             Dims([2, 0, -2, -1, 0, 0]),
             "5 percent curve-fit error",
             "a..i=-1.91844,-0.15973",
@@ -1819,7 +2806,7 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         (
             "specific_heat_capacity",
             293.0,
-            389.085_653_150_371,
+            389.085_653_150_356,
             Dims([2, 0, -2, -1, 0, 0]),
             "5 percent curve-fit error",
             "a..i=-1.91844,-0.15973",
@@ -1837,28 +2824,26 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         expected_specimen,
     ) in expected
     {
-        let (_, claim) = decoded
-            .claims()
-            .claims_for(property)
-            .into_iter()
-            .find(|(_, claim)| {
-                claim.validity.bound("temperature") == Some((temperature, temperature))
-            })
-            .unwrap_or_else(|| panic!("missing OFHC {property} claim at {temperature} K"));
-        let PropertyValue::Scalar { value, dims } = &claim.value else {
-            panic!("OFHC {property} at {temperature} K was not an exact-point scalar");
+        let canonical = property.replace('_', "-");
+        let (_, claim) = decoded.claims().claims_for(&canonical)[0];
+        let PropertyValue::Curve { knots, dims, .. } = &claim.value else {
+            panic!("OFHC {property} must carry a curve");
         };
+        assert_eq!(knots.len(), 24);
+        assert_eq!(claim.validity.bound("temperature"), Some((77.0, 293.0)));
+        let value = common_material_acquisition::sample(
+            &decoded,
+            &canonical,
+            &[("temperature", temperature)],
+        );
         assert_eq!(*dims, expected_dims, "OFHC {property} dimensions moved");
-        let relative_error = (*value - expected_value).abs() / expected_value;
+        let relative_error = (value - expected_value).abs() / expected_value;
         assert!(
             relative_error <= 2.0e-15,
             "OFHC {property} at {temperature} K moved by {relative_error:e} relative"
         );
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
-        assert_eq!(
-            claim.interpolation,
-            InterpolationPolicy::ConstantWithinValidity
-        );
+        assert_eq!(claim.interpolation, InterpolationPolicy::LinearInside);
         assert_eq!(claim.observations.len(), 1);
         assert_eq!(claim.provenance.license, NIST_PUBLIC_INFORMATION_LICENSE);
         assert!(
@@ -1874,11 +2859,7 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
             .expect("OFHC claim observation remains linked");
         assert_eq!(observation.specimen, expected_specimen);
         assert!(observation.method.contains("NIST"));
-        assert!(
-            observation
-                .method
-                .contains("exact-temperature derived scalars")
-        );
+        assert!(observation.method.contains("linear engineering curve"));
         assert!(observation.caveats.contains(fit_error_note));
         assert!(observation.caveats.contains(coefficient_note));
         assert!(
@@ -1895,16 +2876,12 @@ fn g3_cli_compiles_committed_ofhc_copper_exact_point_seed() {
         ("thermal_conductivity", 390.0),
         ("specific_heat_capacity", 386.0),
     ] {
-        let (_, claim) = decoded
-            .claims()
-            .claims_for(property)
-            .into_iter()
-            .find(|(_, claim)| claim.validity.bound("temperature") == Some((293.0, 293.0)))
-            .unwrap_or_else(|| panic!("missing OFHC room-temperature {property}"));
-        let PropertyValue::Scalar { value, .. } = &claim.value else {
-            panic!("OFHC room-temperature comparison point was not scalar");
-        };
-        let relative_difference = (*value - nasa_value).abs() / nasa_value;
+        let value = common_material_acquisition::sample(
+            &decoded,
+            &property.replace('_', "-"),
+            &[("temperature", 293.0)],
+        );
+        let relative_difference = (value - nasa_value).abs() / nasa_value;
         assert!(
             relative_difference <= 0.02,
             "NIST-derived 293 K OFHC {property} and NASA room-temperature comparison differ by {relative_difference:e}"

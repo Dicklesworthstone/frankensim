@@ -24,10 +24,11 @@
 //! wrong answer, so it is not available.
 
 use fs_matdb::{
-    ClaimId, ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION, PcbHomogenizedConductivity,
+    ClaimId, ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION, PcbHomogenizedConductivity, PropertyKey,
     PropertyUsageReceipt, QueryPoint, SelectionPolicy,
 };
-use fs_qty::Dims;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec};
 
 use crate::ConductionError;
 
@@ -35,9 +36,9 @@ use crate::ConductionError;
 /// W/(m·K) = kg·m·s⁻³·K⁻¹.
 pub const CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
 
-/// The temperature axis name used when querying `fs-matdb`. It matches
-/// the `fs_evidence::ValidityDomain` axis convention used by material
-/// cards.
+/// The temperature axis used by the single-axis convenience constructors.
+/// Source packs with another axis or additional state coordinates use the
+/// explicit query-point constructors instead.
 pub const TEMPERATURE_AXIS: &str = "T";
 
 /// Where a conductivity number came from. A model is never silently
@@ -199,7 +200,7 @@ impl ConductivityTable {
         grid: &[f64],
         policy: SelectionPolicy,
     ) -> Result<ConductivityTable, ConductionError> {
-        Self::from_claims_selected(claims, property, grid, ClaimSelection::Policy(policy))
+        Self::from_claims_selected(claims, property, grid, ClaimSelection::Policy(policy), None)
     }
 
     /// Sample one explicitly pinned `fs-matdb` claim over a declared
@@ -218,7 +219,130 @@ impl ConductivityTable {
         grid: &[f64],
         pinned: ClaimId,
     ) -> Result<ConductivityTable, ConductionError> {
-        Self::from_claims_selected(claims, property, grid, ClaimSelection::Pinned(pinned))
+        Self::from_claims_selected(claims, property, grid, ClaimSelection::Pinned(pinned), None)
+    }
+
+    /// Sample an exact property key at fully declared source query points,
+    /// preserving the property's kind and every coordinate descriptor.
+    ///
+    /// `temperature_axis` explicitly identifies the absolute-temperature
+    /// coordinate in kelvin. All other coordinates and their descriptors must
+    /// remain fixed: this table models only `k(T)`, not a changing pressure,
+    /// moisture or process state. Axis aliases and source conditions are never
+    /// inferred. Between samples, the table uses its declared linear model.
+    ///
+    /// # Errors
+    /// The refusals of [`Self::from_claims`], plus a missing temperature axis,
+    /// a non-temperature descriptor or changing non-temperature context.
+    pub fn from_claims_at_query_points(
+        claims: &ClaimSet,
+        property: &PropertyKey,
+        temperature_axis: &str,
+        points: &[QueryPoint],
+        policy: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
+        Self::from_query_points_selected(
+            claims,
+            property,
+            temperature_axis,
+            points,
+            ClaimSelection::Policy(policy),
+        )
+    }
+
+    /// Sample a pinned claim at fully declared source query points.
+    ///
+    /// # Errors
+    /// The same context and grid refusals as
+    /// [`Self::from_claims_at_query_points`], and upstream pinned-claim refusals.
+    pub fn from_claims_pinned_at_query_points(
+        claims: &ClaimSet,
+        property: &PropertyKey,
+        temperature_axis: &str,
+        points: &[QueryPoint],
+        pinned: ClaimId,
+    ) -> Result<Self, ConductionError> {
+        Self::from_query_points_selected(
+            claims,
+            property,
+            temperature_axis,
+            points,
+            ClaimSelection::Pinned(pinned),
+        )
+    }
+
+    fn from_query_points_selected(
+        claims: &ClaimSet,
+        property: &PropertyKey,
+        temperature_axis: &str,
+        points: &[QueryPoint],
+        selection: ClaimSelection,
+    ) -> Result<Self, ConductionError> {
+        let conductivity = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        ));
+        if property.quantity() != conductivity
+            && property.quantity() != QuantitySpec::dimensional(CONDUCTIVITY_DIMS)
+        {
+            return Err(ConductionError::Conductivity {
+                what:
+                    "the property key must declare static thermal conductivity or its SI dimensions"
+                        .to_string(),
+            });
+        }
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let mut grid = Vec::with_capacity(points.len());
+        for point in points {
+            let temperature = point.axes().get(temperature_axis).copied().ok_or_else(|| {
+                ConductionError::Conductivity {
+                    what: format!("query point lacks temperature axis {temperature_axis:?}"),
+                }
+            })?;
+            if temperature <= 0.0
+                || point
+                    .axis_quantities()
+                    .get(temperature_axis)
+                    .is_some_and(|quantity| {
+                        *quantity != absolute
+                            && *quantity != QuantitySpec::dimensional(crate::TEMPERATURE_DIMS)
+                    })
+            {
+                return Err(ConductionError::Conductivity {
+                    what: format!(
+                        "axis {temperature_axis:?} must be positive absolute temperature in kelvin"
+                    ),
+                });
+            }
+            let first = &points[0];
+            if point.axis_quantities() != first.axis_quantities()
+                || !point
+                    .axes()
+                    .iter()
+                    .filter(|(axis, _)| axis.as_str() != temperature_axis)
+                    .eq(first
+                        .axes()
+                        .iter()
+                        .filter(|(axis, _)| axis.as_str() != temperature_axis))
+            {
+                return Err(ConductionError::Conductivity {
+                    what:
+                        "non-temperature query context and all axis descriptors must remain fixed"
+                            .to_string(),
+                });
+            }
+            grid.push(temperature);
+        }
+        Self::from_claims_selected(
+            claims,
+            property.name(),
+            &grid,
+            selection,
+            Some((property, points)),
+        )
     }
 
     fn from_claims_selected(
@@ -226,6 +350,7 @@ impl ConductivityTable {
         property: &str,
         grid: &[f64],
         selection: ClaimSelection,
+        queries: Option<(&PropertyKey, &[QueryPoint])>,
     ) -> Result<ConductivityTable, ConductionError> {
         if grid.len() < 2 {
             return Err(ConductionError::Conductivity {
@@ -244,17 +369,28 @@ impl ConductivityTable {
         }
         let mut knots = Vec::with_capacity(grid.len());
         let mut receipts = Vec::with_capacity(grid.len());
-        for &t in grid {
-            let point = QueryPoint::new().with(TEMPERATURE_AXIS, t).map_err(|e| {
-                ConductionError::MaterialQuery {
-                    property: property.to_string(),
-                    temperature: t,
-                    upstream: e.to_string(),
+        for (index, &t) in grid.iter().enumerate() {
+            let point = match queries {
+                Some((_, points)) => points[index].clone(),
+                None => QueryPoint::new().with(TEMPERATURE_AXIS, t).map_err(|e| {
+                    ConductionError::MaterialQuery {
+                        property: property.to_string(),
+                        temperature: t,
+                        upstream: e.to_string(),
+                    }
+                })?,
+            };
+            let answer = match (selection, queries) {
+                (ClaimSelection::Policy(policy), Some((key, _))) => {
+                    claims.query_typed(key, &point, policy)
                 }
-            })?;
-            let answer = match selection {
-                ClaimSelection::Policy(policy) => claims.query(property, &point, policy),
-                ClaimSelection::Pinned(pinned) => claims.query_pinned(property, &point, pinned),
+                (ClaimSelection::Pinned(pinned), Some((key, _))) => {
+                    claims.query_pinned_typed(key, &point, pinned)
+                }
+                (ClaimSelection::Policy(policy), None) => claims.query(property, &point, policy),
+                (ClaimSelection::Pinned(pinned), None) => {
+                    claims.query_pinned(property, &point, pinned)
+                }
             }
             .map_err(|e| ConductionError::MaterialQuery {
                 property: property.to_string(),

@@ -127,6 +127,23 @@ diameter.
 | `march_duty_cycle_with_element_materials` | the declared duty-cycle march using each tet's assigned linear `K_e`. One-material assignment matches the uniform duty march; a two-layer assignment relaxes to the series interface. Any `k(T)` assignment is refused |
 | `ConductionError` | the total typed refusal set; `rule()` gives a stable slug |
 
+`ConductivityTable::from_claims_at_query_points` and its pinned counterpart
+accept an exact conductivity property key, an explicit temperature-axis name
+and complete source query points. They preserve the declared property kind
+through typed selection, retain typed coordinates in every receipt and require positive absolute
+temperature in kelvin, an increasing sample grid, and fixed non-temperature
+coordinates and axis descriptors. They infer neither axis aliases nor missing
+source conditions. The single-axis convenience constructors use `T` only.
+The real NIST 304/316/6061 source-compiler/store/conduction test in
+`xtask/tests/matdb_pack_cli.rs` checks a manufactured steady temperature field,
+heat flux, material substitution and context/domain refusals. Its IAPWS-water
+counterpart checks 293.15–298.15 K and 333.15–338.15 K at exactly 100000 Pa,
+with the liquid-phase context retained. Both use eight free interior degrees
+of freedom, direct temperature/flux references and an energy-balance check.
+This is numerical integration evidence for the declared interpolants;
+water is conduction-only, with no buoyancy, fluid-motion, experimental,
+transient-heat or phase-change qualification.
+
 ### `ThermalBc::from_scenario_row` — the Robin seam
 
 `fs-scenario`'s Robin row is `expectation(Physics::Thermal, BcKind::Robin) ==

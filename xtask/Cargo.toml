@@ -19,7 +19,11 @@ fs-tropical = { path = "../crates/fs-tropical" }
 fs-vvreg = { path = "../crates/fs-vvreg" }
 
 [dev-dependencies]
+fs-alloc = { path = "../crates/fs-alloc" }
 fs-cli = { path = "../crates/fs-cli" }
+fs-conduction = { path = "../crates/fs-conduction" }
+fs-exec = { path = "../crates/fs-exec" }
+fs-matdb-store = { path = "../crates/fs-matdb-store" }
 fs-material = { path = "../crates/fs-material" }
 
 [lints]

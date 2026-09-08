@@ -914,6 +914,52 @@ fn declared_conductivity_never_claims_matdb_provenance() {
 }
 
 #[test]
+fn sampled_table_refuses_to_mix_individually_valid_state_contexts() {
+    let claims = conductivity_claims();
+    let key = &claims.claims_for("thermal_conductivity")[0].1.key;
+    let points = [300.0, 350.0].map(|t| {
+        fs_matdb::QueryPoint::new()
+            .with("T", t)
+            .unwrap()
+            .with("operator-context", 0.0)
+            .unwrap()
+    });
+    ConductivityTable::from_claims_at_query_points(
+        &claims,
+        key,
+        "T",
+        &points,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("fixed context can be sampled");
+    let changed = [
+        points[0].clone(),
+        points[1].clone().with("operator-context", 1.0).unwrap(),
+    ];
+    // Both source queries remain admissible. The new refusal must come from
+    // trying to represent changing context as a function of temperature alone.
+    for point in &changed {
+        claims
+            .query(
+                "thermal_conductivity",
+                point,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .expect("individual source query");
+    }
+    assert!(matches!(
+        ConductivityTable::from_claims_at_query_points(
+            &claims,
+            key,
+            "T",
+            &changed,
+            SelectionPolicy::SingleClaimOnly,
+        ),
+        Err(ConductionError::Conductivity { .. })
+    ));
+}
+
+#[test]
 fn material_queries_outside_validity_refuse() {
     let claims = conductivity_claims();
     // 600 K is outside the claim's validity box.
