@@ -26,6 +26,7 @@ fs-couple = { path = "../crates/fs-couple" }
 fs-exec = { path = "../crates/fs-exec" }
 fs-matdb-store = { path = "../crates/fs-matdb-store" }
 fs-material = { path = "../crates/fs-material" }
+fs-scenario = { path = "../crates/fs-scenario" }
 fs-solid = { path = "../crates/fs-solid" }
 
 [lints]

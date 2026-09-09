@@ -803,6 +803,373 @@ mod common_material_acquisition {
         }
     }
 
+    /// G1/G3: two explicitly different frozen source states drive the actual
+    /// thermoelastic plate/radiator path. Their reference temperatures differ,
+    /// so this is not a controlled same-temperature grade substitution.
+    #[test]
+    fn g1_g3_sourced_metal_profiles_reach_thermoelastic_plate() {
+        use fs_couple::thin_plate::{
+            PlateThicknessConstraint, certified_radiators,
+            with_uniform_isotropic_thermoelastic_material_state,
+        };
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_isotropic_thermoelastic_state_point,
+        };
+        use fs_scenario::ThinPlate;
+
+        let (aluminum_pack, aluminum_path) = compile("aluminum-2024-t3-nasa-tn-d6448");
+        let (stainless_pack, stainless_path) = compile("stainless-316-20c-engineering-reference");
+        let aluminum_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "Al 2024-T3".into(),
+                phase: "solid".into(),
+                process: "NASA TN D-6448 panel property set".into(),
+                revision: 0,
+            },
+            aluminum_pack,
+        )
+        .unwrap();
+        let stainless_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "316 stainless steel / UNS S31600".into(),
+                phase: "solid".into(),
+                process: "cross-source grade-level 20 C engineering reference".into(),
+                revision: 0,
+            },
+            stainless_pack,
+        )
+        .unwrap();
+        let database = fixture_dir().join("metal-thermoelastic-plate.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[
+                    CatalogPack::MaterialCard(aluminum_card.clone()),
+                    CatalogPack::MaterialCard(stainless_card.clone()),
+                ])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(aluminum) =
+            store.load_catalog_pack(aluminum_card.pack_id()).unwrap()
+        else {
+            panic!("wrong stored aluminum family")
+        };
+        let CatalogPack::MaterialCard(stainless) =
+            store.load_catalog_pack(stainless_card.pack_id()).unwrap()
+        else {
+            panic!("wrong stored stainless family")
+        };
+        assert_eq!(aluminum, aluminum_card);
+        assert_eq!(stainless, stainless_card);
+        let property_names = [
+            "density",
+            "young_modulus",
+            "poisson_ratio",
+            "linear_thermal_expansion_coefficient",
+            "specific_heat_capacity",
+            "thermal_conductivity",
+        ];
+        let template = ThinPlate {
+            length_m: 0.20,
+            width_m: 0.15,
+            thickness_m: 0.0016,
+            density_kg_m3: 1.0,
+            e1_pa: 1.0e9,
+            e2_pa: 1.0e9,
+            nu12: 0.3,
+            g12_pa: 1.0e9 / 2.6,
+            material_angle_rad: 0.0,
+            damping_ratio: 0.0,
+            thermoelastic: None,
+            kelvin_voigt_bending: None,
+            n_modes: 1,
+            geometric_nonlinearity: false,
+            pretension_n_m: 0.0,
+            clamped: false,
+        };
+        let thickness_m = 0.0016;
+        let relative_close = |actual: f64, expected: f64| {
+            assert!(
+                (actual - expected).abs() <= 1.0e-10 * expected.abs(),
+                "actual={actual} expected={expected} relative_tolerance=1e-10"
+            );
+        };
+        let inspect = |label: &str,
+                       card: &NormalizedMaterialCardPack,
+                       pack_path: &Path,
+                       discovery: &Path,
+                       temperature_k: f64,
+                       expected: [f64; 6],
+                       requires_pressure_known_axis: bool| {
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                discovery.to_str().unwrap().into(),
+                pack_path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{label}: {}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{label}: {}",
+                discovery.stdout
+            );
+            let claims = card.card().claims();
+            let density = claims.claims_for("density")[0].1;
+            let at = point(density, &[("T", temperature_k)]);
+            assert_eq!(at.axes().get("T"), Some(&temperature_k));
+            if requires_pressure_known_axis {
+                assert_eq!(at.axes().get("source-pressure-known"), Some(&0.0));
+            }
+            let state = resolve_isotropic_thermoelastic_state_point(
+                card.card(),
+                &at,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            assert_eq!(state.resolved().properties().len(), property_names.len());
+            let pins: Vec<_> = property_names
+                .iter()
+                .zip(expected)
+                .map(|(name, expected)| {
+                    let claims_for_property = claims.claims_for(name);
+                    assert_eq!(claims_for_property.len(), 1, "{label} {name}");
+                    let (id, claim) = claims_for_property[0];
+                    if requires_pressure_known_axis {
+                        assert_eq!(claim.observations.len(), 2, "{label} {name}");
+                        assert!(
+                            claim.observations.iter().any(|observation| {
+                                claims.observation(*observation).is_some_and(|dataset| {
+                                    dataset.method.contains("cross-source")
+                                        && dataset.caveats.contains("not a common coupon")
+                                })
+                            }),
+                            "{label} {name} must retain its compatibility caveat"
+                        );
+                    }
+                    let actual = state.resolved().property(name).unwrap().value_si();
+                    assert!(
+                        (actual - expected).abs() <= 1.0e-10 * expected.abs(),
+                        "{label} {name}: actual={actual} expected={expected}"
+                    );
+                    claims
+                        .verify_receipt(&state.resolved().property(name).unwrap().answer().receipt)
+                        .unwrap();
+                    ((*name).to_owned(), id)
+                })
+                .collect();
+            let specimen = with_uniform_isotropic_thermoelastic_material_state(
+                template,
+                &state,
+                PlateThicknessConstraint::FixedThickness(thickness_m),
+            )
+            .unwrap();
+            assert_eq!(specimen.material().identity(), state.resolved().identity());
+            let plate = specimen.plate();
+            let [rho, e, nu, alpha, cp, conductivity] = expected;
+            assert_eq!(plate.density_kg_m3, rho);
+            assert_eq!(plate.e1_pa, e);
+            assert_eq!(plate.e2_pa, e);
+            assert_eq!(plate.nu12, nu);
+            assert_eq!(plate.g12_pa, e / (2.0 * (1.0 + nu)));
+            let thermal = plate.thermoelastic.unwrap();
+            assert_eq!(thermal.temperature_k, temperature_k);
+            assert_eq!(thermal.linear_expansion_per_k, alpha);
+            assert_eq!(thermal.specific_heat_j_kg_k, cp);
+            assert_eq!(thermal.conductivity_w_m_k, conductivity);
+            assert_eq!(thermal.state_identity, Some(state.resolved().identity()));
+            close(
+                specimen.mass_kg(),
+                rho * thickness_m * plate.length_m * plate.width_m,
+            );
+            let bending_rigidity = e * thickness_m.powi(3) / (12.0 * (1.0 - nu * nu));
+            let continuum_omega11 = core::f64::consts::PI.powi(2)
+                * (bending_rigidity / (rho * thickness_m)).sqrt()
+                * (1.0 / plate.length_m.powi(2) + 1.0 / plate.width_m.powi(2));
+            let mut radiators = certified_radiators(plate).unwrap();
+            let body = radiators.remove(0);
+            assert!(
+                (body.omega / continuum_omega11 - 1.0).abs() < 0.20,
+                "{label}: DKT omega={} continuum omega11={continuum_omega11}",
+                body.omega
+            );
+            let tau =
+                thickness_m.powi(2) * rho * cp / (core::f64::consts::PI.powi(2) * conductivity);
+            let delta = e * alpha.powi(2) * temperature_k / (rho * cp);
+            let expected_zeta = 0.5 * delta * body.omega * tau / (1.0 + (body.omega * tau).powi(2));
+            relative_close(body.zeta, expected_zeta);
+            let replay = certified_radiators(plate).unwrap().remove(0);
+            assert_eq!(body.omega.to_bits(), replay.omega.to_bits());
+            assert_eq!(body.zeta.to_bits(), replay.zeta.to_bits());
+
+            let total_force_n = 0.1;
+            let dt_s = 1.0e-5;
+            let mut damped = body.clone();
+            let mut replay_damped = body.clone();
+            let mut no_thermal_plate = plate;
+            no_thermal_plate.thermoelastic = None;
+            let mut undamped = certified_radiators(no_thermal_plate).unwrap().remove(0);
+            assert_eq!(undamped.zeta, 0.0);
+            let mut pressure_difference = false;
+            let mut final_pressure = 0.0;
+            let mut max_damped_undamped_delta_pa = 0.0_f64;
+            for step in 0..128 {
+                let generalized_force = if step == 0 {
+                    total_force_n * damped.drive_participation
+                } else {
+                    0.0
+                };
+                let pressure = damped
+                    .drive_and_radiate(generalized_force, dt_s, 1.2, 1.0)
+                    .unwrap();
+                let replay_pressure = replay_damped
+                    .drive_and_radiate(generalized_force, dt_s, 1.2, 1.0)
+                    .unwrap();
+                let undamped_pressure = undamped
+                    .drive_and_radiate(generalized_force, dt_s, 1.2, 1.0)
+                    .unwrap();
+                assert!(pressure.is_finite());
+                final_pressure = pressure;
+                max_damped_undamped_delta_pa =
+                    max_damped_undamped_delta_pa.max((pressure - undamped_pressure).abs());
+                if step == 0 {
+                    let expected_initial_pressure = 1.2 * body.area_m2 * generalized_force
+                        / body.mass_kg
+                        / (2.0 * core::f64::consts::PI);
+                    relative_close(pressure, expected_initial_pressure);
+                }
+                assert_eq!(pressure.to_bits(), replay_pressure.to_bits());
+                pressure_difference |= pressure.to_bits() != undamped_pressure.to_bits();
+            }
+            assert!(
+                pressure_difference,
+                "{label}: the resolved thermoelastic zeta must affect evolved pressure"
+            );
+            assert!(max_damped_undamped_delta_pa > 0.0);
+            println!(
+                "metal-plate source={} T={temperature_k} K source_pressure_known_axis_present={} source_pressure_known_value={:?} rho={rho} kg/m3 E={e} Pa nu={nu} alpha={alpha} 1/K Cp={cp} J/kg/K k={conductivity} W/m/K mass={} kg omega={} rad/s continuum_omega11={continuum_omega11} rad/s zeta={} final_pressure={final_pressure} Pa max_damped_undamped_delta={max_damped_undamped_delta_pa} Pa source_receipts={:?} different_reference_temperatures=true ambient_density_for_radiation=1.2kg/m3",
+                card.pack_id(),
+                requires_pressure_known_axis,
+                at.axes().get("source-pressure-known"),
+                specimen.mass_kg(),
+                body.omega,
+                body.zeta,
+                state
+                    .resolved()
+                    .properties()
+                    .iter()
+                    .map(|property| property.answer().receipt.selected)
+                    .collect::<Vec<_>>(),
+            );
+            (state, pins, at, final_pressure)
+        };
+        let (aluminum_state, aluminum_pins, aluminum_point, aluminum_pressure) = inspect(
+            "aluminum",
+            &aluminum,
+            &aluminum_path,
+            &workspace_path(
+                "examples/material-discovery/aluminum-2024-t3-thermoelastic-reference.json",
+            ),
+            300.0,
+            [2705.0, 72.4e9, 0.33, 23.0e-6, 840.0, 126.0],
+            false,
+        );
+        let (stainless_state, _stainless_pins, stainless_point, stainless_pressure) = inspect(
+            "stainless",
+            &stainless,
+            &stainless_path,
+            &workspace_path(
+                "examples/material-discovery/stainless-316-thermoelastic-reference.json",
+            ),
+            293.15,
+            [
+                8000.0,
+                194_644_525_149.347_6,
+                0.30,
+                1.538_267_176_297_722_9e-5,
+                485.417_304_218_698_3,
+                15.127_317_130_127_033,
+            ],
+            true,
+        );
+        let t = 293.15_f64;
+        let epsilon = 1.0e-5
+            * (-295.54 - 0.39811 * t + 0.0092683 * t.powi(2) - 0.000020261 * t.powi(3)
+                + 0.000000017127 * t.powi(4));
+        let epsilon_prime = 1.0e-5
+            * (-0.39811 + 2.0 * 0.0092683 * t - 3.0 * 0.000020261 * t.powi(2)
+                + 4.0 * 0.000000017127 * t.powi(3));
+        relative_close(epsilon, 0.0000030538065389264904375);
+        relative_close(
+            stainless_state
+                .resolved()
+                .property("linear_thermal_expansion_coefficient")
+                .unwrap()
+                .value_si(),
+            epsilon_prime / (1.0 + epsilon),
+        );
+        relative_close(
+            stainless_state
+                .resolved()
+                .property("young_modulus")
+                .unwrap()
+                .value_si(),
+            1.0e9
+                * (207.9488 + 0.07394241 * t - 0.0009627200 * t.powi(2)
+                    + 0.000002845560 * t.powi(3)
+                    - 0.0000000032408 * t.powi(4)),
+        );
+        assert_ne!(
+            aluminum_state.resolved().identity(),
+            stainless_state.resolved().identity()
+        );
+        assert_ne!(aluminum_pressure.to_bits(), stainless_pressure.to_bits());
+        assert!(
+            resolve_isotropic_thermoelastic_state_point(
+                stainless.card(),
+                &stainless_point,
+                MaterialPropertySelection::PinnedByProperty(aluminum_pins.clone()),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_isotropic_thermoelastic_state_point(
+                aluminum.card(),
+                &aluminum_point,
+                MaterialPropertySelection::PinnedByProperty(aluminum_pins[..5].to_vec()),
+            )
+            .is_err()
+        );
+        let aluminum_density = aluminum.card().claims().claims_for("density")[0].1;
+        let stainless_density = stainless.card().claims().claims_for("density")[0].1;
+        for refused in [
+            point(aluminum_density, &[("T", 300.01)]),
+            point(stainless_density, &[("T", 293.16)]),
+            point(stainless_density, &[("source-pressure-known", 1.0)]),
+        ] {
+            assert!(
+                resolve_isotropic_thermoelastic_state_point(
+                    if refused.axes().contains_key("source-pressure-known") {
+                        stainless.card()
+                    } else {
+                        aluminum.card()
+                    },
+                    &refused,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+        }
+    }
+
     /// G1/G3: real source compilation and persistent transport reach the
     /// nonlinear heat solve. This qualifies the declared interpolant, not a
     /// physical stainless specimen or an unspecified pressure condition.
