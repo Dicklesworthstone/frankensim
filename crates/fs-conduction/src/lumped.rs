@@ -794,8 +794,11 @@ pub fn solve_lumped_contact_step(
             // bracket followed by division here can place its endpoint a few
             // ulps outside a chart. Correct only this arithmetic roundoff;
             // the resulting stored-energy error still faces the caller budget.
-            let roundoff = 8.0 * f64::EPSILON
-                * initial.abs().max(source.abs().max(transfer.abs()) / body.mass_kg);
+            let roundoff = 8.0
+                * f64::EPSILON
+                * initial
+                    .abs()
+                    .max(source.abs().max(transfer.abs()) / body.mass_kg);
             let corrected = if value.is_finite() && (bounded - value).abs() <= roundoff {
                 bounded
             } else {
@@ -813,9 +816,6 @@ pub fn solve_lumped_contact_step(
         if !contact_residual_j.is_finite() || !energy_residual_j.is_finite() {
             return Err(fail("contact energy arithmetic is not representable"));
         }
-        if residual_a.abs() > config.energy_tolerance_j || residual_b.abs() > config.energy_tolerance_j {
-            return Err(fail("individual stored-state roundoff exceeds the contact energy budget"));
-        }
         Ok(LumpedContactStep {
             state_a,
             state_b,
@@ -825,11 +825,33 @@ pub fn solve_lumped_contact_step(
             maximum_biot,
         })
     };
+    let accept = |step: LumpedContactStep| {
+        let residual_a = a.mass_kg * (step.state_a.specific_enthalpy_j_kg() - ha) - source_a
+            + step.heat_a_to_b_j;
+        let residual_b = b.mass_kg * (step.state_b.specific_enthalpy_j_kg() - hb)
+            - source_b
+            - step.heat_a_to_b_j;
+        if !residual_a.is_finite()
+            || !residual_b.is_finite()
+            || residual_a.abs() > config.energy_tolerance_j
+            || residual_b.abs() > config.energy_tolerance_j
+            || step.energy_residual_j.abs() > config.energy_tolerance_j
+        {
+            return Err(fail(
+                "stored-state roundoff exceeds the contact energy budget",
+            ));
+        }
+        Ok(step)
+    };
     // Bound Q by both finite source charts, never by an extrapolated state.
-    let mut lo = (a.mass_kg * (ha - a.phase_curve.knots().last().unwrap().specific_enthalpy_j_kg) + source_a)
+    let mut lo = (a.mass_kg * (ha - a.phase_curve.knots().last().unwrap().specific_enthalpy_j_kg)
+        + source_a)
         .max(b.mass_kg * (b.phase_curve.knots()[0].specific_enthalpy_j_kg - hb) - source_b);
     let mut hi = (a.mass_kg * (ha - a.phase_curve.knots()[0].specific_enthalpy_j_kg) + source_a)
-        .min(b.mass_kg * (b.phase_curve.knots().last().unwrap().specific_enthalpy_j_kg - hb) - source_b);
+        .min(
+            b.mass_kg * (b.phase_curve.knots().last().unwrap().specific_enthalpy_j_kg - hb)
+                - source_b,
+        );
     if !lo.is_finite() || !hi.is_finite() || lo > hi {
         return Err(fail(
             "finite-body contact heat bounds are not representable",
@@ -838,12 +860,13 @@ pub fn solve_lumped_contact_step(
     if lo <= 0.0 && hi >= 0.0 {
         let initial = evaluate(0.0)?;
         if initial.contact_residual_j == 0.0 {
-            if initial.energy_residual_j.abs() > config.energy_tolerance_j {
-                return Err(fail("stored-state roundoff exceeds the contact energy budget"));
-            }
-            return Ok(initial);
+            return accept(initial);
         }
-        if initial.contact_residual_j < 0.0 { lo = 0.0; } else { hi = 0.0; }
+        if initial.contact_residual_j < 0.0 {
+            lo = 0.0;
+        } else {
+            hi = 0.0;
+        }
     }
     if evaluate(lo)?.contact_residual_j > 0.0 || evaluate(hi)?.contact_residual_j < 0.0 {
         return Err(fail(
@@ -865,12 +888,7 @@ pub fn solve_lumped_contact_step(
             candidate.state_b.temperature_k() >= candidate.state_a.temperature_k()
         };
         if downhill && candidate.contact_residual_j.abs() <= config.energy_tolerance_j {
-            if candidate.energy_residual_j.abs() > config.energy_tolerance_j {
-                return Err(fail(
-                    "stored-state roundoff exceeds the contact energy budget",
-                ));
-            }
-            return Ok(candidate);
+            return accept(candidate);
         }
         if candidate.contact_residual_j < 0.0 {
             lo = q;
@@ -1010,7 +1028,7 @@ pub struct LumpedFiniteThermalContact<'a> {
     pub energy_tolerance_j: f64,
 }
 
-/// Source deposition followed by finite-body contact, without publication.
+/// Joint source deposition and finite-body contact, without publication.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteThermalContactReport {
     /// Contact transfer with specimen on A and finite support on B.
@@ -1024,10 +1042,9 @@ pub struct FiniteThermalContactReport {
 impl LumpedFiniteThermalContact<'_> {
     /// Propose both states using the existing uniform-body callback contract.
     ///
-    /// This is first-order source/contact splitting: deposit the declared
-    /// internal energy, then solve implicit contact. Both intermediate and
+    /// Backward Euler solves supplied internal heat and contact jointly;
     /// final states must remain inside their charts. Residual tolerances do
-    /// not bound splitting error. Contact covers the declared effective
+    /// not bound temporal discretization error. Contact covers the declared effective
     /// exchange area; no ambient, radiation or extra power term is added.
     /// The caller must publish `report.contact.state_b` only after accepting
     /// the specimen transaction, including its mechanical/regime checks.
@@ -1038,11 +1055,12 @@ impl LumpedFiniteThermalContact<'_> {
     ) -> Result<fs_material::phase::UniformEnthalpyStep<FiniteThermalContactReport>, ConductionError>
     {
         if self.support_state.phase_curve_identity() != self.support.phase_curve.identity()
+            || input.initial.phase_curve_identity() != input.curve.identity()
             || !(input.volume_m3.is_finite() && input.volume_m3 > 0.0)
             || !(input.duration_s.is_finite() && input.duration_s > 0.0)
         {
             return Err(lumped_error("finite thermal support",
-                "support state must match its chart and specimen volume/duration must be positive and finite".to_owned()));
+                "both states must match their charts and specimen volume/duration must be positive and finite".to_owned()));
         }
         let specimen = LumpedEnthalpyBody::try_new_with_transport(
             "coupled contact specimen",
@@ -1053,18 +1071,16 @@ impl LumpedFiniteThermalContact<'_> {
             self.specimen_transport.clone(),
             input.curve,
         )?;
-        let heated = input
-            .curve
-            .advance_specific_energy(input.initial, input.internal_heat_j / input.mass_kg)
-            .map_err(|error| lumped_error("coupled contact specimen", error.to_string()))?;
         let contact = solve_lumped_contact_step(
             cx,
             &specimen,
             self.support,
             self.resistance,
             LumpedContactStepConfig {
-                specific_enthalpy_a_j_kg: heated.specific_enthalpy_j_kg(),
+                specific_enthalpy_a_j_kg: input.initial.specific_enthalpy_j_kg(),
                 specific_enthalpy_b_j_kg: self.support_state.specific_enthalpy_j_kg(),
+                supplied_heat_a_j: input.internal_heat_j,
+                supplied_heat_b_j: 0.0,
                 duration_s: input.duration_s,
                 energy_tolerance_j: self.energy_tolerance_j,
             },

@@ -100,6 +100,7 @@ diameter.
 | `InterfaceResistance` | a positive area-specific resistance in m² K/W selected from an ordered `InterfaceSystemCard`; retains both the card identity and exact property-use receipt. `from_card_pinned` preserves an explicit project claim pin without weakening property, dimensional, validity, finiteness, or positivity checks |
 | `InterfaceSurface` / `ThermalInterfaces` | named, explicitly oriented matching-face pairs; every coincident boundary pair must be bound exactly once and may not also carry an external boundary condition |
 | `ThermalResistanceTerm` / `SeriesThermalResistance` | named K/W terms and a deterministic series sum; stated half-widths combine conservatively by addition, while any unstated term keeps the complete band unknown |
+| `ThermalResistanceTerm::slab_from_card` | resolves an exact static scalar conductivity key at the complete reference query point and computes `L/(kA)`. `ResistanceOrigin::BulkMaterialCard` retains card identity, usage receipt, original conductivity uncertainty and caller geometry. Resistance uncertainty stays `Unstated`: geometry and reciprocal uncertainty are not propagated. This is a reference-state series resistance, not a nonlinear temperature-span solve, transient heating law or inferred contact resistance. Two focused API regressions cover source retention, geometry scaling and property/state/geometry refusals |
 | `ComponentPower` / `PowerMap` | per-component dissipation in W bound to a mesh vertex set, plus the declared system total. Names are unique and sorted; bound vertices are sorted and deduplicated so a repeated binding cannot take a double share while the totals still balance |
 | `PowerMap::volumetric_source` | projects the map onto the nodal `W/m³` source AND returns the audit computed from that same field, so the reported delivered power is what the solve receives rather than a parallel estimate of it |
 | `PowerMap::regional_volumetric_source` | the s93ej.2 generation companion of `from_region_ids`: one finite W/m³ per region id, lumped to nodes so delivered power is exactly `Σ_e f_e V_e`. Unmapped regions and length mismatches refuse. This is generation, not conductivity |
@@ -885,9 +886,9 @@ authority.
   the march identity includes both. Setting both temperatures equal recovers
   the shared-temperature model. Directional illumination and view-factor
   networks are outside this rung.
-  `solve_lumped_contact_step` adds an isolated finite-body exchange through
+  `solve_lumped_contact_step` adds finite-body exchange with signed supplied heat through
   the existing `SeriesThermalResistance`. Backward Euler solves one signed
-  heat transfer and returns both enthalpy/temperature/phase states together;
+  heat transfer jointly with both supplied energies and returns both enthalpy/temperature/phase states together;
   latent heat is already included in each body's chart. It enforces both
   source domains, a contact Biot limit using each declared exchange area,
   and explicit contact-law/total-energy residual budgets. Cancellation and
@@ -898,11 +899,14 @@ authority.
   publication. Spatial spreading, geometry evolution and dynamic contact
   pressure are not resolved by this reduced operator.
   `LumpedFiniteThermalContact::advance` connects this operator to the shared
-  `UniformEnthalpyStepInput` callback. It deposits internal specimen energy
-  once, then applies finite contact, returning the actual signed boundary
+  `UniformEnthalpyStepInput` callback. It accounts for internal specimen energy
+  once in the joint contact balance, returning the actual signed boundary
   transfer and the support candidate alongside both energy residuals.
-  This first-order split requires the intermediate deposited state to remain
-  in-domain; its residual budget is not a bound on temporal splitting error.
+  Only accepted initial and final states must lie in-domain; an isolated
+  source-only intermediate need not exist. The scheme is first-order in time;
+  its residual budget does not bound temporal discretization error. Analytic
+  source/contact tests cover simultaneous heating and cooling, both-body
+  sources, signed cooling and side exchange.
   The caller commits the support only after its coupled specimen transaction
   accepts. The existing string-runtime integration test verifies temperature,
   damping and pressure feedback, support energy debit and late-refusal retry.

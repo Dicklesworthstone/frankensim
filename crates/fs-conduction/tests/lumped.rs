@@ -90,6 +90,115 @@ fn g1_finite_contact_adapter_counts_internal_heat_once() {
 }
 
 #[test]
+fn g1_finite_contact_heating_remains_in_domain_with_simultaneous_cooling() {
+    use fs_conduction::lumped::LumpedFiniteThermalContact;
+    let curve = phase_curve();
+    let support = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    let adapter = LumpedFiniteThermalContact {
+        support: &support,
+        support_state: curve.state_at_specific_enthalpy(10_000.0).unwrap(),
+        resistance: &resistance,
+        specimen_transport: LumpedThermalTransport::try_declared(35.0, 0.0).unwrap(),
+        energy_tolerance_j: 1e-8,
+    };
+    let input = fs_material::phase::UniformEnthalpyStepInput {
+        curve: &curve,
+        initial: curve.state_at_specific_enthalpy(90_000.0).unwrap(),
+        mass_kg: 2.0,
+        volume_m3: 0.0002,
+        surface_area_m2: 0.01,
+        internal_heat_j: 40_000.0,
+        duration_s: 200.0,
+    };
+    assert!(
+        curve
+            .advance_specific_energy(input.initial, 20_000.0)
+            .is_err()
+    );
+    let step = with_cx(|cx| adapter.advance(cx, input).unwrap());
+    // C_A=400 J/K, C_B=200 J/K: Q=200*(775+100-400)/(1+200/400+200/200).
+    assert!((step.report.contact.heat_a_to_b_j - 38_000.0).abs() < 1e-8);
+    assert!((step.state.temperature_k() - 780.0).abs() < 1e-8);
+    assert!((step.report.contact.state_b.temperature_k() - 590.0).abs() < 1e-8);
+    assert!(step.report.total_energy_residual_j.abs() <= 1e-8);
+    let foreign = phase_curve_for(ContentHash([0x91; 32]));
+    assert!(
+        with_cx(|cx| adapter.advance(
+            cx,
+            fs_material::phase::UniformEnthalpyStepInput {
+                initial: foreign.state_at_specific_enthalpy(90_000.0).unwrap(),
+                ..input
+            }
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn g1_g3_finite_contact_balances_sources_on_both_bodies() {
+    use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step};
+    let curve = phase_curve();
+    let body = enthalpy_body(&curve);
+    let resistance = contact_resistance();
+    with_cx(|cx| {
+        for heat_b in [300.0, -100.0] {
+            let config = LumpedContactStepConfig {
+                specific_enthalpy_a_j_kg: 20_000.0,
+                specific_enthalpy_b_j_kg: 10_000.0,
+                supplied_heat_a_j: 100.0,
+                supplied_heat_b_j: heat_b,
+                duration_s: 1.0,
+                energy_tolerance_j: 1e-8,
+            };
+            let step = solve_lumped_contact_step(cx, &body, &body, &resistance, config).unwrap();
+            let exact_q = (100.0 + (100.0 - heat_b) / 200.0) / 1.01;
+            assert!((step.heat_a_to_b_j - exact_q).abs() < 1e-8);
+            assert!(
+                (2.0 * (step.state_a.specific_enthalpy_j_kg() - 20_000.0) + step.heat_a_to_b_j
+                    - 100.0)
+                    .abs()
+                    < 1e-8
+            );
+            assert!(
+                (2.0 * (step.state_b.specific_enthalpy_j_kg() - 10_000.0)
+                    - step.heat_a_to_b_j
+                    - heat_b)
+                    .abs()
+                    < 1e-8
+            );
+            let reverse = solve_lumped_contact_step(
+                cx,
+                &body,
+                &body,
+                &resistance,
+                LumpedContactStepConfig {
+                    specific_enthalpy_a_j_kg: config.specific_enthalpy_b_j_kg,
+                    specific_enthalpy_b_j_kg: config.specific_enthalpy_a_j_kg,
+                    supplied_heat_a_j: heat_b,
+                    supplied_heat_b_j: 100.0,
+                    ..config
+                },
+            )
+            .unwrap();
+            assert!((reverse.heat_a_to_b_j + step.heat_a_to_b_j).abs() < 1e-8);
+            for invalid in [
+                LumpedContactStepConfig {
+                    duration_s: 0.0,
+                    ..config
+                },
+                LumpedContactStepConfig {
+                    supplied_heat_a_j: f64::NAN,
+                    ..config
+                },
+            ] {
+                assert!(solve_lumped_contact_step(cx, &body, &body, &resistance, invalid).is_err());
+            }
+        }
+    });
+}
+
+#[test]
 fn g1_finite_contact_equilibrates_with_conservative_first_order_refinement() {
     use fs_conduction::lumped::{LumpedContactStepConfig, solve_lumped_contact_step};
     let curve_a = phase_curve();
@@ -112,6 +221,8 @@ fn g1_finite_contact_equilibrates_with_conservative_first_order_refinement() {
                     let config = LumpedContactStepConfig {
                         specific_enthalpy_a_j_kg: ha,
                         specific_enthalpy_b_j_kg: hb,
+                        supplied_heat_a_j: 0.0,
+                        supplied_heat_b_j: 0.0,
                         duration_s: 120.0 / f64::from(steps),
                         energy_tolerance_j: 1e-8,
                     };
@@ -147,6 +258,8 @@ fn g3_finite_contact_transfers_latent_heat_and_relabels_sides() {
         let config = LumpedContactStepConfig {
             specific_enthalpy_a_j_kg: 70_000.0,
             specific_enthalpy_b_j_kg: 30_000.0,
+            supplied_heat_a_j: 0.0,
+            supplied_heat_b_j: 0.0,
             duration_s: 1000.0,
             energy_tolerance_j: 1e-8,
         };
@@ -221,6 +334,8 @@ fn g4_finite_contact_refuses_domain_exit_and_cancellation() {
     let config = LumpedContactStepConfig {
         specific_enthalpy_a_j_kg: 20_000.0,
         specific_enthalpy_b_j_kg: 95_000.0,
+        supplied_heat_a_j: 0.0,
+        supplied_heat_b_j: 0.0,
         duration_s: 1.0,
         energy_tolerance_j: 1e-8,
     };
