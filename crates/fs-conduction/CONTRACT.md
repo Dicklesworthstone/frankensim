@@ -134,6 +134,12 @@ through typed selection, retain typed coordinates in every receipt and require p
 temperature in kelvin, an increasing sample grid, and fixed non-temperature
 coordinates and axis descriptors. They infer neither axis aliases nor missing
 source conditions. The single-axis convenience constructors use `T` only.
+All four source-backed constructors require one continuously supported claim
+throughout the requested temperature span. They retain every source knot on
+that temperature axis, with the original fixed context and replayable receipts.
+A coarse caller grid cannot replace a source curve with its endpoint chord;
+tabulated-only temperature support refuses even when both endpoints exist.
+Declared curves remain explicitly authored models without database authority.
 The real NIST 304/316/6061 source-compiler/store/conduction test in
 `xtask/tests/matdb_pack_cli.rs` checks a manufactured steady temperature field,
 heat flux, material substitution and context/domain refusals. Its IAPWS-water

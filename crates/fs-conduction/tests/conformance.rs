@@ -834,6 +834,138 @@ fn conductivity_claims() -> ClaimSet {
 }
 
 #[test]
+fn g3_conductivity_tables_preserve_source_knots_and_typed_context() {
+    let claims = conductivity_claims();
+    let (id, claim) = claims.claims_for("thermal_conductivity")[0];
+    let policy = SelectionPolicy::SingleClaimOnly;
+    let table = ConductivityTable::from_claims(&claims, claim.key.name(), &[250.0, 500.0], policy)
+        .expect("coarse source-backed table");
+    let pinned =
+        ConductivityTable::from_claims_pinned(&claims, claim.key.name(), &[250.0, 500.0], id)
+            .expect("pinned table");
+    let expected = [
+        (250.0, 160.0),
+        (300.0, 167.0),
+        (400.0, 177.0),
+        (500.0, 186.0),
+    ];
+    assert_eq!(table.knots(), expected);
+    assert_eq!(pinned.knots(), expected);
+    for t in [275.0, 325.0, 425.0] {
+        let point = fs_matdb::QueryPoint::new().with("T", t).unwrap();
+        let source = claims.query(claim.key.name(), &point, policy).unwrap();
+        assert!((table.eval(t).unwrap() - source.evidence.value.value).abs() < 1e-12);
+    }
+    for receipt in table.receipts().iter().chain(pinned.receipts()) {
+        claims.verify_receipt(receipt).unwrap();
+    }
+
+    // An authored alias and a fixed, typed pressure survive inserted points.
+    let mut aliased = claim.clone();
+    aliased.observations.clear();
+    if let PropertyValue::Curve { abscissa, .. } = &mut aliased.value {
+        *abscissa = "temperature".to_owned();
+    }
+    aliased.validity = ValidityDomain::unconstrained()
+        .with_quantity(
+            "temperature",
+            fs_qty::QuantitySpec::dimensional(TEMPERATURE_DIMS),
+            250.0,
+            500.0,
+        )
+        .with_quantity(
+            "pressure",
+            fs_qty::QuantitySpec::dimensional(Dims([-1, 1, -2, 0, 0, 0])),
+            1e5,
+            1e5,
+        );
+    let key = aliased.key.clone();
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(aliased).unwrap();
+    let points = [250.0, 500.0].map(|t| {
+        fs_matdb::QueryPoint::new()
+            .with_quantity(
+                "temperature",
+                fs_qty::QuantitySpec::dimensional(TEMPERATURE_DIMS),
+                t,
+            )
+            .unwrap()
+            .with_quantity(
+                "pressure",
+                fs_qty::QuantitySpec::dimensional(Dims([-1, 1, -2, 0, 0, 0])),
+                1e5,
+            )
+            .unwrap()
+    });
+    let typed = ConductivityTable::from_claims_at_query_points(
+        &claims,
+        &key,
+        "temperature",
+        &points,
+        policy,
+    )
+    .unwrap();
+    let pinned = ConductivityTable::from_claims_pinned_at_query_points(
+        &claims,
+        &key,
+        "temperature",
+        &points,
+        id,
+    )
+    .unwrap();
+    for table in [typed, pinned] {
+        assert_eq!(table.knots(), expected);
+        for receipt in table.receipts() {
+            claims.verify_receipt(receipt).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g0_conductivity_tables_refuse_discrete_only_source_support() {
+    let original = conductivity_claims();
+    let mut claim = original.claims_for("thermal_conductivity")[0].1.clone();
+    claim.observations.clear();
+    claim.interpolation = InterpolationPolicy::TabulatedOnly;
+    let key = claim.key.clone();
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(claim).unwrap();
+    let points = [250.0, 500.0].map(|t| fs_matdb::QueryPoint::new().with("T", t).unwrap());
+    // Endpoints themselves remain valid measurements.
+    for point in &points {
+        claims
+            .query(key.name(), point, SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+    }
+    assert!(
+        ConductivityTable::from_claims(
+            &claims,
+            key.name(),
+            &[250.0, 500.0],
+            SelectionPolicy::SingleClaimOnly
+        )
+        .is_err()
+    );
+    assert!(
+        ConductivityTable::from_claims_pinned(&claims, key.name(), &[250.0, 500.0], id).is_err()
+    );
+    assert!(
+        ConductivityTable::from_claims_at_query_points(
+            &claims,
+            &key,
+            "T",
+            &points,
+            SelectionPolicy::SingleClaimOnly
+        )
+        .is_err()
+    );
+    assert!(
+        ConductivityTable::from_claims_pinned_at_query_points(&claims, &key, "T", &points, id)
+            .is_err()
+    );
+}
+
+#[test]
 fn matdb_receipts_travel_with_the_solve() {
     let claims = conductivity_claims();
     let grid = [280.0f64, 300.0, 320.0, 340.0, 360.0];

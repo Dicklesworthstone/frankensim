@@ -11,12 +11,12 @@
 //! function of the iteration path.
 //!
 //! So a [`ConductivityTable`] is built ONCE from a DECLARED temperature
-//! grid: one matdb query per grid point, every receipt retained. The
-//! solve then reads the table. That splits the claim cleanly:
+//! grid augmented with every source temperature knot: one matdb query per
+//! retained point, every receipt retained. The solve then reads the table:
 //!
 //! - the KNOT VALUES are matdb's claim, and each carries its receipt;
-//! - the values BETWEEN knots are THIS crate's claim, and the
-//!   interpolation is declared: piecewise linear in T.
+//! - values BETWEEN knots preserve the selected source's continuous scalar
+//!   or piecewise-linear law. Discrete-only support and source switching refuse.
 //!
 //! Outside the sampled span the table REFUSES
 //! ([`crate::ConductionError::OutsideTemperatureSpan`]). Extrapolating
@@ -24,8 +24,9 @@
 //! wrong answer, so it is not available.
 
 use fs_matdb::{
-    ClaimId, ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION, PcbHomogenizedConductivity, PropertyKey,
-    PropertyUsageReceipt, QueryPoint, SelectionPolicy,
+    ClaimId, ClaimSelection, ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION,
+    PcbHomogenizedConductivity, PropertyKey, PropertyUsageReceipt, PropertyValue, QueryPoint,
+    SelectionPolicy,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
@@ -186,7 +187,8 @@ impl ConductivityTable {
     }
 
     /// Sample an `fs-matdb` property over a declared temperature grid,
-    /// retaining one receipt per grid point.
+    /// retaining one receipt per grid point and any added source temperature knot.
+    /// One selected claim must continuously support the entire span.
     ///
     /// # Errors
     /// [`ConductionError::Conductivity`] for a malformed grid;
@@ -229,7 +231,8 @@ impl ConductivityTable {
     /// coordinate in kelvin. All other coordinates and their descriptors must
     /// remain fixed: this table models only `k(T)`, not a changing pressure,
     /// moisture or process state. Axis aliases and source conditions are never
-    /// inferred. Between samples, the table uses its declared linear model.
+    /// inferred. Source temperature knots are retained so interpolation
+    /// preserves the selected source law throughout the requested span.
     ///
     /// # Errors
     /// The refusals of [`Self::from_claims`], plus a missing temperature axis,
@@ -341,7 +344,7 @@ impl ConductivityTable {
             property.name(),
             &grid,
             selection,
-            Some((property, points)),
+            Some((property, points, temperature_axis)),
         )
     }
 
@@ -350,7 +353,7 @@ impl ConductivityTable {
         property: &str,
         grid: &[f64],
         selection: ClaimSelection,
-        queries: Option<(&PropertyKey, &[QueryPoint])>,
+        queries: Option<(&PropertyKey, &[QueryPoint], &str)>,
     ) -> Result<ConductivityTable, ConductionError> {
         if grid.len() < 2 {
             return Err(ConductionError::Conductivity {
@@ -367,24 +370,55 @@ impl ConductivityTable {
                 });
             }
         }
-        let mut knots = Vec::with_capacity(grid.len());
-        let mut receipts = Vec::with_capacity(grid.len());
-        for (index, &t) in grid.iter().enumerate() {
-            let point = match queries {
-                Some((_, points)) => points[index].clone(),
-                None => QueryPoint::new().with(TEMPERATURE_AXIS, t).map_err(|e| {
-                    ConductionError::MaterialQuery {
-                        property: property.to_string(),
-                        temperature: t,
-                        upstream: e.to_string(),
-                    }
-                })?,
-            };
+        let temperature_axis = queries.map_or(TEMPERATURE_AXIS, |(_, _, axis)| axis);
+        let point_at = |t| {
+            queries
+                .map_or_else(QueryPoint::new, |(_, points, _)| points[0].clone())
+                .with(temperature_axis, t)
+                .map_err(|e| ConductionError::MaterialQuery {
+                    property: property.to_string(),
+                    temperature: t,
+                    upstream: e.to_string(),
+                })
+        };
+        let lower = point_at(grid[0])?;
+        let upper = point_at(grid[grid.len() - 1])?;
+        let support = match queries {
+            Some((key, _, _)) => claims.query_envelope_typed(key, &lower, &upper, selection),
+            None => claims.query_envelope(property, &lower, &upper, selection),
+        }
+        .map_err(|error| ConductionError::MaterialQuery {
+            property: property.to_string(),
+            temperature: grid[0],
+            upstream: format!("continuous temperature support required: {error:?}"),
+        })?;
+        let selected = claims
+            .claim(support.lower.receipt.selected)
+            .expect("envelope selected an existing immutable claim");
+        let mut source_grid = grid.to_vec();
+        if let PropertyValue::Curve {
+            abscissa, knots, ..
+        } = &selected.value
+            && abscissa == temperature_axis
+        {
+            source_grid.extend(
+                knots
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .filter(|t| (grid[0]..=grid[grid.len() - 1]).contains(t)),
+            );
+            source_grid.sort_by(f64::total_cmp);
+            source_grid.dedup();
+        }
+        let mut knots = Vec::with_capacity(source_grid.len());
+        let mut receipts = Vec::with_capacity(source_grid.len());
+        for t in source_grid {
+            let point = point_at(t)?;
             let answer = match (selection, queries) {
-                (ClaimSelection::Policy(policy), Some((key, _))) => {
+                (ClaimSelection::Policy(policy), Some((key, _, _))) => {
                     claims.query_typed(key, &point, policy)
                 }
-                (ClaimSelection::Pinned(pinned), Some((key, _))) => {
+                (ClaimSelection::Pinned(pinned), Some((key, _, _))) => {
                     claims.query_pinned_typed(key, &point, pinned)
                 }
                 (ClaimSelection::Policy(policy), None) => claims.query(property, &point, policy),
@@ -517,12 +551,6 @@ impl ConductivityTable {
         let (x1, y1) = self.knots[s + 1];
         Ok((y1 - y0) / (x1 - x0))
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ClaimSelection {
-    Policy(SelectionPolicy),
-    Pinned(ClaimId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
