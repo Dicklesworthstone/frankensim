@@ -80,6 +80,25 @@ homogenization, the P2 milestone.
   it is not a circuit, contact-resistance, current-distribution, temperature,
   or energy-balance model. The adapter is synchronous, fixed-cost arithmetic
   and has no cancellation claim.
+  `OhmicDrive` distinguishes ideal current and voltage control;
+  `current_a_for_drive` resolves `I` or `V/R`, refusing nonfinite inputs and
+  unrepresentable nonzero currents. The same `joule_power_w` law then supplies
+  nonnegative source dissipation. No dynamic circuit or source impedance is inferred.
+- `liquid::resolve_liquid_state` resolves positive density, specific heat,
+  conductivity and dynamic viscosity at one caller-supplied source condition.
+  It retains the complete four-property bundle and derives kinematic viscosity,
+  thermal diffusivity and Prandtl number, refusing non-finite or non-positive
+  results. Liquid phase, formulation, concentration and operating support come
+  from the selected card and query; the adapter adds no EOS, concentration
+  conversion, pressure-independence or phase-stability evidence. Arithmetic
+  after bounded resolution is synchronous and fixed-cost. Source-driven heat
+  and flow comparisons remain numerical checks of the declared properties,
+  not experimental qualification. The separate
+  `liquid::resolve_liquid_state_from_kinematic` entry point requires a
+  kinematic-viscosity claim instead and derives dynamic viscosity as `rho*nu`
+  at the same query point. It retains the original kinematic receipt and
+  refuses unrepresentable conversion; neither API silently substitutes the
+  other viscosity basis or certifies consistency of independent source tables.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for
