@@ -1,7 +1,11 @@
 //! G0/G1/G3: material resolution → circular specimen → existing pressure solver.
 //! Synthetic material data check the implementation, not measured wire fidelity.
 
-use fs_couple::acoustic_realize::{realize_assembly, string_mode_omega};
+use fs_conduction::lumped::LumpedThermalEnvironment as ThermalStringEnvironment;
+use fs_couple::acoustic_realize::{
+    AcousticRealizeError, LinearMaterialStringRuntime, ThermalMaterialStringRuntime,
+    ThermalStringError, realize_assembly, string_mode_omega,
+};
 use fs_couple::string_specimen::{
     BENDING_RELAXATION_TIME_PROPERTY, EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
     KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, RELAXING_BENDING_MODULUS_PROPERTY,
@@ -152,16 +156,25 @@ fn thermal_state(
     ResolvedMaterialStatePoint,
     IntegratedIsotropicThermalExpansion,
 ) {
+    thermal_state_with_density(
+        temperature_k,
+        PropertyValue::Scalar {
+            value: 7800.0,
+            dims: Density::DIMS,
+        },
+    )
+}
+
+fn thermal_state_with_density(
+    temperature_k: f64,
+    density: PropertyValue,
+) -> (
+    ResolvedMaterialStatePoint,
+    IntegratedIsotropicThermalExpansion,
+) {
     let mut claims = ClaimSet::new();
     for (key, dims, value) in [
-        (
-            "density",
-            Density::DIMS,
-            PropertyValue::Scalar {
-                value: 7800.0,
-                dims: Density::DIMS,
-            },
-        ),
+        ("density", Density::DIMS, density),
         (
             "young_modulus",
             Pressure::DIMS,
@@ -407,6 +420,398 @@ fn template() -> PrestressedString {
         polarization_detune: 0.0,
         moving_end: false,
     }
+}
+
+fn with_string_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>, &fs_exec::CancelGate) -> R) -> R {
+    let gate = fs_exec::CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 5,
+                kernel_id: 5,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx, &gate)
+    })
+}
+
+fn incremental_specimen(
+    temperature_k: f64,
+    n_modes: usize,
+) -> fs_couple::string_specimen::ResolvedStringSpecimen {
+    let (state, expansion) = thermal_state(temperature_k);
+    with_uniform_circular_thermal_extension(
+        PrestressedString {
+            length_m: 0.502,
+            n_modes,
+            ..template()
+        },
+        StringGeometryConstraint::FixedMass(0.001),
+        &state,
+        &expansion,
+        0.5,
+        0.01,
+    )
+    .unwrap()
+}
+
+fn incremental_ambient() -> AmbientGas {
+    AmbientGas {
+        temperature_k: 300.0,
+        pressure_pa: 101_325.0,
+        relative_humidity: 0.0,
+    }
+}
+
+#[test]
+fn g1_incremental_material_hot_rebind_preserves_motion_and_accounts_parameter_work() {
+    with_string_cx(|cx, _| {
+        let cold = incremental_specimen(300.0, 1);
+        let hot = incremental_specimen(400.0, 1);
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            cold,
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        for _ in 0..8 {
+            runtime.step(cx, &[0.0]).unwrap();
+        }
+        let mut unchanged = runtime.clone();
+        let before = runtime.states()[0];
+        let old_omega = runtime.modes()[0].angular_frequency_rad_s;
+        let update = runtime.rebind(cx, hot.clone(), 1.0).unwrap();
+        assert_eq!(runtime.states(), &[before]);
+        assert_eq!(runtime.accepted_samples(), 8);
+        assert_eq!(runtime.epoch(), 9);
+        assert_eq!(runtime.specimen().material(), hot.material());
+        let omega = runtime.modes()[0].angular_frequency_rad_s;
+        assert!(omega < old_omega);
+        let expected_work =
+            0.5 * (omega.powi(2) - old_omega.powi(2)) * before.displacement_m_sqrt_kg.powi(2);
+        close(update.parameter_work_j, expected_work);
+        close(
+            update.energy_after_j - update.energy_before_j,
+            expected_work,
+        );
+
+        // Independent damped-oscillator solution, Rayleigh alpha=2 => decay=1/s.
+        let dt: f64 = 1.0 / 48_000.0;
+        let wd = (omega * omega - 1.0).sqrt();
+        let q = before.displacement_m_sqrt_kg;
+        let v = before.velocity_m_sqrt_kg_per_s;
+        let expected_q = (-dt).exp() * (q * (wd * dt).cos() + (v + q) / wd * (wd * dt).sin());
+        let expected_v =
+            (-dt).exp() * (v * (wd * dt).cos() - (v + omega * omega * q) / wd * (wd * dt).sin());
+        let frame = runtime.step(cx, &[0.0]).unwrap();
+        close(runtime.states()[0].displacement_m_sqrt_kg, expected_q);
+        close(runtime.states()[0].velocity_m_sqrt_kg_per_s, expected_v);
+        let string = hot.string();
+        let gas = fs_material::gas::GasState::try_new_moist_air(300.0, 101_325.0, 0.0).unwrap();
+        let scale = (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
+        let area_weight = gas.density * string.width_m * string.length_m
+            / (2.0 * core::f64::consts::PI.powi(2) * scale);
+        let expected_pressure = area_weight * (-omega * omega * expected_q - 2.0 * expected_v);
+        close(frame.acoustic.observer_pressure_pa, expected_pressure);
+        let cold_frame = unchanged.step(cx, &[0.0]).unwrap();
+        assert!(
+            (frame.acoustic.observer_pressure_pa - cold_frame.acoustic.observer_pressure_pa).abs()
+                > cold_frame.acoustic.observer_pressure_pa.abs() * 0.01
+        );
+        assert_eq!(runtime.epoch(), 10);
+    });
+}
+
+#[test]
+fn g3_incremental_fixed_mass_density_cycle_preserves_basis_and_changes_pressure() {
+    // These are prescribed current-state density/strain data, not a closed
+    // heat/Poisson-contraction model. The same immutable card supplies both states.
+    let bind = |temperature_k| {
+        let (state, expansion) = thermal_state_with_density(
+            temperature_k,
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                knots: vec![(300.0, 7800.0), (400.0, 7784.4)],
+                dims: Density::DIMS,
+            },
+        );
+        with_uniform_circular_thermal_extension(
+            PrestressedString {
+                length_m: 0.502,
+                n_modes: 1,
+                ..template()
+            },
+            StringGeometryConstraint::FixedMass(0.001),
+            &state,
+            &expansion,
+            0.5,
+            0.01,
+        )
+        .unwrap()
+    };
+    with_string_cx(|cx, _| {
+        let cold = bind(300.0);
+        let hot = bind(400.0);
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            cold.clone(),
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        for _ in 0..8 {
+            runtime.step(cx, &[0.0]).unwrap();
+        }
+        let mut cold_continuation = runtime.clone();
+        let before = runtime.states().to_vec();
+        let cold_modes = runtime.modes().to_vec();
+        let update = runtime.rebind(cx, hot.clone(), 1.0).unwrap();
+        assert_eq!(runtime.states(), before);
+        assert_eq!(runtime.accepted_samples(), 8);
+        assert_eq!(runtime.epoch(), 9);
+        assert!(update.parameter_work_j < 0.0);
+        for specimen in [&cold, &hot] {
+            assert_eq!(specimen.mass_kg().to_bits(), 0.001_f64.to_bits());
+            assert_eq!(
+                specimen.string().lin_density_kg_m.to_bits(),
+                (0.001_f64 / 0.502).to_bits()
+            );
+        }
+        assert_ne!(cold.specimen_identity(), hot.specimen_identity());
+        close(
+            hot.string().width_m / cold.string().width_m,
+            (7800.0_f64 / 7784.4).sqrt(),
+        );
+        close(
+            hot.string().bending_stiffness_n_m2 / cold.string().bending_stiffness_n_m2,
+            (7800.0_f64 / 7784.4).powi(2),
+        );
+
+        let frame = runtime.step(cx, &[0.0]).unwrap();
+        let mode = runtime.modes()[0];
+        let state = runtime.states()[0];
+        let acceleration = -mode.angular_frequency_rad_s.powi(2) * state.displacement_m_sqrt_kg
+            - 2.0
+                * mode.damping_ratio
+                * mode.angular_frequency_rad_s
+                * state.velocity_m_sqrt_kg_per_s;
+        let gas = fs_material::gas::GasState::try_new_moist_air(300.0, 101_325.0, 0.0).unwrap();
+        let area_weight = gas.density * hot.string().width_m * 0.502
+            / (2.0 * core::f64::consts::PI.powi(2) * (0.001_f64 / 2.0).sqrt());
+        close(
+            frame.acoustic.observer_pressure_pa,
+            area_weight * acceleration,
+        );
+        let cold_frame = cold_continuation.step(cx, &[0.0]).unwrap();
+        assert!(
+            (frame.acoustic.observer_pressure_pa - cold_frame.acoustic.observer_pressure_pa).abs()
+                > 0.01 * cold_frame.acoustic.observer_pressure_pa.abs()
+        );
+
+        let hot_motion = runtime.states().to_vec();
+        let reverse = runtime.rebind(cx, cold.clone(), 1.0).unwrap();
+        assert!(reverse.parameter_work_j > 0.0);
+        assert_eq!(runtime.states(), hot_motion);
+        assert_eq!(runtime.modes(), cold_modes);
+        assert_eq!(runtime.specimen(), &cold);
+        assert_eq!(runtime.accepted_samples(), 9);
+        assert_eq!(runtime.epoch(), 11);
+    });
+}
+
+#[test]
+fn g0_fixed_mass_identity_distinguishes_masses_with_the_same_rounded_radius() {
+    let material = elastic("mass-rounding", 7800.0, 200e9);
+    let bind = |mass| {
+        with_uniform_circular_material_and_constraints(
+            PrestressedString {
+                length_m: 0.502,
+                ..template()
+            },
+            StringGeometryConstraint::FixedMass(mass),
+            &material,
+            StringPrestress::FixedTension(20.0),
+        )
+        .unwrap()
+    };
+    let first = bind(0.001);
+    let second = bind(f64::from_bits(0.001_f64.to_bits() + 1));
+    assert_eq!(
+        first.string().width_m.to_bits(),
+        second.string().width_m.to_bits()
+    );
+    assert_ne!(first.mass_kg().to_bits(), second.mass_kg().to_bits());
+    assert_ne!(
+        first.string().lin_density_kg_m.to_bits(),
+        second.string().lin_density_kg_m.to_bits()
+    );
+    assert_ne!(first.specimen_identity(), second.specimen_identity());
+}
+
+#[test]
+fn g4_incremental_material_refusals_preserve_epoch_and_replay_suffix() {
+    with_string_cx(|cx, _| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 2),
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        for _ in 0..8 {
+            runtime.step(cx, &[0.0, 0.0]).unwrap();
+        }
+        let mut reference = runtime.clone();
+        let hot = incremental_specimen(400.0, 2);
+        assert!(matches!(
+            runtime.rebind(cx, hot.clone(), 0.0),
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "material update exceeds its parameter-work budget"
+            })
+        ));
+        assert!(
+            runtime
+                .rebind(cx, incremental_specimen(400.0, 1), 1.0)
+                .is_err()
+        );
+        for (length_m, mass_kg) in [(0.503, 0.001), (0.502, 0.002)] {
+            let changed = with_uniform_circular_material_and_constraints(
+                PrestressedString {
+                    length_m,
+                    ..hot.string()
+                },
+                StringGeometryConstraint::FixedMass(mass_kg),
+                hot.material(),
+                StringPrestress::FixedTension(20.0),
+            )
+            .unwrap();
+            assert!(runtime.rebind(cx, changed, 1.0).is_err());
+        }
+        assert!(runtime.step(cx, &[f64::NAN, 0.0]).is_err());
+        with_string_cx(|cancelled, gate| {
+            gate.request();
+            assert_eq!(
+                runtime.step(cancelled, &[0.0, 0.0]),
+                Err(AcousticRealizeError::Cancelled)
+            );
+            assert_eq!(
+                runtime.rebind(cancelled, hot.clone(), 1.0),
+                Err(AcousticRealizeError::Cancelled)
+            );
+        });
+        assert_eq!(runtime.states(), reference.states());
+        assert_eq!(runtime.modes(), reference.modes());
+        assert_eq!(
+            runtime.specimen().material(),
+            reference.specimen().material()
+        );
+        assert_eq!(runtime.epoch(), reference.epoch());
+        assert_eq!(runtime.accepted_samples(), reference.accepted_samples());
+        let before_acceleration: Vec<f64> = runtime
+            .modes()
+            .iter()
+            .zip(runtime.states())
+            .map(|(mode, state)| {
+                -mode.angular_frequency_rad_s.powi(2) * state.displacement_m_sqrt_kg
+                    - 2.0
+                        * mode.damping_ratio
+                        * mode.angular_frequency_rad_s
+                        * state.velocity_m_sqrt_kg_per_s
+            })
+            .collect();
+        assert_eq!(
+            runtime.rebind(cx, hot.clone(), 1.0).unwrap(),
+            reference.rebind(cx, hot, 1.0).unwrap()
+        );
+        for sample in 0..32 {
+            let frame = runtime.step(cx, &[0.0, 0.0]).unwrap();
+            assert_eq!(frame, reference.step(cx, &[0.0, 0.0]).unwrap());
+            if sample == 0 {
+                let string = runtime.specimen().string();
+                let gas =
+                    fs_material::gas::GasState::try_new_moist_air(300.0, 101_325.0, 0.0).unwrap();
+                let pi = core::f64::consts::PI;
+                let factor = gas.density * string.width_m
+                    / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
+                let acceleration: Vec<f64> = runtime
+                    .modes()
+                    .iter()
+                    .zip(runtime.states())
+                    .map(|(mode, state)| {
+                        -mode.angular_frequency_rad_s.powi(2) * state.displacement_m_sqrt_kg
+                            - 2.0
+                                * mode.damping_ratio
+                                * mode.angular_frequency_rad_s
+                                * state.velocity_m_sqrt_kg_per_s
+                    })
+                    .collect();
+                // The even mode's jerk must span the material update, retaining
+                // the last accepted cold acceleration rather than reinitializing it.
+                let expected = factor
+                    * (2.0 * string.length_m / pi * acceleration[0]
+                        - string.length_m.powi(2) / (2.0 * pi * gas.sound_speed)
+                            * (acceleration[1] - before_acceleration[1])
+                            * 48_000.0);
+                close(frame.acoustic.observer_pressure_pa, expected);
+            }
+        }
+        assert_eq!(runtime.states(), reference.states());
+    });
+}
+
+#[test]
+fn g4_incremental_material_late_pressure_refusal_preserves_mechanics() {
+    with_string_cx(|cx, _| {
+        // Deliberately pathological observation geometry forces a late pressure
+        // refusal while the candidate oscillator remains inside its state budget.
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 1),
+            None,
+            incremental_ambient(),
+            1e-12,
+            48_000,
+        )
+        .unwrap();
+        let mut reference = runtime.clone();
+        assert!(matches!(
+            runtime.step(cx, &[1.0]),
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "compact string observer pressure is nonfinite or exceeds its pressure budget"
+            })
+        ));
+        assert_eq!(runtime.states(), reference.states());
+        assert_eq!(runtime.epoch(), 0);
+        assert_eq!(runtime.accepted_samples(), 0);
+        assert_eq!(
+            runtime.step(cx, &[0.0]).unwrap(),
+            reference.step(cx, &[0.0]).unwrap()
+        );
+    });
 }
 
 fn close(actual: f64, expected: f64) {
@@ -705,6 +1110,1482 @@ fn loss_template() -> PrestressedString {
         rayleigh: None,
         ..template()
     }
+}
+
+fn heated_string_parts(
+    cx: &fs_exec::Cx<'_>,
+    rate: u32,
+    elastic_curve: bool,
+    viscosity_policy: InterpolationPolicy,
+) -> (
+    LinearMaterialStringRuntime,
+    MaterialCard,
+    fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+) {
+    heated_string_parts_with_conductor(cx, rate, elastic_curve, viscosity_policy, false)
+}
+
+fn heated_string_parts_with_conductor(
+    cx: &fs_exec::Cx<'_>,
+    rate: u32,
+    elastic_curve: bool,
+    viscosity_policy: InterpolationPolicy,
+    electrical: bool,
+) -> (
+    LinearMaterialStringRuntime,
+    MaterialCard,
+    fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+) {
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    let mut properties = vec![
+        ("density", Density::DIMS, 1000.0),
+        ("young_modulus", Pressure::DIMS, 2e9),
+        (
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+            DynViscosity::DIMS,
+            1e7,
+        ),
+    ];
+    if electrical {
+        properties.push((
+            fs_material::conductor::ELECTRICAL_RESISTIVITY_PROPERTY,
+            fs_material::conductor::ELECTRICAL_RESISTIVITY_DIMS,
+            1e-6,
+        ));
+    }
+    for (name, dims, value) in properties {
+        let is_curve = name == KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY
+            || name == fs_material::conductor::ELECTRICAL_RESISTIVITY_PROPERTY
+            || elastic_curve && name == "young_modulus";
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: if is_curve {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(300.0, value), (340.0, 9.0 * value)],
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Scalar { value, dims }
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with("T", 300.0, 340.0)
+                    .with("omega", 1.0, 20000.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: if is_curve {
+                    viscosity_policy
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic dissipative thermal feedback".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+        requirements.push(
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::NonNegative)
+                .unwrap(),
+        );
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic thermal string".into(),
+            phase: "solid".into(),
+            process: "synthetic".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let point = QueryPoint::new()
+        .with("T", 300.0)
+        .unwrap()
+        .with("omega", 1.0)
+        .unwrap();
+    let state = resolve_material_state_point(
+        &card,
+        &point,
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let specimen = with_uniform_circular_material_state(loss_template(), 0.0015, &state)
+        .unwrap()
+        .with_kelvin_voigt_bending_loss()
+        .unwrap();
+    let runtime = LinearMaterialStringRuntime::try_new(
+        cx,
+        specimen,
+        Some(Pluck {
+            station_frac: 0.4,
+            height_m: 1e-3,
+        }),
+        incremental_ambient(),
+        1.0,
+        rate,
+    )
+    .unwrap();
+    // Deliberately small synthetic cp=0.001 J/(kg K) makes the feedback
+    // measurable in a short test. This is not a physical material dataset.
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        card.content_hash(),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 300.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.1,
+                temperature_k: 400.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.2,
+                temperature_k: 400.0,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+        ],
+    )
+    .unwrap();
+    (runtime, card, curve)
+}
+
+#[test]
+fn g1_current_heating_refines_to_independent_ohmic_temperature_solution() {
+    with_string_cx(|cx, _| {
+        let mut errors = Vec::new();
+        for rate in [4000, 8000, 16000] {
+            let (mechanical, card, curve) = heated_string_parts_with_conductor(
+                cx,
+                rate,
+                false,
+                InterpolationPolicy::LinearInside,
+                true,
+            );
+            let mass = mechanical.specimen().mass_kg();
+            let length = mechanical.specimen().string().length_m;
+            let area = mechanical.specimen().area_m2();
+            let quiet = LinearMaterialStringRuntime::try_new(
+                cx,
+                mechanical.specimen().clone(),
+                None,
+                incremental_ambient(),
+                1.0,
+                rate,
+            )
+            .unwrap();
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, quiet, card, curve, 0.0, 5.0).unwrap();
+            let current = 0.05_f64;
+            let r0 = 1e-6 * length / area;
+            let steps = rate / 100;
+            let mut joules = 0.0;
+            for epoch in 0..u64::from(steps) {
+                let frame = runtime
+                    .step_with_current(cx, epoch, &[0.0], current)
+                    .unwrap();
+                let before = frame.conductor_before.resistance_ohm();
+                close(
+                    frame.coupled.external_heat_j,
+                    current.powi(2) * before / f64::from(rate),
+                );
+                close(
+                    frame.conductor_after.resistance_ohm(),
+                    r0 * (1.0 + 0.2 * (frame.coupled.thermal.temperature_k() - 300.0)),
+                );
+                assert_eq!(frame.coupled.vibration.epoch, epoch + 1);
+                assert_eq!(frame.coupled.vibration.dissipation.material_heat_j, 0.0);
+                joules += frame.coupled.external_heat_j;
+            }
+            // cp=0.001 and rho_e(T)=rho_e0[1+0.2(T-300)] are synthetic.
+            // Solve m cp dT/dt = I² R0[1+alpha(T-300)] independently.
+            let exponent = current.powi(2) * r0 * 0.2 * 0.01 / (mass * 0.001);
+            let exact = 300.0 + exponent.exp_m1() / 0.2;
+            errors.push((runtime.thermal().temperature_k() - exact).abs());
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - joules).abs() < 1e-12);
+        }
+        eprintln!("G1 current-heating temperature errors at4/8/16kHz: {errors:?}");
+        assert!(errors[0] > 1e-6 && errors[0] < 0.01);
+        assert!((0.45..0.55).contains(&(errors[1] / errors[0])));
+        assert!((0.45..0.55).contains(&(errors[2] / errors[1])));
+    });
+}
+
+#[test]
+fn g3_current_sign_preserves_heating_while_resistance_damping_and_sound_respond() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) = heated_string_parts_with_conductor(
+            cx,
+            8000,
+            false,
+            InterpolationPolicy::LinearInside,
+            true,
+        );
+        let mut positive =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let mut negative = positive.clone();
+        let mut unpowered = positive.clone();
+        let mut pressure_difference = 0.0;
+        for epoch in 0..80 {
+            let a = positive.step_with_current(cx, epoch, &[0.0], 0.05).unwrap();
+            let b = negative
+                .step_with_current(cx, epoch, &[0.0], -0.05)
+                .unwrap();
+            let control = unpowered.step_with_current(cx, epoch, &[0.0], 0.0).unwrap();
+            assert_eq!(a.coupled, b.coupled);
+            assert_eq!(a.conductor_after, b.conductor_after);
+            assert!(a.conductor_after.resistance_ohm() > a.conductor_before.resistance_ohm());
+            assert_eq!(
+                a.conductor_after.material().card_identity(),
+                positive.mechanical().specimen().material().card_identity()
+            );
+            assert_eq!(
+                a.conductor_after.material().query_point(),
+                positive.mechanical().specimen().material().query_point()
+            );
+            pressure_difference += (a.coupled.vibration.acoustic.observer_pressure_pa
+                - control.coupled.vibration.acoustic.observer_pressure_pa)
+                .abs();
+        }
+        assert!(positive.thermal().temperature_k() > unpowered.thermal().temperature_k() + 0.1);
+        assert!(
+            positive.mechanical().modes()[0].damping_ratio
+                > unpowered.mechanical().modes()[0].damping_ratio
+        );
+        assert!(pressure_difference > 1e-9);
+    });
+}
+
+#[test]
+fn g4_current_refusal_preserves_electrothermal_state_and_retry() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut missing =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        assert!(matches!(
+            missing.step_with_current(cx, 0, &[0.0], 0.05),
+            Err(ThermalStringError::Admission(_))
+        ));
+        let (mechanical, card, curve) = heated_string_parts_with_conductor(
+            cx,
+            8000,
+            false,
+            InterpolationPolicy::LinearInside,
+            true,
+        );
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        let mut retry = runtime.clone();
+        assert!(matches!(
+            runtime.step_with_current(cx, 0, &[0.0], f64::NAN),
+            Err(ThermalStringError::Electrical(_))
+        ));
+        // Joule heating stays inside the thermal chart but exits the pinned
+        // mechanical/electrical claim domain, after the vibration substep.
+        assert!(matches!(
+            runtime.step_with_current(cx, 0, &[0.0], 5.0),
+            Err(ThermalStringError::Material(_))
+        ));
+        assert_eq!(runtime.thermal(), retry.thermal());
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            retry.mechanical().specimen()
+        );
+        assert_eq!(runtime.mechanical().states(), retry.mechanical().states());
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        for epoch in 0..16 {
+            assert_eq!(
+                runtime.step_with_current(cx, epoch, &[0.0], 0.05).unwrap(),
+                retry.step_with_current(cx, epoch, &[0.0], 0.05).unwrap()
+            );
+            assert!(matches!(
+                runtime.step_with_current(cx, epoch, &[0.0], 0.05),
+                Err(ThermalStringError::Epoch { .. })
+            ));
+        }
+    });
+}
+
+#[test]
+fn g1_thermal_string_heating_updates_sourced_damping_and_pressure_at_one_epoch() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut frozen = mechanical.clone();
+        let mass = mechanical.specimen().mass_kg();
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let mut supplied = 0.0;
+        let mut material_heat = 0.0;
+        let mut pressure_difference = 0.0;
+        for epoch in 0..160 {
+            let external = if epoch % 2 == 0 { 1e-8 } else { -0.5e-8 };
+            let frame = runtime.step(cx, epoch, &[0.0], external).unwrap();
+            let reference = frozen.step(cx, &[0.0]).unwrap();
+            assert_eq!(frame.vibration.epoch, epoch + 1);
+            assert_eq!(runtime.mechanical().epoch(), epoch + 1);
+            assert_eq!(runtime.mechanical().accepted_samples(), epoch + 1);
+            assert_eq!(frame.thermal, runtime.thermal());
+            let state = runtime.mechanical().specimen().material();
+            assert_eq!(
+                state
+                    .query_point()
+                    .iter()
+                    .find(|(axis, _)| axis == "T")
+                    .unwrap()
+                    .1,
+                frame.thermal.temperature_k()
+            );
+            close(
+                state
+                    .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
+                    .unwrap()
+                    .value_si(),
+                1e7 * (1.0 + 0.2 * (frame.thermal.temperature_k() - 300.0)),
+            );
+            assert!(frame.energy_balance_residual_j.abs() <= frame.energy_roundoff_tolerance_j);
+            assert_eq!(frame.vibration.dissipation.authored_loss_j, 0.0);
+            supplied += external;
+            material_heat += frame.vibration.dissipation.material_heat_j;
+            pressure_difference += (frame.vibration.acoustic.observer_pressure_pa
+                - reference.acoustic.observer_pressure_pa)
+                .abs();
+        }
+        close(
+            mass * runtime.thermal().specific_enthalpy_j_kg(),
+            supplied + material_heat,
+        );
+        assert!(runtime.thermal().temperature_k() > 300.5);
+        assert!(
+            runtime.mechanical().modes()[0].damping_ratio > 1.05 * frozen.modes()[0].damping_ratio
+        );
+        assert!(pressure_difference > 1e-9);
+    });
+}
+
+fn heated_mass_string_parts(
+    cx: &fs_exec::Cx<'_>,
+    mass_kg: f64,
+) -> (
+    LinearMaterialStringRuntime,
+    MaterialCard,
+    fs_material::phase::EquilibriumEnthalpyPhaseCurve,
+) {
+    let (base, card, curve) =
+        heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+    let specimen = with_uniform_circular_material_and_constraints(
+        base.specimen().string(),
+        StringGeometryConstraint::FixedMass(mass_kg),
+        base.specimen().material(),
+        StringPrestress::FixedTension(20.0),
+    )
+    .unwrap()
+    .with_kelvin_voigt_bending_loss()
+    .unwrap();
+    let mechanical = LinearMaterialStringRuntime::try_new(
+        cx,
+        specimen,
+        Some(Pluck {
+            station_frac: 0.4,
+            height_m: 1e-3,
+        }),
+        incremental_ambient(),
+        1.0,
+        8000,
+    )
+    .unwrap();
+    (mechanical, card, curve)
+}
+
+#[test]
+fn g3_fixed_mass_thermal_string_matches_the_same_resolved_radius() {
+    with_string_cx(|cx, _| {
+        for mass in [0.002, 0.005] {
+            let (mechanical, card, curve) = heated_mass_string_parts(cx, mass);
+            let original = mechanical.specimen().clone();
+            let radius_specimen = with_uniform_circular_material_state(
+                original.string(),
+                original.radius_m(),
+                original.material(),
+            )
+            .unwrap()
+            .with_kelvin_voigt_bending_loss()
+            .unwrap();
+            let radius_mechanical = LinearMaterialStringRuntime::try_new(
+                cx,
+                radius_specimen,
+                Some(Pluck {
+                    station_frac: 0.4,
+                    height_m: 1e-3,
+                }),
+                incremental_ambient(),
+                1.0,
+                8000,
+            )
+            .unwrap();
+            let initial_damping = mechanical.modes()[0].damping_ratio;
+            let mut runtime = ThermalMaterialStringRuntime::try_new(
+                cx,
+                mechanical,
+                card.clone(),
+                curve.clone(),
+                0.0,
+                5.0,
+            )
+            .unwrap();
+            let mut reference =
+                ThermalMaterialStringRuntime::try_new(cx, radius_mechanical, card, curve, 0.0, 5.0)
+                    .unwrap();
+            let environment = string_environment(0.03, 0.01);
+            let mut pressure_error = 0.0;
+            let mut pressure_scale = 0.0;
+            let mut heat = 0.0;
+            for epoch in 0..80 {
+                let (frame, control) = if epoch % 2 == 0 {
+                    let actual = runtime
+                        .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                            assert_eq!(input.mass_kg.to_bits(), mass.to_bits());
+                            assert_eq!(
+                                input.volume_m3,
+                                original.area_m2() * original.string().length_m
+                            );
+                            let r = original.radius_m();
+                            assert_eq!(
+                                input.surface_area_m2,
+                                2.0 * core::f64::consts::PI * r * (original.string().length_m + r)
+                            );
+                            environment.advance(cx, input)
+                        })
+                        .unwrap();
+                    let expected = reference
+                        .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                            environment.advance(cx, input)
+                        })
+                        .unwrap();
+                    (actual.coupled, expected.coupled)
+                } else {
+                    (
+                        runtime.step(cx, epoch, &[0.0], 1e-8).unwrap(),
+                        reference.step(cx, epoch, &[0.0], 1e-8).unwrap(),
+                    )
+                };
+                let current = runtime.mechanical().specimen();
+                assert_eq!(
+                    current.geometry_constraint(),
+                    StringGeometryConstraint::FixedMass(mass)
+                );
+                assert_eq!(current.mass_kg().to_bits(), mass.to_bits());
+                assert_eq!(
+                    current.string().lin_density_kg_m.to_bits(),
+                    (mass / original.string().length_m).to_bits()
+                );
+                assert_eq!(current.radius_m().to_bits(), original.radius_m().to_bits());
+                assert_eq!(current.area_m2(), original.area_m2());
+                assert_eq!(
+                    current.string().bending_stiffness_n_m2,
+                    original.string().bending_stiffness_n_m2
+                );
+                assert_eq!(frame.vibration.epoch, epoch + 1);
+                // The radius description reconstructs mass with floating-point
+                // roundoff. Compare physical trajectories, not receipt identities.
+                assert!(
+                    (frame.thermal.temperature_k() - control.thermal.temperature_k()).abs() < 2e-8
+                );
+                assert!(
+                    frame.energy_balance_residual_j.abs()
+                        <= frame.energy_roundoff_tolerance_j + frame.thermal_solve_tolerance_j
+                );
+                let p = frame.vibration.acoustic.observer_pressure_pa;
+                let p_ref = control.vibration.acoustic.observer_pressure_pa;
+                pressure_error += (p - p_ref).powi(2);
+                pressure_scale += p_ref.powi(2);
+                heat += frame.external_heat_j + frame.vibration.dissipation.material_heat_j;
+            }
+            assert!(pressure_scale > 0.0);
+            assert!(pressure_error < 1e-14 * pressure_scale); // relative RMS < 1e-7
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - heat).abs() < 1e-12);
+            assert!(runtime.thermal().temperature_k() > 300.5);
+            assert!(runtime.mechanical().modes()[0].damping_ratio > initial_damping);
+        }
+    });
+}
+
+#[test]
+fn g4_fixed_mass_thermal_string_late_refusal_preserves_geometry_and_retry() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) = heated_mass_string_parts(cx, 0.003777001);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        let mut reference = runtime.clone();
+        let mut hot = string_environment(100.0, 0.0);
+        hot.temperature_k = 370.0;
+        hot.radiation_temperature_k = 370.0;
+        let mut thermal_solved = false;
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| {
+                let proposed = hot.advance(cx, input)?;
+                thermal_solved = true;
+                Ok::<_, fs_conduction::ConductionError>(proposed)
+            }),
+            Err(ThermalStringError::Material(_))
+        ));
+        assert!(thermal_solved, "refusal must follow the real thermal solve");
+        assert_eq!(runtime.thermal(), reference.thermal());
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            reference.mechanical().specimen()
+        );
+        assert_eq!(
+            runtime.mechanical().states(),
+            reference.mechanical().states()
+        );
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        let environment = string_environment(0.03, 0.01);
+        for epoch in 0..16 {
+            assert_eq!(
+                runtime
+                    .step_with_thermal_transport(cx, epoch, &[0.0], |input| environment
+                        .advance(cx, input))
+                    .unwrap(),
+                reference
+                    .step_with_thermal_transport(cx, epoch, &[0.0], |input| environment
+                        .advance(cx, input))
+                    .unwrap()
+            );
+        }
+    });
+}
+
+fn string_environment(convection: f64, emissivity: f64) -> ThermalStringEnvironment {
+    ThermalStringEnvironment {
+        temperature_k: 320.0,
+        radiation_temperature_k: 320.0,
+        convection_w_per_m2_k: convection,
+        transport: fs_conduction::lumped::LumpedThermalTransport::try_declared(100.0, emissivity)
+            .unwrap(),
+        enthalpy_tolerance_j_kg: 1e-13,
+        maximum_thermal_residual_j: 1e-14,
+    }
+}
+
+#[test]
+fn g1_ambient_string_convection_matches_analytical_heating_cooling_and_refines() {
+    with_string_cx(|cx, _| {
+        // Independently integrated lumped Newton cooling: T = Ta + (T0-Ta) exp(-hAt/mc).
+        // Two radii exercise the actual area/mass and V/A geometry binding.
+        for radius in [0.001, 0.002] {
+            for initial_temperature in [300.0, 330.0] {
+                let mut errors = Vec::new();
+                for rate in [4000, 8000, 16000] {
+                    let (base, card, curve) =
+                        heated_string_parts(cx, rate, false, InterpolationPolicy::LinearInside);
+                    let specimen = with_uniform_circular_material_state(
+                        base.specimen().string().clone(),
+                        radius,
+                        base.specimen().material(),
+                    )
+                    .unwrap()
+                    .with_kelvin_voigt_bending_loss()
+                    .unwrap();
+                    let length = specimen.string().length_m;
+                    let mass = specimen.mass_kg();
+                    let mechanical = LinearMaterialStringRuntime::try_new(
+                        cx,
+                        specimen,
+                        None,
+                        incremental_ambient(),
+                        1.0,
+                        rate,
+                    )
+                    .unwrap();
+                    let mut runtime = ThermalMaterialStringRuntime::try_new(
+                        cx, mechanical, card, curve, 0.0, 40.0,
+                    )
+                    .unwrap();
+                    runtime
+                        .step(cx, 0, &[0.0], mass * 0.001 * (initial_temperature - 300.0))
+                        .unwrap();
+                    let environment = string_environment(0.03, 0.0);
+                    let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
+                    let volume = core::f64::consts::PI * radius * radius * length;
+                    let decay = environment.convection_w_per_m2_k * area / (mass * 0.001);
+                    let duration = 0.02;
+                    let mut external_heat = 0.0;
+                    for sample in 0..rate / 50 {
+                        let frame = runtime
+                            .step_with_thermal_transport(
+                                cx,
+                                u64::from(sample) + 1,
+                                &[0.0],
+                                |input| environment.advance(cx, input),
+                            )
+                            .unwrap();
+                        close(frame.transport.maximum_biot(), 0.03 * volume / area / 100.0);
+                        let end = frame.transport.samples().last().unwrap();
+                        assert_eq!(end.phase_state, frame.coupled.thermal);
+                        assert_eq!(end.time_s, 1.0 / f64::from(rate));
+                        assert_eq!(end.internal_power_w, 0.0);
+                        assert_eq!(end.radiation_into_body_w, 0.0);
+                        assert_eq!(frame.coupled.vibration.acoustic.observer_pressure_pa, 0.0);
+                        assert_eq!(frame.coupled.vibration.epoch, u64::from(sample) + 2);
+                        assert_eq!(
+                            end.convection_into_body_w.is_sign_positive(),
+                            initial_temperature < 320.0
+                        );
+                        external_heat += frame.coupled.external_heat_j;
+                    }
+                    let exact = 320.0 + (initial_temperature - 320.0) * (-decay * duration).exp();
+                    errors.push((runtime.thermal().temperature_k() - exact).abs());
+                    assert!(
+                        (mass * 0.001 * (runtime.thermal().temperature_k() - initial_temperature)
+                            - external_heat)
+                            .abs()
+                            < 1e-12
+                    );
+                }
+                eprintln!(
+                    "ambient convection radius={radius} initial_T={initial_temperature} errors={errors:?}"
+                );
+                assert!(errors[0] > 1e-4 && errors[0] < 0.1);
+                assert!((0.45..0.55).contains(&(errors[1] / errors[0])));
+                assert!((0.45..0.55).contains(&(errors[2] / errors[1])));
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_ambient_string_fluxes_change_material_damping_and_pressure_without_double_heat() {
+    with_string_cx(|cx, _| {
+        for (convection, emissivity) in [(0.03, 0.0), (0.0, 0.01), (0.03, 0.01)] {
+            let (mechanical, card, curve) =
+                heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+            let mass = mechanical.specimen().mass_kg();
+            let length = mechanical.specimen().string().length_m;
+            let radius = 0.0015;
+            let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0)
+                    .unwrap();
+            let mut insulated = runtime.clone();
+            let environment = string_environment(convection, emissivity);
+            let mut total_heat = 0.0;
+            let mut pressure_difference = 0.0;
+            for epoch in 0..80 {
+                let frame = runtime
+                    .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                        environment.advance(cx, input)
+                    })
+                    .unwrap();
+                let control = insulated.step(cx, epoch, &[0.0], 0.0).unwrap();
+                let end = frame.transport.samples().last().unwrap();
+                let temperature = end.phase_state.temperature_k();
+                let convective_power = convection * area * (320.0 - temperature);
+                let radiative_power = emissivity
+                    * 5.670_374_419e-8
+                    * area
+                    * (320.0_f64.powi(4) - temperature.powi(4));
+                assert!(
+                    (end.convection_into_body_w - convective_power).abs()
+                        <= 1e-12 * convective_power.abs().max(1e-20)
+                );
+                assert!(
+                    (end.radiation_into_body_w - radiative_power).abs()
+                        <= 1e-12 * radiative_power.abs().max(1e-20)
+                );
+                close(
+                    frame.coupled.external_heat_j,
+                    (convective_power + radiative_power) / 8000.0,
+                );
+                close(
+                    end.internal_power_w / 8000.0,
+                    frame.coupled.vibration.dissipation.material_heat_j,
+                );
+                assert!(
+                    frame.coupled.energy_balance_residual_j.abs()
+                        <= frame.coupled.energy_roundoff_tolerance_j
+                            + frame.coupled.thermal_solve_tolerance_j
+                );
+                assert!(
+                    (frame.coupled.energy_balance_residual_j + end.step_energy_residual_j).abs()
+                        <= frame.coupled.energy_roundoff_tolerance_j
+                );
+                total_heat += frame.coupled.external_heat_j
+                    + frame.coupled.vibration.dissipation.material_heat_j;
+                pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
+                    - control.vibration.acoustic.observer_pressure_pa)
+                    .abs();
+            }
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - total_heat).abs() < 1e-12);
+            assert!(runtime.thermal().temperature_k() > insulated.thermal().temperature_k() + 1.0);
+            assert!(
+                runtime.mechanical().modes()[0].damping_ratio
+                    > insulated.mechanical().modes()[0].damping_ratio
+            );
+            assert!(pressure_difference > 1e-9);
+        }
+    });
+}
+
+#[test]
+fn g1_hot_enclosure_and_cool_fluid_drive_shared_string_temperature_and_sound() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mass = mechanical.specimen().mass_kg();
+        let radius = mechanical.specimen().radius_m();
+        let length = mechanical.specimen().string().length_m;
+        let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let mut control = runtime.clone();
+        let mut environment = string_environment(0.03, 0.01);
+        // Both runs start at the chart's 300 K lower boundary. Keep the fluid
+        // there so the control does not demand out-of-domain cooling; the hot
+        // enclosure raises the test string above the same fluid temperature.
+        environment.temperature_k = 300.0;
+        environment.radiation_temperature_k = 330.0;
+        let mut control_environment = environment.clone();
+        control_environment.radiation_temperature_k = 300.0;
+        let mut total_heat = 0.0;
+        let mut pressure_difference = 0.0;
+        for epoch in 0..80 {
+            let frame = runtime
+                .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            let comparison = control
+                .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                    control_environment.advance(cx, input)
+                })
+                .unwrap();
+            let end = frame.transport.samples().last().unwrap();
+            let temperature = frame.coupled.thermal.temperature_k();
+            close(
+                end.convection_into_body_w,
+                0.03 * area * (300.0 - temperature),
+            );
+            close(
+                end.radiation_into_body_w,
+                0.01 * 5.670_374_419e-8 * area * (330.0_f64.powi(4) - temperature.powi(4)),
+            );
+            assert!(end.convection_into_body_w < 0.0);
+            assert!(end.radiation_into_body_w > 0.0);
+            assert_eq!(frame.coupled.vibration.epoch, epoch + 1);
+            assert!(
+                frame.coupled.energy_balance_residual_j.abs()
+                    <= frame.coupled.energy_roundoff_tolerance_j
+                        + frame.coupled.thermal_solve_tolerance_j
+            );
+            total_heat +=
+                frame.coupled.external_heat_j + frame.coupled.vibration.dissipation.material_heat_j;
+            pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
+                - comparison.coupled.vibration.acoustic.observer_pressure_pa)
+                .abs();
+        }
+        assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - total_heat).abs() < 1e-12);
+        assert!(runtime.thermal().temperature_k() > control.thermal().temperature_k() + 1.0);
+        assert!(
+            runtime.mechanical().modes()[0].damping_ratio
+                > control.mechanical().modes()[0].damping_ratio
+        );
+        assert!(pressure_difference > 1e-9);
+
+        let mut retry = runtime.clone();
+        let mut invalid = environment.clone();
+        invalid.radiation_temperature_k = f64::NAN;
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 80, &[0.0], |input| {
+                invalid.advance(cx, input)
+            }),
+            Err(ThermalStringError::Transport(_))
+        ));
+        assert_eq!(runtime.thermal(), retry.thermal());
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            retry.mechanical().specimen()
+        );
+        assert_eq!(runtime.mechanical().states(), retry.mechanical().states());
+        assert_eq!(
+            runtime.mechanical().accepted_samples(),
+            retry.mechanical().accepted_samples()
+        );
+        assert_eq!(
+            runtime
+                .step_with_thermal_transport(cx, 80, &[0.0], |input| environment.advance(cx, input))
+                .unwrap(),
+            retry
+                .step_with_thermal_transport(cx, 80, &[0.0], |input| environment.advance(cx, input))
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn g4_ambient_string_refusal_preserves_temperature_material_sound_and_retry() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        let mut reference = runtime.clone();
+        let environment = string_environment(0.03, 0.01);
+        let mut bad = environment.clone();
+        bad.transport =
+            fs_conduction::lumped::LumpedThermalTransport::try_declared(1e-8, 0.01).unwrap();
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| bad.advance(cx, input)),
+            Err(ThermalStringError::Transport(_))
+        ));
+        bad = environment.clone();
+        bad.enthalpy_tolerance_j_kg = 0.01;
+        bad.maximum_thermal_residual_j = 0.0;
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| bad.advance(cx, input)),
+            Err(ThermalStringError::Transport(message)) if message.contains("ambient thermal solve exceeds its energy-residual budget")
+        ));
+        // Conduction succeeds inside its solid chart but T exits the selected
+        // mechanical property's 340 K domain. Both owners must roll back.
+        bad = string_environment(100.0, 0.0);
+        bad.temperature_k = 370.0;
+        bad.radiation_temperature_k = 370.0;
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| bad.advance(cx, input)),
+            Err(ThermalStringError::Material(_))
+        ));
+        // Thermal solver also supports latent heat, but this string has no
+        // liquid mechanics/state transfer and must not publish a melted string.
+        bad.temperature_k = 400.8;
+        bad.radiation_temperature_k = 400.8;
+        bad.convection_w_per_m2_k = 1000.0;
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| bad.advance(cx, input)),
+            Err(ThermalStringError::Admission(_))
+        ));
+        bad = environment.clone();
+        bad.temperature_k = f64::NAN;
+        assert!(
+            runtime
+                .step_with_thermal_transport(cx, 0, &[0.0], |input| bad.advance(cx, input))
+                .is_err()
+        );
+        // Reject a valid transport result with a substituted phase chart.
+        assert!(matches!(
+            runtime.step_with_thermal_transport(cx, 0, &[0.0], |input| {
+                let mut knots = input.curve.knots().to_vec();
+                knots.last_mut().unwrap().specific_enthalpy_j_kg += 0.1;
+                let foreign = fs_material::phase::EquilibriumEnthalpyPhaseCurve::try_new(
+                    input.curve.material_card_identity(),
+                    knots,
+                )
+                .unwrap();
+                let mut proposed = environment.advance(cx, input)?;
+                proposed.state = foreign
+                    .state_at_specific_enthalpy(proposed.state.specific_enthalpy_j_kg())
+                    .unwrap();
+                Ok::<_, fs_conduction::ConductionError>(proposed)
+            }),
+            Err(ThermalStringError::Admission(_))
+        ));
+        with_string_cx(|cancelled, gate| {
+            gate.request();
+            assert!(matches!(
+                runtime.step_with_thermal_transport(cancelled, 0, &[0.0], |input| environment
+                    .advance(cancelled, input)),
+                Err(ThermalStringError::Acoustic(
+                    AcousticRealizeError::Cancelled
+                ))
+            ));
+        });
+        with_string_cx(|late_cx, gate| {
+            let mut transport_solved = false;
+            assert!(matches!(
+                runtime.step_with_thermal_transport(late_cx, 0, &[0.0], |input| {
+                    let proposed = environment.advance(late_cx, input)?;
+                    transport_solved = true;
+                    gate.request();
+                    Ok::<_, fs_conduction::ConductionError>(proposed)
+                }),
+                Err(ThermalStringError::Acoustic(
+                    AcousticRealizeError::Cancelled
+                ))
+            ));
+            assert!(
+                transport_solved,
+                "late cancellation must reach the real thermal solve"
+            );
+        });
+        assert_eq!(runtime.thermal(), reference.thermal());
+        assert_eq!(
+            runtime.mechanical().states(),
+            reference.mechanical().states()
+        );
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            reference.mechanical().specimen()
+        );
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        for epoch in 0..16 {
+            assert_eq!(
+                runtime
+                    .step_with_thermal_transport(cx, epoch, &[0.01], |input| environment
+                        .advance(cx, input))
+                    .unwrap(),
+                reference
+                    .step_with_thermal_transport(cx, epoch, &[0.01], |input| environment
+                        .advance(cx, input))
+                    .unwrap()
+            );
+            assert!(matches!(
+                runtime.step_with_thermal_transport(cx, epoch, &[0.01], |input| environment
+                    .advance(cx, input)),
+                Err(ThermalStringError::Epoch { .. })
+            ));
+        }
+        let mut resumed = runtime.clone();
+        assert_eq!(
+            runtime
+                .step_with_thermal_transport(cx, 16, &[0.0], |input| environment.advance(cx, input))
+                .unwrap(),
+            resumed
+                .step_with_thermal_transport(cx, 16, &[0.0], |input| environment.advance(cx, input))
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn g4_thermal_string_refusals_and_duplicate_epoch_preserve_both_owners() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mass = mechanical.specimen().mass_kg();
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        let mut reference = runtime.clone();
+        // Mechanics succeeds, then T=350 K lies outside the pinned viscosity
+        // claim while still inside the solid thermal chart.
+        assert!(matches!(
+            runtime.step(cx, 0, &[0.0], mass * 0.05),
+            Err(ThermalStringError::Material(_))
+        ));
+        assert!(matches!(
+            runtime.step(cx, 0, &[0.0], mass * 0.15),
+            Err(ThermalStringError::Admission(_))
+        ));
+        assert!(matches!(
+            runtime.step(cx, 0, &[0.0], mass),
+            Err(ThermalStringError::Phase(_))
+        ));
+        assert!(runtime.step(cx, 0, &[0.0], f64::NAN).is_err());
+        with_string_cx(|cancelled, gate| {
+            gate.request();
+            assert!(matches!(
+                runtime.step(cancelled, 0, &[0.0], 0.0),
+                Err(ThermalStringError::Acoustic(
+                    AcousticRealizeError::Cancelled
+                ))
+            ));
+        });
+        assert_eq!(runtime.thermal(), reference.thermal());
+        assert_eq!(
+            runtime.mechanical().states(),
+            reference.mechanical().states()
+        );
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            reference.mechanical().specimen()
+        );
+        for epoch in 0..32 {
+            assert_eq!(
+                runtime.step(cx, epoch, &[0.01], 1e-8).unwrap(),
+                reference.step(cx, epoch, &[0.01], 1e-8).unwrap()
+            );
+            let accepted = runtime.thermal();
+            assert!(matches!(
+                runtime.step(cx, epoch, &[0.01], 1e-8),
+                Err(ThermalStringError::Epoch { .. })
+            ));
+            assert_eq!(runtime.thermal(), accepted);
+        }
+        let mut resumed = runtime.clone();
+        for epoch in 32..64 {
+            assert_eq!(
+                runtime.step(cx, epoch, &[0.0], 0.0).unwrap(),
+                resumed.step(cx, epoch, &[0.0], 0.0).unwrap()
+            );
+        }
+    });
+}
+
+#[test]
+fn g0_thermal_string_admission_preserves_model_and_temperature_budgets() {
+    with_string_cx(|cx, _| {
+        for (elastic_curve, policy) in [
+            (true, InterpolationPolicy::LinearInside),
+            (false, InterpolationPolicy::TabulatedOnly),
+        ] {
+            let (mechanical, card, curve) = heated_string_parts(cx, 8000, elastic_curve, policy);
+            assert!(matches!(
+                ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 1.0),
+                Err(ThermalStringError::Admission(_))
+            ));
+        }
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mass = mechanical.specimen().mass_kg();
+        let unbound = with_uniform_circular_material_state(
+            loss_template(),
+            0.0015,
+            mechanical.specimen().material(),
+        )
+        .unwrap();
+        let unbound = LinearMaterialStringRuntime::try_new(
+            cx,
+            unbound,
+            None,
+            incremental_ambient(),
+            1.0,
+            8000,
+        )
+        .unwrap();
+        assert!(matches!(
+            ThermalMaterialStringRuntime::try_new(
+                cx,
+                unbound,
+                card.clone(),
+                curve.clone(),
+                0.0,
+                1.0,
+            ),
+            Err(ThermalStringError::Admission(
+                "initial string must already use its sourced Kelvin-Voigt bending law"
+            ))
+        ));
+        for (h, limit) in [(0.001, 1.0), (0.0, 0.0), (0.0, f64::NAN)] {
+            assert!(
+                ThermalMaterialStringRuntime::try_new(
+                    cx,
+                    mechanical.clone(),
+                    card.clone(),
+                    curve.clone(),
+                    h,
+                    limit
+                )
+                .is_err()
+            );
+        }
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 0.1).unwrap();
+        let before = runtime.thermal();
+        assert!(matches!(
+            runtime.step(cx, 0, &[0.0], mass * 0.001),
+            Err(ThermalStringError::Admission(_))
+        ));
+        assert_eq!(runtime.thermal(), before);
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+    });
+}
+
+#[test]
+fn g1_thermal_string_partition_converges_to_independent_coupled_ode() {
+    with_string_cx(|cx, _| {
+        let (mechanical, _, _) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let string = mechanical.specimen().string();
+        let mass = mechanical.specimen().mass_kg();
+        let k = core::f64::consts::PI / string.length_m;
+        let moment = core::f64::consts::PI * 0.0015_f64.powi(4) / 4.0;
+        let omega2 = (20.0 * k.powi(2) + 2e9 * moment * k.powi(4)) / string.lin_density_kg_m;
+        let gas = fs_material::gas::GasState::try_new_moist_air(300.0, 101325.0, 0.0).unwrap();
+        let air_c = fs_couple::air_path::oscillating_cylinder_air_resistance_per_length(
+            0.0015,
+            omega2.sqrt(),
+            &gas,
+        )
+        .unwrap()
+            / string.lin_density_kg_m;
+        let initial = mechanical.states()[0];
+        let rhs = |y: [f64; 3]| {
+            let eta = 1e7 * (1.0 + 0.2 * y[2] / 0.001);
+            let c = eta * moment * k.powi(4) / string.lin_density_kg_m;
+            [
+                y[1],
+                -omega2 * y[0] - (c + air_c) * y[1],
+                c * y[1] * y[1] / mass,
+            ]
+        };
+        // Independent RK4 integrates q, v and h continuously. The production
+        // algorithm instead uses exact frozen-temperature mechanical substeps.
+        let reference = |steps: usize| {
+            let dt = 0.02 / steps as f64;
+            let mut y = [
+                initial.displacement_m_sqrt_kg,
+                initial.velocity_m_sqrt_kg_per_s,
+                0.0,
+            ];
+            let shifted =
+                |y: [f64; 3], k: [f64; 3], scale: f64| std::array::from_fn(|i| y[i] + scale * k[i]);
+            for _ in 0..steps {
+                let a = rhs(y);
+                let b = rhs(shifted(y, a, dt / 2.0));
+                let c = rhs(shifted(y, b, dt / 2.0));
+                let d = rhs(shifted(y, c, dt));
+                y = std::array::from_fn(|i| {
+                    y[i] + dt / 6.0 * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i])
+                });
+            }
+            y
+        };
+        let exact = reference(16384);
+        for (a, b) in exact.iter().zip(reference(8192)) {
+            assert!((a - b).abs() < 1e-11);
+        }
+        let mut errors = Vec::new();
+        for rate in [4000, 8000, 16000] {
+            let (mechanical, card, curve) =
+                heated_string_parts(cx, rate, false, InterpolationPolicy::LinearInside);
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0)
+                    .unwrap();
+            for epoch in 0..u64::from(rate / 50) {
+                runtime.step(cx, epoch, &[0.0], 0.0).unwrap();
+            }
+            let state = runtime.mechanical().states()[0];
+            let error =
+                ((state.displacement_m_sqrt_kg - exact[0]) / initial.displacement_m_sqrt_kg).abs()
+                    + ((state.velocity_m_sqrt_kg_per_s - exact[1])
+                        / (omega2.sqrt() * initial.displacement_m_sqrt_kg))
+                        .abs()
+                    + ((runtime.thermal().specific_enthalpy_j_kg() - exact[2]) / exact[2]).abs();
+            errors.push(error);
+        }
+        eprintln!("G1 thermal string first-order errors: {errors:?}");
+        assert!(errors[0] < 0.02 && errors[2] > 1e-8);
+        for pair in errors.windows(2) {
+            assert!(pair[1] < 0.6 * pair[0] && pair[1] > 0.4 * pair[0]);
+        }
+    });
+}
+
+#[test]
+fn g0_thermal_string_refuses_a_negative_viscosity_between_positive_endpoints() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, _) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut claims = ClaimSet::new();
+        for (_, original) in card.claims().claims_ordered() {
+            let mut claim = original.clone();
+            if let PropertyValue::Curve { knots, .. } = &mut claim.value {
+                knots.insert(1, (320.0, -1e5));
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        let card = MaterialCard::assemble(card.id().clone(), claims, vec![]).unwrap();
+        let requirements: Vec<_> = mechanical
+            .specimen()
+            .material()
+            .properties()
+            .iter()
+            .map(|property| property.requirement().clone())
+            .collect();
+        let point = QueryPoint::new()
+            .with("T", 300.0)
+            .unwrap()
+            .with("omega", 1.0)
+            .unwrap();
+        let state = resolve_material_state_point(
+            &card,
+            &point,
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let specimen = with_uniform_circular_material_state(loss_template(), 0.0015, &state)
+            .unwrap()
+            .with_kelvin_voigt_bending_loss()
+            .unwrap();
+        let mechanical = LinearMaterialStringRuntime::try_new(
+            cx,
+            specimen,
+            None,
+            incremental_ambient(),
+            1.0,
+            8000,
+        )
+        .unwrap();
+        use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+        let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+            card.content_hash(),
+            vec![
+                EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 0.0,
+                    temperature_k: 300.0,
+                    liquid_mass_fraction: 0.0,
+                    bulk_density_kg_m3: 1000.0,
+                },
+                EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg: 1.0,
+                    temperature_k: 400.0,
+                    liquid_mass_fraction: 1.0,
+                    bulk_density_kg_m3: 1000.0,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 100.0),
+            Err(ThermalStringError::Admission(
+                "thermal string viscosity must be nonnegative over its whole source curve"
+            ))
+        ));
+    });
+}
+
+#[test]
+fn g1_material_loss_drives_enthalpy_without_crediting_air_or_pressure_twice() {
+    use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+
+    let eta = 1.0e5;
+    let material = viscous_material(
+        eta,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (1.0, 1e6),
+    );
+    let specimen = with_uniform_circular_material_state(
+        PrestressedString {
+            n_modes: 2,
+            ..loss_template()
+        },
+        0.0015,
+        &material,
+    )
+    .unwrap()
+    .with_kelvin_voigt_bending_loss()
+    .unwrap();
+    let string = specimen.string();
+    let mass = specimen.mass_kg();
+    let moment = specimen.second_moment_m4();
+    // Synthetic constant-cp solid absorber using the existing enthalpy owner.
+    // The final knot is required by that owner's full phase-curve contract;
+    // this test never leaves the solid branch or exercises latent heat.
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        material.card_identity(),
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 293.15,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 1000.0,
+                temperature_k: 294.15,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 2000.0,
+                temperature_k: 294.15,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+        ],
+    )
+    .unwrap();
+    with_string_cx(|cx, _| {
+        let mut thermal = curve.state_at_specific_enthalpy(0.0).unwrap();
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            specimen,
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-3,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        let gas = fs_material::gas::GasState::try_new_moist_air(300.0, 101_325.0, 0.0).unwrap();
+        let energy = |runtime: &LinearMaterialStringRuntime| {
+            runtime
+                .modes()
+                .iter()
+                .zip(runtime.states())
+                .map(|(m, s)| {
+                    0.5 * (s.velocity_m_sqrt_kg_per_s.powi(2)
+                        + (m.angular_frequency_rad_s * s.displacement_m_sqrt_kg).powi(2))
+                })
+                .sum::<f64>()
+        };
+        let initial = energy(&runtime);
+        let mut heat = 0.0;
+        let mut air = 0.0;
+        let mut work = 0.0;
+        let mut numerical = 0.0;
+        let mut allowance = 0.0;
+        for step in 0..64 {
+            let forces = [0.1, -0.05];
+            let before = runtime.states().to_vec();
+            let modes = runtime.modes().to_vec();
+            let frame = runtime.step(cx, &forces).unwrap();
+            assert_eq!(frame.epoch, step + 1);
+            assert_eq!(frame.epoch, runtime.epoch());
+            let mut expected_heat = 0.0;
+            let mut expected_air = 0.0;
+            for i in 0..2 {
+                let k = (i + 1) as f64 * core::f64::consts::PI / string.length_m;
+                let omega = ((string.tension_n * k * k
+                    + string.bending_stiffness_n_m2 * k.powi(4))
+                    / string.lin_density_kg_m)
+                    .sqrt();
+                let solid_c = eta * moment * k.powi(4) / string.lin_density_kg_m;
+                let air_c = fs_couple::air_path::oscillating_cylinder_air_resistance_per_length(
+                    string.width_m / 2.0,
+                    omega,
+                    &gas,
+                )
+                .unwrap()
+                    / string.lin_density_kg_m;
+                close(modes[i].angular_frequency_rad_s, omega);
+                close(2.0 * modes[i].damping_ratio * omega, solid_c + air_c);
+                // Independent analytic velocity and Simpson integration of v^2.
+                // Coefficients are constant throughout this one ZOH interval.
+                let a = (solid_c + air_c) / 2.0;
+                let b = (omega * omega - a * a).sqrt();
+                let q = before[i].displacement_m_sqrt_kg;
+                let v = before[i].velocity_m_sqrt_kg_per_s;
+                let dt = 1.0 / 48_000.0;
+                let mut integral = 0.0;
+                for j in 0..=128 {
+                    let t = dt * j as f64 / 128.0;
+                    let velocity = (-a * t).exp()
+                        * (v * (b * t).cos()
+                            - (a * v + omega * omega * q - forces[i]) / b * (b * t).sin());
+                    let weight = if j == 0 || j == 128 {
+                        1.0
+                    } else if j % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    integral += weight * velocity * velocity;
+                }
+                integral *= dt / (3.0 * 128.0);
+                expected_heat += solid_c * integral;
+                expected_air += air_c * integral;
+            }
+            let loss = frame.dissipation;
+            assert_eq!(loss.authored_loss_j, 0.0);
+            assert!(loss.material_heat_j > 0.0 && loss.air_loss_j > 0.0);
+            assert!(
+                (loss.material_heat_j - expected_heat).abs()
+                    <= loss.roundoff_tolerance_j + 1e-10 * expected_heat
+            );
+            assert!(
+                (loss.air_loss_j - expected_air).abs()
+                    <= loss.roundoff_tolerance_j + 1e-10 * expected_air
+            );
+            thermal = curve
+                .advance_specific_energy(thermal, loss.material_heat_j / mass)
+                .unwrap();
+            heat += loss.material_heat_j;
+            air += loss.air_loss_j;
+            work += frame.acoustic.input_work_j;
+            numerical += loss.roundoff_residual_j;
+            allowance += loss.roundoff_tolerance_j;
+        }
+        let delta_mechanical = energy(&runtime) - initial;
+        let absorbed = mass * thermal.specific_enthalpy_j_kg();
+        close(absorbed, heat);
+        assert!(thermal.temperature_k() > 293.15 && thermal.solid_mass_fraction() == 1.0);
+        let residual = delta_mechanical + absorbed + air + numerical - work;
+        let tolerance = allowance + 256.0 * f64::EPSILON * (initial + work.abs());
+        assert!(
+            residual.abs() <= tolerance,
+            "balance {residual} vs {tolerance}"
+        );
+        // A second credit (including crediting all damping to the solid), or
+        // omitting the mechanical side, cannot hide inside numerical allowance.
+        assert!((residual + absorbed).abs() > tolerance);
+        assert!((residual + air).abs() > tolerance);
+        assert!((residual - delta_mechanical).abs() > tolerance);
+    });
+}
+
+#[test]
+fn g3_rebinding_loss_law_replaces_destinations_and_keeps_roundoff_out_of_heat() {
+    let material = viscous_material(
+        1e5,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (1.0, 1e6),
+    );
+    let bind =
+        |template| with_uniform_circular_material_state(template, 0.0015, &material).unwrap();
+    with_string_cx(|cx, _| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            bind(loss_template())
+                .with_kelvin_voigt_bending_loss()
+                .unwrap(),
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-3,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        let material_frame = runtime.step(cx, &[0.0]).unwrap();
+        assert!(material_frame.dissipation.material_heat_j > 0.0);
+        assert!(material_frame.dissipation.air_loss_j > 0.0);
+        assert_eq!(material_frame.dissipation.authored_loss_j, 0.0);
+        for alpha_per_s in [2.0, 0.0] {
+            let next = bind(PrestressedString {
+                rayleigh: Some(RayleighParams {
+                    alpha_per_s,
+                    beta_s: 0.0,
+                }),
+                ..template()
+            });
+            let before = runtime.states().to_vec();
+            assert_eq!(runtime.rebind(cx, next, 0.0).unwrap().parameter_work_j, 0.0);
+            assert_eq!(runtime.states(), before);
+            let frame = runtime.step(cx, &[0.0]).unwrap();
+            assert_eq!(frame.dissipation.material_heat_j, 0.0);
+            // Existing Rayleigh semantics replace the entire damping model.
+            assert_eq!(frame.dissipation.air_loss_j, 0.0);
+            if alpha_per_s > 0.0 {
+                assert!(frame.dissipation.authored_loss_j > 0.0);
+            } else {
+                assert_eq!(frame.dissipation.authored_loss_j, 0.0);
+                assert_eq!(
+                    frame.dissipation.roundoff_residual_j,
+                    frame.acoustic.viscous_dissipation_j
+                );
+            }
+            assert!(
+                frame.dissipation.roundoff_residual_j.abs()
+                    <= frame.dissipation.roundoff_tolerance_j
+            );
+        }
+    });
 }
 
 fn relaxing_material(

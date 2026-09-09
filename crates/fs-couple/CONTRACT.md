@@ -197,6 +197,12 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+Each frame additionally retains mode-local viscous work-minus-energy differences
+and their scale-aware roundoff allowances. Negative loss beyond a mode's allowance
+refuses the entire step, even when another mode could mask it in the aggregate.
+The aggregate work/energy calculation is unchanged; summing the mode-local
+differences can differ by floating-point roundoff. Neither an undamped mode's
+energy drift nor a negative value within its allowance is physical heating.
 The default initial state is zero displacement and velocity. A caller whose
 window begins after a load has already settled may explicitly initialize the
 exact static compliance `q = F/omega^2`, `qdot = 0`; using that operation to
@@ -358,6 +364,153 @@ moving-source, FW-H, near-field, feedback, room, head, and passivity remain uncl
 
 ### `string_specimen`
 
+`acoustic_realize::LinearMaterialStringRuntime` incrementally advances an explicitly
+linearized pinned string from a `ResolvedStringSpecimen`, using the existing
+exact-ZOH modes, loss admission and compact strip acceleration/jerk observer.
+Material/operator state, modal displacement/velocity, observer history and sample
+position publish at one epoch after all admission checks and a final `Cx` poll.
+`step` returns a `MaterialStringFrame` pairing that epoch and the acoustic frame
+with `StringDissipation`: material Kelvin-Voigt heat, oscillating-cylinder air
+loss, and authored damping without an identified thermal destination. Coefficients
+are retained when the modes are constructed and rebuilt with each rebind.
+For constant additive viscous coefficients during a sample, each mechanism's
+energy is its coefficient fraction times the mode-local viscous loss: all share
+the same integral of squared velocity. This follows the viscous work law in
+[MIT 8.01, section 23.5](https://ocw.mit.edu/courses/8-01sc-classical-mechanics-fall-2016/mit8_01scs22_chapter23.pdf).
+The existing Rayleigh option still replaces the entire damping model; its loss
+is authored, with no silently added air or material contribution. Tiny negative
+mode-local differences and undamped drift remain in a signed roundoff residual,
+not in heat. That residual must fit the combined modal/aggregate/reduction
+roundoff allowance before the runtime commits. Diagnostic microphone pressure
+adds no second radiation-energy debit. The returned partition does not itself
+debit reservoirs or establish a closed thermal feedback/entropy model.
+Refused steps and rebindings preserve the complete accepted runtime. Cloning an
+accepted runtime retains the acceleration history needed for identical continuation.
+
+Rebinding requires the exact same immutable card, length, linear density and
+sine-mode count. This makes the mass-normalized basis identical, with no sorted-mode
+matching, displacement reset or sound-level rescaling. Tension, EI, damping and
+observer weights rebuild together; the source state remains inspectable by other
+consumers. Signed parameter work is the change in modal elastic energy at fixed
+displacement/momentum, checked against an explicit caller budget. It is returned
+for the thermal/external parameter owner's opposite transfer, not booked as damping.
+The axial prestress reservoir, heat transport and closed thermomechanical balance
+are not supplied here. Coefficients are externally scheduled and piecewise constant.
+The acoustic observer retains the preceding accepted acceleration across updates;
+abrupt coefficient changes can produce a transient, without a crossfade.
+
+The rung omits transverse-motion-induced axial stretching, moving supports, extra
+polarizations, Prony memory, basis/geometry transfer, phase change and radiation
+backreaction. It uses fixed ambient gas and listener distance, with no atmospheric
+path filter or common propagation delay. G1 uses a synthetic thermal-expansion card
+and an independent damped-oscillator/pressure calculation. G3 cycles a same-card
+density/temperature update at prescribed mass through changed cross-section, bending
+stiffness and pressure without changing the retained sine basis. G4 exercises material-work
+and late observer refusals, cancellation and exact suffix replay. This is focused
+implementation evidence, not measured string fidelity or full MR05/MR34 completion.
+The loss-partition G1 test independently integrates squared analytic modal
+velocity and feeds only material heat into the existing equilibrium enthalpy
+owner. Its synthetic constant-coefficient solid absorber checks the combined
+mechanical/thermal/air balance and rejects duplicate heat, air credited to the
+solid, and a missing mechanical term. It stays wholly on the solid branch;
+thermoelastic feedback and phase dynamics are not tested. G3 changes loss laws
+without resetting vibration and checks that the returned destinations change.
+Existing G4 refusal/retry tests compare the complete frame, including loss fields.
+
+`acoustic_realize::ThermalMaterialStringRuntime` owns that incremental string,
+its immutable material card and a uniform equilibrium enthalpy state. It closes
+the dissipative temperature/viscosity feedback for the prescribed-radius or
+prescribed-mass, fixed-tension, constant-density, constant-Young's-modulus solid rung. Those
+restrictions keep elastic and axial prestress storage independent of temperature;
+there is no omitted stiffness-change or expansion work. Density must agree with
+the solid branch of the thermal chart. The initial absolute temperature and card
+must agree across both owners. Original query-axis schemas and selected claims
+are retained; subsequent queries pin those claims, with no automatic substitution.
+Constant properties and linearly interpolated temperature-only laws are admitted;
+exact-only temperature tables do not authorize an evolving path between samples.
+Viscosity must be nonnegative throughout its supplied source curve, including
+interior knots whose values cannot be inferred from positive endpoints.
+For `FixedMass`, the prescribed mass and `m/L` remain exact through thermal
+updates; constant density and loaded length keep the resolved radius and basis
+unchanged. Thermal area and volume use `ResolvedStringSpecimen::radius_m()` and
+its cross-section, rather than reconstructing mass through a rounded radius.
+This does not admit changing density, expansion or geometric state transfer.
+
+Each sample advances mechanics at its initial viscosity, credits material loss
+and explicit external heat to total enthalpy, then resolves the new material
+temperature and rebuilds damping. Final pressure and retained observer history
+use the updated acceleration. This is a first-order partitioned coupling; exact
+mechanical substeps do not make the coupled solution exact. A positive caller
+temperature-increment budget constrains every accepted step, and temporal
+refinement must assess coupling error. Air loss and mechanical roundoff remain
+outside material heat. The returned first-law residual includes work, both storage
+changes, outgoing losses and numerical loss, with a scale-aware arithmetic
+allowance including the enthalpy reference. It is not a physical-error certificate.
+All candidates publish at one epoch after the final cancellation poll. Reusing
+an accepted input epoch refuses before consuming another heat input or sample;
+thermal/material refusal after the mechanical substep leaves both owners intact.
+Cloning preserves exact continuation, including thermal state and source pins.
+The direct `step` takes external heat in joules. `step_with_current` instead
+resolves the existing `fs-material::conductor` from the specimen's pinned
+electrical-resistivity claim, current temperature and actual length/area. An
+ideal source deposits `I² R(T_initial) dt` once in the external heat account;
+material vibration loss remains separate. The returned `ElectrothermalStringFrame`
+retains initial/final sourced resistance and the same accepted thermal/mechanical
+epoch. Final electrical resolution precedes publication; any refusal preserves
+the accepted state and retry position. This is first-order partitioned uniform
+Ohmic heating with insulated boundaries, not circuit dynamics, skin/contact
+resistance, a charge-field solve, Lorentz forces or motional emf. Synthetic
+G1/G3/G4 tests check analytical temperature refinement, current-sign symmetry,
+resistance/damping/pressure response and atomic retry, not experimental fidelity.
+`step_with_thermal_transport`
+accepts a thermal proposal through the shared `fs-material::phase` input/result
+carriers. Passing `|input| environment.advance(cx, input)` with
+`fs-conduction::lumped::LumpedThermalEnvironment` uses the existing
+`solve_lumped_enthalpy` for one
+backward-Euler step over the same audio sample. It derives the exposed cylinder
+area `2 pi r (L+r)`, volume and Biot length `V/A` from the resolved specimen,
+with no independently authored thermal mass or geometry. Convection and surface
+radiation act on this same complete boundary; supports are thermally insulating.
+The environment is a prescribed infinite, uniform reservoir and enclosing
+radiation field with independent fluid and enclosure temperatures. Opposing
+convection and radiation fluxes contribute their signed heat once. It neither changes nor debits the separately
+declared acoustic gas. Transport may be declared or card-backed; the conduction
+owner enforces its existing card identity and temperature-coverage rules.
+The callback must not mutate or debit an external source before acceptance.
+The coupling owner verifies that the proposal uses its original phase chart
+and finite heat/residual budgets, then checks the coupled energy balance. This
+keeps fs-conduction out of fs-couple's production dependencies: FEEC's optional
+topology feature already depends on fs-couple. The cross-crate test has a
+development-only conduction dependency.
+
+Material loss enters once as mean internal power for that sample. Boundary heat
+uses the actual endpoint convection/radiation powers, not a subtraction from
+the computed enthalpy change that could hide thermal solve error. The returned
+transport trajectory retains those powers, its Biot value and energy residual.
+The caller's thermal energy-residual budget is checked separately and appears
+as `thermal_solve_tolerance_j`, zero on the direct-heat path. Coupled first-law
+acceptance uses that budget plus the reported arithmetic allowance; neither
+certifies time-discretization error. A late thermal, phase or material refusal
+preserves mechanics, temperature, source receipts, epoch and observer history.
+
+The fixed corpus Biot ceiling is applied, including the conservative radiative
+coefficient over the chart. This is a necessary uniform-body check, not proof
+of initially uniform temperature or homogenized internal heating. Rapid local
+sources and nonuniform support transfer require spatial transport regardless
+of step size. The analytical convection reference and lumped assumptions are
+described in [MIT's transient heat-transfer notes](https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node129.html).
+The thermal chart retains its existing source authority. Finite reservoirs,
+contact heat transfer, spatial conduction, entropy production certification, thermal
+expansion, changing stiffness/density, and solid-liquid transfer are not claimed.
+G1 compares the coupled trajectory with an independently integrated continuous
+ODE and checks temporal convergence. Synthetic heat capacity and viscosity make
+feedback observable in a bounded test; they are not measured material data.
+G1 additionally checks analytical heating/cooling and first-order refinement
+for two radii, plus separate and combined convection/radiation inputs changing
+the material damping and diagnostic pressure. G4 tests Biot, thermal residual,
+source-domain, phase and cancellation refusals, duplicate epochs, retry and
+cloned continuation. These exercise the existing solver directly, not a mock.
+
 `with_uniform_circular_material_state` lowers one homogeneous isotropic circular
 specimen to the existing `PrestressedString` realizer. It consumes the shared
 `ResolvedMaterialStatePoint` API, requiring only positive SI density and Young's
@@ -379,12 +532,16 @@ remains separate from the material receipts, available through `prestress()`.
 
 `with_uniform_circular_material_and_constraints` also accepts a
 `StringGeometryConstraint`: fixed radius or fixed total mass at the template's
-current loaded length. Fixed mass derives `r=sqrt(m/(rho L pi))` and then uses
-the same geometry-to-mass/stiffness lowering. Thus a density change preserves
-linear density to floating-point roundoff while changing EA, EI and observer
-width. Geometry and prestress constraints are independent and both remain
+current loaded length. Fixed mass derives `r=sqrt(m/(rho L pi))`, retains the
+prescribed mass, and sets `mu=m/L` directly. It never reconstructs either mass
+quantity through the rounded radius. Thus changing density at fixed mass/length
+keeps exactly the same numerical modal basis while changing EA, EI and observer
+width. The radius-derived area and `rho A` agree with these mass constraints to
+floating-point roundoff. Geometry and prestress constraints are independent and both remain
 available on the result, separate from material authority. The specimen hash
-binds resolved geometry, not the authored comparison policy.
+binds resolved geometry, mass and linear density, not the authored comparison
+policy. The v2 identity distinguishes prescribed masses even when rounding maps
+them to the same radius.
 
 `with_uniform_circular_thermal_extension` consumes the existing
 `IntegratedIsotropicThermalExpansion` and current elastic resolution from the
@@ -944,6 +1101,20 @@ clarinet is one filling of those objects.
   no-claim. Plate ×
   Helmholtz in `cavity_phs` is the same transformer, not a
   staggered pair of steps.
+  Its modal damping inputs are complete: it never selects aluminum/steel from
+  density or takes the solid's temperature from the gas. `PlateCavitySpec::bind_plate`
+  uses the ordinary `certified_radiators` owner to rebuild frequency, material
+  damping, force participation and monopole area together. Force and flow ports
+  are normalized by the same square root of modal mass. Source-bound callers
+  pass their `ResolvedPlateSpecimen::plate()` and retain that specimen's receipts;
+  this numeric adapter does not mint material authority. Thermal and viscous loss,
+  including prestress dilution, are included once by the plate owner. Nonlinear
+  plates refuse at this linear adapter. Failed admission preserves previous modes.
+  G1/G3 tests carry compiled source curves through this pHS pressure path at two
+  independent solid temperatures on both sides of the former density threshold,
+  compare damping with Zener plus Kelvin–Voigt arithmetic, and exercise repeat
+  determinism and failed rebinding. They are synthetic implementation checks;
+  this adds neither thermal evolution nor exterior plate-radiation back-reaction.
 - Von Karman geometric nonlinearity is the isotropic simply-supported
   analytic primitive when those hypotheses hold, and the FE-sampled
   Airy construction otherwise. The membrane channel remains the

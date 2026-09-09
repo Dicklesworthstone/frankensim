@@ -6,8 +6,8 @@
 //! instrument crate.
 
 use crate::modal_acoustic_time::{
-    ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeError,
-    ModalAcousticTimeModel,
+    MAX_TIME_DOMAIN_ACOUSTIC_MODES, ModalAcousticFrame, ModalAcousticMode, ModalAcousticState,
+    ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
 use crate::reed_bore::{blowing_envelope, realize_reed_bore, reed_structural};
@@ -24,6 +24,10 @@ const SECTION_BUDGET: f64 = 8.0;
 
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::GasState;
+use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, SolidLiquidPhase};
+use fs_material::state_point::{
+    MaterialPropertySelection, ScalarPropertyRequirement, resolve_material_state_point,
+};
 use fs_material::visco::RayleighDamping;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -52,6 +56,8 @@ use fs_tribo::{
 /// Typed realization refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcousticRealizeError {
+    /// The execution scope refused work before candidate publication.
+    Cancelled,
     /// Description failed a physical domain check.
     InvalidDescription {
         /// Which field.
@@ -88,6 +94,7 @@ pub enum AcousticRealizeError {
 impl core::fmt::Display for AcousticRealizeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "FS-COUPLE-ASSEMBLY-CANCELLED"),
             Self::InvalidDescription { what } => {
                 write!(f, "FS-COUPLE-ASSEMBLY: {what}")
             }
@@ -984,6 +991,7 @@ pub fn string_mode_omega(string: &PrestressedString, k: usize) -> f64 {
 /// not the radiation solution for a cylindrical wire. Common propagation
 /// delay is omitted. Jerk uses backward differences of accepted accelerations
 /// (first-order); instantaneous release impulses are not reconstructed.
+#[derive(Clone)]
 struct StringObserver {
     weights: Vec<(f64, f64)>,
     previous_acceleration: Option<Vec<f64>>,
@@ -1069,6 +1077,28 @@ fn mode_zeta(
     wave_number: f64,
     gas: &GasState,
 ) -> Result<f64, AcousticRealizeError> {
+    Ok(mode_loss_parts(string, omega, wave_number, gas)?.total())
+}
+
+#[derive(Clone, Copy, Default)]
+struct StringModeLossParts {
+    material: f64,
+    air: f64,
+    authored: f64,
+}
+
+impl StringModeLossParts {
+    fn total(self) -> f64 {
+        self.material + self.authored + self.air
+    }
+}
+
+fn mode_loss_parts(
+    string: &PrestressedString,
+    omega: f64,
+    wave_number: f64,
+    gas: &GasState,
+) -> Result<StringModeLossParts, AcousticRealizeError> {
     if string.relaxation_bending.is_some()
         && (string.kelvin_voigt_bending.is_some()
             || string.rayleigh.is_some()
@@ -1120,7 +1150,10 @@ fn mode_zeta(
                 what: "Rayleigh coefficients must be finite and non-negative",
             }
         })?;
-        return Ok(r.zeta_at(omega));
+        return Ok(StringModeLossParts {
+            authored: r.zeta_at(omega),
+            ..StringModeLossParts::default()
+        });
     }
     // The compact string path interprets width as circular diameter for air
     // drag. R [N s/m²] / (2 mu_linear omega) is dimensionless. Material
@@ -1137,17 +1170,28 @@ fn mode_zeta(
         });
     }
     if let Some(bending) = material_bending {
-        return Ok(bending + stokes);
+        return Ok(StringModeLossParts {
+            material: bending,
+            air: stokes,
+            authored: 0.0,
+        });
     }
     if string.relaxation_bending.is_some() {
         // The memory arms supply their own storage and dissipation in pHS.
-        return Ok(stokes);
+        return Ok(StringModeLossParts {
+            air: stokes,
+            ..StringModeLossParts::default()
+        });
     }
     // A caller-authored modal ratio is an explicit reduced model. Elastic EI
     // supplies storage, not an additional dissipation law, and one ratio does
     // not identify a relaxation spectrum. Physical bending loss must select
     // the Kelvin-Voigt or causal memory path above.
-    Ok(string.damping_ratio + stokes)
+    Ok(StringModeLossParts {
+        authored: string.damping_ratio,
+        air: stokes,
+        material: 0.0,
+    })
 }
 
 fn relaxing_mode_stiffness(string: &PrestressedString, stiffness_n_m2: f64, k: usize) -> f64 {
@@ -1976,10 +2020,939 @@ fn realize_linear_string(
     Ok(out)
 }
 
+#[derive(Clone)]
 struct LinearMember {
     model: ModalAcousticTimeModel,
     phi_bow: Vec<f64>,
     observer: StringObserver,
+    loss_parts: Vec<StringModeLossParts>,
+}
+
+/// Incremental small-amplitude vibration of one source-bound, pinned string.
+///
+/// This uses the same exact-ZOH modes, loss admission and compact strip observer
+/// as the assembly realizer. The explicit linearization omits axial stretching
+/// induced by transverse motion. Ambient gas and listener distance stay fixed;
+/// no atmospheric path filter, common propagation delay or radiation loading is
+/// included. The observer is a diagnostic, not an additional energy debit.
+///
+/// Rebinding keeps the exact length, linear density and sine-mode count, hence
+/// the same mass-normalized basis. Changing geometry/supports, Prony memory,
+/// nonlinear response or phase requires a different state-transfer owner.
+/// Material temperature is supplied by the specimen, never copied from air.
+/// The caller owns heat transport and must account for returned parameter work;
+/// this runtime alone does not implement a closed thermomechanical system.
+#[derive(Clone)]
+pub struct LinearMaterialStringRuntime {
+    specimen: crate::string_specimen::ResolvedStringSpecimen,
+    member: LinearMember,
+    gas: GasState,
+    listener_m: f64,
+    sample_rate_hz: u32,
+    epoch: u64,
+    accepted_samples: u64,
+}
+
+/// Energy change when replacing stiffness at fixed modal displacement/momentum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringMaterialUpdate {
+    /// Shared material/operator/observer epoch after publication.
+    pub epoch: u64,
+    /// Modal mechanical energy before the update [J].
+    pub energy_before_j: f64,
+    /// Modal mechanical energy after the update [J].
+    pub energy_after_j: f64,
+    /// Signed work into the retained vibration: `sum((omega_new²-omega_old²) q²/2)`.
+    /// The thermal or external parameter owner owes the opposite energy transfer.
+    /// This excludes the axial prestress reservoir and dissipated heat.
+    pub parameter_work_j: f64,
+}
+
+/// One accepted vibration/pressure step and its physical loss destinations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialStringFrame {
+    /// Epoch of mechanics, observer and loss publication.
+    pub epoch: u64,
+    /// The underlying exact-ZOH acoustic frame, including work and modal energy.
+    pub acoustic: ModalAcousticFrame,
+    /// Energy removed by the separately admitted damping mechanisms.
+    pub dissipation: StringDissipation,
+}
+
+/// Losses during one sample, excluding parameter work and diagnostic radiation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringDissipation {
+    /// Kelvin-Voigt bending dissipation inside the solid [J].
+    pub material_heat_j: f64,
+    /// Energy removed by the admitted oscillating-cylinder air resistance [J].
+    /// It leaves the solid; this reduced law does not resolve its fluid heating.
+    pub air_loss_j: f64,
+    /// Authored modal/Rayleigh damping with no identified thermal destination [J].
+    pub authored_loss_j: f64,
+    /// Aggregate work-minus-energy loss minus the three assigned channels [J].
+    /// Includes negative mode-local roundoff and undamped numerical drift;
+    /// it is never deposited as material heat.
+    pub roundoff_residual_j: f64,
+    /// Scale-aware allowance for the residual and numerical loss estimates [J].
+    /// This is not a constitutive-model or temporal-discretization error bound.
+    pub roundoff_tolerance_j: f64,
+}
+
+fn partition_string_dissipation(
+    frame: &ModalAcousticFrame,
+    parts: &[StringModeLossParts],
+) -> Result<StringDissipation, AcousticRealizeError> {
+    let mut loss = StringDissipation {
+        material_heat_j: 0.0,
+        air_loss_j: 0.0,
+        authored_loss_j: 0.0,
+        roundoff_residual_j: 0.0,
+        roundoff_tolerance_j: frame.dissipation_roundoff_tolerance_j,
+    };
+    for (mode, parts) in frame.modal_viscous_losses.iter().zip(parts) {
+        loss.roundoff_tolerance_j += mode.roundoff_tolerance_j;
+        let total = parts.total();
+        if total > 0.0 {
+            // With constant c_i during the step, each mechanism removes
+            // c_i integral(v^2 dt), so its share is c_i / sum(c_i).
+            // Only admitted negative roundoff is excluded, with its signed
+            // difference retained below; the mechanical state is untouched.
+            let dissipated = mode.energy_j.max(0.0);
+            loss.material_heat_j += dissipated * (parts.material / total);
+            loss.air_loss_j += dissipated * (parts.air / total);
+            loss.authored_loss_j += dissipated * (parts.authored / total);
+        }
+    }
+    let assigned = loss.material_heat_j + loss.air_loss_j + loss.authored_loss_j;
+    loss.roundoff_residual_j = frame.viscous_dissipation_j - assigned;
+    loss.roundoff_tolerance_j += 8.0 * f64::EPSILON * parts.len() as f64 * assigned;
+    if !loss.roundoff_residual_j.is_finite()
+        || !loss.roundoff_tolerance_j.is_finite()
+        || loss.roundoff_residual_j.abs() > loss.roundoff_tolerance_j
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "string damping partition does not close within its roundoff allowance",
+        });
+    }
+    Ok(loss)
+}
+
+impl LinearMaterialStringRuntime {
+    /// Initialize zero vibration or a released triangular pluck.
+    ///
+    /// All admission and cancellation checks precede returning the runtime.
+    /// The retained model is bounded by the ordinary audible-reference budgets.
+    pub fn try_new(
+        cx: &fs_exec::Cx<'_>,
+        specimen: crate::string_specimen::ResolvedStringSpecimen,
+        pluck: Option<Pluck>,
+        ambient: AmbientGas,
+        listener_m: f64,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let string = specimen.string();
+        validate_incremental_string(&string)?;
+        validate_string(&string, pluck, None)?;
+        if !(listener_m.is_finite() && listener_m > 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "incremental string listener distance must be finite and positive",
+            });
+        }
+        let gas = gas_state(ambient)?;
+        let member =
+            linear_string_member(&string, pluck, None, &gas, listener_m, sample_rate_hz, 1.0)?;
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        Ok(Self {
+            specimen,
+            member,
+            gas,
+            listener_m,
+            sample_rate_hz,
+            epoch: 0,
+            accepted_samples: 0,
+        })
+    }
+
+    /// Source receipts and physical coefficients at the accepted epoch.
+    #[must_use]
+    pub const fn specimen(&self) -> &crate::string_specimen::ResolvedStringSpecimen {
+        &self.specimen
+    }
+
+    /// One epoch covers the specimen, operators, vibration and observer history.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Number of accepted audio steps; rebinding never consumes a sample.
+    #[must_use]
+    pub const fn accepted_samples(&self) -> u64 {
+        self.accepted_samples
+    }
+
+    /// Current states in the unchanged mass-normalized sine basis.
+    #[must_use]
+    pub fn states(&self) -> &[ModalAcousticState] {
+        self.member.model.states()
+    }
+
+    /// Frequencies and complete admitted damping at the same epoch.
+    #[must_use]
+    pub fn modes(&self) -> &[ModalAcousticMode] {
+        self.member.model.modes()
+    }
+
+    /// Advance one sample under held modal forces [N/sqrt(kg)].
+    ///
+    /// Mechanics, accepted acceleration history and sample position publish
+    /// together after pressure/energy limits and a final cancellation poll.
+    /// A refusal preserves the entire runtime for retry. The returned pressure
+    /// is the compact strip observation; work and loss refer to retained modes.
+    pub fn step(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        forces: &[f64],
+    ) -> Result<MaterialStringFrame, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let epoch = next_string_epoch(self.epoch)?;
+        let samples = next_string_epoch(self.accepted_samples)?;
+        let mut candidate = self.member.clone();
+        let initial = candidate
+            .observer
+            .previous_acceleration
+            .is_none()
+            .then(|| linear_accelerations(&candidate.model, forces));
+        let mut frame = candidate
+            .model
+            .step(forces)
+            .map_err(AcousticRealizeError::Modal)?;
+        frame.observer_pressure_pa = candidate.observer.observe(
+            linear_accelerations(&candidate.model, forces),
+            initial,
+            candidate.model.sample_period_s(),
+        )?;
+        let dissipation = partition_string_dissipation(&frame, &candidate.loss_parts)?;
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        self.member = candidate;
+        self.epoch = epoch;
+        self.accepted_samples = samples;
+        Ok(MaterialStringFrame {
+            epoch,
+            acoustic: frame,
+            dissipation,
+        })
+    }
+
+    /// Replace the material state without resetting vibration or its observer.
+    ///
+    /// The exact card, length, linear density and mode count must be unchanged.
+    /// No mass tolerance or mode-number matching hides a basis transfer. Loss,
+    /// tension, EI and observer weights rebuild together using existing owners.
+    /// Previous accepted acceleration is retained for the observer's backward
+    /// difference; an abrupt parameter jump can therefore emit a transient.
+    /// Updates are piecewise constant, with no crossfade or adiabatic claim.
+    ///
+    /// `maximum_abs_parameter_work_j` is a caller-owned energy-transfer budget,
+    /// not a rescaling target. A refusal leaves all state/receipts unchanged.
+    pub fn rebind(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        specimen: crate::string_specimen::ResolvedStringSpecimen,
+        maximum_abs_parameter_work_j: f64,
+    ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let epoch = next_string_epoch(self.epoch)?;
+        let old = self.specimen.string();
+        let new = specimen.string();
+        validate_incremental_string(&new)?;
+        if self.specimen.material().card_identity() != specimen.material().card_identity()
+            || old.length_m.to_bits() != new.length_m.to_bits()
+            || old.lin_density_kg_m.to_bits() != new.lin_density_kg_m.to_bits()
+            || old.n_modes != new.n_modes
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "incremental material update requires the same card, length, linear density and sine basis; use an explicit state transfer for other changes",
+            });
+        }
+        if !(maximum_abs_parameter_work_j.is_finite() && maximum_abs_parameter_work_j >= 0.0) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "parameter-work budget must be finite and nonnegative",
+            });
+        }
+        let mut candidate = linear_string_member(
+            &new,
+            None,
+            None,
+            &self.gas,
+            self.listener_m,
+            self.sample_rate_hz,
+            1.0,
+        )?;
+        candidate
+            .model
+            .restore_states(self.states())
+            .map_err(AcousticRealizeError::Modal)?;
+        candidate
+            .observer
+            .previous_acceleration
+            .clone_from(&self.member.observer.previous_acceleration);
+        let energy = |model: &ModalAcousticTimeModel| -> f64 {
+            model
+                .modes()
+                .iter()
+                .zip(model.states())
+                .map(|(mode, state)| {
+                    0.5 * (state.velocity_m_sqrt_kg_per_s.powi(2)
+                        + (mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg).powi(2))
+                })
+                .sum()
+        };
+        let energy_before_j = energy(&self.member.model);
+        let energy_after_j = energy(&candidate.model);
+        // Difference the stiffness terms mode by mode; do not subtract large
+        // kinetic energies when the parameter work is small.
+        let parameter_work_j: f64 = self
+            .modes()
+            .iter()
+            .zip(candidate.model.modes())
+            .zip(self.states())
+            .map(|((before, after), state)| {
+                let old_wq = before.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
+                let new_wq = after.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
+                0.5 * (new_wq - old_wq) * (new_wq + old_wq)
+            })
+            .sum();
+        if !parameter_work_j.is_finite() || parameter_work_j.abs() > maximum_abs_parameter_work_j {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "material update exceeds its parameter-work budget",
+            });
+        }
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        self.specimen = specimen;
+        self.member = candidate;
+        self.epoch = epoch;
+        Ok(StringMaterialUpdate {
+            epoch,
+            energy_before_j,
+            energy_after_j,
+            parameter_work_j,
+        })
+    }
+}
+
+/// Coupled refusal; no mechanical, thermal or observer state is published.
+#[derive(Debug)]
+pub enum ThermalStringError {
+    /// Unsupported physical model or invalid coupling budget.
+    Admission(&'static str),
+    /// The caller has already consumed this epoch, or is using stale state.
+    Epoch {
+        /// Epoch the caller intended to advance.
+        expected: u64,
+        /// Currently accepted epoch.
+        actual: u64,
+    },
+    /// Mechanical or acoustic owner refused the candidate.
+    Acoustic(AcousticRealizeError),
+    /// Thermal owner refused the candidate.
+    Phase(fs_material::phase::PhaseStateError),
+    /// The supplied thermal transport refused, retaining its diagnostic.
+    Transport(String),
+    /// The material-backed uniform DC conductor refused the candidate.
+    Electrical(fs_material::conductor::ConductorError),
+    /// Material query coordinates were invalid.
+    Query(fs_matdb::MatDbError),
+    /// The pinned material claims cannot supply the candidate state.
+    Material(fs_material::state_point::MaterialStatePointError),
+}
+
+impl core::fmt::Display for ThermalStringError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FS-COUPLE-THERMAL-STRING: {self:?}")
+    }
+}
+
+impl std::error::Error for ThermalStringError {}
+
+/// Uniform solid temperature coupled to material-resolved viscous vibration.
+///
+/// Density and Young's modulus must be validity-wide constants, with prescribed
+/// radius or mass and fixed tension: no changing elastic/prestress potential or
+/// expansion work is hidden in heat. Viscosity may depend on temperature.
+/// The admitted thermal chart has constant solid density and uses total
+/// specific enthalpy; neither latent heat nor air loss is credited twice.
+///
+/// Each sample freezes viscosity at its initial temperature, evolves the exact
+/// mechanical substep, deposits its material loss, and resolves viscosity at
+/// the new temperature. This is first-order partitioned feedback, not an exact
+/// continuous-temperature solution. The explicit temperature-increment budget
+/// limits a step; time refinement is still required to assess coupling error.
+/// Spatial transport, thermal expansion, melting and acoustic radiation loading are
+/// outside this rung. Ambient gas remains independent of the solid temperature.
+#[derive(Clone)]
+pub struct ThermalMaterialStringRuntime {
+    mechanical: LinearMaterialStringRuntime,
+    card: fs_matdb::MaterialCard,
+    point: fs_matdb::QueryPoint,
+    requirements: Vec<ScalarPropertyRequirement>,
+    selection: MaterialPropertySelection,
+    curve: EquilibriumEnthalpyPhaseCurve,
+    thermal: EquilibriumPhaseState,
+    maximum_temperature_increment_k: f64,
+}
+
+/// One accepted thermal/mechanical sample, with a single publication epoch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermalMaterialStringFrame {
+    /// Mechanical work/loss over the sample and final-state diagnostic pressure.
+    pub vibration: MaterialStringFrame,
+    /// Thermal state at the same epoch as `vibration.epoch`.
+    pub thermal: EquilibriumPhaseState,
+    /// Signed externally supplied heat [J]; its source lies outside this owner.
+    pub external_heat_j: f64,
+    /// Actual increase in total thermal enthalpy [J].
+    pub enthalpy_change_j: f64,
+    /// Work + external heat - mechanical/thermal storage changes - outgoing
+    /// air/authored loss - the separately reported mechanical numerical loss [J].
+    pub energy_balance_residual_j: f64,
+    /// Arithmetic allowance [J], including the absolute enthalpy reference.
+    /// This does not bound coupling truncation or constitutive-model error.
+    pub energy_roundoff_tolerance_j: f64,
+    /// Separately declared thermal-solve residual allowance [J], zero for
+    /// directly supplied heat. Neither this nor roundoff bounds timestep error.
+    pub thermal_solve_tolerance_j: f64,
+}
+
+/// Atomic vibration/temperature result and the actual thermal solver trajectory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermalStringTransportFrame<R> {
+    /// Coupled state and first-law balance at the newly accepted epoch.
+    pub coupled: ThermalMaterialStringFrame,
+    /// Concrete report returned by the transport owner, without type erasure.
+    pub transport: R,
+}
+
+/// One accepted prescribed-current sample of a uniform conducting string.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElectrothermalStringFrame {
+    /// Accepted mechanics, temperature and pressure at one publication epoch.
+    pub coupled: ThermalMaterialStringFrame,
+    /// Signed ideal-source current held throughout the sample [A].
+    pub current_a: f64,
+    /// Source-resolved resistance at the beginning of the sample.
+    /// This frozen law supplies the sample's Joule heat.
+    pub conductor_before: fs_material::conductor::ResolvedConductor,
+    /// Source-resolved resistance at the accepted final temperature.
+    pub conductor_after: fs_material::conductor::ResolvedConductor,
+}
+
+impl ThermalMaterialStringRuntime {
+    /// Attach the same immutable card and thermal chart to an accepted string.
+    /// Existing material coordinates and selected claims are retained exactly.
+    pub fn try_new(
+        cx: &fs_exec::Cx<'_>,
+        mechanical: LinearMaterialStringRuntime,
+        card: fs_matdb::MaterialCard,
+        curve: EquilibriumEnthalpyPhaseCurve,
+        specific_enthalpy_j_kg: f64,
+        maximum_temperature_increment_k: f64,
+    ) -> Result<Self, ThermalStringError> {
+        use crate::string_specimen::StringPrestress;
+        let refuse = ThermalStringError::Admission;
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        let specimen = mechanical.specimen();
+        let material = specimen.material();
+        let thermal = curve
+            .state_at_specific_enthalpy(specific_enthalpy_j_kg)
+            .map_err(ThermalStringError::Phase)?;
+        if !(maximum_temperature_increment_k.is_finite() && maximum_temperature_increment_k > 0.0)
+            || card.content_hash() != material.card_identity()
+            || thermal.material_card_identity() != material.card_identity()
+            || !matches!(specimen.prestress(), StringPrestress::FixedTension(_))
+        {
+            return Err(refuse(
+                "thermal string requires one card, fixed tension and a positive temperature-increment budget",
+            ));
+        }
+        for name in ["density", "young_modulus"] {
+            let property = material
+                .property(name)
+                .ok_or(refuse("thermal string needs density and Young's modulus"))?;
+            let claim = card
+                .claims()
+                .claim(property.answer().receipt.selected)
+                .ok_or(refuse("thermal string selected claim is absent"))?;
+            if !matches!(claim.value, fs_matdb::PropertyValue::Scalar { .. }) {
+                return Err(refuse(
+                    "changing density or elastic stiffness requires thermodynamic work and state transfer",
+                ));
+            }
+        }
+        for property in material.properties() {
+            cx.checkpoint()
+                .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+            let claim = card
+                .claims()
+                .claim(property.answer().receipt.selected)
+                .ok_or(refuse("thermal string selected claim is absent"))?;
+            // Endpoint queries of a TabulatedOnly curve do not admit the path
+            // between them. Constant claims and linear T-only curves do.
+            if !property.is_constant_at_fixed_temperature()
+                || matches!(claim.value, fs_matdb::PropertyValue::Curve { .. })
+                    && claim.interpolation != fs_matdb::InterpolationPolicy::LinearInside
+            {
+                return Err(refuse(
+                    "thermal string requires constant or linearly interpolated temperature-only claims",
+                ));
+            }
+            if property.requirement().name()
+                == crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY
+                && let fs_matdb::PropertyValue::Curve { knots, .. } = &claim.value
+                && knots.iter().any(|(_, viscosity)| *viscosity < 0.0)
+            {
+                return Err(refuse(
+                    "thermal string viscosity must be nonnegative over its whole source curve",
+                ));
+            }
+        }
+        let density = material
+            .property("density")
+            .ok_or(refuse("thermal string needs density"))?
+            .value_si();
+        if curve.knots().iter().any(|knot| {
+            knot.liquid_mass_fraction == 0.0
+                && knot.bulk_density_kg_m3.to_bits() != density.to_bits()
+        }) {
+            return Err(refuse(
+                "solid thermal density must equal the constant mechanical density",
+            ));
+        }
+        let mut point = fs_matdb::QueryPoint::new();
+        for (axis, value) in material.query_point() {
+            point = match material.axis_quantities().get(axis) {
+                Some(quantity) => point.with_quantity(axis, *quantity, *value),
+                None => point.with(axis, *value),
+            }
+            .map_err(ThermalStringError::Query)?;
+        }
+        let absolute_temperature =
+            fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+                fs_qty::semantic::QuantityKind::AbsoluteTemperature,
+                fs_qty::semantic::ValueForm::Static,
+            ));
+        if point.axes().get("T").copied() != Some(thermal.temperature_k())
+            || point.axis_quantities().get("T").is_some_and(|q| {
+                *q != absolute_temperature
+                    && *q != fs_qty::QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
+            })
+            || thermal.phase() != SolidLiquidPhase::Solid
+        {
+            return Err(refuse(
+                "initial solid thermal temperature must match the material's absolute T coordinate",
+            ));
+        }
+        let requirements = material
+            .properties()
+            .iter()
+            .map(|p| p.requirement().clone())
+            .collect();
+        let selection = MaterialPropertySelection::PinnedByProperty(
+            material
+                .properties()
+                .iter()
+                .map(|p| {
+                    (
+                        p.requirement().name().to_owned(),
+                        p.answer().receipt.selected,
+                    )
+                })
+                .collect(),
+        );
+        let result = Self {
+            mechanical,
+            card,
+            point,
+            requirements,
+            selection,
+            curve,
+            thermal,
+            maximum_temperature_increment_k,
+        };
+        // Validate the initial law against its original receipt. Pinning an
+        // already selected claim changes the query-policy receipt identity;
+        // that is not a physical mismatch. Future temperature queries are
+        // pinned, but attaching this owner preserves the accepted source state.
+        let rebound = result
+            .mechanical
+            .specimen()
+            .clone()
+            .with_kelvin_voigt_bending_loss()
+            .map_err(ThermalStringError::Acoustic)?;
+        if rebound.string() != result.mechanical.specimen().string() {
+            return Err(refuse(
+                "initial string must already use its sourced Kelvin-Voigt bending law",
+            ));
+        }
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        Ok(result)
+    }
+
+    /// Mechanics, material receipts, observer history and epoch, read only.
+    #[must_use]
+    pub const fn mechanical(&self) -> &LinearMaterialStringRuntime {
+        &self.mechanical
+    }
+
+    /// Accepted uniform thermal state.
+    #[must_use]
+    pub const fn thermal(&self) -> EquilibriumPhaseState {
+        self.thermal
+    }
+
+    fn conductor(&self) -> Result<fs_material::conductor::ResolvedConductor, ThermalStringError> {
+        use fs_material::conductor::{ELECTRICAL_RESISTIVITY_PROPERTY, resolve_uniform_conductor};
+        let specimen = self.mechanical.specimen();
+        let property = specimen
+            .material()
+            .property(ELECTRICAL_RESISTIVITY_PROPERTY)
+            .ok_or(ThermalStringError::Admission(
+                "current-driven string requires a resolved electrical_resistivity claim",
+            ))?;
+        let point = self
+            .point
+            .clone()
+            .with("T", self.thermal.temperature_k())
+            .map_err(ThermalStringError::Query)?;
+        resolve_uniform_conductor(
+            &self.card,
+            &point,
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                ELECTRICAL_RESISTIVITY_PROPERTY.to_owned(),
+                property.answer().receipt.selected,
+            )]),
+            specimen.string().length_m,
+            specimen.area_m2(),
+        )
+        .map_err(ThermalStringError::Electrical)
+    }
+
+    /// Deposit `I² R(T_initial) dt` from an ideal prescribed current source.
+    /// Resistance uses the same immutable card, pinned resistivity claim,
+    /// temperature and actual length/area as mechanics. Both electrical states
+    /// are resolved before publishing mechanics, temperature or sound.
+    ///
+    /// This is a first-order, uniform quasi-static Ohmic model, with insulated
+    /// thermal boundaries. The external heat account is electrical source work
+    /// converted once to Joule heat; material vibration loss stays separate.
+    /// No circuit dynamics, skin/contact resistance, charge field, Lorentz
+    /// force, motional emf or changing-geometry electrical work is represented.
+    pub fn step_with_current(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        current_a: f64,
+    ) -> Result<ElectrothermalStringFrame, ThermalStringError> {
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        let conductor_before = self.conductor()?;
+        let power = conductor_before
+            .joule_power_w(current_a)
+            .map_err(ThermalStringError::Electrical)?;
+        let heat = power * self.mechanical.member.model.sample_period_s();
+        if !heat.is_finite() || (power > 0.0 && heat == 0.0) {
+            return Err(ThermalStringError::Admission(
+                "Joule heat is not representable in joules",
+            ));
+        }
+        let mut candidate = self.clone();
+        let coupled = candidate.step(cx, expected_epoch, forces, heat)?;
+        let conductor_after = candidate.conductor()?;
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        *self = candidate;
+        Ok(ElectrothermalStringFrame {
+            coupled,
+            current_a,
+            conductor_before,
+            conductor_after,
+        })
+    }
+
+    fn specimen_at(
+        &self,
+        thermal: EquilibriumPhaseState,
+    ) -> Result<crate::string_specimen::ResolvedStringSpecimen, ThermalStringError> {
+        let point = self
+            .point
+            .clone()
+            .with("T", thermal.temperature_k())
+            .map_err(ThermalStringError::Query)?;
+        let state = resolve_material_state_point(
+            &self.card,
+            &point,
+            &self.requirements,
+            self.selection.clone(),
+        )
+        .map_err(ThermalStringError::Material)?;
+        let old = self.mechanical.specimen();
+        crate::string_specimen::with_uniform_circular_material_and_constraints(
+            old.string(),
+            old.geometry_constraint(),
+            &state,
+            old.prestress(),
+        )
+        .and_then(|s| s.with_kelvin_voigt_bending_loss())
+        .map_err(ThermalStringError::Acoustic)
+    }
+
+    /// Advance mechanics, material heating and viscosity feedback as one commit.
+    /// `expected_epoch` prevents replaying an accepted heat/source application.
+    /// Signed external heat is supplied as energy [J], not an inferred ambient
+    /// flux. A refusal consumes neither this input nor an audio sample.
+    pub fn step(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        external_heat_j: f64,
+    ) -> Result<ThermalMaterialStringFrame, ThermalStringError> {
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        if !external_heat_j.is_finite() {
+            return Err(ThermalStringError::Admission(
+                "external heat must be finite joules",
+            ));
+        }
+        let mut candidate = self.mechanical.clone();
+        let vibration = candidate
+            .step(cx, forces)
+            .map_err(ThermalStringError::Acoustic)?;
+        let heat = vibration.dissipation.material_heat_j + external_heat_j;
+        let thermal = self
+            .curve
+            .advance_specific_energy(self.thermal, heat / candidate.specimen().mass_kg())
+            .map_err(ThermalStringError::Phase)?;
+        let result = self.finish_thermal_step(
+            cx,
+            forces,
+            candidate,
+            vibration,
+            fs_material::phase::UniformEnthalpyStep {
+                state: thermal,
+                external_heat_j,
+                energy_residual_tolerance_j: 0.0,
+                report: (),
+            },
+        )?;
+        Ok(result.coupled)
+    }
+
+    /// Advance material heating and boundary heat exchange through a supplied
+    /// transport owner. For fs-conduction's `LumpedThermalEnvironment`, pass
+    /// `|input| environment.advance(cx, input)`; no reverse crate dependency
+    /// from this coupled owner to a spatial solver is required.
+    ///
+    /// Area is `2 pi r (L + r)` and the Biot length is the actual volume/area.
+    /// The transport must justify its lumped approximation and return actual
+    /// boundary heat, separately from internal heating and solver residual.
+    /// It proposes a result; it must not publish state or debit a mutable source.
+    pub fn step_with_thermal_transport<R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        transport: impl FnOnce(
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
+    ) -> Result<ThermalStringTransportFrame<R>, ThermalStringError> {
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        let specimen = self.mechanical.specimen();
+        let radius = specimen.radius_m();
+        let length = specimen.string().length_m;
+        let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
+        let volume = specimen.area_m2() * length;
+        let mut candidate = self.mechanical.clone();
+        let vibration = candidate
+            .step(cx, forces)
+            .map_err(ThermalStringError::Acoustic)?;
+        let dt = candidate.member.model.sample_period_s();
+        let proposed = transport(fs_material::phase::UniformEnthalpyStepInput {
+            curve: &self.curve,
+            initial: self.thermal,
+            mass_kg: specimen.mass_kg(),
+            volume_m3: volume,
+            surface_area_m2: area,
+            internal_heat_j: vibration.dissipation.material_heat_j,
+            duration_s: dt,
+        })
+        .map_err(|error| ThermalStringError::Transport(error.to_string()))?;
+        if proposed.state.phase_curve_identity() != self.curve.identity()
+            || !proposed.external_heat_j.is_finite()
+            || !proposed.energy_residual_tolerance_j.is_finite()
+            || proposed.energy_residual_tolerance_j < 0.0
+        {
+            return Err(ThermalStringError::Admission(
+                "thermal transport returned a foreign chart, invalid heat or invalid residual budget",
+            ));
+        }
+        self.finish_thermal_step(cx, forces, candidate, vibration, proposed)
+    }
+
+    fn finish_thermal_step<R>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        forces: &[f64],
+        mut candidate: LinearMaterialStringRuntime,
+        mut vibration: MaterialStringFrame,
+        proposed: fs_material::phase::UniformEnthalpyStep<R>,
+    ) -> Result<ThermalStringTransportFrame<R>, ThermalStringError> {
+        let fs_material::phase::UniformEnthalpyStep {
+            state: thermal,
+            external_heat_j,
+            energy_residual_tolerance_j: thermal_solve_tolerance_j,
+            report,
+        } = proposed;
+        let energy_before_j: f64 = self
+            .mechanical
+            .modes()
+            .iter()
+            .zip(self.mechanical.states())
+            .map(|(mode, state)| {
+                0.5 * (state.velocity_m_sqrt_kg_per_s.powi(2)
+                    + (mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg).powi(2))
+            })
+            .sum();
+        let mass = candidate.specimen().mass_kg();
+        let heat = vibration.dissipation.material_heat_j + external_heat_j;
+        if thermal.phase() != SolidLiquidPhase::Solid
+            || (thermal.temperature_k() - self.thermal.temperature_k()).abs()
+                > self.maximum_temperature_increment_k
+        {
+            return Err(ThermalStringError::Admission(
+                "thermal step left the solid phase or exceeded its temperature-increment budget",
+            ));
+        }
+        let specimen = self.specimen_at(thermal)?;
+        // The internal rebind shares this sample's publication epoch. Start
+        // from the accepted epoch so the last representable epoch is usable.
+        candidate.epoch = self.mechanical.epoch();
+        candidate
+            .rebind(cx, specimen, 0.0)
+            .map_err(ThermalStringError::Acoustic)?;
+        // Rebinding is internal to this sample's transaction, not a second
+        // accepted instant. Observe the final acceleration with the previous
+        // accepted history, so pressure and its retained history use the new law.
+        candidate.member.observer = self.mechanical.member.observer.clone();
+        let initial = candidate
+            .member
+            .observer
+            .previous_acceleration
+            .is_none()
+            .then(|| linear_accelerations(&self.mechanical.member.model, forces));
+        vibration.acoustic.observer_pressure_pa = candidate
+            .member
+            .observer
+            .observe(
+                linear_accelerations(&candidate.member.model, forces),
+                initial,
+                candidate.member.model.sample_period_s(),
+            )
+            .map_err(ThermalStringError::Acoustic)?;
+        let enthalpy_change_j =
+            mass * (thermal.specific_enthalpy_j_kg() - self.thermal.specific_enthalpy_j_kg());
+        let a = &vibration.acoustic;
+        let d = &vibration.dissipation;
+        let energy_balance_residual_j = a.input_work_j + external_heat_j
+            - ((a.total_modal_energy_j - energy_before_j)
+                + enthalpy_change_j
+                + d.air_loss_j
+                + d.authored_loss_j
+                + d.roundoff_residual_j);
+        let scale = a.input_work_j.abs()
+            + external_heat_j.abs()
+            + energy_before_j
+            + a.total_modal_energy_j
+            + mass
+                * (thermal.specific_enthalpy_j_kg().abs()
+                    + self.thermal.specific_enthalpy_j_kg().abs())
+            + heat.abs()
+            + d.air_loss_j
+            + d.authored_loss_j;
+        let energy_roundoff_tolerance_j = d.roundoff_tolerance_j + 32.0 * f64::EPSILON * scale;
+        if !energy_balance_residual_j.is_finite()
+            || !energy_roundoff_tolerance_j.is_finite()
+            || energy_balance_residual_j.abs()
+                > energy_roundoff_tolerance_j + thermal_solve_tolerance_j
+        {
+            return Err(ThermalStringError::Admission(
+                "coupled thermal/mechanical energy balance exceeds its roundoff and solve allowances",
+            ));
+        }
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        self.mechanical = candidate;
+        self.thermal = thermal;
+        Ok(ThermalStringTransportFrame {
+            coupled: ThermalMaterialStringFrame {
+                vibration,
+                thermal,
+                external_heat_j,
+                enthalpy_change_j,
+                energy_balance_residual_j,
+                energy_roundoff_tolerance_j,
+                thermal_solve_tolerance_j,
+            },
+            transport: report,
+        })
+    }
+}
+
+fn next_string_epoch(epoch: u64) -> Result<u64, AcousticRealizeError> {
+    epoch
+        .checked_add(1)
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "incremental string epoch or sample counter overflow",
+        })
+}
+
+fn validate_incremental_string(string: &PrestressedString) -> Result<(), AcousticRealizeError> {
+    validate_string(string, None, None)?;
+    if string.moving_end
+        || string.polarization_detune != 0.0
+        || string.relaxation_bending.is_some()
+        || string.n_modes > MAX_TIME_DOMAIN_ACOUSTIC_MODES
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "incremental linear string needs one fixed-end sine basis without relaxation memory, within the modal budget",
+        });
+    }
+    Ok(())
 }
 
 fn linear_string_member(
@@ -1996,15 +2969,18 @@ fn linear_string_member(
     let mut modes = Vec::with_capacity(string.n_modes);
     let mut states = Vec::with_capacity(string.n_modes);
     let mut phi_bow = vec![0.0; string.n_modes];
+    let mut loss_parts = Vec::with_capacity(string.n_modes);
     for k in 1..=string.n_modes {
         let omega = string_mode_omega(string, k);
         let q_phys = pluck.map_or(0.0, |p| triangular_pluck_modal(p, k));
+        let loss = mode_loss_parts(string, omega, k as f64 * pi / string.length_m, gas)?;
         modes.push(ModalAcousticMode {
             angular_frequency_rad_s: omega,
-            damping_ratio: mode_zeta(string, omega, k as f64 * pi / string.length_m, gas)?,
+            damping_ratio: loss.total(),
             // The time-domain observer below includes actual applied forces.
             pressure_per_modal_velocity: C64::ZERO,
         });
+        loss_parts.push(loss);
         states.push(ModalAcousticState {
             displacement_m_sqrt_kg: mass_scale * q_phys,
             velocity_m_sqrt_kg_per_s: 0.0,
@@ -2026,6 +3002,7 @@ fn linear_string_member(
         model,
         phi_bow,
         observer: StringObserver::new(string, gas, listener_m, radiation_scale),
+        loss_parts,
     })
 }
 

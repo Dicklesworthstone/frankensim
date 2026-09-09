@@ -527,7 +527,7 @@ fn moist_air_reference(temperature_k: f64, pressure_pa: f64, rh: f64) -> (f64, f
     let t = temperature_k - 273.15;
     let x = rh * 611.21 * ((18.678 - t / 234.5) * t / (257.14 + t)).exp() / pressure_pa;
     let molar_mass = (1.0 - x) * 28.9644e-3 + x * 18.01528e-3;
-    let cv_molar = (1.0 - x) * 8.31432 / 0.4 + x * 8.31432 / 0.3291;
+    let cv_molar = (1.0 - x) * 8.31432 / 0.4 + x * (33.590 - 8.31432);
     let gamma = (cv_molar + 8.31432) / cv_molar;
     let rho = pressure_pa * molar_mass / (8.31432 * temperature_k);
     let c = (gamma * 8.31432 * temperature_k / molar_mass).sqrt();
@@ -2432,6 +2432,142 @@ mod material_plate_tests {
             matches!(error, MaterialAssemblyError::Resolution { component, source: fs_material::state_point::MaterialStatePointError::Query { property, .. } } if component == "string" && property == LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)
         );
         assert_eq!(input, original);
+    }
+
+    #[test]
+    fn g1_cavity_material_modes_preserve_thermal_loss_and_change_pressure() {
+        use fs_couple::cavity_phs::{PlateCavitySpec, realize_plate_cavity};
+        use fs_material::gas::{GasSpec, GasState};
+
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 101_325.0).unwrap();
+        let mut input = empty_base();
+        input.plate = Some(ThinPlate {
+            pretension_n_m: 0.0,
+            ..thermal_template(false)
+        });
+        let force: Vec<_> = (0..480)
+            .map(|i| {
+                if i < 16 {
+                    (core::f64::consts::PI * i as f64 / 16.0).sin()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        // Synthetic source curves exercise the compiler and real pHS pressure
+        // path. They are not experimental validation of a named material.
+        for rho in [4_999.0, 5_001.0] {
+            for viscosity in [None, Some(3e6)] {
+                input.plate.as_mut().unwrap().kelvin_voigt_bending =
+                    thermal_template(viscosity.is_some()).kelvin_voigt_bending;
+                let card = thermal_card(rho, viscosity);
+                let mut pressures = Vec::new();
+                for (temperature, cp, conductivity) in [(300.0, 500.0, 80.0), (450.0, 700.0, 40.0)]
+                {
+                    let point = thermal_point(temperature);
+                    let compiled = compile_material_assembly(
+                        &input,
+                        &AcousticMaterialBindings {
+                            string: None,
+                            plate: Some(PlateMaterialBinding::Uniform {
+                                source: source(&card, &point),
+                                model: Model::Isotropic,
+                                thickness: Thickness::FixedThickness(0.002),
+                            }),
+                        },
+                    )
+                    .unwrap();
+                    let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                        panic!("uniform plate");
+                    };
+                    let mut cavity = PlateCavitySpec {
+                        omegas: vec![],
+                        zetas: vec![],
+                        drive: vec![],
+                        areas: vec![],
+                        volume_m3: 0.008,
+                        neck_radius_m: 0.02,
+                        neck_length_m: 0.03,
+                        gas,
+                        relative_humidity: 0.0,
+                    };
+                    cavity.bind_plate(specimen.plate()).unwrap();
+                    assert_eq!(cavity.omegas.len(), 1);
+                    let omega = cavity.omegas[0];
+                    // Independent Zener + proportional Kelvin-Voigt arithmetic,
+                    // with zero geometric prestress: no material-name selection
+                    // and no second thermal debit in the cavity owner.
+                    let delta = 12e9 * 1e-8 * temperature / (rho * cp);
+                    let tau = 0.002_f64.powi(2) * rho * cp
+                        / (core::f64::consts::PI.powi(2) * conductivity);
+                    let wt = omega * tau;
+                    let expected = 0.5 * delta * wt / (1.0 + wt * wt)
+                        + 0.5 * viscosity.unwrap_or(0.0) / 12e9 * omega;
+                    assert!((cavity.zetas[0] / expected - 1.0).abs() < 1e-10);
+                    let mode = &certified_radiators(specimen.plate()).unwrap()[0];
+                    assert_eq!(
+                        cavity.drive[0],
+                        mode.drive_participation / mode.mass_kg.sqrt()
+                    );
+                    assert_eq!(cavity.areas[0], mode.area_m2 / mode.mass_kg.sqrt());
+                    assert_eq!(
+                        cavity.gas.temperature, 300.0,
+                        "hot solid is independent of its gas"
+                    );
+                    let actual = realize_plate_cavity(&cavity, &force, 8_000, 1.0).unwrap();
+                    assert!(peak_abs(&actual) > 0.0);
+                    assert_eq!(
+                        actual,
+                        realize_plate_cavity(&cavity, &force, 8_000, 1.0).unwrap()
+                    );
+                    pressures.push(actual);
+                }
+                let delta: Vec<_> = pressures[0]
+                    .iter()
+                    .zip(&pressures[1])
+                    .map(|(a, b)| a - b)
+                    .collect();
+                assert!(
+                    peak_abs(&delta) > 1e-8 * peak_abs(&pressures[0]),
+                    "equal-density specimens at different thermal states must change cavity pressure"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_cavity_plate_binding_refuses_without_partial_modal_replacement() {
+        use fs_couple::cavity_phs::{CavityPhsError, PlateCavitySpec};
+        use fs_material::gas::{GasSpec, GasState};
+
+        let mut cavity = PlateCavitySpec {
+            omegas: vec![600.0],
+            zetas: vec![0.006],
+            drive: vec![1.0],
+            areas: vec![0.08],
+            volume_m3: 0.008,
+            neck_radius_m: 0.02,
+            neck_length_m: 0.03,
+            gas: GasState::try_new(&GasSpec::dry_air_ussa1976(), 300.0, 101_325.0).unwrap(),
+            relative_humidity: 0.0,
+        };
+        let before = cavity.clone();
+        let mut invalid = template();
+        invalid.geometric_nonlinearity = true;
+        assert!(matches!(
+            cavity.bind_plate(invalid),
+            Err(CavityPhsError::Invalid { .. })
+        ));
+        invalid.geometric_nonlinearity = false;
+        invalid.n_modes = 0;
+        assert!(matches!(
+            cavity.bind_plate(invalid),
+            Err(CavityPhsError::Plate(_))
+        ));
+        assert_eq!(cavity.omegas, before.omegas);
+        assert_eq!(cavity.zetas, before.zetas);
+        assert_eq!(cavity.drive, before.drive);
+        assert_eq!(cavity.areas, before.areas);
     }
 
     #[test]

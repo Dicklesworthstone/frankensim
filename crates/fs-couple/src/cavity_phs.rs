@@ -5,10 +5,9 @@
 //! the plate's flow port). A bottle and a vented enclosure are the
 //! same objects. There is no guitar type.
 
-use fs_material::{
-    gas::GasState,
-    visco::{ThermoelasticZener, loss_factor_to_zeta},
-};
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::thin_plate::certified_radiators;
+use fs_material::gas::GasState;
 use fs_phs::{
     MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
     helmholtz_resonator_flow, step, transformer,
@@ -24,6 +23,8 @@ pub enum CavityPhsError {
     },
     /// pHS admission or step refusal.
     Phs(String),
+    /// Material, geometry or modal admission refused by the plate owner.
+    Plate(AcousticRealizeError),
 }
 
 impl core::fmt::Display for CavityPhsError {
@@ -31,6 +32,7 @@ impl core::fmt::Display for CavityPhsError {
         match self {
             Self::Invalid { what } => write!(f, "FS-COUPLE-CAVITY: {what}"),
             Self::Phs(e) => write!(f, "FS-COUPLE-CAVITY-PHS: {e}"),
+            Self::Plate(e) => write!(f, "FS-COUPLE-CAVITY-PLATE: {e}"),
         }
     }
 }
@@ -42,16 +44,13 @@ impl std::error::Error for CavityPhsError {}
 pub struct PlateCavitySpec {
     /// Plate modal frequencies [rad/s].
     pub omegas: Vec<f64>,
-    /// Authored viscous ratios (thermoelastic is added on top).
+    /// Complete modal damping ratios, including any resolved material loss.
+    /// The cavity never adds an inferred material contribution.
     pub zetas: Vec<f64>,
     /// Drive weights at the external force (mass-normalized).
     pub drive: Vec<f64>,
-    /// Monopole areas [m²] (volume velocity = A · v).
+    /// Mass-normalized monopole areas [m²/√kg] (volume velocity = A · v).
     pub areas: Vec<f64>,
-    /// Plate thickness [m]. Zero skips thermoelastic loss.
-    pub thickness_m: f64,
-    /// Plate density [kg/m³] (selects Al vs steel thermoelastic).
-    pub plate_density_kg_m3: f64,
     /// Cavity volume [m³].
     pub volume_m3: f64,
     /// Neck radius [m].
@@ -59,10 +58,44 @@ pub struct PlateCavitySpec {
     /// Neck length [m] (end correction is applied inside the pHS).
     pub neck_length_m: f64,
     /// Admitted ambient state used consistently by the cavity, radiation,
-    /// observer, thermoelastic loss, and propagation path.
+    /// observer and propagation path. Plate temperature is independent.
     pub gas: GasState,
     /// Relative humidity in `[0, 1]` for the observer path.
     pub relative_humidity: f64,
+}
+
+impl PlateCavitySpec {
+    /// Replace all modal mechanics and loss coefficients from the ordinary
+    /// thin-plate owner, including material-bound thermal/viscous damping and
+    /// prestress dilution. Both force and volume-flow ports use the same
+    /// mass-normalized modal basis. Cavity geometry and ambient gas stay explicit.
+    ///
+    /// A source-bound caller passes `ResolvedPlateSpecimen::plate()` and retains
+    /// that specimen's receipts. This numeric adapter adds no source authority,
+    /// thermal evolution, or exterior plate-radiation back-reaction.
+    ///
+    /// # Errors
+    /// Nonlinear plates require a nonlinear owner. Other plate admission errors
+    /// propagate. Any refusal leaves all previously bound coefficients unchanged.
+    pub fn bind_plate(&mut self, plate: fs_scenario::ThinPlate) -> Result<(), CavityPhsError> {
+        if plate.geometric_nonlinearity {
+            return Err(CavityPhsError::Invalid {
+                what: "the linear plate-cavity modal bank cannot bind a nonlinear plate",
+            });
+        }
+        let modes = certified_radiators(plate).map_err(CavityPhsError::Plate)?;
+        self.omegas = modes.iter().map(|mode| mode.omega).collect();
+        self.zetas = modes.iter().map(|mode| mode.zeta).collect();
+        self.drive = modes
+            .iter()
+            .map(|mode| mode.drive_participation / mode.mass_kg.sqrt())
+            .collect();
+        self.areas = modes
+            .iter()
+            .map(|mode| mode.area_m2 / mode.mass_kg.sqrt())
+            .collect();
+        Ok(())
+    }
 }
 
 /// Realize observer pressure of a driven plate on a Helmholtz volume.
@@ -99,19 +132,7 @@ pub fn realize_plate_cavity(
             what: "relative humidity must be finite and inside [0, 1]",
         });
     }
-    let mut zetas = spec.zetas.clone();
-    if spec.thickness_m > 0.0 && spec.plate_density_kg_m3 > 0.0 {
-        let te = if spec.plate_density_kg_m3 > 5_000.0 {
-            ThermoelasticZener::structural_steel(spec.gas.temperature)
-        } else {
-            ThermoelasticZener::aluminum(spec.gas.temperature)
-        }
-        .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
-        for (z, &w) in zetas.iter_mut().zip(&spec.omegas) {
-            *z += loss_factor_to_zeta(te.loss_factor(w, spec.thickness_m));
-        }
-    }
-    let plate = plate_force_and_flow(&spec.omegas, &zetas, &spec.drive, &spec.areas)
+    let plate = plate_force_and_flow(&spec.omegas, &spec.zetas, &spec.drive, &spec.areas)
         .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     let pi = core::f64::consts::PI;
     let neck_area = pi * spec.neck_radius_m * spec.neck_radius_m;
@@ -242,8 +263,6 @@ mod tests {
             zetas: vec![0.006],
             drive: vec![1.0],
             areas: vec![0.08],
-            thickness_m: 0.002,
-            plate_density_kg_m3: 2_700.0,
             volume_m3: volume,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
@@ -292,16 +311,16 @@ mod tests {
     }
 
     #[test]
-    fn thermoelastic_changes_the_waveform() {
+    fn declared_modal_loss_changes_the_waveform() {
         let f = pulse(800, 2.0);
         let mut with = panel(0.008);
         let mut bare = with.clone();
-        bare.thickness_m = 0.0;
-        with.thickness_m = 0.003;
+        bare.zetas[0] = 0.0;
+        with.zetas[0] = 0.02;
         let a = realize_plate_cavity(&bare, &f, 8_000, 1.0).expect("bare");
         let b = realize_plate_cavity(&with, &f, 8_000, 1.0).expect("te");
         let err: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum();
-        assert!(err > 1.0e-10, "thermoelastic ζ must move the waveform");
+        assert!(err > 1.0e-10, "declared modal loss must move the waveform");
     }
 
     #[test]
@@ -325,7 +344,6 @@ mod tests {
     #[test]
     fn forged_gas_state_is_refused_before_cavity_compute() {
         let mut spec = panel(0.008);
-        spec.thickness_m = 0.0;
         let admitted = spec.gas;
         let mut cases: Vec<(&str, GasState)> = Vec::new();
         for (name, mutate) in [

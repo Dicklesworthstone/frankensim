@@ -90,8 +90,22 @@ pub struct ModalAcousticFrame {
     /// Values within `dissipation_roundoff_tolerance_j` of zero may be
     /// slightly negative because this is computed as `work - delta_energy`.
     pub viscous_dissipation_j: f64,
+    /// Mode-local work-minus-energy differences for physical loss routing.
+    /// Their sum agrees with the aggregate loss within the reported roundoff
+    /// allowances; an undamped mode's roundoff is not physical heating.
+    pub modal_viscous_losses: Vec<ModalViscousLoss>,
     /// Scale-aware roundoff allowance attached to the dissipation value [J].
     pub dissipation_roundoff_tolerance_j: f64,
+}
+
+/// Viscous energy removal for one retained mode, with numerical uncertainty.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModalViscousLoss {
+    /// Held-force work minus the mode's stored-energy change [J].
+    /// A small negative result within the allowance is roundoff, not cooling.
+    pub energy_j: f64,
+    /// Scale-aware allowance for the mode-local subtraction [J].
+    pub roundoff_tolerance_j: f64,
 }
 
 /// Typed refusal from model admission or a transactional sample step.
@@ -611,6 +625,7 @@ impl ModalAcousticTimeModel {
 
         let mut candidate = Vec::with_capacity(self.states.len());
         let mut modal_energy_j = Vec::with_capacity(self.states.len());
+        let mut modal_viscous_losses = Vec::with_capacity(self.states.len());
         let mut pressure_pa = 0.0;
         let mut input_work_j = 0.0;
         let mut energy_before_j = 0.0;
@@ -643,7 +658,26 @@ impl ModalAcousticTimeModel {
             let after = modal_energy(*mode, next);
             energy_before_j += before;
             energy_after_j += after;
-            input_work_j += force * (next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
+            let work = force * (next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
+            input_work_j += work;
+            let loss = work - (after - before);
+            let allowance =
+                256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE);
+            if !loss.is_finite() {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "mode-local viscous energy must be finite",
+                });
+            }
+            if loss < -allowance {
+                return Err(ModalAcousticTimeError::NegativeDissipation {
+                    dissipation_j: loss,
+                    tolerance_j: allowance,
+                });
+            }
+            modal_viscous_losses.push(ModalViscousLoss {
+                energy_j: loss,
+                roundoff_tolerance_j: allowance,
+            });
             pressure_pa += mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s
                 + mode.pressure_per_modal_velocity.im
                     * mode.angular_frequency_rad_s
@@ -690,6 +724,7 @@ impl ModalAcousticTimeModel {
             total_modal_energy_j: energy_after_j,
             input_work_j,
             viscous_dissipation_j,
+            modal_viscous_losses,
             dissipation_roundoff_tolerance_j,
         })
     }
@@ -1103,6 +1138,43 @@ mod tests {
         assert!(frame.viscous_dissipation_j.abs() <= frame.dissipation_roundoff_tolerance_j);
         let expected_pressure = 2.0 * expected_v - 0.25 * omega * expected_q;
         assert!((frame.observer_pressure_pa - expected_pressure).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn g1_mode_local_loss_survives_a_large_undamped_energy_background() {
+        let large = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 400.0,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let small = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 1000.0,
+            damping_ratio: 0.2,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let small_state = ModalAcousticState {
+            displacement_m_sqrt_kg: 1e-9,
+            velocity_m_sqrt_kg_per_s: 0.0,
+        };
+        let mut combined =
+            ModalAcousticTimeModel::try_new(48_000, vec![large, small], budget()).unwrap();
+        combined
+            .restore_states(&[
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: 10.0,
+                    velocity_m_sqrt_kg_per_s: 0.0,
+                },
+                small_state,
+            ])
+            .unwrap();
+        let mut isolated = ModalAcousticTimeModel::try_new(48_000, vec![small], budget()).unwrap();
+        isolated.restore_states(&[small_state]).unwrap();
+        let combined = combined.step(&[0.0, 0.0]).unwrap();
+        let isolated = isolated.step(&[0.0]).unwrap();
+        let loss = combined.modal_viscous_losses[1];
+        assert_eq!(loss, isolated.modal_viscous_losses[0]);
+        assert!(loss.energy_j > 100.0 * loss.roundoff_tolerance_j);
+        assert!(loss.energy_j < f64::EPSILON * combined.total_modal_energy_j);
     }
 
     #[test]
