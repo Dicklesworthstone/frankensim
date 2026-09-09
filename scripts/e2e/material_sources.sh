@@ -16,6 +16,8 @@ readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g1_g3_sourced_metal_profiles_reach_thermoelastic_plate"
   "common_material_acquisition::g1_g3_sourced_conductors_reach_circuit_dissipation"
   "common_material_acquisition::g1_g3_sourced_humid_air_reaches_acoustic_transport"
+  "common_material_acquisition::g1_g3_sourced_glycols_reach_heat_and_flow"
+  "common_material_acquisition::g1_g3_sourced_mineral_oil_reaches_heat_and_flow"
 )
 
 usage() {

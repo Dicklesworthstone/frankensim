@@ -1,12 +1,12 @@
 # Material data inventory
 
-Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air model, 316 reference-state and copper/aluminum resistivity additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
+Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air and water-vapor models, 316 reference-state, copper/aluminum resistivity and glycol coolant additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
-The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.794138 MB** (0.757349 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.672951 MB**. There are **169 source bundles**, including **151 bulk-material bundles**.
+The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.805374 MB** (0.768064 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.682671 MB**. There are **171 source bundles**, including **153 bulk-material bundles**.
 
-A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 150 complete material cards. The tables below use the exact, auditable source-bundle count.
+A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 153 complete material cards. The tables below use the exact, auditable source-bundle count.
 
 ## Where the values live and how code reads them
 
@@ -40,6 +40,19 @@ The application domain is explicitly 273.15–313.15 K, 80–110 kPa, dry,
 USSA-1976 composition. These are five model parameters, not five new measured
 thermophysical properties, and the result does not qualify humidity transport.
 
+The water-vapor parameter pack now joins that dry-air source through a
+receipt-preserving humid-air adapter. Five humid states, including both
+temperature endpoints and the saturation limit, pass independent mixture,
+cylinder-drag and classical sound-absorption references through the real
+compiler, reopened store and separate component discovery. The existing gas
+constructor now mixes viscosity with Wilke's rule and conductivity with WMS,
+alongside consistent ideal-mixture heat capacity and sound speed. Exact dry
+recovery, humidity-basis conversion, replay and unsupported-state refusals pass.
+The sourced range is 273.15–313.15 K and 80–110 kPa. Constant vapor heat
+capacity, ambient Sutherland extrapolation and Eucken conductivity remain
+explicit engineering approximations; condensation, real-gas corrections and
+experimental accuracy are not qualified.
+
 The complete 2024-T3 and 316 reference profiles now pass the same actual plate
 consumer through compilation, persistent storage/reopen, discovery and typed
 resolution. All six selected properties and their receipts reach plate mass,
@@ -68,30 +81,44 @@ ampacity, contact resistance, AC behavior or experimental qualification.
 
 There are also numerical presets in code. For example, [ThermoelasticZener handbook constructors in visco.rs](../crates/fs-material/src/visco.rs) embed aluminum/structural-steel constants, and [rc_section in fs-solid](../crates/fs-solid/src/fiber.rs) constructs an example steel law with fixed parameters. These are outside this source-data census. The dry-air adapter reuses the existing gas equations and explicit conductivity-model choice in [gas.rs](../crates/fs-material/src/gas.rs); adding its parameter pack does not replace every existing ambient preset automatically. This inventory is not an exhaustive audit of constants, examples or test fixtures throughout the repository.
 
+The DOWTHERM SR-1 and DOWFROST coolant packs each supply density, specific heat,
+conductivity and dynamic viscosity at five temperatures from 40 to 60 °C,
+at exactly 50% glycol by volume. The [liquid adapter](../crates/fs-material/src/liquid.rs)
+preserves the four source receipts and derives kinematic viscosity, thermal
+diffusivity and Prandtl number. The actual compiler, reopened store and discovery
+path feed existing lumped heat and LBM channel solvers at every knot and one
+interpolated temperature. The eleven-case source runner passed remotely on
+2026-09-09 UTC (receipt `frankensim-material-sources.AlDYg9`). Maximum channel
+profile error was 1.31% of the independent analytic peak; heat energy closure
+error was below 9e-14 J. These are numerical checks of a fixed-property heat
+approximation and steady laminar flow. Source pressure and concentration-reference
+temperature remain unknown; exact freezing/boiling limits, other concentrations,
+mass/volume conversion and experimental qualification remain unsupported.
+
 ## Size and populated records
 
 Sizes are logical file-content bytes, not filesystem allocation, Git object size, remote build cache size, or compressed size. MB means 1,000,000 bytes; MiB means 1,048,576 bytes.
 
 | Measured item | Bytes | MB | MiB |
 | --- | ---: | ---: | ---: |
-| All files in data/matdb/seed-v1 | 794,138 | 0.794138 | 0.757349 |
-| All TSV files, including manifests | 672,951 | 0.672951 | 0.641776 |
-| Manifests | 158,140 | 0.158140 | 0.150814 |
-| Source TSV plus axis-convention TSV | 514,811 | 0.514811 | 0.490962 |
-| README and license notice | 121,187 | 0.121187 | 0.115573 |
+| All files in data/matdb/seed-v1 | 805,374 | 0.805374 | 0.768064 |
+| All TSV files, including manifests | 682,671 | 0.682671 | 0.651046 |
+| Manifests | 160,728 | 0.160728 | 0.153282 |
+| Source TSV plus axis-convention TSV | 521,943 | 0.521943 | 0.497764 |
+| README and license notice | 122,703 | 0.122703 | 0.117019 |
 
-There are **341 files**: 339 TSV files and 2 Markdown files. The TSV set contains 169 manifests, 169 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
+There are **345 files**: 343 TSV files and 2 Markdown files. The TSV set contains 171 manifests, 171 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
 
 | Bundle category | Bundles | Distinct populated property names, summed per bundle | Scalar claims | Curve claims | Curve knots |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bulk material/condition | 151 | 828 | 864 | 59 | 614 |
+| Bulk material/condition | 153 | 836 | 864 | 67 | 654 |
 | Ordered interface system | 8 | 23 | 29 | 0 | 0 |
 | Gas species metadata | 7 | 0 | 0 | 0 | 0 |
 | Authored contact-law card | 3 | 0 | 0 | 0 | 0 |
 
-The bulk and interface sources contain **952 property claims**: 893 scalars and 59 curves with 614 retained knots. That is 1,507 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots, retaining the handbook reference approximations. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
+The bulk and interface sources contain **960 property claims**: 893 scalars and 67 curves with 654 retained knots. That is 1,547 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
 
-Across the 151 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.48**. The sum is 828 populated bundle/property-name pairs. Across bulk and interface bundles together there are 304 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
+Across the 153 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.46**. The sum is 836 populated bundle/property-name pairs. Across bulk and interface bundles together there are 305 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
 
 A **metric** below means a distinct populated property name in a bundle. It does not count a manifest declaration without a value, an observation, a validity axis, or an uncertainty row as another material property. Several condition-specific scalar claims for one name still count as one metric; a curve counts as one metric regardless of its knot count. Units shown are the source-record units, before compiler normalization. Byte size includes every file within that bundle's directory. Species fields and contact-law parameters are listed separately because they are not scalar/curve property claims.
 
@@ -99,6 +126,8 @@ A **metric** below means a distinct populated property name in a bundle. It does
 
 | Source bundle | Metrics | Scalar claims | Curve claims | Knots | KiB | Populated property names [source units] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [dowtherm-sr1-eg50-40-60c](../data/matdb/seed-v1/dowtherm-sr1-eg50-40-60c/manifest.tsv) | 4 | 0 | 4 | 20 | 4.75 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `dynamic_viscosity` [Pa*s]; inhibited SR-1, 50 volume percent ethylene glycol, 40–60 °C, pressure and volume-reference temperature unknown |
+| [dowfrost-pg50-40-60c](../data/matdb/seed-v1/dowfrost-pg50-40-60c/manifest.tsv) | 4 | 0 | 4 | 20 | 4.74 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `dynamic_viscosity` [Pa*s]; inhibited DOWFROST, 50 volume percent propylene glycol, 40–60 °C, pressure and volume-reference temperature unknown |
 | [water-vapor-sutherland-ambient](../data/matdb/seed-v1/water-vapor-sutherland-ambient/manifest.tsv) | 5 | 5 | 0 | 0 | 4.31 | `molar_mass` [kg/mol]; `heat_capacity_ratio` [1]; `sutherland_reference_viscosity` [Pa*s]; `sutherland_reference_temperature` [K absolute]; `sutherland_temperature` [K interval]; dilute-vapor model parameters, constant Cp and extrapolated steam transport, not pure-phase validity |
 | [copper-annealed-iacs-nbs-hb100](../data/matdb/seed-v1/copper-annealed-iacs-nbs-hb100/manifest.tsv) | 1 | 0 | 1 | 3 | 2.28 | `electrical_resistivity` [Ohm*m]; standard annealed 100% IACS copper, source-derived linear volume-resistivity reference at 10–30 °C |
 | [aluminum-ec-h19-nbs-hb109](../data/matdb/seed-v1/aluminum-ec-h19-nbs-hb109/manifest.tsv) | 1 | 0 | 1 | 5 | 2.28 | `electrical_resistivity` [Ohm*m]; EC-H19 wire, five source table entries with linear interpolation at 0–30 °C |

@@ -4,7 +4,7 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 169 source bundles, of which 151 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 151 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 171 source bundles, of which 153 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 153 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
 Priorities are engineering judgment based on breadth of applications, FrankenSim's existing consumers, the size of the current gap, and likely acquisition effort. They are not a measured global consumption ranking. **A** means the next delivery tranche; **B** means the following expansion; **C** means a targeted application should pull it forward. Effort estimates concern the first useful, bounded dataset, not full physical qualification.
 
@@ -32,7 +32,20 @@ at four temperature/pressure states. The five parameters derive the full gas
 tuple over the declared 273.15–313.15 K / 80–110 kPa dry application range;
 they are not independent measurements of every output property. Source-table
 errata, the 1976 composition and the model's approximation limits remain
-explicit. F04 humidity-dependent transport is still separate unfinished work.
+explicit. F04 now adds the water-vapor parameter source and reuses the existing
+humidity path with ideal molar heat-capacity mixing, Wilke viscosity and WMS
+conductivity. The ten-case source runner passes, including five humid states
+through actual compilation, store/reopen, component discovery, resolution,
+cylinder drag and classical sound absorption. Independent source-equation
+references, exact dry recovery, humidity-basis conversions, receipts, replay
+and unsupported-state refusals pass. Constant vapor heat capacity, ambient
+Sutherland extrapolation and Eucken conductivity have no experimental error
+bound; condensation and real-gas behavior remain outside this delivery.
+Fourteen focused gas unit tests and three existing acoustic assembly tests
+also pass remotely. The actual duct waveform shifts by 17.605 cents versus
+the independent mixture prediction of 17.248 cents, within the unchanged
+3-cent tolerance. This is numerical regression evidence, not experimental
+qualification of the mixture or duct model.
 
 M11 adds standard annealed 100% IACS copper (10–30 °C, NBS HB100) and
 EC-H19 aluminum (0–30 °C, NBS HB109) volume-resistivity curves. These are
@@ -44,6 +57,18 @@ Joule/supplied-energy checks at eight knots and two interpolated states,
 geometry scaling, receipts, replay and unsupported-input refusals. This closes
 the missing source-to-DC-consumer connection; temperature feedback, ampacity,
 AC/contact effects and broader electrical qualification remain separate work.
+
+F05 now supplies two bounded coolant profiles: DOWTHERM SR-1 ethylene glycol
+and DOWFROST propylene glycol, each at exactly 50% glycol by volume and 40–60 °C.
+Four five-knot curves per product resolve through the new liquid adapter into
+existing lumped heat and LBM channel calculations. The eleven-case source runner
+passed remotely on 2026-09-09 UTC, covering literal source values, interpolation,
+persistent store/reopen, discovery, receipts, independent heat/flow references,
+replay and unsupported-state refusals. F05 remains **in progress**: the guides
+do not state the volume-reference temperature or exact 50-vol% phase endpoints.
+Neighboring phase-table rows cannot silently supply those missing claims. This
+delivery does not qualify mass/volume conversion, other concentrations, evolving
+transport coefficients, boiling/freezing or experimental accuracy.
 
 ## Materials to add or complete
 
@@ -106,7 +131,7 @@ For example, six suitable mechanical/thermal properties can make a metal useful 
 - [ ] Acquire one named HDPE grade, one PP grade and one rigid PVC formulation. Follow with ABS and PC. Select a bounded elastic or thermal requirement set first; obtain the missing quantities instead of declaring a product complete from its datasheet title.
 - [ ] Add one ordinary mild-steel product condition and one annealed float-glass product. Reuse the same consumer-level checks where applicable.
 - [x] Complete a bounded dry-air profile around the existing gas model: F03's five sourced parameters resolve through the real compiler/store and gas adapter into acoustic cylinder loss, with independent property/loss references, source sensitivity, replay and input refusals. No parallel EOS was added.
-- [ ] Complete humidity-dependent source coverage and transport for the actual flow/heat consumer (F04); the dry-air delivery does not qualify humidity transport.
+- [x] Complete bounded humidity-dependent source coverage and transport for the existing acoustic consumers (F04): the ten-case source runner passes the five-state humid-air mixture, cylinder-drag and sound-absorption checks. Separate full airflow/heat evolution and experimental qualification remain unclaimed.
 
 ### 3. Make buildings, furniture and compliant parts useful
 
