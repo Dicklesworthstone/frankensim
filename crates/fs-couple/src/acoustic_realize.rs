@@ -2440,13 +2440,23 @@ pub struct ThermalStringTransportFrame<R> {
     pub transport: R,
 }
 
-/// One accepted prescribed-current sample of a uniform conducting string.
+/// One accepted ideal-source sample of a uniform conducting string.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ElectrothermalStringFrame {
+pub struct ElectrothermalStringFrame<R = ()> {
     /// Accepted mechanics, temperature and pressure at one publication epoch.
     pub coupled: ThermalMaterialStringFrame,
-    /// Signed ideal-source current held throughout the sample [A].
+    /// Authored ideal-source control retained independently of resolved current.
+    pub drive: fs_material::conductor::OhmicDrive,
+    /// Signed current evaluated with initial resistance and frozen for the sample [A].
     pub current_a: f64,
+    /// Current demanded by the same source at the accepted final resistance [A].
+    pub final_current_a: f64,
+    /// Electrical source work converted to internal Joule heat [J].
+    pub joule_heat_j: f64,
+    /// Signed thermal boundary heat [J], excluding Joule and vibration heat.
+    pub boundary_heat_j: f64,
+    /// Actual thermal transport report, or `()` for insulated boundaries.
+    pub transport: R,
     /// Source-resolved resistance at the beginning of the sample.
     /// This frozen law supplies the sample's Joule heat.
     pub conductor_before: fs_material::conductor::ResolvedConductor,
@@ -2663,6 +2673,68 @@ impl ThermalMaterialStringRuntime {
         forces: &[f64],
         current_a: f64,
     ) -> Result<ElectrothermalStringFrame, ThermalStringError> {
+        self.step_with_drive(
+            cx,
+            expected_epoch,
+            forces,
+            fs_material::conductor::OhmicDrive::Current(current_a),
+        )
+    }
+
+    /// Prescribe voltage instead of current, with `I_initial = V/R(T_initial)`.
+    /// The same first-order frozen-law and insulated-boundary model applies.
+    /// Final current is resolved at the accepted temperature before publication.
+    pub fn step_with_voltage(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        voltage_v: f64,
+    ) -> Result<ElectrothermalStringFrame, ThermalStringError> {
+        self.step_with_drive(
+            cx,
+            expected_epoch,
+            forces,
+            fs_material::conductor::OhmicDrive::Voltage(voltage_v),
+        )
+    }
+
+    fn step_with_drive(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        drive: fs_material::conductor::OhmicDrive,
+    ) -> Result<ElectrothermalStringFrame, ThermalStringError> {
+        let (conductor_before, current_a, heat) = self.prepare_drive(cx, expected_epoch, drive)?;
+        let mut candidate = self.clone();
+        let coupled = candidate.step(cx, expected_epoch, forces, heat)?;
+        let conductor_after = candidate.conductor()?;
+        let final_current_a = conductor_after
+            .current_a_for_drive(drive)
+            .map_err(ThermalStringError::Electrical)?;
+        cx.checkpoint()
+            .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
+        *self = candidate;
+        Ok(ElectrothermalStringFrame {
+            coupled,
+            drive,
+            current_a,
+            final_current_a,
+            joule_heat_j: heat,
+            boundary_heat_j: 0.0,
+            transport: (),
+            conductor_before,
+            conductor_after,
+        })
+    }
+
+    fn prepare_drive(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        drive: fs_material::conductor::OhmicDrive,
+    ) -> Result<(fs_material::conductor::ResolvedConductor, f64, f64), ThermalStringError> {
         cx.checkpoint()
             .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
         if expected_epoch != self.mechanical.epoch() {
@@ -2672,6 +2744,9 @@ impl ThermalMaterialStringRuntime {
             });
         }
         let conductor_before = self.conductor()?;
+        let current_a = conductor_before
+            .current_a_for_drive(drive)
+            .map_err(ThermalStringError::Electrical)?;
         let power = conductor_before
             .joule_power_w(current_a)
             .map_err(ThermalStringError::Electrical)?;
@@ -2681,15 +2756,102 @@ impl ThermalMaterialStringRuntime {
                 "Joule heat is not representable in joules",
             ));
         }
+        Ok((conductor_before, current_a, heat))
+    }
+
+    /// Couple prescribed-current heating to an existing thermal transport owner.
+    /// The transport receives vibration plus Joule heat as its internal source;
+    /// it must return only actual boundary heat in `external_heat_j`. This owner
+    /// separately retains both inputs and includes electrical source work once
+    /// in the coupled external-energy account. For a prescribed ambient use
+    /// `|input| environment.advance(cx, input)`.
+    ///
+    /// The callback proposes state without publishing or debiting a source.
+    /// Initial resistance is frozen for the sample, so this retains the same
+    /// first-order electrical/material partition and uniform-body limits as
+    /// `step_with_current`, while transport owns its thermal discretization.
+    pub fn step_with_current_and_thermal_transport<R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        current_a: f64,
+        transport: impl FnOnce(
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
+    ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
+        self.step_with_drive_and_thermal_transport(
+            cx,
+            expected_epoch,
+            forces,
+            fs_material::conductor::OhmicDrive::Current(current_a),
+            transport,
+        )
+    }
+
+    /// Prescribed-voltage counterpart of `step_with_current_and_thermal_transport`.
+    /// Joule heat uses the initial `V²/R`; temperature-dependent current, thermal
+    /// transport, material laws and sound publish at the same accepted epoch.
+    pub fn step_with_voltage_and_thermal_transport<R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        voltage_v: f64,
+        transport: impl FnOnce(
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
+    ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
+        self.step_with_drive_and_thermal_transport(
+            cx,
+            expected_epoch,
+            forces,
+            fs_material::conductor::OhmicDrive::Voltage(voltage_v),
+            transport,
+        )
+    }
+
+    fn step_with_drive_and_thermal_transport<R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        drive: fs_material::conductor::OhmicDrive,
+        transport: impl FnOnce(
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<fs_material::phase::UniformEnthalpyStep<R>, E>,
+    ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
+        let (conductor_before, current_a, heat) = self.prepare_drive(cx, expected_epoch, drive)?;
         let mut candidate = self.clone();
-        let coupled = candidate.step(cx, expected_epoch, forces, heat)?;
+        let result =
+            candidate.step_with_thermal_transport(cx, expected_epoch, forces, |mut input| {
+                input.internal_heat_j += heat;
+                if !input.internal_heat_j.is_finite() {
+                    return Err("combined Joule and vibration heat is not finite".to_owned());
+                }
+                let proposed = transport(input).map_err(|error| error.to_string())?;
+                Ok(fs_material::phase::UniformEnthalpyStep {
+                    state: proposed.state,
+                    external_heat_j: proposed.external_heat_j + heat,
+                    energy_residual_tolerance_j: proposed.energy_residual_tolerance_j,
+                    report: (proposed.external_heat_j, proposed.report),
+                })
+            })?;
         let conductor_after = candidate.conductor()?;
+        let final_current_a = conductor_after
+            .current_a_for_drive(drive)
+            .map_err(ThermalStringError::Electrical)?;
         cx.checkpoint()
             .map_err(|_| ThermalStringError::Acoustic(AcousticRealizeError::Cancelled))?;
         *self = candidate;
         Ok(ElectrothermalStringFrame {
-            coupled,
+            coupled: result.coupled,
+            drive,
             current_a,
+            final_current_a,
+            joule_heat_j: heat,
+            boundary_heat_j: result.transport.0,
+            transport: result.transport.1,
             conductor_before,
             conductor_after,
         })

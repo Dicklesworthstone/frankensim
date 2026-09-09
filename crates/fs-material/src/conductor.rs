@@ -20,6 +20,15 @@ pub const ELECTRICAL_RESISTIVITY_PROPERTY: &str = "electrical_resistivity";
 /// Electrical resistivity dimensions `[L, M, t, T, I, N]` for ohm metre.
 pub const ELECTRICAL_RESISTIVITY_DIMS: Dims = Dims([3, 1, -3, 0, -2, 0]);
 
+/// Ideal quasi-static electrical boundary condition for a uniform resistor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OhmicDrive {
+    /// Prescribed signed current [A].
+    Current(f64),
+    /// Prescribed signed potential difference [V], with `I = V/R`.
+    Voltage(f64),
+}
+
 /// A uniform conductor resolved from one source-supported material state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedConductor {
@@ -30,6 +39,11 @@ pub struct ResolvedConductor {
 }
 
 impl ResolvedConductor {
+    /// Resolve the signed current for an ideal current or voltage source.
+    /// The complementary variable is algebraic; no circuit dynamics are solved.
+    pub fn current_a_for_drive(&self, drive: OhmicDrive) -> Result<f64, ConductorError> {
+        current_a_for_drive(self.resistance_ohm, drive)
+    }
     /// Exact source-resolved material bundle, including its usage receipt.
     #[must_use]
     pub const fn material(&self) -> &ResolvedMaterialStatePoint {
@@ -143,6 +157,26 @@ fn joule_power_w(resistance_ohm: f64, current_a: f64) -> Result<f64, ConductorEr
     Ok(power_w)
 }
 
+fn current_a_for_drive(resistance_ohm: f64, drive: OhmicDrive) -> Result<f64, ConductorError> {
+    let (value, quantity) = match drive {
+        OhmicDrive::Current(value) => (value, "current_a"),
+        OhmicDrive::Voltage(value) => (value, "voltage_v"),
+    };
+    if !value.is_finite() {
+        return Err(ConductorError::InvalidInput { quantity });
+    }
+    let current = match drive {
+        OhmicDrive::Current(value) => value,
+        OhmicDrive::Voltage(value) => value / resistance_ohm,
+    };
+    if !current.is_finite() || (value != 0.0 && current == 0.0) {
+        return Err(ConductorError::InvalidDerived {
+            quantity: "current_a",
+        });
+    }
+    Ok(current)
+}
+
 /// Resolve a uniform isotropic DC conductor from one resistivity claim.
 ///
 /// The card must provide `electrical_resistivity` in ohm metre dimensions at
@@ -193,6 +227,45 @@ pub fn resolve_uniform_conductor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g1_ideal_voltage_and_current_drives_obey_ohms_law_and_passivity() {
+        for resistance in [0.25, 10.0, 1000.0] {
+            for voltage in [-12.0, 0.0, 12.0] {
+                let current =
+                    current_a_for_drive(resistance, OhmicDrive::Voltage(voltage)).unwrap();
+                assert_eq!(current, voltage / resistance);
+                assert_eq!(
+                    current_a_for_drive(resistance, OhmicDrive::Current(current)).unwrap(),
+                    current
+                );
+                let power = joule_power_w(resistance, current).unwrap();
+                assert!(power >= 0.0);
+                assert!((power - voltage * current).abs() <= 4.0 * f64::EPSILON * power);
+            }
+        }
+    }
+
+    #[test]
+    fn g0_voltage_drive_refuses_nonfinite_and_unrepresentable_current() {
+        for voltage in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                current_a_for_drive(1.0, OhmicDrive::Voltage(voltage)),
+                Err(ConductorError::InvalidInput {
+                    quantity: "voltage_v"
+                })
+            ));
+        }
+        for (resistance, voltage) in [(f64::MIN_POSITIVE, f64::MAX), (f64::MAX, f64::MIN_POSITIVE)]
+        {
+            assert!(matches!(
+                current_a_for_drive(resistance, OhmicDrive::Voltage(voltage)),
+                Err(ConductorError::InvalidDerived {
+                    quantity: "current_a"
+                })
+            ));
+        }
+    }
 
     #[test]
     fn g0_resistance_recovers_after_intermediate_product_overflow() {

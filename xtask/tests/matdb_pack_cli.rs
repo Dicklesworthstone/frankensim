@@ -4012,6 +4012,261 @@ mod common_material_acquisition {
             );
         }
     }
+    #[test]
+    fn g1_g3_sourced_glycols_reach_heat_and_flow() {
+        use fs_conduction::lumped::{BiotGate, LumpedNetwork, LumpedNode, solve_gated};
+        use fs_lbm::Lbm;
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::liquid::resolve_liquid_state;
+        use fs_material::state_point::MaterialPropertySelection;
+
+        // Independent literal guide rows: rho[kg/m3], cp[J/kg/K], k[W/m/K], mu[Pa*s].
+        // Versions are deliberately not pooled with later, differing Dow TDS values.
+        let products = [
+            (
+                "dowtherm-sr1-eg50-40-60c",
+                "ethylene-glycol-volume-fraction",
+                "source-formulation-dowtherm-sr1",
+                "examples/material-discovery/dowtherm-sr1-eg50.json",
+                [
+                    [1064.9, 3359.0, 0.378, 0.00226],
+                    [1062.1, 3379.0, 0.381, 0.00200],
+                    [1059.3, 3398.0, 0.383, 0.00178],
+                    [1056.3, 3417.0, 0.385, 0.00159],
+                    [1053.2, 3437.0, 0.387, 0.00143],
+                ],
+            ),
+            (
+                "dowfrost-pg50-40-60c",
+                "propylene-glycol-volume-fraction",
+                "source-formulation-dowfrost",
+                "examples/material-discovery/dowfrost-pg50.json",
+                [
+                    [1032.1, 3609.0, 0.353, 0.00310],
+                    [1028.8, 3628.0, 0.355, 0.00265],
+                    [1025.4, 3648.0, 0.358, 0.00228],
+                    [1021.9, 3667.0, 0.360, 0.00199],
+                    [1018.2, 3686.0, 0.362, 0.00175],
+                ],
+            ),
+        ];
+        let relative_close = |actual: f64, expected: f64| {
+            assert!(
+                (actual / expected - 1.0).abs() < 1e-10,
+                "actual={actual:.16e} expected={expected:.16e} relative_tolerance=1e-10"
+            );
+        };
+        let mut warm_flows = Vec::new();
+        for (slug, fraction_axis, formulation_axis, request, rows) in products {
+            let (pack, path) = compile(slug);
+            let original = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: slug.into(),
+                    phase: "liquid".into(),
+                    process: "versioned inhibited product; 50 volume percent glycol".into(),
+                    revision: 0,
+                },
+                pack,
+            )
+            .unwrap();
+            let database = fixture_dir().join(format!("{slug}.sqlite"));
+            {
+                let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+                store
+                    .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                    .unwrap();
+                store.seal_corpus().unwrap();
+            }
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            let CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(original.pack_id()).unwrap()
+            else {
+                panic!("wrong stored family")
+            };
+            assert_eq!(loaded, original);
+            let card = loaded.card();
+            let claim = card.claims().claims_for("density")[0].1;
+            let mut states = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| (313.15 + i as f64 * 5.0, *row))
+                .collect::<Vec<_>>();
+            states.push((
+                315.65,
+                std::array::from_fn(|j| (rows[0][j] + rows[1][j]) / 2.0),
+            ));
+            for (t, [rho, cp, k, mu]) in states {
+                let at = point(claim, &[("temperature", t)]);
+                let state =
+                    resolve_liquid_state(card, &at, MaterialPropertySelection::SingleClaimOnly)
+                        .unwrap();
+                assert_eq!(
+                    state,
+                    resolve_liquid_state(card, &at, MaterialPropertySelection::SingleClaimOnly)
+                        .unwrap()
+                );
+                for (actual, expected) in [
+                    (state.density_kg_m3(), rho),
+                    (state.specific_heat_j_kg_k(), cp),
+                    (state.thermal_conductivity_w_m_k(), k),
+                    (state.dynamic_viscosity_pa_s(), mu),
+                    (state.kinematic_viscosity_m2_s(), mu / rho),
+                    (state.thermal_diffusivity_m2_s(), k / (rho * cp)),
+                    (state.prandtl(), mu * cp / k),
+                ] {
+                    relative_close(actual, expected);
+                }
+                for name in [
+                    "density",
+                    "specific_heat_capacity",
+                    "thermal_conductivity",
+                    "dynamic_viscosity",
+                ] {
+                    let selected = state.material().property(name).unwrap();
+                    // Receipt validation uses the real original claim set, not a copied expected hash.
+                    card.claims()
+                        .verify_receipt(&selected.answer().receipt)
+                        .unwrap();
+                }
+
+                // Frozen-coefficient, small-signal heat response. The 0.1 K excursion
+                // stays inside the sourced range; this is not continuously recoupled heat.
+                let volume = 1e-6;
+                let area = 1e-3;
+                let path_length = 0.1;
+                let ambient = if t == 333.15 { t - 0.1 } else { t + 0.1 };
+                let capacity = state.density_kg_m3() * volume * state.specific_heat_j_kg_k();
+                let conductance = state.thermal_conductivity_w_m_k() * area / path_length;
+                let node = LumpedNode::new(
+                    slug,
+                    capacity,
+                    conductance,
+                    volume / area,
+                    state.thermal_conductivity_w_m_k(),
+                    area,
+                )
+                .unwrap();
+                relative_close(node.biot(), 0.01);
+                let network = LumpedNetwork::new(vec![node], ambient).unwrap();
+                let time = 100.0;
+                let heat =
+                    solve_gated(&network, BiotGate::corpus_default(), &[0.0], &[t], time).unwrap();
+                let tau = rho * volume * cp / (k * area / path_length);
+                let expected_delta = (ambient - t) * (1.0 - (-time / tau).exp());
+                let actual_delta = heat.temperature_k[0] - t;
+                assert!((actual_delta - expected_delta).abs() < 1e-11);
+                let energy = capacity * actual_delta;
+                let supplied =
+                    (k * area / path_length) * (ambient - t) * tau * (1.0 - (-time / tau).exp());
+                assert!((energy - supplied).abs() < 1e-10);
+                assert_eq!(
+                    heat,
+                    solve_gated(&network, BiotGate::corpus_default(), &[0.0], &[t], time).unwrap()
+                );
+
+                // Existing forced D2Q9 channel: fixed physical acceleration and geometry,
+                // source viscosity controls tau. Map SI -> lattice and back explicitly.
+                let dx: f64 = 1e-4;
+                let dt: f64 = 1e-3;
+                let acceleration: f64 = 1e-3;
+                let height = 16.0 * dx;
+                let nu_lattice = state.kinematic_viscosity_m2_s() * dt / (dx * dx);
+                let tau_lattice = 0.5 + 3.0 * nu_lattice;
+                assert!((0.8..1.5).contains(&tau_lattice));
+                let mut flow = Lbm::channel(2, 16, tau_lattice, acceleration * dt * dt / dx);
+                let initial_mass = flow.total_mass();
+                let mut replay = flow.clone();
+                flow.run(12_000);
+                replay.run(12_000);
+                assert_eq!(flow.x_velocity_profile(), replay.x_velocity_profile());
+                let mass_defect = (flow.total_mass() - initial_mass).abs();
+                assert!(mass_defect < 1e-8, "{slug} mass defect {mass_defect}");
+                let peak_reference = acceleration * height * height / (8.0 * (mu / rho));
+                let mut maximum_error = 0.0_f64;
+                for (row, u_lattice) in flow.x_velocity_profile().into_iter().enumerate() {
+                    let y = (row as f64 + 0.5) * dx;
+                    let expected = acceleration * y * (height - y) / (2.0 * (mu / rho));
+                    let actual = u_lattice * dx / dt;
+                    maximum_error = maximum_error.max((actual - expected).abs() / peak_reference);
+                }
+                // The established BGK/bounce-back fixture has a spatial wall error.
+                // This band covers that error; it is not an experimental accuracy bound.
+                assert!(
+                    maximum_error < 0.02,
+                    "{slug} T={t} profile defect={maximum_error}"
+                );
+                let midpoint_velocity = flow.velocity(0, 7).0 * dx / dt;
+                if t == 313.15 {
+                    warm_flows.push(midpoint_velocity);
+                }
+                eprintln!(
+                    "coolant={slug} T={t}K volume_fraction=0.5 pressure=unstated volume_reference_temperature=unstated rho={rho}kg/m3 cp={cp}J/kg/K k={k}W/m/K mu={mu}Pa*s source_relative_tolerance=1e-10 heat_delta_actual={actual_delta:.12e}K heat_delta_expected={expected_delta:.12e}K heat_absolute_tolerance=1e-11K energy={energy:.12e}J energy_defect={:.12e}J energy_tolerance=1e-10J flow_midpoint={midpoint_velocity:.12e}m/s profile_peak_relative_defect={maximum_error:.12e} profile_tolerance=0.02 lattice_mass_defect={mass_defect:.12e} source_bundle={:?}",
+                    (energy - supplied).abs(),
+                    state.material().identity()
+                );
+            }
+            for (axis, wrong) in [
+                (fraction_axis, 0.4),
+                (fraction_axis, 0.6),
+                (formulation_axis, 0.0),
+                ("phase-liquid", 0.0),
+                ("source-pressure-known", 1.0),
+                ("volume-reference-temperature-known", 1.0),
+                ("temperature", 253.15),
+                ("temperature", 333.16),
+            ] {
+                let at = point(claim, &[(axis, wrong)]);
+                assert!(
+                    resolve_liquid_state(card, &at, MaterialPropertySelection::SingleClaimOnly)
+                        .is_err(),
+                    "{slug}: must refuse {axis}={wrong}"
+                );
+            }
+            // A mass-fraction label is not a volume fraction. Missing the required
+            // volume coordinate must refuse; no unknown-reference conversion is invented.
+            let mut mass_basis = QueryPoint::new();
+            for (axis, &(lo, _)) in claim.validity.bounds() {
+                let name = if axis == fraction_axis {
+                    "glycol-mass-fraction"
+                } else {
+                    axis
+                };
+                mass_basis = mass_basis
+                    .with_quantity(name, claim.validity.axis_quantities()[axis], lo)
+                    .unwrap();
+            }
+            assert!(
+                resolve_liquid_state(
+                    card,
+                    &mass_basis,
+                    MaterialPropertySelection::SingleClaimOnly
+                )
+                .is_err()
+            );
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                workspace_path(request).to_str().unwrap().into(),
+                path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{}",
+                discovery.stdout
+            );
+        }
+        assert!(
+            warm_flows[1] < warm_flows[0] * 0.8,
+            "source viscosity difference must reach the actual channel"
+        );
+    }
 }
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);

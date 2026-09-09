@@ -1263,6 +1263,378 @@ fn heated_string_parts_with_conductor(
 }
 
 #[test]
+fn g1_voltage_heating_refines_to_independent_temperature_solution() {
+    with_string_cx(|cx, _| {
+        let mut errors = Vec::new();
+        for rate in [4000, 8000, 16000] {
+            let (mechanical, card, curve) = heated_string_parts_with_conductor(
+                cx,
+                rate,
+                false,
+                InterpolationPolicy::LinearInside,
+                true,
+            );
+            let specimen = mechanical.specimen();
+            let mass = specimen.mass_kg();
+            let r0 = 1e-6 * specimen.string().length_m / specimen.area_m2();
+            let voltage = 0.05 * r0;
+            let quiet = LinearMaterialStringRuntime::try_new(
+                cx,
+                specimen.clone(),
+                None,
+                incremental_ambient(),
+                1.0,
+                rate,
+            )
+            .unwrap();
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, quiet, card, curve, 0.0, 5.0).unwrap();
+            let mut joules = 0.0;
+            for epoch in 0..u64::from(rate / 100) {
+                let frame = runtime
+                    .step_with_voltage(cx, epoch, &[0.0], voltage)
+                    .unwrap();
+                assert_eq!(
+                    frame.drive,
+                    fs_material::conductor::OhmicDrive::Voltage(voltage)
+                );
+                close(
+                    frame.joule_heat_j,
+                    voltage * frame.current_a / f64::from(rate),
+                );
+                close(
+                    frame.final_current_a,
+                    voltage / frame.conductor_after.resistance_ohm(),
+                );
+                assert!(frame.final_current_a < frame.current_a);
+                joules += frame.joule_heat_j;
+            }
+            // C dtheta/dt = V²/[R0(1+alpha theta)], hence
+            // theta + alpha theta²/2 = V² t/(C R0).
+            let a_t = voltage.powi(2) * 0.01 / (mass * 0.001 * r0);
+            let exact = 300.0 + 2.0 * a_t / ((1.0 + 2.0 * 0.2 * a_t).sqrt() + 1.0);
+            errors.push((runtime.thermal().temperature_k() - exact).abs());
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - joules).abs() < 1e-12);
+        }
+        eprintln!("G1 voltage-heating temperature errors at 4/8/16 kHz: {errors:?}");
+        assert!(errors[0] > 1e-6 && errors[0] < 0.01);
+        assert!((0.45..0.55).contains(&(errors[1] / errors[0])));
+        assert!((0.45..0.55).contains(&(errors[2] / errors[1])));
+    });
+}
+
+#[test]
+fn g3_voltage_matches_equivalent_current_and_changes_heated_string_feedback() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) = heated_string_parts_with_conductor(
+            cx,
+            8000,
+            false,
+            InterpolationPolicy::LinearInside,
+            true,
+        );
+        let mut resistance =
+            1e-6 * mechanical.specimen().string().length_m / mechanical.specimen().area_m2();
+        let voltage = 0.05 * resistance;
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let mut equivalent = runtime.clone();
+        let mut negative = runtime.clone();
+        let mut fixed_current = runtime.clone();
+        let mut environment = string_environment(0.03, 0.01);
+        environment.temperature_k = 300.0;
+        environment.radiation_temperature_k = 300.0;
+        let mut pressure_difference = 0.0;
+        for epoch in 0..80 {
+            let frame = runtime
+                .step_with_voltage_and_thermal_transport(cx, epoch, &[0.0], voltage, |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            let current = equivalent
+                .step_with_current_and_thermal_transport(
+                    cx,
+                    epoch,
+                    &[0.0],
+                    voltage / resistance,
+                    |input| environment.advance(cx, input),
+                )
+                .unwrap();
+            let reversed = negative
+                .step_with_voltage_and_thermal_transport(cx, epoch, &[0.0], -voltage, |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            let fixed = fixed_current
+                .step_with_current_and_thermal_transport(cx, epoch, &[0.0], 0.05, |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            assert_eq!(frame.coupled, current.coupled);
+            assert_eq!(frame.transport, current.transport);
+            assert_eq!(frame.coupled, reversed.coupled);
+            assert_eq!(frame.current_a, -reversed.current_a);
+            assert_eq!(frame.final_current_a, -reversed.final_current_a);
+            resistance = frame.conductor_after.resistance_ohm();
+            pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
+                - fixed.coupled.vibration.acoustic.observer_pressure_pa)
+                .abs();
+        }
+        assert!(runtime.thermal().temperature_k() < fixed_current.thermal().temperature_k());
+        assert!(
+            runtime.mechanical().modes()[0].damping_ratio
+                < fixed_current.mechanical().modes()[0].damping_ratio
+        );
+        assert!(pressure_difference > 1e-9);
+        let mut retry = runtime.clone();
+        assert!(matches!(
+            runtime.step_with_voltage(cx, 80, &[0.0], f64::NAN),
+            Err(ThermalStringError::Electrical(_))
+        ));
+        // About 62 K of Joule heating exits the 340 K source domain before publication.
+        assert!(
+            runtime
+                .step_with_voltage(cx, 80, &[0.0], 5.0 * resistance)
+                .is_err()
+        );
+        assert_eq!(runtime.thermal(), retry.thermal());
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            retry.mechanical().specimen()
+        );
+        assert_eq!(runtime.mechanical().states(), retry.mechanical().states());
+        assert_eq!(runtime.mechanical().accepted_samples(), 80);
+        assert_eq!(
+            runtime.step_with_voltage(cx, 80, &[0.0], voltage).unwrap(),
+            retry.step_with_voltage(cx, 80, &[0.0], voltage).unwrap()
+        );
+    });
+}
+
+#[test]
+fn g1_current_and_convection_refine_to_independent_electrothermal_solution() {
+    with_string_cx(|cx, _| {
+        let mut errors = Vec::new();
+        for rate in [4000, 8000, 16000] {
+            let (mechanical, card, curve) = heated_string_parts_with_conductor(
+                cx,
+                rate,
+                false,
+                InterpolationPolicy::LinearInside,
+                true,
+            );
+            let specimen = mechanical.specimen();
+            let mass = specimen.mass_kg();
+            let radius = specimen.radius_m();
+            let length = specimen.string().length_m;
+            let area = 2.0 * core::f64::consts::PI * radius * (length + radius);
+            let r0 = 1e-6 * length / specimen.area_m2();
+            let quiet = LinearMaterialStringRuntime::try_new(
+                cx,
+                specimen.clone(),
+                None,
+                incremental_ambient(),
+                1.0,
+                rate,
+            )
+            .unwrap();
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, quiet, card, curve, 0.0, 5.0).unwrap();
+            let mut environment = string_environment(0.03, 0.0);
+            environment.temperature_k = 300.0;
+            let mut net_heat = 0.0;
+            for epoch in 0..u64::from(rate / 100) {
+                let frame = runtime
+                    .step_with_current_and_thermal_transport(cx, epoch, &[0.0], 0.05, |input| {
+                        environment.advance(cx, input)
+                    })
+                    .unwrap();
+                assert!(frame.joule_heat_j > 0.0);
+                assert!(frame.boundary_heat_j < 0.0);
+                assert_eq!(
+                    frame.coupled.external_heat_j,
+                    frame.joule_heat_j + frame.boundary_heat_j
+                );
+                close(
+                    frame.boundary_heat_j,
+                    0.03 * area * (300.0 - frame.coupled.thermal.temperature_k()) / f64::from(rate),
+                );
+                net_heat += frame.coupled.external_heat_j;
+            }
+            // Independent solution of C dtheta/dt = I² R0 + (I² R0 alpha - hA)theta.
+            let source = 0.05_f64.powi(2) * r0;
+            let capacity = mass * 0.001;
+            let decay = (0.03 * area - source * 0.2) / capacity;
+            let exact = 300.0 + source / capacity * -(-decay * 0.01).exp_m1() / decay;
+            errors.push((runtime.thermal().temperature_k() - exact).abs());
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - net_heat).abs() < 1e-12);
+        }
+        eprintln!("G1 current/convection temperature errors at 4/8/16 kHz: {errors:?}");
+        assert!(errors[0] > 1e-6 && errors[0] < 0.01);
+        assert!((0.45..0.55).contains(&(errors[1] / errors[0])));
+        assert!((0.45..0.55).contains(&(errors[2] / errors[1])));
+    });
+}
+
+#[test]
+fn g1_joule_and_boundary_heat_remain_separate_in_the_sound_runtime() {
+    with_string_cx(|cx, _| {
+        for (convection, emissivity) in [(0.03, 0.0), (0.0, 0.01), (0.03, 0.01)] {
+            let (mechanical, card, curve) = heated_string_parts_with_conductor(
+                cx,
+                8000,
+                false,
+                InterpolationPolicy::LinearInside,
+                true,
+            );
+            let mass = mechanical.specimen().mass_kg();
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0)
+                    .unwrap();
+            let mut insulated = runtime.clone();
+            let mut environment = string_environment(convection, emissivity);
+            environment.temperature_k = 300.0;
+            environment.radiation_temperature_k = 300.0;
+            let mut net_heat = 0.0;
+            let mut pressure_difference = 0.0;
+            for epoch in 0..80 {
+                let frame = runtime
+                    .step_with_current_and_thermal_transport(cx, epoch, &[0.0], 0.05, |input| {
+                        environment.advance(cx, input)
+                    })
+                    .unwrap();
+                let control = insulated
+                    .step_with_current(cx, epoch, &[0.0], 0.05)
+                    .unwrap();
+                let endpoint = frame.transport.samples().last().unwrap();
+                close(
+                    endpoint.internal_power_w / 8000.0,
+                    frame.joule_heat_j + frame.coupled.vibration.dissipation.material_heat_j,
+                );
+                close(
+                    frame.boundary_heat_j,
+                    (endpoint.convection_into_body_w + endpoint.radiation_into_body_w) / 8000.0,
+                );
+                assert!(frame.boundary_heat_j < 0.0);
+                assert!(
+                    frame.coupled.energy_balance_residual_j.abs()
+                        <= frame.coupled.energy_roundoff_tolerance_j
+                            + frame.coupled.thermal_solve_tolerance_j
+                );
+                net_heat += frame.joule_heat_j
+                    + frame.boundary_heat_j
+                    + frame.coupled.vibration.dissipation.material_heat_j;
+                pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
+                    - control.coupled.vibration.acoustic.observer_pressure_pa)
+                    .abs();
+            }
+            assert!((mass * runtime.thermal().specific_enthalpy_j_kg() - net_heat).abs() < 1e-12);
+            assert!(runtime.thermal().temperature_k() < insulated.thermal().temperature_k());
+            assert!(
+                runtime.mechanical().modes()[0].damping_ratio
+                    < insulated.mechanical().modes()[0].damping_ratio
+            );
+            assert!(pressure_difference > 1e-9);
+        }
+    });
+}
+
+#[test]
+fn g4_current_transport_refuses_atomically_and_zero_current_matches_thermal_path() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) = heated_string_parts_with_conductor(
+            cx,
+            8000,
+            false,
+            InterpolationPolicy::LinearInside,
+            true,
+        );
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 200.0).unwrap();
+        let mut reference = runtime.clone();
+        let environment = string_environment(0.03, 0.01);
+        let mut called = false;
+        assert!(matches!(
+            runtime.step_with_current_and_thermal_transport(cx, 0, &[0.0], f64::NAN, |input| {
+                called = true;
+                environment.advance(cx, input)
+            },),
+            Err(ThermalStringError::Electrical(_))
+        ));
+        assert!(!called);
+        assert!(matches!(
+            runtime
+                .step_with_current_and_thermal_transport(cx, 0, &[0.0], 5.0, |input| environment
+                    .advance(cx, input),),
+            Err(ThermalStringError::Material(_))
+        ));
+        with_string_cx(|late_cx, gate| {
+            let mut solved = false;
+            assert!(matches!(
+                runtime.step_with_current_and_thermal_transport(
+                    late_cx,
+                    0,
+                    &[0.0],
+                    0.05,
+                    |input| {
+                        let result = environment.advance(late_cx, input)?;
+                        solved = true;
+                        gate.request();
+                        Ok::<_, fs_conduction::ConductionError>(result)
+                    },
+                ),
+                Err(ThermalStringError::Acoustic(
+                    AcousticRealizeError::Cancelled
+                ))
+            ));
+            assert!(solved);
+        });
+        assert_eq!(runtime.thermal(), reference.thermal());
+        assert_eq!(
+            runtime.mechanical().specimen(),
+            reference.mechanical().specimen()
+        );
+        assert_eq!(
+            runtime.mechanical().states(),
+            reference.mechanical().states()
+        );
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        for epoch in 0..16 {
+            let frame = runtime
+                .step_with_current_and_thermal_transport(cx, epoch, &[0.0], 0.0, |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            let plain = reference
+                .step_with_thermal_transport(cx, epoch, &[0.0], |input| {
+                    environment.advance(cx, input)
+                })
+                .unwrap();
+            assert_eq!(frame.coupled, plain.coupled);
+            assert_eq!(frame.transport, plain.transport);
+            assert_eq!(frame.joule_heat_j, 0.0);
+        }
+        let mut resumed = runtime.clone();
+        assert_eq!(
+            runtime
+                .step_with_current_and_thermal_transport(cx, 16, &[0.0], 0.05, |input| environment
+                    .advance(cx, input))
+                .unwrap(),
+            resumed
+                .step_with_current_and_thermal_transport(cx, 16, &[0.0], 0.05, |input| environment
+                    .advance(cx, input))
+                .unwrap()
+        );
+        assert!(matches!(
+            runtime
+                .step_with_current_and_thermal_transport(cx, 16, &[0.0], 0.05, |input| environment
+                    .advance(cx, input)),
+            Err(ThermalStringError::Epoch { .. })
+        ));
+    });
+}
+
+#[test]
 fn g1_current_heating_refines_to_independent_ohmic_temperature_solution() {
     with_string_cx(|cx, _| {
         let mut errors = Vec::new();

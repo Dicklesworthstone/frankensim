@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "fnx-classes"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fnx-runtime",
  "indexmap",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "fnx-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4897,6 +4897,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-govern",
+ "fs-lbm",
  "fs-matdb",
  "fs-matdb-store",
  "fs-material",

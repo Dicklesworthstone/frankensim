@@ -462,6 +462,24 @@ Ohmic heating with insulated boundaries, not circuit dynamics, skin/contact
 resistance, a charge-field solve, Lorentz forces or motional emf. Synthetic
 G1/G3/G4 tests check analytical temperature refinement, current-sign symmetry,
 resistance/damping/pressure response and atomic retry, not experimental fidelity.
+`step_with_current_and_thermal_transport` composes the same current source
+with the existing transport callback. The thermal owner receives vibration
+plus Joule heat as internal deposition and returns actual boundary heat.
+`ElectrothermalStringFrame<R>` retains Joule heat, boundary heat and the
+concrete transport report separately; its coupled external-energy account is
+their sum, so electrical work is neither lost nor counted twice. Both paths
+share current admission, and final electrical resolution still precedes
+publication. Zero current reduces to the ordinary thermal transport trajectory.
+The independently prescribed fluid/enclosure reservoirs retain the existing
+uniform-body, Biot and infinite-reservoir restrictions.
+`step_with_voltage` and `step_with_voltage_and_thermal_transport` share these
+same transactions under `OhmicDrive::Voltage`. Each sample freezes the current
+`V/R(T_initial)` and deposits its Joule energy; the next sample uses the updated
+resistance. The frame retains the authored drive, initial sample current and
+current demanded at the final accepted resistance. Final electrical evaluation
+must succeed before publication. Positive temperature coefficients therefore
+reduce fixed-voltage heating while increasing fixed-current heating. The
+partition remains first order; no within-sample circuit solve is claimed.
 `step_with_thermal_transport`
 accepts a thermal proposal through the shared `fs-material::phase` input/result
 carriers. Passing `|input| environment.advance(cx, input)` with

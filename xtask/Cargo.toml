@@ -24,6 +24,7 @@ fs-cli = { path = "../crates/fs-cli" }
 fs-conduction = { path = "../crates/fs-conduction" }
 fs-couple = { path = "../crates/fs-couple" }
 fs-exec = { path = "../crates/fs-exec" }
+fs-lbm = { path = "../crates/fs-lbm" }
 fs-matdb-store = { path = "../crates/fs-matdb-store" }
 fs-material = { path = "../crates/fs-material" }
 fs-phs = { path = "../crates/fs-phs" }
