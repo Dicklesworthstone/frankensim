@@ -869,7 +869,13 @@ authority.
   mean power. Boundary heat is integrated from the actual endpoint fluxes,
   with a separately checked caller energy-residual budget and the complete
   transport report retained. The environment is a prescribed infinite
-  uniform fluid/enclosure; it publishes no state and debits no finite source.
+  uniform fluid and enclosure with independent positive absolute temperatures;
+  it publishes no state and debits no finite source. Convection uses the fluid
+  temperature; diffuse-gray whole-surface radiation uses the enclosure
+  temperature. The conservative radiative Biot bound uses the latter, and
+  the march identity includes both. Setting both temperatures equal recovers
+  the shared-temperature model. Directional illumination and view-factor
+  networks are outside this rung.
   The Biot gate alone does not prove initially uniform temperature or the
   validity of homogenizing a rapid local source. Cross-crate G1/G4 tests in
   `fs-couple/tests/string_specimen.rs` consume this production path.

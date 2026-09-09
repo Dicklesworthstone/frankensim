@@ -3148,6 +3148,869 @@ mod common_material_acquisition {
             println!("source pack {slug}: compiler, typed query, context refusal, receipt pass");
         }
     }
+
+    /// G1/G3: the source-resolved conductor adapter reaches the actual
+    /// circuit DAE. These are bulk resistivity source checks at the two
+    /// retained wire-table states, not a wire-temperature or contact model.
+    #[test]
+    fn g1_g3_sourced_conductors_reach_circuit_dissipation() {
+        use fs_blake3::ContentHash;
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack, PropertyKey, PropertyValue};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::conductor::{
+            ConductorError, ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY,
+            resolve_uniform_conductor,
+        };
+        use fs_material::state_point::MaterialPropertySelection;
+        use fs_phs::circuit::{Branch, CircuitGraph, assemble_circuit};
+        use fs_qty::semantic::{QuantityKind, QuantitySpec, SemanticType, ValueForm};
+
+        const LENGTH_M: f64 = 1.0;
+        const AREA_M2: f64 = 1.0e-6;
+        const CURRENT_A: f64 = 2.0;
+        const COPPER: &str = "copper-annealed-iacs-nbs-hb100";
+        const ALUMINUM: &str = "aluminum-ec-h19-nbs-hb109";
+
+        // HB-100 prints copper resistivity as 0.017241 ohm mm²/m at 20 C,
+        // with 0.0000681 ohm mm²/m/C slope. These are the retained source
+        // table relation's three derived SI knots; no reciprocal conductivity or
+        // generic temperature coefficient is substituted.
+        let cases: [(&str, &[f64], &[f64]); 2] = [
+            (
+                COPPER,
+                &[283.15, 293.15, 303.15],
+                &[1.6560e-8, 1.7241e-8, 1.7922e-8],
+            ),
+            (
+                ALUMINUM,
+                &[273.15, 288.15, 293.15, 298.15, 303.15],
+                &[2.5986e-8, 2.7695e-8, 2.8264e-8, 2.8834e-8, 2.9403e-8],
+            ),
+        ];
+        let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let resistivity_key = PropertyKey::with_quantity(
+            ELECTRICAL_RESISTIVITY_PROPERTY,
+            QuantitySpec::dimensional(ELECTRICAL_RESISTIVITY_DIMS),
+        );
+        let close_relative = |actual: f64, expected: f64| {
+            assert!(
+                (actual / expected - 1.0).abs() <= 1.0e-10,
+                "actual {actual} differs from source-derived expected {expected}"
+            );
+        };
+
+        for (slug, temperatures, expected_rho) in cases {
+            let (pack, pack_path) = compile(slug);
+            let claims = pack.claims();
+            let resistivity_claims = claims.claims_for(ELECTRICAL_RESISTIVITY_PROPERTY);
+            assert_eq!(
+                resistivity_claims.len(),
+                1,
+                "{slug}: exactly one resistivity claim required"
+            );
+            let (_, claim) = resistivity_claims[0];
+            assert_eq!(claim.key, resistivity_key);
+            let PropertyValue::Curve {
+                abscissa, knots, ..
+            } = &claim.value
+            else {
+                panic!("{slug}: electrical resistivity must be a curve");
+            };
+            assert_eq!(abscissa, "T");
+            assert_eq!(knots.len(), temperatures.len());
+            for (&(actual_t, actual_rho), (&expected_t, &expected_value)) in
+                knots.iter().zip(temperatures.iter().zip(expected_rho))
+            {
+                assert_eq!(
+                    actual_t, expected_t,
+                    "{slug}: source temperature knot moved"
+                );
+                close_relative(actual_rho, expected_value);
+            }
+            assert!(
+                claim.validity.axis_quantities().get("T") == Some(&absolute_temperature),
+                "{slug}: T must retain absolute-temperature semantics"
+            );
+            assert_eq!(
+                claim.validity.bound("source-pressure-known"),
+                Some((0.0, 0.0))
+            );
+
+            let card = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: format!("{slug}; wire-table source state"),
+                    phase: "solid conductor".into(),
+                    process: "source-table wire temper retained; no thermal evolution".into(),
+                    revision: 0,
+                },
+                pack.clone(),
+            )
+            .unwrap();
+            let card_path = fixture_dir().join(format!("{slug}.fsmcdpk"));
+            let card_bytes = card.to_bytes();
+            fs::write(&card_path, &card_bytes).unwrap();
+            let decoded =
+                NormalizedMaterialCardPack::from_bytes_verified(card.content_hash(), &card_bytes)
+                    .expect("round-trip card");
+            assert_eq!(decoded, card);
+
+            let database = fixture_dir().join(format!("{slug}.sqlite"));
+            {
+                let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+                store
+                    .ingest_bundle(&[CatalogPack::MaterialCard(card.clone())])
+                    .unwrap();
+                store.seal_corpus().unwrap();
+                let stored = store
+                    .evaluate_typed(
+                        card.pack_id(),
+                        &resistivity_key,
+                        &query_point(claim, temperatures[0]),
+                        fs_matdb::SelectionPolicy::SingleClaimOnly,
+                    )
+                    .unwrap();
+                close_relative(stored.evidence.value.value, expected_rho[0]);
+            }
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            let CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(card.pack_id()).unwrap()
+            else {
+                panic!("{slug}: stored family changed");
+            };
+            assert_eq!(loaded, card);
+
+            let graph = CircuitGraph {
+                node_count: 2,
+                branches: vec![
+                    (1, 0, Branch::CurrentSource { port: 0 }),
+                    (1, 0, Branch::Resistor { ohms: 1.0 }),
+                ],
+                transformers: vec![],
+            };
+            let mut operating_states: Vec<_> = temperatures
+                .iter()
+                .copied()
+                .zip(expected_rho.iter().copied())
+                .collect();
+            // Interior state independently checks the declared linear
+            // interpolant; it is not an additional source measurement.
+            operating_states.push((
+                (temperatures[0] + temperatures[1]) * 0.5,
+                (expected_rho[0] + expected_rho[1]) * 0.5,
+            ));
+            for (temperature, rho) in operating_states {
+                let point = query_point(
+                    loaded
+                        .card()
+                        .claims()
+                        .claims_for(ELECTRICAL_RESISTIVITY_PROPERTY)[0]
+                        .1,
+                    temperature,
+                );
+                let conductor = resolve_uniform_conductor(
+                    loaded.card(),
+                    &point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    AREA_M2,
+                )
+                .unwrap_or_else(|error| panic!("{slug} at {temperature} K: {error}"));
+                let expected_resistance = rho * LENGTH_M / AREA_M2;
+                close_relative(conductor.resistance_ohm(), expected_resistance);
+                close_relative(
+                    conductor.joule_power_w(CURRENT_A).unwrap(),
+                    CURRENT_A * CURRENT_A * expected_resistance,
+                );
+                assert_eq!(conductor.joule_power_w(0.0).unwrap(), 0.0);
+                assert_eq!(
+                    conductor.joule_power_w(-CURRENT_A).unwrap(),
+                    conductor.joule_power_w(CURRENT_A).unwrap()
+                );
+                assert!(conductor.joule_power_w(f64::NAN).is_err());
+                let resolved_rho = conductor
+                    .material()
+                    .property(ELECTRICAL_RESISTIVITY_PROPERTY)
+                    .expect("resistivity in resolved conductor");
+                loaded
+                    .card()
+                    .claims()
+                    .verify_receipt(&resolved_rho.answer().receipt)
+                    .expect("source receipt verifies");
+                let scaled = resolve_uniform_conductor(
+                    loaded.card(),
+                    &point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    2.0 * LENGTH_M,
+                    0.5 * AREA_M2,
+                )
+                .expect("scaled uniform geometry");
+                close_relative(scaled.resistance_ohm(), 4.0 * expected_resistance);
+
+                let dae = assemble_circuit(&CircuitGraph {
+                    branches: vec![
+                        (1, 0, Branch::CurrentSource { port: 0 }),
+                        (
+                            1,
+                            0,
+                            Branch::Resistor {
+                                ohms: conductor.resistance_ohm(),
+                            },
+                        ),
+                    ],
+                    ..graph.clone()
+                })
+                .expect("current-source/resistor circuit admits");
+                let zero = dae
+                    .consistent_initial_state(&vec![0.0; dae.system.state_dim()], &[0.0])
+                    .expect("zero-source algebraic state");
+                let (record, defect) = dae
+                    .step_audited(&zero, &[CURRENT_A], 1.0)
+                    .expect("one-second DAE step");
+                let voltage = record.y[0];
+                let midpoint_voltage = (zero[dae.node_potential_index[0]]
+                    + record.x[dae.node_potential_index[0]])
+                    * 0.5;
+                close_relative(voltage, midpoint_voltage);
+                close_relative(voltage, CURRENT_A * expected_resistance);
+                close_relative(
+                    record.dissipated,
+                    CURRENT_A * CURRENT_A * expected_resistance,
+                );
+                close_relative(record.supplied, CURRENT_A * voltage);
+                assert!(
+                    defect <= 1.0e-10,
+                    "{slug} at {temperature} K: audit {defect}"
+                );
+                assert!(record.solver_residual.is_finite());
+                assert!(record.solver_residual <= 1.0e-10);
+                println!(
+                    "conductor source={slug} T={temperature} K rho_expected={rho} Ohm*m R_actual={} Ohm R_expected={expected_resistance} Ohm I={CURRENT_A} A dt=1 s voltage={voltage} V dissipated={} J supplied={} J residual={} supply_defect={defect} J relative_tolerance=1e-10 claim={:?}",
+                    conductor.resistance_ohm(),
+                    record.dissipated,
+                    record.supplied,
+                    record.solver_residual,
+                    resolved_rho.answer().receipt.selected,
+                );
+                let (replayed_record, replayed_defect) = dae
+                    .step_audited(&zero, &[CURRENT_A], 1.0)
+                    .expect("deterministic DAE replay");
+                assert_eq!(
+                    replayed_record.x, record.x,
+                    "{slug}: DAE state replay moved"
+                );
+                assert_eq!(
+                    replayed_record.y, record.y,
+                    "{slug}: DAE voltage replay moved"
+                );
+                assert_eq!(
+                    replayed_record.dissipated, record.dissipated,
+                    "{slug}: DAE dissipation replay moved"
+                );
+                assert_eq!(replayed_defect, defect, "{slug}: DAE audit replay moved");
+                let replay = resolve_uniform_conductor(
+                    loaded.card(),
+                    &point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    AREA_M2,
+                )
+                .expect("deterministic conductor replay");
+                assert_eq!(replay, conductor, "{slug} conductor replay moved");
+            }
+
+            let source_claim = loaded
+                .card()
+                .claims()
+                .claims_for(ELECTRICAL_RESISTIVITY_PROPERTY)[0]
+                .1;
+            let valid_point = query_point(source_claim, temperatures[0]);
+            assert!(matches!(
+                resolve_uniform_conductor(
+                    loaded.card(),
+                    &valid_point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    0.0,
+                    AREA_M2,
+                ),
+                Err(ConductorError::InvalidInput {
+                    quantity: "length_m"
+                })
+            ));
+            assert!(matches!(
+                resolve_uniform_conductor(
+                    loaded.card(),
+                    &valid_point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    f64::NAN,
+                ),
+                Err(ConductorError::InvalidInput {
+                    quantity: "area_m2"
+                })
+            ));
+            let outside = query_point(source_claim, temperatures[0] - 1.0);
+            assert!(
+                resolve_uniform_conductor(
+                    loaded.card(),
+                    &outside,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    AREA_M2,
+                )
+                .is_err()
+            );
+            let wrong_unit = PropertyKey::with_quantity(
+                ELECTRICAL_RESISTIVITY_PROPERTY,
+                fs_qty::QuantitySpec::dimensional(Dims::NONE),
+            );
+            assert!(
+                store
+                    .evaluate_typed(
+                        card.pack_id(),
+                        &wrong_unit,
+                        &valid_point,
+                        fs_matdb::SelectionPolicy::SingleClaimOnly,
+                    )
+                    .is_err()
+            );
+            let missing_card = fs_matdb::MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: format!("{slug}; missing resistivity"),
+                    phase: "solid conductor".into(),
+                    process: "deliberate missing-property refusal".into(),
+                    revision: 0,
+                },
+                fs_matdb::ClaimSet::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            assert!(matches!(
+                resolve_uniform_conductor(
+                    &missing_card,
+                    &valid_point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    AREA_M2,
+                ),
+                Err(ConductorError::MaterialState(_))
+            ));
+            let mut wrong_claims = fs_matdb::ClaimSet::new();
+            for observation_id in loaded.card().claims().observation_ids() {
+                wrong_claims
+                    .register_observation(
+                        loaded
+                            .card()
+                            .claims()
+                            .observation(observation_id)
+                            .expect("source observation")
+                            .clone(),
+                    )
+                    .unwrap();
+            }
+            let wrong_value = match &source_claim.value {
+                PropertyValue::Curve {
+                    abscissa,
+                    abscissa_dims,
+                    knots,
+                    ..
+                } => PropertyValue::Curve {
+                    abscissa: abscissa.clone(),
+                    abscissa_dims: *abscissa_dims,
+                    knots: knots.clone(),
+                    dims: Dims::NONE,
+                },
+                PropertyValue::Scalar { value, .. } => PropertyValue::Scalar {
+                    value: *value,
+                    dims: Dims::NONE,
+                },
+            };
+            let wrong_claim = fs_matdb::PropertyClaim {
+                key: PropertyKey::with_quantity(
+                    ELECTRICAL_RESISTIVITY_PROPERTY,
+                    fs_qty::QuantitySpec::dimensional(Dims::NONE),
+                ),
+                value: wrong_value,
+                ..source_claim.clone()
+            };
+            wrong_claims.insert_claim(wrong_claim).unwrap();
+            let wrong_unit_card = fs_matdb::MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: format!("{slug}; wrong resistivity unit"),
+                    phase: "solid conductor".into(),
+                    process: "deliberate dimension refusal".into(),
+                    revision: 0,
+                },
+                wrong_claims,
+                Vec::new(),
+            )
+            .unwrap();
+            assert!(matches!(
+                resolve_uniform_conductor(
+                    &wrong_unit_card,
+                    &valid_point,
+                    MaterialPropertySelection::SingleClaimOnly,
+                    LENGTH_M,
+                    AREA_M2,
+                ),
+                Err(ConductorError::MaterialState(_))
+            ));
+            assert!(
+                resolve_uniform_conductor(
+                    loaded.card(),
+                    &valid_point,
+                    MaterialPropertySelection::PinnedByProperty(vec![(
+                        ELECTRICAL_RESISTIVITY_PROPERTY.into(),
+                        fs_matdb::ClaimId(ContentHash([0; 32])),
+                    )]),
+                    LENGTH_M,
+                    AREA_M2,
+                )
+                .is_err()
+            );
+
+            let request_path = workspace_path(&format!(
+                "examples/material-discovery/{}-dc-conductor.json",
+                if slug == COPPER { "copper" } else { "aluminum" }
+            ));
+            assert!(
+                request_path.is_file(),
+                "missing discovery request {request_path:?}"
+            );
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                request_path.to_str().unwrap().into(),
+                pack_path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{}",
+                discovery.stdout
+            );
+            println!(
+                "{slug}: source_rho={expected_rho:?} temperature_K={temperatures:?} geometry_L_m={LENGTH_M} geometry_A_m2={AREA_M2} current_A={CURRENT_A} discovery=complete"
+            );
+        }
+    }
+
+    fn query_point(claim: &PropertyClaim, temperature: f64) -> QueryPoint {
+        let mut point = QueryPoint::new();
+        for (axis, &(lo, _)) in claim.validity.bounds() {
+            let value = if axis == "T" { temperature } else { lo };
+            point = if let Some(quantity) = claim.validity.axis_quantities().get(axis) {
+                point.with_quantity(axis, *quantity, value)
+            } else {
+                point.with(axis, value)
+            }
+            .expect("typed source query point");
+        }
+        point
+    }
+
+    /// G1/G3: two independently sourced component cards reach the actual
+    /// humid-gas transport and cylinder-loss consumer. The Buck, ideal-mixture,
+    /// Wilke, and WMS calculations below are independent test oracles; this is
+    /// a bounded engineering mixture check, not humid-air qualification.
+    #[test]
+    fn g1_g3_sourced_humid_air_reaches_acoustic_transport() {
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::gas::{ConductivityModel, R_USSA_1976, resolve_sutherland_gas_state};
+        use fs_material::moist_air::resolve_moist_air_state;
+        use fs_material::state_point::MaterialPropertySelection;
+        use fs_qty::semantic::{
+            QuantityKind, QuantitySpec as SemanticQuantitySpec, SemanticType, ValueForm,
+        };
+        use fs_qty::{Dims, QuantitySpec};
+
+        const DRY: &str = "air-dry-ussa1976";
+        const VAPOR: &str = "water-vapor-sutherland-ambient";
+        const MD: f64 = 28.9644e-3;
+        const MV: f64 = 18.01528e-3;
+        const GD: f64 = 1.4;
+        const GV: f64 = 33.590 / (33.590 - R_USSA_1976);
+        const BETA_D: f64 = 1.458e-6;
+        const S_D: f64 = 110.4;
+        const MU_REF_V: f64 = 1.12e-5;
+        const T_REF_V: f64 = 350.0;
+        const S_V: f64 = 1064.0;
+        const RADIUS_M: f64 = 0.0005;
+        const OMEGA_RAD_S: f64 = core::f64::consts::TAU * 220.0;
+
+        let (dry_pack, dry_path) = compile(DRY);
+        assert_eq!(dry_pack.pack_id(), "air-dry-ussa1976-ambient-model");
+        let (vapor_pack, vapor_path) = compile(VAPOR);
+        assert_eq!(vapor_pack.pack_id(), VAPOR);
+        let dry_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "dry air; USSA-1976 reference composition".into(),
+                phase: "gas".into(),
+                process: "USSA-1976 dry-air constants and transport fits".into(),
+                revision: 0,
+            },
+            dry_pack.clone(),
+        )
+        .unwrap();
+        let vapor_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "water vapor; Sutherland ambient reference".into(),
+                phase: "gas".into(),
+                process: "NIST component source and declared Sutherland/Eucken model".into(),
+                revision: 0,
+            },
+            vapor_pack.clone(),
+        )
+        .unwrap();
+        let database = fixture_dir().join("humid-air-components.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[
+                    CatalogPack::MaterialCard(dry_card.clone()),
+                    CatalogPack::MaterialCard(vapor_card.clone()),
+                ])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded_dry) =
+            store.load_catalog_pack(dry_card.pack_id()).unwrap()
+        else {
+            panic!("dry component changed family");
+        };
+        let CatalogPack::MaterialCard(loaded_vapor) =
+            store.load_catalog_pack(vapor_card.pack_id()).unwrap()
+        else {
+            panic!("vapor component changed family");
+        };
+        assert_eq!(loaded_dry, dry_card);
+        assert_eq!(loaded_vapor, vapor_card);
+
+        let absolute_temperature = SemanticQuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let pressure = SemanticQuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Pressure,
+            ValueForm::Static,
+        ));
+        let dimensionless = QuantitySpec::dimensional(Dims::NONE);
+        let component_point = |claim: &PropertyClaim, t: f64, p: f64, flag: &str| {
+            let mut point = QueryPoint::new();
+            for (axis, &(lo, _)) in claim.validity.bounds() {
+                let value = match axis.as_str() {
+                    "temperature" => t,
+                    "pressure" => p,
+                    "relative-humidity" => 0.0,
+                    name if name == flag => 1.0,
+                    _ => lo,
+                };
+                let quantity = claim
+                    .validity
+                    .axis_quantities()
+                    .get(axis)
+                    .copied()
+                    .unwrap_or_else(|| match axis.as_str() {
+                        "temperature" => absolute_temperature,
+                        "pressure" => pressure,
+                        "relative-humidity"
+                        | "source-composition-ussa1976"
+                        | "source-component-water-vapor" => dimensionless,
+                        _ => QuantitySpec::dimensional(Dims::NONE),
+                    });
+                point = point
+                    .with_quantity(axis, quantity, value)
+                    .expect("typed humid-air component point");
+            }
+            point
+        };
+        let dry_claim = dry_pack.claims().claims_for("molar_mass")[0].1;
+        let vapor_claim = vapor_pack.claims().claims_for("molar_mass")[0].1;
+        let dry_point =
+            |t: f64, p: f64| component_point(dry_claim, t, p, "source-composition-ussa1976");
+        let vapor_point =
+            |t: f64, p: f64| component_point(vapor_claim, t, p, "source-component-water-vapor");
+        let relative_close = |actual: f64, expected: f64| {
+            assert!(
+                (actual / expected - 1.0).abs() <= 1.0e-10,
+                "actual {actual:.16e}, expected {expected:.16e}"
+            );
+        };
+        let saturation_pressure = |temperature_k: f64| {
+            let celsius = temperature_k - 273.15;
+            611.21 * f64::exp((18.678 - celsius / 234.5) * celsius / (257.14 + celsius))
+        };
+        let sutherland = |beta: f64, s: f64, t: f64| beta * t.powf(1.5) / (t + s);
+        let expected = |t: f64, p: f64, rh: f64| {
+            let x = rh * saturation_pressure(t) / p;
+            let mm = MD + x * (MV - MD);
+            let r_v = R_USSA_1976 / MV;
+            let r_mix = R_USSA_1976 / mm;
+            let inv_gamma_minus_one = (1.0 - x) / (GD - 1.0) + x / (GV - 1.0);
+            let gamma = 1.0 + 1.0 / inv_gamma_minus_one;
+            let cp_v = 33.590 / MV;
+            let mu_d = sutherland(BETA_D, S_D, t);
+            let mu_v = MU_REF_V * (t / T_REF_V).powf(1.5) * (T_REF_V + S_V) / (t + S_V);
+            let t32 = t * t.sqrt();
+            let k_d =
+                2.64638e-3 * t32 / (t + 245.4 * f64::exp((-12.0 / t) * core::f64::consts::LN_10));
+            let k_v = mu_v * (cp_v + 1.25 * r_v);
+            let phi = |mi: f64, mj: f64, mui: f64, muj: f64| {
+                (1.0 + (mui / muj).sqrt() * (mj / mi).powf(0.25)).powi(2)
+                    / (8.0 * (1.0 + mi / mj)).sqrt()
+            };
+            let phi_dv = phi(MD, MV, mu_d, mu_v);
+            let phi_vd = phi(MV, MD, mu_v, mu_d);
+            let mu =
+                (1.0 - x) * mu_d / ((1.0 - x) + x * phi_dv) + x * mu_v / ((1.0 - x) * phi_vd + x);
+            let k = (1.0 - x) * k_d / ((1.0 - x) + x * phi_dv) + x * k_v / ((1.0 - x) * phi_vd + x);
+            let density = p / (r_mix * t);
+            let sound_speed = (gamma * r_mix * t).sqrt();
+            let cp = gamma * r_mix / (gamma - 1.0);
+            let prandtl = mu * cp / k;
+            let loss = core::f64::consts::TAU
+                * mu
+                * (1.0 + RADIUS_M * (2.0 * density * OMEGA_RAD_S / mu).sqrt());
+            (
+                x,
+                x * MV / mm,
+                gamma,
+                density,
+                sound_speed,
+                mu,
+                k,
+                cp,
+                prandtl,
+                loss,
+            )
+        };
+
+        for &(t, p, rh) in &[
+            (273.15, 110_000.0, 0.8),
+            (293.15, 101_325.0, 0.3),
+            (293.15, 101_325.0, 0.8),
+            (293.15, 101_325.0, 1.0),
+            (313.15, 80_000.0, 0.8),
+        ] {
+            let dry_at = dry_point(t, p);
+            let vapor_at = vapor_point(t, p);
+            let resolved = resolve_moist_air_state(
+                loaded_dry.card(),
+                &dry_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &vapor_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                rh,
+            )
+            .unwrap_or_else(|error| panic!("humid state T={t} K p={p} Pa RH={rh}: {error}"));
+            let replay = resolve_moist_air_state(
+                loaded_dry.card(),
+                &dry_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &vapor_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                rh,
+            )
+            .expect("humid state replay");
+            assert_eq!(resolved, replay, "humid state replay moved");
+            let (x, w, gamma, rho, c, mu, k, cp, prandtl, loss) = expected(t, p, rh);
+            let state = resolved.state();
+            relative_close(state.water_mole_fraction, x);
+            relative_close(resolved.water_mass_fraction(), w);
+            relative_close(state.gamma, gamma);
+            relative_close(state.density, rho);
+            relative_close(state.sound_speed, c);
+            relative_close(state.dynamic_viscosity, mu);
+            relative_close(state.thermal_conductivity, k);
+            relative_close(state.specific_heat_cp, cp);
+            relative_close(state.prandtl, prandtl);
+            let actual_loss = fs_couple::air_path::oscillating_cylinder_air_resistance_per_length(
+                RADIUS_M,
+                OMEGA_RAD_S,
+                state,
+            )
+            .unwrap();
+            relative_close(actual_loss, loss);
+            let absorption = OMEGA_RAD_S.powi(2) / (2.0 * rho * c.powi(3))
+                * (4.0 * mu / 3.0 + (gamma - 1.0) * k / cp);
+            relative_close(state.stokes_kirchhoff_absorption(OMEGA_RAD_S), absorption);
+            assert_eq!(resolved.dry_air().parameters().properties().len(), 5);
+            assert_eq!(resolved.water_vapor().parameters().properties().len(), 5);
+            for (name, expected_value) in [
+                ("sutherland_reference_viscosity", MU_REF_V),
+                ("sutherland_reference_temperature", T_REF_V),
+                ("sutherland_temperature", S_V),
+            ] {
+                relative_close(
+                    resolved
+                        .water_vapor()
+                        .parameters()
+                        .property(name)
+                        .unwrap()
+                        .value_si(),
+                    expected_value,
+                );
+            }
+            for (component, card) in [
+                (resolved.dry_air(), loaded_dry.card()),
+                (resolved.water_vapor(), loaded_vapor.card()),
+            ] {
+                for property in component.parameters().properties() {
+                    card.claims()
+                        .verify_receipt(&property.answer().receipt)
+                        .expect("humid component receipt");
+                }
+            }
+            println!(
+                "humid-air T={t} K p={p} Pa RH={rh} x_w={x:.9e} w_w={w:.9e} rho={rho:.9e} kg/m3 c={c:.9e} m/s mu_actual={:.9e} mu_expected={mu:.9e} Pa*s k_actual={:.9e} k_expected={k:.9e} W/m/K Cp={cp:.9e} J/kg/K Pr={prandtl:.9e} loss_actual={actual_loss:.9e} loss_expected={loss:.9e} N*s/m2 absorption={absorption:.9e} 1/m relative_tolerance=1e-10 dry_claims={:?} vapor_claims={:?}",
+                state.dynamic_viscosity,
+                state.thermal_conductivity,
+                resolved.dry_air().parameters().identity(),
+                resolved.water_vapor().parameters().identity(),
+            );
+        }
+
+        let dry_at = dry_point(293.15, 101_325.0);
+        let vapor_at = vapor_point(293.15, 101_325.0);
+        let dry_limit = resolve_moist_air_state(
+            loaded_dry.card(),
+            &dry_at,
+            MaterialPropertySelection::SingleClaimOnly,
+            loaded_vapor.card(),
+            &vapor_at,
+            MaterialPropertySelection::SingleClaimOnly,
+            0.0,
+        )
+        .expect("RH=0 dry limit");
+        let dry_state = resolve_sutherland_gas_state(
+            loaded_dry.card(),
+            &dry_at,
+            ConductivityModel::Ussa1976AirFit,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("dry component");
+        assert_eq!(
+            dry_limit.state(),
+            dry_state.state(),
+            "RH=0 must be dry limit"
+        );
+        assert_eq!(dry_limit.relative_humidity(), 0.0);
+        assert_eq!(dry_limit.water_mass_fraction(), 0.0);
+
+        let wrong_flag = dry_at
+            .with_quantity(
+                "source-composition-ussa1976",
+                QuantitySpec::dimensional(Dims::NONE),
+                0.0,
+            )
+            .unwrap();
+        assert!(
+            resolve_moist_air_state(
+                loaded_dry.card(),
+                &wrong_flag,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &vapor_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                0.3,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_moist_air_state(
+                loaded_dry.card(),
+                &dry_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &vapor_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                -0.01,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_moist_air_state(
+                loaded_dry.card(),
+                &dry_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &vapor_at,
+                MaterialPropertySelection::SingleClaimOnly,
+                1.01,
+            )
+            .is_err()
+        );
+        let outside_t = dry_point(250.0, 101_325.0);
+        let outside_vapor_t = vapor_point(250.0, 101_325.0);
+        assert!(
+            resolve_moist_air_state(
+                loaded_dry.card(),
+                &outside_t,
+                MaterialPropertySelection::SingleClaimOnly,
+                loaded_vapor.card(),
+                &outside_vapor_t,
+                MaterialPropertySelection::SingleClaimOnly,
+                0.3,
+            )
+            .is_err()
+        );
+        for mismatched in [
+            vapor_point(294.15, 101_325.0),
+            vapor_point(293.15, 100_000.0),
+        ] {
+            for rh in [0.0, 0.3] {
+                assert!(
+                    resolve_moist_air_state(
+                        loaded_dry.card(),
+                        &dry_at,
+                        MaterialPropertySelection::SingleClaimOnly,
+                        loaded_vapor.card(),
+                        &mismatched,
+                        MaterialPropertySelection::SingleClaimOnly,
+                        rh,
+                    )
+                    .is_err(),
+                    "mismatched components must refuse even at the dry limit"
+                );
+            }
+        }
+        for (request, path) in [
+            ("examples/material-discovery/dry-air.json", dry_path),
+            (
+                "examples/material-discovery/water-vapor-component.json",
+                vapor_path,
+            ),
+        ] {
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                workspace_path(request).to_str().unwrap().into(),
+                path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{}",
+                discovery.stdout
+            );
+        }
+    }
 }
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);

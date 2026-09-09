@@ -154,6 +154,7 @@ fn enthalpy_config() -> LumpedEnthalpyMarchConfig {
     LumpedEnthalpyMarchConfig {
         initial_specific_enthalpy_j_kg: 20_000.0,
         ambient_temperature_k: 300.0,
+        radiation_temperature_k: 300.0,
         internal_power_w: 500.0,
         duration_s: 100.0,
         maximum_step_s: 1.0,
@@ -560,6 +561,112 @@ fn g1_enthalpy_march_conserves_energy_through_the_latent_heat_plateau() {
 }
 
 #[test]
+fn g1_distinct_fluid_and_radiation_reservoirs_hold_analytical_equilibrium() {
+    let curve = phase_curve();
+    let equilibrium = 500.0_f64;
+    let sigma = 5.670_374_419e-8;
+    for (fluid, enclosure) in [(300.0_f64, 600.0_f64), (600.0, 300.0)] {
+        // Independently balance h(Tf-T) + epsilon sigma(Tr^4-T^4) = 0.
+        let htc = 0.5 * sigma * (enclosure.powi(4) - equilibrium.powi(4)) / (equilibrium - fluid);
+        let body = LumpedEnthalpyBody::try_new(
+            "opposing reservoirs",
+            0.1,
+            0.02,
+            htc,
+            0.5,
+            0.001,
+            100.0,
+            &curve,
+        )
+        .unwrap();
+        let config = LumpedEnthalpyMarchConfig {
+            ambient_temperature_k: fluid,
+            radiation_temperature_k: enclosure,
+            internal_power_w: 0.0,
+            ..enthalpy_config()
+        };
+        let march = with_cx(|cx| {
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap()
+        });
+        for sample in march.samples() {
+            assert!((sample.phase_state.temperature_k() - equilibrium).abs() < 1e-8);
+            assert_eq!(
+                sample.convection_into_body_w.is_sign_positive(),
+                fluid > equilibrium
+            );
+            assert_eq!(
+                sample.radiation_into_body_w.is_sign_positive(),
+                enclosure > equilibrium
+            );
+            assert!(sample.convection_into_body_w.abs() > 1.0);
+            assert!(sample.net_power_into_body_w.abs() < 1e-8);
+        }
+        assert!(march.cumulative_absolute_energy_residual_j() < 1e-6);
+    }
+}
+
+#[test]
+fn g3_inactive_reservoir_does_not_change_enthalpy_but_remains_in_identity() {
+    let curve = phase_curve();
+    for (htc, emissivity) in [(1.0, 0.0), (0.0, 0.5)] {
+        let body = LumpedEnthalpyBody::try_new(
+            "one active reservoir",
+            0.1,
+            0.02,
+            htc,
+            emissivity,
+            0.001,
+            100.0,
+            &curve,
+        )
+        .unwrap();
+        let config = LumpedEnthalpyMarchConfig {
+            ambient_temperature_k: 400.0,
+            radiation_temperature_k: 400.0,
+            internal_power_w: 0.0,
+            duration_s: 1.0,
+            ..enthalpy_config()
+        };
+        let mut changed = config;
+        if htc == 0.0 {
+            changed.ambient_temperature_k = 100_000.0;
+        } else {
+            changed.radiation_temperature_k = 100_000.0;
+        }
+        with_cx(|cx| {
+            let run = |c| solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), c).unwrap();
+            let first = run(config);
+            let second = run(changed);
+            assert_eq!(first.samples(), second.samples());
+            assert_ne!(first.identity(), second.identity());
+        });
+    }
+}
+
+#[test]
+fn g0_radiation_reservoir_is_validated_and_controls_radiative_biot() {
+    let curve = phase_curve();
+    let body =
+        LumpedEnthalpyBody::try_new("radiation gate", 0.1, 0.02, 0.0, 0.5, 0.001, 100.0, &curve)
+            .unwrap();
+    for temperature in [f64::NAN, f64::INFINITY, 0.0, -1.0, 100_000.0] {
+        let config = LumpedEnthalpyMarchConfig {
+            radiation_temperature_k: temperature,
+            internal_power_w: 0.0,
+            ..enthalpy_config()
+        };
+        let error = with_cx(|cx| {
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), config).unwrap_err()
+        });
+        if temperature == 100_000.0 {
+            assert!(error.to_string().contains("Biot"));
+        } else {
+            assert!(error.to_string().contains("radiation temperature"));
+        }
+    }
+}
+
+#[test]
 fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
     let curve = phase_curve();
     let body = LumpedEnthalpyBody::try_new(
@@ -576,6 +683,7 @@ fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
     let config = LumpedEnthalpyMarchConfig {
         initial_specific_enthalpy_j_kg: 20_000.0,
         ambient_temperature_k: 1_000.0,
+        radiation_temperature_k: 1_000.0,
         internal_power_w: 0.0,
         // Long enough to enter the latent-heat interval, but intentionally
         // short of the phase curve's 95 kJ/kg evidence boundary. The solver
@@ -643,6 +751,7 @@ fn g1_card_backed_transport_drives_the_same_phase_curve_without_extrapolation() 
     let config = LumpedEnthalpyMarchConfig {
         initial_specific_enthalpy_j_kg: 20_000.0,
         ambient_temperature_k: 1_000.0,
+        radiation_temperature_k: 1_000.0,
         internal_power_w: 0.0,
         duration_s: 10.0,
         maximum_step_s: 0.25,

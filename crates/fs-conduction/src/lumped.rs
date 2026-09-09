@@ -404,16 +404,17 @@ impl<'a> LumpedEnthalpyBody<'a> {
 
     /// Conservative Biot number including convection and the maximum
     /// linearized radiative transfer coefficient over the admitted curve and
-    /// declared ambient.
+    /// declared radiation enclosure. The fluid temperature does not enter the
+    /// radiative coefficient; convection already supplies its own coefficient.
     #[must_use]
-    pub fn maximum_biot(&self, ambient_temperature_k: f64) -> f64 {
+    pub fn maximum_biot(&self, radiation_temperature_k: f64) -> f64 {
         let maximum_curve_temperature = self
             .phase_curve
             .knots()
             .iter()
             .map(|knot| knot.temperature_k)
             .fold(0.0_f64, f64::max);
-        let maximum_temperature = maximum_curve_temperature.max(ambient_temperature_k);
+        let maximum_temperature = maximum_curve_temperature.max(radiation_temperature_k);
         let radiation = 4.0
             * self.transport.maximum_emissivity
             * STEFAN_BOLTZMANN_W_M2_K4
@@ -430,8 +431,12 @@ impl<'a> LumpedEnthalpyBody<'a> {
 pub struct LumpedEnthalpyMarchConfig {
     /// Initial specific enthalpy [J/kg].
     pub initial_specific_enthalpy_j_kg: f64,
-    /// Constant environmental radiation/convection temperature [K].
+    /// Constant convection-fluid temperature [K].
     pub ambient_temperature_k: f64,
+    /// Constant effective temperature of the enclosing radiation field [K].
+    /// Whole-surface diffuse-gray exchange with a large enclosure; this is not
+    /// a directional illumination or finite-reservoir model.
+    pub radiation_temperature_k: f64,
     /// Constant internally deposited power [W], positive into the body.
     pub internal_power_w: f64,
     /// Requested physical horizon [s].
@@ -522,7 +527,7 @@ pub fn solve_lumped_enthalpy(
     config: LumpedEnthalpyMarchConfig,
 ) -> Result<LumpedEnthalpyMarch, ConductionError> {
     validate_enthalpy_config(body, config)?;
-    let maximum_biot = body.maximum_biot(config.ambient_temperature_k);
+    let maximum_biot = body.maximum_biot(config.radiation_temperature_k);
     if maximum_biot > gate.ceiling() {
         return Err(lumped_error(
             &body.name,
@@ -588,11 +593,12 @@ pub fn solve_lumped_enthalpy(
             step_energy_residual_j: residual,
         });
     }
-    let mut identity = DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-march.v1");
+    let mut identity = DomainHasher::new("org.frankensim.fs-conduction.lumped-enthalpy-march.v2");
     identity.update(body.identity().as_bytes());
     for value in [
         config.initial_specific_enthalpy_j_kg,
         config.ambient_temperature_k,
+        config.radiation_temperature_k,
         config.internal_power_w,
         config.duration_s,
         config.maximum_step_s,
@@ -622,6 +628,11 @@ fn validate_enthalpy_config(
 ) -> Result<(), ConductionError> {
     for (value, field, strictly_positive) in [
         (config.ambient_temperature_k, "ambient temperature", true),
+        (
+            config.radiation_temperature_k,
+            "radiation temperature",
+            true,
+        ),
         (config.duration_s, "duration", false),
         (config.maximum_step_s, "maximum step", true),
         (config.enthalpy_tolerance_j_kg, "enthalpy tolerance", true),
@@ -713,7 +724,7 @@ fn enthalpy_power(
     let radiation = body.transport.emissivity_at(body_temperature_k)?
         * STEFAN_BOLTZMANN_W_M2_K4
         * body.surface_area_m2
-        * (fourth_power(config.ambient_temperature_k) - fourth_power(body_temperature_k));
+        * (fourth_power(config.radiation_temperature_k) - fourth_power(body_temperature_k));
     let net = config.internal_power_w + convection + radiation;
     Ok((convection, radiation, net))
 }
@@ -723,13 +734,15 @@ fn fourth_power(value: f64) -> f64 {
     square * square
 }
 
-/// Prescribed uniform fluid and enclosing radiation field at one temperature.
+/// Independently prescribed uniform fluid and enclosing radiation field.
 /// The whole declared body boundary is exposed; there is no contact or finite
 /// reservoir debit. Transport may be declared or material-card-backed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LumpedThermalEnvironment {
-    /// Infinite reservoir temperature held constant during a step [K].
+    /// Infinite convection-fluid reservoir temperature during a step [K].
     pub temperature_k: f64,
+    /// Effective enclosing radiation temperature during a step [K].
+    pub radiation_temperature_k: f64,
     /// Declared whole-surface convection coefficient [W/(m2 K)].
     pub convection_w_per_m2_k: f64,
     /// Conductivity and total hemispherical emissivity authority.
@@ -778,6 +791,7 @@ impl LumpedThermalEnvironment {
             LumpedEnthalpyMarchConfig {
                 initial_specific_enthalpy_j_kg: input.initial.specific_enthalpy_j_kg(),
                 ambient_temperature_k: self.temperature_k,
+                radiation_temperature_k: self.radiation_temperature_k,
                 internal_power_w: input.internal_heat_j / input.duration_s,
                 duration_s: input.duration_s,
                 maximum_step_s: input.duration_s,

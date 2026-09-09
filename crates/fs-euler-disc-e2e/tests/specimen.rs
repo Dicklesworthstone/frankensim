@@ -718,6 +718,7 @@ fn g1_hot_ambient_phase_march_is_bound_to_exact_disc_geometry_and_escalates_at_m
     let config = LumpedEnthalpyMarchConfig {
         initial_specific_enthalpy_j_kg: 0.0,
         ambient_temperature_k: 1_200.0,
+        radiation_temperature_k: 1_200.0,
         internal_power_w: 0.0,
         duration_s: 4.0,
         maximum_step_s: 0.01,
