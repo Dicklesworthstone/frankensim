@@ -4267,6 +4267,299 @@ mod common_material_acquisition {
             "source viscosity difference must reach the actual channel"
         );
     }
+
+    #[test]
+    fn g1_g3_sourced_mineral_oil_reaches_heat_and_flow() {
+        use fs_conduction::lumped::{BiotGate, LumpedNetwork, LumpedNode, solve_gated};
+        use fs_lbm::Lbm;
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::liquid::{resolve_liquid_state, resolve_liquid_state_from_kinematic};
+        use fs_material::state_point::MaterialPropertySelection::SingleClaimOnly;
+
+        let slug = "shell-heat-transfer-oil-s2-2011";
+        let (pack, path) = compile(slug);
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: slug.into(),
+                phase: "liquid".into(),
+                process: "May 2011 typical mineral heat-transfer oil; aged oil excluded".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let database = fixture_dir().join("shell-s2.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let card = loaded.card();
+        let claim = card.claims().claims_for("density")[0].1;
+        // Literal source T[K], rho[kg/m3], Cp[J/kg/K], k[W/m/K], nu[mm2/s].
+        // The fifth state is only the declared linear interpolant, not a measured point.
+        let rows = [
+            [273.15, 876.0, 1809.0, 0.136, 223.0],
+            [313.15, 850.0, 1954.0, 0.133, 25.0],
+            [373.15, 811.0, 2173.0, 0.128, 4.7],
+            [473.15, 746.0, 2538.0, 0.121, 1.1],
+            [343.15, 830.5, 2063.5, 0.1305, 14.85],
+        ];
+        let close = |actual: f64, expected: f64| {
+            assert!(
+                (actual / expected - 1.0).abs() < 1e-10,
+                "actual={actual:.16e} expected={expected:.16e} relative_tolerance=1e-10"
+            );
+        };
+        let mut knot_flows = Vec::new();
+        for [t, rho, cp, k, nu_mm2_s] in rows {
+            let at = point(claim, &[("temperature", t)]);
+            let state = resolve_liquid_state_from_kinematic(card, &at, SingleClaimOnly).unwrap();
+            assert_eq!(
+                state,
+                resolve_liquid_state_from_kinematic(card, &at, SingleClaimOnly).unwrap()
+            );
+            // Explicit basis: this pack cannot satisfy the dynamic-source API.
+            assert!(resolve_liquid_state(card, &at, SingleClaimOnly).is_err());
+            let nu = nu_mm2_s * 1e-6;
+            for (actual, expected) in [
+                (state.density_kg_m3(), rho),
+                (state.specific_heat_j_kg_k(), cp),
+                (state.thermal_conductivity_w_m_k(), k),
+                (state.kinematic_viscosity_m2_s(), nu),
+                (state.dynamic_viscosity_pa_s(), rho * nu),
+                (state.thermal_diffusivity_m2_s(), k / (rho * cp)),
+                (state.prandtl(), rho * nu * cp / k),
+            ] {
+                close(actual, expected);
+            }
+            for name in [
+                "density",
+                "specific_heat_capacity",
+                "thermal_conductivity",
+                "kinematic_viscosity",
+            ] {
+                card.claims()
+                    .verify_receipt(&state.material().property(name).unwrap().answer().receipt)
+                    .unwrap();
+            }
+            assert!(state.material().property("dynamic_viscosity").is_none());
+
+            // Existing gated lumped owner, frozen coefficients and 0.1 K excitation.
+            let capacity = state.density_kg_m3() * 1e-6 * state.specific_heat_j_kg_k();
+            let conductance = state.thermal_conductivity_w_m_k() * 0.01;
+            let ambient = if t == 473.15 { t - 0.1 } else { t + 0.1 };
+            let node = LumpedNode::new(slug, capacity, conductance, 0.001, k, 0.001).unwrap();
+            close(node.biot(), 0.01);
+            let network = LumpedNetwork::new(vec![node], ambient).unwrap();
+            let heat =
+                solve_gated(&network, BiotGate::corpus_default(), &[0.0], &[t], 100.0).unwrap();
+            let decay = (-100.0 * k * 0.01 / (rho * 1e-6 * cp)).exp();
+            let expected_delta = (ambient - t) * (1.0 - decay);
+            let actual_delta = heat.temperature_k[0] - t;
+            assert!((actual_delta - expected_delta).abs() < 1e-11);
+            let energy_defect = capacity * (actual_delta - expected_delta);
+            assert!(energy_defect.abs() < 1e-10);
+            assert_eq!(
+                heat,
+                solve_gated(&network, BiotGate::corpus_default(), &[0.0], &[t], 100.0).unwrap()
+            );
+
+            // Hold physical geometry/acceleration fixed; choose dt for tau=1.
+            // Adapting numerical time scale accommodates the 200-fold viscosity range.
+            let dx: f64 = 1e-4;
+            let dt = dx * dx / (6.0 * state.kinematic_viscosity_m2_s());
+            let acceleration = 1e-3;
+            let mut flow = Lbm::channel(2, 16, 1.0, acceleration * dt * dt / dx);
+            let mass = flow.total_mass();
+            let mut replay = flow.clone();
+            flow.run(12_000);
+            replay.run(12_000);
+            assert_eq!(flow.x_velocity_profile(), replay.x_velocity_profile());
+            let mass_defect = (flow.total_mass() - mass).abs();
+            assert!(mass_defect < 1e-8);
+            let height = 16.0 * dx;
+            let peak = acceleration * height * height / (8.0 * nu);
+            let mut defect = 0.0_f64;
+            for (row, u) in flow.x_velocity_profile().into_iter().enumerate() {
+                let y = (row as f64 + 0.5) * dx;
+                let expected = acceleration * y * (height - y) / (2.0 * nu);
+                defect = defect.max((u * dx / dt - expected).abs() / peak);
+            }
+            assert!(defect < 0.02, "T={t} profile defect={defect}");
+            let midpoint = flow.velocity(0, 7).0 * dx / dt;
+            if t != 343.15 {
+                knot_flows.push(midpoint);
+            }
+            eprintln!(
+                "oil={slug} T={t}K pressure=unstated aged_oil=excluded rho={rho}kg/m3 cp={cp}J/kg/K k={k}W/m/K source_nu={nu_mm2_s}mm2/s derived_mu={}Pa*s derived_Pr={} source_Pr_conflict=unresolved heat_delta={actual_delta:.12e}K expected_delta={expected_delta:.12e}K heat_tolerance=1e-11K energy_defect={energy_defect:.12e}J energy_tolerance=1e-10J flow_midpoint={midpoint:.12e}m/s profile_peak_relative_defect={defect:.12e} profile_tolerance=0.02 lattice_mass_defect={mass_defect:.12e} source_bundle={:?}",
+                state.dynamic_viscosity_pa_s(),
+                state.prandtl(),
+                state.material().identity()
+            );
+        }
+        assert!(knot_flows.windows(2).all(|pair| pair[1] > pair[0]));
+        // Tiny cold-state lattice forcing loses precision to population subtraction.
+        // Compare the physical inverse-viscosity ratio within the same profile band.
+        assert!(((knot_flows[3] / knot_flows[0]) / (223.0 / 1.1) - 1.0).abs() < 0.02);
+        for (axis, wrong) in [
+            ("temperature", 273.14),
+            ("temperature", 473.16),
+            ("phase-liquid", 0.0),
+            ("source-pressure-known", 1.0),
+            ("source-formulation-shell-s2-2011", 0.0),
+            ("aged-oil", 1.0),
+        ] {
+            assert!(
+                resolve_liquid_state_from_kinematic(
+                    card,
+                    &point(claim, &[(axis, wrong)]),
+                    SingleClaimOnly
+                )
+                .is_err(),
+                "must refuse {axis}={wrong}"
+            );
+        }
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/shell-heat-transfer-oil-s2.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(
+            discovery.exit_code,
+            fs_cli::exit::SUCCESS,
+            "{}",
+            discovery.stderr
+        );
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+    }
+
+    /// G0/G3: retain the named PE300 source observations and their unresolved
+    /// test conditions through compiler, material-card storage and replay.
+    /// This is not a thermal, constitutive, or product qualification model.
+    #[test]
+    fn g0_g3_sourced_ensinger_tecafine_pe300_natural_2017_observations() {
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_qty::QuantitySpec;
+
+        let (pack, _) = compile("ensinger-tecafine-pe300-natural-2017");
+        assert_eq!(pack.claims().claim_count(), 4);
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "PE-HD; Tecafine PE300 natural".into(),
+                phase: "solid polymer".into(),
+                process: "Ensinger 2017 source observations; test conditions unresolved".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let database = fixture_dir().join("ensinger-tecafine-pe300-natural-2017.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let claims = loaded.card().claims();
+        let axes = [
+            ("source-grade-tecafine-pe300-natural-2017", 1.0),
+            ("source-test-temperature-known", 0.0),
+            ("source-processing-condition-known", 0.0),
+            ("source-test-rate-known", 0.0),
+        ];
+        for (name, expected, dims) in [
+            ("density", 960.0, Dims([-3, 1, 0, 0, 0, 0])),
+            ("tensile-modulus", 1.1e9, Dims([-1, 1, -2, 0, 0, 0])),
+            ("tensile-yield-strength", 23.0e6, Dims([-1, 1, -2, 0, 0, 0])),
+            ("tensile-yield-strain", 0.09, Dims::NONE),
+        ] {
+            let available = claims.claims_for(name);
+            assert_eq!(available.len(), 1, "one source observation for {name}");
+            let (_, claim) = available[0];
+            assert_eq!(claim.key.dims(), dims, "{name} dimensions");
+            assert!(
+                claim.validity.bound("temperature").is_none(),
+                "{name} must not manufacture a source temperature"
+            );
+            for (axis, value) in axes {
+                assert_eq!(claim.validity.bound(axis), Some((value, value)));
+                assert_eq!(
+                    claim.validity.axis_quantities().get(axis),
+                    Some(&QuantitySpec::dimensional(Dims::NONE)),
+                    "{name} {axis} must remain a typed dimensionless source condition"
+                );
+            }
+            let answer = claims
+                .query_typed(
+                    &claim.key,
+                    &point(claim, &[]),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            close(answer.evidence.value.value, expected);
+            claims.verify_receipt(&answer.receipt).unwrap();
+        }
+        let density = claims.claims_for("density")[0].1;
+        for (axis, wrong) in [
+            ("source-grade-tecafine-pe300-natural-2017", 0.0),
+            ("source-test-temperature-known", 1.0),
+        ] {
+            assert!(
+                claims
+                    .query_typed(
+                        &density.key,
+                        &point(density, &[(axis, wrong)]),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .is_err(),
+                "must refuse {axis}={wrong}"
+            );
+        }
+        for absent in [
+            "specific-heat-capacity",
+            "thermal-conductivity",
+            "young-modulus",
+            "specific_heat_capacity",
+            "thermal_conductivity",
+            "young_modulus",
+        ] {
+            assert!(
+                claims.claims_for(absent).is_empty(),
+                "source-observed tensile data must not manufacture {absent}"
+            );
+        }
+        println!(
+            "HDPE Ensinger 2017 AA: 4 source facts compiled and stored/reopened; rho=960 kg/m3, tensile modulus=1100 MPa, yield=23 MPa, yield strain=0.09; wrong-grade and asserted-known-temperature queries refused; no thermal or isotropic elastic profile"
+        );
+    }
 }
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);

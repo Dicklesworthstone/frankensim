@@ -36,12 +36,12 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_matdb::{MaterialCard, SelectionPolicy};
+use fs_matdb::{ClaimSelection, MaterialCard, PropertyValue, QueryPoint, SelectionPolicy};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 
 use crate::ConductionError;
 use crate::material::ConductivityTable;
-use crate::radiation::{STEFAN_BOLTZMANN_W_M2_K4, SurfaceEmissivity};
+use crate::radiation::{STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity};
 
 /// The admitted Biot ceiling for lumped treatment.
 ///
@@ -114,7 +114,9 @@ impl LumpedThermalTransport {
     /// Resolve conductivity and hemispherical-total emissivity from one card.
     ///
     /// Both properties are queried at every strictly increasing temperature
-    /// in `grid_k`. All receipts remain load-bearing. The grid must cover the
+    /// in `grid_k`, augmented with every source curve knot in that span.
+    /// Each property must have one continuously supported claim throughout
+    /// the span. All receipts remain load-bearing. The grid must cover the
     /// entire phase curve later attached to the body.
     pub fn from_material_card(
         card: &MaterialCard,
@@ -131,6 +133,66 @@ impl LumpedThermalTransport {
                 ),
             ));
         }
+        if grid_k.len() < 2
+            || grid_k.iter().any(|t| !t.is_finite() || *t <= 0.0)
+            || grid_k.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(lumped_error(
+                "card-backed thermal transport",
+                "temperature grid requires at least two strictly increasing positive finite kelvin values".to_owned(),
+            ));
+        }
+        let lower = QueryPoint::new()
+            .with("T", grid_k[0])
+            .map_err(|error| lumped_error("card-backed thermal transport", format!("{error:?}")))?;
+        let upper = QueryPoint::new()
+            .with("T", grid_k[grid_k.len() - 1])
+            .map_err(|error| lumped_error("card-backed thermal transport", format!("{error:?}")))?;
+        let mut supported_grid = Vec::new();
+        supported_grid
+            .try_reserve_exact(MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES)
+            .map_err(|_| {
+                lumped_error(
+                    "card-backed thermal transport",
+                    "grid capacity exceeded".to_owned(),
+                )
+            })?;
+        supported_grid.extend_from_slice(grid_k);
+        for property in [conductivity_property, SURFACE_EMISSIVITY_PROPERTY] {
+            let support = card
+                .claims()
+                .query_envelope(property, &lower, &upper, ClaimSelection::Policy(policy))
+                .map_err(|error| {
+                    lumped_error(
+                        "card-backed thermal transport",
+                        format!("{property} lacks continuous source support: {error:?}"),
+                    )
+                })?;
+            let claim = card
+                .claims()
+                .claim(support.lower.receipt.selected)
+                .expect("envelope selected an existing immutable claim");
+            if let PropertyValue::Curve { knots, .. } = &claim.value {
+                // Preserve every linear piece and its extrema; resampling only
+                // caller endpoints can change fluxes and understate the Biot gate.
+                for &(temperature, _) in knots {
+                    if (grid_k[0]..=grid_k[grid_k.len() - 1]).contains(&temperature)
+                        && let Err(index) =
+                            supported_grid.binary_search_by(|t| t.total_cmp(&temperature))
+                    {
+                        if supported_grid.len() == MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES {
+                            return Err(lumped_error(
+                                "card-backed thermal transport",
+                                "source-complete temperature grid exceeds hard sample maximum"
+                                    .to_owned(),
+                            ));
+                        }
+                        supported_grid.insert(index, temperature);
+                    }
+                }
+            }
+        }
+        let grid_k = supported_grid.as_slice();
         let conductivity =
             ConductivityTable::from_claims(card.claims(), conductivity_property, grid_k, policy)?;
         let mut emissivity = Vec::new();

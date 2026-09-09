@@ -111,6 +111,12 @@ fn phase_curve_for(material_card_identity: ContentHash) -> EquilibriumEnthalpyPh
 }
 
 fn thermal_material_card() -> MaterialCard {
+    thermal_material_card_with_curves(None)
+}
+
+fn thermal_material_card_with_curves(
+    curve: Option<(f64, f64, InterpolationPolicy)>,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         ("thermal_conductivity", CONDUCTIVITY_DIMS, 35.0),
@@ -119,10 +125,29 @@ fn thermal_material_card() -> MaterialCard {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
+                value: match curve {
+                    None => PropertyValue::Scalar { value, dims },
+                    Some((k, epsilon, _)) => PropertyValue::Curve {
+                        abscissa: "T".to_owned(),
+                        abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                        knots: vec![
+                            (300.0, value),
+                            (
+                                500.0,
+                                if name == "thermal_conductivity" {
+                                    k
+                                } else {
+                                    epsilon
+                                },
+                            ),
+                            (800.0, value),
+                        ],
+                        dims,
+                    },
+                },
                 validity: ValidityDomain::unconstrained().with("T", 300.0, 800.0),
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                interpolation: curve.map_or(InterpolationPolicy::ConstantWithinValidity, |c| c.2),
                 observations: Vec::new(),
                 provenance: Provenance {
                     source: format!("synthetic card-backed {name}"),
@@ -710,6 +735,88 @@ fn g1_hot_environment_changes_phase_via_convection_and_radiation() {
             .all(|sample| sample.convection_into_body_w > 0.0
                 && sample.radiation_into_body_w > 0.0)
     );
+}
+
+#[test]
+fn g3_transport_preserves_source_extrema_independently_of_sampling_grid() {
+    let card =
+        thermal_material_card_with_curves(Some((1.0, 0.9, InterpolationPolicy::LinearInside)));
+    let resolve = |grid: &[f64]| {
+        LumpedThermalTransport::from_material_card(
+            &card,
+            "thermal_conductivity",
+            grid,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .expect("continuously supported transport")
+    };
+    let coarse = resolve(&[300.0, 800.0]);
+    let explicit = resolve(&[300.0, 500.0, 800.0]);
+    assert_eq!(
+        coarse, explicit,
+        "caller grid cannot erase source knots or receipts"
+    );
+    let curve = phase_curve_for(card.content_hash());
+    let body = LumpedEnthalpyBody::try_new_with_transport(
+        "source extrema",
+        0.1,
+        0.02,
+        20.0,
+        0.001,
+        coarse,
+        &curve,
+    )
+    .expect("body");
+    let expected = (20.0
+        + 4.0 * 0.9 * fs_conduction::radiation::STEFAN_BOLTZMANN_W_M2_K4 * 800.0_f64.powi(3))
+        * 0.001;
+    assert!((body.maximum_biot(300.0) - expected).abs() < 1e-14);
+    assert!(expected > LUMPED_BIOT_CEILING);
+    with_cx(|cx| {
+        assert!(
+            solve_lumped_enthalpy(cx, &body, BiotGate::corpus_default(), enthalpy_config())
+                .is_err(),
+            "interior extrema must prevent false lumped admission"
+        );
+    });
+}
+
+#[test]
+fn g0_transport_refuses_discrete_support_and_hidden_nonphysical_knots() {
+    for curve in [
+        (35.0, 0.5, InterpolationPolicy::TabulatedOnly),
+        (0.0, 0.5, InterpolationPolicy::LinearInside),
+        (35.0, 1.1, InterpolationPolicy::LinearInside),
+    ] {
+        let card = thermal_material_card_with_curves(Some(curve));
+        assert!(
+            LumpedThermalTransport::from_material_card(
+                &card,
+                "thermal_conductivity",
+                &[300.0, 800.0],
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .is_err(),
+            "unsupported transport {curve:?}"
+        );
+    }
+    let card = thermal_material_card();
+    for grid in [
+        vec![],
+        vec![300.0],
+        vec![800.0, 300.0],
+        vec![300.0, f64::NAN],
+    ] {
+        assert!(
+            LumpedThermalTransport::from_material_card(
+                &card,
+                "thermal_conductivity",
+                &grid,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

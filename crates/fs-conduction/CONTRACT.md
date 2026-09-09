@@ -852,8 +852,11 @@ authority.
   branches. `LumpedThermalTransport` may retain temperature-sampled
   conductivity and emissivity receipts from the exact same material card as
   that phase curve; each accepted state evaluates those properties at its own
-  temperature, while the Biot gate conservatively uses the sampled minimum
-  conductivity and maximum emissivity. Declared constants remain available
+  temperature. Each property requires one continuously supported source claim
+  throughout the requested temperature span. Every source curve knot in that
+  span is retained, so coarse caller grids cannot erase interior extrema or
+  bridge tabulated-only data. The Biot gate conservatively uses the resulting
+  minimum conductivity and maximum emissivity. Declared constants remain available
   but explicitly carry no material provenance. This is an isothermal reduced
   rung only: it refuses when the
   convection-plus-radiation Biot gate fails or when a step leaves the supplied
