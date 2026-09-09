@@ -2054,6 +2054,133 @@ fn string_environment(convection: f64, emissivity: f64) -> ThermalStringEnvironm
 }
 
 #[test]
+fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptance() {
+    use fs_conduction::interface::{
+        ResistanceUncertainty, SeriesThermalResistance, ThermalResistanceTerm,
+    };
+    use fs_conduction::lumped::{
+        LumpedEnthalpyBody, LumpedFiniteThermalContact, LumpedThermalTransport,
+    };
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mass = mechanical.specimen().mass_kg();
+        let support_curve = curve.clone();
+        let support = LumpedEnthalpyBody::try_new(
+            "finite support",
+            2.0 * mass,
+            0.01,
+            0.0,
+            0.0,
+            0.001,
+            100.0,
+            &support_curve,
+        )
+        .unwrap();
+        let mut support_state = support_curve.state_at_specific_enthalpy(0.02).unwrap();
+        let support_initial = support_state;
+        let resistance = SeriesThermalResistance::new(vec![
+            ThermalResistanceTerm::declared(
+                "support path",
+                10_000.0,
+                ResistanceUncertainty::Unstated,
+                "synthetic finite support path",
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let mut insulated = runtime.clone();
+        let make_contact = |state| LumpedFiniteThermalContact {
+            support: &support,
+            support_state: state,
+            resistance: &resistance,
+            specimen_transport: LumpedThermalTransport::try_declared(100.0, 0.0).unwrap(),
+            energy_tolerance_j: 1e-14,
+        };
+        let mut transferred = 0.0;
+        let mut pressure_difference = 0.0;
+        for epoch in 0..80 {
+            let adapter = make_contact(support_state);
+            let frame = runtime
+                .step_with_thermal_transport(cx, epoch, &[0.0], |input| adapter.advance(cx, input))
+                .unwrap();
+            let control = insulated.step(cx, epoch, &[0.0], 0.0).unwrap();
+            assert_eq!(
+                frame.coupled.external_heat_j,
+                -frame.transport.contact.heat_a_to_b_j
+            );
+            assert_eq!(
+                frame.transport.internal_heat_j,
+                frame.coupled.vibration.dissipation.material_heat_j
+            );
+            transferred += frame.transport.contact.heat_a_to_b_j;
+            // Publication follows successful coupled material/mechanical acceptance.
+            support_state = frame.transport.contact.state_b;
+            pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
+                - control.vibration.acoustic.observer_pressure_pa)
+                .abs();
+        }
+        assert!(support_state.temperature_k() < support_initial.temperature_k());
+        assert!(runtime.thermal().temperature_k() > insulated.thermal().temperature_k() + 1.0);
+        assert!(
+            runtime.mechanical().modes()[0].damping_ratio
+                > insulated.mechanical().modes()[0].damping_ratio
+        );
+        assert!(pressure_difference > 1e-9);
+        assert!(
+            (2.0 * mass
+                * (support_state.specific_enthalpy_j_kg()
+                    - support_initial.specific_enthalpy_j_kg())
+                - transferred)
+                .abs()
+                < 1e-12
+        );
+
+        let before = runtime.clone();
+        let adapter = make_contact(support_state);
+        let mut solved = false;
+        assert!(
+            runtime
+                .step_with_thermal_transport(cx, 80, &[0.0], |input| {
+                    let mut proposal = adapter.advance(cx, input)?;
+                    solved = true;
+                    let mut knots = input.curve.knots().to_vec();
+                    knots.last_mut().unwrap().specific_enthalpy_j_kg += 0.1;
+                    let foreign = fs_material::phase::EquilibriumEnthalpyPhaseCurve::try_new(
+                        input.curve.material_card_identity(),
+                        knots,
+                    )
+                    .unwrap();
+                    proposal.state = foreign
+                        .state_at_specific_enthalpy(proposal.state.specific_enthalpy_j_kg())
+                        .unwrap();
+                    Ok::<_, fs_conduction::ConductionError>(proposal)
+                })
+                .is_err()
+        );
+        assert!(solved);
+        assert_eq!(runtime.thermal(), before.thermal());
+        assert_eq!(runtime.mechanical().states(), before.mechanical().states());
+        assert_eq!(
+            runtime.mechanical().accepted_samples(),
+            before.mechanical().accepted_samples()
+        );
+        assert_eq!(support_state, adapter.support_state);
+        let mut retry = before;
+        assert_eq!(
+            runtime
+                .step_with_thermal_transport(cx, 80, &[0.0], |input| adapter.advance(cx, input))
+                .unwrap(),
+            retry
+                .step_with_thermal_transport(cx, 80, &[0.0], |input| adapter.advance(cx, input))
+                .unwrap()
+        );
+    });
+}
+
+#[test]
 fn g1_ambient_string_convection_matches_analytical_heating_cooling_and_refines() {
     with_string_cx(|cx, _| {
         // Independently integrated lumped Newton cooling: T = Ta + (T0-Ta) exp(-hAt/mc).
