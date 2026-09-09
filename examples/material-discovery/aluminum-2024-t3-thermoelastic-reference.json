@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "density", "unit": "kg/m3", "kind": "dimensional"},
+    {"name": "young_modulus", "unit": "Pa", "kind": "dimensional"},
+    {"name": "poisson_ratio", "unit": "1", "kind": "dimensional"},
+    {"name": "specific_heat_capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "thermal_conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
+    {"name": "linear_thermal_expansion_coefficient", "unit": "K-1", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "T", "kind": "absolute-temperature", "lower": "300 K", "upper": "300 K"}
+    ]
+  },
+  "selection": "single-claim-only"
+}

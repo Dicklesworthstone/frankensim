@@ -1,0 +1,30 @@
+frankensim.matdb-source.v1
+observation	compatibility	316 stainless steel isotropic engineering reference at 20 C	Explicit cross-source assembly for small-strain elastic and thermoelastic calculations	Metalcor identifies 1.4401 / AISI 316 / UNS S31600 and supplies density at 20 C; Austral Wright supplies typical annealed 316 Poisson ratio at 20 C; NIST identifies 316 / UNS S31600 and supplies bulk elastic, heat-capacity, conductivity and length equations spanning this temperature. These are nominal bulk austenitic-grade inputs at a common temperature, not a common coupon, certified product form or jointly measured distribution. Only the Poisson source explicitly identifies annealed condition; the NIST fit and Metalcor density do not establish heat treatment. Using these together as an isotropic grade-level engineering approximation is explicit, not qualification of cold-worked, welded, cast, sensitized, 316L or 316H stock. Pressure, texture, loading history and covariance remain unknown. Validity is the single reference state, not a heating trajectory or pressure-independent claim.
+observation	density-metalcor	Metalcor 1.4401 / AISI 316 / UNS S31600	Datasheet page 1 Physical Properties 20 C, density row	Printed density 8 g/cm3 converted exactly to 8000 kg/m3. Source does not specify a density specimen, uncertainty, heat treatment or pressure. Supplier typical engineering fact, not an accuracy guarantee. See compatibility observation for the cross-source assumption.
+observation	nu-austral-wright	Austral Wright Metals Grade 316	Product Data Sheet, Physical Properties (Typical, annealed), Poisson ratio at 20 C	Printed Poisson ratio 0.30 at 20 C is used as a dimensionless isotropic engineering input; no uncertainty, pressure, common NIST coupon or product-form matching is inferred. The page discusses 316 variants; this reference selects ordinary 316 / UNS S31600 and does not qualify 316L or 316H. See compatibility observation.
+observation	nist-point	NIST 316 Stainless / UNS S31600 equations evaluated at 293.15 K	NIST cryogenic material-property page, high-temperature Young modulus and specific heat branches, conductivity and relative-length equations	For k and Cp, log10(y)=sum(a_i*log10(T)^i). k coefficients a..i=(-1.4087,1.3982,0.2543,-0.6260,0.2334,0.4256,-0.4658,0.1650,-0.0199); Cp high branch=(-1879.464,3643.198,76.70125,-6176.028,7437.6247,-4305.7217,1382.4627,-237.22704,17.05262). E/GPa=207.9488+0.07394241*T-0.0009627200*T^2+0.000002845560*T^3-0.0000000032408*T^4. This state lies inside the published data and equation ranges: k and Cp 4..300 K data (Cp high equation 50..300 K), E high data 48..294 K/equation 50..294 K. Printed relative curve-fit errors are 2 percent for k/Cp and 1 percent for E, not statistical confidence or joint uncertainty. These point values are direct equation evaluations using 65-digit decimal arithmetic, not interpolated knots or new measurements. Source product form, heat treatment and pressure are unspecified; see compatibility observation.
+observation	nist-instantaneous-alpha	Derivative of NIST 316 relative-length fit at 293.15 K	Derived instantaneous alpha=(dL/dT)/L from the published strain relative to L293, not mean expansion	Define epsilon(T)=1e-5*(-295.54-0.39811*T+0.0092683*T^2-0.000020261*T^3+0.000000017127*T^4)=(L(T)-L293)/L293. Differentiate analytically and use alpha=epsilon_prime/(1+epsilon); division by current relative length is required. At 293.15 K epsilon=0.0000030538065389264904375. The source reference is 293 K, not 293.15 K, and its small polynomial residual at 293 K is retained rather than forcibly renormalized. The source's 5 percent length-fit error does not bound derivative error; alpha uncertainty remains Unstated. This is a fit-derived instantaneous coefficient at one temperature, not a measured or interval-mean CTE. No extrapolation or thermal-path integration is authorized.
+scalar	rho	density-metalcor,compatibility	density	8000	kg/m3	constant
+uncertainty	rho	unstated	-	-	-	-
+validity	rho	T	293.15	293.15	K
+validity	rho	source-pressure-known	0	0	1
+scalar	E	nist-point,compatibility	young_modulus	194644525149.347587945	Pa	constant
+uncertainty	E	unstated	-	-	-	-
+validity	E	T	293.15	293.15	K
+validity	E	source-pressure-known	0	0	1
+scalar	nu	nu-austral-wright,compatibility	poisson_ratio	0.30	1	constant
+uncertainty	nu	unstated	-	-	-	-
+validity	nu	T	293.15	293.15	K
+validity	nu	source-pressure-known	0	0	1
+scalar	cp	nist-point,compatibility	specific_heat_capacity	485.417304218698276595748801534478	J/kg/K	constant
+uncertainty	cp	unstated	-	-	-	-
+validity	cp	T	293.15	293.15	K
+validity	cp	source-pressure-known	0	0	1
+scalar	k	nist-point,compatibility	thermal_conductivity	15.1273171301270323042327469275576	W/m/K	constant
+uncertainty	k	unstated	-	-	-	-
+validity	k	T	293.15	293.15	K
+validity	k	source-pressure-known	0	0	1
+scalar	alpha	nist-instantaneous-alpha,compatibility	linear_thermal_expansion_coefficient	0.0000153826717629772290602532590753322	K-1	constant
+uncertainty	alpha	unstated	-	-	-	-
+validity	alpha	T	293.15	293.15	K
+validity	alpha	source-pressure-known	0	0	1

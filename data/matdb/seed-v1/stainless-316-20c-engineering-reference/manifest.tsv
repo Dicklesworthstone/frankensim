@@ -1,0 +1,9 @@
+frankensim.matdb-manifest.v3
+pack_id	stainless-316-20c-engineering-reference
+redistribution	permitted	Only two attributed supplier numerical facts and derived NIST equation evaluations are distributed, not source documents, tables or prose. Supplier documents retain their copyrights; no document redistribution license is asserted. NIST unmarked public information may be copied with attribution.
+citation	NIST, Material Properties: 316 Stainless (UNS S31600), https://trc.nist.gov/cryogenics/materials/316Stainless/316Stainless_rev.htm ; Metalcor, 1.4401 / AISI 316 / UNS S31600 datasheet, physical properties at 20 C, https://www.metalcor.de/en/datenblatt-pdf/11/ ; Austral Wright Metals, Product Data Sheet - 316 Stainless Steel, typical annealed physical properties, https://www.australwright.com.au/technical-data/alloys/stainless-steel/stainless-steel-grade-316/ ; accessed 2026-09-09
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	thermal_conductivity	thermal_conductivity	thermal-conductivity
+axis	T	T	absolute-temperature
+axis	source-pressure-known	source-pressure-known	dimensional

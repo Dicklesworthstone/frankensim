@@ -31,6 +31,28 @@ temperature axes. Names such as `specific-heat-capacity` and
 is a source bundle with its own conditions; it is not automatically a complete
 material card or a qualified simulation.
 
+`stainless-316-20c-engineering-reference` supplies a complete six-property
+isotropic thermoelastic input set at exactly 293.15 K: density, Young modulus,
+Poisson ratio, specific heat, thermal conductivity and instantaneous expansion.
+It explicitly joins Metalcor's 316 density at 20 °C and Austral Wright's typical
+annealed 316 Poisson ratio at 20 °C with direct NIST 316 equation evaluations
+at the same temperature. This is a nominal bulk austenitic-grade engineering
+approximation; only the Poisson source specifies annealing. It does not establish
+a common specimen, product form, heat treatment, pressure or joint uncertainty.
+The manifest distributes attributed numerical facts and derived values; it
+does not license or redistribute the supplier documents. Existing NIST curve
+packs remain separate and retain their original coverage.
+
+The NIST expansion input is `epsilon'(T)/(1+epsilon(T))`, where epsilon is
+relative to the source's **293 K** length. It is an instantaneous coefficient,
+not interval-mean expansion; the 293 K fit residual is retained. The complete
+profile is valid only at 293.15 K with `source-pressure-known=0` (unknown),
+not over the full individual NIST curve ranges. Together with the existing
+2024-T3 NASA profile at 300 K, it supports two distinct reference-state plate
+calculations through the existing material resolver. The temperatures differ,
+so comparing those calculations is not a controlled same-temperature material
+substitution, and neither point set authorizes a finite heating trajectory.
+
 `air-dry-ussa1976` supplies five parameters for the existing calorically perfect
 gas model: molar mass, heat-capacity ratio, reference viscosity, its absolute
 reference temperature, and the Sutherland temperature interval. The static
