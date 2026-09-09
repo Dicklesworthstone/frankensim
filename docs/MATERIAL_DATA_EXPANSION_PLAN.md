@@ -4,7 +4,18 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 171 source bundles, of which 153 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 153 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 173 source bundles, of which 155 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 155 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+
+P01 has a first named HDPE acquisition in `ensinger-tecafine-pe300-natural-2017`:
+four producer comparison facts for density, tensile modulus, yield strength and
+yield strain. The source's internal 2017 AA revision is preserved. Unknown test
+temperature, process details and rate remain explicit; CLTE lacks its interval
+and convention and is observation-only. These records do not complete P01 or
+P11a. The missing positive delivery is a condition-compatible elastic or thermal
+profile connected to its actual consumer; service-temperature limits cannot fill
+that gap. A second reviewed producer candidate, INEOS HD6070FA cast film, states
+density at 23 C but omits temperatures for Cp and conductivity; it is not merged
+with Ensinger stock shapes to manufacture completeness.
 
 Priorities are engineering judgment based on breadth of applications, FrankenSim's existing consumers, the size of the current gap, and likely acquisition effort. They are not a measured global consumption ranking. **A** means the next delivery tranche; **B** means the following expansion; **C** means a targeted application should pull it forward. Effort estimates concern the first useful, bounded dataset, not full physical qualification.
 
@@ -70,6 +81,21 @@ Neighboring phase-table rows cannot silently supply those missing claims. This
 delivery does not qualify mass/volume conversion, other concentrations, evolving
 transport coefficients, boiling/freezing or experimental accuracy.
 
+F06 delivers a bounded mineral-oil engineering profile from Shell's May 2011
+Heat Transfer Oil S2 data sheet: density, heat capacity, conductivity and
+kinematic viscosity at four common temperatures over 0–200 °C. An explicit
+kinematic adapter derives dynamic viscosity using density at the same resolved
+point and preserves the original four receipts. The twelve-case source runner
+passed remotely on 2026-09-09 UTC, including real compilation, persistent
+store/reopen, discovery, gated heat and LBM channel flow at four knots and one
+interior interpolated state. Independent formulas, replay and domain/basis
+refusals pass; three liquid unit tests also pass. The source's printed Prandtl
+numbers disagree with its other tables, and that unresolved inconsistency is
+retained explicitly. Sparse interpolation and derived transport values are
+engineering approximations, not measured validation. Pressure dependence,
+aging, friction, hydraulic-grade substitution and experimental qualification
+remain outside this delivery.
+
 ## Materials to add or complete
 
 | Priority / effort | Family and first targets | What exists now | Most valuable missing coverage and resulting use |
@@ -86,7 +112,7 @@ transport coefficients, boiling/freezing or experimental accuracy.
 | B / medium | **MDF, particleboard, LVL, glulam and CLT** | No dedicated grade/layup bundles for these products. | Start with MDF or particleboard for furniture/panels, then engineered structural products. Preserve adhesive, density, layer axes, layup and moisture; do not relabel clear-wood data as a finished panel. |
 | B / medium | **EPS/XPS, mineral wool and flexible polyurethane foam** | Glass-fiber, cellulose, rigid urethane and other CFAST insulation inputs; some PVC foam values. | Extend temperature/moisture/density dependence for actual insulation products, then compression/viscoelastic data for cushioning. Open/closed cells, fill gas and aging matter. Thermal insulation data do not establish porous acoustic absorption. |
 | B / medium–high | **Epoxy adhesives, silicone sealants, FR-4 PCB laminate, alumina and silicon** | A specialized epoxy/insulation source and magnet-wire data; no general PCB laminate, silicon or alumina bundles. | Choose one cured adhesive and one exact FR-4 construction first. Add anisotropic thermal expansion/conductivity, dielectric properties versus frequency, and mechanics. Adhesive joints need bondline and interface data; an epoxy resin card cannot stand in for glass-fiber laminate. |
-| B / medium | **Hydraulic/mineral oils and water–glycol coolants** | Several specific oils/greases and one inhibited water/ethylene-glycol formulation. | Complete one ordinary hydraulic-oil grade and selected coolant concentrations: viscosity versus temperature, density, heat capacity and conductivity. Keep additive/formulation and mass-versus-volume concentration bases explicit. |
+| B / medium | **Hydraulic/mineral oils and water–glycol coolants** | Shell Heat Transfer Oil S2 now has four typical-design curves at 0–200 °C, with its printed Prandtl inconsistency retained. Both Dow glycol families have four curves at 40–60 °C and exactly 50% glycol by volume. | Extend to a named hydraulic-oil grade and additional coolant concentrations. Preserve sparse-interpolation limits, pressure/additive/aging context, and missing coolant phase endpoints and concentration-reference temperatures. Heat-transfer mineral oil does not qualify a hydraulic grade. |
 | B–C / high | **Asphalt/bitumen, sand, gravel, clay/soil, granite and limestone** | No dedicated bulk bundles for these proposed classes. | Start with a selected pavement mix or rock application, then soils with density/porosity/saturation and stress history. A generic “soil” modulus would be misleading; these need stateful granular/porous constitutive support as well as data. |
 | B–C / medium–high | **GFRP and CFRP laminates** | No dedicated general engineering laminate bundles; isolated fiber-filled interface materials are not substitutes. | Name fiber, resin, fraction, cure and layup. Supply orthotropic stiffness and thermal response, then failure and interlaminar properties for the requested analysis. Reuse MR10's tensor/frame machinery. |
 | B–C / medium | **Paper/cardboard, cotton, polyester textiles, felt and leather** | Specialized cellulose insulation, Nomex and biological source records, not complete everyday sheet/fabric bundles. | Packaging and soft objects need direction, thickness or areal density, moisture, bending response and loss. Woven textile effective behavior differs from a bulk fiber's modulus. |
