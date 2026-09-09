@@ -162,16 +162,19 @@ pub struct ResolvedGasState {
 }
 
 impl ResolvedGasState {
+    /// Derived state accepted by the existing gas and acoustic consumers.
     #[must_use]
     pub const fn state(&self) -> &GasState {
         &self.state
     }
 
+    /// Selected parameter values and their original material-card receipts.
     #[must_use]
     pub const fn parameters(&self) -> &crate::state_point::ResolvedMaterialStatePoint {
         &self.parameters
     }
 
+    /// Explicit constitutive choice, separate from the parameter-bundle identity.
     #[must_use]
     pub const fn conductivity_model(&self) -> ConductivityModel {
         self.conductivity

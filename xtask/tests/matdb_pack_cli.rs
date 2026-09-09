@@ -335,6 +335,474 @@ mod common_material_acquisition {
         );
     }
 
+    /// G1/G3: an exact dry-air source condition survives compilation and
+    /// persistent storage to drive the actual acoustic cylinder-loss law.
+    /// This checks the declared ideal-gas/Sutherland/USSA model, not ambient
+    /// measurements, weather, humidity physics, or an experimental loss test.
+    #[test]
+    fn g1_g3_sourced_dry_air_reaches_acoustic_loss() {
+        use fs_couple::air_path::oscillating_cylinder_air_resistance_per_length;
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::gas::{ConductivityModel, resolve_sutherland_gas_state};
+        use fs_material::state_point::MaterialPropertySelection;
+        use fs_qty::QuantitySpec;
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+        let (pack, pack_path) = compile("air-dry-ussa1976");
+        assert_eq!(pack.pack_id(), "air-dry-ussa1976-ambient-model");
+        let card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "dry air; USSA-1976 reference composition".into(),
+                phase: "gas".into(),
+                process: "USSA-1976 dry-air constants and transport fits".into(),
+                revision: 0,
+            },
+            pack.clone(),
+        )
+        .unwrap();
+        let database = fixture_dir().join("dry-air-ussa1976.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(card.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) = store.load_catalog_pack(card.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, card);
+        let claims = loaded.card().claims();
+        let parameters = [
+            "molar_mass",
+            "heat_capacity_ratio",
+            "sutherland_reference_viscosity",
+            "sutherland_reference_temperature",
+            "sutherland_temperature",
+        ];
+        let pins: Vec<_> = parameters
+            .iter()
+            .map(|name| {
+                let available = claims.claims_for(name);
+                assert_eq!(
+                    available.len(),
+                    1,
+                    "{name} must have one exact source claim"
+                );
+                available[0].0
+            })
+            .collect();
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/dry-air.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            pack_path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(
+            discovery.exit_code,
+            fs_cli::exit::SUCCESS,
+            "{}",
+            discovery.stderr
+        );
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+        println!("dry-air units rho=kg/m3 c=m/s mu=Pa*s k=W/m/K Cp=J/kg/K R_loss=N*s/m2");
+
+        let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let pressure =
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+        let dimensionless = QuantitySpec::dimensional(Dims::NONE);
+        let point = |temperature_k: f64, pressure_pa: f64| {
+            QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, temperature_k)
+                .unwrap()
+                .with_quantity("pressure", pressure, pressure_pa)
+                .unwrap()
+                .with_quantity("relative-humidity", dimensionless, 0.0)
+                .unwrap()
+                .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+                .unwrap()
+        };
+        let resolve = |at: &QueryPoint, selection| {
+            resolve_sutherland_gas_state(
+                loaded.card(),
+                at,
+                ConductivityModel::Ussa1976AirFit,
+                selection,
+            )
+        };
+        let relative_close = |actual: f64, expected: f64| {
+            assert!(
+                (actual - expected).abs() <= 1.0e-10 * expected.abs(),
+                "actual {actual}, source-derived expected {expected}, relative_tolerance=1e-10"
+            );
+        };
+        let source_observations = claims.observation_ids().collect::<Vec<_>>();
+        let reference_temperature = 273.15_f64;
+        let sutherland_temperature = 110.4_f64;
+        let reference_viscosity = 1.458e-6 * reference_temperature.powf(1.5)
+            / (reference_temperature + sutherland_temperature);
+        let expected = |temperature_k: f64, pressure_pa: f64| {
+            let molar_mass = 0.028_964_4_f64;
+            let gamma = 1.4_f64;
+            let r = 8.314_32_f64 / molar_mass;
+            let beta = reference_viscosity * (reference_temperature + sutherland_temperature)
+                / reference_temperature.powf(1.5);
+            let temperature_32 = temperature_k.powf(1.5);
+            let density = pressure_pa / (r * temperature_k);
+            let sound_speed = (gamma * r * temperature_k).sqrt();
+            let viscosity = beta * temperature_32 / (temperature_k + sutherland_temperature);
+            let cp = gamma * r / (gamma - 1.0);
+            let conductivity = 2.646_38e-3 * temperature_32
+                / (temperature_k + 245.4 * 10.0_f64.powf(-12.0 / temperature_k));
+            (
+                density,
+                sound_speed,
+                viscosity,
+                cp,
+                conductivity,
+                viscosity * cp / conductivity,
+            )
+        };
+        let radius_m = 0.0005_f64;
+        let omega_rad_s = core::f64::consts::TAU * 220.0;
+        let mut resistance = Vec::new();
+        for (temperature_k, pressure_pa) in [
+            (273.15, 80_000.0),
+            (288.15, 101_325.0),
+            (293.15, 101_325.0),
+            (313.15, 110_000.0),
+        ] {
+            let at = point(temperature_k, pressure_pa);
+            let resolved = resolve(&at, MaterialPropertySelection::SingleClaimOnly).unwrap();
+            let replay = resolve(&at, MaterialPropertySelection::SingleClaimOnly).unwrap();
+            assert_eq!(resolved, replay, "deterministic gas replay at {at:?}");
+            assert_eq!(
+                resolved.conductivity_model(),
+                ConductivityModel::Ussa1976AirFit
+            );
+            assert_eq!(
+                resolved.parameters().query_point(),
+                replay.parameters().query_point()
+            );
+            assert_eq!(resolved.parameters().properties().len(), parameters.len());
+            for property in resolved.parameters().properties() {
+                claims.verify_receipt(&property.answer().receipt).unwrap();
+            }
+            let state = resolved.state();
+            let (rho, c, mu, cp, conductivity, prandtl) = expected(temperature_k, pressure_pa);
+            relative_close(state.density, rho);
+            relative_close(state.sound_speed, c);
+            relative_close(state.dynamic_viscosity, mu);
+            relative_close(state.specific_heat_cp, cp);
+            relative_close(state.thermal_conductivity, conductivity);
+            relative_close(state.prandtl, prandtl);
+            relative_close(state.characteristic_impedance, rho * c);
+            let cv = state.specific_heat_cp - state.specific_gas_constant;
+            relative_close(state.specific_heat_cp / cv, 1.4);
+            let actual_resistance =
+                oscillating_cylinder_air_resistance_per_length(radius_m, omega_rad_s, state)
+                    .unwrap();
+            let expected_resistance = core::f64::consts::TAU
+                * mu
+                * (1.0 + radius_m * (2.0 * rho * omega_rad_s / mu).sqrt());
+            relative_close(actual_resistance, expected_resistance);
+            assert_eq!(
+                actual_resistance.to_bits(),
+                oscillating_cylinder_air_resistance_per_length(
+                    radius_m,
+                    omega_rad_s,
+                    replay.state()
+                )
+                .unwrap()
+                .to_bits()
+            );
+            println!(
+                "dry-air source_artifact={} observations={:?} query={:?} T={temperature_k} K p={pressure_pa} Pa rho_expected={rho:.9} rho_actual={:.9} c_expected={c:.9} c_actual={:.9} mu_expected={mu:.12e} mu_actual={:.12e} k_expected={conductivity:.12e} k_actual={:.12e} Pr_expected={prandtl:.9} Pr_actual={:.9} resistance_expected={expected_resistance:.12e} resistance_actual={actual_resistance:.12e} relative_tolerance=1e-10 source_receipts={:?}",
+                pack.source_artifact(),
+                claims.observation_ids().collect::<Vec<_>>(),
+                resolved.parameters().query_point(),
+                state.density,
+                state.sound_speed,
+                state.dynamic_viscosity,
+                state.thermal_conductivity,
+                state.prandtl,
+                resolved
+                    .parameters()
+                    .properties()
+                    .iter()
+                    .map(|property| property.answer().receipt.selected)
+                    .collect::<Vec<_>>(),
+            );
+            resistance.push(actual_resistance);
+        }
+        assert!(
+            (resistance[1] - resistance[2]).abs() > 0.0,
+            "temperature changes air loss"
+        );
+        let low_pressure = resolve(
+            &point(288.15, 80_000.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let high_pressure = resolve(
+            &point(288.15, 110_000.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(
+            oscillating_cylinder_air_resistance_per_length(
+                radius_m,
+                omega_rad_s,
+                high_pressure.state()
+            )
+            .unwrap()
+                > oscillating_cylinder_air_resistance_per_length(
+                    radius_m,
+                    omega_rad_s,
+                    low_pressure.state()
+                )
+                .unwrap(),
+            "pressure changes the actual acoustic-loss result"
+        );
+        let sea_level = resolve(
+            &point(288.15, 101_325.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!((sea_level.state().density - 1.2250).abs() < 5.0e-5);
+        assert!((sea_level.state().sound_speed - 340.29).abs() < 5.0e-3);
+        assert!((sea_level.state().dynamic_viscosity - 1.7894e-5).abs() < 5.0e-9);
+        assert!(
+            (sea_level.state().thermal_conductivity - 0.025_325_884_264_263_953).abs() < 1.0e-14
+        );
+
+        let compile_synthetic = |suffix: &str, properties: String| {
+            let source_dir = workspace_path("data/matdb/seed-v1/air-dry-ussa1976");
+            let synthetic_dir = fixture_dir().join(format!("dry-air-{suffix}"));
+            fs::create_dir_all(&synthetic_dir).unwrap();
+            fs::copy(
+                source_dir.join("manifest.tsv"),
+                synthetic_dir.join("manifest.tsv"),
+            )
+            .unwrap();
+            fs::write(synthetic_dir.join("properties.tsv"), properties).unwrap();
+            let output = synthetic_dir.join("synthetic.fsmatpk");
+            let run = run_compiler(&synthetic_dir.join("manifest.tsv"), &output);
+            assert!(
+                run.status.success(),
+                "synthetic {suffix}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            let bytes = fs::read(output).unwrap();
+            let decoded = NormalizedPack::from_bytes(&bytes).unwrap();
+            NormalizedPack::from_bytes_verified(decoded.content_hash(), &bytes).unwrap()
+        };
+        let source_properties = fs::read_to_string(workspace_path(
+            "data/matdb/seed-v1/air-dry-ussa1976/properties.tsv",
+        ))
+        .unwrap();
+        let causal_properties = source_properties.replacen(
+            "0.000017160792662455268875",
+            "0.0000188768719287007957625",
+            1,
+        );
+        assert_ne!(causal_properties, source_properties);
+        let causal_pack = compile_synthetic("synthetic-mu-reference", causal_properties);
+        let causal_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "dry air; USSA-1976 reference composition".into(),
+                phase: "gas".into(),
+                process: "synthetic mu_ref causal control; not a source claim".into(),
+                revision: 0,
+            },
+            causal_pack,
+        )
+        .unwrap();
+        let causal_state = resolve_sutherland_gas_state(
+            causal_card.card(),
+            &point(288.15, 101_325.0),
+            ConductivityModel::Ussa1976AirFit,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let base_resistance = oscillating_cylinder_air_resistance_per_length(
+            radius_m,
+            omega_rad_s,
+            sea_level.state(),
+        )
+        .unwrap();
+        let causal_resistance = oscillating_cylinder_air_resistance_per_length(
+            radius_m,
+            omega_rad_s,
+            causal_state.state(),
+        )
+        .unwrap();
+        assert!(causal_state.state().dynamic_viscosity > sea_level.state().dynamic_viscosity);
+        assert!(causal_resistance > base_resistance);
+        println!(
+            "dry-air synthetic_control=mu_ref_changed source_claim=false baseline_resistance={base_resistance:.12e} changed_resistance={causal_resistance:.12e}"
+        );
+        let wrong_unit_properties =
+            source_properties.replacen("\tkg/mol\tconstant", "\t1\tconstant", 1);
+        assert_ne!(wrong_unit_properties, source_properties);
+        let wrong_unit_pack = compile_synthetic("wrong-molar-mass-unit", wrong_unit_properties);
+        let wrong_unit_card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "dry air; synthetic wrong molar-mass unit".into(),
+                phase: "gas".into(),
+                process: "synthetic unit refusal control; not a source claim".into(),
+                revision: 0,
+            },
+            wrong_unit_pack,
+        )
+        .unwrap();
+        assert!(
+            resolve_sutherland_gas_state(
+                wrong_unit_card.card(),
+                &point(288.15, 101_325.0),
+                ConductivityModel::Ussa1976AirFit,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            claims.observation_ids().collect::<Vec<_>>(),
+            source_observations
+        );
+
+        let pinned: Vec<_> = parameters
+            .iter()
+            .zip(&pins)
+            .map(|(name, id)| ((*name).to_owned(), *id))
+            .collect();
+        let pinned_state = resolve(
+            &point(288.15, 101_325.0),
+            MaterialPropertySelection::PinnedByProperty(pinned.clone()),
+        )
+        .unwrap();
+        assert_eq!(pinned_state.state(), sea_level.state());
+        assert_eq!(
+            pinned_state
+                .parameters()
+                .properties()
+                .iter()
+                .map(|property| property.answer().receipt.selected)
+                .collect::<Vec<_>>(),
+            sea_level
+                .parameters()
+                .properties()
+                .iter()
+                .map(|property| property.answer().receipt.selected)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            resolve(
+                &point(288.15, 101_325.0),
+                MaterialPropertySelection::PinnedByProperty(pinned[..4].to_vec())
+            )
+            .is_err()
+        );
+        let incomplete = QueryPoint::new()
+            .with_quantity("pressure", pressure, 101_325.0)
+            .unwrap()
+            .with_quantity("relative-humidity", dimensionless, 0.0)
+            .unwrap()
+            .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+            .unwrap();
+        assert!(resolve(&incomplete, MaterialPropertySelection::SingleClaimOnly).is_err());
+        let wrong_temperature = QueryPoint::new()
+            .with("temperature", 288.15)
+            .unwrap()
+            .with_quantity("pressure", pressure, 101_325.0)
+            .unwrap()
+            .with_quantity("relative-humidity", dimensionless, 0.0)
+            .unwrap()
+            .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+            .unwrap();
+        assert!(
+            resolve(
+                &wrong_temperature,
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_err()
+        );
+        let missing_pressure = QueryPoint::new()
+            .with_quantity("temperature", absolute_temperature, 288.15)
+            .unwrap()
+            .with_quantity("relative-humidity", dimensionless, 0.0)
+            .unwrap()
+            .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+            .unwrap();
+        assert!(
+            resolve(
+                &missing_pressure,
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_err()
+        );
+        let wrong_pressure = QueryPoint::new()
+            .with_quantity("temperature", absolute_temperature, 288.15)
+            .unwrap()
+            .with_quantity("pressure", absolute_temperature, 101_325.0)
+            .unwrap()
+            .with_quantity("relative-humidity", dimensionless, 0.0)
+            .unwrap()
+            .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+            .unwrap();
+        assert!(resolve(&wrong_pressure, MaterialPropertySelection::SingleClaimOnly).is_err());
+        for refused in [
+            point(313.151, 101_325.0),
+            point(288.15, 110_000.1),
+            QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, 288.15)
+                .unwrap()
+                .with_quantity("pressure", pressure, 101_325.0)
+                .unwrap()
+                .with_quantity("relative-humidity", dimensionless, 1.0)
+                .unwrap()
+                .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+                .unwrap(),
+            QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, 288.15)
+                .unwrap()
+                .with_quantity("pressure", pressure, 101_325.0)
+                .unwrap()
+                .with_quantity("source-composition-ussa1976", dimensionless, 1.0)
+                .unwrap(),
+            QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, 288.15)
+                .unwrap()
+                .with_quantity("pressure", pressure, 101_325.0)
+                .unwrap()
+                .with_quantity("relative-humidity", dimensionless, 0.0)
+                .unwrap()
+                .with_quantity("source-composition-ussa1976", dimensionless, 0.0)
+                .unwrap(),
+            QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, 288.15)
+                .unwrap()
+                .with_quantity("pressure", pressure, 101_325.0)
+                .unwrap()
+                .with_quantity("relative-humidity", dimensionless, 0.0)
+                .unwrap(),
+        ] {
+            assert!(resolve(&refused, MaterialPropertySelection::SingleClaimOnly).is_err());
+        }
+    }
+
     /// G1/G3: real source compilation and persistent transport reach the
     /// nonlinear heat solve. This qualifies the declared interpolant, not a
     /// physical stainless specimen or an unspecified pressure condition.

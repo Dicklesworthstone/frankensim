@@ -283,6 +283,11 @@ out-of-source-domain or invalid parameters refuse atomically. The
 `air-dry-ussa1976` seed defines a narrower 273.15–313.15 K / 80–110 kPa dry
 engineering application range, with its 1976 composition and model limits.
 This is source-backed model evaluation, not real-gas or humidity qualification.
+The G1/G3 `g1_g3_sourced_dry_air_reaches_acoustic_loss` integration case in
+`xtask/tests/matdb_pack_cli.rs` exercises real source compilation, persistent
+store reopening, discovery, this adapter and the existing cylinder air-loss
+law at four T/P states, with independent references, receipts, replay and
+source-sensitivity/refusal controls. This evidence is numerical, not empirical.
 
 ### `visco` — viscoelastic damping tiers (bead ybc75)
 
