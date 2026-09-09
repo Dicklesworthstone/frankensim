@@ -2061,7 +2061,7 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
     use fs_conduction::lumped::{
         LumpedEnthalpyBody, LumpedFiniteThermalContact, LumpedThermalTransport,
     };
-    with_string_cx(|cx, _| {
+    with_string_cx(|cx, gate| {
         let (mechanical, card, curve) =
             heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
         let mass = mechanical.specimen().mass_kg();
@@ -2102,9 +2102,14 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
         let mut transferred = 0.0;
         let mut pressure_difference = 0.0;
         for epoch in 0..80 {
-            let adapter = make_contact(support_state);
             let frame = runtime
-                .step_with_thermal_transport(cx, epoch, &[0.0], |input| adapter.advance(cx, input))
+                .step_with_thermal_state(cx, epoch, &[0.0], &mut support_state, |state, input| {
+                    let proposal = make_contact(*state).advance(cx, input)?;
+                    Ok::<_, fs_conduction::ConductionError>((
+                        proposal.report.contact.state_b,
+                        proposal,
+                    ))
+                })
                 .unwrap();
             let control = insulated.step(cx, epoch, &[0.0], 0.0).unwrap();
             assert_eq!(
@@ -2116,8 +2121,7 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
                 frame.coupled.vibration.dissipation.material_heat_j
             );
             transferred += frame.transport.contact.heat_a_to_b_j;
-            // Publication follows successful coupled material/mechanical acceptance.
-            support_state = frame.transport.contact.state_b;
+            assert_eq!(support_state, frame.transport.contact.state_b);
             pressure_difference += (frame.coupled.vibration.acoustic.observer_pressure_pa
                 - control.vibration.acoustic.observer_pressure_pa)
                 .abs();
@@ -2139,12 +2143,13 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
         );
 
         let before = runtime.clone();
-        let adapter = make_contact(support_state);
+        let support_before = support_state;
         let mut solved = false;
         assert!(
             runtime
-                .step_with_thermal_transport(cx, 80, &[0.0], |input| {
-                    let mut proposal = adapter.advance(cx, input)?;
+                .step_with_thermal_state(cx, 80, &[0.0], &mut support_state, |state, input| {
+                    let mut proposal = make_contact(*state).advance(cx, input)?;
+                    assert_ne!(proposal.report.contact.state_b, *state);
                     solved = true;
                     let mut knots = input.curve.knots().to_vec();
                     knots.last_mut().unwrap().specific_enthalpy_j_kg += 0.1;
@@ -2156,7 +2161,10 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
                     proposal.state = foreign
                         .state_at_specific_enthalpy(proposal.state.specific_enthalpy_j_kg())
                         .unwrap();
-                    Ok::<_, fs_conduction::ConductionError>(proposal)
+                    Ok::<_, fs_conduction::ConductionError>((
+                        proposal.report.contact.state_b,
+                        proposal,
+                    ))
                 })
                 .is_err()
         );
@@ -2167,16 +2175,224 @@ fn g3_g4_finite_support_changes_string_material_sound_and_commits_after_acceptan
             runtime.mechanical().accepted_samples(),
             before.mechanical().accepted_samples()
         );
-        assert_eq!(support_state, adapter.support_state);
+        assert_eq!(support_state, support_before);
         let mut retry = before;
+        let mut retry_support = support_before;
         assert_eq!(
             runtime
-                .step_with_thermal_transport(cx, 80, &[0.0], |input| adapter.advance(cx, input))
+                .step_with_thermal_state(cx, 80, &[0.0], &mut support_state, |state, input| {
+                    let proposal = make_contact(*state).advance(cx, input)?;
+                    Ok::<_, fs_conduction::ConductionError>((
+                        proposal.report.contact.state_b,
+                        proposal,
+                    ))
+                })
                 .unwrap(),
             retry
-                .step_with_thermal_transport(cx, 80, &[0.0], |input| adapter.advance(cx, input))
+                .step_with_thermal_state(cx, 80, &[0.0], &mut retry_support, |state, input| {
+                    let proposal = make_contact(*state).advance(cx, input)?;
+                    Ok::<_, fs_conduction::ConductionError>((
+                        proposal.report.contact.state_b,
+                        proposal,
+                    ))
+                })
                 .unwrap()
         );
+        assert_eq!(support_state, retry_support);
+        let before_cancel = runtime.clone();
+        let support_before_cancel = support_state;
+        assert!(
+            runtime
+                .step_with_thermal_state(cx, 81, &[0.0], &mut support_state, |state, input| {
+                    let proposal = make_contact(*state).advance(cx, input)?;
+                    gate.request();
+                    Ok::<_, fs_conduction::ConductionError>((
+                        proposal.report.contact.state_b,
+                        proposal,
+                    ))
+                })
+                .is_err()
+        );
+        assert_eq!(runtime.thermal(), before_cancel.thermal());
+        assert_eq!(
+            runtime.mechanical().states(),
+            before_cancel.mechanical().states()
+        );
+        assert_eq!(
+            runtime.mechanical().epoch(),
+            before_cancel.mechanical().epoch()
+        );
+        assert_eq!(support_state, support_before_cancel);
+    });
+}
+
+#[test]
+fn g1_g4_electrical_drive_and_finite_support_publish_together() {
+    use fs_conduction::interface::{
+        ResistanceUncertainty, SeriesThermalResistance, ThermalResistanceTerm,
+    };
+    use fs_conduction::lumped::{
+        LumpedEnthalpyBody, LumpedFiniteThermalContact, LumpedThermalTransport,
+    };
+    use fs_material::conductor::OhmicDrive;
+    with_string_cx(|cx, _| {
+        for drive in [OhmicDrive::Current(0.05), OhmicDrive::Voltage(0.003)] {
+            let (mechanical, card, curve) = heated_string_parts_with_conductor(
+                cx,
+                8000,
+                false,
+                InterpolationPolicy::LinearInside,
+                true,
+            );
+            let mass = mechanical.specimen().mass_kg();
+            let support_curve = curve.clone();
+            let support = LumpedEnthalpyBody::try_new(
+                "powered string support",
+                2.0 * mass,
+                0.01,
+                0.0,
+                0.0,
+                0.001,
+                100.0,
+                &support_curve,
+            )
+            .unwrap();
+            let resistance = SeriesThermalResistance::new(vec![
+                ThermalResistanceTerm::declared(
+                    "support path",
+                    10_000.0,
+                    ResistanceUncertainty::Unstated,
+                    "synthetic finite support path",
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let mut state = support_curve.state_at_specific_enthalpy(0.0).unwrap();
+            let contact = |state| LumpedFiniteThermalContact {
+                support: &support,
+                support_state: state,
+                resistance: &resistance,
+                specimen_transport: LumpedThermalTransport::try_declared(100.0, 0.0).unwrap(),
+                energy_tolerance_j: 1e-14,
+            };
+            let mut runtime =
+                ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0)
+                    .unwrap();
+            let mut reference = runtime.clone();
+            let mut transfer = 0.0;
+            for epoch in 0..32 {
+                let old_state = state;
+                let frame = runtime
+                    .step_with_drive_and_thermal_state(
+                        cx,
+                        epoch,
+                        &[0.0],
+                        drive,
+                        &mut state,
+                        |accepted, input| {
+                            let proposal = contact(*accepted).advance(cx, input)?;
+                            Ok::<_, fs_conduction::ConductionError>((
+                                proposal.report.contact.state_b,
+                                proposal,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                let expected = match drive {
+                    OhmicDrive::Current(current) => reference
+                        .step_with_current_and_thermal_transport(
+                            cx,
+                            epoch,
+                            &[0.0],
+                            current,
+                            |input| contact(old_state).advance(cx, input),
+                        ),
+                    OhmicDrive::Voltage(voltage) => reference
+                        .step_with_voltage_and_thermal_transport(
+                            cx,
+                            epoch,
+                            &[0.0],
+                            voltage,
+                            |input| contact(old_state).advance(cx, input),
+                        ),
+                }
+                .unwrap();
+                assert_eq!(frame, expected);
+                assert_eq!(state, frame.transport.contact.state_b);
+                assert_eq!(
+                    frame.boundary_heat_j,
+                    -frame.transport.contact.heat_a_to_b_j
+                );
+                close(
+                    frame.transport.internal_heat_j,
+                    frame.joule_heat_j + frame.coupled.vibration.dissipation.material_heat_j,
+                );
+                close(
+                    frame.coupled.external_heat_j,
+                    frame.joule_heat_j + frame.boundary_heat_j,
+                );
+                transfer += frame.transport.contact.heat_a_to_b_j;
+            }
+            assert!(state.temperature_k() > 300.0);
+            assert!((2.0 * mass * state.specific_enthalpy_j_kg() - transfer).abs() < 1e-12);
+            let before = runtime.clone();
+            let state_before = state;
+            with_string_cx(|late_cx, gate| {
+                let mut solved = false;
+                assert!(
+                    runtime
+                        .step_with_drive_and_thermal_state(
+                            late_cx,
+                            32,
+                            &[0.0],
+                            drive,
+                            &mut state,
+                            |accepted, input| {
+                                let proposal = contact(*accepted).advance(late_cx, input)?;
+                                solved = true;
+                                gate.request();
+                                Ok::<_, fs_conduction::ConductionError>((
+                                    proposal.report.contact.state_b,
+                                    proposal,
+                                ))
+                            },
+                        )
+                        .is_err()
+                );
+                assert!(solved);
+            });
+            assert_eq!(state, state_before);
+            assert_eq!(runtime.thermal(), before.thermal());
+            assert_eq!(runtime.mechanical().states(), before.mechanical().states());
+            assert_eq!(runtime.mechanical().epoch(), before.mechanical().epoch());
+            let mut retry = before;
+            let mut retry_state = state_before;
+            let step =
+                |runtime: &mut ThermalMaterialStringRuntime,
+                 state: &mut fs_material::phase::EquilibriumPhaseState| {
+                    runtime
+                        .step_with_drive_and_thermal_state(
+                            cx,
+                            32,
+                            &[0.0],
+                            drive,
+                            state,
+                            |accepted, input| {
+                                let proposal = contact(*accepted).advance(cx, input)?;
+                                Ok::<_, fs_conduction::ConductionError>((
+                                    proposal.report.contact.state_b,
+                                    proposal,
+                                ))
+                            },
+                        )
+                        .unwrap()
+                };
+            assert_eq!(
+                step(&mut runtime, &mut state),
+                step(&mut retry, &mut retry_state)
+            );
+            assert_eq!(state, retry_state);
+        }
     });
 }
 

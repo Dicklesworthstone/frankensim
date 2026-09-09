@@ -2811,6 +2811,52 @@ impl ThermalMaterialStringRuntime {
         )
     }
 
+    /// Couple an ideal current or voltage source to caller-owned thermal state.
+    /// The callback has the same proposal-only contract as
+    /// [`Self::step_with_thermal_state`]. Both owners publish only after final
+    /// electrical resolution as well as thermal/mechanical acceptance.
+    /// Joule work is counted once by the existing electrical transport path.
+    pub fn step_with_drive_and_thermal_state<S, R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        drive: fs_material::conductor::OhmicDrive,
+        state: &mut S,
+        transport: impl FnOnce(
+            &S,
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<(S, fs_material::phase::UniformEnthalpyStep<R>), E>,
+    ) -> Result<ElectrothermalStringFrame<R>, ThermalStringError> {
+        let frame = self.step_with_drive_and_thermal_transport(
+            cx,
+            expected_epoch,
+            forces,
+            drive,
+            |input| {
+                let (candidate, proposal) = transport(state, input)?;
+                Ok::<_, E>(fs_material::phase::UniformEnthalpyStep {
+                    state: proposal.state,
+                    external_heat_j: proposal.external_heat_j,
+                    energy_residual_tolerance_j: proposal.energy_residual_tolerance_j,
+                    report: (candidate, proposal.report),
+                })
+            },
+        )?;
+        let _previous = core::mem::replace(state, frame.transport.0);
+        Ok(ElectrothermalStringFrame {
+            coupled: frame.coupled,
+            drive: frame.drive,
+            current_a: frame.current_a,
+            final_current_a: frame.final_current_a,
+            joule_heat_j: frame.joule_heat_j,
+            boundary_heat_j: frame.boundary_heat_j,
+            transport: frame.transport.1,
+            conductor_before: frame.conductor_before,
+            conductor_after: frame.conductor_after,
+        })
+    }
+
     fn step_with_drive_and_thermal_transport<R, E: core::fmt::Display>(
         &mut self,
         cx: &fs_exec::Cx<'_>,
@@ -2984,6 +3030,45 @@ impl ThermalMaterialStringRuntime {
             ));
         }
         self.finish_thermal_step(cx, forces, candidate, vibration, proposed)
+    }
+
+    /// Advance with caller-owned thermal state, such as a finite support's
+    /// enthalpy, publishing that state only after coupled acceptance.
+    ///
+    /// The callback reads accepted state and returns an owned candidate with
+    /// the usual thermal proposal. It must not mutate shared interior state,
+    /// debit external resources or emit observations. All transport, material,
+    /// energy, epoch and cancellation refusals preserve both accepted owners.
+    /// This method does not validate the opaque state's physical meaning;
+    /// that remains the transport owner's responsibility. Publication uses
+    /// exclusive borrows, not a cross-thread or durable transaction.
+    pub fn step_with_thermal_state<S, R, E: core::fmt::Display>(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        forces: &[f64],
+        state: &mut S,
+        transport: impl FnOnce(
+            &S,
+            fs_material::phase::UniformEnthalpyStepInput<'_>,
+        ) -> Result<(S, fs_material::phase::UniformEnthalpyStep<R>), E>,
+    ) -> Result<ThermalStringTransportFrame<R>, ThermalStringError> {
+        let frame = self.step_with_thermal_transport(cx, expected_epoch, forces, |input| {
+            let (candidate, proposal) = transport(state, input)?;
+            Ok::<_, E>(fs_material::phase::UniformEnthalpyStep {
+                state: proposal.state,
+                external_heat_j: proposal.external_heat_j,
+                energy_residual_tolerance_j: proposal.energy_residual_tolerance_j,
+                report: (candidate, proposal.report),
+            })
+        })?;
+        // No fallible operation or cancellation point separates publication.
+        // Move the old value out so even its destructor runs after both commits.
+        let _previous = core::mem::replace(state, frame.transport.0);
+        Ok(ThermalStringTransportFrame {
+            coupled: frame.coupled,
+            transport: frame.transport.1,
+        })
     }
 
     fn finish_thermal_step<R>(

@@ -495,6 +495,22 @@ convection and radiation fluxes contribute their signed heat once. It neither ch
 declared acoustic gas. Transport may be declared or card-backed; the conduction
 owner enforces its existing card identity and temperature-coverage rules.
 The callback must not mutate or debit an external source before acceptance.
+`step_with_thermal_state` also accepts caller-owned state by exclusive borrow.
+Its callback reads that accepted state and returns an owned candidate alongside
+the normal thermal proposal. Only after all coupled checks succeed does the
+method replace the caller's state. A finite support therefore advances with
+the string without a separate caller commit. G3/G4 finite-support integration
+checks heat debit, temperature/damping/pressure feedback, late foreign-chart
+refusal and exact retry of both owners. The transport owner validates its
+opaque state; callbacks must not mutate shared interior state or external
+resources. This is synchronous publication through exclusive borrows, not a
+cross-thread or durable transaction.
+`step_with_drive_and_thermal_state` provides the same publication boundary
+for either `OhmicDrive::Current` or `OhmicDrive::Voltage`, reusing the existing
+electrothermal path. External thermal state remains a candidate until final
+resistance/current resolution also succeeds. The callback receives Joule plus
+material heat; its boundary transfer excludes both. Finite-support tests check
+this separation, current/voltage callback parity, cancellation and retry.
 The coupling owner verifies that the proposal uses its original phase chart
 and finite heat/residual budgets, then checks the coupled energy balance. This
 keeps fs-conduction out of fs-couple's production dependencies: FEEC's optional
@@ -517,8 +533,9 @@ of initially uniform temperature or homogenized internal heating. Rapid local
 sources and nonuniform support transfer require spatial transport regardless
 of step size. The analytical convection reference and lumped assumptions are
 described in [MIT's transient heat-transfer notes](https://web.mit.edu/16.unified/www/FALL/thermodynamics/notes/node129.html).
-The thermal chart retains its existing source authority. Finite reservoirs,
-contact heat transfer, spatial conduction, entropy production certification, thermal
+The thermal chart retains its existing source authority. Finite-support contact
+uses the conduction adapter's fixed resistance and uniform-body limits; spatial
+conduction, entropy production certification, thermal
 expansion, changing stiffness/density, and solid-liquid transfer are not claimed.
 G1 compares the coupled trajectory with an independently integrated continuous
 ODE and checks temporal convergence. Synthetic heat capacity and viscosity make
