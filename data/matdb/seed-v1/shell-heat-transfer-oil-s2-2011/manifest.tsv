@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	shell-heat-transfer-oil-s2-2011
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source-document, table-layout or prose redistribution license is asserted
+citation	Shell Lubricants (May 2011), Shell Heat Transfer Oil S2 Technical Data Sheet, page 2 Typical Physical Characteristics and Typical Design Data; https://www.psg.shell.com/download/FileRequest.aspx?fileid=344
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	shell-s2-may2011	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific_heat_capacity	dimensional
+property	thermal_conductivity	thermal_conductivity	thermal-conductivity
+property	kinematic_viscosity	kinematic_viscosity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_formulation_shell_s2_2011	source-formulation-shell-s2-2011	dimensional
+axis	phase_liquid	phase-liquid	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	aged_oil	aged-oil	dimensional

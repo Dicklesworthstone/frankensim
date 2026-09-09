@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "density", "unit": "kg/m3", "kind": "dimensional"},
+    {"name": "specific_heat_capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "thermal_conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
+    {"name": "kinematic_viscosity", "unit": "m2/s", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "273.15 K", "upper": "473.15 K"},
+      {"name": "source-formulation-shell-s2-2011", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "phase-liquid", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "source-pressure-known", "kind": "dimensional", "lower": "0", "upper": "0"},
+      {"name": "aged-oil", "kind": "dimensional", "lower": "0", "upper": "0"}
+    ]
+  },
+  "selection": "single-claim-only"
+}

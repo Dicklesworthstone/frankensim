@@ -25,6 +25,22 @@ identified, redistributable interface evidence is added.
 
 ## Common material acquisition, September 2026
 
+`shell-heat-transfer-oil-s2-2011` retains four common-temperature rows from
+Shell's May 2011 technical data sheet for a named refined mineral heat-transfer
+oil: density, heat capacity, conductivity and kinematic viscosity at 0, 40,
+100 and 200 °C. The kinematic adapter in `fs-material::liquid` resolves all four
+at one point and derives dynamic viscosity using that point's density. This is
+not a hydraulic viscosity-grade specification. Pressure, precise additive
+composition and measurement uncertainty are unstated; aged-oil use is excluded.
+The source's printed Prandtl row disagrees with its other property tables by
+more than rounding, and that unresolved discrepancy is retained in the source
+observations. Derived Prandtl values are engineering calculations, not another
+measurement. Sparse linear interpolation has no accuracy bound. The pack does
+not support friction, wear, oxidation or boiling, nor extrapolation beyond its
+retained rows. The source document itself is not redistributed; this pack contains
+only selected attributed numerical facts and original explanatory notes.
+Discovery request: `examples/material-discovery/shell-heat-transfer-oil-s2.json`.
+
 Scalar/curve source packs use manifest v3 with explicit property-name mappings and typed
 temperature axes. Names such as `specific-heat-capacity` and
 `thermal-conductivity` therefore match current discovery requests. A directory

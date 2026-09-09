@@ -1,0 +1,26 @@
+frankensim.matdb-source.v1
+observation	stock-shapes-2017-aa	Ensinger-TECAFINE-PE300-natural-white-opaque-PE-HD-stock-shapes-2017-AA	Ensinger product comparison guideline values; tensile modulus, yield strength and yield elongation reference DIN EN ISO 527-1	Named heat-stabilized natural PE-HD stock shapes (rods, plates, tubes), not generic polyethylene or a purchased batch. The sheet is internally dated 2017/11/23 version AA despite the download filename containing 202512. Density 0.96 g/cm3 is converted to 960 kg/m3; tensile modulus 1100 MPa and yield strength 23 MPa are converted to Pa; yield elongation 9 percent is converted to strain 0.09. These are typical comparison guidelines, not guaranteed bounds, individual measurements or design allowables. Test temperature, humidity conditioning, rate, direction, stock dimensions, extrusion/molding schedule, crystallinity, additive composition and lot are unstated. Unknown flags acknowledge missing metadata and do not mean zero temperature or zero rate. Dimensional and orientation effects are explicitly acknowledged by the manufacturer. No isotropic Young modulus, Poisson ratio, creep, frequency-independent dynamic law, thermal conductivity or heat capacity is supplied. The printed CLTE 18e-5/K has no temperature interval or mean/instantaneous convention and is retained only in this observation, not a thermal-expansion law. Service limits -50 to +80 C do not qualify any property over that interval. These four facts alone do not complete P01 or qualify the P11 thermal or elastic solver journey.
+scalar	density	stock-shapes-2017-aa	density	960	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_tecafine_pe300_natural_2017	1	1	1
+validity	density	source_test_temperature_known	0	0	1
+validity	density	source_processing_condition_known	0	0	1
+validity	density	source_test_rate_known	0	0	1
+scalar	tensile-modulus	stock-shapes-2017-aa	tensile_modulus	1100000000	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_tecafine_pe300_natural_2017	1	1	1
+validity	tensile-modulus	source_test_temperature_known	0	0	1
+validity	tensile-modulus	source_processing_condition_known	0	0	1
+validity	tensile-modulus	source_test_rate_known	0	0	1
+scalar	tensile-yield-strength	stock-shapes-2017-aa	tensile_yield_strength	23000000	Pa	constant
+uncertainty	tensile-yield-strength	unstated	-	-	-	-
+validity	tensile-yield-strength	source_grade_tecafine_pe300_natural_2017	1	1	1
+validity	tensile-yield-strength	source_test_temperature_known	0	0	1
+validity	tensile-yield-strength	source_processing_condition_known	0	0	1
+validity	tensile-yield-strength	source_test_rate_known	0	0	1
+scalar	tensile-yield-strain	stock-shapes-2017-aa	tensile_yield_strain	9	%	constant
+uncertainty	tensile-yield-strain	unstated	-	-	-	-
+validity	tensile-yield-strain	source_grade_tecafine_pe300_natural_2017	1	1	1
+validity	tensile-yield-strain	source_test_temperature_known	0	0	1
+validity	tensile-yield-strain	source_processing_condition_known	0	0	1
+validity	tensile-yield-strain	source_test_rate_known	0	0	1
