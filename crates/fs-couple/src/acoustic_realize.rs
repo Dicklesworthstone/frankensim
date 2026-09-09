@@ -10,7 +10,7 @@ use crate::modal_acoustic_time::{
     ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
-use crate::reed_bore::{blowing_envelope, realize_reed_bore, reed_structural};
+use crate::reed_bore::{blowing_envelope, realize_reed_bore, reed_pressure_face, reed_structural};
 use crate::thin_plate::{
     PlateBank, PlateChartRadiation, VkBody, certified_chart_radiators, certified_radiators,
     vk_plate_phs,
@@ -3953,7 +3953,7 @@ fn realize_reed_ode(
         let (k, r_damp) = reed_structural(reed);
         let phs = mass_spring_damper(reed.mass_kg, k, r_damp)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let face = reed.width_m * 0.025;
+        let face = reed_pressure_face(reed);
         let k_lay = 1.0e7 * reed.width_m;
         let chi = r_damp / (k_lay * reed.rest_opening_m * reed.rest_opening_m).max(1.0e-18);
         let lay = slit_lay(k_lay, 2.0)

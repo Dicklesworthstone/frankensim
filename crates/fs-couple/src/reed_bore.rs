@@ -74,8 +74,20 @@ pub(crate) fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
     reed.blowing_pressure_pa * 0.5 * (1.0 - det::cos(core::f64::consts::PI * x))
 }
 
+/// Effective pressure area consistent with the declared static closing point:
+/// k H = P_c A. This is an effective modal area, not a measured surface mesh.
+/// A zero stiffness retains the legacy 25 mm face-length reduction, whose
+/// stiffness is itself derived from the closing pressure.
+pub(crate) fn reed_pressure_face(reed: BeatingReed) -> f64 {
+    if reed.stiffness_n_m > 0.0 {
+        (reed.stiffness_n_m / reed.closing_pressure_pa) * reed.rest_opening_m
+    } else {
+        reed.width_m * 0.025
+    }
+}
+
 pub(crate) fn reed_structural(reed: BeatingReed) -> (f64, f64) {
-    let face = reed.width_m * 0.025;
+    let face = reed_pressure_face(reed);
     let k = if reed.stiffness_n_m > 0.0 {
         reed.stiffness_n_m
     } else {
@@ -296,7 +308,7 @@ pub(crate) fn step_massive_reed(
     mode: ReedSolverMode,
     stats: &mut FastSolveStats,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
-    let face = reed.width_m * 0.025;
+    let face = reed_pressure_face(reed);
     let (k, r_damp) = reed_structural(reed);
     let p_plus = match mode {
         ReedSolverMode::Strict => {
@@ -468,6 +480,54 @@ mod fast_mode_tests {
     fn fixture_impedance(gas: &GasState) -> f64 {
         let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
         gas.characteristic_impedance / area
+    }
+
+    #[test]
+    fn g1_massive_reed_pressure_force_matches_declared_closing_pressure() {
+        let gas = air20();
+        for stiffness in [100.0, 800.0] {
+            for closing in [3_000.0, 9_000.0] {
+                let reed = BeatingReed {
+                    mass_kg: 1e-5,
+                    stiffness_n_m: stiffness,
+                    closing_pressure_pa: closing,
+                    ..reed()
+                };
+                let face = reed_pressure_face(reed);
+                assert!((closing * face - stiffness * reed.rest_opening_m).abs() < 1e-15);
+                let dt = 1e-6;
+                let mouth = 0.5 * closing;
+                let (p_plus, _, velocity) = step_massive_reed(
+                    reed,
+                    gas.density,
+                    fixture_impedance(&gas),
+                    0.0,
+                    mouth,
+                    reed.rest_opening_m,
+                    0.0,
+                    dt,
+                    0.0,
+                    None,
+                    ReedSolverMode::Strict,
+                    &mut FastSolveStats::default(),
+                )
+                .unwrap();
+                // At rest opening with zero velocity, spring and damping
+                // vanish: m dv/dt = -(k H/Pc) (Pmouth-Pbore).
+                let expected = -stiffness * reed.rest_opening_m * ((mouth - p_plus) / closing) * dt
+                    / reed.mass_kg;
+                assert!((velocity - expected).abs() < 1e-13);
+            }
+        }
+        let legacy = reed();
+        let (stiffness, _) = reed_structural(legacy);
+        assert_eq!(reed_pressure_face(legacy), legacy.width_m * 0.025);
+        assert!(
+            (stiffness * legacy.rest_opening_m
+                - legacy.closing_pressure_pa * reed_pressure_face(legacy))
+            .abs()
+                < 1e-15
+        );
     }
 
     #[test]

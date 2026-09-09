@@ -785,7 +785,17 @@ clarinet is one filling of those objects.
 - Bow: MWS regularized friction (steep stiction ramp + falling kinetic
   shoulder). Helmholtz motion is possible with enough modes; it is not
   guaranteed and not a measured rosin curve.
-- Reed path: quasistatic or massive Bernoulli valve. Isolated
+- Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
+  positive stiffness derive their effective pressure area from the
+  declared closing relation `A = k H / Pc`. Characteristic-line motion and
+  ODE pressure force/swept-face flow share that area; a fixed 25 mm face
+  length no longer overrides explicit stiffness and closing pressure.
+  This is an effective modal area, not measured geometry. The zero-stiffness
+  legacy reduction still derives stiffness using a 25 mm face length, and
+  the existing hardcoded damping ratio remains a model limitation.
+  G1 tests exercise the force balance and actual moving-reed acceleration.
+  Characteristic-line aperture/face-motion feedback remains outside this fix.
+  Isolated
   cylindrical bores use the `acoustic_chain` ODE with a
   `ViscothermalPin` (massive
   reed = `mass_spring_damper` + jet + face flow). Blow/reed on a
