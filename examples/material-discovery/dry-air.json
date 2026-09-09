@@ -1,0 +1,22 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "molar_mass", "unit": "kg/mol", "kind": "dimensional"},
+    {"name": "heat_capacity_ratio", "unit": "1", "kind": "dimensional"},
+    {"name": "sutherland_reference_viscosity", "unit": "Pa*s", "kind": "dimensional"},
+    {"name": "sutherland_reference_temperature", "unit": "K", "kind": "absolute-temperature"},
+    {"name": "sutherland_temperature", "unit": "K", "kind": "temperature-difference"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "273.15 K", "upper": "313.15 K"},
+      {"name": "pressure", "kind": "pressure", "lower": "80000 Pa", "upper": "110000 Pa"},
+      {"name": "relative-humidity", "kind": "dimensional", "lower": "0", "upper": "0"},
+      {"name": "source-composition-ussa1976", "kind": "dimensional", "lower": "1", "upper": "1"}
+    ]
+  },
+  "selection": "single-claim-only"
+}
