@@ -1,0 +1,38 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, physical and thermal properties	This pack selects five producer facts as nominal engineering inputs for a frozen 25–26 C calculation reference. The 298.15–299.15 K query domain is author-declared; it is not source measurement coverage or a guaranteed-accuracy band. The source states extrusion for pipes and fittings; exact extrusion schedule, conditions, formulation, color, specimen, temperature, pressure, test rate, and conditioning details are unstated for these selected values, so every claim requires engineering-reference-model=1, source-temperatures-matched=0, and reference-iplex-rigid-pvc-u-pipe=1. The source family is Iplex PVC-U pipe, not PVC-P, foam, or a generic PVC substitution. The source lists a 0–50 C service band; that is an application band, not property coverage. CLTE is retained as an observation only because no interval or mean/instantaneous convention is stated. This pack does not claim pressure qualification, creep, fracture, melting, transient temperature dependence, or physical validation.
+observation	density	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Physical properties, Specific gravity	The producer lists specific gravity 1.47. Density 1470 kg/m3 is an explicit author nominal conversion using 1000 kg/m3 as the reference-water density; it is not a source-reported density measurement. Source density test temperature, pressure, specimen, conditioning, and uncertainty are unstated.
+observation	tensile-modulus	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Physical properties, Tensile modulus	The producer lists tensile modulus 3200 MPa, retained as 3.2e9 Pa. Test temperature, loading rate, pressure, specimen, conditioning, direction, and uncertainty are unstated; this is not promoted to isotropic Young modulus.
+observation	poisson-ratio	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Physical properties, Poisson ratio	The producer lists Poisson ratio 0.38. Test temperature, pressure, specimen, conditioning, and uncertainty are unstated.
+observation	specific-heat-capacity	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Thermal properties, Specific heat	The producer lists specific heat 1045 J/(kg K). Measurement temperature, pressure, specimen, conditioning, and uncertainty are unstated.
+observation	thermal-conductivity	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Thermal properties, Thermal conductivity	The producer lists thermal conductivity 0.138 W/(m K). Measurement temperature, pressure, specimen, conditioning, and uncertainty are unstated.
+observation	mean-linear-expansion	Iplex PVC-U pressure-system pipe	Iplex PVC-U product page, Thermal properties, Coefficient of linear thermal expansion	The producer lists CLTE 70e-6/K. No interval or mean/instantaneous convention is stated, so this remains an observation and is not admitted as a scalar or temperature law. The producer service band is 0–50 C, which is not property measurement coverage.
+scalar	density	density,engineering-reference	density	1470	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+validity	density	reference_iplex_rigid_pvc_u_pipe	1	1	1
+validity	density	temperature	298.15	299.15	K
+scalar	tensile-modulus	tensile-modulus,engineering-reference	tensile_modulus	3.2e9	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	engineering_reference_model	1	1	1
+validity	tensile-modulus	source_temperatures_matched	0	0	1
+validity	tensile-modulus	reference_iplex_rigid_pvc_u_pipe	1	1	1
+validity	tensile-modulus	temperature	298.15	299.15	K
+scalar	poisson-ratio	poisson-ratio,engineering-reference	poisson_ratio	0.38	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
+validity	poisson-ratio	reference_iplex_rigid_pvc_u_pipe	1	1	1
+validity	poisson-ratio	temperature	298.15	299.15	K
+scalar	specific-heat-capacity	specific-heat-capacity,engineering-reference	specific_heat_capacity	1045	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	engineering_reference_model	1	1	1
+validity	specific-heat-capacity	source_temperatures_matched	0	0	1
+validity	specific-heat-capacity	reference_iplex_rigid_pvc_u_pipe	1	1	1
+validity	specific-heat-capacity	temperature	298.15	299.15	K
+scalar	thermal-conductivity	thermal-conductivity,engineering-reference	thermal_conductivity	0.138	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	engineering_reference_model	1	1	1
+validity	thermal-conductivity	source_temperatures_matched	0	0	1
+validity	thermal-conductivity	reference_iplex_rigid_pvc_u_pipe	1	1	1
+validity	thermal-conductivity	temperature	298.15	299.15	K

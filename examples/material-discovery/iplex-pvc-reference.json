@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "density", "unit": "kg/m3", "kind": "dimensional"},
+    {"name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "298.15 K", "upper": "299.15 K"},
+      {"name": "engineering-reference-model", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "source-temperatures-matched", "kind": "dimensional", "lower": "0", "upper": "0"},
+      {"name": "reference-iplex-rigid-pvc-u-pipe", "kind": "dimensional", "lower": "1", "upper": "1"}
+    ]
+  },
+  "selection": "single-claim-only"
+}
