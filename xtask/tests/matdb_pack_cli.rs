@@ -3909,6 +3909,7 @@ mod common_material_acquisition {
         assert_eq!(dry_limit.water_mass_fraction(), 0.0);
 
         let wrong_flag = dry_at
+            .clone()
             .with_quantity(
                 "source-composition-ussa1976",
                 QuantitySpec::dimensional(Dims::NONE),
