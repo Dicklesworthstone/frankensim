@@ -840,7 +840,10 @@ publication.
   source geometry or material claims, establish mesh convergence beyond what a
   declared uniform h-ladder measured on the QoI's nodal maximum (no
   energy-norm or DWR bound), or lower nonmatching or temperature-dependent
-  contact. Unsupported interface models refuse rather
+  contact. Constant-contact admission checks source curve knots throughout
+  the admitted temperature range; equal endpoints cannot hide interior
+  resistance variation. Flat supported curves remain usable.
+  Unsupported interface models refuse rather
   than silently assuming perfect contact. When the project declares a
   schema-v4 `(airflow-convection ...)` law, the stage performs ONE branch's
   conjugate airflow exchange (driver v10, receipt v3 `conjugate` object):

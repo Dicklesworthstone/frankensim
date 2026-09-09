@@ -4868,16 +4868,6 @@ fn lower_thermal_interfaces(
                     "supply the property required by the thermal steady binding contract",
                 )
             })?;
-        if property.value_lo.to_bits() != property.value_hi.to_bits() {
-            return Err(conduction_error(
-                "cli-solve-conduction-interface-temperature-variation",
-                format!(
-                    "interface `{name}` resistance varies from {} to {} m^2 K/W over [{}, {}] K",
-                    property.value_lo, property.value_hi, binding.range_lo, binding.range_hi
-                ),
-                "use a constant-within-validity contact claim until temperature-dependent contact is coupled into the nonlinear solve",
-            ));
-        }
         let card = library.interface(&binding.card).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-interface-card",
@@ -4885,6 +4875,33 @@ fn lower_thermal_interfaces(
                 "supply the exact normalized interface pack used by material-resolve",
             )
         })?;
+        let selected = parse_claim_id(&property.selected_claim, name)?;
+        let claim = card.claims().claim(selected).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-interface-card",
+                format!("interface `{name}` selected claim is absent"),
+                "resolve the interface against the supplied immutable card",
+            )
+        })?;
+        // Binding already proves continuous support by this same claim.
+        // Equal endpoints alone do not prove a piecewise-linear law constant.
+        let interior_varies = match &claim.value {
+            fs_matdb::PropertyValue::Curve { knots, .. } => knots.iter().any(|(t, value)| {
+                (binding.range_lo..=binding.range_hi).contains(t)
+                    && value.to_bits() != property.value_lo.to_bits()
+            }),
+            fs_matdb::PropertyValue::Scalar { .. } => false,
+        };
+        if property.value_lo.to_bits() != property.value_hi.to_bits() || interior_varies {
+            return Err(conduction_error(
+                "cli-solve-conduction-interface-temperature-variation",
+                format!(
+                    "interface `{name}` resistance is not constant over [{2}, {3}] K (endpoint values {0}, {1} m^2 K/W)",
+                    property.value_lo, property.value_hi, binding.range_lo, binding.range_hi
+                ),
+                "use a constant-within-validity contact claim until temperature-dependent contact is coupled into the nonlinear solve",
+            ));
+        }
         let point = QueryPoint::new()
             .with(requirements.temperature_axis.clone(), binding.range_lo)
             .map_err(|error| {

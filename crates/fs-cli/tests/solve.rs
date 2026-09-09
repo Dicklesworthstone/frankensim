@@ -209,6 +209,10 @@ fn fixture_cards() -> CardPackSet {
 }
 
 fn interface_pack_bytes() -> Vec<u8> {
+    interface_pack_bytes_with_peak(None)
+}
+
+fn interface_pack_bytes_with_peak(peak: Option<f64>) -> Vec<u8> {
     use fs_evidence::ValidityDomain;
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack, NormalizedPack,
@@ -239,16 +243,34 @@ fn interface_pack_bytes() -> Vec<u8> {
                 fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
                 fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
             ),
-            value: PropertyValue::Scalar {
-                value: 0.1,
-                dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
-            },
+            value: peak.map_or(
+                PropertyValue::Scalar {
+                    value: 0.1,
+                    dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+                },
+                |peak| PropertyValue::Curve {
+                    abscissa: "T".to_owned(),
+                    abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
+                    knots: vec![
+                        (200.0, 0.1),
+                        (295.0, 0.1),
+                        (300.0, peak),
+                        (305.0, 0.1),
+                        (450.0, 0.1),
+                    ],
+                    dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+                },
+            ),
             validity: ValidityDomain::unconstrained().with("T", 200.0, 450.0),
             uncertainty: UncertaintyModel::HalfWidth {
                 half_width: 0.005,
                 confidence: 0.95,
             },
-            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            interpolation: if peak.is_some() {
+                InterpolationPolicy::LinearInside
+            } else {
+                InterpolationPolicy::ConstantWithinValidity
+            },
             observations: vec![observation],
             provenance: provenance.clone(),
         })
@@ -291,6 +313,10 @@ fn interface_pack_bytes() -> Vec<u8> {
 }
 
 fn contact_cards() -> CardPackSet {
+    contact_cards_with_interface(interface_pack_bytes())
+}
+
+fn contact_cards_with_interface(interface_bytes: Vec<u8>) -> CardPackSet {
     CardPackSet::admit(vec![
         raw_pack(
             CardPackKind::Material,
@@ -300,7 +326,7 @@ fn contact_cards() -> CardPackSet {
         raw_pack(
             CardPackKind::Interface,
             "fixtures/cold-hot.fsintpk",
-            interface_pack_bytes(),
+            interface_bytes,
         ),
     ])
     .expect("contact card set admits")
@@ -3846,6 +3872,52 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
         resume_progress.is_empty(),
         "completed QoI is not re-emitted"
     );
+}
+
+#[test]
+fn g0_conduction_stage_checks_interior_contact_resistance() {
+    for peak in [0.1, 0.2] {
+        let cards = contact_cards_with_interface(interface_pack_bytes_with_peak(Some(peak)));
+        let mut spec = multi_region_contact_project();
+        spec.interface_cards.as_mut().unwrap()[0].card = cards.interfaces()[0].card().to_hex();
+        let bindings = fs_project::resolve_bindings(
+            &spec,
+            &cards.library(),
+            &fs_project::BindingRequirements::thermal_steady_v1(),
+        );
+        assert!(bindings.admissible(), "{:?}", bindings.violations);
+        let contact = bindings
+            .bindings
+            .iter()
+            .find(|binding| matches!(binding.target, fs_project::BindingTarget::Interface(_)))
+            .unwrap();
+        assert_eq!(contact.properties[0].value_lo, 0.1);
+        assert_eq!(
+            contact.properties[0].value_hi, 0.1,
+            "regression must pass the old endpoint-only constant check"
+        );
+        let decoded = decode(&spec);
+        assert!(decoded.findings().is_empty(), "{:?}", decoded.findings());
+        let ledger = Ledger::open(":memory:").unwrap();
+        import_multi_region_contact(&ledger, &spec);
+        let gate = CancelGate::new_clock_free();
+        let mut clock = benign_clock();
+        let mut progress = Vec::new();
+        let result = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress);
+        if peak == 0.1 {
+            assert!(
+                matches!(result.unwrap().status, fs_cli::SolveRunStatus::Completed),
+                "a continuously supported flat curve remains usable"
+            );
+        } else {
+            let refusal =
+                result.expect_err("equal endpoints cannot hide varying contact resistance");
+            assert_eq!(
+                refusal.code,
+                "cli-solve-conduction-interface-temperature-variation"
+            );
+        }
+    }
 }
 
 fn assert_undeclared_conduction_interface_refusal(
