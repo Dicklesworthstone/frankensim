@@ -1,0 +1,11 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [{"name": "electrical_resistivity", "unit": "Ohm*m", "kind": "dimensional"}],
+  "models": [],
+  "domain": {"mode": "envelope", "axes": [
+    {"name": "T", "kind": "absolute-temperature", "lower": "273.15 K", "upper": "303.15 K"},
+    {"name": "source-pressure-known", "kind": "dimensional", "lower": "0", "upper": "0"}
+  ]},
+  "selection": "single-claim-only"
+}

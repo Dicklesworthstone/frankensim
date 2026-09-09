@@ -31,6 +31,24 @@ temperature axes. Names such as `specific-heat-capacity` and
 is a source bundle with its own conditions; it is not automatically a complete
 material card or a qualified simulation.
 
+`copper-annealed-iacs-nbs-hb100` and `aluminum-ec-h19-nbs-hb109` supply
+temperature-dependent **bulk electrical resistivity** in ohm metres, for
+standard annealed 100% IACS copper and EC-H19 aluminum respectively. Copper
+retains the handbook's rounded 20 °C reference and published volume-resistivity
+slope over a bounded 10–30 °C range. Aluminum retains five literal tabulated
+values over 0–30 °C with linear interpolation and the source's approximation
+neglecting volume expansion. Neither pack substitutes a wire-resistance
+temperature coefficient for a volume-resistivity coefficient, or infers a
+modern UNS/alloy specification from a historical conductivity designation.
+Both retain unknown pressure and unstated statistical uncertainty.
+
+The `fs-material::conductor` adapter resolves the selected claim and its receipt
+to uniform DC resistance using caller-supplied **actual geometry at the queried
+state**, `R = rho_e L/A`. It supplies resistance to the existing circuit owner;
+it does not infer thermal expansion, contact resistance, stranding, AC skin
+effects, ampacity or a self-heating temperature trajectory. Discovery requests
+are in `examples/material-discovery/{copper,aluminum}-dc-conductor.json`.
+
 `stainless-316-20c-engineering-reference` supplies a complete six-property
 isotropic thermoelastic input set at exactly 293.15 K: density, Young modulus,
 Poisson ratio, specific heat, thermal conductivity and instantaneous expansion.
@@ -76,6 +94,29 @@ errata. Source use is permitted by the NTRS record. Discovery of the complete
 parameter set uses [`dry-air.json`](../../../examples/material-discovery/dry-air.json).
 Humidity transport, real-gas effects and experimental accuracy remain outside
 this profile. It does not claim nine independent measured output properties.
+
+`water-vapor-sutherland-ambient` supplies the five corresponding parameters
+for a dilute water-vapor component. Its molar mass comes from NASA
+TP-2002-211556, while its constant heat capacity uses NIST-JANAF H-064 at
+298.15 K. The distinct NASA heat-capacity value is not silently substituted.
+The COMSOL/White steam viscosity reference is retained literally at 350 K;
+using its Sutherland relation at 273.15–313.15 K is an explicitly unbounded
+engineering extrapolation. Eucken conductivity is likewise a model estimate.
+The 80–110 kPa axis denotes total mixture pressure, not stable pure steam.
+Discovery uses [`water-vapor-component.json`](../../../examples/material-discovery/water-vapor-component.json).
+
+`fs_material::moist_air::resolve_moist_air_state` keeps both component cards
+and ten receipts, takes relative humidity separately, and uses the existing
+gas/acoustic path. It mixes ideal molar heat capacities; viscosity and
+conductivity follow the [IDAES Wilke](https://idaes-pse.readthedocs.io/en/stable/explanations/components/property_package/general/transport_properties/viscosity_wilke.html)
+and [Wassiljewa–Mason–Saxena](https://idaes-pse.readthedocs.io/en/stable/explanations/components/property_package/general/transport_properties/thermal_conductivity_wms.html)
+formulations. The existing Buck-1996 liquid-water saturation equation is
+documented by [CIRES's formula comparison](https://cires1.colorado.edu/~voemel/vp.html),
+which attributes it to the Buck Research CR-1A manual, revised July 1996;
+that manufacturer manual was not retrieved in this acquisition.
+Pure-water saturation pressure omits the moist-air enhancement factor.
+Supersaturation and unsupported component conditions refuse; condensation,
+real-gas behavior and experimental accuracy are not qualified by this model.
 
 `silicon-cubic-25c-nasa-rp1057` uses manifest v6 to carry all 36 explicitly
 addressed engineering stiffness entries in crystal axes `[100],[010],[001]`,

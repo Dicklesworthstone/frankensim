@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	aluminum-ec-h19-nbs-hb109
+redistribution	permitted	Attributed numerical reference facts from NBS Handbook 109, a US Government handbook; retain NBS and Aluminum Association attribution and source approximation limits
+citation	C. Peterson, J. L. Thomas and H. Cook, Aluminum Wire Tables, National Bureau of Standards Handbook 109 (1972), printed pp.2-3 and Table 1 p.5, EC-H19 column; https://nvlpubs.nist.gov/nistpubs/Legacy/hb/nbshandbook109.pdf
+license	US-Government-NBS-Publication-Attribution-Retained
+source	nbs-reference	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature
+axis	source-pressure-known	source-pressure-known	dimensional

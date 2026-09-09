@@ -8,5 +8,6 @@ property	thermal_conductivity	thermal-conductivity	thermal-conductivity
 property	specific_heat_capacity	specific-heat-capacity	dimensional
 property	young_modulus	young-modulus	dimensional
 property	linear_expansion_relative_to_293k	linear-expansion-relative-to-293k	dimensional
+property	linear_thermal_expansion_coefficient	linear-thermal-expansion-coefficient	dimensional
 axis	temperature	temperature	absolute-temperature
 axis	source_pressure_known	source-pressure-known	dimensional

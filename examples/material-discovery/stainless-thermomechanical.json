@@ -5,7 +5,8 @@
     {"name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
     {"name": "specific-heat-capacity", "unit": "J/kg/K", "kind": "dimensional"},
     {"name": "young-modulus", "unit": "Pa", "kind": "dimensional"},
-    {"name": "linear-expansion-relative-to-293k", "unit": "1", "kind": "dimensional"}
+    {"name": "linear-expansion-relative-to-293k", "unit": "1", "kind": "dimensional"},
+    {"name": "linear-thermal-expansion-coefficient", "unit": "K^-1", "kind": "dimensional"}
   ],
   "models": [],
   "domain": {

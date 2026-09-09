@@ -1,0 +1,8 @@
+frankensim.matdb-manifest.v3
+pack_id	copper-annealed-iacs-nbs-hb100
+redistribution	permitted	Attributed numerical reference values and derived curve from NBS Handbook 100, a US Government publication; retain source identity and approximation limits
+citation	National Bureau of Standards, Copper Wire Tables, Handbook 100 (1966), printed pp.3-4 and Appendix 2 p.35, Appendix 6 pp.40-41; https://nvlpubs.nist.gov/nistpubs/Legacy/hb/nbshandbook100.pdf
+license	US-Government-NBS-Publication
+source	nbs-reference	properties.tsv	material-tsv-v1
+axis	T	T	absolute-temperature
+axis	source-pressure-known	source-pressure-known	dimensional

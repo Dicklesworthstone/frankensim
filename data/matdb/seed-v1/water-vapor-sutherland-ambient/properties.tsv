@@ -1,0 +1,27 @@
+frankensim.matdb-source.v1
+observation	vapor-component	Dilute H2O gas component for a USSA dry-air / water-vapor engineering mixture, not a stable pure-steam specimen at the total mixture pressure	Calorically perfect ideal-gas component with Sutherland viscosity and explicitly selected Eucken conductivity	M=18.01528e-3 kg/mol. NIST-JANAF H-064 reports ideal-gas Cp=33.590 J/(mol K) at 298.15 K and standard-state pressure0.1MPa; retain this Cp as a constant approximation and derive gamma=Cp/(Cp-8.31432) using the existing USSA gas constant. The model does not reproduce the full temperature-dependent JANAF table. COMSOL6.4 Table5-2 gives steam mu_ref=1.12e-5 Pa*s at350K and S=1064K; the existing Sutherland adapter evaluates mu=mu_ref*(T/350)^(3/2)*(350+1064)/(T+1064). Reference350K is a parameter reference, not the operating-temperature applicability bound. Application at273.15..313.15K is explicitly extrapolated from that steam reference, with no stated error bound. Eucken k=mu*(Cp_mass+1.25*R/M) is a kinetic-theory approximation, not an independently measured conductivity. The pressure axis80..110kPa is total mixture pressure for the dilute component model, not proof that pure steam is stable there. A separate dry-air card and explicit relative humidity are required by the moist-air adapter; no condensation, real-gas correction, CO2 variation, numerical uncertainty or experimental qualification is supplied. This authored application rectangle is not a source-certified accuracy envelope. Retain five source parameters as parameters, not five independent output measurements.
+scalar	molar-mass	vapor-component	molar_mass	0.01801528	kg/mol	constant
+uncertainty	molar-mass	unstated	-	-	-	-
+validity	molar-mass	temperature	273.15	313.15	K
+validity	molar-mass	pressure	80000	110000	Pa
+validity	molar-mass	source_component_water_vapor	1	1	1
+scalar	gamma	vapor-component	heat_capacity_ratio	1.32894545270394307888	1	constant
+uncertainty	gamma	unstated	-	-	-	-
+validity	gamma	temperature	273.15	313.15	K
+validity	gamma	pressure	80000	110000	Pa
+validity	gamma	source_component_water_vapor	1	1	1
+scalar	mu-reference	vapor-component	sutherland_reference_viscosity	0.0000112	Pa*s	constant
+uncertainty	mu-reference	unstated	-	-	-	-
+validity	mu-reference	temperature	273.15	313.15	K
+validity	mu-reference	pressure	80000	110000	Pa
+validity	mu-reference	source_component_water_vapor	1	1	1
+scalar	temperature-reference	vapor-component	sutherland_reference_temperature	350	K	constant
+uncertainty	temperature-reference	unstated	-	-	-	-
+validity	temperature-reference	temperature	273.15	313.15	K
+validity	temperature-reference	pressure	80000	110000	Pa
+validity	temperature-reference	source_component_water_vapor	1	1	1
+scalar	sutherland-s	vapor-component	sutherland_temperature	1064	K	constant
+uncertainty	sutherland-s	unstated	-	-	-	-
+validity	sutherland-s	temperature	273.15	313.15	K
+validity	sutherland-s	pressure	80000	110000	Pa
+validity	sutherland-s	source_component_water_vapor	1	1	1
