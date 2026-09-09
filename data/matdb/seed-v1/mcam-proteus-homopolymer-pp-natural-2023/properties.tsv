@@ -1,0 +1,60 @@
+frankensim.matdb-source.v1
+observation	mcam-proteus-pp-natural-2023	Proteus Homopolymer PP Natural	Mitsubishi Chemical Advanced Materials product datasheet, issue/revision 2023-02-17, pages 1–2	Named Proteus Homopolymer PP Natural polypropylene stock-shape product. The source presents indicative comparison values and says they are not guaranteed or design limits. Its comparison-data footer describes dry material; this pack therefore requires dry-material=1 for every retained claim, while exact specimen preparation and conditioning are not asserted where absent. This pack retains selected attributed numerical facts only; it does not assert a source-document redistribution license, a generic unfilled formulation, a Poisson ratio, a dynamic modulus law, or thermal heat capacity.
+observation	density	Proteus Homopolymer PP Natural	Product Datasheet page 1, Miscellaneous, Density, ISO 1183-1	Printed density is 0.91 g/cm3, converted to 910 kg/m3. The source footer describes dry material, but density specimen preparation, conditioning protocol, test temperature, pressure and uncertainty are unstated.
+observation	thermal-conductivity	Proteus Homopolymer PP Natural	Product Datasheet page 1, Thermal properties, Thermal conductivity at 23 C, ISO table	Printed thermal conductivity is 0.22 W/(K m) at 23 C (296.15 K). The source footer describes dry material, but thermal-conductivity specimen preparation, orientation, pressure and uncertainty are unstated.
+observation	tensile-modulus	Proteus Homopolymer PP Natural	Product Datasheet page 1, Mechanical Properties, Tensile modulus of elasticity, ISO 527-1/-2 (9)	Printed tensile modulus is 1,800 MPa, converted to 1.8e9 Pa. Note 6 says the mechanical averages use dry specimens machined from 40–60 mm rods when available, otherwise 10–20 mm plate; all tests are at room temperature 23 C. Note 9 specifies 1 mm/min using type 1B tensile bars. Pressure, orientation and uncertainty are unstated.
+observation	tensile-strength	Proteus Homopolymer PP Natural	Product Datasheet page 1, Mechanical Properties, Tensile strength, ISO 527-1/-2 (7)	Printed tensile strength is 34 MPa, converted to 34e6 Pa. Note 6 gives dry specimens and room temperature 23 C; note 7 gives test speed either 5 or 50 mm/min selected by ductile behaviour, so speed is retained as unknown rather than a fabricated interval. Pressure, orientation and uncertainty are unstated.
+observation	tensile-yield-strain	Proteus Homopolymer PP Natural	Product Datasheet page 1, Mechanical Properties, Tensile strain at yield, ISO 527-1/-2 (7)	Printed tensile strain at yield is 6 percent, converted to strain 0.06. Note 6 gives dry specimens and room temperature 23 C; note 7 gives test speed either 5 or 50 mm/min selected by ductile behaviour, so speed is retained as unknown rather than a fabricated interval. Pressure, orientation and uncertainty are unstated.
+observation	mean-linear-thermal-expansion-coefficient	Proteus Homopolymer PP Natural	Product Datasheet page 1, Thermal properties, coefficient of linear thermal expansion, 23–100 C	The source prints 150 micrometre/(m K) over 23–100 C, converted to 150e-6 K^-1. It is retained as the requested mean interval coefficient over the stated source interval, not an instantaneous expansion law. Pressure, specimen, conditioning and uncertainty are unstated.
+scalar	density	mcam-proteus-pp-natural-2023	density	910	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_proteus_pp_natural_2023	1	1	1
+validity	density	dry_material	1	1	1
+validity	density	source_temperature_known	0	0	1
+validity	density	source_specimen_form_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+scalar	thermal-conductivity	mcam-proteus-pp-natural-2023	thermal_conductivity	0.22	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_proteus_pp_natural_2023	1	1	1
+validity	thermal-conductivity	dry_material	1	1	1
+validity	thermal-conductivity	source_temperature_known	1	1	1
+validity	thermal-conductivity	source_specimen_form_known	0	0	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	temperature	296.15	296.15	K
+scalar	tensile-modulus	mcam-proteus-pp-natural-2023	tensile_modulus	1.8e9	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_proteus_pp_natural_2023	1	1	1
+validity	tensile-modulus	dry_material	1	1	1
+validity	tensile-modulus	source_temperature_known	1	1	1
+validity	tensile-modulus	source_specimen_form_known	0	0	1
+validity	tensile-modulus	source_test_speed_known	1	1	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+validity	tensile-modulus	temperature	296.15	296.15	K
+scalar	tensile-strength	mcam-proteus-pp-natural-2023	tensile_strength	34e6	Pa	constant
+uncertainty	tensile-strength	unstated	-	-	-	-
+validity	tensile-strength	source_grade_proteus_pp_natural_2023	1	1	1
+validity	tensile-strength	dry_material	1	1	1
+validity	tensile-strength	source_temperature_known	1	1	1
+validity	tensile-strength	source_specimen_form_known	0	0	1
+validity	tensile-strength	source_test_speed_known	0	0	1
+validity	tensile-strength	source_pressure_known	0	0	1
+validity	tensile-strength	temperature	296.15	296.15	K
+scalar	tensile-yield-strain	mcam-proteus-pp-natural-2023	tensile_yield_strain	0.06	1	constant
+uncertainty	tensile-yield-strain	unstated	-	-	-	-
+validity	tensile-yield-strain	source_grade_proteus_pp_natural_2023	1	1	1
+validity	tensile-yield-strain	dry_material	1	1	1
+validity	tensile-yield-strain	source_temperature_known	1	1	1
+validity	tensile-yield-strain	source_specimen_form_known	0	0	1
+validity	tensile-yield-strain	source_test_speed_known	0	0	1
+validity	tensile-yield-strain	source_pressure_known	0	0	1
+validity	tensile-yield-strain	temperature	296.15	296.15	K
+scalar	mean-linear-thermal-expansion-coefficient	mcam-proteus-pp-natural-2023	mean_linear_thermal_expansion_coefficient	150e-6	1/K	constant
+uncertainty	mean-linear-thermal-expansion-coefficient	unstated	-	-	-	-
+validity	mean-linear-thermal-expansion-coefficient	source_grade_proteus_pp_natural_2023	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	dry_material	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	source_temperature_known	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	source_specimen_form_known	0	0	1
+validity	mean-linear-thermal-expansion-coefficient	source_pressure_known	0	0	1
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_lower	296.15	296.15	K
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_upper	373.15	373.15	K

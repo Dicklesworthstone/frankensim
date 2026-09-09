@@ -1,0 +1,20 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "thermal-conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "296.15 K", "upper": "296.15 K"},
+      {"name": "source-grade-proteus-pp-natural-2023", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "dry-material", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "source-temperature-known", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "source-specimen-form-known", "kind": "dimensional", "lower": "0", "upper": "0"},
+      {"name": "source-pressure-known", "kind": "dimensional", "lower": "0", "upper": "0"}
+    ]
+  },
+  "selection": "single-claim-only"
+}
