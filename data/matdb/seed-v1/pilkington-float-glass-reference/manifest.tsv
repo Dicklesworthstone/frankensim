@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	pilkington-float-glass-reference
+redistribution	permitted	Selected attributed numerical facts and original notes only; the Pilkington source document and its table layout are not redistributed or licensed
+citation	Pilkington North America, Technical Bulletin ATS-129, Properties of Soda-Lime Silica Float Glass, 04/2025, pages 1–2; https://www.pilkington.com/-/media/pilkington/site-content/usa/window-manufacturers/technical-bulletins/ats-129---properties-of-soda-lime-silica-float-glass.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	engineering-reference	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	young_modulus	young-modulus	dimensional
+property	poisson_ratio	poisson-ratio	dimensional
+property	specific_heat_capacity	specific-heat-capacity	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+property	mean_linear_thermal_expansion_coefficient	mean-linear-thermal-expansion-coefficient	dimensional
+axis	engineering_reference_model	engineering-reference-model	dimensional
+axis	source_temperatures_matched	source-temperatures-matched	dimensional
+axis	reference_annealed_glass	reference-annealed-glass	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	expansion_interval_lower	expansion-interval-lower	absolute-temperature
+axis	expansion_interval_upper	expansion-interval-upper	absolute-temperature

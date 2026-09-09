@@ -1,0 +1,46 @@
+frankensim.matdb-source.v1
+observation	engineering-reference	SCHOTT BOROFLOAT 33 floated borosilicate glass	Frozen engineering reference assembled from named producer sheets	This pack selects six producer facts as nominal engineering inputs for a 25–26 C frozen-coefficient calculation of BOROFLOAT 33 annealed glass. The 298.15–299.15 K query domain is author-declared; it is not source measurement coverage or a guaranteed-accuracy band. The source gives different or unstated property temperatures, retained in the per-property notes, so this is not a co-measured state and every claim requires engineering-reference-model=1 and source-temperatures-matched=0. The producer says its listed values are not guaranteed reference values; no error is quantified here. It is not a particular-pane qualification, a tempered-glass representation, fracture/impact input, temperature-qualified law, instantaneous expansion coefficient, or physical validation result.
+observation	density	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1, Mechanical properties	Printed density at 25 C is 2.23 g/cm3, converted to 2230 kg/m3. No density-test pressure, specimen or uncertainty is stated.
+observation	young-modulus	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1, Mechanical properties	Printed Young modulus according to DIN 13316 is 64 kN/mm2, converted to 64 GPa. No test temperature, pressure or uncertainty is stated.
+observation	poisson-ratio	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1, Mechanical properties	Printed Poisson ratio according to DIN 13316 is 0.2. No test temperature, pressure or uncertainty is stated.
+observation	specific-heat-capacity	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1; Thermal Properties (2014), page 1	Printed specific heat capacity is 0.83 kJ/(kg K) over 20–100 C, converted to 830 J/(kg K). This reported interval value is retained as one frozen engineering input; it is not an instantaneous heat-capacity curve.
+observation	thermal-conductivity	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1; Thermal Properties (2014), page 1	Printed thermal conductivity at 90 C is 1.2 W/(m K). The stated 90 C is 363.15 K, but it is not added as a common state axis because the pack's other source facts do not share it.
+observation	mean-linear-expansion	SCHOTT BOROFLOAT 33	BOROFLOAT 33 Technical Data, page 1; Thermal Properties (2014), page 1	Printed CTE according to ISO 7991 is 3.25e-6 K^-1 over 20–300 C. It is retained solely as a mean coefficient over 293.15–573.15 K, not an instantaneous coefficient at any temperature or a curve.
+scalar	density	density,engineering-reference	density	2230	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+validity	density	reference_annealed_glass	1	1	1
+validity	density	temperature	298.15	299.15	K
+scalar	young-modulus	young-modulus,engineering-reference	young_modulus	64000000000	Pa	constant
+uncertainty	young-modulus	unstated	-	-	-	-
+validity	young-modulus	engineering_reference_model	1	1	1
+validity	young-modulus	source_temperatures_matched	0	0	1
+validity	young-modulus	reference_annealed_glass	1	1	1
+validity	young-modulus	temperature	298.15	299.15	K
+scalar	poisson-ratio	poisson-ratio,engineering-reference	poisson_ratio	0.2	1	constant
+uncertainty	poisson-ratio	unstated	-	-	-	-
+validity	poisson-ratio	engineering_reference_model	1	1	1
+validity	poisson-ratio	source_temperatures_matched	0	0	1
+validity	poisson-ratio	reference_annealed_glass	1	1	1
+validity	poisson-ratio	temperature	298.15	299.15	K
+scalar	specific-heat-capacity	specific-heat-capacity,engineering-reference	specific_heat_capacity	830	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	engineering_reference_model	1	1	1
+validity	specific-heat-capacity	source_temperatures_matched	0	0	1
+validity	specific-heat-capacity	reference_annealed_glass	1	1	1
+validity	specific-heat-capacity	temperature	298.15	299.15	K
+scalar	thermal-conductivity	thermal-conductivity,engineering-reference	thermal_conductivity	1.2	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	engineering_reference_model	1	1	1
+validity	thermal-conductivity	source_temperatures_matched	0	0	1
+validity	thermal-conductivity	reference_annealed_glass	1	1	1
+validity	thermal-conductivity	temperature	298.15	299.15	K
+scalar	mean-linear-thermal-expansion-coefficient	mean-linear-expansion,engineering-reference	mean_linear_thermal_expansion_coefficient	3.25e-6	K^-1	constant
+uncertainty	mean-linear-thermal-expansion-coefficient	unstated	-	-	-	-
+validity	mean-linear-thermal-expansion-coefficient	engineering_reference_model	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	source_temperatures_matched	0	0	1
+validity	mean-linear-thermal-expansion-coefficient	reference_annealed_glass	1	1	1
+validity	mean-linear-thermal-expansion-coefficient	temperature	298.15	299.15	K
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_lower	293.15	293.15	K
+validity	mean-linear-thermal-expansion-coefficient	expansion_interval_upper	573.15	573.15	K
