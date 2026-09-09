@@ -4,7 +4,7 @@ Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon te
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
-The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.811365 MB** (0.773778 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.687485 MB**. There are **172 source bundles**, including **154 bulk-material bundles**.
+The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.815642 MB** (0.777857 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.691762 MB**. There are **173 source bundles**, including **155 bulk-material bundles**.
 
 A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 154 complete material cards. The tables below use the exact, auditable source-bundle count.
 
@@ -109,30 +109,39 @@ frozen coefficients. The supplier's inconsistent printed Prandtl row remains
 unresolved; this does not establish source-wide thermophysical consistency,
 experimental accuracy, hydraulic-grade qualification or aged-oil behavior.
 
+Ensinger TECAFINE PE300 natural now contributes four 2017 product-sheet
+comparison facts for named heat-stabilized natural PE-HD stock shapes: density,
+tensile modulus, tensile yield strength and tensile yield strain. The source
+does not state test temperature, conditioning, rate, direction, stock
+dimensions or production history. Temperature, process and rate have typed
+unknown-condition flags; the remaining omissions are retained in source notes. Its
+printed CLTE and service-temperature band are not thermal-property claims.
+This partial bundle does not complete P01 or reach a thermal consumer.
+
 ## Size and populated records
 
 Sizes are logical file-content bytes, not filesystem allocation, Git object size, remote build cache size, or compressed size. MB means 1,000,000 bytes; MiB means 1,048,576 bytes.
 
 | Measured item | Bytes | MB | MiB |
 | --- | ---: | ---: | ---: |
-| All files in data/matdb/seed-v1 | 811,365 | 0.811365 | 0.773778 |
-| All TSV files, including manifests | 687,485 | 0.687485 | 0.655637 |
-| Manifests | 161,806 | 0.161806 | 0.154310 |
-| Source TSV plus axis-convention TSV | 525,679 | 0.525679 | 0.501327 |
+| All files in data/matdb/seed-v1 | 815,642 | 0.815642 | 0.777857 |
+| All TSV files, including manifests | 691,762 | 0.691762 | 0.659716 |
+| Manifests | 162,986 | 0.162986 | 0.155436 |
+| Source TSV plus axis-convention TSV | 528,776 | 0.528776 | 0.504280 |
 | README and license notice | 123,880 | 0.123880 | 0.118141 |
 
-There are **347 files**: 345 TSV files and 2 Markdown files. The TSV set contains 172 manifests, 172 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
+There are **349 files**: 347 TSV files and 2 Markdown files. The TSV set contains 173 manifests, 173 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
 
 | Bundle category | Bundles | Distinct populated property names, summed per bundle | Scalar claims | Curve claims | Curve knots |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bulk material/condition | 154 | 840 | 864 | 71 | 670 |
+| Bulk material/condition | 155 | 844 | 868 | 71 | 670 |
 | Ordered interface system | 8 | 23 | 29 | 0 | 0 |
 | Gas species metadata | 7 | 0 | 0 | 0 | 0 |
 | Authored contact-law card | 3 | 0 | 0 | 0 | 0 |
 
-The bulk and interface sources contain **964 property claims**: 893 scalars and 71 curves with 670 retained knots. That is 1,563 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. Shell's mineral heat-transfer oil adds four curves with 16 retained typical-design ordinates at 0–200 °C. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
+The bulk and interface sources contain **968 property claims**: 897 scalars and 71 curves with 670 retained knots. That is 1,567 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. Shell's mineral heat-transfer oil adds four curves with 16 retained typical-design ordinates at 0–200 °C. Ensinger PE300 adds four comparison facts with unresolved test temperature, processing and rate. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
 
-Across the 154 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.45**. The sum is 840 populated bundle/property-name pairs. Across bulk and interface bundles together there are 305 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
+Across the 155 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.45**. The sum is 844 populated bundle/property-name pairs. Across bulk and interface bundles together there are 308 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
 
 A **metric** below means a distinct populated property name in a bundle. It does not count a manifest declaration without a value, an observation, a validity axis, or an uncertainty row as another material property. Several condition-specific scalar claims for one name still count as one metric; a curve counts as one metric regardless of its knot count. Units shown are the source-record units, before compiler normalization. Byte size includes every file within that bundle's directory. Species fields and contact-law parameters are listed separately because they are not scalar/curve property claims.
 
@@ -140,6 +149,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 
 | Source bundle | Metrics | Scalar claims | Curve claims | Knots | KiB | Populated property names [source units] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [ensinger-tecafine-pe300-natural-2017](../data/matdb/seed-v1/ensinger-tecafine-pe300-natural-2017/manifest.tsv) | 4 | 4 | 0 | 0 | 4.18 | `density` [kg/m3]; `tensile-modulus` [Pa]; `tensile-yield-strength` [Pa]; `tensile-yield-strain` [%]; named heat-stabilized natural PE-HD stock shapes, product-sheet comparison facts, test temperature/process/rate unknown |
 | [shell-heat-transfer-oil-s2-2011](../data/matdb/seed-v1/shell-heat-transfer-oil-s2-2011/manifest.tsv) | 4 | 0 | 4 | 16 | 4.70 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `kinematic_viscosity` [m2/s, converted from source mm2/s]; named mineral oil, typical 0–200 °C design inputs, pressure unknown, aged oil excluded, printed source Prandtl discrepancy unresolved |
 | [dowtherm-sr1-eg50-40-60c](../data/matdb/seed-v1/dowtherm-sr1-eg50-40-60c/manifest.tsv) | 4 | 0 | 4 | 20 | 4.75 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `dynamic_viscosity` [Pa*s]; inhibited SR-1, 50 volume percent ethylene glycol, 40–60 °C, pressure and volume-reference temperature unknown |
 | [dowfrost-pg50-40-60c](../data/matdb/seed-v1/dowfrost-pg50-40-60c/manifest.tsv) | 4 | 0 | 4 | 20 | 4.74 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `dynamic_viscosity` [Pa*s]; inhibited DOWFROST, 50 volume percent propylene glycol, 40–60 °C, pressure and volume-reference temperature unknown |
