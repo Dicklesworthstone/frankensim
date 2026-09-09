@@ -4,7 +4,7 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 173 source bundles, of which 155 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 155 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 177 source bundles, of which 159 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 159 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
 P01 has a first named HDPE acquisition in `ensinger-tecafine-pe300-natural-2017`:
 four producer comparison facts for density, tensile modulus, yield strength and
@@ -17,7 +17,39 @@ that gap. A second reviewed producer candidate, INEOS HD6070FA cast film, states
 density at 23 C but omits temperatures for Cp and conductivity; it is not merged
 with Ensinger stock shapes to manufacture completeness.
 
+P02 now has six producer comparison facts in
+`mcam-proteus-homopolymer-pp-natural-2023`. Its conductivity is explicitly
+at 23 °C and can feed the new source-card slab resistance consumer; its
+database integration check is blocked by a shared FrankenSQLite pager
+compile error (E0596, 2026-09-09). Cp, Poisson ratio and complete processing
+qualification remain missing, so P02 and the complete PP consumer remain open.
+No generic PP heat capacity is merged into this named grade.
+
+P03 now includes `iplex-pvc-u-pipe-engineering-reference`: five nominal
+producer-family inputs with extrusion retained and unknown exact formulation,
+schedule and property test conditions. The 25–26 C frozen model requires
+explicit opt-in; source service limits do not define property coverage.
+Specific gravity uses a declared nominal conversion, and CLTE remains
+observation-only. A source/store/discovery/resolver/lumped-heat test is
+implemented, with runtime verification pending. Exact compound qualification,
+condition-dependent properties and pressure/creep consumers remain open.
+
 Priorities are engineering judgment based on breadth of applications, FrankenSim's existing consumers, the size of the current gap, and likely acquisition effort. They are not a measured global consumption ranking. **A** means the next delivery tranche; **B** means the following expansion; **C** means a targeted application should pull it forward. Effort estimates concern the first useful, bounded dataset, not full physical qualification.
+
+B01 now adds two explicitly opted-in reference bundles:
+`pilkington-float-glass-reference` and `schott-borofloat33-reference`.
+Each retains six manufacturer inputs, including interval-mean expansion under
+a separate property name. The 25–26 C frozen-coefficient model domain is an
+author-selected calculation boundary, not measured temperature coverage or an
+accuracy guarantee. Source temperatures and omissions remain in each property's
+observation; callers must acknowledge unmatched source temperatures. Pilkington
+is a generic producer float-glass bulletin, not a qualified named pane product.
+The shared heat-comparison regression exercises these reference inputs through
+the existing compiler, store, discovery, resolver and lumped heat owner. This
+focused test passed remotely on 2026-09-09 for both glasses, including independent
+heat-response and energy checks, replay and unsupported-context refusals.
+B01's fully condition-qualified profiles and the optical
+and fracture consumer tasks remain unfinished.
 
 Execution is tracked under **`frankensim-7sga6`**. The 2026-09-08 review preserved all 56 original tasks and added nine execution steps: separate HDPE/PP/PVC consumers, separate building structural/heat consumers, separate glass optics/fracture consumers, a sourced soft-sheet law adapter and the shared material-source E2E script. The graph has 71 records: six epics and 65 task records, including four tasks that now aggregate children. Every original material and consumer requirement remains; each task has explicit unit, source, domain, physical-reference and logged E2E acceptance. Nine material tasks now relate to MR10 instead of waiting for tensor infrastructure that already exists. M11's copper/aluminum conductors no longer wait for M02's potentially different metal pair. Existing MR14–MR18 obligations remain attached to the root.
 

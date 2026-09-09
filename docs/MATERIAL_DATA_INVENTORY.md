@@ -1,12 +1,12 @@
 # Material data inventory
 
-Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air and water-vapor models, 316 reference-state, copper/aluminum resistivity, glycol coolant and mineral-oil additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
+Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air and water-vapor models, 316 reference-state, copper/aluminum resistivity, glycol coolant, mineral-oil and named glass reference additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
-The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.815642 MB** (0.777857 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.691762 MB**. There are **173 source bundles**, including **155 bulk-material bundles**.
+The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.843829 MB** (0.804738 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.719949 MB**. There are **177 source bundles**, including **159 bulk-material bundles**.
 
-A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 154 complete material cards. The tables below use the exact, auditable source-bundle count.
+A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 159 complete material cards. The tables below use the exact, auditable source-bundle count.
 
 ## Where the values live and how code reads them
 
@@ -31,6 +31,22 @@ and density into the real oriented tetrahedral operator. Its focused numerical
 test checks forces, energy and mass at two orientations against an independent
 cubic-crystal formula. This is a sourced engineering reference at 25 °C with
 explicit cross-source/unknown-condition limits, not a qualified wafer model.
+
+The Pilkington soda-lime float and SCHOTT BOROFLOAT 33 profiles are explicit
+opt-in frozen engineering references with six scalar inputs each. Their
+author-selected query domain is 298.15–299.15 K for a 25–26 °C frozen
+calculation; it is not source coverage, measurement accuracy, or a claim that
+the six values were co-measured. Each claim retains its source temperature (or
+unknown temperature) in the observation, requires
+`engineering-reference-model=1` and `source-temperatures-matched=0`, and keeps
+the printed CTE as a mean coefficient over its source interval. No
+instantaneous expansion law is supplied. The focused remote integration test
+passed on 2026-09-09: both profiles reached the existing gated lumped heat
+operator through the compiler, reopened store, discovery and material resolver.
+For the prescribed conductance model, their 100 s temperature rises were
+0.346824281 K and 0.477083374 K; independent exponential-response, energy,
+deterministic replay and unsupported-context checks passed. This verifies the
+frozen reference calculation, not experimental glass behavior.
 
 The dry-air source now resolves through the real compiler and reopened store
 into the existing gas model and cylinder acoustic-loss calculation. Four
@@ -118,30 +134,57 @@ unknown-condition flags; the remaining omissions are retained in source notes. I
 printed CLTE and service-temperature band are not thermal-property claims.
 This partial bundle does not complete P01 or reach a thermal consumer.
 
+MCAM Proteus Homopolymer PP Natural adds six producer comparison facts from
+its 2023 datasheet. Conductivity is 0.22 W/(m K) at exactly 23 °C; tensile
+modulus retains the stated 1 mm/min test speed. Density has no stated source
+temperature, and expansion is a mean over 23–100 °C. Heat capacity and Poisson
+ratio are absent. The new `slab_from_card` consumer computes reference-state
+L/(kA) while retaining the source receipt and caller geometry. Two focused
+API tests passed remotely on 2026-09-09, covering source/geometry retention,
+scaling and invalid-property/state/geometry refusals. Resistance uncertainty
+remains explicitly unstated. The full PP
+import/store/discovery/consumer runtime check is blocked by a shared
+FrankenSQLite pager compile error (E0596 at `pager.rs:14062`, 2026-09-09).
+No transient-heating or finite-temperature-range claim follows from this
+singleton conductivity value.
+
+The Iplex PVC-U pipe reference adds five nominal inputs from the producer's
+[product page](https://www.iplex.com.au/products/pvc-pressure-system/pvc-u):
+density, tensile modulus, Poisson ratio, heat capacity and conductivity.
+Density is an explicitly authored conversion of specific gravity 1.47 using
+1000 kg/m³ reference-water density. The source identifies extrusion, but leaves
+the exact compound, extrusion schedule and property test conditions unspecified.
+Every claim therefore requires engineering-reference opt-in, unmatched-source-
+temperature acknowledgment and the Iplex rigid-PVC identity flag. Its authored
+25–26 °C frozen calculation range is not measurement coverage. CLTE lacks an
+interval/convention and remains observation-only. A real lumped-heat integration
+case is implemented; runtime verification is pending. No foam substitution,
+creep, pipe pressure-rating or experimental-accuracy claim is made.
+
 ## Size and populated records
 
 Sizes are logical file-content bytes, not filesystem allocation, Git object size, remote build cache size, or compressed size. MB means 1,000,000 bytes; MiB means 1,048,576 bytes.
 
 | Measured item | Bytes | MB | MiB |
 | --- | ---: | ---: | ---: |
-| All files in data/matdb/seed-v1 | 815,642 | 0.815642 | 0.777857 |
-| All TSV files, including manifests | 691,762 | 0.691762 | 0.659716 |
-| Manifests | 162,986 | 0.162986 | 0.155436 |
-| Source TSV plus axis-convention TSV | 528,776 | 0.528776 | 0.504280 |
+| All files in data/matdb/seed-v1 | 843,829 | 0.843829 | 0.804738 |
+| All TSV files, including manifests | 719,949 | 0.719949 | 0.686597 |
+| Manifests | 168,576 | 0.168576 | 0.160767 |
+| Source TSV plus axis-convention TSV | 551,373 | 0.551373 | 0.525830 |
 | README and license notice | 123,880 | 0.123880 | 0.118141 |
 
-There are **349 files**: 347 TSV files and 2 Markdown files. The TSV set contains 173 manifests, 173 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
+There are **357 files**: 355 TSV files and 2 Markdown files. The TSV set contains 177 manifests, 177 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
 
 | Bundle category | Bundles | Distinct populated property names, summed per bundle | Scalar claims | Curve claims | Curve knots |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bulk material/condition | 155 | 844 | 868 | 71 | 670 |
+| Bulk material/condition | 159 | 867 | 891 | 71 | 670 |
 | Ordered interface system | 8 | 23 | 29 | 0 | 0 |
 | Gas species metadata | 7 | 0 | 0 | 0 | 0 |
 | Authored contact-law card | 3 | 0 | 0 | 0 | 0 |
 
-The bulk and interface sources contain **968 property claims**: 897 scalars and 71 curves with 670 retained knots. That is 1,567 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. Shell's mineral heat-transfer oil adds four curves with 16 retained typical-design ordinates at 0–200 °C. Ensinger PE300 adds four comparison facts with unresolved test temperature, processing and rate. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
+The bulk and interface sources contain **991 property claims**: 920 scalars and 71 curves with 670 retained knots. That is 1,590 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. Shell's mineral heat-transfer oil adds four curves with 16 retained typical-design ordinates at 0–200 °C. Ensinger PE300 adds four comparison facts with unresolved test temperature, processing and rate. The Pilkington and SCHOTT glass references add twelve author-selected frozen-reference scalars with source temperatures retained separately; their focused reference heat calculation passes numerical integration tests, without experimental qualification. MCAM Proteus PP adds six producer comparison facts with property-specific conditions. Iplex PVC-U adds five frozen-reference inputs, including a declared nominal specific-gravity conversion. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
 
-Across the 155 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.45**. The sum is 844 populated bundle/property-name pairs. Across bulk and interface bundles together there are 308 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
+Across the 159 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.45**. The sum is 867 populated bundle/property-name pairs. Across bulk and interface bundles together there are 309 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
 
 A **metric** below means a distinct populated property name in a bundle. It does not count a manifest declaration without a value, an observation, a validity axis, or an uncertainty row as another material property. Several condition-specific scalar claims for one name still count as one metric; a curve counts as one metric regardless of its knot count. Units shown are the source-record units, before compiler normalization. Byte size includes every file within that bundle's directory. Species fields and contact-law parameters are listed separately because they are not scalar/curve property claims.
 
@@ -149,6 +192,8 @@ A **metric** below means a distinct populated property name in a bundle. It does
 
 | Source bundle | Metrics | Scalar claims | Curve claims | Knots | KiB | Populated property names [source units] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [iplex-pvc-u-pipe-engineering-reference](../data/matdb/seed-v1/iplex-pvc-u-pipe-engineering-reference/manifest.tsv) | 5 | 5 | 0 | 0 | 5.89 | `density` [kg/m3, authored SG conversion]; `tensile-modulus` [Pa]; `poisson-ratio` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; extruded PVC-U pipe-family reference, explicit 25–26 °C frozen-model opt-in, source temperatures and exact compound unknown, no scalar CLTE or pressure/creep qualification |
+| [mcam-proteus-homopolymer-pp-natural-2023](../data/matdb/seed-v1/mcam-proteus-homopolymer-pp-natural-2023/manifest.tsv) | 6 | 6 | 0 | 0 | 8.14 | `density` [kg/m3]; `thermal-conductivity` [W/m/K]; `tensile-modulus` [Pa]; `tensile-strength` [Pa]; `tensile-yield-strain` [1]; `mean-linear-thermal-expansion-coefficient` [K^-1]; named PP homopolymer, dry producer comparison facts, conductivity at 23 °C, density temperature unknown, no Cp or Poisson ratio |
 | [ensinger-tecafine-pe300-natural-2017](../data/matdb/seed-v1/ensinger-tecafine-pe300-natural-2017/manifest.tsv) | 4 | 4 | 0 | 0 | 4.18 | `density` [kg/m3]; `tensile-modulus` [Pa]; `tensile-yield-strength` [Pa]; `tensile-yield-strain` [%]; named heat-stabilized natural PE-HD stock shapes, product-sheet comparison facts, test temperature/process/rate unknown |
 | [shell-heat-transfer-oil-s2-2011](../data/matdb/seed-v1/shell-heat-transfer-oil-s2-2011/manifest.tsv) | 4 | 0 | 4 | 16 | 4.70 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `kinematic_viscosity` [m2/s, converted from source mm2/s]; named mineral oil, typical 0–200 °C design inputs, pressure unknown, aged oil excluded, printed source Prandtl discrepancy unresolved |
 | [dowtherm-sr1-eg50-40-60c](../data/matdb/seed-v1/dowtherm-sr1-eg50-40-60c/manifest.tsv) | 4 | 0 | 4 | 20 | 4.75 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `dynamic_viscosity` [Pa*s]; inhibited SR-1, 50 volume percent ethylene glycol, 40–60 °C, pressure and volume-reference temperature unknown |
@@ -209,6 +254,8 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [douglas-fir-coast-fpl-gtr282](../data/matdb/seed-v1/douglas-fir-coast-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.98 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |
 | [face-g-cdtrf-g-2023-v1](../data/matdb/seed-v1/face-g-cdtrf-g-2023-v1/manifest.tsv) | 6 | 7 | 0 | 0 | 6.69 | `cyclohexane_component_volume_fraction` [%]; `diisobutylene_component_volume_fraction` [%]; `isooctane_component_volume_fraction` [%]; `n_heptane_component_volume_fraction` [%]; `reported_calculated_research_octane_number` [1]; `toluene_component_volume_fraction` [%] |
 | [glass-borosilicate-duran-ntrs-19860021558](../data/matdb/seed-v1/glass-borosilicate-duran-ntrs-19860021558/manifest.tsv) | 8 | 8 | 0 | 0 | 5.30 | `density` [kg/m3]; `glass-transition-temperature` [K]; `mean-linear-thermal-expansion-coefficient` [K^-1]; `poisson-ratio` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `thermal-shock-resistance-temperature-difference` [K]; `young-modulus` [GPa] |
+| [pilkington-float-glass-reference](../data/matdb/seed-v1/pilkington-float-glass-reference/manifest.tsv) | 6 | 6 | 0 | 0 | 6.98 | `density` [kg/m3]; `young-modulus` [Pa]; `poisson-ratio` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `mean-linear-thermal-expansion-coefficient` [K^-1]; opt-in 25–26 °C frozen reference for generic soda-lime float glass, source temperatures differ or are unstated, mean expansion only |
+| [schott-borofloat33-reference](../data/matdb/seed-v1/schott-borofloat33-reference/manifest.tsv) | 6 | 6 | 0 | 0 | 6.51 | `density` [kg/m3]; `young-modulus` [Pa]; `poisson-ratio` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `mean-linear-thermal-expansion-coefficient` [K^-1]; opt-in 25–26 °C frozen reference for annealed BOROFLOAT 33, source temperatures differ, mean expansion only |
 | [glass-fiber-insulation-cfast](../data/matdb/seed-v1/glass-fiber-insulation-cfast/manifest.tsv) | 5 | 5 | 0 | 0 | 5.37 | `density` [kg/m3]; `emissivity` [1]; `nominal-thickness` [m]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K] |
 | [glass-soda-lime-srm-1826b-nist](../data/matdb/seed-v1/glass-soda-lime-srm-1826b-nist/manifest.tsv) | 2 | 2 | 0 | 0 | 2.33 | `density` [kg/m3]; `linear-thermal-expansion-coefficient` [K^-1] |
 | [gray-cast-iron-s2-s](../data/matdb/seed-v1/gray-cast-iron-s2-s/manifest.tsv) | 15 | 15 | 0 | 0 | 4.99 | `carbon_equivalent_ce` [%]; `carbon_mass_fraction` [%]; `copper_mass_fraction` [%]; `eutectic_colony_areal_density` [cm-2]; `graphite_area_fraction` [%]; `manganese_mass_fraction` [%]; `maximum_graphite_flake_length` [um]; `molybdenum_mass_fraction` [%]; `phosphorus_mass_fraction` [%]; `primary_dendrite_area_fraction` [%]; `silicon_mass_fraction` [%]; `sulfur_mass_fraction` [%]; `thermal_conductivity` [W/m/K]; `tin_mass_fraction` [%]; `ultimate_tensile_strength` [MPa] |

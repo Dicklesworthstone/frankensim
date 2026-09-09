@@ -20,7 +20,7 @@ mod common_material_acquisition {
     use super::*;
     use fs_matdb::{PropertyClaim, QueryPoint, SelectionPolicy};
 
-    fn compile(slug: &str) -> (NormalizedPack, PathBuf) {
+    pub(super) fn compile(slug: &str) -> (NormalizedPack, PathBuf) {
         let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
         let path = fixture_dir().join(format!("{slug}.fsmatpk"));
         let run = run_compiler(&manifest, &path);
@@ -82,7 +82,7 @@ mod common_material_acquisition {
             .value
     }
 
-    fn close(actual: f64, expected: f64) {
+    pub(super) fn close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() <= 1.0e-10 * expected.abs().max(1.0),
             "actual {actual}, source-derived expected {expected}"
@@ -1260,17 +1260,23 @@ mod common_material_acquisition {
             )
             .unwrap();
             assert_eq!(pinned.knots(), table.knots());
+            assert_eq!(table.knots().len(), table.receipts().len());
+            assert_eq!(table.knots().len(), pinned.receipts().len());
             let requirement = ScalarPropertyRequirement::try_with_key(
                 &claim.key,
                 ScalarAdmissibility::StrictlyPositive,
             )
             .unwrap();
-            for ((at, receipt), pinned_receipt) in
-                points.iter().zip(table.receipts()).zip(pinned.receipts())
+            for (((temperature, _), receipt), pinned_receipt) in table
+                .knots()
+                .iter()
+                .zip(table.receipts())
+                .zip(pinned.receipts())
             {
+                let at = point(claim, &[("temperature", *temperature)]);
                 let resolved = resolve_material_state_point(
                     loaded.card(),
-                    at,
+                    &at,
                     std::slice::from_ref(&requirement),
                     MaterialPropertySelection::SingleClaimOnly,
                 )
@@ -1392,6 +1398,7 @@ mod common_material_acquisition {
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
         let mut solutions = Vec::new();
         for (index, table) in tables.into_iter().enumerate() {
+            let expected_receipts = table.receipts().len();
             let material = ConductivityModel::isotropic(table);
             let solution = pool.scope(|arena| {
                 let cx = Cx::new(
@@ -1437,7 +1444,7 @@ mod common_material_acquisition {
                 solution.report.material_provenance,
                 ProvenanceClass::MatdbReceipts
             );
-            assert_eq!(solution.report.material_receipts, 2);
+            assert_eq!(solution.report.material_receipts, expected_receipts);
             assert!(
                 solution.report.energy.relative_closure() < 1.0e-8,
                 "material {index}: {:?}",
@@ -4452,6 +4459,209 @@ mod common_material_acquisition {
         );
     }
 
+    /// G1/G3: named PP conductivity reaches a reference-state series heat
+    /// resistance without inventing heat capacity or a temperature law.
+    #[test]
+    fn g1_g3_source_card_slab_proteus_pp() {
+        use fs_conduction::interface::{
+            ResistanceOrigin, ResistanceUncertainty, SeriesThermalResistance, ThermalResistanceTerm,
+        };
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack, QueryPoint};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+
+        let slug = "mcam-proteus-homopolymer-pp-natural-2023";
+        let (pack, path) = compile(slug);
+        assert_eq!(pack.claims().claim_count(), 6);
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "MCAM Proteus Homopolymer PP Natural".into(),
+                phase: "dry solid stock shapes".into(),
+                process: "2023 producer comparison data; processing schedule unstated".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let database = fixture_dir().join("proteus-pp.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) = store.load_catalog_pack(slug).unwrap() else {
+            panic!("wrong stored family");
+        };
+        assert_eq!(loaded, original);
+        let card = loaded.card();
+        for (name, expected) in [
+            ("density", 910.0),
+            ("thermal-conductivity", 0.22),
+            ("tensile-modulus", 1.8e9),
+            ("tensile-strength", 34.0e6),
+            ("tensile-yield-strain", 0.06),
+            ("mean-linear-thermal-expansion-coefficient", 150e-6),
+        ] {
+            let claims = card.claims().claims_for(name);
+            assert_eq!(claims.len(), 1, "{name}");
+            let claim = claims[0].1;
+            let answer = card
+                .claims()
+                .query_typed(
+                    &claim.key,
+                    &point(claim, &[]),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            close(answer.evidence.value.value, expected);
+            card.claims().verify_receipt(&answer.receipt).unwrap();
+        }
+        let claim = card.claims().claims_for("thermal-conductivity")[0].1;
+        assert_eq!(claim.validity.bound("temperature"), Some((296.15, 296.15)));
+        let modulus = card.claims().claims_for("tensile-modulus")[0].1;
+        assert_eq!(
+            modulus.validity.bound("temperature"),
+            Some((296.15, 296.15))
+        );
+        assert_eq!(
+            modulus.validity.bound("test-speed"),
+            Some((1.0 / 60_000.0, 1.0 / 60_000.0))
+        );
+        assert!(
+            card.claims()
+                .query_typed(
+                    &modulus.key,
+                    &point(modulus, &[("test-speed", 2.0 / 60_000.0)]),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .is_err()
+        );
+        let expansion = card
+            .claims()
+            .claims_for("mean-linear-thermal-expansion-coefficient")[0]
+            .1;
+        assert_eq!(
+            expansion.validity.bound("expansion-interval-lower"),
+            Some((296.15, 296.15))
+        );
+        assert_eq!(
+            expansion.validity.bound("expansion-interval-upper"),
+            Some((373.15, 373.15))
+        );
+        let at = point(claim, &[]);
+        let requirement = ScalarPropertyRequirement::try_with_key(
+            &claim.key,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap();
+        let state = resolve_material_state_point(
+            card,
+            &at,
+            &[requirement],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let slab = |name, length, at: &QueryPoint| {
+            ThermalResistanceTerm::slab_from_card(
+                name,
+                length,
+                0.01,
+                card,
+                &claim.key,
+                at,
+                SelectionPolicy::SingleClaimOnly,
+            )
+        };
+        let a = slab("layer-a", 0.002, &at).unwrap();
+        let b = slab("layer-b", 0.003, &at).unwrap();
+        for (term, length) in [(&a, 0.002), (&b, 0.003)] {
+            assert_eq!(term.uncertainty(), &ResistanceUncertainty::Unstated);
+            let ResistanceOrigin::BulkMaterialCard {
+                card_identity,
+                receipt,
+                length_m,
+                area_m2,
+                ..
+            } = term.origin()
+            else {
+                panic!("lost bulk source provenance");
+            };
+            assert_eq!(*card_identity, card.content_hash());
+            assert_eq!(*length_m, length);
+            assert_eq!(*area_m2, 0.01);
+            assert_eq!(
+                receipt,
+                &state
+                    .property("thermal-conductivity")
+                    .unwrap()
+                    .answer()
+                    .receipt
+            );
+            card.claims().verify_receipt(receipt).unwrap();
+        }
+        let network = SeriesThermalResistance::new(vec![a.clone(), b.clone()]).unwrap();
+        let replay = SeriesThermalResistance::new(vec![b, a]).unwrap();
+        assert_eq!(network, replay);
+        // Independent Fourier-law conductance for 5 mm total thickness,
+        // 100 cm² cross-section and the source conductivity at exactly 23 C.
+        close(network.budget().value_k_per_w, 25.0 / 11.0);
+        close(1.0 / network.budget().value_k_per_w, 0.44);
+        assert_eq!(network.budget().complete_half_width_k_per_w(), None);
+        assert_eq!(network.budget().unbounded_terms.len(), 2);
+        for (axis, wrong) in [
+            ("temperature", 296.14),
+            ("temperature", 296.16),
+            ("source-grade-proteus-pp-natural-2023", 0.0),
+            ("dry-material", 0.0),
+        ] {
+            assert!(
+                slab("invalid", 0.002, &point(claim, &[(axis, wrong)])).is_err(),
+                "{axis}"
+            );
+        }
+        assert!(slab("missing-context", 0.002, &QueryPoint::new()).is_err());
+        assert!(
+            card.claims()
+                .claims_for("specific-heat-capacity")
+                .is_empty()
+        );
+        assert!(
+            card.claims()
+                .claims_for("linear-thermal-expansion-coefficient")
+                .is_empty()
+        );
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/proteus-pp-conductivity.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(
+            discovery.exit_code,
+            fs_cli::exit::SUCCESS,
+            "{}",
+            discovery.stderr
+        );
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+        eprintln!(
+            "PP={slug} reference_temperature=296.15K k=0.22W/m/K lengths=0.002,0.003m area=0.01m2 resistance={}K/W expected=2.272727272727273K/W conductance=0.44W/K unknown_uncertainty_terms=2 replay=identical no_transient_or_temperature_range_claim=1",
+            network.budget().value_k_per_w
+        );
+    }
+
     /// G0/G3: retain the named PE300 source observations and their unresolved
     /// test conditions through compiler, material-card storage and replay.
     /// This is not a thermal, constitutive, or product qualification model.
@@ -4558,6 +4768,216 @@ mod common_material_acquisition {
         }
         println!(
             "HDPE Ensinger 2017 AA: 4 source facts compiled and stored/reopened; rho=960 kg/m3, tensile modulus=1100 MPa, yield=23 MPa, yield strain=0.09; wrong-grade and asserted-known-temperature queries refused; no thermal or isotropic elastic profile"
+        );
+    }
+
+    /// G1/G3: this frozen engineering reference carries its author-declared
+    /// 25–26 C model range into a lumped heat calculation. It is not a
+    /// co-measured PVC-U state, a creep model, or a product qualification.
+    #[test]
+    fn g1_g3_iplex_pvc_reference_reaches_heat() {
+        use fs_conduction::lumped::{BiotGate, LumpedNetwork, LumpedNode, solve_gated};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+        use fs_qty::QuantitySpec;
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+        let slug = "iplex-pvc-u-pipe-engineering-reference";
+        let (pack, path) = compile(slug);
+        assert_eq!(pack.claims().claim_count(), 5);
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "IPLEX rigid PVC-U pipe engineering reference".into(),
+                phase: "solid polymer".into(),
+                process: "extruded pipe-family frozen reference; schedule and source temperatures unknown"
+                    .into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let database = fixture_dir().join("iplex-pvc-u-pipe-engineering-reference.sqlite");
+        {
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let card = loaded.card();
+        let names = [
+            "density",
+            "tensile-modulus",
+            "poisson-ratio",
+            "specific-heat-capacity",
+            "thermal-conductivity",
+        ];
+        let expected = [1470.0, 3.2e9, 0.38, 1045.0, 0.138];
+        let flags = [
+            ("engineering-reference-model", 1.0),
+            ("source-temperatures-matched", 0.0),
+            ("reference-iplex-rigid-pvc-u-pipe", 1.0),
+        ];
+        let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let dimensionless = QuantitySpec::dimensional(Dims::NONE);
+        let keys = names.map(|name| {
+            let found = card.claims().claims_for(name);
+            assert_eq!(found.len(), 1, "one source claim for {name}");
+            found[0].1.key.clone()
+        });
+        let requirements = keys
+            .iter()
+            .map(|key| {
+                ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::StrictlyPositive)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let anchor = card.claims().claims_for("density")[0].1;
+        let resolve = |point: &QueryPoint| {
+            resolve_material_state_point(
+                card,
+                point,
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+        };
+        let lower = point(anchor, &[]);
+        let state = resolve(&lower).unwrap();
+        assert_eq!(state.properties().len(), 5);
+        for ((name, expected), key) in names.into_iter().zip(expected).zip(&keys) {
+            close(state.property(name).unwrap().value_si(), expected);
+            assert_eq!(state.property_by_key(key).unwrap().value_si(), expected);
+        }
+        for property in state.properties() {
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+        for (_, claim) in card.claims().claims_ordered() {
+            assert_eq!(claim.validity.bound("temperature"), Some((298.15, 299.15)));
+            assert_eq!(
+                claim.validity.axis_quantities().get("temperature"),
+                Some(&absolute_temperature)
+            );
+            for (axis, value) in flags {
+                assert_eq!(claim.validity.bound(axis), Some((value, value)));
+                assert_eq!(
+                    claim.validity.axis_quantities().get(axis),
+                    Some(&dimensionless)
+                );
+            }
+        }
+        assert!(
+            resolve(&QueryPoint::new()).is_err(),
+            "opt-in axes are mandatory"
+        );
+        for (axis, wrong) in [
+            ("engineering-reference-model", 0.0),
+            ("source-temperatures-matched", 1.0),
+            ("reference-iplex-rigid-pvc-u-pipe", 0.0),
+            ("temperature", 298.14),
+            ("temperature", 299.16),
+        ] {
+            assert!(
+                resolve(&point(anchor, &[(axis, wrong)])).is_err(),
+                "must refuse {axis}={wrong}"
+            );
+        }
+        let upper = resolve(&point(anchor, &[("temperature", 299.15)])).unwrap();
+        for (name, expected) in names.into_iter().zip(expected) {
+            close(upper.property(name).unwrap().value_si(), expected);
+        }
+        assert!(
+            card.claims()
+                .claims_for("linear-thermal-expansion-coefficient")
+                .is_empty(),
+            "an observation-only CLTE cannot become an instantaneous alpha law"
+        );
+
+        let rho = state.property("density").unwrap().value_si();
+        let cp = state.property("specific-heat-capacity").unwrap().value_si();
+        let conductivity = state.property("thermal-conductivity").unwrap().value_si();
+        let volume = 1.0e-6;
+        let area = 1.0e-3;
+        let conductance = conductivity * area / 0.1;
+        let capacity = rho * volume * cp;
+        let initial = 298.15;
+        let ambient = 299.15;
+        let time = 100.0;
+        let node = LumpedNode::new(
+            slug,
+            capacity,
+            conductance,
+            volume / area,
+            conductivity,
+            area,
+        )
+        .unwrap();
+        let network = LumpedNetwork::new(vec![node], ambient).unwrap();
+        let heat = solve_gated(
+            &network,
+            BiotGate::corpus_default(),
+            &[0.0],
+            &[initial],
+            time,
+        )
+        .unwrap();
+        assert_eq!(
+            heat,
+            solve_gated(
+                &network,
+                BiotGate::corpus_default(),
+                &[0.0],
+                &[initial],
+                time,
+            )
+            .unwrap()
+        );
+        let tau = capacity / conductance;
+        let expected_delta = (ambient - initial) * (1.0 - (-time / tau).exp());
+        let actual_delta = heat.temperature_k[0] - initial;
+        assert!((actual_delta - expected_delta).abs() < 1e-11);
+        let energy = capacity * actual_delta;
+        let supplied = conductance * (ambient - initial) * tau * (1.0 - (-time / tau).exp());
+        assert!((energy - supplied).abs() < 1e-10);
+
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/iplex-pvc-reference.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(
+            discovery.exit_code,
+            fs_cli::exit::SUCCESS,
+            "{}",
+            discovery.stderr
+        );
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+        eprintln!(
+            "PVC-U={slug} author_frozen_reference_temperature=298.15..299.15K source_temperatures_matched=0 rho={rho}kg/m3 Cp={cp}J/kg/K k={conductivity}W/m/K delta={actual_delta:.12e}K tau={tau:.12e}s energy={energy:.12e}J no_measurement_coverage_or_product_qualification=1 source_bundle={:?}",
+            state.identity()
         );
     }
 }
@@ -4840,6 +5260,256 @@ fn fixture_dir() -> PathBuf {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => panic!("unique fixture directory: {error}"),
         }
+    }
+}
+
+mod glass_reference {
+    use super::common_material_acquisition::{close, compile, point};
+    use super::*;
+
+    /// G1/G3: source-reference glass bundles drive a frozen-coefficient heat
+    /// operator. The source temperatures differ, so this is not a common-T
+    /// material comparison or a temperature-qualified property law.
+    #[test]
+    fn g1_g3_glass_reference_profiles_reach_heat() {
+        use fs_conduction::lumped::{BiotGate, LumpedNetwork, LumpedNode, solve_gated};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack, QueryPoint};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+        use fs_qty::QuantitySpec;
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+        let references = [
+            (
+                "pilkington-float-glass-reference",
+                "Pilkington float glass reference",
+                [2500.0, 72.0e9, 0.22, 880.0, 0.937, 8.3e-6],
+                (297.038_888_888_888_9, 574.816_666_666_666_7),
+            ),
+            (
+                "schott-borofloat33-reference",
+                "SCHOTT BOROFLOAT 33 reference",
+                [2230.0, 64.0e9, 0.2, 830.0, 1.2, 3.25e-6],
+                (293.15, 573.15),
+            ),
+        ];
+        let names = [
+            "density",
+            "young-modulus",
+            "poisson-ratio",
+            "specific-heat-capacity",
+            "thermal-conductivity",
+            "mean-linear-thermal-expansion-coefficient",
+        ];
+        let flags = [
+            ("engineering-reference-model", 1.0),
+            ("source-temperatures-matched", 0.0),
+            ("reference-annealed-glass", 1.0),
+        ];
+        let dimensionless = QuantitySpec::dimensional(Dims::NONE);
+        let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let mut temperature_deltas = Vec::new();
+        for (slug, chemistry, expected, expansion_interval) in references {
+            let (pack, path) = compile(slug);
+            assert_eq!(pack.claims().claim_count(), 6);
+            let original = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: chemistry.into(),
+                    phase: "annealed glass reference".into(),
+                    process: "cross-source engineering reference; source temperatures unmatched"
+                        .into(),
+                    revision: 0,
+                },
+                pack,
+            )
+            .unwrap();
+            let database = fixture_dir().join(format!("{slug}.sqlite"));
+            {
+                let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+                store
+                    .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                    .unwrap();
+                store.seal_corpus().unwrap();
+            }
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            let CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(original.pack_id()).unwrap()
+            else {
+                panic!("wrong stored family")
+            };
+            assert_eq!(loaded, original);
+            let claims = loaded.card().claims();
+            let keys = names.map(|name| {
+                let available = claims.claims_for(name);
+                assert_eq!(available.len(), 1, "one source claim for {slug} {name}");
+                available[0].1.key.clone()
+            });
+            let requirements = keys
+                .iter()
+                .map(|key| {
+                    ScalarPropertyRequirement::try_with_key(
+                        key,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let mean = claims.claims_for("mean-linear-thermal-expansion-coefficient")[0].1;
+            let at = point(mean, &[]);
+            let resolve = |at: &QueryPoint| {
+                resolve_material_state_point(
+                    loaded.card(),
+                    at,
+                    &requirements,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+            };
+            let state = resolve(&at).unwrap();
+            assert_eq!(state.properties().len(), 6);
+            let without_opt_in = QueryPoint::new()
+                .with_quantity("temperature", absolute_temperature, 298.15)
+                .unwrap();
+            assert!(resolve(&without_opt_in).is_err());
+            for ((name, expected), key) in names.into_iter().zip(expected).zip(&keys) {
+                close(state.property(name).unwrap().value_si(), expected);
+                assert_eq!(state.property_by_key(key).unwrap().value_si(), expected);
+            }
+            for property in state.properties() {
+                claims.verify_receipt(&property.answer().receipt).unwrap();
+            }
+            for (_, claim) in claims.claims_ordered() {
+                assert!(
+                    claim.validity.bound("temperature") == Some((298.15, 299.15)),
+                    "{slug}: author-selected model range, not measured property coverage"
+                );
+                assert_eq!(
+                    claim.validity.axis_quantities().get("temperature"),
+                    Some(&absolute_temperature)
+                );
+                for (axis, value) in flags {
+                    assert_eq!(claim.validity.bound(axis), Some((value, value)));
+                    assert_eq!(
+                        claim.validity.axis_quantities().get(axis),
+                        Some(&dimensionless)
+                    );
+                }
+            }
+            assert_eq!(
+                mean.validity.bound("expansion-interval-lower"),
+                Some((expansion_interval.0, expansion_interval.0))
+            );
+            assert_eq!(
+                mean.validity.bound("expansion-interval-upper"),
+                Some((expansion_interval.1, expansion_interval.1))
+            );
+            for axis in ["expansion-interval-lower", "expansion-interval-upper"] {
+                assert_eq!(
+                    mean.validity.axis_quantities().get(axis),
+                    Some(&absolute_temperature)
+                );
+            }
+            assert!(
+                claims
+                    .claims_for("linear-thermal-expansion-coefficient")
+                    .is_empty(),
+                "mean CTE must not manufacture an instantaneous law"
+            );
+            for (axis, wrong) in [
+                ("engineering-reference-model", 0.0),
+                ("source-temperatures-matched", 1.0),
+                ("reference-annealed-glass", 0.0),
+                ("temperature", 297.0),
+                ("temperature", 300.0),
+                ("expansion-interval-lower", expansion_interval.0 + 1.0),
+            ] {
+                assert!(resolve(&point(mean, &[(axis, wrong)])).is_err());
+            }
+            let upper = resolve(&point(mean, &[("temperature", 299.15)])).unwrap();
+            for (name, value) in names.into_iter().zip(expected) {
+                close(upper.property(name).unwrap().value_si(), value);
+            }
+
+            let rho = state.property("density").unwrap().value_si();
+            let cp = state.property("specific-heat-capacity").unwrap().value_si();
+            let conductivity = state.property("thermal-conductivity").unwrap().value_si();
+            let volume = 1.0e-6;
+            let area = 1.0e-3;
+            let conductance = conductivity * area / 0.1;
+            let capacity = rho * volume * cp;
+            let node = LumpedNode::new(
+                slug,
+                capacity,
+                conductance,
+                volume / area,
+                conductivity,
+                area,
+            )
+            .unwrap();
+            let ambient = 299.15;
+            let initial = 298.15;
+            let time = 100.0;
+            let network = LumpedNetwork::new(vec![node], ambient).unwrap();
+            let heat = solve_gated(
+                &network,
+                BiotGate::corpus_default(),
+                &[0.0],
+                &[initial],
+                time,
+            )
+            .unwrap();
+            let replay = solve_gated(
+                &network,
+                BiotGate::corpus_default(),
+                &[0.0],
+                &[initial],
+                time,
+            )
+            .unwrap();
+            assert_eq!(heat, replay);
+            let tau = capacity / conductance;
+            let expected_delta = (ambient - initial) * (1.0 - (-time / tau).exp());
+            let actual_delta = heat.temperature_k[0] - initial;
+            assert!((actual_delta - expected_delta).abs() < 1.0e-11);
+            let energy = capacity * actual_delta;
+            let supplied = conductance * (ambient - initial) * tau * (1.0 - (-time / tau).exp());
+            assert!((energy - supplied).abs() < 1.0e-10);
+            temperature_deltas.push(actual_delta);
+            eprintln!(
+                "glass={slug} frozen_nominal_engineering_reference=1 source_temperatures_matched=0 rho={rho}kg/m3 Cp={cp}J/kg/K k={conductivity}W/m/K Tinitial={initial}K Tambient={ambient}K time={time}s delta={actual_delta:.12e}K tau={tau:.12e}s energy={energy:.12e}J source_bundle={:?} no_physical_accuracy_bound=1",
+                state.identity()
+            );
+
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                workspace_path("examples/material-discovery/glass-reference.json")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{}",
+                discovery.stdout
+            );
+        }
+        assert!(
+            temperature_deltas[1] > temperature_deltas[0],
+            "fixed geometry must retain the two sourced frozen-coefficient heat responses"
+        );
     }
 }
 

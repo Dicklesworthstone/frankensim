@@ -19,6 +19,9 @@ readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g1_g3_sourced_glycols_reach_heat_and_flow"
   "common_material_acquisition::g1_g3_sourced_mineral_oil_reaches_heat_and_flow"
   "common_material_acquisition::g0_g3_sourced_ensinger_tecafine_pe300_natural_2017_observations"
+  "glass_reference::g1_g3_glass_reference_profiles_reach_heat"
+  "common_material_acquisition::g1_g3_source_card_slab_proteus_pp"
+  "common_material_acquisition::g1_g3_iplex_pvc_reference_reaches_heat"
 )
 
 usage() {

@@ -49,7 +49,7 @@ validity	tensile-yield-strain	source_specimen_form_known	0	0	1
 validity	tensile-yield-strain	source_test_speed_known	0	0	1
 validity	tensile-yield-strain	source_pressure_known	0	0	1
 validity	tensile-yield-strain	temperature	296.15	296.15	K
-scalar	mean-linear-thermal-expansion-coefficient	mcam-proteus-pp-natural-2023	mean_linear_thermal_expansion_coefficient	150e-6	1/K	constant
+scalar	mean-linear-thermal-expansion-coefficient	mcam-proteus-pp-natural-2023	mean_linear_thermal_expansion_coefficient	150e-6	K^-1	constant
 uncertainty	mean-linear-thermal-expansion-coefficient	unstated	-	-	-	-
 validity	mean-linear-thermal-expansion-coefficient	source_grade_proteus_pp_natural_2023	1	1	1
 validity	mean-linear-thermal-expansion-coefficient	dry_material	1	1	1
