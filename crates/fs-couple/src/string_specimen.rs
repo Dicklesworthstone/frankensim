@@ -41,6 +41,8 @@ pub enum StringGeometryConstraint {
     /// Keep the current circular radius [m] fixed when replacing material.
     FixedRadius(f64),
     /// Keep total specimen mass [kg] fixed; derive `r = sqrt(m / (rho L pi))`.
+    /// Retain the prescribed mass and compute linear density directly as `m/L`;
+    /// neither is reconstructed through the rounded radius.
     /// This compares uniform specimens at their resolved material states. It
     /// does not transport mass, strain, or history between evolving states.
     FixedMass(f64),
@@ -133,6 +135,14 @@ impl ResolvedStringSpecimen {
         self.area_m2
     }
 
+    /// Resolved circular radius [m] used for mechanics and the radiator width.
+    /// For a mass prescription this is derived geometry, not a replacement for
+    /// the exact prescribed mass or `m/L` linear density.
+    #[must_use]
+    pub const fn radius_m(&self) -> f64 {
+        0.5 * self.string.width_m
+    }
+
     /// Area second moment about either transverse centroidal axis [m⁴].
     #[must_use]
     pub const fn second_moment_m4(&self) -> f64 {
@@ -145,8 +155,8 @@ impl ResolvedStringSpecimen {
         self.mass_kg
     }
 
-    /// Identity of geometry and material resolution, excluding loading and solver
-    /// options. It is not an identity of the complete acoustic scenario.
+    /// Identity of geometry, mass and material resolution, excluding loading and
+    /// solver options. It is not an identity of the complete acoustic scenario.
     #[must_use]
     pub const fn specimen_identity(&self) -> ContentHash {
         self.specimen_identity
@@ -502,13 +512,14 @@ pub fn with_uniform_circular_thermal_extension(
 /// material binding. The template always supplies the current loaded length.
 ///
 /// Fixed radius changes mass when density changes. Fixed mass changes radius,
-/// axial/bending stiffness and observer width coherently; linear density remains
-/// `m/L` to floating-point roundoff. All prestress policies apply to the resulting
+/// axial/bending stiffness and observer width coherently; linear density is set
+/// directly to `m/L`, preserving its bits across density changes at fixed mass
+/// and length. All prestress policies apply to the resulting
 /// geometry. Thermal strain is supplied explicitly by its prestress prescription;
 /// it is never inferred from density. No conservation across time or transverse
 /// contraction is solved. The authored constraint is retained separately from the
-/// material receipts; specimen identity binds the resolved radius, not the choice
-/// of constraint that produced it.
+/// material receipts; specimen identity binds the resolved radius and mass
+/// quantities, not the choice of constraint that produced them.
 ///
 /// # Errors
 /// In addition to the fixed-radius binding's refusals, rejects nonpositive or
@@ -557,11 +568,22 @@ pub fn with_uniform_circular_material_and_constraints(
     let radius_squared = radius_m * radius_m;
     let area_m2 = core::f64::consts::PI * radius_squared;
     let second_moment_m4 = area_m2 * (0.25 * radius_squared);
-    string.lin_density_kg_m = density * area_m2;
+    // Mass is the constraint's independent variable. Reconstructing it via
+    // rho*pi*r^2 introduces density-dependent roundoff and would invalidate
+    // an otherwise unchanged mass-normalized basis during material rebinding.
+    let mass_kg = match geometry_constraint {
+        StringGeometryConstraint::FixedMass(mass_kg) => {
+            string.lin_density_kg_m = mass_kg / string.length_m;
+            mass_kg
+        }
+        StringGeometryConstraint::FixedRadius(_) => {
+            string.lin_density_kg_m = density * area_m2;
+            string.lin_density_kg_m * string.length_m
+        }
+    };
     string.axial_stiffness_n = young * area_m2;
     string.bending_stiffness_n_m2 = young * second_moment_m4;
     string.width_m = 2.0 * radius_m;
-    let mass_kg = string.lin_density_kg_m * string.length_m;
     if ![
         area_m2,
         second_moment_m4,
@@ -579,10 +601,12 @@ pub fn with_uniform_circular_material_and_constraints(
         ));
     }
     string.tension_n = resolve_prestress(&string, prestress)?;
-    let mut identity = DomainHasher::new("org.frankensim.fs-couple.circular-string-specimen.v1");
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.circular-string-specimen.v2");
     identity.update(state.identity().as_bytes());
     identity.update(&string.length_m.to_bits().to_le_bytes());
     identity.update(&radius_m.to_bits().to_le_bytes());
+    identity.update(&mass_kg.to_bits().to_le_bytes());
+    identity.update(&string.lin_density_kg_m.to_bits().to_le_bytes());
     let resolved = ResolvedStringSpecimen {
         string,
         geometry_constraint,
