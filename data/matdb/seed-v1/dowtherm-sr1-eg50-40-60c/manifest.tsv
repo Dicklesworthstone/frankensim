@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	dowtherm-sr1-eg50-40-60c
+redistribution	permitted	A small selection of attributed numerical facts and original explanatory text only; no source-document, table-layout or prose redistribution license is asserted
+citation	The Dow Chemical Company (2001), Engineering and Operating Guide for DOWTHERM SR-1 and DOWTHERM 4000 Inhibited Ethylene Glycol-based Heat Transfer Fluids, Tables 11, 15, 19, 23, printed pages 19, 23, 27, 31; https://petroleumservicecompany.com/content/pdfs/DOWTHERMSR-1ENGINEERINGANDOPERATIONMANUAL.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	dowtherm-sr1-eg50-guide	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	specific_heat_capacity	specific_heat_capacity	dimensional
+property	thermal_conductivity	thermal_conductivity	thermal-conductivity
+property	dynamic_viscosity	dynamic_viscosity	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	ethylene_glycol_volume_fraction	ethylene-glycol-volume-fraction	dimensional
+axis	source_formulation_dowtherm_sr1	source-formulation-dowtherm-sr1	dimensional
+axis	phase_liquid	phase-liquid	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	volume_reference_temperature_known	volume-reference-temperature-known	dimensional

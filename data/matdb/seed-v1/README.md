@@ -71,6 +71,28 @@ calculations through the existing material resolver. The temperatures differ,
 so comparing those calculations is not a controlled same-temperature material
 substitution, and neither point set authorizes a finite heating trajectory.
 
+`dowtherm-sr1-eg50-40-60c` and `dowfrost-pg50-40-60c` retain density,
+specific heat, conductivity and dynamic viscosity from the Dow-authored
+2001 SR-1 and 2007 DOWFROST engineering guides. Each curve has five literal
+5 °C source rows over 40–60 °C, with explicitly approximate linear
+interpolation. The concentration is exactly 50% **glycol by volume**, not
+50% product or 50% glycol by mass. These are distinct inhibited products;
+the later technical data sheets' differing values are not pooled into them.
+Only selected attributed numerical facts and original notes are distributed.
+
+The guides do not state the volume-reference temperature or numerical
+property-test pressure. Both remain explicitly unknown in the query flags;
+the 20 °C water-density reference used for specific gravity does not establish
+a concentration-reference temperature. The selected rows are below the
+tables' atmospheric-boiling markings. The separate phase tables lack an
+exact 50.0-volume-percent row, so freezing/boiling points and mass-to-volume
+conversion are not invented for these profiles. Other concentrations, phase
+changes and operation outside 40–60 °C remain unsupported.
+The source-resolved tuple is exposed by `fs_material::liquid::resolve_liquid_state`;
+the existing heat and flow owners consume its coefficients. Discovery requests
+are [`dowtherm-sr1-eg50.json`](../../../examples/material-discovery/dowtherm-sr1-eg50.json)
+and [`dowfrost-pg50.json`](../../../examples/material-discovery/dowfrost-pg50.json).
+
 `air-dry-ussa1976` supplies five parameters for the existing calorically perfect
 gas model: molar mass, heat-capacity ratio, reference viscosity, its absolute
 reference temperature, and the Sutherland temperature interval. The static

@@ -1,0 +1,23 @@
+{
+  "schema": "frankensim.discovery.v1",
+  "target": "properties",
+  "properties": [
+    {"name": "density", "unit": "kg/m3", "kind": "dimensional"},
+    {"name": "specific_heat_capacity", "unit": "J/kg/K", "kind": "dimensional"},
+    {"name": "thermal_conductivity", "unit": "W/m/K", "kind": "thermal-conductivity"},
+    {"name": "dynamic_viscosity", "unit": "Pa*s", "kind": "dimensional"}
+  ],
+  "models": [],
+  "domain": {
+    "mode": "envelope",
+    "axes": [
+      {"name": "temperature", "kind": "absolute-temperature", "lower": "313.15 K", "upper": "333.15 K"},
+      {"name": "propylene-glycol-volume-fraction", "kind": "dimensional", "lower": "0.5", "upper": "0.5"},
+      {"name": "source-formulation-dowfrost", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "phase-liquid", "kind": "dimensional", "lower": "1", "upper": "1"},
+      {"name": "source-pressure-known", "kind": "dimensional", "lower": "0", "upper": "0"},
+      {"name": "volume-reference-temperature-known", "kind": "dimensional", "lower": "0", "upper": "0"}
+    ]
+  },
+  "selection": "single-claim-only"
+}
