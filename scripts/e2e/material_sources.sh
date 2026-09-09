@@ -13,6 +13,9 @@ readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g0_g3_stainless_thermomechanical_envelope"
   "common_material_acquisition::g1_g3_sourced_silicon_tensor_reaches_oriented_solid"
   "common_material_acquisition::g1_g3_sourced_dry_air_reaches_acoustic_loss"
+  "common_material_acquisition::g1_g3_sourced_metal_profiles_reach_thermoelastic_plate"
+  "common_material_acquisition::g1_g3_sourced_conductors_reach_circuit_dissipation"
+  "common_material_acquisition::g1_g3_sourced_humid_air_reaches_acoustic_transport"
 )
 
 usage() {

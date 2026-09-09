@@ -1,10 +1,12 @@
 # Material data inventory
 
-Snapshot: **2026-09-08 17:40 UTC**, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
+Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air model, 316 reference-state and copper/aluminum resistivity additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
 
-The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.730206 MB** (0.696379 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.620345 MB**. There are **162 source bundles**, including **144 bulk-material bundles**.
+Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
-A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 144 complete material cards. The tables below use the exact, auditable source-bundle count.
+The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.794138 MB** (0.757349 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.672951 MB**. There are **169 source bundles**, including **151 bulk-material bundles**.
+
+A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 150 complete material cards. The tables below use the exact, auditable source-bundle count.
 
 ## Where the values live and how code reads them
 
@@ -24,7 +26,47 @@ A bundle identifies a source and condition, not a unique chemical material. Copp
 
 The regular material path is source TSV → offline compiler → normalized pack → store/direct typed query → material resolution → consumer. Binary packs are generated artifacts; the seed README says they are deliberately not committed. There is no single prebuilt, comprehensive material database file in this directory. The runtime does not automatically treat every source directory as a complete, loaded specimen.
 
-There are also numerical presets in code. For example, [ThermoelasticZener handbook constructors in visco.rs](../crates/fs-material/src/visco.rs) embed aluminum/structural-steel constants, and [rc_section in fs-solid](../crates/fs-solid/src/fiber.rs) constructs an example steel law with fixed parameters. These are outside this source-data census. This inventory is not an exhaustive audit of constants, examples or test fixtures throughout the repository.
+The silicon reference now follows that path through all 36 stiffness components
+and density into the real oriented tetrahedral operator. Its focused numerical
+test checks forces, energy and mass at two orientations against an independent
+cubic-crystal formula. This is a sourced engineering reference at 25 °C with
+explicit cross-source/unknown-condition limits, not a qualified wafer model.
+
+The dry-air source now resolves through the real compiler and reopened store
+into the existing gas model and cylinder acoustic-loss calculation. Four
+temperature/pressure states match independent source-equation/property and
+loss references; a synthetic reference-viscosity change alters the result.
+The application domain is explicitly 273.15–313.15 K, 80–110 kPa, dry,
+USSA-1976 composition. These are five model parameters, not five new measured
+thermophysical properties, and the result does not qualify humidity transport.
+
+The complete 2024-T3 and 316 reference profiles now pass the same actual plate
+consumer through compilation, persistent storage/reopen, discovery and typed
+resolution. All six selected properties and their receipts reach plate mass,
+stiffness and thermal damping; 128-step pressure traces are deterministic and
+change when thermal damping is removed. The test checks mass and Zener damping
+against independent equations, and modal frequency against the existing 20%
+coarse-mesh continuum band (observed difference about 2.3%). The profiles use
+different explicit temperatures, 300 K and 293.15 K. The 316 data are a
+cross-source engineering approximation with pressure and product form unknown;
+this evidence does not establish a controlled same-temperature substitution,
+measured acoustic accuracy, or a finite heating trajectory. The eight-case
+`scripts/e2e/material_sources.sh --run` remote run passed on 2026-09-09 UTC.
+
+The copper and EC-H19 aluminum resistivity curves also pass compilation,
+persistent storage/reopen, discovery and the source-resolved uniform conductor
+adapter into the existing circuit DAE. Eight source knots and two interior
+interpolation states check resistance, voltage, Joule energy, supplied energy,
+geometry scaling and deterministic replay. At 20 °C, a 1 m conductor with
+1 mm² cross-section has resistance 0.017241 ohm for copper and 0.028264 ohm for
+aluminum. At 2 A for 1 s, the circuit dissipates 0.068964 J and 0.113056 J,
+respectively. The nine-case remote runner passed on 2026-09-09 UTC (receipt
+`frankensim-material-sources.UKHQHK`, 9 passed, zero failed/ignored).
+The handbook approximations and respective 10–30 °C / 0–30 °C coverage remain
+explicit. This proves the fixed-state DC path, not temperature feedback,
+ampacity, contact resistance, AC behavior or experimental qualification.
+
+There are also numerical presets in code. For example, [ThermoelasticZener handbook constructors in visco.rs](../crates/fs-material/src/visco.rs) embed aluminum/structural-steel constants, and [rc_section in fs-solid](../crates/fs-solid/src/fiber.rs) constructs an example steel law with fixed parameters. These are outside this source-data census. The dry-air adapter reuses the existing gas equations and explicit conductivity-model choice in [gas.rs](../crates/fs-material/src/gas.rs); adding its parameter pack does not replace every existing ambient preset automatically. This inventory is not an exhaustive audit of constants, examples or test fixtures throughout the repository.
 
 ## Size and populated records
 
@@ -32,24 +74,24 @@ Sizes are logical file-content bytes, not filesystem allocation, Git object size
 
 | Measured item | Bytes | MB | MiB |
 | --- | ---: | ---: | ---: |
-| All files in data/matdb/seed-v1 | 730,206 | 0.730206 | 0.696379 |
-| All TSV files, including manifests | 620,345 | 0.620345 | 0.591607 |
-| Manifests | 143,018 | 0.143018 | 0.136393 |
-| Source TSV plus axis-convention TSV | 477,327 | 0.477327 | 0.455215 |
-| README and license notice | 109,861 | 0.109861 | 0.104772 |
+| All files in data/matdb/seed-v1 | 794,138 | 0.794138 | 0.757349 |
+| All TSV files, including manifests | 672,951 | 0.672951 | 0.641776 |
+| Manifests | 158,140 | 0.158140 | 0.150814 |
+| Source TSV plus axis-convention TSV | 514,811 | 0.514811 | 0.490962 |
+| README and license notice | 121,187 | 0.121187 | 0.115573 |
 
-There are **327 files**: 325 TSV files and 2 Markdown files. The TSV set contains 162 manifests, 162 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
+There are **341 files**: 339 TSV files and 2 Markdown files. The TSV set contains 169 manifests, 169 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
 
 | Bundle category | Bundles | Distinct populated property names, summed per bundle | Scalar claims | Curve claims | Curve knots |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bulk material/condition | 144 | 801 | 821 | 45 | 389 |
+| Bulk material/condition | 151 | 828 | 864 | 59 | 614 |
 | Ordered interface system | 8 | 23 | 29 | 0 | 0 |
 | Gas species metadata | 7 | 0 | 0 | 0 | 0 |
 | Authored contact-law card | 3 | 0 | 0 | 0 | 0 |
 
-The bulk and interface sources contain **895 property claims**: 850 scalars and 45 curves with 389 retained knots. That is 1,239 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
+The bulk and interface sources contain **952 property claims**: 893 scalars and 59 curves with 614 retained knots. That is 1,507 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters. Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots, retaining the handbook reference approximations. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
 
-Across the 144 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.56**. The sum is 801 populated bundle/property-name pairs. Across bulk and interface bundles together there are 296 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence.
+Across the 151 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.48**. The sum is 828 populated bundle/property-name pairs. Across bulk and interface bundles together there are 304 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
 
 A **metric** below means a distinct populated property name in a bundle. It does not count a manifest declaration without a value, an observation, a validity axis, or an uncertainty row as another material property. Several condition-specific scalar claims for one name still count as one metric; a curve counts as one metric regardless of its knot count. Units shown are the source-record units, before compiler normalization. Byte size includes every file within that bundle's directory. Species fields and contact-law parameters are listed separately because they are not scalar/curve property claims.
 
@@ -57,6 +99,12 @@ A **metric** below means a distinct populated property name in a bundle. It does
 
 | Source bundle | Metrics | Scalar claims | Curve claims | Knots | KiB | Populated property names [source units] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [water-vapor-sutherland-ambient](../data/matdb/seed-v1/water-vapor-sutherland-ambient/manifest.tsv) | 5 | 5 | 0 | 0 | 4.31 | `molar_mass` [kg/mol]; `heat_capacity_ratio` [1]; `sutherland_reference_viscosity` [Pa*s]; `sutherland_reference_temperature` [K absolute]; `sutherland_temperature` [K interval]; dilute-vapor model parameters, constant Cp and extrapolated steam transport, not pure-phase validity |
+| [copper-annealed-iacs-nbs-hb100](../data/matdb/seed-v1/copper-annealed-iacs-nbs-hb100/manifest.tsv) | 1 | 0 | 1 | 3 | 2.28 | `electrical_resistivity` [Ohm*m]; standard annealed 100% IACS copper, source-derived linear volume-resistivity reference at 10–30 °C |
+| [aluminum-ec-h19-nbs-hb109](../data/matdb/seed-v1/aluminum-ec-h19-nbs-hb109/manifest.tsv) | 1 | 0 | 1 | 5 | 2.28 | `electrical_resistivity` [Ohm*m]; EC-H19 wire, five source table entries with linear interpolation at 0–30 °C |
+| [stainless-316-20c-engineering-reference](../data/matdb/seed-v1/stainless-316-20c-engineering-reference/manifest.tsv) | 6 | 6 | 0 | 0 | 6.13 | `density` [kg/m3]; `young_modulus` [Pa]; `poisson_ratio` [1]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `linear_thermal_expansion_coefficient` [K-1]; explicit cross-source engineering approximation at exactly 20 °C, pressure unknown |
+| [air-dry-ussa1976](../data/matdb/seed-v1/air-dry-ussa1976/manifest.tsv) | 5 | 5 | 0 | 0 | 4.80 | `molar_mass` [kg/mol]; `heat_capacity_ratio` [1]; `sutherland_reference_viscosity` [Pa*s]; `sutherland_reference_temperature` [K absolute]; `sutherland_temperature` [K interval]; bounded dry-air model parameters, with explicit conductivity-model choice |
+| [silicon-cubic-25c-nasa-rp1057](../data/matdb/seed-v1/silicon-cubic-25c-nasa-rp1057/manifest.tsv) | 2 | 37 | 0 | 0 | 14.76 | `density` [kg/m3]; `stiffness` [MPa], 36 explicit engineering-Voigt components at 25 °C derived from three cubic constants; cross-source engineering reference, not a qualified wafer |
 | [aisi-1045-cold-drawn](../data/matdb/seed-v1/aisi-1045-cold-drawn/manifest.tsv) | 3 | 3 | 0 | 0 | 2.19 | `tensile_elongation_50mm` [%]; `ultimate_tensile_strength` [MPa]; `yield_strength` [MPa] |
 | [aisi-4140-rc33](../data/matdb/seed-v1/aisi-4140-rc33/manifest.tsv) | 7 | 14 | 0 | 0 | 5.50 | `charpy_v_notch_impact_energy` [J]; `double_shear_ultimate_strength` [GPa]; `double_shear_yield_strength` [GPa]; `tensile_elongation_2in` [%]; `tensile_reduction_of_area` [%]; `ultimate_tensile_strength` [GPa]; `yield_strength_0p2_offset` [GPa] |
 | [aisi-52100-cvm-hot-hardness](../data/matdb/seed-v1/aisi-52100-cvm-hot-hardness/manifest.tsv) | 8 | 15 | 0 | 0 | 8.59 | `carbon_mass_fraction` [%]; `chromium_mass_fraction` [%]; `manganese_mass_fraction` [%]; `phosphorus_mass_fraction` [%]; `retained_austenite_volume_fraction` [%]; `rockwell_c_scale_reading` [1]; `silicon_mass_fraction` [%]; `sulfur_mass_fraction` [%] |
@@ -65,7 +113,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [aluminum-2024-t3-nasa-tn-d6448](../data/matdb/seed-v1/aluminum-2024-t3-nasa-tn-d6448/manifest.tsv) | 7 | 7 | 0 | 0 | 2.77 | `density` [kg/m3]; `linear_thermal_expansion_coefficient` [K-1]; `loss_factor_thermoelastic_peak` [1]; `poisson_ratio` [1]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `young_modulus` [MPa] |
 | [aluminum-2024-t3-sheet-mil-hdbk-5j](../data/matdb/seed-v1/aluminum-2024-t3-sheet-mil-hdbk-5j/manifest.tsv) | 13 | 13 | 0 | 0 | 4.03 | `compression_modulus` [GPa]; `compressive_yield_l_a_basis` [MPa]; `compressive_yield_lt_a_basis` [MPa]; `density` [kg/m3]; `elongation_lt_minimum` [%]; `poisson_ratio` [1]; `shear_modulus` [GPa]; `shear_ultimate_a_basis` [MPa]; `tensile_ultimate_l_a_basis` [MPa]; `tensile_ultimate_lt_a_basis` [MPa]; `tensile_yield_l_a_basis` [MPa]; `tensile_yield_lt_a_basis` [MPa]; `young_modulus` [GPa] |
 | [aluminum-2024-t4-damping-nasa-tn-d2893](../data/matdb/seed-v1/aluminum-2024-t4-damping-nasa-tn-d2893/manifest.tsv) | 7 | 7 | 0 | 0 | 2.72 | `loss_factor_1500hz` [1]; `loss_factor_150hz` [1]; `loss_factor_15hz` [1]; `loss_factor_300hz` [1]; `loss_factor_30hz` [1]; `loss_factor_700hz` [1]; `loss_factor_70hz` [1] |
-| [aluminum-6061-t6-cryogenic](../data/matdb/seed-v1/aluminum-6061-t6-cryogenic/manifest.tsv) | 3 | 6 | 0 | 0 | 2.93 | `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K]; `young_modulus` [GPa] |
+| [aluminum-6061-t6-cryogenic](../data/matdb/seed-v1/aluminum-6061-t6-cryogenic/manifest.tsv) | 3 | 0 | 3 | 72 | 5.62 | `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `young-modulus` [GPa] |
 | [aluminum-7075-t6-nasa-cr-71699](../data/matdb/seed-v1/aluminum-7075-t6-nasa-cr-71699/manifest.tsv) | 1 | 0 | 1 | 6 | 2.03 | `thermal-conductivity` [W/m/K] |
 | [aluminum-fusion-nasa-tp3287](../data/matdb/seed-v1/aluminum-fusion-nasa-tp3287/manifest.tsv) | 2 | 2 | 0 | 0 | 1.81 | `latent-heat-fusion` [J/kg]; `melting-point` [K] |
 | [aluminum-liquid-nasa-tp3287](../data/matdb/seed-v1/aluminum-liquid-nasa-tp3287/manifest.tsv) | 2 | 0 | 2 | 10 | 2.77 | `specific-enthalpy-reference-29815k` [J/kg]; `specific-heat-capacity` [J/kg/K] |
@@ -148,7 +196,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [nickel-pure-nasa-cr-71699](../data/matdb/seed-v1/nickel-pure-nasa-cr-71699/manifest.tsv) | 1 | 0 | 1 | 13 | 2.03 | `thermal-conductivity` [W/m/K] |
 | [nist-srm-1720-northern-continental-air](../data/matdb/seed-v1/nist-srm-1720-northern-continental-air/manifest.tsv) | 4 | 4 | 0 | 0 | 6.27 | `information_argon_amount_fraction` [%]; `information_carbon_monoxide_amount_fraction_lower_bound` [%]; `information_carbon_monoxide_amount_fraction_upper_bound` [%]; `information_oxygen_amount_fraction` [%] |
 | [nist-srm-2728-auto-emission-reference-gas](../data/matdb/seed-v1/nist-srm-2728-auto-emission-reference-gas/manifest.tsv) | 4 | 4 | 0 | 0 | 6.28 | `information_total_other_hydrocarbons_propane_equivalent_amount_fraction` [%]; `nominal_carbon_dioxide_amount_fraction` [%]; `nominal_carbon_monoxide_amount_fraction` [%]; `nominal_propane_amount_fraction` [%] |
-| [ofhc-copper-rrr100](../data/matdb/seed-v1/ofhc-copper-rrr100/manifest.tsv) | 2 | 4 | 0 | 0 | 2.38 | `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K] |
+| [ofhc-copper-rrr100](../data/matdb/seed-v1/ofhc-copper-rrr100/manifest.tsv) | 2 | 0 | 2 | 48 | 4.29 | `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K] |
 | [osb-aspen-pu-1992-mill7-fpl-gtr282](../data/matdb/seed-v1/osb-aspen-pu-1992-mill7-fpl-gtr282/manifest.tsv) | 6 | 6 | 0 | 0 | 4.22 | `bending-moe-parallel` [GPa]; `bending-moe-perpendicular` [GPa]; `bending-mor-parallel` [MPa]; `bending-mor-perpendicular` [MPa]; `internal-bond-strength` [MPa]; `specific-gravity` [1] |
 | [osb-southern-pine-biblis-1989-mill1-fpl-gtr282](../data/matdb/seed-v1/osb-southern-pine-biblis-1989-mill1-fpl-gtr282/manifest.tsv) | 6 | 6 | 0 | 0 | 4.32 | `bending-moe-parallel` [GPa]; `bending-moe-perpendicular` [GPa]; `bending-mor-parallel` [MPa]; `bending-mor-perpendicular` [MPa]; `internal-bond-strength` [MPa]; `specific-gravity` [1] |
 | [peek-nasa-thermic-plate](../data/matdb/seed-v1/peek-nasa-thermic-plate/manifest.tsv) | 3 | 9 | 0 | 0 | 4.83 | `density` [kg/m3]; `specific_heat_capacity` [J/kg/K]; `thermal_conductivity` [W/m/K] |
@@ -173,9 +221,9 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [stainless-17-4ph-h1025-bar-mil-hdbk-5j](../data/matdb/seed-v1/stainless-17-4ph-h1025-bar-mil-hdbk-5j/manifest.tsv) | 9 | 9 | 0 | 0 | 3.16 | `compression_modulus` [GPa]; `compressive_yield_l_s_basis` [MPa]; `elongation_l_s_basis` [%]; `poisson_ratio` [1]; `shear_modulus` [GPa]; `shear_ultimate_s_basis` [MPa]; `tensile_ultimate_l_s_basis` [MPa]; `tensile_yield_l_s_basis` [MPa]; `young_modulus` [GPa] |
 | [stainless-301-annealed-mil-hdbk-5j](../data/matdb/seed-v1/stainless-301-annealed-mil-hdbk-5j/manifest.tsv) | 18 | 17 | 1 | 4 | 5.99 | `compression_modulus_l` [GPa]; `compressive_yield_l_s_basis` [MPa]; `compressive_yield_lt_s_basis` [MPa]; `density` [kg/m3]; `elongation_lt_s_basis` [%]; `poisson_ratio` [1]; `shear_modulus` [GPa]; `shear_ultimate_s_basis` [MPa]; `tensile_ultimate_l_s_basis` [MPa]; `tensile_ultimate_lt_s_basis` [MPa]; `tensile_yield_fraction` [1]; `tensile_yield_fraction_1033k` [1]; `tensile_yield_fraction_478k` [1]; `tensile_yield_fraction_589k` [1]; `tensile_yield_fraction_811k` [1]; `tensile_yield_l_s_basis` [MPa]; `tensile_yield_lt_s_basis` [MPa]; `young_modulus_l` [GPa] |
 | [stainless-301-full-hard-mil-hdbk-5j](../data/matdb/seed-v1/stainless-301-full-hard-mil-hdbk-5j/manifest.tsv) | 13 | 13 | 0 | 0 | 4.24 | `compressive_yield_l_b_basis` [MPa]; `compressive_yield_lt_b_basis` [MPa]; `density` [kg/m3]; `elongation_lt_minimum` [%]; `poisson_ratio` [1]; `shear_modulus` [GPa]; `shear_ultimate_b_basis` [MPa]; `tensile_ultimate_l_b_basis` [MPa]; `tensile_ultimate_lt_b_basis` [MPa]; `tensile_yield_l_b_basis` [MPa]; `tensile_yield_lt_b_basis` [MPa]; `young_modulus_l` [GPa]; `young_modulus_lt` [GPa] |
-| [stainless-304-nist-cryogenic](../data/matdb/seed-v1/stainless-304-nist-cryogenic/manifest.tsv) | 4 | 0 | 4 | 43 | 6.47 | `linear-expansion-relative-to-293k` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `young-modulus` [GPa] |
+| [stainless-304-nist-cryogenic](../data/matdb/seed-v1/stainless-304-nist-cryogenic/manifest.tsv) | 5 | 0 | 5 | 54 | 8.35 | `linear-expansion-relative-to-293k` [1]; `linear-thermal-expansion-coefficient` [K^-1, model-derived]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `young-modulus` [GPa] |
 | [stainless-304a-nasa-cr-71699](../data/matdb/seed-v1/stainless-304a-nasa-cr-71699/manifest.tsv) | 1 | 0 | 1 | 7 | 2.06 | `thermal-conductivity` [W/m/K] |
-| [stainless-316-nist-cryogenic](../data/matdb/seed-v1/stainless-316-nist-cryogenic/manifest.tsv) | 4 | 0 | 4 | 44 | 6.65 | `linear-expansion-relative-to-293k` [1]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `young-modulus` [GPa] |
+| [stainless-316-nist-cryogenic](../data/matdb/seed-v1/stainless-316-nist-cryogenic/manifest.tsv) | 5 | 0 | 5 | 55 | 8.53 | `linear-expansion-relative-to-293k` [1]; `linear-thermal-expansion-coefficient` [K^-1, model-derived]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; `young-modulus` [GPa] |
 | [stainless-347-nasa-cr-71699](../data/matdb/seed-v1/stainless-347-nasa-cr-71699/manifest.tsv) | 1 | 0 | 1 | 13 | 2.07 | `thermal-conductivity` [W/m/K] |
 | [steel-4130-sheet-normalized-mil-hdbk-5j](../data/matdb/seed-v1/steel-4130-sheet-normalized-mil-hdbk-5j/manifest.tsv) | 10 | 10 | 0 | 0 | 3.58 | `compression_modulus` [GPa]; `compressive_yield_s_basis` [MPa]; `density` [kg/m3]; `elongation_t_minimum` [%]; `poisson_ratio` [1]; `shear_modulus` [GPa]; `shear_ultimate_s_basis` [MPa]; `tensile_ultimate_s_basis` [MPa]; `tensile_yield_s_basis` [MPa]; `young_modulus` [GPa] |
 | [sweetgum-fpl-gtr282](../data/matdb/seed-v1/sweetgum-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.97 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |
@@ -194,6 +242,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 | [vocalfold-human-indentation-jvoice-pmc12180296](../data/matdb/seed-v1/vocalfold-human-indentation-jvoice-pmc12180296/manifest.tsv) | 3 | 3 | 0 | 0 | 1.91 | `young_modulus_effective_inferior` [kPa]; `young_modulus_effective_medial` [kPa]; `young_modulus_effective_superior` [kPa] |
 | [vocalfold-porcine-aspiration-mdpi-s21092923](../data/matdb/seed-v1/vocalfold-porcine-aspiration-mdpi-s21092923/manifest.tsv) | 4 | 4 | 0 | 0 | 2.18 | `young_modulus_dynamic_day_printed_range_high` [kPa]; `young_modulus_dynamic_day_printed_range_low` [kPa]; `young_modulus_dynamic_printed_range_high` [kPa]; `young_modulus_dynamic_printed_range_low` [kPa] |
 | [walnut-black-fpl-gtr282](../data/matdb/seed-v1/walnut-black-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.97 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |
+| [water-liquid-iapws-sr6-08](../data/matdb/seed-v1/water-liquid-iapws-sr6-08/manifest.tsv) | 5 | 0 | 5 | 75 | 8.43 | `density` [kg/m3]; `dynamic-viscosity` [Pa*s]; `specific-enthalpy` [J/kg]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K] |
 | [waterborne-preservative-treated-lumber-fpl-gtr282](../data/matdb/seed-v1/waterborne-preservative-treated-lumber-fpl-gtr282/manifest.tsv) | 4 | 4 | 0 | 0 | 4.97 | `post-treatment-redrying-standard-temperature-limit` [K]; `post-treatment-redrying-temperature-threshold` [K]; `waterborne-retention-high-reference` [kg/m3]; `waterborne-retention-low-threshold` [kg/m3] |
 | [wo2018-125520-formulation-8-5w30](../data/matdb/seed-v1/wo2018-125520-formulation-8-5w30/manifest.tsv) | 11 | 12 | 0 | 0 | 9.02 | `cold_cranking_simulator_dynamic_viscosity` [mPa*s]; `high_temperature_high_shear_dynamic_viscosity` [mPa*s]; `infineum_p6003_component_mass_fraction` [%]; `kinematic_viscosity` [mm^2/s]; `mini_rotary_viscometer_dynamic_viscosity` [mPa*s]; `noack_mass_loss_fraction` [%]; `pour_point_temperature` [degC]; `spectrasyn_4_component_mass_fraction` [%]; `spectrasyn_elite_150_component_mass_fraction` [%]; `synesstic_5_component_mass_fraction` [%]; `viscosity_index_scale_reading` [1] |
 | [yellow-poplar-fpl-gtr282](../data/matdb/seed-v1/yellow-poplar-fpl-gtr282/manifest.tsv) | 15 | 15 | 0 | 0 | 3.98 | `density` [kg/m3]; `er_over_el` [1]; `et_over_el` [1]; `glr_over_el` [1]; `glt_over_el` [1]; `grt_over_el` [1]; `modulus_of_elasticity_bending` [MPa]; `nu_lr` [1]; `nu_lt` [1]; `nu_rl` [1]; `nu_rt` [1]; `nu_tl` [1]; `nu_tr` [1]; `specific_gravity` [1]; `young_modulus_longitudinal` [MPa] |

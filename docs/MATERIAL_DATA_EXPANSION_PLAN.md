@@ -2,18 +2,55 @@
 
 Planning snapshot: **2026-09-08**. Based on the current shared working tree, the [material inventory](MATERIAL_DATA_INVENTORY.md), the seed manifests and selected source records, and primary-source research. Proposed work below has not been implemented by writing this document.
 
-The largest everyday gaps are **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
+The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog has 162 source bundles, of which 144 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 144 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 169 source bundles, of which 151 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 151 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
 Priorities are engineering judgment based on breadth of applications, FrankenSim's existing consumers, the size of the current gap, and likely acquisition effort. They are not a measured global consumption ranking. **A** means the next delivery tranche; **B** means the following expansion; **C** means a targeted application should pull it forward. Effort estimates concern the first useful, bounded dataset, not full physical qualification.
+
+Execution is tracked under **`frankensim-7sga6`**. The 2026-09-08 review preserved all 56 original tasks and added nine execution steps: separate HDPE/PP/PVC consumers, separate building structural/heat consumers, separate glass optics/fracture consumers, a sourced soft-sheet law adapter and the shared material-source E2E script. The graph has 71 records: six epics and 65 task records, including four tasks that now aggregate children. Every original material and consumer requirement remains; each task has explicit unit, source, domain, physical-reference and logged E2E acceptance. Nine material tasks now relate to MR10 instead of waiting for tensor infrastructure that already exists. M11's copper/aluminum conductors no longer wait for M02's potentially different metal pair. Existing MR14–MR18 obligations remain attached to the root.
+
+Use `br show frankensim-7sga6`, `br ready` and `bv --robot-triage --label material-expansion` for current state. M00, M01, F01 and F02 retain their focused runtime closures. After the dependency correction, `bv` ranks B01 glass first; the bounded AGC/Pilkington/SCHOTT search has useful reference data but unresolved common-temperature/treatment and instantaneous-versus-mean expansion context, recorded in the still-open Bead. M02 now delivers the two reference-state metal profiles described below; the broader MR14–MR18 qualifications remain unfinished. MR10 is closed on the sourced silicon tensor reaching the actual oriented solid operator, with independent force/energy checks; this does not complete the alumina/silicon electronics task. The shared runner [scripts/e2e/material_sources.sh](../scripts/e2e/material_sources.sh), tracked by `.6`, passed eight exact source/consumer cases remotely on 2026-09-09 UTC, including dry air and both metal profiles. It retains numerical diagnostics and failing exit status; full DSR and experimental qualification remain outstanding.
+
+M02 reuses the NASA 2024-T3 set at 300 K and adds
+`stainless-316-20c-engineering-reference` at 293.15 K. Six source requirements
+(rho, E, nu, Cp, k and instantaneous alpha) pass through compilation,
+sealed/reopened storage, discovery and typed resolution into the existing
+thermoelastic plate and radiator. Independent mass/modal/Zener references,
+six receipts, unsupported-state/pin refusals and deterministic 128-step pressure
+evolution pass. The same 0.20 × 0.15 × 0.0016 m geometry gives masses of
+0.12984 kg and 0.384 kg. The 316 set explicitly joins supplier density/nu with
+NIST equation evaluations at 20 °C; it is a nominal isotropic engineering
+reference, not a common-coupon or product-form qualification. Different source
+temperatures remain explicit. M03 warm-temperature acquisition, M13 optics and
+MR15's broader acoustic/trajectory obligations remain open.
+
+F03 adds the `air-dry-ussa1976` parameter pack and a small material-card adapter
+into the existing `GasSpec`/`GasState` model. Its actual compiler, persistent
+store/reopen, discovery, typed resolution and cylinder acoustic-loss path pass
+at four temperature/pressure states. The five parameters derive the full gas
+tuple over the declared 273.15–313.15 K / 80–110 kPa dry application range;
+they are not independent measurements of every output property. Source-table
+errata, the 1976 composition and the model's approximation limits remain
+explicit. F04 humidity-dependent transport is still separate unfinished work.
+
+M11 adds standard annealed 100% IACS copper (10–30 °C, NBS HB100) and
+EC-H19 aluminum (0–30 °C, NBS HB109) volume-resistivity curves. These are
+explicit handbook reference conditions, not inferred C11000 or 1350 grades.
+The source compiler, persistent store/reopen, discovery and typed conductor
+adapter now reach the existing circuit DAE. The nine-case source runner passed
+remotely on 2026-09-09 UTC, including independent resistance, voltage and
+Joule/supplied-energy checks at eight knots and two interpolated states,
+geometry scaling, receipts, replay and unsupported-input refusals. This closes
+the missing source-to-DC-consumer connection; temperature feedback, ampacity,
+AC/contact effects and broader electrical qualification remain separate work.
 
 ## Materials to add or complete
 
 | Priority / effort | Family and first targets | What exists now | Most valuable missing coverage and resulting use |
 | --- | --- | --- | --- |
-| A / low–medium | **Pure liquid water; dry and humid air** | Water-vapor species metadata, air reference-gas composition, one water/ethylene-glycol formulation. These do not constitute a liquid-water thermophysical bundle. Humidity already affects an acoustic gas-state path. | Water density, heat capacity, enthalpy, conductivity and viscosity over a bounded ambient range; air transport and thermodynamics matched to composition, pressure, temperature and humidity. Enables ordinary cooling and fluid experiments and sourced acoustic inputs. Extend to boiling/steam/ice only with the appropriate phase models. |
-| A / medium | **6061-T6 aluminum, C11000 copper, annealed 304/316 stainless; existing 2024-T3 reference** | Several source packs, but different grades, phases and conditions. 6061 currently has three properties at 77 K and 293 K; 304/316 now have four cryogenic curves. 2024-T3 already has a useful six-property mechanical/thermal input set at 300 K. | Complete a compatible density–elasticity–thermal set and its actual temperature domain. Add electrical resistivity for conductor consumers and loss models for acoustics. Enables meaningful plate, beam and thermal substitutions. Preserve 304/316 and copper purity/temper distinctions. |
+| A / low–medium | **Pure liquid water; dry and humid air** | New IAPWS source pack: five 15-knot liquid-water curves over 10–80 °C at exactly 0.1 MPa, with declared enthalpy reference and interpolation/consistency limits. Its compiled/stored conductivity now drives two actual steady-conduction solves with state-dependent flux and source-domain refusals. Water-vapor species metadata, air reference-gas composition and one water/ethylene-glycol formulation remain separate. Humidity already affects an acoustic gas-state path. | Extend water to the selected transient-heat or flow consumer; complete air transport and thermodynamics matched to composition, pressure, temperature and humidity. Enables ordinary cooling and fluid experiments and sourced acoustic inputs. Extend to boiling/steam/ice only with the appropriate phase models. |
+| A / medium | **6061-T6 aluminum, C11000 copper, annealed 304/316 stainless; existing 2024-T3 reference** | 6061 has three 24-knot curves over 77–293 K; OFHC has two. 304/316 retain five cryogenic curves each, including derived instantaneous expansion, with NIST product form/heat treatment unspecified. The separate 316 engineering reference now adds a complete six-property set at 293.15 K using attributed supplier density/nu and NIST equations; both it and the 2024-T3 300 K profile drive the actual thermoelastic plate consumer. The complete profiles do not inherit the wider individual curve coverage. | Extend compatible full profiles to finite heating domains and additional everyday grades/forms. Add electrical resistivity for conductor consumers and sourced loss models for broader acoustics. Preserve 304/316, copper purity/temper and cross-source qualification distinctions. |
 | A / medium | **A36 plate, A572 Grade 50, A500 Grade C tube, 1018 mild steel; A615 Grade 60 rebar** | 1045/4130/4140 and specialized bearing/carburizing steels; no dedicated bundles for these proposed ordinary grades. | Begin with one product form and grade: density, elastic properties, thermal properties, then stress–strain/hardening where plastic deformation is requested. Expands buildings, frames, brackets and machinery. Rebar remains a separate reinforcement constituent; it does not turn concrete into one isotropic material. |
 | A / medium | **HDPE, LDPE/LLDPE, polypropylene, rigid PVC and plasticized PVC** | No dedicated PE/PP bulk bundles. The PVC source is low-density foam, not pipe-grade solid PVC or flexible cable insulation. | First one named HDPE grade, one PP grade and rigid PVC formulation, with density, elastic response, heat capacity, conductivity and expansion at stated conditions. Then creep/viscoelasticity and processing dependence. Enables containers, pipes, housings, films and insulation without substituting foam data. |
 | A–B / medium | **PET, ABS, polycarbonate, PMMA, POM, PA6/PA66; PLA and PETG for printed objects** | PEEK, PTFE and a few specialized insulation/resin sources; these everyday resin families lack dedicated bulk bundles. | Prioritize ABS and PC housings, PET packaging, nylon/POM parts. Retain molding direction, fillers, moisture conditioning and rate. Printed PLA/PETG require build direction and process-specific data; injection-molded values cannot qualify printed parts. |
@@ -54,21 +91,22 @@ For example, six suitable mechanical/thermal properties can make a metal useful 
 
 ### 1. Turn the best existing source sets into usable selections
 
-- [ ] Use an existing consumer's exact requirement set to expose the missing quantities, incompatible states and uncovered intervals for 2024-T3, 6061-T6, C11000 and 304/316. Reuse the 2024-T3 300 K input set as a starting point wherever it already fits; verify existing wiring before duplicating it.
-- [ ] Select the first two materially distinct metal bundles that can satisfy the same bounded requirement set with the least additional acquisition. 6061-T6, C11000 and 304 are the everyday targets; the choice must follow compatible evidence, not alloy-name similarity.
-- [ ] Extend the 6061 and OFHC source-fit point samples into supported curves where the published equations and existing compiler can do so. Preserve fit/data limits and quantify the numerical approximation. This improves in-range coverage without another material search.
-- [ ] Add missing density, elastic or expansion quantities only from compatible source conditions. Resolve property spelling through existing explicit semantic mappings; do not collapse mean expansion, instantaneous expansion and relative strain into one identifier.
-- [ ] Run the actual compiler → store → discovery → resolver path for the selected set, then an existing relevant physical consumer. A successful source-pack query alone is not the physical delivery.
+- [x] Inspect the existing six-property thermoelastic requirement set and reuse the 2024-T3 300 K input set. Its typed conductivity already works in the resolver; no new adapter was needed. The 6061/C11000/304 wider complete-profile gaps remain separate acquisition work.
+- [x] Select the first two materially distinct bundles: 2024-T3 at 300 K and an explicitly cross-source 316 engineering reference at 293.15 K. Both satisfy the same six-property point profile; this does not certify arbitrary stock or a same-temperature substitution.
+- [x] Extend the 6061 and OFHC source-fit point samples into supported curves where the published equations and existing compiler can do so. M01 delivered five 24-knot curves over 77–293 K; source, compiler/store/discovery, deterministic rebuild and original endpoint checks passed. Fit/data limits and sampled interpolation discrepancies remain explicit.
+- [x] Add 316 density and Poisson ratio from explicit 20 °C supplier facts, with documented compatibility limits, and directly evaluate four NIST inputs at that temperature. Keep alpha=epsilon'/(1+epsilon), source reference length and unknown uncertainty distinct from interval-mean expansion. Existing curve packs and semantic mappings remain intact.
+- [x] Run both selected sets through the actual compiler → store/reopen → discovery → resolver → thermoelastic plate/radiator. The new case and all seven earlier source/consumer cases passed remotely; independent equations and evolved pressure sensitivity provide the physical positive result.
 
 **Temperature targets must be stated honestly.** A useful subsequent heating target is 20–100 °C, but it is a proposed acquisition domain, not current coverage. Cryogenic curves ending near 300 K cannot meet it. Even the existing stainless modulus endpoints differ: 304 ends at 293 K and 316 at 294 K. A room-temperature point does not support a finite heating trajectory. Use the source-supported interval for the first delivery, then obtain compatible warmer data explicitly.
 
 ### 2. Add water and the first commodity plastics
 
-- [ ] Implement a bounded pure-liquid-water dataset using the IAPWS liquid-water release; proposed initial domain **10–80 °C at 0.1 MPa**, comfortably within its common stable-liquid region. Verify thermodynamic consistency between heat capacity and enthalpy, source equations, units and numerical approximation before declaring that profile complete.
-- [ ] Bind water to an existing heat/fluid consumer. Keep vapor species metadata and liquid material data separate. Do not broaden this slice into a complete steam/boiling engine.
+- [x] Implement a bounded pure-liquid-water dataset using the IAPWS liquid-water release: F01 delivered five 15-knot curves over **10–80 °C at 0.1 MPa**, with source equations, units, Cp/enthalpy approximation consistency, actual compiler/store/discovery and unsupported-state checks passing.
+- [x] Bind water to an existing heat/fluid consumer. F02's real source/compiler/store/resolver/conduction path passed manufactured temperature/flux and energy checks at **20–25 °C and 60–65 °C**, exactly 0.1 MPa, liquid phase. The warmer interval gives 8.5% greater mean flux for the same 5 K/m gradient. Unsupported temperature/pressure/phase queries refuse. This establishes steady conduction, not fluid motion, transient heating or boiling.
 - [ ] Acquire one named HDPE grade, one PP grade and one rigid PVC formulation. Follow with ABS and PC. Select a bounded elastic or thermal requirement set first; obtain the missing quantities instead of declaring a product complete from its datasheet title.
 - [ ] Add one ordinary mild-steel product condition and one annealed float-glass product. Reuse the same consumer-level checks where applicable.
-- [ ] Complete dry/humid-air source coverage around the existing acoustic gas-state behavior; add transport data for the actual flow/heat consumer. Audit existing models before implementing any new equation of state.
+- [x] Complete a bounded dry-air profile around the existing gas model: F03's five sourced parameters resolve through the real compiler/store and gas adapter into acoustic cylinder loss, with independent property/loss references, source sensitivity, replay and input refusals. No parallel EOS was added.
+- [ ] Complete humidity-dependent source coverage and transport for the actual flow/heat consumer (F04); the dry-air delivery does not qualify humidity transport.
 
 ### 3. Make buildings, furniture and compliant parts useful
 
