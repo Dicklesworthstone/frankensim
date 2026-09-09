@@ -648,6 +648,7 @@ impl ValveCard {
             attack_s,
             mass_kg: m0.mass_kg,
             stiffness_n_m: m0.stiffness_n_m,
+            damping_ratio: 0.5 * self.loss_factor,
         }
     }
 
@@ -1120,7 +1121,8 @@ mod reduce_tests {
             let beating = card.beating_reed(2000.0, 0.01);
             let reed_ok = beating.mass_kg > 0.0
                 && beating.stiffness_n_m > 0.0
-                && beating.rest_opening_m == card.rest_gap_m;
+                && beating.rest_opening_m == card.rest_gap_m
+                && beating.damping_ratio == 0.5 * card.loss_factor;
             let pass = identical && matches!(refused, Err(ReduceError::Card { .. })) && reed_ok;
             verdict(
                 "rl-004-round-trip-and-tamper",

@@ -925,6 +925,7 @@ fn beating_reed_locks_near_the_quarter_wave() {
         attack_s: 0.008,
         mass_kg: 0.0,
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     });
     let out = realize_assembly(&a).expect("reed");
     let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
@@ -1080,6 +1081,7 @@ fn massive_reed_speaks_on_the_ode_clock() {
         attack_s: 0.008,
         mass_kg: 3.0e-4,
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     });
     let out = realize_assembly(&a).expect("massive reed");
     let tail = &out.pressure_pa[out.pressure_pa.len() / 2..];
@@ -4945,6 +4947,7 @@ fn reed_on_moving_end_string_plate_duct_speaks() {
         attack_s: 0.008,
         mass_kg: 0.0,
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     });
     a.duration_s = 0.08;
     let out = realize_assembly(&a).expect("reed leftover");
@@ -5102,6 +5105,7 @@ fn reed_ode_refuses_nonfinite_attack_and_stiffness_up_front() {
             attack_s: 0.02,
             mass_kg: 0.0,
             stiffness_n_m: 8_000.0,
+            damping_ratio: 0.35,
         });
         a
     };
@@ -5110,12 +5114,21 @@ fn reed_ode_refuses_nonfinite_attack_and_stiffness_up_front() {
         realize_assembly(&base()).is_ok(),
         "physical quasistatic reed carrier must realize"
     );
-    for (what, fix) in [("stiffness", 1usize), ("attack", 2usize)] {
+    for (what, fix) in [
+        ("stiffness", 1usize),
+        ("attack", 2usize),
+        ("damping NaN", 3usize),
+        ("negative damping", 4usize),
+        ("infinite damping", 5usize),
+    ] {
         let mut bad = base();
         let r = bad.reed.as_mut().expect("carrier present");
         match fix {
             1 => r.stiffness_n_m = f64::NAN,
-            _ => r.attack_s = f64::NAN,
+            2 => r.attack_s = f64::NAN,
+            3 => r.damping_ratio = f64::NAN,
+            4 => r.damping_ratio = -0.1,
+            _ => r.damping_ratio = f64::INFINITY,
         }
         let err =
             realize_assembly(&bad).expect_err("non-finite reed field must refuse at admission");

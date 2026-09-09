@@ -50,6 +50,7 @@ fn reed() -> BeatingReed {
         attack_s: 0.008,
         mass_kg: 0.0,
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     }
 }
 
@@ -66,6 +67,28 @@ fn reed_voice() -> ReedBoreVoice {
         None,
     )
     .expect("voice admits")
+}
+
+#[test]
+fn reed_voice_refuses_invalid_damping_ratio() {
+    for ratio in [-0.1, f64::NAN, f64::INFINITY] {
+        let mut invalid = reed();
+        invalid.damping_ratio = ratio;
+        assert!(matches!(
+            ReedBoreVoice::new(
+                &clarinet_ish(),
+                &air(),
+                invalid,
+                Termination::UnflangedOpen,
+                PlateBank::default(),
+                1.0,
+                RATE,
+                N,
+                None,
+            ),
+            Err(fs_couple::acoustic_realize::AcousticRealizeError::InvalidDescription { .. })
+        ));
+    }
 }
 
 /// Render N samples through the context in fixed-size blocks.

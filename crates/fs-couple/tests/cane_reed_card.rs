@@ -363,6 +363,13 @@ fn cr_001_the_minted_card_carries_the_provenance_chain() {
     assert!((card.rest_gap_m - 1.0e-3).abs() < 1e-12);
     // Provenance chain: identities present and reproducible.
     assert_eq!(card.identity, card.recomputed_identity());
+    let reed = card.beating_reed(2000.0, 0.01);
+    assert_eq!(reed.damping_ratio, 0.5 * CANE_ETA);
+    let playing_damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
+    assert!(
+        (playing_damping - card.modes[0].damping_n_s_m).abs()
+            <= 1e-14 * card.modes[0].damping_n_s_m
+    );
     assert!(!card.source_id.is_empty());
     // The lay's arc radius is a real facing-scale number (~0.14 m).
     let r = lay.radius_m();

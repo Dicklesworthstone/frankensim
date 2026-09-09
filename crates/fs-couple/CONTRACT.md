@@ -792,7 +792,11 @@ clarinet is one filling of those objects.
   length no longer overrides explicit stiffness and closing pressure.
   This is an effective modal area, not measured geometry. The zero-stiffness
   legacy reduction still derives stiffness using a 25 mm face length, and
-  the existing hardcoded damping ratio remains a model limitation.
+  damping is now an explicit finite nonnegative ratio, consumed as
+  `c = 2 zeta sqrt(k m)`. Reduced valve cards pass `zeta = eta/2`, preserving
+  their existing `c = eta sqrt(k m)` model. This removes the runtime's fixed
+  0.35 substitution; authored fixture ratios remain explicit assumptions,
+  not measurements. G1 covers actual velocity decay; G4 rejects invalid ratios.
   G1 tests exercise the force balance and actual moving-reed acceleration.
   Characteristic-line aperture/face-motion feedback remains outside this fix.
   Isolated

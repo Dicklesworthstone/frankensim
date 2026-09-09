@@ -28,7 +28,8 @@ flagships.
   linear taper; `wall` is a locally reacting
   `LocallyReactingWall` or rigid), `ToneHole` (`open_fraction` σ is the
   TMM/ODE vent mix, not a bool), `Pluck`, `BowStroke` as Stribeck
-  friction, `BeatingReed` as a Bernoulli aperture, `RadiatingPlate` as a
+  friction, `BeatingReed` as a Bernoulli aperture with explicit effective
+  mass/stiffness and finite nonnegative viscous damping ratio, `RadiatingPlate` as a
   compact modal monopole, `ThinPlate` as an orthotropic panel whose
   modes are not data, `UnilateralObstacle` as a distributed contact
   profile, `ContactTexture` as a declared self-affine height spectrum,

@@ -222,6 +222,7 @@ fn td_onset(candidates: &[f64]) -> f64 {
             attack_s: 0.02,
             mass_kg: 0.0,
             stiffness_n_m: 0.0,
+            damping_ratio: 0.35,
         };
         let mut plates = PlateBank::default();
         let n = (0.5 * f64::from(RATE)) as usize;

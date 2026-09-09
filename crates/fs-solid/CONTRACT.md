@@ -403,7 +403,9 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   canonical-bytes round-trip and tamper refusal; `beating_reed()`
   mints the `fs_scenario::BeatingReed` with the runtime's own face
   convention `P_c = k H / (w * 0.025)` so the massless and massive
-  branches agree.
+  branches agree. It also passes the card loss as explicit reed damping
+  `zeta = eta/2`, preserving `c = eta sqrt(k m)` in the playing dynamics.
+  This is the existing reduced viscous model, not a broadband loss-law fit.
 
 ## Invariants
 

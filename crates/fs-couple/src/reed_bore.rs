@@ -93,7 +93,7 @@ pub(crate) fn reed_structural(reed: BeatingReed) -> (f64, f64) {
     } else {
         reed.closing_pressure_pa * face / reed.rest_opening_m
     };
-    let r_damp = 2.0 * 0.35 * det::sqrt((k * reed.mass_kg).max(0.0));
+    let r_damp = 2.0 * reed.damping_ratio * det::sqrt((k * reed.mass_kg).max(0.0));
     (k, r_damp)
 }
 
@@ -474,12 +474,51 @@ mod fast_mode_tests {
             attack_s: 0.008,
             mass_kg: 0.0,
             stiffness_n_m: 0.0,
+            damping_ratio: 0.35,
         }
     }
 
     fn fixture_impedance(gas: &GasState) -> f64 {
         let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
         gas.characteristic_impedance / area
+    }
+
+    #[test]
+    fn g1_reed_declared_damping_controls_actual_velocity_decay() {
+        let gas = air20();
+        for damping_ratio in [0.0, 0.1, 0.7] {
+            let reed = BeatingReed {
+                mass_kg: 1e-5,
+                stiffness_n_m: 500.0,
+                damping_ratio,
+                ..reed()
+            };
+            let dt = 1e-6;
+            let velocity = 0.1;
+            let damping = 2.0 * damping_ratio * (500.0_f64 * 1e-5).sqrt();
+            let (_, _, next_velocity) = step_massive_reed(
+                reed,
+                gas.density,
+                fixture_impedance(&gas),
+                0.0,
+                0.0,
+                reed.rest_opening_m,
+                velocity,
+                dt,
+                0.0,
+                None,
+                ReedSolverMode::Strict,
+                &mut FastSolveStats::default(),
+            )
+            .unwrap();
+            let expected = velocity * (1.0 - damping * dt / reed.mass_kg);
+            assert!((next_velocity - expected).abs() < 1e-14);
+            if damping_ratio > 0.0 {
+                assert!(next_velocity < velocity && next_velocity > 0.0);
+            } else {
+                assert_eq!(next_velocity, velocity);
+            }
+        }
     }
 
     #[test]

@@ -275,6 +275,10 @@ pub struct BeatingReed {
     pub mass_kg: f64,
     /// Reed stiffness [N/m]. Ignored when `mass_kg == 0`.
     pub stiffness_n_m: f64,
+    /// Effective viscous modal damping ratio `zeta >= 0`, finite. The
+    /// dynamic damper is `c = 2 zeta sqrt(k m)`; no material loss is inferred.
+    /// Ignored by the quasistatic valve, but still validated.
+    pub damping_ratio: f64,
 }
 
 /// Regularized Stribeck friction at a station (bow, brake, fault).

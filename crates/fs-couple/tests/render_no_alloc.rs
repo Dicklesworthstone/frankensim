@@ -74,6 +74,7 @@ fn admitted_no_alloc_assembly_allocates_nothing_per_block() {
         attack_s: 0.008,
         mass_kg: 0.0, // massless: the admitted no-alloc reed path
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     };
     let voice = ReedBoreVoice::new(
         &duct,

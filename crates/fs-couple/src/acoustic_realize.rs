@@ -3923,6 +3923,8 @@ fn realize_reed_ode(
         && reed.attack_s >= 0.0
         && reed.mass_kg >= 0.0
         && reed.stiffness_n_m >= 0.0
+        && reed.damping_ratio >= 0.0
+        && reed.damping_ratio.is_finite()
         && reed.mass_kg.is_finite())
     {
         return Err(AcousticRealizeError::InvalidDescription {

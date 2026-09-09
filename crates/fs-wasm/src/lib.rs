@@ -93,6 +93,7 @@ fn new_instrument_reed_context() -> Option<RenderContext> {
         attack_s: 0.008,
         mass_kg: 0.0,
         stiffness_n_m: 0.0,
+        damping_ratio: 0.35,
     };
     let voice = ReedBoreVoice::new(
         &bore,
