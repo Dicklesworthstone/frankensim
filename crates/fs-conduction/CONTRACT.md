@@ -885,6 +885,27 @@ authority.
   the march identity includes both. Setting both temperatures equal recovers
   the shared-temperature model. Directional illumination and view-factor
   networks are outside this rung.
+  `solve_lumped_contact_step` adds an isolated finite-body exchange through
+  the existing `SeriesThermalResistance`. Backward Euler solves one signed
+  heat transfer and returns both enthalpy/temperature/phase states together;
+  latent heat is already included in each body's chart. It enforces both
+  source domains, a contact Biot limit using each declared exchange area,
+  and explicit contact-law/total-energy residual budgets. Cancellation and
+  refusal publish no state. G1 sensible equilibration/refinement, G3 latent
+  heat and side exchange, and G4 cancellation/domain refusals are covered by
+  `tests/lumped.rs`. Resistance is held fixed for the step. Callers own
+  interface-law refresh, operator composition and atomic mechanical-state
+  publication. Spatial spreading, geometry evolution and dynamic contact
+  pressure are not resolved by this reduced operator.
+  `LumpedFiniteThermalContact::advance` connects this operator to the shared
+  `UniformEnthalpyStepInput` callback. It deposits internal specimen energy
+  once, then applies finite contact, returning the actual signed boundary
+  transfer and the support candidate alongside both energy residuals.
+  This first-order split requires the intermediate deposited state to remain
+  in-domain; its residual budget is not a bound on temporal splitting error.
+  The caller commits the support only after its coupled specimen transaction
+  accepts. The existing string-runtime integration test verifies temperature,
+  damping and pressure feedback, support energy debit and late-refusal retry.
   The Biot gate alone does not prove initially uniform temperature or the
   validity of homogenizing a rapid local source. Cross-crate G1/G4 tests in
   `fs-couple/tests/string_specimen.rs` consume this production path.
