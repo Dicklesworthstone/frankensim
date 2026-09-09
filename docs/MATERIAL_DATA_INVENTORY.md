@@ -142,10 +142,12 @@ ratio are absent. The new `slab_from_card` consumer computes reference-state
 L/(kA) while retaining the source receipt and caller geometry. Two focused
 API tests passed remotely on 2026-09-09, covering source/geometry retention,
 scaling and invalid-property/state/geometry refusals. Resistance uncertainty
-remains explicitly unstated. The full PP
-import/store/discovery/consumer runtime check is blocked by a shared
-FrankenSQLite pager compile error (E0596 at `pager.rs:14062`, 2026-09-09).
-No transient-heating or finite-temperature-range claim follows from this
+remains explicitly unstated. The PP import/store/reopen/discovery/resolver/
+consumer integration passed remotely on 2026-09-09 after the sibling pager
+fix and correction of the source's reciprocal-expansion unit spelling.
+Two ideal bulk layers totaling 5 mm over 0.01 m² give 2.272727273 K/W and
+0.44 W/K at 23 °C, matching the independent Fourier-law reference. No
+transient-heating or finite-temperature-range claim follows from this
 singleton conductivity value.
 
 The Iplex PVC-U pipe reference adds five nominal inputs from the producer's
@@ -157,8 +159,13 @@ the exact compound, extrusion schedule and property test conditions unspecified.
 Every claim therefore requires engineering-reference opt-in, unmatched-source-
 temperature acknowledgment and the Iplex rigid-PVC identity flag. Its authored
 25–26 °C frozen calculation range is not measurement coverage. CLTE lacks an
-interval/convention and remains observation-only. A real lumped-heat integration
-case is implemented; runtime verification is pending. No foam substitution,
+interval/convention and remains observation-only. The source/store/reopen/
+discovery/resolver/lumped-heat integration passed remotely on 2026-09-09:
+the prescribed 100 s reference calculation produced a 0.085917983 K rise
+and 0.131982909 J stored energy, matching independent exponential-response
+and energy checks. Replay and unsupported-reference/state refusals passed.
+The combined common-material run passed all 11 selected cases, zero failed
+or ignored (`/tmp/greenosprey-p02-p03-integration.log`). No foam substitution,
 creep, pipe pressure-rating or experimental-accuracy claim is made.
 
 ## Size and populated records

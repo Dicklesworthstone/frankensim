@@ -19,9 +19,10 @@ with Ensinger stock shapes to manufacture completeness.
 
 P02 now has six producer comparison facts in
 `mcam-proteus-homopolymer-pp-natural-2023`. Its conductivity is explicitly
-at 23 °C and can feed the new source-card slab resistance consumer; its
-database integration check is blocked by a shared FrankenSQLite pager
-compile error (E0596, 2026-09-09). Cp, Poisson ratio and complete processing
+at 23 °C and feeds the new source-card slab resistance consumer through
+compilation, persistent store/reopen, discovery and resolution. The focused
+integration passed remotely on 2026-09-09 after the sibling pager fix and
+source-unit spelling correction. Cp, Poisson ratio and complete processing
 qualification remain missing, so P02 and the complete PP consumer remain open.
 No generic PP heat capacity is merged into this named grade.
 
@@ -30,8 +31,9 @@ producer-family inputs with extrusion retained and unknown exact formulation,
 schedule and property test conditions. The 25–26 C frozen model requires
 explicit opt-in; source service limits do not define property coverage.
 Specific gravity uses a declared nominal conversion, and CLTE remains
-observation-only. A source/store/discovery/resolver/lumped-heat test is
-implemented, with runtime verification pending. Exact compound qualification,
+observation-only. The source/store/reopen/discovery/resolver/lumped-heat test
+passed remotely on 2026-09-09, including independent response and energy,
+replay and unsupported-state/reference refusals. Exact compound qualification,
 condition-dependent properties and pressure/creep consumers remain open.
 
 Priorities are engineering judgment based on breadth of applications, FrankenSim's existing consumers, the size of the current gap, and likely acquisition effort. They are not a measured global consumption ranking. **A** means the next delivery tranche; **B** means the following expansion; **C** means a targeted application should pull it forward. Effort estimates concern the first useful, bounded dataset, not full physical qualification.
