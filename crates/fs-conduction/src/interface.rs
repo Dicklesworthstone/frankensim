@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_matdb::{
-    ClaimId, InterfaceSystemCard, PropertyUsageReceipt, QueryPoint, SelectionPolicy,
-    UncertaintyModel,
+    ClaimId, InterfaceSystemCard, MaterialCard, PropertyKey, PropertyUsageReceipt, QueryPoint,
+    SelectionPolicy, UncertaintyModel,
 };
 use fs_sparse::Coo;
 
@@ -361,6 +361,20 @@ pub enum ResistanceOrigin {
         /// Exact material-property selection receipt.
         receipt: PropertyUsageReceipt,
     },
+    /// Bulk conductivity evaluated at one explicit reference state. Geometry
+    /// is caller-supplied; this is not a temperature-dependent layer solve.
+    BulkMaterialCard {
+        /// Exact immutable bulk material card.
+        card_identity: ContentHash,
+        /// Conductivity selection and complete reference query point.
+        receipt: PropertyUsageReceipt,
+        /// Source conductivity uncertainty, before any reciprocal transform.
+        conductivity_uncertainty: UncertaintyModel,
+        /// Caller-supplied uniform slab thickness [m].
+        length_m: f64,
+        /// Caller-supplied heat-flow cross-section [m²].
+        area_m2: f64,
+    },
 }
 
 /// One named K/W term in a series thermal-resistance network.
@@ -373,6 +387,86 @@ pub struct ThermalResistanceTerm {
 }
 
 impl ThermalResistanceTerm {
+    /// Resolve scalar conductivity at `point` and form the reference-state
+    /// slab resistance `L/(k A)` [K/W]. The exact source receipt and caller
+    /// geometry are retained. Only that reference state is admitted: this
+    /// does not extend a point measurement over a finite temperature range,
+    /// integrate a nonlinear layer, or infer heat capacity or contact losses.
+    ///
+    /// The resulting resistance uncertainty is explicitly unstated. The
+    /// original conductivity uncertainty remains in the origin; no geometry
+    /// uncertainty or reciprocal uncertainty propagation is claimed.
+    ///
+    /// # Errors
+    /// Refuses invalid geometry, non-conductivity keys, unsupported or
+    /// ambiguous source queries, and non-positive/non-finite results.
+    pub fn slab_from_card(
+        name: impl Into<String>,
+        length_m: f64,
+        area_m2: f64,
+        card: &MaterialCard,
+        property: &PropertyKey,
+        point: &QueryPoint,
+        policy: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
+        use fs_qty::QuantitySpec;
+        use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+        let name = name.into();
+        for (label, value) in [("length", length_m), ("area", area_m2)] {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(interface_error(
+                    &name,
+                    format!("slab {label} {value} must be finite and positive"),
+                    "supply positive SI geometry",
+                ));
+            }
+        }
+        let conductivity = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        ));
+        if property.quantity() != conductivity
+            && property.quantity() != QuantitySpec::dimensional(crate::CONDUCTIVITY_DIMS)
+        {
+            return Err(interface_error(
+                &name,
+                "slab property is not static scalar thermal conductivity",
+                "select a thermal-conductivity key in W/(m K)",
+            ));
+        }
+        let answer = card
+            .claims()
+            .query_typed(property, point, policy)
+            .map_err(|error| {
+                interface_error(
+                    &name,
+                    format!("fs-matdb refused slab conductivity: {error}"),
+                    "select one supported conductivity claim at the complete reference state",
+                )
+            })?;
+        let sample = &answer.evidence.value;
+        if !(sample.value.is_finite() && sample.value > 0.0) {
+            return Err(interface_error(
+                &name,
+                "slab conductivity must be finite and positive",
+                "supply a positive source conductivity",
+            ));
+        }
+        Self::new(
+            name,
+            length_m / sample.value / area_m2,
+            ResistanceUncertainty::Unstated,
+            ResistanceOrigin::BulkMaterialCard {
+                card_identity: card.content_hash(),
+                conductivity_uncertainty: sample.uncertainty.clone(),
+                receipt: answer.receipt,
+                length_m,
+                area_m2,
+            },
+        )
+    }
+
     /// Build a caller-declared term.  The declaration is allowed for analytic
     /// fixtures and explicit engineering inputs, but it never masquerades as
     /// material-card provenance.

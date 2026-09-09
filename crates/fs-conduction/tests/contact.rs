@@ -24,10 +24,12 @@ use fs_conduction::{
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, SurfaceSpec,
-    SystemContext, UncertaintyModel,
+    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    SurfaceSpec, SystemContext, UncertaintyModel,
 };
+use fs_qty::QuantitySpec;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_rep_mesh::TetComplex;
 use fs_vvreg::thermal_level_a::{
     ThermalLevelAAcceptance, ThermalLevelAKind, thermal_level_a_cases,
@@ -124,6 +126,60 @@ fn empty_contact_card() -> InterfaceSystemCard {
         Vec::new(),
     )
     .expect("empty interface card is structurally valid")
+}
+
+fn bulk_conductivity_card(
+    conductivity_w_per_mk: f64,
+    lower_temperature_k: f64,
+    upper_temperature_k: f64,
+) -> (MaterialCard, PropertyKey) {
+    let property = PropertyKey::with_quantity(
+        "thermal-conductivity",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        )),
+    );
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: property.clone(),
+            value: PropertyValue::Scalar {
+                value: conductivity_w_per_mk,
+                dims: fs_conduction::CONDUCTIVITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with(
+                "T",
+                lower_temperature_k,
+                upper_temperature_k,
+            ),
+            uncertainty: UncertaintyModel::HalfWidth {
+                half_width: 0.25,
+                confidence: 0.95,
+            },
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "G0 source-card slab fixture".to_string(),
+                license: "internal-test-use".to_string(),
+                artifact: None,
+            },
+        })
+        .expect("bulk conductivity claim inserts");
+    (
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "fixture-conductivity".to_string(),
+                phase: "solid".to_string(),
+                process: "source-card-slab".to_string(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .expect("bulk conductivity card assembles"),
+        property,
+    )
 }
 
 fn slab_chain_mesh(n: usize, slab_count: usize) -> (ConductionMesh, usize) {
@@ -1750,5 +1806,128 @@ fn a_measured_value_cannot_masquerade_as_the_cards_own_claim() {
                 .is_err(),
             "{bad} must be refused; perfect contact is never an implicit default"
         );
+    }
+}
+
+#[test]
+fn g0_source_card_slab_retains_card_receipt_geometry_and_scaling() {
+    let (card, property) = bulk_conductivity_card(5.0, 295.0, 305.0);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    let term = ThermalResistanceTerm::slab_from_card(
+        "source-card slab",
+        0.02,
+        0.004,
+        &card,
+        &property,
+        &point,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("in-domain sourced conductivity resolves");
+
+    assert!((term.value_k_per_w() - 1.0).abs() < 1.0e-15);
+    assert_eq!(term.uncertainty(), &ResistanceUncertainty::Unstated);
+    match term.origin() {
+        fs_conduction::ResistanceOrigin::BulkMaterialCard {
+            card_identity,
+            receipt,
+            conductivity_uncertainty,
+            length_m,
+            area_m2,
+        } => {
+            assert_eq!(*card_identity, card.content_hash());
+            card.claims().verify_receipt(receipt).unwrap();
+            assert_eq!(
+                conductivity_uncertainty,
+                &UncertaintyModel::HalfWidth {
+                    half_width: 0.25,
+                    confidence: 0.95,
+                }
+            );
+            assert_eq!(*length_m, 0.02);
+            assert_eq!(*area_m2, 0.004);
+        }
+        origin => panic!("expected bulk material-card provenance, got {origin:?}"),
+    }
+
+    let doubled_length = ThermalResistanceTerm::slab_from_card(
+        "double length",
+        0.04,
+        0.004,
+        &card,
+        &property,
+        &point,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    let doubled_area = ThermalResistanceTerm::slab_from_card(
+        "double area",
+        0.02,
+        0.008,
+        &card,
+        &property,
+        &point,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(doubled_length.value_k_per_w(), 2.0);
+    assert_eq!(doubled_area.value_k_per_w(), 0.5);
+}
+
+#[test]
+fn g0_source_card_slab_refuses_invalid_property_state_and_geometry() {
+    let (card, property) = bulk_conductivity_card(5.0, 295.0, 305.0);
+    let in_domain = QueryPoint::new().with("T", 300.0).unwrap();
+    let resolve =
+        |length_m, area_m2, card: &MaterialCard, property: &PropertyKey, point: &QueryPoint| {
+            ThermalResistanceTerm::slab_from_card(
+                "source-card refusal",
+                length_m,
+                area_m2,
+                card,
+                property,
+                point,
+                SelectionPolicy::SingleClaimOnly,
+            )
+        };
+
+    let wrong_kind = PropertyKey::with_quantity(
+        "thermal-conductivity",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::OpticalExtinctionCoefficient,
+            ValueForm::Static,
+        )),
+    );
+    assert!(resolve(0.02, 0.004, &card, &wrong_kind, &in_domain).is_err());
+    assert!(
+        resolve(
+            0.02,
+            0.004,
+            &card,
+            &property,
+            &QueryPoint::new().with("T", 306.0).unwrap(),
+        )
+        .is_err()
+    );
+
+    let missing = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "empty fixture".to_string(),
+            phase: "solid".to_string(),
+            process: "source-card-slab".to_string(),
+            revision: 0,
+        },
+        ClaimSet::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(resolve(0.02, 0.004, &missing, &property, &in_domain).is_err());
+
+    for conductivity in [0.0, -5.0] {
+        let (invalid, invalid_property) = bulk_conductivity_card(conductivity, 295.0, 305.0);
+        assert!(resolve(0.02, 0.004, &invalid, &invalid_property, &in_domain).is_err());
+    }
+    for geometry in [0.0, -0.02, f64::NAN, f64::INFINITY] {
+        assert!(resolve(geometry, 0.004, &card, &property, &in_domain).is_err());
+        assert!(resolve(0.02, geometry, &card, &property, &in_domain).is_err());
     }
 }
