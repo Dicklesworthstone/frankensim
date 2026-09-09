@@ -57,25 +57,26 @@
 //! derives the ideal dry-air + water-vapor mixture from relative
 //! humidity — a player's warm humid breath vs a cold dry hall is a
 //! real ~0.3%-class sound-speed effect, physics rather than a detune
-//! knob. Mixture rules, both EXACT for an ideal mixture: molar mass
-//! linear in the vapor mole fraction, and the isochoric-heat identity
-//! `1/(γ_mix−1) = Σ x_i/(γ_i−1)`. The vapor fraction comes from the
+//! knob. The ideal-mixture thermodynamics use mole-weighted molar
+//! mass and molar heat capacities. Dynamic viscosity uses Wilke's
+//! low-pressure mixture rule, and thermal conductivity uses the
+//! Wassiljewa–Mason–Saxena rule with Wilke's viscosity-based
+//! interaction function. The vapor fraction comes from the
 //! Buck 1996 saturation fit over liquid water
 //! (`e_s = 611.21 exp((18.678 − t/234.5) t/(257.14 + t))` Pa, t in
 //! °C; quoted for −20..+50 °C — refused outside when RH > 0). Water
-//! vapor spec provenance: `M = 18.01528e-3` kg/mol (CODATA/IUPAC),
-//! `γ = 1.3291` from NIST-JANAF `cp(H2O g, 298.15 K) = 33.58`
-//! J/(mol K) via `γ = cp/(cp − R)`, Sutherland `β = 2.418e-6`,
-//! `S = 1064 K` (White, *Viscous Fluid Flow*, steam constants;
-//! reproduces `μ(373 K) ≈ 1.21e-5` Pa s).
+//! vapor spec provenance: `M = 18.01528e-3` kg/mol (NASA TP-2002-211556, Table B1),
+//! NIST-JANAF `cp(H2O g, 298.15 K) = 33.590 J/(mol K)` and
+//! `γ = 33.590/(33.590 − R*)`, and Sutherland `β = 2.4186073348106757e-6`,
+//! `S = 1064 K` derived from COMSOL's steam reference `μ(350 K) =
+//! 1.12e-5` Pa s (the retained component fits remain approximations).
 //!
-//! MOIST-AIR NO-CLAIMS, stated honestly: (a) transport coefficients
-//! (μ, κ) REMAIN THE DRY-AIR FITS — humidity's transport effect is
-//! sub-1% at musical vapor fractions and ~2%-class at the admitted
-//! ceiling `x_w ≤ 0.15` (refused above: the disclosed approximation
-//! band, estimated tier). (b) The saturation ENHANCEMENT FACTOR of
-//! moist air over the pure-phase `e_s` (~0.5% at 1 atm) is neglected.
-//! (c) RH > 1 is REFUSED — a supersaturated input describes a
+//! MOIST-AIR NO-CLAIMS, stated honestly: (a) the water-vapor
+//! Sutherland and Eucken component-model choices, and the Wilke/WMS
+//! combination, are engineering approximations with no experimental
+//! error bound asserted here. (b) The saturation ENHANCEMENT FACTOR of moist air
+//! over the pure-phase `e_s` (~0.5% at 1 atm) is neglected. (c) RH >
+//! 1 is REFUSED — a supersaturated input describes a
 //! condensing state the ideal-gas model cannot represent, so the
 //! phase no-claim is structural at this constructor's input; the
 //! plain [`GasState::try_new`] window no-claim above still stands.
@@ -133,18 +134,18 @@ impl GasSpec {
         }
     }
 
-    /// Water vapor: `M = 18.01528e-3` kg/mol (CODATA/IUPAC),
-    /// `gamma = 1.3291` from NIST-JANAF `cp(H2O g, 298.15 K) = 33.58`
-    /// J/(mol K) via `gamma = cp/(cp - R)`, Sutherland steam constants
-    /// `beta = 2.418e-6`, `S = 1064 K` (White, *Viscous Fluid Flow*;
-    /// gives `mu(373 K) ~ 1.21e-5` Pa s vs the tabulated ~1.2e-5),
-    /// Eucken conductivity.
+    /// Water vapor: `M = 18.01528e-3` kg/mol (NASA TP-2002-211556, Table B1),
+    /// NIST-JANAF `cp(H2O g, 298.15 K) = 33.590 J/(mol K)` and
+    /// `gamma = 33.590/(33.590 - R*)`, Sutherland `S = 1064 K`, and
+    /// `beta = 2.4186073348106757e-6` derived from COMSOL's steam
+    /// `mu(350 K) = 1.12e-5` Pa s. Eucken conductivity remains an
+    /// explicit approximation.
     #[must_use]
     pub const fn water_vapor_nist() -> GasSpec {
         GasSpec {
             molar_mass: 18.01528e-3,
-            gamma: 1.3291,
-            sutherland_beta: 2.418e-6,
+            gamma: 33.590 / (33.590 - R_USSA_1976),
+            sutherland_beta: 2.4186073348106757e-6,
             sutherland_s: 1064.0,
             conductivity: ConductivityModel::Eucken,
         }
@@ -440,11 +441,12 @@ impl GasState {
 
     /// Moist air from `(T, p, relative humidity)`: the ideal dry-air +
     /// water-vapor mixture (see the module doc's MOIST AIR section for
-    /// provenance and no-claims). Both mixture rules are exact for an
-    /// ideal mixture: `M_mix = M_a + x_w (M_w − M_a)` and the
-    /// isochoric-heat identity `1/(γ_mix−1) = (1−x_w)/(γ_a−1) +
-    /// x_w/(γ_v−1)`. Transport coefficients remain the DRY-AIR fits
-    /// (disclosed, estimated tier, `x_w ≤ 0.15` refused above).
+    /// provenance and no-claims). Molar mass and heat capacity are
+    /// ideal-mixture quantities; dynamic viscosity uses Wilke and
+    /// conductivity uses WMS with the same viscosity-based interaction
+    /// factor. The retained water-vapor component coefficients make
+    /// this an engineering approximation without an experimental error
+    /// bound. `x_w > 0.15` is refused.
     ///
     /// `relative_humidity == 0` takes the plain dry-air path — the dry
     /// limit is the SAME CODE, bitwise.
@@ -473,33 +475,9 @@ impl GasState {
         if relative_humidity == 0.0 {
             return Self::try_new(&dry, temperature, pressure);
         }
-        let vapor = GasSpec::water_vapor_nist();
-        let e_sat = saturation_pressure_water_pa(temperature)?;
-        if !(pressure > 0.0 && pressure.is_finite()) {
-            return Err(MaterialError::Parameters {
-                what: format!("pressure {pressure} Pa must be positive and finite"),
-            });
-        }
-        let x_w = relative_humidity * e_sat / pressure;
-        if x_w > 0.15 {
-            return Err(MaterialError::Parameters {
-                what: format!(
-                    "water mole fraction {x_w:.4} above the 0.15 ceiling of the \
-                     dry-air-transport approximation (disclosed band)"
-                ),
-            });
-        }
-        let molar_mass = dry.molar_mass + x_w * (vapor.molar_mass - dry.molar_mass);
-        let inv_gm1 = (1.0 - x_w) / (dry.gamma - 1.0) + x_w / (vapor.gamma - 1.0);
-        let gamma = 1.0 + 1.0 / inv_gm1;
-        let mixture = GasSpec {
-            molar_mass,
-            gamma,
-            ..dry
-        };
-        let mut state = Self::try_new(&mixture, temperature, pressure)?;
-        state.water_mole_fraction = x_w;
-        Ok(state)
+        let dry_state = Self::try_new(&dry, temperature, pressure)?;
+        let vapor_state = Self::try_new(&GasSpec::water_vapor_nist(), temperature, pressure)?;
+        mix_moist_air(dry_state, vapor_state, relative_humidity)
     }
 
     /// Classical Stokes–Kirchhoff absorption coefficient [1/m].
@@ -535,6 +513,151 @@ impl GasState {
     ) -> Result<f64, crate::MaterialError> {
         crate::iso9613::iso9613_absorption(self, relative_humidity, omega)
     }
+}
+
+/// Mix compatible dry-air and water-vapor component states at an explicit
+/// relative humidity. The caller supplies gas states rather than a mass-basis
+/// humidity: `x_w = RH e_sat(T) / p` remains a vapor *mole* fraction.
+///
+/// Wilke viscosity and Wassiljewa–Mason–Saxena conductivity both use
+/// `phi_ij = [1 + sqrt(mu_i/mu_j) (M_j/M_i)^(1/4)]^2 /
+/// sqrt(8 (1 + M_i/M_j))`. The component transport coefficients are retained
+/// source approximations; this mixing rule carries no experimental error bound.
+///
+/// # Errors
+/// Refuses incompatible, already-moist, non-finite, or non-positive component
+/// states; RH outside `[0, 1]`; Buck-window and vapor-fraction failures.
+pub(crate) fn mix_moist_air(
+    dry: GasState,
+    vapor: GasState,
+    relative_humidity: f64,
+) -> Result<GasState, MaterialError> {
+    if !(relative_humidity.is_finite() && (0.0..=1.0).contains(&relative_humidity)) {
+        return Err(MaterialError::Parameters {
+            what: format!("relative humidity {relative_humidity} outside [0, 1]"),
+        });
+    }
+    for (name, state) in [("dry-air", dry), ("water-vapor", vapor)] {
+        if state.water_mole_fraction != 0.0 {
+            return Err(MaterialError::Parameters {
+                what: format!("{name} component must be dry (water_mole_fraction = 0)"),
+            });
+        }
+        if [
+            state.temperature,
+            state.pressure,
+            state.density,
+            state.sound_speed,
+            state.dynamic_viscosity,
+            state.thermal_conductivity,
+            state.gamma,
+            state.specific_gas_constant,
+            state.specific_heat_cp,
+            state.prandtl,
+            state.characteristic_impedance,
+        ]
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.0)
+            || state.gamma <= 1.0
+        {
+            return Err(MaterialError::Parameters {
+                what: format!("{name} component must have finite positive gas properties"),
+            });
+        }
+    }
+    if dry.temperature != vapor.temperature || dry.pressure != vapor.pressure {
+        return Err(MaterialError::Parameters {
+            what: "dry-air and water-vapor components must have identical temperature and pressure"
+                .into(),
+        });
+    }
+    if relative_humidity == 0.0 {
+        return Ok(dry);
+    }
+
+    let x_vapor = relative_humidity * saturation_pressure_water_pa(dry.temperature)? / dry.pressure;
+    if !(x_vapor > 0.0 && x_vapor <= 0.15 && x_vapor.is_finite()) {
+        return Err(MaterialError::Parameters {
+            what: format!(
+                "water mole fraction {x_vapor:.4} is non-positive, non-finite, or above the 0.15 ceiling of the supported mixture model"
+            ),
+        });
+    }
+    let x_dry = 1.0 - x_vapor;
+    let molar_mass_dry = R_USSA_1976 / dry.specific_gas_constant;
+    let molar_mass_vapor = R_USSA_1976 / vapor.specific_gas_constant;
+    let molar_mass = x_dry * molar_mass_dry + x_vapor * molar_mass_vapor;
+    let cp_molar = x_dry * dry.specific_heat_cp * molar_mass_dry
+        + x_vapor * vapor.specific_heat_cp * molar_mass_vapor;
+    let cv_molar = cp_molar - R_USSA_1976;
+    if !(molar_mass.is_finite() && molar_mass > 0.0 && cp_molar.is_finite() && cv_molar > 0.0) {
+        return Err(MaterialError::Parameters {
+            what: "component heat capacities cannot form a physical ideal-gas mixture".into(),
+        });
+    }
+    let specific_gas_constant = R_USSA_1976 / molar_mass;
+    let specific_heat_cp = cp_molar / molar_mass;
+    let gamma = cp_molar / cv_molar;
+    let interaction = |mu_i: f64, mu_j: f64, molar_mass_i: f64, molar_mass_j: f64| {
+        let numerator = 1.0 + (mu_i / mu_j).sqrt() * (molar_mass_j / molar_mass_i).sqrt().sqrt();
+        numerator * numerator / (8.0 * (1.0 + molar_mass_i / molar_mass_j)).sqrt()
+    };
+    let phi_dry_vapor = interaction(
+        dry.dynamic_viscosity,
+        vapor.dynamic_viscosity,
+        molar_mass_dry,
+        molar_mass_vapor,
+    );
+    let phi_vapor_dry = interaction(
+        vapor.dynamic_viscosity,
+        dry.dynamic_viscosity,
+        molar_mass_vapor,
+        molar_mass_dry,
+    );
+    let dry_denominator = x_dry + x_vapor * phi_dry_vapor;
+    let vapor_denominator = x_vapor + x_dry * phi_vapor_dry;
+    let dynamic_viscosity = x_dry * dry.dynamic_viscosity / dry_denominator
+        + x_vapor * vapor.dynamic_viscosity / vapor_denominator;
+    let thermal_conductivity = x_dry * dry.thermal_conductivity / dry_denominator
+        + x_vapor * vapor.thermal_conductivity / vapor_denominator;
+    let density = dry.pressure / (specific_gas_constant * dry.temperature);
+    let sound_speed = (gamma * specific_gas_constant * dry.temperature).sqrt();
+    let prandtl = dynamic_viscosity * specific_heat_cp / thermal_conductivity;
+    let characteristic_impedance = density * sound_speed;
+    let state = GasState {
+        temperature: dry.temperature,
+        pressure: dry.pressure,
+        density,
+        sound_speed,
+        dynamic_viscosity,
+        thermal_conductivity,
+        gamma,
+        specific_gas_constant,
+        specific_heat_cp,
+        prandtl,
+        characteristic_impedance,
+        water_mole_fraction: x_vapor,
+    };
+    if [
+        state.density,
+        state.sound_speed,
+        state.dynamic_viscosity,
+        state.thermal_conductivity,
+        state.gamma,
+        state.specific_gas_constant,
+        state.specific_heat_cp,
+        state.prandtl,
+        state.characteristic_impedance,
+    ]
+    .into_iter()
+    .any(|value| !value.is_finite() || value <= 0.0)
+        || state.gamma <= 1.0
+    {
+        return Err(MaterialError::Parameters {
+            what: "moist-air mixture produced non-physical gas properties".into(),
+        });
+    }
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -824,6 +947,13 @@ mod tests {
                 "dry limit must be bitwise in {what}"
             );
         }
+        let vapor = GasState::try_new(&GasSpec::water_vapor_nist(), 288.15, 101_325.0)
+            .expect("vapor component");
+        assert_eq!(
+            mix_moist_air(dry, vapor, 0.0).expect("helper dry limit"),
+            dry,
+            "the source-resolved helper preserves its compatible dry component exactly"
+        );
         println!(
             "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-dry-limit-bitwise\",\"verdict\":\"pass\"}}"
         );
@@ -835,8 +965,8 @@ mod tests {
         // two quantities derived from the same GasState. Here the
         // molar mass and gamma are recomputed IN THE TEST from raw
         // literals and the public saturation fn, then matched against
-        // what the constructor derived — the mu-cancelling identity
-        // route for gamma (cv mixing) vs the constructor's own path.
+        // what the constructor derived — the cv identity for gamma vs
+        // the constructor's molar-cp route.
         let (t, p, rh) = (303.15, 98_000.0, 0.73);
         let state = GasState::try_new_moist_air(t, p, rh).expect("moist");
         let x = rh * saturation_pressure_water_pa(t).expect("es") / p;
@@ -850,7 +980,8 @@ mod tests {
             ((m_state - m_indep) / m_indep).abs() < 1e-12,
             "mixture molar mass: state {m_state:.9e} vs independent {m_indep:.9e}"
         );
-        let gamma_indep = 1.0 + 1.0 / ((1.0 - x) / 0.4 + x / 0.3291);
+        let gamma_vapor_indep = 33.590 / (33.590 - R_USSA_1976);
+        let gamma_indep = 1.0 + 1.0 / ((1.0 - x) / 0.4 + x / (gamma_vapor_indep - 1.0));
         assert!(
             ((state.gamma - gamma_indep) / gamma_indep).abs() < 1e-12,
             "mixture gamma: state {} vs independent {gamma_indep}",
@@ -884,11 +1015,67 @@ mod tests {
     }
 
     #[test]
+    fn moist_transport_matches_independent_wilke_wms_expressions() {
+        // Independent two-component implementation of the published
+        // Wilke/WMS equations. This guards both the shared interaction
+        // factor and the fact that humidity now reaches actual transport.
+        let (t, p, rh) = (303.15, 98_000.0, 0.73);
+        let dry = GasState::try_new(&GasSpec::dry_air_ussa1976(), t, p).expect("dry");
+        let vapor = GasState::try_new(&GasSpec::water_vapor_nist(), t, p).expect("vapor");
+        let mixed = mix_moist_air(dry, vapor, rh).expect("mixed");
+        let xv = rh * saturation_pressure_water_pa(t).expect("Buck") / p;
+        let xd = 1.0 - xv;
+        let md = R_USSA_1976 / dry.specific_gas_constant;
+        let mv = R_USSA_1976 / vapor.specific_gas_constant;
+        let phi = |mu_i: f64, mu_j: f64, m_i: f64, m_j: f64| {
+            let numerator = 1.0 + (mu_i / mu_j).sqrt() * (m_j / m_i).sqrt().sqrt();
+            numerator * numerator / (8.0 * (1.0 + m_i / m_j)).sqrt()
+        };
+        let phi_dv = phi(dry.dynamic_viscosity, vapor.dynamic_viscosity, md, mv);
+        let phi_vd = phi(vapor.dynamic_viscosity, dry.dynamic_viscosity, mv, md);
+        let dd = xd + xv * phi_dv;
+        let vd = xv + xd * phi_vd;
+        let mu = xd * dry.dynamic_viscosity / dd + xv * vapor.dynamic_viscosity / vd;
+        let k = xd * dry.thermal_conductivity / dd + xv * vapor.thermal_conductivity / vd;
+        assert!((mixed.dynamic_viscosity - mu).abs() < 1e-18, "Wilke mu");
+        assert!((mixed.thermal_conductivity - k).abs() < 1e-15, "WMS k");
+        assert!(
+            mixed.dynamic_viscosity < dry.dynamic_viscosity
+                && mixed.thermal_conductivity < dry.thermal_conductivity,
+            "the retained vapor coefficients must causally alter humid transport"
+        );
+        assert!(
+            (mixed.prandtl
+                - mixed.dynamic_viscosity * mixed.specific_heat_cp / mixed.thermal_conductivity)
+                .abs()
+                < 1e-14
+        );
+    }
+
+    #[test]
+    fn moist_mixer_refuses_incompatible_components_before_dry_limit() {
+        let dry = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("dry");
+        let mismatched_vapor =
+            GasState::try_new(&GasSpec::water_vapor_nist(), 294.15, 101_325.0).expect("vapor");
+        assert!(
+            mix_moist_air(dry, mismatched_vapor, 0.0).is_err(),
+            "a source adapter cannot bypass component-state compatibility at RH=0"
+        );
+        let vapor =
+            GasState::try_new(&GasSpec::water_vapor_nist(), 293.15, 101_325.0).expect("vapor");
+        let already_moist = GasState {
+            water_mole_fraction: 0.01,
+            ..vapor
+        };
+        assert!(mix_moist_air(dry, already_moist, 0.0).is_err());
+        assert!(mix_moist_air(dry, vapor, 1.1).is_err());
+    }
+
+    #[test]
     fn moist_refusals_fire_and_repeats_are_bitwise() {
         // RH outside [0,1] (the structural phase refusal), the Buck
         // window when RH > 0 (while RH = 0 keeps the full dry window),
-        // and the vapor-fraction ceiling of the dry-transport
-        // approximation.
+        // and the vapor-fraction ceiling of the stated mixture model.
         assert!(GasState::try_new_moist_air(293.15, 101_325.0, -0.1).is_err());
         assert!(GasState::try_new_moist_air(293.15, 101_325.0, 1.1).is_err());
         assert!(GasState::try_new_moist_air(293.15, 101_325.0, f64::NAN).is_err());

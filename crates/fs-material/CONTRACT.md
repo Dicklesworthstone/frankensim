@@ -71,6 +71,15 @@ homogenization, the P2 milestone.
   Absent source bounds remain unconstrained. This nominal unit conversion does
   not modify receipts, extend source support or freeze a sampled frequency curve.
   G0 tests cover conversions, source preservation, ambiguity and invalid bounds.
+- `conductor::resolve_uniform_conductor` binds exactly one sourced
+  `electrical_resistivity` claim in ohm-metre dimensions to caller-owned
+  positive uniform length and cross-sectional area, retaining the resolved
+  material bundle and receipt with `R = rho_e L / A`. It refuses invalid
+  geometry, source/unit/domain/selection failures, and unrepresentable derived
+  resistance. `joule_power_w` evaluates finite signed-current `I^2 R` only;
+  it is not a circuit, contact-resistance, current-distribution, temperature,
+  or energy-balance model. The adapter is synchronous, fixed-cost arithmetic
+  and has no cancellation claim.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for
@@ -289,6 +298,18 @@ store reopening, discovery, this adapter and the existing cylinder air-loss
 law at four T/P states, with independent references, receipts, replay and
 source-sensitivity/refusal controls. This evidence is numerical, not empirical.
 
+`moist_air::resolve_moist_air_state` resolves the carrier and dilute water-vapor
+cards separately at the same typed temperature and total mixture pressure,
+then uses the shared moist-gas evaluator. Both parameter bundles and all ten
+usage receipts remain accessible; relative humidity, vapor mole fraction and
+vapor mass fraction are distinct outputs. Explicit component flags and normal
+source applicability prevent silently substituting another composition.
+Neither component identity alone identifies the mixture. USSA carrier
+conductivity, Eucken vapor conductivity and Wilke/Wassiljewa–Mason–Saxena
+mixing are explicit fixed model choices. The component evaluation does not
+assert stable pure steam at the mixture's total pressure. This is bounded
+source-backed engineering model evaluation, not condensation or a real-gas EOS.
+
 ### `visco` — viscoelastic damping tiers (bead ybc75)
 
 Four tiers, one runtime path. `RayleighDamping` (tier 0: αM + βK
@@ -365,9 +386,11 @@ None.
   RH → vapor-fraction step is the Buck 1996 liquid-water fit
   (`e_s = 611.21 exp((18.678 − t/234.5)t/(257.14 + t))` Pa, quoted
   −20..+50 °C, refused outside when RH > 0). Water-vapor spec
-  provenance: M = 18.01528e-3 (CODATA/IUPAC), γ = 1.3291 from
-  NIST-JANAF cp(H2O g, 298.15 K) = 33.58 J/(mol K), Sutherland steam
-  constants β = 2.418e-6, S = 1064 K (White). The dry limit RH = 0 is
+  provenance: M = 18.01528e-3 kg/mol, γ = 33.590/(33.590−8.31432)
+  from NIST-JANAF H-064 cp(H2O g, 298.15 K) = 33.590 J/(mol K).
+  The COMSOL/White steam reference μ = 1.12e-5 Pa s at 350 K and
+  S = 1064 K gives β = 2.4186073348106757e-6. These correct the
+  earlier rounded/misattributed Cp and β. The dry limit RH = 0 is
   the SAME CODE PATH — bitwise, so no golden anywhere moves.
 
 - Cane packs (music bead 3ez8g.3.6): the reed card's material
@@ -1213,10 +1236,14 @@ caught only by its own gates/fixtures); free-energy and reciprocity
 gates run at caller-chosen points and prove nothing globally;
 objectivity/frame-indifference remains per-law fixture scope, not a
 graph-level proof.
-- Moist air no-claims: transport coefficients (μ, κ) REMAIN the
-  dry-air fits (sub-1% at musical vapor fractions, ~2%-class at the
-  refused x_w = 0.15 ceiling — estimated tier, disclosed); the
-  saturation ENHANCEMENT FACTOR (~0.5% at 1 atm) is neglected; RH > 1
+- Moist air transport uses the Wilke viscosity mixture rule and the
+  Wassiljewa–Mason–Saxena conductivity rule with viscosity-based mixing
+  factors. Ideal molar heat capacities determine mixture Cp/Cv; Prandtl
+  number is recomputed from the resulting Cp, viscosity and conductivity.
+  These dilute-gas rules, vapor Sutherland extrapolation and Eucken
+  conductivity are engineering approximations without a measured error bound.
+  The existing x_w = 0.15 ceiling remains; the saturation ENHANCEMENT
+  FACTOR (~0.5% at 1 atm) is neglected; RH > 1
   is refused (a condensing state the ideal-gas mixture cannot
   represent — the phase no-claim made structural at this constructor's
   input; the plain try_new window no-claim stands). CO2 fraction is
