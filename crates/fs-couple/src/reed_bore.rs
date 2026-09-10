@@ -317,35 +317,42 @@ pub(crate) fn step_massive_reed(
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let face = reed_pressure_face(reed);
     let (k, r_damp) = reed_structural(reed);
-    // Pressure, aperture and face flow all use the current mechanical state.
-    // The following structural advance remains an explicit partitioned step.
-    let p_plus = solve_moving_aperture_wave(
-        reed.width_m,
-        y.max(0.0),
-        rho,
-        zc,
-        p_minus,
-        p_m,
-        reed_swept_flow(face, v) + u_body,
-    )?;
+    // Hold the aperture and nonlinear lay force over this interval. Linear
+    // mechanics and pressure use the SAME midpoint velocity. Eliminating
+    // mechanics leaves the existing monotone fixed-aperture junction:
+    //   vbar = v_free - beta * dp
+    //   dp + Z (Ujet - A vbar + Ubody) = Pmouth - 2 Pminus.
+    // Positive A*beta adds load; it cannot introduce a negative impedance.
+    let mut contact_force = 0.0;
+    if let Some(obstacle) = lay {
+        contact_force = slit_contact_force(obstacle, y)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
+            + obstacle.dissipative_modal_forces(1, &[y, v], &[v])[0];
+    }
+    let half_dt = 0.5 * dt;
+    let mass_mid = reed.mass_kg + half_dt * r_damp + half_dt * half_dt * k;
+    let v_free =
+        (reed.mass_kg * v + half_dt * (contact_force - k * (y - reed.rest_opening_m))) / mass_mid;
+    let beta = half_dt * face / mass_mid;
+    let load = 1.0 + zc * face * beta;
+    let drive = (p_m - 2.0 * p_minus - zc * (reed_swept_flow(face, v_free) + u_body)) / load;
+    if !mass_mid.is_finite() || !load.is_finite() || !v_free.is_finite() {
+        return Err(AcousticRealizeError::Reed {
+            what: "midpoint reed mechanics left the finite set",
+        });
+    }
+    let jet_pressure =
+        solve_moving_aperture_wave(reed.width_m, y.max(0.0), rho, zc / load, 0.0, drive, 0.0)?;
+    let dp = drive - jet_pressure;
+    let p_plus = p_m - p_minus - dp;
+    let v_mid = v_free - beta * dp;
+    let y1 = y + dt * v_mid;
+    let v1 = 2.0 * v_mid - v;
     if mode == ReedSolverMode::FastNewton {
         // The quasistatic Newton Jacobian does not describe a moving aperture.
         stats.fallback_samples += 1;
     }
-    let p_bore = p_plus + p_minus;
-    let dp = p_m - p_bore;
-    let mut acc = (-k * (y - reed.rest_opening_m) - r_damp * v - face * dp) / reed.mass_kg;
-    let mut y1 = y + dt * v;
-    let mut v1 = v + dt * acc;
-    if let Some(obstacle) = lay {
-        let contact = slit_contact_force(obstacle, y1)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let hc = obstacle.dissipative_modal_forces(1, &[y1, v], &[v])[0];
-        acc += (contact + hc) / reed.mass_kg;
-        v1 = v + dt * acc;
-        y1 = y + dt * v1;
-    }
-    if !y1.is_finite() || !v1.is_finite() {
+    if !p_plus.is_finite() || !y1.is_finite() || !v1.is_finite() {
         return Err(AcousticRealizeError::Reed {
             what: "massive reed left the finite set",
         });
@@ -547,6 +554,9 @@ mod fast_mode_tests {
             let dt = 1e-6;
             let velocity = 0.1;
             let damping = 2.0 * damping_ratio * (500.0_f64 * 1e-5).sqrt();
+            let midpoint_mass =
+                reed.mass_kg + 0.5 * dt * damping + 0.25 * dt * dt * reed.stiffness_n_m;
+            let free_mid_velocity = reed.mass_kg * velocity / midpoint_mass;
             let (_, _, next_velocity) = step_massive_reed(
                 reed,
                 gas.density,
@@ -557,19 +567,16 @@ mod fast_mode_tests {
                 velocity,
                 dt,
                 // Cancel swept-face flow to isolate structural damping.
-                reed_pressure_face(reed) * velocity,
+                reed_pressure_face(reed) * free_mid_velocity,
                 None,
                 ReedSolverMode::Strict,
                 &mut FastSolveStats::default(),
             )
             .unwrap();
-            let expected = velocity * (1.0 - damping * dt / reed.mass_kg);
+            // Midpoint spring motion stores energy even when damping is zero.
+            let expected = 2.0 * free_mid_velocity - velocity;
             assert!((next_velocity - expected).abs() < 1e-14);
-            if damping_ratio > 0.0 {
-                assert!(next_velocity < velocity && next_velocity > 0.0);
-            } else {
-                assert_eq!(next_velocity, velocity);
-            }
+            assert!(next_velocity < velocity && next_velocity > 0.0);
         }
     }
 
@@ -588,7 +595,7 @@ mod fast_mode_tests {
                 for mouth in [-3000.0, 0.0, 12000.0] {
                     let incoming = 70.0;
                     let body_flow = 2e-7;
-                    let (outgoing, _, _) = step_massive_reed(
+                    let (outgoing, _, next_velocity) = step_massive_reed(
                         reed,
                         gas.density,
                         zc,
@@ -610,17 +617,175 @@ mod fast_mode_tests {
                         * (2.0 * dp.abs() / gas.density).sqrt()
                         * dp.signum();
                     let wave = (outgoing - incoming) / zc;
-                    assert!((wave - jet + face * velocity - body_flow).abs() < 1e-16);
-                    // Instantaneous pressure/face work cancels; jet loss is nonnegative.
+                    let midpoint_velocity = 0.5 * (velocity + next_velocity);
+                    assert!((wave - jet + face * midpoint_velocity - body_flow).abs() < 1e-16);
+                    // Midpoint pressure/face work cancels; jet loss is nonnegative.
                     let pressure_force = -face * dp;
-                    let loss = dp * (wave - body_flow) - pressure_force * velocity;
+                    let loss = dp * (wave - body_flow) - pressure_force * midpoint_velocity;
                     assert!((loss - dp * jet).abs() < 1e-12);
                     assert!(dp * jet >= 0.0);
                     if opening == 0.0 {
-                        assert_eq!(outgoing, incoming + zc * (-face * velocity + body_flow));
+                        let expected = incoming + zc * (-face * midpoint_velocity + body_flow);
+                        assert!((outgoing - expected).abs() < 1e-12 * (1.0 + outgoing.abs()));
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn g1_massive_reed_midpoint_closes_linear_energy_with_bore_work() {
+        let gas = air20();
+        let zc = fixture_impedance(&gas);
+        for damping_ratio in [0.0, 0.35] {
+            let reed = BeatingReed {
+                mass_kg: 1e-5,
+                stiffness_n_m: 500.0,
+                damping_ratio,
+                ..reed()
+            };
+            let damping = 2.0 * damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
+            let energy = |y: f64, v: f64| {
+                0.5 * reed.mass_kg * v * v
+                    + 0.5 * reed.stiffness_n_m * (y - reed.rest_opening_m).powi(2)
+            };
+            for dt in [1e-6, 2e-5, 2e-4] {
+                for y in [0.0, 0.5 * reed.rest_opening_m, 1.2 * reed.rest_opening_m] {
+                    for v in [-0.2, 0.1] {
+                        for mouth in [-500.0, 0.0, 500.0] {
+                            let incoming = 75.0;
+                            let body = 2e-7;
+                            let (outgoing, y1, v1) = step_massive_reed(
+                                reed,
+                                gas.density,
+                                zc,
+                                incoming,
+                                mouth,
+                                y,
+                                v,
+                                dt,
+                                body,
+                                None,
+                                ReedSolverMode::Strict,
+                                &mut FastSolveStats::default(),
+                            )
+                            .unwrap();
+                            let vm = 0.5 * (v + v1);
+                            let dp = mouth - outgoing - incoming;
+                            let jet = reed.width_m
+                                * y
+                                * (2.0 * dp.abs() / gas.density).sqrt()
+                                * dp.signum();
+                            let flow = (outgoing - incoming) / zc;
+                            let supply = dt * dp * (flow - body);
+                            let loss = dt * (dp * jet + damping * vm * vm);
+                            let change = energy(y1, v1) - energy(y, v);
+                            assert!(loss >= 0.0);
+                            assert!(
+                                (change + loss - supply).abs() < 2e-17,
+                                "linear energy defect {} at dt={dt}",
+                                change + loss - supply
+                            );
+                            assert!((y1 - y - dt * vm).abs() < 1e-18);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_massive_reed_midpoint_retains_generic_lay_force() {
+        let gas = air20();
+        let reed = BeatingReed {
+            mass_kg: 1e-5,
+            stiffness_n_m: 500.0,
+            ..reed()
+        };
+        let lay = crate::unilateral_contact::slit_lay(1e8, 2.0)
+            .unwrap()
+            .with_internal_loss(5.0)
+            .unwrap();
+        let y = -1e-4;
+        let dt = 1e-6;
+        let (_, damping) = reed_structural(reed);
+        for v in [-0.2, 0.1, 0.3] {
+            let (pressure, y1, v1) = step_massive_reed(
+                reed,
+                gas.density,
+                fixture_impedance(&gas),
+                0.0,
+                0.0,
+                y,
+                v,
+                dt,
+                0.0,
+                Some(&lay),
+                ReedSolverMode::Strict,
+                &mut FastSolveStats::default(),
+            )
+            .unwrap();
+            // Power-law elastic force plus Hunt-Crossley loss, including
+            // the nonadhesive unloading clamp. Force is held from (y,v).
+            let expected = 1e8 * y * y * (1.0 - 5.0 * v).max(0.0);
+            let reconstructed = reed.mass_kg * (v1 - v) / dt
+                + reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m)
+                + damping * 0.5 * (v + v1)
+                - reed_pressure_face(reed) * pressure;
+            assert!((reconstructed - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn g1_massive_reed_isolated_midpoint_conserves_energy_and_refines_phase() {
+        let gas = air20();
+        let reed = BeatingReed {
+            mass_kg: 1e-5,
+            stiffness_n_m: 500.0,
+            damping_ratio: 0.0,
+            ..reed()
+        };
+        let amplitude = 1e-5;
+        let omega = (reed.stiffness_n_m / reed.mass_kg).sqrt();
+        let duration = 1.0 / omega;
+        let mut errors = Vec::new();
+        for steps in [8, 16, 32] {
+            let dt = duration / f64::from(steps);
+            let (mut y, mut v) = (reed.rest_opening_m + amplitude, 0.0);
+            for _ in 0..steps {
+                // Independent zero-pressure midpoint velocity supplies the
+                // counterflow that isolates the mechanical oscillator.
+                let vm = (reed.mass_kg * v
+                    - 0.5 * dt * reed.stiffness_n_m * (y - reed.rest_opening_m))
+                    / (reed.mass_kg + 0.25 * dt * dt * reed.stiffness_n_m);
+                let (p, y1, v1) = step_massive_reed(
+                    reed,
+                    gas.density,
+                    fixture_impedance(&gas),
+                    0.0,
+                    0.0,
+                    y,
+                    v,
+                    dt,
+                    reed_pressure_face(reed) * vm,
+                    None,
+                    ReedSolverMode::Strict,
+                    &mut FastSolveStats::default(),
+                )
+                .unwrap();
+                assert!(p.abs() < 1e-10);
+                (y, v) = (y1, v1);
+                let normalized_energy = ((y - reed.rest_opening_m) / amplitude).powi(2)
+                    + (v / (omega * amplitude)).powi(2);
+                assert!((normalized_energy - 1.0).abs() < 1e-12);
+            }
+            let error = (((y - reed.rest_opening_m) / amplitude - 1.0_f64.cos()).powi(2)
+                + (v / (omega * amplitude) + 1.0_f64.sin()).powi(2))
+            .sqrt();
+            errors.push(error);
+        }
+        for pair in errors.windows(2) {
+            assert!(pair[0] / pair[1] > 3.9 && pair[0] / pair[1] < 4.1);
         }
     }
 
@@ -715,10 +880,11 @@ mod fast_mode_tests {
                     &mut FastSolveStats::default(),
                 )
                 .unwrap();
-                // At rest opening with zero velocity, spring and damping
-                // vanish: m dv/dt = -(k H/Pc) (Pmouth-Pbore).
+                // Midpoint spring and damping forces act during the step,
+                // although both vanish at the initial rest state.
+                let (_, damping) = reed_structural(reed);
                 let expected = -stiffness * reed.rest_opening_m * ((mouth - p_plus) / closing) * dt
-                    / reed.mass_kg;
+                    / (reed.mass_kg + 0.5 * dt * damping + 0.25 * dt * dt * stiffness);
                 assert!((velocity - expected).abs() < 1e-13);
             }
         }

@@ -799,21 +799,26 @@ clarinet is one filling of those objects.
   not measurements. G1 covers actual velocity decay; G4 rejects invalid ratios.
   G1 tests exercise the force balance and actual moving-reed acceleration.
   The massive characteristic-line junction now uses the current opening and
-  swept-face flow `-A v`, plus body volume flow, in the pressure solve. Positive
+  swept-face flow `-A v_mid`, plus body volume flow, in the pressure solve. Positive
   velocity widens the opening: the ODE and characteristic paths share this
   sign, conjugate to `F = -A (Pmouth - Pbore)`. It corrects the ODE's former
   positive swept-flow sign; see Silva et al., arXiv:0810.2870, Eq. 27.
-  Its
-  fixed-opening residual is monotone, bracketed between zero jet flow and
+  Its fixed-opening residual is monotone, bracketed between zero jet flow and
   zero pressure drop, and uses the same signed Bernoulli primitive as the ODE.
   The massless solver and its Newton Jacobian are not used for massive reeds;
   fast-mode massive samples count as strict fallbacks. G1 tests cover closed
   apertures, reverse flow, and instantaneous pressure/face work cancellation;
   G3 covers mass-dependent bore pressure at equal static compliance.
-  Structural motion still advances explicitly after the current-state junction.
-  This is not a time-discrete energy/passivity certificate or an implicit
-  contact solve; convergence, onset validation and full work accounting remain
-  MR68 obligations.
+  Characteristic-line linear mechanics now uses midpoint position and velocity,
+  with that same average velocity in swept flow. Eliminating the linear reed
+  response produces a positive effective load for the existing aperture solve.
+  G1 checks the discrete spring/kinetic energy change against pressure work,
+  Bernoulli loss and viscous loss without contact, plus energy preservation and
+  second-order phase convergence of the isolated oscillator.
+  Aperture geometry and nonlinear lay forces are held at the start of the step.
+  The isolated ODE reed retains its own pHS stepping scheme. This is not a
+  nonlinear contact or whole-bore energy certificate: contact work, coupled
+  geometry/time refinement and onset validation remain MR68 obligations.
   Isolated
   cylindrical bores use the `acoustic_chain` ODE with a
   `ViscothermalPin` (massive
