@@ -36,7 +36,10 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_matdb::{ClaimSelection, MaterialCard, PropertyValue, QueryPoint, SelectionPolicy};
+use fs_matdb::{
+    ClaimSelection, MaterialCard, PropertyKey, PropertyUsageReceipt, PropertyValue, QueryPoint,
+    SelectionPolicy,
+};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 
 use crate::ConductionError;
@@ -70,9 +73,10 @@ enum LumpedEmissivityModel {
 ///
 /// A declared transport says explicitly that its two constants have no
 /// material-database provenance. A card-backed transport retains every
-/// conductivity and emissivity query receipt over one shared temperature
+/// active conductivity and emissivity query receipt over one shared temperature
 /// grid, and refuses outside that grid rather than extrapolating toward a
-/// phase boundary.
+/// phase boundary. Radiation may instead be explicitly disabled without
+/// asserting a material emissivity observation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LumpedThermalTransport {
     conductivity: ConductivityTable,
@@ -251,7 +255,75 @@ impl LumpedThermalTransport {
         })
     }
 
-    /// Card that supplied both properties, or `None` for declared constants.
+    /// Resolve source conductivity with radiation explicitly disabled.
+    ///
+    /// Uses complete typed query points, preserving fixed source context and
+    /// every conductivity knot in the requested span. No emissivity claim is
+    /// requested or inferred: zero radiation is a boundary-model choice.
+    /// The same-card and temperature-span checks still apply when attached to
+    /// an enthalpy body, and the source minimum conductivity gates convection.
+    pub fn from_material_card_without_radiation(
+        card: &MaterialCard,
+        conductivity_property: &PropertyKey,
+        temperature_axis: &str,
+        points: &[QueryPoint],
+        policy: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
+        if points.len() > MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES {
+            return Err(lumped_error(
+                "card-backed thermal transport",
+                "temperature grid exceeds hard sample maximum".to_owned(),
+            ));
+        }
+        let conductivity = ConductivityTable::from_claims_at_query_points(
+            card.claims(),
+            conductivity_property,
+            temperature_axis,
+            points,
+            policy,
+        )?;
+        if conductivity.knots().len() > MAX_LUMPED_THERMAL_TRANSPORT_SAMPLES {
+            return Err(lumped_error(
+                "card-backed thermal transport",
+                "source-complete temperature grid exceeds hard sample maximum".to_owned(),
+            ));
+        }
+        let minimum_conductivity_w_per_m_k = conductivity
+            .knots()
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(f64::INFINITY, f64::min);
+        let card_identity = card.content_hash();
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-conduction.lumped-thermal-transport.v1");
+        // Distinct from declared constants (0) and sourced emissivity (1).
+        identity.update(&[2]);
+        identity.update(card_identity.as_bytes());
+        identity.update(&(conductivity.knots().len() as u64).to_le_bytes());
+        for ((temperature, value), receipt) in
+            conductivity.knots().iter().zip(conductivity.receipts())
+        {
+            identity.update(&temperature.to_bits().to_le_bytes());
+            identity.update(&value.to_bits().to_le_bytes());
+            identity.update(receipt.content_hash().as_bytes());
+        }
+        Ok(Self {
+            conductivity,
+            emissivity: LumpedEmissivityModel::Declared(0.0),
+            material_card_identity: Some(card_identity),
+            minimum_conductivity_w_per_m_k,
+            maximum_emissivity: 0.0,
+            identity: identity.finalize(),
+        })
+    }
+
+    /// Retained conductivity query receipts, empty for declared constants.
+    #[must_use]
+    pub fn conductivity_receipts(&self) -> &[PropertyUsageReceipt] {
+        self.conductivity.receipts()
+    }
+
+    /// Card that supplied the active properties, or `None` for declared constants.
     #[must_use]
     pub const fn material_card_identity(&self) -> Option<ContentHash> {
         self.material_card_identity

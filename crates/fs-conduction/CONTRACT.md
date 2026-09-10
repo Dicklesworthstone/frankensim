@@ -113,7 +113,7 @@ diameter.
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them. `from_claims_pinned` samples one explicit claim pin at every knot and still refuses invalid or out-of-domain use |
-| `LumpedThermalTransport` | one reduced-body conductivity/emissivity pair, either explicitly provenance-free declared constants or temperature-grid samples queried from one immutable material card with every conductivity and emissivity receipt retained; sampled models refuse extrapolation and bind to the same card as the phase curve |
+| `LumpedThermalTransport` | reduced-body transport: explicitly provenance-free declared constants, sourced conductivity/emissivity, or sourced conductivity with radiation explicitly disabled; every active property receipt is retained, sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
 | `MaterialId` / `MaterialTable` / `ElementMaterials` | a checked constitutive table plus one id per tet. `from_region_ids` maps labeled mesh regions onto that table. `bind_labeled_volume` is the mesher-agnostic s93ej.1 handoff: an independently audited `TetComplex` + region ids + region→material map become a `ConductionMesh` and assignment together. Assembly, Newton, `assemble_operator_with_element_materials` / `assemble_jacobian_with_element_materials`, and `element_heat_flux_assigned` use the named model at the element mean temperature. This is constitutive selection, not `element_scale`. Unknown/duplicate/empty/unmapped-region/length-mismatched assignments refuse. `solve_with_element_materials` is the product entry; `solve_with_element_materials_and_interfaces` is the joint contact path. Region materials cannot erase undeclared coincident faces. A bound assignment's table receipts and provenance travel on `ConductionReport` in place of the unused fallback. The uniform `ConductionProblem::material` path is unchanged. Two- and three-layer series, assigned `k(T)` Newton, assigned Jacobian-vs-FD, assigned IFT vs FD, one- and two-material contact coexistence, assigned matdb receipts, unused-table/mixed-provenance honesty, rotated orthotropic x-series, contrast/refinement/coalescing/map-swap metamorphics, and a labeled-volume lowering through `bind_labeled_volume` are covered; that last case is not yet the parent solve-stage E2E |
 | `AssembledSystem`, `DofMap` | the full `n×n` operator and load, and the free/prescribed bookkeeping the Dirichlet elimination uses |
@@ -863,7 +863,13 @@ authority.
   throughout the requested temperature span. Every source curve knot in that
   span is retained, so coarse caller grids cannot erase interior extrema or
   bridge tabulated-only data. The Biot gate conservatively uses the resulting
-  minimum conductivity and maximum emissivity. Declared constants remain available
+  minimum conductivity and maximum emissivity. The explicit
+  `from_material_card_without_radiation` path accepts complete typed query points,
+  retains conductivity source knots and receipts, and requires no emissivity
+  observation. Zero radiation is a declared boundary assumption; it does not
+  assert that the material has zero emissivity. Fixed source context, same-card
+  identity, temperature coverage and the convection Biot gate still apply.
+  Declared constants remain available
   but explicitly carry no material provenance. This is an isothermal reduced
   rung only: it refuses when the
   convection-plus-radiation Biot gate fails or when a step leaves the supplied
