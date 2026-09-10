@@ -1685,6 +1685,187 @@ mod common_material_acquisition {
         }
     }
 
+    /// G1/G3: an isobaric liquid parcel heats using the sourced enthalpy curve,
+    /// without fabricated melting endpoints or a frozen initial heat capacity.
+    #[test]
+    fn g1_g3_sourced_liquid_water_enthalpy_heating() {
+        use fs_conduction::lumped::{
+            BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, solve_lumped_enthalpy,
+        };
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::phase::{
+            EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase,
+        };
+
+        let (pack, path) = compile("water-liquid-iapws-sr6-08");
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "IAPWS ordinary water".into(),
+                phase: "liquid".into(),
+                process: "SR6-08(2011), isobaric 0.1 MPa".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let db = fixture_dir().join("liquid-water-enthalpy.sqlite");
+        {
+            let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let card = loaded.card();
+        let h = card.claims().claims_for("specific-enthalpy")[0].1;
+        let rho = card.claims().claims_for("density")[0].1;
+        let k = card.claims().claims_for("thermal-conductivity")[0].1;
+        let PropertyValue::Curve { knots: h_knots, .. } = &h.value else {
+            panic!("source enthalpy curve required")
+        };
+        assert_eq!(h_knots.len(), 15);
+        let mut phase_knots = Vec::new();
+        let mut minimum_k = f64::INFINITY;
+        let mut receipts = Vec::new();
+        for &(temperature, _) in h_knots {
+            let values: Vec<_> = [h, rho, k]
+                .iter()
+                .map(|claim| {
+                    let answer = card
+                        .claims()
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[("temperature", temperature)]),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .unwrap();
+                    card.claims().verify_receipt(&answer.receipt).unwrap();
+                    receipts.push(answer.receipt.clone());
+                    answer.evidence.value.value
+                })
+                .collect();
+            phase_knots.push(EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: values[0],
+                temperature_k: temperature,
+                liquid_mass_fraction: 1.0,
+                bulk_density_kg_m3: values[1],
+            });
+            minimum_k = minimum_k.min(values[2]);
+        }
+        assert_eq!(receipts.len(), 45);
+        assert!(
+            EquilibriumEnthalpyPhaseCurve::try_new(card.content_hash(), phase_knots.clone())
+                .is_err()
+        );
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            card.content_hash(),
+            SolidLiquidPhase::Liquid,
+            phase_knots,
+        )
+        .unwrap();
+        // No boundary heat exchange: conductivity supplies a conservative Biot
+        // input only. No emissivity observation is needed for disabled radiation.
+        // Mass is fixed; volume may change at prescribed pressure. This does not
+        // solve flow, geometry evolution, or spatial temperature gradients.
+        let mass = 0.1;
+        let body = LumpedEnthalpyBody::try_new(
+            "isobaric-liquid-water",
+            mass,
+            0.01,
+            0.0,
+            0.0,
+            0.01,
+            minimum_k,
+            &curve,
+        )
+        .unwrap();
+        // Independent SR6-08 table ordinates at 20 C and 60 C.
+        let initial_h = 84005.842699135;
+        let final_h = 251246.640203514;
+        let config = LumpedEnthalpyMarchConfig {
+            initial_specific_enthalpy_j_kg: initial_h,
+            ambient_temperature_k: 293.15,
+            radiation_temperature_k: 293.15,
+            internal_power_w: mass * (final_h - initial_h) / 100.0,
+            duration_s: 100.0,
+            maximum_step_s: 1.0,
+            maximum_steps: 100,
+            enthalpy_tolerance_j_kg: 1e-7,
+        };
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(&gate, arena, StreamKey { seed: 0xA91, kernel_id: 53, tile: 0, iteration: 0 }, Budget::INFINITE, ExecMode::Deterministic);
+            let march = solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap();
+            assert_eq!(march, solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap());
+            assert_eq!(march.samples().len(), 101);
+            for sample in march.samples() {
+                let expected_h = initial_h + config.internal_power_w * sample.time_s / mass;
+                assert!((sample.phase_state.specific_enthalpy_j_kg() - expected_h).abs() < 1e-5);
+                let pair = h_knots.windows(2).find(|pair| pair[0].1 <= expected_h && expected_h <= pair[1].1).unwrap();
+                let expected_t = pair[0].0 + (expected_h - pair[0].1) * (pair[1].0 - pair[0].0) / (pair[1].1 - pair[0].1);
+                assert!((sample.phase_state.temperature_k() - expected_t).abs() < 1e-7);
+                assert_eq!(sample.phase_state.phase(), SolidLiquidPhase::Liquid);
+                assert_eq!(sample.phase_state.material_card_identity(), card.content_hash());
+                assert_eq!(sample.convection_into_body_w, 0.0);
+                assert_eq!(sample.radiation_into_body_w, 0.0);
+            }
+            let last = march.samples().last().unwrap().phase_state;
+            assert!((last.temperature_k() - 333.15).abs() < 1e-7);
+            assert!(march.cumulative_absolute_energy_residual_j() < 1e-5);
+            let outside = LumpedEnthalpyMarchConfig { internal_power_w: 1000.0, ..config };
+            assert!(solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), outside).is_err());
+            assert_eq!(march, solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap());
+            eprintln!("water isobaric=100000Pa mass={mass}kg samples={} initial=293.15K final={}K heat={}J energy_residual={}J receipts=45 source_span=283.15..353.15K no_phase_transition_or_spatial_flow_claim=1", march.samples().len(), last.temperature_k(), mass*(last.specific_enthalpy_j_kg()-initial_h), march.cumulative_absolute_energy_residual_j());
+        });
+        for (axis, wrong) in [
+            ("pressure", 100001.0),
+            ("phase-liquid", 0.0),
+            ("temperature", 353.16),
+            ("enthalpy-reference-iapws-sr6-08-eq1", 0.0),
+        ] {
+            assert!(
+                card.claims()
+                    .query_typed(
+                        &h.key,
+                        &point(h, &[(axis, wrong)]),
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err(),
+                "{axis}"
+            );
+        }
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/liquid-water.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(
+            discovery.exit_code,
+            fs_cli::exit::SUCCESS,
+            "{}",
+            discovery.stderr
+        );
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+    }
+
     fn check_claims(pack: &NormalizedPack) {
         assert!(pack.claims().claims_ordered().next().is_some());
         for (id, claim) in pack.claims().claims_ordered() {

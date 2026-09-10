@@ -4,6 +4,16 @@ Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon te
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
+A new transient integration, `g1_g3_sourced_liquid_water_enthalpy_heating`,
+connects the existing IAPWS enthalpy data to the lumped enthalpy marcher through
+an explicit single-phase curve constructor. It models 0.1 kg of uniformly
+heated liquid at 0.1 MPa from 20 to 60 °C; fixed mass permits volume to change.
+Its checks cover every step's enthalpy and temperature, energy closure, replay
+and refusal beyond source coverage. Remote execution is pending. Temperature
+uses the source's sampled linear enthalpy interpolant; density uses linear
+specific volume against enthalpy between knots. This is not a spatial flow,
+free-surface, freezing or boiling model, and adds no new database records.
+
 The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.863382 MB** (0.823385 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.739502 MB**. There are **180 source bundles**, including **162 bulk-material bundles**.
 
 A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 162 complete material cards. The tables below use the exact, auditable source-bundle count.
@@ -184,6 +194,20 @@ PC rate/direction/humidity and both grades' identity/temperature refusals pass.
 The log is `/tmp/greenosprey-p05-housing-integration.log`; this focused result
 does not establish transient heating, a temperature-range law or physical
 housing qualification.
+
+Polystone G natural adds a same-source HDPE thermal reference from the producer's
+2024-07-17 release, version 12.0 (the PDF print date is 2026-05-05).
+Density 950 kg/m³, Cp 1900 J/(kg K) and conductivity 0.4 W/(m K) are nominal
+inputs to an explicitly opted-in frozen 25–26 °C model. The producer's
+measurement temperatures and selected product form/process remain unknown.
+The shared HDPE/PVC heat comparison passed required-remote verification on
+2026-09-10: one integration test covers both source packs, store/reopen,
+discovery, resolution, deterministic replay, unsupported-state/expansion
+refusals and independent temperature/energy expectations. At identical geometry
+and boundary after 100 s, HDPE warms by 0.1987695321955 K and PVC by
+0.08591798266622 K. The retained log is
+`/tmp/greenosprey-p01-hdpe-pvc-heat.log`. This is numerical verification of a
+declared reference model, not measured temperature coverage or product qualification.
 
 ## Size and populated records
 

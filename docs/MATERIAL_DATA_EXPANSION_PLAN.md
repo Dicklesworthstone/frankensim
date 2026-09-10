@@ -22,7 +22,12 @@ reference opt-in. Its producer sheet does not state the property test
 temperatures or selected product form/process. The existing PVC heat regression
 now also runs this HDPE reference at identical geometry and boundary, with
 source/discovery/store/resolver, independent response/energy and refusal checks.
-Runtime verification is pending. P01/P11a remain unfinished for their original
+Required-remote verification passed on 2026-09-10: both reference profiles
+survived import/store/reopen/discovery/resolution and produced the independent
+heat-response and energy expectations. At fixed geometry after 100 s, HDPE
+warms by 0.1987695321955 K versus PVC's 0.08591798266622 K. Replay and
+unsupported identity, reference policy, temperature and expansion requirements
+also pass. P01/P11a remain unfinished for their original
 condition-qualified delivery; the reference does not establish measured
 temperature coverage, creep or product qualification.
 

@@ -9,6 +9,7 @@ readonly -a EXPECTED_TESTS=(
   "common_material_acquisition::g0_g3_cryogenic_aluminum_copper_curves_and_discovery"
   "common_material_acquisition::g0_g3_iapws_liquid_water_curves_and_discovery"
   "common_material_acquisition::g1_g3_sourced_water_conduction_at_two_states"
+  "common_material_acquisition::g1_g3_sourced_liquid_water_enthalpy_heating"
   "common_material_acquisition::g1_g3_sourced_stainless_store_to_conduction"
   "common_material_acquisition::g0_g3_stainless_thermomechanical_envelope"
   "common_material_acquisition::g1_g3_sourced_silicon_tensor_reaches_oriented_solid"
