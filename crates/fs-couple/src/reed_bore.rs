@@ -10,7 +10,7 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::BernoulliAperture;
 use crate::thin_plate::PlateBank;
-use crate::unilateral_contact::slit_contact_force;
+use crate::unilateral_contact::slit_contact_coefficients;
 use fs_dcontact::Obstacle;
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
@@ -114,8 +114,8 @@ pub(crate) fn reed_swept_flow(face_m2: f64, opening_velocity_m_s: f64) -> f64 {
 
 /// Aperture-junction solver mode (bead frankensim-2s4i5).
 ///
-/// `Strict` is the certification default: the retained deterministic
-/// bisection with its 21-point grid-argmin fallback. `FastNewton` is a
+/// `Strict` is the default: bounded bracket expansion followed by
+/// deterministic bisection to floating-point resolution. `FastNewton` is a
 /// DECLARED FAST MODE (the fs-rand ziggurat precedent): island Newton
 /// on the analytic Jacobian with a monotone-descent guard that hands
 /// every cornered sample to the strict path. It is not bitwise-equal
@@ -167,12 +167,9 @@ const NEWTON_MAX_ITERS: usize = 12;
 /// Line-search halvings allowed before the sample is declared
 /// cornered (4 halvings cover a 16x overshoot).
 const NEWTON_BACKTRACK_MAX: u32 = 4;
-/// Step-size convergence: stop when a full Newton step moves `p_plus`
-/// by less than this relative amount. Converging on the shared
-/// residual acceptance (`1e-8·(1+|p_m|)` in flow units) instead would
-/// let the fast root sit `tol/|f'|` — order 100 Pa — from the strict
-/// root, which is audible. Step-sized convergence bounds the deviation
-/// at uPa scale for ~2 extra cheap iterations.
+/// Relative pressure-step tolerance, with a 1 Pa absolute reference scale.
+/// Strict mode instead refines a sign-changing pressure bracket until
+/// its endpoints are adjacent floating-point values.
 const NEWTON_STEP_TOL: f64 = 1.0e-9;
 
 /// Analytic `d f / d p_plus` of [`reed_flow_mismatch`] at `p_plus`.
@@ -224,8 +221,8 @@ fn reed_flow_jacobian(
 
 /// Declared fast mode: guarded island Newton on the analytic Jacobian.
 ///
-/// Convergence tolerance matches the strict path's acceptance test
-/// exactly. Any cornered sample — sqrt kink, non-finite state,
+/// Convergence uses a pressure-step tolerance. Any cornered sample —
+/// sqrt kink, non-finite state,
 /// vanishing slope, non-monotone residual, or iteration cap — is
 /// handed untouched to the strict bisection and counted in
 /// `stats.fallback_samples`. The strict path remains the
@@ -245,10 +242,7 @@ pub(crate) fn solve_reed_wave_fast(
 ) -> Result<f64, AcousticRealizeError> {
     // Shared closed-branch early-out: identical bytes in both modes
     // (no aperture flow at all), so it is not a solver-work sample.
-    let denom = (1.0 - r0).clamp(-0.999, 0.999);
-    let closed_plus = p_minus_hist / denom;
-    let p_bore_closed = closed_plus + (p_minus_hist + r0 * closed_plus);
-    if p_m - p_bore_closed >= reed.closing_pressure_pa {
+    if let Some(closed_plus) = closed_reed_wave(reed, zc, r0, p_minus_hist, p_m, u_body) {
         return Ok(closed_plus);
     }
     let mut p = guess;
@@ -317,47 +311,57 @@ pub(crate) fn step_massive_reed(
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let face = reed_pressure_face(reed);
     let (k, r_damp) = reed_structural(reed);
-    // Hold the aperture and nonlinear lay force over this interval. Linear
+    // Hold aperture geometry and elastic lay force over this interval. Linear
     // mechanics and pressure use the SAME midpoint velocity. Eliminating
     // mechanics leaves the existing monotone fixed-aperture junction:
     //   vbar = v_free - beta * dp
     //   dp + Z (Ujet - A vbar + Ubody) = Pmouth - 2 Pminus.
     // Positive A*beta adds load; it cannot introduce a negative impedance.
-    let mut contact_force = 0.0;
-    if let Some(obstacle) = lay {
-        contact_force = slit_contact_force(obstacle, y)
-            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
-            + obstacle.dissipative_modal_forces(1, &[y, v], &[v])[0];
+    let (elastic, contact_damping) = lay.map_or(Ok((0.0, 0.0)), |obstacle| {
+        slit_contact_coefficients(obstacle, y)
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
+    })?;
+    let solve = |contact_force: f64, contact_loss: f64| {
+        let half_dt = 0.5 * dt;
+        let mass_mid = reed.mass_kg + half_dt * (r_damp + contact_loss) + half_dt * half_dt * k;
+        let v_free = (reed.mass_kg * v + half_dt * (contact_force - k * (y - reed.rest_opening_m)))
+            / mass_mid;
+        let beta = half_dt * face / mass_mid;
+        let load = 1.0 + zc * face * beta;
+        let drive = (p_m - 2.0 * p_minus - zc * (reed_swept_flow(face, v_free) + u_body)) / load;
+        if !mass_mid.is_finite() || !load.is_finite() || !v_free.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "midpoint reed mechanics left the finite set",
+            });
+        }
+        let jet_pressure =
+            solve_moving_aperture_wave(reed.width_m, y.max(0.0), rho, zc / load, 0.0, drive, 0.0)?;
+        let dp = drive - jet_pressure;
+        let p_plus = p_m - p_minus - dp;
+        let v_mid = v_free - beta * dp;
+        let y1 = y + dt * v_mid;
+        let v1 = 2.0 * v_mid - v;
+        if !p_plus.is_finite() || !y1.is_finite() || !v1.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "massive reed left the finite set",
+            });
+        }
+        Ok((p_plus, y1, v1))
+    };
+    let mut result = solve(elastic, contact_damping)?;
+    // The held-penetration Hunt-Crossley law has two linear branches:
+    // F = max(elastic - contact_damping * v_mid, 0). If the active
+    // solve would attract, solve its zero-reaction unloading branch.
+    // Monotonicity of the pressure/mechanical residual makes this branch
+    // selection unique. Loss work uses the SAME velocity as mechanics.
+    if elastic - contact_damping * (0.5 * (v + result.2)) < 0.0 {
+        result = solve(0.0, 0.0)?;
     }
-    let half_dt = 0.5 * dt;
-    let mass_mid = reed.mass_kg + half_dt * r_damp + half_dt * half_dt * k;
-    let v_free =
-        (reed.mass_kg * v + half_dt * (contact_force - k * (y - reed.rest_opening_m))) / mass_mid;
-    let beta = half_dt * face / mass_mid;
-    let load = 1.0 + zc * face * beta;
-    let drive = (p_m - 2.0 * p_minus - zc * (reed_swept_flow(face, v_free) + u_body)) / load;
-    if !mass_mid.is_finite() || !load.is_finite() || !v_free.is_finite() {
-        return Err(AcousticRealizeError::Reed {
-            what: "midpoint reed mechanics left the finite set",
-        });
-    }
-    let jet_pressure =
-        solve_moving_aperture_wave(reed.width_m, y.max(0.0), rho, zc / load, 0.0, drive, 0.0)?;
-    let dp = drive - jet_pressure;
-    let p_plus = p_m - p_minus - dp;
-    let v_mid = v_free - beta * dp;
-    let y1 = y + dt * v_mid;
-    let v1 = 2.0 * v_mid - v;
     if mode == ReedSolverMode::FastNewton {
         // The quasistatic Newton Jacobian does not describe a moving aperture.
         stats.fallback_samples += 1;
     }
-    if !p_plus.is_finite() || !y1.is_finite() || !v1.is_finite() {
-        return Err(AcousticRealizeError::Reed {
-            what: "massive reed left the finite set",
-        });
-    }
-    Ok((p_plus, y1, v1))
+    Ok(result)
 }
 
 /// Fixed-state characteristic junction, shared by any moving slit valve.
@@ -405,8 +409,29 @@ fn solve_moving_aperture_wave(
     Ok(f64::midpoint(lo, hi))
 }
 
+/// A closed slit has zero jet flow, but a moving body still supplies flow:
+/// `(1-r0) p_plus - p_minus_hist = Zc Ubody`. Closure must be checked at
+/// this loaded pressure: body motion can reopen an otherwise closed slit.
+/// A singular or nonfinite candidate cannot establish the closed branch.
+fn closed_reed_wave(
+    reed: BeatingReed,
+    zc: f64,
+    r0: f64,
+    p_minus_hist: f64,
+    p_m: f64,
+    u_body: f64,
+) -> Option<f64> {
+    let denom = 1.0 - r0;
+    if denom == 0.0 {
+        return None;
+    }
+    let p_plus = (p_minus_hist + zc * u_body) / denom;
+    let p_bore = p_plus + (p_minus_hist + r0 * p_plus);
+    let dp = p_m - p_bore;
+    (p_plus.is_finite() && dp.is_finite() && dp >= reed.closing_pressure_pa).then_some(p_plus)
+}
+
 #[allow(clippy::too_many_arguments)] // one coherent junction record
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface across the reed solvers
 pub(crate) fn solve_reed_wave_strict(
     reed: BeatingReed,
     rho: f64,
@@ -417,47 +442,75 @@ pub(crate) fn solve_reed_wave_strict(
     guess: f64,
     u_body: f64,
 ) -> Result<f64, AcousticRealizeError> {
-    let denom = (1.0 - r0).clamp(-0.999, 0.999);
-    let closed_plus = p_minus_hist / denom;
-    let p_bore_closed = closed_plus + (p_minus_hist + r0 * closed_plus);
-    if p_m - p_bore_closed >= reed.closing_pressure_pa {
+    if ![rho, zc, r0, p_minus_hist, p_m, guess, u_body]
+        .iter()
+        .all(|v| v.is_finite())
+        || rho <= 0.0
+        || zc <= 0.0
+    {
+        return Err(AcousticRealizeError::Reed {
+            what: "reed junction requires finite inputs and positive density and impedance",
+        });
+    }
+    if let Some(closed_plus) = closed_reed_wave(reed, zc, r0, p_minus_hist, p_m, u_body) {
         return Ok(closed_plus);
     }
-    let span = (2.0 * reed.closing_pressure_pa)
+    let mut span = (2.0 * reed.closing_pressure_pa)
         .max(2.0 * p_m.abs())
         .max(1.0);
     let mut lo = guess - span;
     let mut hi = guess + span;
     let mut f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
     let mut f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
-    if f_lo * f_hi > 0.0 {
+    // Preserve the local bracket when it succeeds; otherwise expand a
+    // symmetric bracket. Compare signs without multiplying small residuals.
+    for _ in 0..32 {
+        if !f_lo.is_finite() || !f_hi.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "reed bracket flow left the finite set",
+            });
+        }
+        if f_lo == 0.0 {
+            return Ok(lo);
+        }
+        if f_hi == 0.0 {
+            return Ok(hi);
+        }
+        if f_lo.is_sign_positive() != f_hi.is_sign_positive() {
+            break;
+        }
         lo = -span;
         hi = span;
+        span *= 2.0;
         f_lo = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, lo, u_body);
         f_hi = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, hi, u_body);
     }
-    if f_lo * f_hi > 0.0 {
-        let mut best = guess;
-        let mut best_a =
-            reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body).abs();
-        for k in 0..21 {
-            let x = -span + (2.0 * span) * f64::from(k) / 20.0;
-            let a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, x, u_body).abs();
-            if a < best_a {
-                best_a = a;
-                best = x;
-            }
-        }
-        return Ok(best);
+    if !f_lo.is_finite()
+        || !f_hi.is_finite()
+        || (f_lo != 0.0 && f_hi != 0.0 && f_lo.is_sign_positive() == f_hi.is_sign_positive())
+    {
+        return Err(AcousticRealizeError::Reed {
+            what: "reed root could not be bracketed within 32 expansions",
+        });
     }
-    let mut mid = f64::midpoint(lo, hi);
-    for _ in 0..48 {
-        mid = f64::midpoint(lo, hi);
+    // No flow tolerance scaled by pressure: finish at an exact residual
+    // zero or adjacent representable pressure endpoints. Multiple roots
+    // remain possible; this is deterministic selection, not a uniqueness claim.
+    for _ in 0..96 {
+        let mid = f64::midpoint(lo, hi);
+        if mid == lo || mid == hi || f_lo == 0.0 || f_hi == 0.0 {
+            return Ok(if f_lo.abs() <= f_hi.abs() { lo } else { hi });
+        }
         let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid, u_body);
-        if f_mid.abs() < 1.0e-8 * (1.0 + p_m.abs()) {
+        if !f_mid.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "reed bisection flow left the finite set",
+            });
+        }
+        if f_mid == 0.0 {
             return Ok(mid);
         }
-        if f_lo * f_mid <= 0.0 {
+        if f_lo.is_sign_positive() != f_mid.is_sign_positive() {
             hi = mid;
             f_hi = f_mid;
         } else {
@@ -465,12 +518,13 @@ pub(crate) fn solve_reed_wave_strict(
             f_lo = f_mid;
         }
     }
-    let _ = f_hi;
-    Ok(mid)
+    Err(AcousticRealizeError::Reed {
+        what: "reed pressure bracket did not converge within 96 bisections",
+    })
 }
 
-/// Certification default: the retained deterministic bisection path,
-/// unchanged bit-for-bit from the pre-fast-mode code. All callers that
+/// Default deterministic bisection path with a shared closed-flow solve.
+/// All callers that
 /// do not explicitly opt into [`ReedSolverMode::FastNewton`] land here.
 #[allow(clippy::too_many_arguments)] // one coherent junction record
 #[allow(clippy::unnecessary_wraps)] // uniform Result surface across the reed solvers
@@ -539,6 +593,93 @@ mod fast_mode_tests {
     fn fixture_impedance(gas: &GasState) -> f64 {
         let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
         gas.characteristic_impedance / area
+    }
+
+    #[test]
+    fn g1_closed_reed_conserves_body_flow_with_reflected_waves() {
+        let gas = air20();
+        let zc = fixture_impedance(&gas);
+        for reflection in [-0.8, 0.0, 0.8] {
+            for incoming in [-70.0, 70.0] {
+                for body in [-2e-6, 0.0, 2e-6] {
+                    let mut stats = FastSolveStats::default();
+                    let strict = solve_reed_wave_strict(
+                        reed(),
+                        gas.density,
+                        zc,
+                        reflection,
+                        incoming,
+                        12000.0,
+                        0.0,
+                        body,
+                    )
+                    .unwrap();
+                    let fast = solve_reed_wave_fast(
+                        reed(),
+                        gas.density,
+                        zc,
+                        reflection,
+                        incoming,
+                        12000.0,
+                        0.0,
+                        body,
+                        &mut stats,
+                    )
+                    .unwrap();
+                    assert_eq!(strict.to_bits(), fast.to_bits());
+                    let returned = incoming + reflection * strict;
+                    assert!(12000.0 - strict - returned >= reed().closing_pressure_pa);
+                    assert!(((strict - returned) / zc - body).abs() < 1e-19);
+                    assert_eq!(stats, FastSolveStats::default());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_body_flow_can_reopen_a_quasistatic_reed() {
+        let gas = air20();
+        let zc = fixture_impedance(&gas);
+        // At 8 kPa and zero body flow the slit closes. With no incoming wave,
+        // body flow producing an 8 kPa outgoing wave equalizes the pressures:
+        // the opening is H, jet flow is zero, and all flow is body-supplied.
+        let body = 8000.0 / zc;
+        assert_eq!(
+            reed_flow_mismatch(reed(), gas.density, zc, 0.0, 0.0, 8000.0, 8000.0, body),
+            0.0,
+            "the analytic equal-pressure state must conserve flow"
+        );
+        assert!(closed_reed_wave(reed(), zc, 0.0, 0.0, 8000.0, 0.0).is_some());
+        assert!(closed_reed_wave(reed(), zc, 0.0, 0.0, 8000.0, body).is_none());
+        let strict =
+            solve_reed_wave_strict(reed(), gas.density, zc, 0.0, 0.0, 8000.0, 8000.0, body)
+                .unwrap();
+        let fast = solve_reed_wave_fast(
+            reed(),
+            gas.density,
+            zc,
+            0.0,
+            0.0,
+            8000.0,
+            8000.0,
+            body,
+            &mut FastSolveStats::default(),
+        )
+        .unwrap();
+        assert_eq!(strict, 8000.0, "Zc={zc}, body={body}, rho={}", gas.density);
+        assert_eq!(fast, strict);
+    }
+
+    #[test]
+    fn closed_reed_shortcut_does_not_accept_singular_or_nonfinite_pressure() {
+        for (reflection, incoming, mouth) in [
+            (1.0, 0.0, 12000.0),
+            (1.0, 70.0, 12000.0),
+            (0.0, f64::NEG_INFINITY, 12000.0),
+            (0.0, 0.0, f64::INFINITY),
+        ] {
+            assert!(closed_reed_wave(reed(), 1e7, reflection, incoming, mouth, 0.0).is_none());
+        }
     }
 
     #[test]
@@ -726,13 +867,67 @@ mod fast_mode_tests {
             )
             .unwrap();
             // Power-law elastic force plus Hunt-Crossley loss, including
-            // the nonadhesive unloading clamp. Force is held from (y,v).
-            let expected = 1e8 * y * y * (1.0 - 5.0 * v).max(0.0);
+            // the nonadhesive unloading clamp. Penetration is held from y;
+            // loss uses the accepted midpoint velocity, not the old one.
+            let vm = 0.5 * (v + v1);
+            let expected = 1e8 * y * y * (1.0 - 5.0 * vm).max(0.0);
             let reconstructed = reed.mass_kg * (v1 - v) / dt
                 + reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m)
                 + damping * 0.5 * (v + v1)
                 - reed_pressure_face(reed) * pressure;
             assert!((reconstructed - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn g1_reed_contact_loss_removes_energy_during_velocity_reversal() {
+        let gas = air20();
+        let reed = BeatingReed {
+            mass_kg: 1e-5,
+            stiffness_n_m: 500.0,
+            ..reed()
+        };
+        let lay = crate::unilateral_contact::slit_lay(1e8, 2.0)
+            .unwrap()
+            .with_internal_loss(5.0)
+            .unwrap();
+        let (y, v) = (-1e-4, -0.2);
+        let old_loss = lay.dissipative_modal_forces(1, &[y, v], &[v])[0];
+        for dt in [1e-4, 5e-4] {
+            let (pressure, y1, v1) = step_massive_reed(
+                reed,
+                gas.density,
+                fixture_impedance(&gas),
+                0.0,
+                0.0,
+                y,
+                v,
+                dt,
+                0.0,
+                Some(&lay),
+                ReedSolverMode::Strict,
+                &mut FastSolveStats::default(),
+            )
+            .unwrap();
+            let vm = 0.5 * (v + v1);
+            assert!(vm > 0.0, "fixture must reverse direction within the step");
+            let loss = lay.dissipative_modal_forces(1, &[y, v], &[vm])[0];
+            assert!(
+                old_loss * vm > 0.0,
+                "old-velocity loss is an energy source here"
+            );
+            assert!(loss * vm < 0.0, "midpoint loss must remove energy");
+            let elastic = 1e8 * y * y;
+            assert!(elastic + loss >= 0.0, "contact must not attract");
+            let (_, damping) = reed_structural(reed);
+            let force = reed.mass_kg * (v1 - v) / dt
+                + reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m)
+                + damping * vm
+                - reed_pressure_face(reed) * pressure;
+            assert!(
+                (force - elastic - loss).abs() < 1e-10,
+                "the actual step must use the dissipative force"
+            );
         }
     }
 
@@ -968,29 +1163,72 @@ mod fast_mode_tests {
     }
 
     #[test]
-    fn fast_newton_meets_the_strict_residual_contract_within_conditioning_band() {
-        const FLOW_ACCEPT_TOL: f64 = 1.0e-8;
-        const POSITION_HEADROOM: f64 = 4.0;
+    fn g1_strict_reed_balances_flow_across_loading_and_reflection() {
+        let reed = reed();
+        let gas = air20();
+        let zc = fixture_impedance(&gas);
+        for reflection in [-0.4, 0.0, 0.8] {
+            for incoming in [-200.0, 120.0, 1e6] {
+                for mouth in [-500.0, 200.0, 2800.0, 6000.0, 8000.0] {
+                    for body in [-2e-6, 0.0, 2e-6] {
+                        let outgoing = solve_reed_wave_strict(
+                            reed,
+                            gas.density,
+                            zc,
+                            reflection,
+                            incoming,
+                            mouth,
+                            0.0,
+                            body,
+                        )
+                        .unwrap();
+                        let returned = incoming + reflection * outgoing;
+                        let dp = mouth - outgoing - returned;
+                        // Independent constitutive evaluation in SI units.
+                        let opening = reed.rest_opening_m
+                            * (1.0 - dp / reed.closing_pressure_pa).clamp(0.0, 1.0);
+                        let jet = reed.width_m
+                            * opening
+                            * dp.signum()
+                            * (2.0 * dp.abs() / gas.density).sqrt();
+                        let wave = (outgoing - returned) / zc;
+                        let scale = (jet.abs() + wave.abs() + body.abs()).max(1e-12);
+                        assert!(
+                            (jet + body - wave).abs() <= 1e-10 * scale,
+                            "flow defect {} m^3/s, scale={scale}, r={reflection}, incoming={incoming}, mouth={mouth}",
+                            jet + body - wave
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strict_reed_refuses_unbracketed_and_nonfinite_junctions() {
+        let gas = air20();
+        let zc = fixture_impedance(&gas);
+        // r0=1 and zero history fix the characteristic flow at zero.
+        // More body flow than the aperture can carry leaves no root.
+        for (reflection, body) in [(1.0, -1.0), (0.0, f64::NAN)] {
+            assert!(solve_reed_wave_strict(
+                reed(), gas.density, zc, reflection, 0.0, 2800.0, 0.0, body,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn fast_newton_matches_resolved_strict_roots_and_conserves_flow() {
         let reed = reed();
         let gas = air20();
         let rho = gas.density;
         let zc = fixture_impedance(&gas);
         let mut stats = FastSolveStats::default();
-        // A sweep across open/interior/closing phases with varied
-        // history and reflection. TWO gates, both derived from the
-        // strict path's own acceptance test:
-        // 1. RESIDUAL CONTRACT: every Newton-resolved sample satisfies
-        //    |f| < 1e-8*(1+p_m) — byte-for-byte the same acceptance
-        //    the strict bisection uses.
-        // 2. CONDITIONING-SCALED POSITION BAND: the residual is nearly
-        //    flat here (|J| ~ 1e-7 because zc ~ 2.7e7 makes the wave
-        //    term tiny), so ANY solver's root position carries an
-        //    uncertainty of flow_tol*(1+p_m)/|J| — tens of Pa at some
-        //    operating points. The positional assertion uses four
-        //    times that per-sample bound; a fixed microbar band would
-        //    encode false precision about an ill-conditioned root.
+        // The flow scale is a volume flow, not a mouth pressure.
+        let flow_scale =
+            reed.width_m * reed.rest_opening_m * (2.0 * reed.closing_pressure_pa / rho).sqrt();
         let mut max_dev = 0.0_f64;
-        let mut max_allowed = 0.0_f64;
         for k in 0..64 {
             let pm = 200.0 + 120.0 * f64::from(k);
             let h = 40.0 * f64::from(k % 7) - 120.0;
@@ -1000,30 +1238,21 @@ mod fast_mode_tests {
             let fast = solve_reed_wave_fast(reed, rho, zc, 0.0, h, pm, guess, 0.0, &mut stats)
                 .expect("fast solves");
             let dev = (fast - strict).abs();
-            let f_fast = reed_flow_mismatch(reed, rho, zc, 0.0, h, pm, fast, 0.0);
-            assert!(
-                f_fast.abs() < FLOW_ACCEPT_TOL * (1.0 + pm.abs()),
-                "Newton root violates the strict residual contract at \
-                 k={k}: |f|={:e} vs tol {:e}",
-                f_fast.abs(),
-                FLOW_ACCEPT_TOL * (1.0 + pm.abs())
-            );
-            let j = reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, fast)
-                .map_or(0.0, f64::abs)
-                .max(reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, strict).map_or(0.0, f64::abs));
-            let allowed = POSITION_HEADROOM * (FLOW_ACCEPT_TOL * (1.0 + pm.abs())) / j.max(1.0e-12);
+            for pressure in [strict, fast] {
+                let residual = reed_flow_mismatch(reed, rho, zc, 0.0, h, pm, pressure, 0.0);
+                assert!(
+                    residual.abs() <= 1e-10 * flow_scale,
+                    "flow defect {residual:e} m^3/s at k={k}"
+                );
+            }
+            let allowed = 1e-8 * (1.0 + strict.abs());
             max_dev = max_dev.max(dev);
-            max_allowed = max_allowed.max(allowed);
             assert!(
                 dev <= allowed,
-                "root deviation {dev:.3} Pa exceeds the conditioning band \
-                 {allowed:.3} Pa at k={k} (pm={pm}, h={h}, |J|={j:e})"
+                "root deviation {dev:e} Pa exceeds {allowed:e} Pa at k={k}"
             );
         }
-        println!(
-            "receipt: aperture-newton battery max|p_fast-p_strict| = {max_dev:e} Pa \
-(max conditioning-scaled allowance {max_allowed:e} Pa)"
-        );
+        println!("receipt: aperture-newton battery max|p_fast-p_strict| = {max_dev:e} Pa");
         // MEASURED (this battery, damped-Newton solver): ~43% of
         // cold-seeded samples defer to bisection - a flat residual
         // (|J|~1e-7) makes far-off guesses genuinely hard, and the

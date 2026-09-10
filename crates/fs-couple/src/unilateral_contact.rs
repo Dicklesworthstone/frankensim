@@ -75,6 +75,29 @@ pub fn slit_contact_force(obstacle: &Obstacle, opening_m: f64) -> Result<f64, DC
     Ok(-g[0])
 }
 
+/// Frozen-opening single-slit response: total force is
+/// `max(elastic - damping * opening_velocity, 0)`. These are the
+/// existing obstacle's elastic reaction and Hunt–Crossley coefficient,
+/// for the unit opening coordinate used by `slit_lay`.
+pub(crate) fn slit_contact_coefficients(
+    obstacle: &Obstacle,
+    opening_m: f64,
+) -> Result<(f64, f64), DContactError> {
+    if obstacle.n_points() != 1 || obstacle.collocation() != [-1.0] {
+        return Err(DContactError::Shape {
+            what: "slit response requires one unit opening coordinate",
+        });
+    }
+    let elastic = slit_contact_force(obstacle, opening_m)?;
+    let damping = elastic * obstacle.internal_loss();
+    if !elastic.is_finite() || elastic < 0.0 || !damping.is_finite() || damping < 0.0 {
+        return Err(DContactError::Parameter {
+            what: "slit response coefficients must be finite and nonnegative",
+        });
+    }
+    Ok((elastic, damping))
+}
+
 /// Modal contact forces `f_k = −∂V/∂q_k` for an interleaved `[q, p]` state.
 ///
 /// # Errors

@@ -258,10 +258,27 @@ in `fs-phs` (budget now scales with `|z|`).
 
 ### Aperture-junction solver modes (bead frankensim-2s4i5)
 
+Both modes share the closed-slit characteristic constraint
+`(1-r0) p_plus - p_minus_history = Zc Ubody`. The reflection denominator
+is not clamped, and closure is evaluated at the body-loaded bore pressure;
+body motion can reopen the slit. Singular or nonfinite candidates do not
+qualify for this shortcut. G1 junction tests cover signed body flow,
+reflected incoming waves, and reopening.
+
 The reed aperture junction has two solver modes on
 `ReedBoreVoice::set_solver_mode`. `Strict` (default) is the
-certification path: deterministic bisection with its 21-point
-grid-argmin fallback. `FastNewton` is a DECLARED FAST MODE (the
+deterministic path: a local sign-changing bracket, up to 32 symmetric
+bracket expansions if needed, then up to 96 bisections. It stops at an
+exact residual zero or adjacent floating-point pressure endpoints,
+returning the endpoint with smaller flow residual. Nonfinite residuals,
+failure to bracket, or exhausted refinement return errors; a grid guess
+is never returned as a solution. This removes the former dimensionally
+invalid pressure-scaled flow tolerance. Root selection is deterministic,
+but multiple quasistatic roots and the Bernoulli dead zone remain model
+limitations; this is not a uniqueness or exact-arithmetic certificate.
+G1 tests independently reconstruct volume-flow balance across body flow,
+reflection, and large incoming pressure, and test refusal without a root.
+`FastNewton` is a DECLARED FAST MODE (the
 fs-rand ziggurat precedent): DAMPED island Newton on the analytic
 Jacobian of the shared Bernoulli-plus-wave-junction residual — each
 step is halved up to four times until the residual magnitude strictly
@@ -273,12 +290,9 @@ slope is handed untouched to the strict path and counted in
 a converged root. It is NOT bitwise-equal to the strict path and must
 never become the default until it earns the same proof. Receipts (bead
 2s4i5): the junction-level battery lives inline (`fast_mode_tests`) —
-a 64-point open/interior/closing stimulus sweep gating two things per
-sample: every Newton root satisfies the strict path's own residual
-contract (`|f| < 1e-8*(1+p_m)`), and positional deviation from the
-strict root stays within four times the per-sample conditioning bound
-(`flow_tol*(1+p_m)/|J|`; the residual is nearly flat here because
-zc ~ 2.7e7 makes the wave term tiny). The integration lane
+a 64-point open/interior/closing stimulus sweep checks both modes against
+a volume-flow scale `w H sqrt(2 Pc/rho)` and checks pressure agreement
+within `1e-8 * (1 Pa + |p_strict|)`. The integration lane
 (`tests/reed_newton_fusion.rs`) owns the fallback-hit-rate receipt on
 a full nominal render (bounded structurally at 0.5; measured 12-22%
 warm-seeded) and before/after budget rows stamped with build profile —
@@ -296,32 +310,6 @@ compositions render through the block API and encode through the ONE
 pascals→PCM owner, `pcm_wav::encode_pcm16_wav` — the recorded seam
 decision (beads ib15w + h7xu5.7.8): the cinematic stereo/receipt-hashed
 encoder stays cinematic, no third RIFF writer exists in the music lane.
-grid-argmin fallback. `FastNewton` is a DECLARED FAST MODE (the
-fs-rand ziggurat precedent): DAMPED island Newton on the analytic
-Jacobian of the shared Bernoulli-plus-wave-junction residual — each
-step is halved up to four times until the residual magnitude strictly
-decreases, and a sample that never improves, hits a sqrt kink or
-non-finite state, exhausts its iteration budget, or shows a vanishing
-slope is handed untouched to the strict path and counted in
-`FastSolveStats`. Convergence requires an UNDOUBLED full step inside
-`NEWTON_STEP_TOL`, so a still-descending line search never reads as
-a converged root. It is NOT bitwise-equal to the strict path and must
-never become the default until it earns the same proof. Receipts (bead
-2s4i5): the junction-level battery lives inline (`fast_mode_tests`) —
-a 64-point open/interior/closing stimulus sweep gating two things per
-sample: every Newton root satisfies the strict path's own residual
-contract (`|f| < 1e-8*(1+p_m)`), and positional deviation from the
-strict root stays within four times the per-sample conditioning bound
-(`flow_tol*(1+p_m)/|J|`; the residual is nearly flat here because
-zc ~ 2.7e7 makes the wave term tiny). The integration lane
-(`tests/reed_newton_fusion.rs`) owns the fallback-hit-rate receipt on
-a full nominal render (bounded structurally at 0.5; measured 12-22%
-warm-seeded) and before/after budget rows stamped with build profile —
-debug rows are diagnostics forever, per the budget-lane doctrine.
-Recorded finding: end-to-end rendered waveforms are NOT comparable
-between modes beyond onset — the self-oscillating loop amplifies
-per-sample root differences into phase-divergent (O(kPa)) waveforms,
-so waveform equality is never a claim either mode makes.
 
 ### `bakeoff`
 
@@ -815,7 +803,15 @@ clarinet is one filling of those objects.
   G1 checks the discrete spring/kinetic energy change against pressure work,
   Bernoulli loss and viscous loss without contact, plus energy preservation and
   second-order phase convergence of the isolated oscillator.
-  Aperture geometry and nonlinear lay forces are held at the start of the step.
+  Aperture geometry and elastic lay force are held at the start of the step.
+  Single-slit Hunt–Crossley loss uses the same midpoint velocity as mechanics:
+  the active reaction is `elastic - elastic*chi*v_mid`; a second zero-reaction
+  solve handles the nonadhesive unloading clamp. The coefficients come from
+  the admitted fs-dcontact obstacle, restricted to one unit opening coordinate.
+  G1 exercises loading, unloading and within-step reversal; a lagged-velocity
+  negative control injects energy where the accepted loss removes it.
+  This proves the sign of loss work against the held elastic reaction, not
+  that the latter matches the change in nonlinear contact potential.
   The isolated ODE reed retains its own pHS stepping scheme. This is not a
   nonlinear contact or whole-bore energy certificate: contact work, coupled
   geometry/time refinement and onset validation remain MR68 obligations.
