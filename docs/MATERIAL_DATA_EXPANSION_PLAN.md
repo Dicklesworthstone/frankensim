@@ -4,7 +4,7 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 179 source bundles, of which 161 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 161 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 180 source bundles, of which 162 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 162 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
 P01 has a first named HDPE acquisition in `ensinger-tecafine-pe300-natural-2017`:
 four producer comparison facts for density, tensile modulus, yield strength and
@@ -15,7 +15,16 @@ P11a. The missing positive delivery is a condition-compatible elastic or thermal
 profile connected to its actual consumer; service-temperature limits cannot fill
 that gap. A second reviewed producer candidate, INEOS HD6070FA cast film, states
 density at 23 C but omits temperatures for Cp and conductivity; it is not merged
-with Ensinger stock shapes to manufacture completeness.
+with Ensinger stock shapes to manufacture completeness. The next acquisition,
+`roechling-polystone-g-natural-reference`, retains three same-source nominal
+thermal inputs (density, Cp, conductivity) under an explicit frozen 25–26 C
+reference opt-in. Its producer sheet does not state the property test
+temperatures or selected product form/process. The existing PVC heat regression
+now also runs this HDPE reference at identical geometry and boundary, with
+source/discovery/store/resolver, independent response/energy and refusal checks.
+Runtime verification is pending. P01/P11a remain unfinished for their original
+condition-qualified delivery; the reference does not establish measured
+temperature coverage, creep or product qualification.
 
 P02 now has six producer comparison facts in
 `mcam-proteus-homopolymer-pp-natural-2023`. Its conductivity is explicitly

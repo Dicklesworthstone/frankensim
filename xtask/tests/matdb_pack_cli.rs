@@ -4973,11 +4973,11 @@ mod common_material_acquisition {
         );
     }
 
-    /// G1/G3: this frozen engineering reference carries its author-declared
-    /// 25–26 C model range into a lumped heat calculation. It is not a
-    /// co-measured PVC-U state, a creep model, or a product qualification.
+    /// G1/G3: frozen HDPE/PVC engineering references drive the same geometry
+    /// and thermal boundary. The author-declared 25–26 C model range is not
+    /// measured property coverage, a creep model, or product qualification.
     #[test]
-    fn g1_g3_iplex_pvc_reference_reaches_heat() {
+    fn g1_g3_polymer_reference_comparison_reaches_heat() {
         use fs_conduction::lumped::{BiotGate, LumpedNetwork, LumpedNode, solve_gated};
         use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
         use fs_matdb_store::{CatalogPack, MaterialStore};
@@ -4988,198 +4988,246 @@ mod common_material_acquisition {
         use fs_qty::QuantitySpec;
         use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
-        let slug = "iplex-pvc-u-pipe-engineering-reference";
-        let (pack, path) = compile(slug);
-        assert_eq!(pack.claims().claim_count(), 5);
-        let original = NormalizedMaterialCardPack::new(
-            MaterialStateId {
-                chemistry: "IPLEX rigid PVC-U pipe engineering reference".into(),
-                phase: "solid polymer".into(),
-                process: "extruded pipe-family frozen reference; schedule and source temperatures unknown"
-                    .into(),
-                revision: 0,
-            },
-            pack,
-        )
-        .unwrap();
-        let database = fixture_dir().join("iplex-pvc-u-pipe-engineering-reference.sqlite");
-        {
-            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
-            store
-                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
-                .unwrap();
-            store.seal_corpus().unwrap();
-        }
-        let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
-        let CatalogPack::MaterialCard(loaded) =
-            store.load_catalog_pack(original.pack_id()).unwrap()
-        else {
-            panic!("wrong stored family")
-        };
-        assert_eq!(loaded, original);
-        let card = loaded.card();
-        let names = [
-            "density",
-            "tensile-modulus",
-            "poisson-ratio",
-            "specific-heat-capacity",
-            "thermal-conductivity",
-        ];
-        let expected = [1470.0, 3.2e9, 0.38, 1045.0, 0.138];
-        let flags = [
-            ("engineering-reference-model", 1.0),
-            ("source-temperatures-matched", 0.0),
-            ("reference-iplex-rigid-pvc-u-pipe", 1.0),
-        ];
-        let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
-        let dimensionless = QuantitySpec::dimensional(Dims::NONE);
-        let keys = names.map(|name| {
-            let found = card.claims().claims_for(name);
-            assert_eq!(found.len(), 1, "one source claim for {name}");
-            found[0].1.key.clone()
-        });
-        let requirements = keys
-            .iter()
-            .map(|key| {
-                ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::StrictlyPositive)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let anchor = card.claims().claims_for("density")[0].1;
-        let resolve = |point: &QueryPoint| {
-            resolve_material_state_point(
-                card,
-                point,
-                &requirements,
-                MaterialPropertySelection::SingleClaimOnly,
+        let mut deltas = Vec::new();
+        for (slug, identity_flag, process, names, expected, discovery_file) in [
+            (
+                "iplex-pvc-u-pipe-engineering-reference",
+                "reference-iplex-rigid-pvc-u-pipe",
+                "extruded pipe-family frozen reference; schedule and source temperatures unknown",
+                vec![
+                    "density",
+                    "tensile-modulus",
+                    "poisson-ratio",
+                    "specific-heat-capacity",
+                    "thermal-conductivity",
+                ],
+                vec![1470.0, 3.2e9, 0.38, 1045.0, 0.138],
+                "examples/material-discovery/iplex-pvc-reference.json",
+            ),
+            (
+                "roechling-polystone-g-natural-reference",
+                "reference-roechling-polystone-g-natural",
+                "named HDPE stock material frozen reference; specimen history and source temperatures unknown",
+                vec!["density", "specific-heat-capacity", "thermal-conductivity"],
+                vec![950.0, 1900.0, 0.4],
+                "examples/material-discovery/polystone-g-reference.json",
+            ),
+        ] {
+            let (pack, path) = compile(slug);
+            assert_eq!(pack.claims().claim_count(), names.len());
+            let original = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: slug.into(),
+                    phase: "solid polymer".into(),
+                    process: process.into(),
+                    revision: 0,
+                },
+                pack,
             )
-        };
-        let lower = point(anchor, &[]);
-        let state = resolve(&lower).unwrap();
-        assert_eq!(state.properties().len(), 5);
-        for ((name, expected), key) in names.into_iter().zip(expected).zip(&keys) {
-            close(state.property(name).unwrap().value_si(), expected);
-            assert_eq!(state.property_by_key(key).unwrap().value_si(), expected);
-        }
-        for property in state.properties() {
-            card.claims()
-                .verify_receipt(&property.answer().receipt)
+            .unwrap();
+            let database = fixture_dir().join(format!("{slug}.sqlite"));
+            {
+                let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+                store
+                    .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                    .unwrap();
+                store.seal_corpus().unwrap();
+            }
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            let CatalogPack::MaterialCard(loaded) =
+                store.load_catalog_pack(original.pack_id()).unwrap()
+            else {
+                panic!("wrong stored family")
+            };
+            assert_eq!(loaded, original);
+            let card = loaded.card();
+            let flags = [
+                ("engineering-reference-model", 1.0),
+                ("source-temperatures-matched", 0.0),
+                (identity_flag, 1.0),
+            ];
+            let absolute_temperature = QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            ));
+            let dimensionless = QuantitySpec::dimensional(Dims::NONE);
+            let keys: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let found = card.claims().claims_for(name);
+                    assert_eq!(found.len(), 1, "one source claim for {name}");
+                    found[0].1.key.clone()
+                })
+                .collect();
+            let requirements = keys
+                .iter()
+                .map(|key| {
+                    ScalarPropertyRequirement::try_with_key(
+                        key,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-        }
-        for (_, claim) in card.claims().claims_ordered() {
-            assert_eq!(claim.validity.bound("temperature"), Some((298.15, 299.15)));
-            assert_eq!(
-                claim.validity.axis_quantities().get("temperature"),
-                Some(&absolute_temperature)
-            );
-            for (axis, value) in flags {
-                assert_eq!(claim.validity.bound(axis), Some((value, value)));
+            let anchor = card.claims().claims_for("density")[0].1;
+            let resolve = |point: &QueryPoint| {
+                resolve_material_state_point(
+                    card,
+                    point,
+                    &requirements,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+            };
+            let lower = point(anchor, &[]);
+            let state = resolve(&lower).unwrap();
+            assert_eq!(state.properties().len(), names.len());
+            for ((name, expected), key) in names
+                .iter()
+                .copied()
+                .zip(expected.iter().copied())
+                .zip(&keys)
+            {
+                close(state.property(name).unwrap().value_si(), expected);
+                assert_eq!(state.property_by_key(key).unwrap().value_si(), expected);
+            }
+            for property in state.properties() {
+                card.claims()
+                    .verify_receipt(&property.answer().receipt)
+                    .unwrap();
+            }
+            for (_, claim) in card.claims().claims_ordered() {
+                assert_eq!(claim.validity.bound("temperature"), Some((298.15, 299.15)));
                 assert_eq!(
-                    claim.validity.axis_quantities().get(axis),
-                    Some(&dimensionless)
+                    claim.validity.axis_quantities().get("temperature"),
+                    Some(&absolute_temperature)
+                );
+                for (axis, value) in flags {
+                    assert_eq!(claim.validity.bound(axis), Some((value, value)));
+                    assert_eq!(
+                        claim.validity.axis_quantities().get(axis),
+                        Some(&dimensionless)
+                    );
+                }
+            }
+            assert!(
+                resolve(&QueryPoint::new()).is_err(),
+                "opt-in axes are mandatory"
+            );
+            for (axis, wrong) in [
+                ("engineering-reference-model", 0.0),
+                ("source-temperatures-matched", 1.0),
+                (identity_flag, 0.0),
+                ("temperature", 298.14),
+                ("temperature", 299.16),
+            ] {
+                assert!(
+                    resolve(&point(anchor, &[(axis, wrong)])).is_err(),
+                    "must refuse {axis}={wrong}"
                 );
             }
-        }
-        assert!(
-            resolve(&QueryPoint::new()).is_err(),
-            "opt-in axes are mandatory"
-        );
-        for (axis, wrong) in [
-            ("engineering-reference-model", 0.0),
-            ("source-temperatures-matched", 1.0),
-            ("reference-iplex-rigid-pvc-u-pipe", 0.0),
-            ("temperature", 298.14),
-            ("temperature", 299.16),
-        ] {
+            let upper = resolve(&point(anchor, &[("temperature", 299.15)])).unwrap();
+            for (name, expected) in names.iter().copied().zip(expected.iter().copied()) {
+                close(upper.property(name).unwrap().value_si(), expected);
+            }
             assert!(
-                resolve(&point(anchor, &[(axis, wrong)])).is_err(),
-                "must refuse {axis}={wrong}"
+                card.claims()
+                    .claims_for("linear-thermal-expansion-coefficient")
+                    .is_empty(),
+                "an observation-only CLTE cannot become an instantaneous alpha law"
             );
-        }
-        let upper = resolve(&point(anchor, &[("temperature", 299.15)])).unwrap();
-        for (name, expected) in names.into_iter().zip(expected) {
-            close(upper.property(name).unwrap().value_si(), expected);
-        }
-        assert!(
-            card.claims()
-                .claims_for("linear-thermal-expansion-coefficient")
-                .is_empty(),
-            "an observation-only CLTE cannot become an instantaneous alpha law"
-        );
+            let mut thermal_and_expansion = requirements.clone();
+            thermal_and_expansion.push(
+                ScalarPropertyRequirement::try_new(
+                    "linear-thermal-expansion-coefficient",
+                    Dims([0, 0, 0, -1, 0, 0]),
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap(),
+            );
+            assert!(
+                resolve_material_state_point(
+                    card,
+                    &lower,
+                    &thermal_and_expansion,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err(),
+                "thermal inputs must not manufacture an unsupported expansion law"
+            );
 
-        let rho = state.property("density").unwrap().value_si();
-        let cp = state.property("specific-heat-capacity").unwrap().value_si();
-        let conductivity = state.property("thermal-conductivity").unwrap().value_si();
-        let volume = 1.0e-6;
-        let area = 1.0e-3;
-        let conductance = conductivity * area / 0.1;
-        let capacity = rho * volume * cp;
-        let initial = 298.15;
-        let ambient = 299.15;
-        let time = 100.0;
-        let node = LumpedNode::new(
-            slug,
-            capacity,
-            conductance,
-            volume / area,
-            conductivity,
-            area,
-        )
-        .unwrap();
-        let network = LumpedNetwork::new(vec![node], ambient).unwrap();
-        let heat = solve_gated(
-            &network,
-            BiotGate::corpus_default(),
-            &[0.0],
-            &[initial],
-            time,
-        )
-        .unwrap();
-        assert_eq!(
-            heat,
-            solve_gated(
+            let rho = state.property("density").unwrap().value_si();
+            let cp = state.property("specific-heat-capacity").unwrap().value_si();
+            let conductivity = state.property("thermal-conductivity").unwrap().value_si();
+            let volume = 1.0e-6;
+            let area = 1.0e-3;
+            let conductance = conductivity * area / 0.1;
+            let capacity = rho * volume * cp;
+            let initial = 298.15;
+            let ambient = 299.15;
+            let time = 100.0;
+            let node = LumpedNode::new(
+                slug,
+                capacity,
+                conductance,
+                volume / area,
+                conductivity,
+                area,
+            )
+            .unwrap();
+            let network = LumpedNetwork::new(vec![node], ambient).unwrap();
+            let heat = solve_gated(
                 &network,
                 BiotGate::corpus_default(),
                 &[0.0],
                 &[initial],
                 time,
             )
-            .unwrap()
-        );
-        let tau = capacity / conductance;
-        let expected_delta = (ambient - initial) * (1.0 - (-time / tau).exp());
-        let actual_delta = heat.temperature_k[0] - initial;
-        assert!((actual_delta - expected_delta).abs() < 1e-11);
-        let energy = capacity * actual_delta;
-        let supplied = conductance * (ambient - initial) * tau * (1.0 - (-time / tau).exp());
-        assert!((energy - supplied).abs() < 1e-10);
-
-        let discovery = fs_cli::run(vec![
-            "--json".into(),
-            "discover".into(),
-            workspace_path("examples/material-discovery/iplex-pvc-reference.json")
-                .to_str()
+            .unwrap();
+            assert_eq!(
+                heat,
+                solve_gated(
+                    &network,
+                    BiotGate::corpus_default(),
+                    &[0.0],
+                    &[initial],
+                    time,
+                )
                 .unwrap()
-                .into(),
-            path.to_str().unwrap().into(),
-        ]);
-        assert_eq!(
-            discovery.exit_code,
-            fs_cli::exit::SUCCESS,
-            "{}",
-            discovery.stderr
-        );
+            );
+            let tau = capacity / conductance;
+            let expected_delta = (ambient - initial) * (1.0 - (-time / tau).exp());
+            let actual_delta = heat.temperature_k[0] - initial;
+            deltas.push(actual_delta);
+            assert!((actual_delta - expected_delta).abs() < 1e-11);
+            let energy = capacity * actual_delta;
+            let supplied = conductance * (ambient - initial) * tau * (1.0 - (-time / tau).exp());
+            assert!((energy - supplied).abs() < 1e-10);
+
+            let discovery = fs_cli::run(vec![
+                "--json".into(),
+                "discover".into(),
+                workspace_path(discovery_file).to_str().unwrap().into(),
+                path.to_str().unwrap().into(),
+            ]);
+            assert_eq!(
+                discovery.exit_code,
+                fs_cli::exit::SUCCESS,
+                "{}",
+                discovery.stderr
+            );
+            assert!(
+                discovery.stdout.contains("\"status\":\"complete\""),
+                "{}",
+                discovery.stdout
+            );
+            eprintln!(
+                "polymer={slug} comparison=fixed_geometry volume=1e-6m3 area=1e-3m2 path=0.1m time=100s author_frozen_reference_temperature=298.15..299.15K source_temperatures_matched=0 rho={rho}kg/m3 Cp={cp}J/kg/K k={conductivity}W/m/K delta={actual_delta:.12e}K tau={tau:.12e}s energy={energy:.12e}J no_measurement_coverage_or_product_qualification=1 source_bundle={:?}",
+                state.identity()
+            );
+        }
         assert!(
-            discovery.stdout.contains("\"status\":\"complete\""),
-            "{}",
-            discovery.stdout
-        );
-        eprintln!(
-            "PVC-U={slug} author_frozen_reference_temperature=298.15..299.15K source_temperatures_matched=0 rho={rho}kg/m3 Cp={cp}J/kg/K k={conductivity}W/m/K delta={actual_delta:.12e}K tau={tau:.12e}s energy={energy:.12e}J no_measurement_coverage_or_product_qualification=1 source_bundle={:?}",
-            state.identity()
+            deltas[1] > deltas[0],
+            "source-driven HDPE reference warms faster than PVC under identical geometry and boundary"
         );
     }
 }
