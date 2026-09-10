@@ -193,29 +193,7 @@ impl EquilibriumEnthalpyPhaseCurve {
         material_card_identity: ContentHash,
         knots: Vec<EnthalpyPhaseKnot>,
     ) -> Result<Self, PhaseStateError> {
-        if material_card_identity == ContentHash([0; 32]) {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "material-card identity must not be zero",
-            });
-        }
-        if knots.len() < 2 {
-            return Err(PhaseStateError::InvalidCurve {
-                what: "an equilibrium phase curve needs at least two knots",
-            });
-        }
-        for knot in &knots {
-            if !(knot.specific_enthalpy_j_kg.is_finite()
-                && knot.temperature_k > 0.0
-                && knot.temperature_k.is_finite()
-                && (0.0..=1.0).contains(&knot.liquid_mass_fraction)
-                && knot.bulk_density_kg_m3 > 0.0
-                && knot.bulk_density_kg_m3.is_finite())
-            {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "every knot needs finite enthalpy, positive temperature/density, and liquid fraction in [0,1]",
-                });
-            }
-        }
+        validate_curve_common(material_card_identity, &knots)?;
         if knots[0].liquid_mass_fraction != 0.0
             || knots[knots.len() - 1].liquid_mass_fraction != 1.0
         {
@@ -224,13 +202,6 @@ impl EquilibriumEnthalpyPhaseCurve {
             });
         }
         for pair in knots.windows(2) {
-            if pair[1].specific_enthalpy_j_kg <= pair[0].specific_enthalpy_j_kg
-                || !(pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg).is_finite()
-            {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "specific enthalpy knots must be strictly increasing",
-                });
-            }
             if pair[1].temperature_k < pair[0].temperature_k {
                 return Err(PhaseStateError::InvalidCurve {
                     what: "temperature must be nondecreasing with specific enthalpy",
@@ -242,12 +213,56 @@ impl EquilibriumEnthalpyPhaseCurve {
                 });
             }
         }
-        let identity = phase_curve_identity(material_card_identity, &knots);
-        Ok(Self {
+        Ok(Self::from_valid_knots(material_card_identity, knots))
+    }
+
+    /// Admit a bounded equilibrium enthalpy curve entirely in one explicit
+    /// phase. Solid curves carry liquid fraction zero; liquid curves carry
+    /// liquid fraction one. Temperature must rise strictly, so this ingress
+    /// cannot hide a latent plateau or mixed transition.
+    pub fn try_single_phase(
+        material_card_identity: ContentHash,
+        phase: SolidLiquidPhase,
+        knots: Vec<EnthalpyPhaseKnot>,
+    ) -> Result<Self, PhaseStateError> {
+        validate_curve_common(material_card_identity, &knots)?;
+        let liquid_mass_fraction = match phase {
+            SolidLiquidPhase::Solid => 0.0,
+            SolidLiquidPhase::Liquid => 1.0,
+            SolidLiquidPhase::SolidLiquid => {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "a single-phase curve must declare Solid or Liquid",
+                });
+            }
+        };
+        if knots
+            .iter()
+            .any(|knot| knot.liquid_mass_fraction != liquid_mass_fraction)
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "every single-phase knot must carry the declared phase fraction",
+            });
+        }
+        if knots
+            .windows(2)
+            .any(|pair| pair[1].temperature_k <= pair[0].temperature_k)
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "single-phase temperature knots must be strictly increasing",
+            });
+        }
+        Ok(Self::from_valid_knots(material_card_identity, knots))
+    }
+
+    fn from_valid_knots(
+        material_card_identity: ContentHash,
+        knots: Vec<EnthalpyPhaseKnot>,
+    ) -> Self {
+        Self {
             material_card_identity,
+            identity: phase_curve_identity(material_card_identity, &knots),
             knots,
-            identity,
-        })
+        }
     }
 
     /// Material card that owns the supplied equilibrium data.
@@ -390,6 +405,45 @@ impl EquilibriumEnthalpyPhaseCurve {
             identity: hasher.finalize(),
         })
     }
+}
+
+fn validate_curve_common(
+    material_card_identity: ContentHash,
+    knots: &[EnthalpyPhaseKnot],
+) -> Result<(), PhaseStateError> {
+    if material_card_identity == ContentHash([0; 32]) {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "material-card identity must not be zero",
+        });
+    }
+    if knots.len() < 2 {
+        return Err(PhaseStateError::InvalidCurve {
+            what: "an equilibrium phase curve needs at least two knots",
+        });
+    }
+    for knot in knots {
+        if !(knot.specific_enthalpy_j_kg.is_finite()
+            && knot.temperature_k > 0.0
+            && knot.temperature_k.is_finite()
+            && (0.0..=1.0).contains(&knot.liquid_mass_fraction)
+            && knot.bulk_density_kg_m3 > 0.0
+            && knot.bulk_density_kg_m3.is_finite())
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "every knot needs finite enthalpy, positive temperature/density, and liquid fraction in [0,1]",
+            });
+        }
+    }
+    for pair in knots.windows(2) {
+        if pair[1].specific_enthalpy_j_kg <= pair[0].specific_enthalpy_j_kg
+            || !(pair[1].specific_enthalpy_j_kg - pair[0].specific_enthalpy_j_kg).is_finite()
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "specific enthalpy knots must be strictly increasing",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Typed refusal from equilibrium phase-state admission or evaluation.
@@ -545,6 +599,122 @@ mod tests {
         assert!(matches!(
             EquilibriumEnthalpyPhaseCurve::try_new(ContentHash([0x54; 32]), knots),
             Err(PhaseStateError::InvalidCurve { .. })
+        ));
+    }
+
+    fn single_phase_knots(liquid_mass_fraction: f64) -> Vec<EnthalpyPhaseKnot> {
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 10.0,
+                temperature_k: 300.0,
+                liquid_mass_fraction,
+                bulk_density_kg_m3: 1_000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 110.0,
+                temperature_k: 350.0,
+                liquid_mass_fraction,
+                bulk_density_kg_m3: 900.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn g0_single_phase_enthalpy_curves_interpolate_without_phase_transition() {
+        let solid = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x61; 32]),
+            SolidLiquidPhase::Solid,
+            single_phase_knots(0.0),
+        )
+        .unwrap();
+        let solid_midpoint = solid.state_at_specific_enthalpy(60.0).unwrap();
+        assert_eq!(solid_midpoint.phase(), SolidLiquidPhase::Solid);
+        assert_eq!(
+            solid_midpoint.liquid_mass_fraction().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            solid_midpoint.solid_mass_fraction().to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            solid_midpoint.temperature_k().to_bits(),
+            325.0_f64.to_bits()
+        );
+        assert!((solid_midpoint.bulk_density_kg_m3() - 947.368_421_052_631_6).abs() < 1e-12);
+
+        let liquid = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            ContentHash([0x62; 32]),
+            SolidLiquidPhase::Liquid,
+            single_phase_knots(1.0),
+        )
+        .unwrap();
+        let liquid_midpoint = liquid.state_at_specific_enthalpy(60.0).unwrap();
+        assert_eq!(liquid_midpoint.phase(), SolidLiquidPhase::Liquid);
+        assert_eq!(
+            liquid_midpoint.liquid_mass_fraction().to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            liquid_midpoint.solid_mass_fraction().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            liquid_midpoint.temperature_k().to_bits(),
+            325.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn g0_single_phase_enthalpy_curves_refuse_transition_plateau_and_extrapolation() {
+        let identity = ContentHash([0x63; 32]);
+        let mut mixed_fraction = single_phase_knots(0.0);
+        mixed_fraction[1].liquid_mass_fraction = 0.5;
+        assert!(matches!(
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::Solid,
+                mixed_fraction,
+            ),
+            Err(PhaseStateError::InvalidCurve { .. })
+        ));
+        assert!(matches!(
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::SolidLiquid,
+                single_phase_knots(0.0),
+            ),
+            Err(PhaseStateError::InvalidCurve { .. })
+        ));
+        let mut plateau = single_phase_knots(0.0);
+        plateau[1].temperature_k = plateau[0].temperature_k;
+        assert!(matches!(
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::Solid,
+                plateau
+            ),
+            Err(PhaseStateError::InvalidCurve { .. })
+        ));
+        let mut cooling = single_phase_knots(1.0);
+        cooling[1].temperature_k = 299.0;
+        assert!(matches!(
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                identity,
+                SolidLiquidPhase::Liquid,
+                cooling
+            ),
+            Err(PhaseStateError::InvalidCurve { .. })
+        ));
+        let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+            identity,
+            SolidLiquidPhase::Solid,
+            single_phase_knots(0.0),
+        )
+        .unwrap();
+        assert!(matches!(
+            curve.state_at_specific_enthalpy(9.0),
+            Err(PhaseStateError::OutsideEnthalpyDomain { .. })
         ));
     }
 }

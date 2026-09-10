@@ -212,8 +212,11 @@ homogenization, the P2 milestone.
   source-provided monotone specific-enthalpy knots resolve temperature, bulk
   density, and solid/liquid mass fractions, including an isothermal
   latent-heat plateau. It contains no material-name presets and never
-  extrapolates. It is not a heat-transfer, deformation, remeshing,
-  free-surface, acoustic, or optical solver.
+  extrapolates. `try_single_phase` admits only explicitly all-solid or
+  all-liquid curves with strictly increasing temperature; it refuses a
+  latent plateau or mixed fractions disguised as a one-phase curve. It is not
+  a heat-transfer, deformation, remeshing, free-surface, acoustic, or optical
+  solver.
   `UniformEnthalpyStepInput` and `UniformEnthalpyStep<R>` carry a proposed
   uniform-body heat-transfer step between physical owners without a reverse
   solver dependency. They include specimen mass/geometry, initial chart/state,
