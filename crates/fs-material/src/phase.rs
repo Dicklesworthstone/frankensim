@@ -19,6 +19,9 @@ const EQUILIBRIUM_ENTHALPY_PHASE_IDENTITY_DOMAIN: &str =
 const EQUILIBRIUM_PHASE_STATE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.equilibrium-phase-state.v1";
 
+/// Upper bound on generated enthalpy knots from one heat-capacity chart.
+pub const MAX_HEAT_CAPACITY_ENTHALPY_KNOTS: usize = 4_096;
+
 /// Proposed uniform-body thermal step shared by transport and coupled owners.
 /// Geometry and mass belong to the specimen; this carrier does not justify
 /// lumping, solve transport, or mutate the accepted state.
@@ -71,6 +74,19 @@ pub struct EnthalpyPhaseKnot {
     /// enthalpy. The solid mass fraction is exactly its complement.
     pub liquid_mass_fraction: f64,
     /// Equilibrium bulk density [kg/m3] at this state.
+    pub bulk_density_kg_m3: f64,
+}
+
+/// One source point for a single-phase heat-capacity chart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeatCapacityKnot {
+    /// Absolute temperature [K].
+    pub temperature_k: f64,
+    /// Specific heat capacity [J/(kg K)].
+    pub specific_heat_capacity_j_kg_k: f64,
+    /// Bulk density [kg/m3]. It is linearly interpolated in temperature only
+    /// while producing the enthalpy chart; the resulting chart retains its
+    /// existing specific-volume interpolation between generated knots.
     pub bulk_density_kg_m3: f64,
 }
 
@@ -226,15 +242,7 @@ impl EquilibriumEnthalpyPhaseCurve {
         knots: Vec<EnthalpyPhaseKnot>,
     ) -> Result<Self, PhaseStateError> {
         validate_curve_common(material_card_identity, &knots)?;
-        let liquid_mass_fraction = match phase {
-            SolidLiquidPhase::Solid => 0.0,
-            SolidLiquidPhase::Liquid => 1.0,
-            SolidLiquidPhase::SolidLiquid => {
-                return Err(PhaseStateError::InvalidCurve {
-                    what: "a single-phase curve must declare Solid or Liquid",
-                });
-            }
-        };
+        let liquid_mass_fraction = single_phase_fraction(phase)?;
         if knots
             .iter()
             .any(|knot| knot.liquid_mass_fraction != liquid_mass_fraction)
@@ -252,6 +260,193 @@ impl EquilibriumEnthalpyPhaseCurve {
             });
         }
         Ok(Self::from_valid_knots(material_card_identity, knots))
+    }
+
+    /// Construct a bounded one-phase enthalpy chart from source heat-capacity
+    /// knots. Heat capacity and density are linearly interpolated in
+    /// temperature. Each segment's heat capacity is integrated exactly; it is
+    /// subdivided until its straight enthalpy chord differs from that integral
+    /// by no more than `maximum_interpolation_error_j_kg`.
+    ///
+    /// The requested bound covers only this interpolation arithmetic. It does
+    /// not quantify source error, floating-point roundoff, or the density
+    /// interpolation approximation.
+    pub fn try_from_heat_capacity(
+        material_card_identity: ContentHash,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+        knots: &[HeatCapacityKnot],
+        maximum_interpolation_error_j_kg: f64,
+    ) -> Result<Self, PhaseStateError> {
+        let liquid_mass_fraction = single_phase_fraction(phase)?;
+        if material_card_identity == ContentHash([0; 32]) {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "material-card identity must not be zero",
+            });
+        }
+        if !reference_specific_enthalpy_j_kg.is_finite() {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "reference specific enthalpy must be finite",
+            });
+        }
+        if !(maximum_interpolation_error_j_kg.is_finite() && maximum_interpolation_error_j_kg > 0.0)
+        {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "maximum interpolation error must be finite and positive",
+            });
+        }
+        if knots.len() < 2 {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "a heat-capacity chart needs at least two knots",
+            });
+        }
+        if knots.len() > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+            return Err(PhaseStateError::InvalidCurve {
+                what: "heat-capacity source knot count exceeds the generated-knot budget",
+            });
+        }
+        let mut generated_count = 1_usize;
+        let mut enthalpy = reference_specific_enthalpy_j_kg;
+        for knot in knots {
+            if !(knot.temperature_k.is_finite()
+                && knot.temperature_k > 0.0
+                && knot.specific_heat_capacity_j_kg_k.is_finite()
+                && knot.specific_heat_capacity_j_kg_k > 0.0
+                && knot.bulk_density_kg_m3.is_finite()
+                && knot.bulk_density_kg_m3 > 0.0)
+            {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity knots need finite positive temperature, heat capacity, and density",
+                });
+            }
+        }
+        for pair in knots.windows(2) {
+            let delta_temperature = pair[1].temperature_k - pair[0].temperature_k;
+            if !(delta_temperature.is_finite() && delta_temperature > 0.0) {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity temperatures must be strictly increasing",
+                });
+            }
+            let curvature_error = (pair[1].specific_heat_capacity_j_kg_k
+                - pair[0].specific_heat_capacity_j_kg_k)
+                .abs()
+                * delta_temperature
+                / 8.0;
+            if !curvature_error.is_finite() {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity interpolation error is not finite",
+                });
+            }
+            let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
+                1
+            } else {
+                let required = (curvature_error / maximum_interpolation_error_j_kg)
+                    .sqrt()
+                    .ceil();
+                if !(required.is_finite() && required <= MAX_HEAT_CAPACITY_ENTHALPY_KNOTS as f64) {
+                    return Err(PhaseStateError::InvalidCurve {
+                        what: "heat-capacity interpolation exceeds the generated-knot budget",
+                    });
+                }
+                required as usize
+            };
+            generated_count =
+                generated_count
+                    .checked_add(subdivisions)
+                    .ok_or(PhaseStateError::InvalidCurve {
+                        what: "heat-capacity interpolation exceeds the generated-knot budget",
+                    })?;
+            if generated_count > MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity interpolation exceeds the generated-knot budget",
+                });
+            }
+            let enthalpy_gain = (0.5 * pair[0].specific_heat_capacity_j_kg_k
+                + 0.5 * pair[1].specific_heat_capacity_j_kg_k)
+                * delta_temperature;
+            let next_enthalpy = enthalpy + enthalpy_gain;
+            if !(enthalpy_gain.is_finite() && next_enthalpy.is_finite() && next_enthalpy > enthalpy)
+            {
+                return Err(PhaseStateError::InvalidCurve {
+                    what: "heat-capacity integration produced non-finite or collapsed enthalpy",
+                });
+            }
+            enthalpy = next_enthalpy;
+        }
+
+        let mut generated = Vec::with_capacity(generated_count);
+        generated.push(EnthalpyPhaseKnot {
+            specific_enthalpy_j_kg: reference_specific_enthalpy_j_kg,
+            temperature_k: knots[0].temperature_k,
+            liquid_mass_fraction,
+            bulk_density_kg_m3: knots[0].bulk_density_kg_m3,
+        });
+        let mut enthalpy = reference_specific_enthalpy_j_kg;
+        for pair in knots.windows(2) {
+            let segment_start_enthalpy = enthalpy;
+            let delta_temperature = pair[1].temperature_k - pair[0].temperature_k;
+            let enthalpy_gain = (0.5 * pair[0].specific_heat_capacity_j_kg_k
+                + 0.5 * pair[1].specific_heat_capacity_j_kg_k)
+                * delta_temperature;
+            let endpoint_enthalpy = enthalpy + enthalpy_gain;
+            let curvature_error = (pair[1].specific_heat_capacity_j_kg_k
+                - pair[0].specific_heat_capacity_j_kg_k)
+                .abs()
+                * delta_temperature
+                / 8.0;
+            let subdivisions = if curvature_error <= maximum_interpolation_error_j_kg {
+                1
+            } else {
+                (curvature_error / maximum_interpolation_error_j_kg)
+                    .sqrt()
+                    .ceil() as usize
+            };
+            for step in 1..=subdivisions {
+                let fraction = step as f64 / subdivisions as f64;
+                let delta = delta_temperature * fraction;
+                let temperature_k = if step == subdivisions {
+                    pair[1].temperature_k
+                } else {
+                    pair[0].temperature_k + delta
+                };
+                let specific_enthalpy_j_kg = if step == subdivisions {
+                    endpoint_enthalpy
+                } else {
+                    segment_start_enthalpy
+                        + pair[0].specific_heat_capacity_j_kg_k * delta
+                        + 0.5
+                            * (pair[1].specific_heat_capacity_j_kg_k
+                                - pair[0].specific_heat_capacity_j_kg_k)
+                            / delta_temperature
+                            * delta
+                            * delta
+                };
+                let bulk_density_kg_m3 = if step == subdivisions {
+                    pair[1].bulk_density_kg_m3
+                } else {
+                    pair[0].bulk_density_kg_m3
+                        + (pair[1].bulk_density_kg_m3 - pair[0].bulk_density_kg_m3) * fraction
+                };
+                if !(temperature_k.is_finite()
+                    && specific_enthalpy_j_kg.is_finite()
+                    && specific_enthalpy_j_kg > enthalpy
+                    && bulk_density_kg_m3.is_finite()
+                    && bulk_density_kg_m3 > 0.0)
+                {
+                    return Err(PhaseStateError::InvalidCurve {
+                        what: "generated heat-capacity enthalpy knot is invalid",
+                    });
+                }
+                generated.push(EnthalpyPhaseKnot {
+                    specific_enthalpy_j_kg,
+                    temperature_k,
+                    liquid_mass_fraction,
+                    bulk_density_kg_m3,
+                });
+                enthalpy = specific_enthalpy_j_kg;
+            }
+        }
+        Self::try_single_phase(material_card_identity, phase, generated)
     }
 
     fn from_valid_knots(
@@ -446,6 +641,16 @@ fn validate_curve_common(
     Ok(())
 }
 
+fn single_phase_fraction(phase: SolidLiquidPhase) -> Result<f64, PhaseStateError> {
+    match phase {
+        SolidLiquidPhase::Solid => Ok(0.0),
+        SolidLiquidPhase::Liquid => Ok(1.0),
+        SolidLiquidPhase::SolidLiquid => Err(PhaseStateError::InvalidCurve {
+            what: "a single-phase curve must declare Solid or Liquid",
+        }),
+    }
+}
+
 /// Typed refusal from equilibrium phase-state admission or evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PhaseStateError {
@@ -619,6 +824,21 @@ mod tests {
         ]
     }
 
+    fn heat_capacity_knots(first_cp: f64, second_cp: f64) -> [HeatCapacityKnot; 2] {
+        [
+            HeatCapacityKnot {
+                temperature_k: 300.0,
+                specific_heat_capacity_j_kg_k: first_cp,
+                bulk_density_kg_m3: 1_000.0,
+            },
+            HeatCapacityKnot {
+                temperature_k: 400.0,
+                specific_heat_capacity_j_kg_k: second_cp,
+                bulk_density_kg_m3: 900.0,
+            },
+        ]
+    }
+
     #[test]
     fn g0_single_phase_enthalpy_curves_interpolate_without_phase_transition() {
         let solid = EquilibriumEnthalpyPhaseCurve::try_single_phase(
@@ -716,5 +936,143 @@ mod tests {
             curve.state_at_specific_enthalpy(9.0),
             Err(PhaseStateError::OutsideEnthalpyDomain { .. })
         ));
+    }
+
+    #[test]
+    fn g0_heat_capacity_curve_integrates_linear_capacity_and_preserves_endpoints() {
+        let source = heat_capacity_knots(1_000.0, 2_000.0);
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x71; 32]),
+            SolidLiquidPhase::Liquid,
+            0.0,
+            &source,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            curve.knots()[0].temperature_k.to_bits(),
+            300.0_f64.to_bits()
+        );
+        assert_eq!(
+            curve.knots()[0].specific_enthalpy_j_kg.to_bits(),
+            0.0_f64.to_bits()
+        );
+        let last = curve.knots().last().unwrap();
+        assert_eq!(last.temperature_k.to_bits(), 400.0_f64.to_bits());
+        assert_eq!(last.bulk_density_kg_m3.to_bits(), 900.0_f64.to_bits());
+        assert!((last.specific_enthalpy_j_kg - 150_000.0).abs() < 1e-10);
+
+        // Exact h(350 K) = 1_000*50 + 0.5*10*50^2. The source chord error
+        // is bounded by 1 J/kg, so inverse temperature error is at most that
+        // divided by the minimum source Cp of 1_000 J/(kg K).
+        let midpoint = curve.state_at_specific_enthalpy(62_500.0).unwrap();
+        assert_eq!(midpoint.phase(), SolidLiquidPhase::Liquid);
+        assert!((midpoint.temperature_k() - 350.0).abs() <= 0.001);
+        // Include points between generated knots, not only the exact center.
+        for temperature in [333.3, 347.25, 371.25] {
+            let delta = temperature - 300.0;
+            let exact_h = 1_000.0 * delta + 5.0 * delta * delta;
+            let state = curve.state_at_specific_enthalpy(exact_h).unwrap();
+            assert!((state.temperature_k() - temperature).abs() <= 0.001);
+        }
+    }
+
+    #[test]
+    fn g0_heat_capacity_curve_handles_decreasing_and_constant_capacity() {
+        let decreasing = heat_capacity_knots(2_000.0, 1_000.0);
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x72; 32]),
+            SolidLiquidPhase::Solid,
+            20.0,
+            &decreasing,
+            1.0,
+        )
+        .unwrap();
+        assert!((curve.knots().last().unwrap().specific_enthalpy_j_kg - 150_020.0).abs() < 1e-10);
+        assert!(
+            (curve
+                .state_at_specific_enthalpy(87_520.0)
+                .unwrap()
+                .temperature_k()
+                - 350.0)
+                .abs()
+                <= 0.001
+        );
+
+        let constant = heat_capacity_knots(1_000.0, 1_000.0);
+        let constant_curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            ContentHash([0x73; 32]),
+            SolidLiquidPhase::Solid,
+            10.0,
+            &constant,
+            1.0e-12,
+        )
+        .unwrap();
+        assert_eq!(constant_curve.knots().len(), 2);
+        assert_eq!(
+            constant_curve.knots()[1].specific_enthalpy_j_kg.to_bits(),
+            100_010.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn g0_heat_capacity_curve_refuses_invalid_source_phase_tolerance_and_budget() {
+        let source = heat_capacity_knots(1_000.0, 2_000.0);
+        let refuse = |phase, reference, knots: &[HeatCapacityKnot], tolerance| {
+            EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+                ContentHash([0x74; 32]),
+                phase,
+                reference,
+                knots,
+                tolerance,
+            )
+        };
+        assert!(refuse(SolidLiquidPhase::SolidLiquid, 0.0, &source, 1.0).is_err());
+        assert!(refuse(SolidLiquidPhase::Solid, f64::NAN, &source, 1.0).is_err());
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &source, 0.0).is_err());
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &source, f64::INFINITY).is_err());
+
+        let mut nonpositive_cp = source;
+        nonpositive_cp[1].specific_heat_capacity_j_kg_k = 0.0;
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &nonpositive_cp, 1.0).is_err());
+        let mut unordered = source;
+        unordered[1].temperature_k = unordered[0].temperature_k;
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &unordered, 1.0).is_err());
+        let mut nonfinite = source;
+        nonfinite[1].bulk_density_kg_m3 = f64::NAN;
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &nonfinite, 1.0).is_err());
+        assert!(
+            refuse(
+                SolidLiquidPhase::Solid,
+                1.0e300,
+                &heat_capacity_knots(1.0, 1.0),
+                1.0
+            )
+            .is_err()
+        );
+
+        let over_budget = [
+            HeatCapacityKnot {
+                temperature_k: 300.0,
+                specific_heat_capacity_j_kg_k: 1.0,
+                bulk_density_kg_m3: 1_000.0,
+            },
+            HeatCapacityKnot {
+                temperature_k: 301.0,
+                specific_heat_capacity_j_kg_k: 1.0e9,
+                bulk_density_kg_m3: 999.0,
+            },
+        ];
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &over_budget, 1.0).is_err());
+
+        let too_many = vec![
+            HeatCapacityKnot {
+                temperature_k: f64::NAN,
+                specific_heat_capacity_j_kg_k: 1.0,
+                bulk_density_kg_m3: 1.0,
+            };
+            MAX_HEAT_CAPACITY_ENTHALPY_KNOTS + 1
+        ];
+        assert!(refuse(SolidLiquidPhase::Solid, 0.0, &too_many, 1.0).is_err());
     }
 }

@@ -217,6 +217,14 @@ homogenization, the P2 milestone.
   latent plateau or mixed fractions disguised as a one-phase curve. It is not
   a heat-transfer, deformation, remeshing, free-surface, acoustic, or optical
   solver.
+  `try_from_heat_capacity` derives that same one-phase chart from positive,
+  strictly increasing source `Cp(T)` knots, taking its enthalpy reference at
+  the first source temperature. Linear `Cp` segments are integrated exactly
+  and subdivided under a caller-provided real-arithmetic chord-error bound;
+  all source endpoints remain knots. The bound excludes source uncertainty,
+  floating-point error and the linear-in-temperature density approximation.
+  Generated charts cap at 4096 knots before allocation. This is bounded
+  numerical construction, not experimental validation or a mechanical model.
   `UniformEnthalpyStepInput` and `UniformEnthalpyStep<R>` carry a proposed
   uniform-body heat-transfer step between physical owners without a reverse
   solver dependency. They include specimen mass/geometry, initial chart/state,
