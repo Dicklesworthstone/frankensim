@@ -4662,6 +4662,208 @@ mod common_material_acquisition {
         );
     }
 
+    /// G1/G3: exact housing grades survive storage and supply room-state
+    /// slab resistances; PC additionally retains its through-plane direction.
+    /// Neither grade supplies a transient heating or isotropic elastic law.
+    #[test]
+    fn g1_g3_housing_polymers_source_card_slab() {
+        use fs_conduction::interface::{ResistanceOrigin, ThermalResistanceTerm};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack, QueryPoint};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_material_state_point,
+        };
+
+        for (slug, density, modulus, conductivity) in [
+            ("covestro-makrolon-2405", 1200.0, 2.4e9, 0.2),
+            ("ineos-terluran-gp-22", 1040.0, 2.3e9, 0.17),
+        ] {
+            let (pack, path) = compile(slug);
+            assert_eq!(pack.claims().claim_count(), 3, "{slug}");
+            let original = NormalizedMaterialCardPack::new(
+                MaterialStateId {
+                    chemistry: slug.into(),
+                    phase: "solid polymer".into(),
+                    process: "named injection-molding grade; producer typical data".into(),
+                    revision: 0,
+                },
+                pack,
+            )
+            .unwrap();
+            let database = fixture_dir().join(format!("{slug}.sqlite"));
+            {
+                let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+                store
+                    .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                    .unwrap();
+                store.seal_corpus().unwrap();
+            }
+            let store = MaterialStore::open(database.to_str().unwrap()).unwrap();
+            let CatalogPack::MaterialCard(loaded) = store.load_catalog_pack(slug).unwrap() else {
+                panic!("wrong stored family");
+            };
+            assert_eq!(loaded, original);
+            let card = loaded.card();
+            for (name, expected) in [
+                ("density", density),
+                ("tensile-modulus", modulus),
+                ("thermal-conductivity", conductivity),
+            ] {
+                let claim = card.claims().claims_for(name)[0].1;
+                let answer = card
+                    .claims()
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &[]),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .unwrap();
+                close(answer.evidence.value.value, expected);
+                card.claims().verify_receipt(&answer.receipt).unwrap();
+                assert!(
+                    card.claims()
+                        .query_typed(
+                            &claim.key,
+                            &QueryPoint::new(),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .is_err(),
+                    "{slug}: {name} requires source context"
+                );
+            }
+            for absent in [
+                "specific-heat-capacity",
+                "young-modulus",
+                "linear-thermal-expansion-coefficient",
+            ] {
+                assert!(
+                    card.claims().claims_for(absent).is_empty(),
+                    "{slug}: {absent}"
+                );
+            }
+            let claim = card.claims().claims_for("thermal-conductivity")[0].1;
+            let is_pc = slug == "covestro-makrolon-2405";
+            assert_eq!(claim.validity.bound("temperature"), Some((296.15, 296.15)));
+            if is_pc {
+                let discovery = fs_cli::run(vec![
+                    "--json".into(),
+                    "discover".into(),
+                    workspace_path("examples/material-discovery/makrolon-2405-conductivity.json")
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    path.to_str().unwrap().into(),
+                ]);
+                assert_eq!(
+                    discovery.exit_code,
+                    fs_cli::exit::SUCCESS,
+                    "{}",
+                    discovery.stderr
+                );
+                assert!(
+                    discovery.stdout.contains("\"status\":\"complete\""),
+                    "{}",
+                    discovery.stdout
+                );
+                assert_eq!(claim.validity.bound("relative-humidity"), Some((0.5, 0.5)));
+                assert_eq!(claim.validity.bound("through-plane"), Some((1.0, 1.0)));
+                let tensile = card.claims().claims_for("tensile-modulus")[0].1;
+                assert_eq!(
+                    tensile.validity.bound("test-speed"),
+                    Some((1.0 / 60_000.0, 1.0 / 60_000.0))
+                );
+                assert!(
+                    card.claims()
+                        .query_typed(
+                            &tensile.key,
+                            &point(tensile, &[("test-speed", 2.0 / 60_000.0)]),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+            let at = point(claim, &[]);
+            let state = resolve_material_state_point(
+                card,
+                &at,
+                &[ScalarPropertyRequirement::try_with_key(
+                    &claim.key,
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+                .unwrap()],
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let slab = |length, at: &QueryPoint| {
+                ThermalResistanceTerm::slab_from_card(
+                    "polymer-wall",
+                    length,
+                    0.01,
+                    card,
+                    &claim.key,
+                    at,
+                    SelectionPolicy::SingleClaimOnly,
+                )
+            };
+            let wall = slab(0.002, &at).unwrap();
+            let ResistanceOrigin::BulkMaterialCard {
+                card_identity,
+                receipt,
+                length_m,
+                area_m2,
+                ..
+            } = wall.origin()
+            else {
+                panic!("lost source receipt");
+            };
+            assert_eq!(*card_identity, card.content_hash());
+            assert_eq!(*length_m, 0.002);
+            assert_eq!(*area_m2, 0.01);
+            assert_eq!(
+                receipt,
+                &state
+                    .property("thermal-conductivity")
+                    .unwrap()
+                    .answer()
+                    .receipt
+            );
+            card.claims().verify_receipt(receipt).unwrap();
+            let network =
+                fs_conduction::interface::SeriesThermalResistance::new(vec![wall]).unwrap();
+            let expected = if is_pc { 1.0 } else { 20.0 / 17.0 };
+            close(network.budget().value_k_per_w, expected);
+            let thicker = fs_conduction::interface::SeriesThermalResistance::new(vec![
+                slab(0.004, &at).unwrap(),
+            ])
+            .unwrap();
+            close(thicker.budget().value_k_per_w, 2.0 * expected);
+            let mut refusals = vec![("temperature", 296.16), ("temperature", 296.14)];
+            if is_pc {
+                refusals.extend([
+                    ("relative-humidity", 0.4),
+                    ("through-plane", 0.0),
+                    ("source-grade-makrolon-2405", 0.0),
+                ]);
+            } else {
+                refusals.extend([
+                    ("source-grade-terluran-gp22", 0.0),
+                    ("source-typical-uncolored", 0.0),
+                ]);
+            }
+            for (axis, wrong) in refusals {
+                assert!(
+                    slab(0.002, &point(claim, &[(axis, wrong)])).is_err(),
+                    "{axis}"
+                );
+            }
+            eprintln!(
+                "polymer={slug} T=296.15K k={conductivity}W/m/K wall=0.002m area=0.01m2 resistance={}K/W expected={expected}K/W thickness_scaling=2 no_transient_or_temperature_range_claim=1 store_replay=identical",
+                network.budget().value_k_per_w
+            );
+        }
+    }
+
     /// G0/G3: retain the named PE300 source observations and their unresolved
     /// test conditions through compiler, material-card storage and replay.
     /// This is not a thermal, constitutive, or product qualification model.

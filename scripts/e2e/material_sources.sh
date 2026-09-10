@@ -22,6 +22,7 @@ readonly -a EXPECTED_TESTS=(
   "glass_reference::g1_g3_glass_reference_profiles_reach_heat"
   "common_material_acquisition::g1_g3_source_card_slab_proteus_pp"
   "common_material_acquisition::g1_g3_iplex_pvc_reference_reaches_heat"
+  "common_material_acquisition::g1_g3_housing_polymers_source_card_slab"
 )
 
 usage() {
