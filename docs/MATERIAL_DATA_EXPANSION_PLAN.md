@@ -35,6 +35,25 @@ roundoff; density interpolation and uniform-body assumptions remain explicit.
 This adds no source observations, expansion/stress solution or exact M02
 specimen compatibility.
 
+The next bounded M03 change adds source-backed conductivity to the reduced
+heating body with radiation explicitly disabled. This removes the unnecessary
+emissivity requirement for that boundary model while retaining typed source
+context, all conductivity knots and receipts, card identity, temperature-domain
+checks and the convection Biot gate. The existing warm-316 regression now
+includes convective heating and an independent backward-Euler energy-balance
+reference. Conductivity qualifies the uniform-body approximation through the
+Biot gate; heat capacity and the declared convection boundary govern this
+reduced trajectory. It does not resolve internal temperature gradients.
+Required-remote verification passed on 2026-09-10: one selected integration,
+zero failed or ignored, 0.68 seconds after a 13m41s build; wrapper exit zero.
+The 100-second convective trajectory reaches 366.0826919116728 K versus
+373.14999835768424 K without boundary heat loss. Maximum Biot number is
+0.007698229407236336; accumulated absolute energy residual is
+1.2663870307960678e-7 J. The independent stepwise reference, repeatability,
+three retained conductivity receipts and context/domain/high-Biot refusals
+pass. Log: `/tmp/greenosprey-m03-sourced-convection.log`.
+Full DSR and the complete source runner were not rerun; this is not M03 closeout.
+
 F01 follow-through (`frankensim-7sga6.2.8`) now connects the existing liquid-water
 enthalpy data to the existing lumped heating solver using an explicit
 single-phase constructor. The focused regression imports and reopens the
