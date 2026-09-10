@@ -4,7 +4,36 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 180 source bundles, of which 162 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 162 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 181 source bundles, of which 163 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 163 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+
+M03 has a bounded warm thermal addition in `stainless-316-nasa-tp216435`:
+three density/Cp/conductivity curves with nine literal NASA Table 23 values
+over 273–400 K, explicit linear interpolation and unknown exact material
+condition. The reusable discovery request selects 300–400 K. A real
+source/store/reopen/query/conduction regression passed remotely on 2026-09-10
+(one test, zero failures/ignored; log `/tmp/greenosprey-m03-warm-316.log`).
+Independent temperature/flux, source values, discovery, replay and unsupported
+conditions passed, with relative energy closure 1.3703324189659064e-14.
+This generic 316 source cannot fill an exact M02 specimen by name, and supplies
+no elastic constants or expansion convention. Full two-metal transient
+thermoelastic acceptance remains unfinished.
+
+The next M03 thermal step now constructs a relative enthalpy chart by
+integrating the sourced linear Cp(T) segments, with an explicit straight-chord
+interpolation limit and a bounded generated-knot count. The existing warm-316
+regression also drives the uniform enthalpy marcher from 300 to 373.15 K,
+checks every step against an independent quadratic integral/inverse, and
+compares against frozen initial Cp. Required-remote verification passed on
+2026-09-10: eight phase unit tests and the extended warm-316 integration,
+zero failed or ignored. The 101-sample trajectory reaches
+373.14999835768424 K; frozen initial Cp instead predicts
+375.162502443392 K. Accumulated absolute energy residual is
+9.585760096797458e-8 J, with a requested interpolation limit of 0.001 J/kg.
+Log: `/tmp/greenosprey-m03-variable-cp.log`. The
+integration tolerance does not cover source uncertainty or floating-point
+roundoff; density interpolation and uniform-body assumptions remain explicit.
+This adds no source observations, expansion/stress solution or exact M02
+specimen compatibility.
 
 F01 follow-through (`frankensim-7sga6.2.8`) now connects the existing liquid-water
 enthalpy data to the existing lumped heating solver using an explicit

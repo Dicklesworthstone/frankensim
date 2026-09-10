@@ -1,6 +1,6 @@
 # Material data inventory
 
-Snapshot: **2026-09-09 UTC**, refreshed after the metal/water curves, silicon tensor, dry-air and water-vapor models, 316 reference-state, copper/aluminum resistivity, glycol coolant, mineral-oil and named glass reference additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
+Snapshot: **2026-09-10 UTC**, refreshed after the warm NASA 316 thermal table and preceding material additions, current shared working tree on main, including uncommitted material additions. This is an inventory of populated source records, not a claim that every bundle compiles, every property is measured, or every material can run a complete simulation.
 
 Focused consumer evidence now includes actual source compilation, storage, material resolution and steady conduction for NIST 304/316/6061 and IAPWS liquid water. The water check covers 20–25 °C and 60–65 °C at exactly 0.1 MPa, retains liquid-phase receipts and refuses unsupported states. These manufactured temperature/flux and energy-balance checks exercise the declared interpolants; they do not establish experimental accuracy, flowing-water behavior, transient heat or phase changes. The executable cases are in [matdb_pack_cli.rs](../xtask/tests/matdb_pack_cli.rs).
 
@@ -18,7 +18,22 @@ uses the source's sampled linear enthalpy interpolant; density uses linear
 specific volume against enthalpy between knots. This is not a spatial flow,
 free-surface, freezing or boiling model, and adds no new database records.
 
-The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.863382 MB** (0.823385 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.739502 MB**. There are **180 source bundles**, including **162 bulk-material bundles**.
+The sourced catalog lives in **[data/matdb/seed-v1](../data/matdb/seed-v1/README.md)** as static text files. It currently occupies **0.870005 MB** (0.829701 MiB), including its README and license notice. The TSV data and manifests alone occupy **0.744865 MB**. There are **181 source bundles**, including **163 bulk-material bundles**.
+
+The new `stainless-316-nasa-tp216435` bundle retains three thermal curves
+(density, specific heat and conductivity), with nine literal Table 23 values
+at 273, 300 and 400 K. Intermediate values use declared linear interpolation.
+Its generic 316 designation, unknown UNS/heat treatment/product form/pressure
+and unstated uncertainty remain explicit; it cannot silently complete a
+different 316 or 316L specimen. The [warm-316 discovery request](../examples/material-discovery/warm-316-thermal.json)
+selects this thermal-only profile. Its real store/reopen/query and 300–400 K
+conduction regression passed on remote worker vmi1152480 on 2026-09-10:
+one test passed, zero failed or ignored. Independent field/flux checks,
+deterministic replay, source-context refusals and discovery passed; relative
+energy closure was 1.3703324189659064e-14. The log is
+`/tmp/greenosprey-m03-warm-316.log`. Scalar isotropic transport
+is a declared calculation approximation, not measured directional evidence.
+This addition does not supply the full M03 two-metal transient thermoelastic profile.
 
 A bundle identifies a source and condition, not a unique chemical material. Copper, lead, stainless steel, and other materials have multiple bundles for different sources, phases, grades, processing, or measurements. Conversely, one bundle can contain several specimens or conditions. The directory therefore does **not** establish an exact deduplicated count of distinct materials, nor 162 complete material cards. The tables below use the exact, auditable source-bundle count.
 
@@ -219,26 +234,26 @@ Sizes are logical file-content bytes, not filesystem allocation, Git object size
 
 | Measured item | Bytes | MB | MiB |
 | --- | ---: | ---: | ---: |
-| All files in data/matdb/seed-v1 | 863,382 | 0.863382 | 0.823385 |
-| All TSV files, including manifests | 739,502 | 0.739502 | 0.705244 |
-| Manifests | 172,555 | 0.172555 | 0.164561 |
-| Source TSV plus axis-convention TSV | 566,947 | 0.566947 | 0.540683 |
-| README and license notice | 123,880 | 0.123880 | 0.118141 |
+| All files in data/matdb/seed-v1 | 870,005 | 0.870005 | 0.829701 |
+| All TSV files, including manifests | 744,865 | 0.744865 | 0.710359 |
+| Manifests | 173,918 | 0.173918 | 0.165861 |
+| Source TSV plus axis-convention TSV | 570,947 | 0.570947 | 0.544497 |
+| README and license notice | 125,140 | 0.125140 | 0.119343 |
 
-There are **363 files**: 361 TSV files and 2 Markdown files. The TSV set contains 180 manifests, 180 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
+There are **365 files**: 363 TSV files and 2 Markdown files. The TSV set contains 181 manifests, 181 referenced source files and one [instrument-axis-convention.tsv](../data/matdb/seed-v1/instrument-axis-convention.tsv). No PDF, compiled pack, or SQLite file is present under this directory in this snapshot. Downloaded reference PDFs in session scratch storage are excluded.
 
 | Bundle category | Bundles | Distinct populated property names, summed per bundle | Scalar claims | Curve claims | Curve knots |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Bulk material/condition | 162 | 876 | 900 | 71 | 670 |
+| Bulk material/condition | 163 | 879 | 900 | 74 | 679 |
 | Ordered interface system | 8 | 23 | 29 | 0 | 0 |
 | Gas species metadata | 7 | 0 | 0 | 0 | 0 |
 | Authored contact-law card | 3 | 0 | 0 | 0 | 0 |
 
-The bulk and interface sources contain **1,000 property claims**: 929 scalars and 71 curves with 670 retained knots. That is 1,599 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters.
+The bulk and interface sources contain **1,003 property claims**: 929 scalars and 74 curves with 679 retained knots. That is 1,608 scalar values or curve ordinate entries, before counting temperatures, validity endpoints, uncertainty fields, species metadata, or contact parameters.
 
 Five curves replaced ten isolated 6061-T6/OFHC endpoint claims, liquid water added five curves with 75 knots, and two stainless instantaneous-expansion curves add 22 knots derived from the published relative-length fits. The silicon tensor adds 36 explicitly addressed entries derived from only three cubic constants, plus a separately sourced density. Dry air and dilute water vapor each add five parameters for the existing gas model, not separate measured thermodynamic/transport output properties. The 316 engineering reference adds six scalar inputs at 20 °C, four evaluated from existing NIST equations and two supplier facts; it is not six new measurements. Copper and EC-H19 aluminum add two electrical volume-resistivity curves with eight knots. The two inhibited glycol profiles add eight curves with 40 literal supplier-guide ordinates, limited to 40–60 °C and one volume concentration each. Shell's mineral heat-transfer oil adds four curves with 16 retained typical-design ordinates at 0–200 °C. Ensinger PE300 adds four comparison facts with unresolved test temperature, processing and rate. The Pilkington and SCHOTT glass references add twelve author-selected frozen-reference scalars with source temperatures retained separately; their focused reference heat calculation passes numerical integration tests, without experimental qualification. MCAM Proteus PP adds six producer comparison facts with property-specific conditions. Iplex PVC-U adds five frozen-reference inputs, including a declared nominal specific-gravity conversion. Makrolon 2405 and Terluran GP-22 add three typical producer facts each at 23 °C, with property-specific conditioning and omissions retained. Polystone G natural adds three nominal thermal inputs to an explicitly opted-in reference; its model interval is not measured coverage. These entries include measurements, source fits, handbook values and authored/model inputs; they are not all independent experimental measurements.
 
-Across the 162 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.41**. The sum is 876 populated bundle/property-name pairs. Across bulk and interface bundles together there are 309 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
+Across the 163 bulk bundles, distinct populated property names range from **1 to 18**, with **median 4** and **mean 5.39**. The sum is 879 populated bundle/property-name pairs. Across bulk and interface bundles together there are 309 distinct property identifier spellings after each manifest's explicit mapping. This last count does not merge legacy spelling aliases or prove semantic equivalence. The silicon tensor's 36 coordinate-bearing `stiffness` keys count as one property name here, alongside density; they are not a scalar isotropic stiffness or 36 independent measurements.
 
 A **metric** below means a distinct populated property name in a bundle. It does not count a manifest declaration without a value, an observation, a validity axis, or an uncertainty row as another material property. Several condition-specific scalar claims for one name still count as one metric; a curve counts as one metric regardless of its knot count. Units shown are the source-record units, before compiler normalization. Byte size includes every file within that bundle's directory. Species fields and contact-law parameters are listed separately because they are not scalar/curve property claims.
 
@@ -246,6 +261,7 @@ A **metric** below means a distinct populated property name in a bundle. It does
 
 | Source bundle | Metrics | Scalar claims | Curve claims | Knots | KiB | Populated property names [source units] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [stainless-316-nasa-tp216435](../data/matdb/seed-v1/stainless-316-nasa-tp216435/manifest.tsv) | 3 | 0 | 3 | 9 | 5.24 | `density` [kg/m3]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; generic 316, linear table interpolation at 273–400 K; exact UNS/form/heat/pressure unknown |
 | [roechling-polystone-g-natural-reference](../data/matdb/seed-v1/roechling-polystone-g-natural-reference/manifest.tsv) | 3 | 3 | 0 | 0 | 5.40 | `density` [kg/m3]; `specific-heat-capacity` [J/kg/K]; `thermal-conductivity` [W/m/K]; named HDPE reference, explicit frozen 25–26 °C model opt-in; source temperatures, product form and process unknown; no scalar expansion or elastic law |
 | [covestro-makrolon-2405](../data/matdb/seed-v1/covestro-makrolon-2405/manifest.tsv) | 3 | 3 | 0 | 0 | 7.04 | `density` [kg/m3]; `tensile-modulus` [Pa]; `thermal-conductivity` [W/m/K]; named PC grade at 23 °C, modulus and through-plane conductivity at 50% RH, modulus at 1 mm/min; no Cp or isotropic elasticity |
 | [ineos-terluran-gp-22](../data/matdb/seed-v1/ineos-terluran-gp-22/manifest.tsv) | 3 | 3 | 0 | 0 | 6.65 | `density` [kg/m3]; `tensile-modulus` [Pa]; `thermal-conductivity` [W/m/K]; named uncolored ABS grade, shared source heading 23 °C, conditioning/rate/orientation unknown; no Cp or isotropic elasticity |

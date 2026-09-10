@@ -1685,6 +1685,354 @@ mod common_material_acquisition {
         }
     }
 
+    /// G1/G3: the warm NASA 316 table drives a nonuniform-temperature solve.
+    /// This generic source condition is not the exact M02 mechanical specimen.
+    #[test]
+    fn g1_g3_sourced_warm_316_reaches_conduction() {
+        use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
+        use fs_conduction::field::ScalarField;
+        use fs_conduction::material::{ConductivityModel, ConductivityTable, ProvenanceClass};
+        use fs_conduction::mesh::ConductionMesh;
+        use fs_conduction::solve::{
+            ConductionProblem, InitialGuess, SolveConfig, StopRule, element_heat_flux, solve,
+        };
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+
+        let (pack, path) = compile("stainless-316-nasa-tp216435");
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "316 stainless steel; NASA Table 23".into(),
+                phase: "solid".into(),
+                process: "form, heat treatment and pressure unspecified".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let db = fixture_dir().join("warm-316-conduction.sqlite");
+        {
+            let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let claims = loaded.card().claims();
+        // Literal Table 23 ordinates, independent of the compiled interpolants.
+        for (name, at273, at300, at400) in [
+            ("density", 7972.70, 7960.74, 7916.46),
+            ("specific-heat-capacity", 456.39, 467.69, 502.87),
+            ("thermal-conductivity", 12.99, 13.46, 15.14),
+        ] {
+            let claim = claims.claims_for(name)[0].1;
+            for (t, expected) in [
+                (273.0, at273),
+                (300.0, at300),
+                (350.0, (at300 + at400) / 2.0),
+                (400.0, at400),
+            ] {
+                let answer = claims
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &[("temperature", t)]),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .unwrap();
+                close(answer.evidence.value.value, expected);
+                claims.verify_receipt(&answer.receipt).unwrap();
+            }
+            for t in [272.99, 400.01] {
+                assert!(
+                    claims
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[("temperature", t)]),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+        }
+        assert!(claims.claims_for("young-modulus").is_empty());
+        for (axis, wrong) in [
+            ("source-generic-316-identity", 0.0),
+            ("source-uns-designation-known", 1.0),
+            ("source-heat-treatment-known", 1.0),
+            ("source-product-form-known", 1.0),
+            ("source-pressure-known", 1.0),
+        ] {
+            let claim = claims.claims_for("thermal-conductivity")[0].1;
+            assert!(
+                claims
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &[("temperature", 350.0), (axis, wrong)]),
+                        SelectionPolicy::SingleClaimOnly
+                    )
+                    .is_err(),
+                "{axis}"
+            );
+        }
+        let discovery = fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            workspace_path("examples/material-discovery/warm-316-thermal.json")
+                .to_str()
+                .unwrap()
+                .into(),
+            path.to_str().unwrap().into(),
+        ]);
+        assert_eq!(discovery.exit_code, 0, "{}", discovery.stderr);
+        assert!(
+            discovery.stdout.contains("\"status\":\"complete\""),
+            "{}",
+            discovery.stdout
+        );
+        let claim = claims.claims_for("thermal-conductivity")[0].1;
+        let points = [300.0, 400.0].map(|t| point(claim, &[("temperature", t)]));
+        let table = ConductivityTable::from_claims_at_query_points(
+            claims,
+            &claim.key,
+            "temperature",
+            &points,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+        let receipt_count = table.receipts().len();
+        // Scalar isotropic transport is an explicit approximation for this
+        // manufactured calculation, not a measured directional-source claim.
+        let material = ConductivityModel::isotropic(table);
+        let (complex, positions) = fs_conduction::fixtures::unit_cube(3);
+        let mesh = ConductionMesh::new(complex, positions).unwrap();
+        let reference: Vec<_> = mesh
+            .positions()
+            .iter()
+            .map(|p| 300.0 + 100.0 * p[0])
+            .collect();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "warm-316",
+                |_| true,
+                ThermalBc::Dirichlet {
+                    temperature: ScalarField::Nodal(reference.clone()),
+                },
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+        // T=300+100*x and linear k(T): -div(k grad T)=-100*(15.14-13.46).
+        let source = ScalarField::Uniform(-100.0 * (15.14 - 13.46));
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(&gate, arena, StreamKey { seed: 0x316, kernel_id: 54, tile: 0, iteration: 0 }, Budget::INFINITE, ExecMode::Deterministic);
+            let run = || solve(&cx, ConductionProblem { mesh: &mesh, boundary: &boundary, material: &material, element_materials: None, source: &source }, SolveConfig { initial: InitialGuess::Uniform(350.0), stop: StopRule { residual_rtol: 1e-13, ..StopRule::default() }, ..SolveConfig::default() }).unwrap();
+            let solution = run();
+            assert_eq!(solution.temperature, run().temperature);
+            assert_eq!(solution.report.free_dofs, 8);
+            assert_eq!(solution.report.material_provenance, ProvenanceClass::MatdbReceipts);
+            assert_eq!(solution.report.material_receipts, receipt_count);
+            assert!(solution.report.energy.relative_closure() < 1e-8);
+            for (actual, expected) in solution.temperature.iter().zip(&reference) {
+                assert!((actual-expected).abs() < 1e-7, "T={actual}, expected={expected}");
+            }
+            let fluxes = element_heat_flux(&mesh, &material, &solution.temperature).unwrap();
+            for (tet, flux) in mesh.complex().tets.iter().zip(&fluxes) {
+                let mean = tet.iter().map(|&v| reference[v as usize]).sum::<f64>()/4.0;
+                let expected = -100.0*(13.46+(15.14-13.46)*(mean-300.0)/100.0);
+                assert!((flux[0]-expected).abs() < 1e-5);
+                assert!(flux[1].abs().max(flux[2].abs()) < 1e-5);
+            }
+            eprintln!("NASA316 conduction=300..400K source=-168W/m3 free_dofs=8 receipts={receipt_count} energy_relative_closure={} table_interpolation_only=1 no_exact_grade_or_transient_mechanics_claim=1", solution.report.energy.relative_closure());
+        });
+
+        use fs_conduction::lumped::{
+            BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, solve_lumped_enthalpy,
+        };
+        use fs_material::phase::{
+            EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
+        };
+        let cp = claims.claims_for("specific-heat-capacity")[0].1;
+        let rho = claims.claims_for("density")[0].1;
+        let PropertyValue::Curve { knots, .. } = &cp.value else {
+            panic!("source Cp curve required")
+        };
+        let mut thermal_knots = Vec::new();
+        let mut thermal_receipts = Vec::new();
+        for &(temperature, _) in knots {
+            let values: Vec<_> = [cp, rho]
+                .iter()
+                .map(|claim| {
+                    let answer = claims
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &[("temperature", temperature)]),
+                            SelectionPolicy::SingleClaimOnly,
+                        )
+                        .unwrap();
+                    claims.verify_receipt(&answer.receipt).unwrap();
+                    thermal_receipts.push(answer.receipt);
+                    answer.evidence.value.value
+                })
+                .collect();
+            thermal_knots.push(HeatCapacityKnot {
+                temperature_k: temperature,
+                specific_heat_capacity_j_kg_k: values[0],
+                bulk_density_kg_m3: values[1],
+            });
+        }
+        assert_eq!(thermal_receipts.len(), 6);
+        // h=0 at273K is a declared relative reference, not an absolute source
+        // enthalpy measurement. Linear Cp is the source-pack approximation.
+        let error_j_kg = 0.001;
+        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            loaded.card().content_hash(),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &thermal_knots,
+            error_j_kg,
+        )
+        .unwrap();
+        let initial_h = (456.39 + 467.69) * 27.0 / 2.0;
+        let cp_slope = (502.87 - 467.69) / 100.0;
+        let rise = 373.15 - 300.0;
+        let target_h = initial_h + 467.69 * rise + 0.5 * cp_slope * rise * rise;
+        let mass = 0.1;
+        // Uniform internal heating with no boundary exchange: no source
+        // emissivity is invented. This does not solve expansion or stress.
+        let k_claim = claims.claims_for("thermal-conductivity")[0].1;
+        let transport_points = [273.0, 400.0].map(|t| point(k_claim, &[("temperature", t)]));
+        let transport =
+            fs_conduction::lumped::LumpedThermalTransport::from_material_card_without_radiation(
+                loaded.card(),
+                &k_claim.key,
+                "temperature",
+                &transport_points,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert_eq!(
+            transport.material_card_identity(),
+            Some(loaded.card().content_hash())
+        );
+        assert_eq!(transport.conductivity_receipts().len(), 3); // retains the interior 300K knot
+        for receipt in transport.conductivity_receipts() {
+            claims.verify_receipt(receipt).unwrap();
+        }
+        let short_transport =
+            fs_conduction::lumped::LumpedThermalTransport::from_material_card_without_radiation(
+                loaded.card(),
+                &k_claim.key,
+                "temperature",
+                &points,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert!(
+            LumpedEnthalpyBody::try_new_with_transport(
+                "short source span",
+                mass,
+                0.01,
+                0.0,
+                0.01,
+                short_transport,
+                &curve
+            )
+            .is_err()
+        );
+        let mut wrong_context = transport_points.clone();
+        wrong_context[1] = point(
+            k_claim,
+            &[("temperature", 400.0), ("source-pressure-known", 1.0)],
+        );
+        assert!(
+            fs_conduction::lumped::LumpedThermalTransport::from_material_card_without_radiation(
+                loaded.card(),
+                &k_claim.key,
+                "temperature",
+                &wrong_context,
+                SelectionPolicy::SingleClaimOnly
+            )
+            .is_err()
+        );
+        let body = LumpedEnthalpyBody::try_new_with_transport(
+            "NASA316-uniform-heating",
+            mass,
+            0.01,
+            0.0,
+            0.01,
+            transport.clone(),
+            &curve,
+        )
+        .unwrap();
+        let config = LumpedEnthalpyMarchConfig {
+            initial_specific_enthalpy_j_kg: initial_h,
+            ambient_temperature_k: 300.0,
+            radiation_temperature_k: 300.0,
+            internal_power_w: mass * (target_h - initial_h) / 100.0,
+            duration_s: 100.0,
+            maximum_step_s: 1.0,
+            maximum_steps: 100,
+            enthalpy_tolerance_j_kg: 1e-7,
+        };
+        pool.scope(|arena| {
+            let cx = Cx::new(&gate, arena, StreamKey { seed:0x316, kernel_id:55, tile:0, iteration:0 }, Budget::INFINITE, ExecMode::Deterministic);
+            let march = solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap();
+            assert_eq!(march, solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap());
+            assert_eq!(march.samples().len(),101);
+            for sample in march.samples() {
+                let dh = config.internal_power_w*sample.time_s/mass;
+                // Stable independent inverse of dh=Cp(300)*dT+slope*dT^2/2.
+                let expected_t = 300.0 + 2.0*dh/(467.69+(467.69_f64.powi(2)+2.0*cp_slope*dh).sqrt());
+                assert!((sample.phase_state.temperature_k()-expected_t).abs() < error_j_kg/456.39+1e-8);
+                assert!((sample.phase_state.specific_enthalpy_j_kg()-initial_h-dh).abs() < 1e-5);
+                assert_eq!(sample.phase_state.phase(),SolidLiquidPhase::Solid);
+                assert_eq!(sample.phase_state.material_card_identity(),loaded.card().content_hash());
+            }
+            let final_t = march.samples().last().unwrap().phase_state.temperature_k();
+            assert!((final_t-373.15).abs() < 3e-6);
+            let frozen_cp_t = 300.0+(target_h-initial_h)/467.69;
+            assert!((frozen_cp_t-final_t).abs() > 1.0, "variable Cp must affect the result");
+            assert!(march.cumulative_absolute_energy_residual_j() < 1e-5);
+            assert!(solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), LumpedEnthalpyMarchConfig { internal_power_w:1000.0, ..config }).is_err());
+            eprintln!("NASA316 heating=300..373.15K mass={mass}kg samples=101 final={final_t}K frozen_cp_final={frozen_cp_t}K energy_residual={}J cp_interpolation_error_limit={error_j_kg}J/kg source_receipts=6 no_expansion_or_stress_claim=1", march.cumulative_absolute_energy_residual_j());
+            let convective_body = LumpedEnthalpyBody::try_new_with_transport("NASA316-convection",mass,0.01,10.0,0.01,transport.clone(),&curve).unwrap();
+            let convection = solve_lumped_enthalpy(&cx,&convective_body,BiotGate::corpus_default(),config).unwrap();
+            assert_eq!(convection,solve_lumped_enthalpy(&cx,&convective_body,BiotGate::corpus_default(),config).unwrap());
+            close(convection.maximum_biot(),10.0*0.01/12.99);
+            let mut expected_delta_h = 0.0;
+            let b = 467.69 + 10.0*0.01*config.maximum_step_s/mass;
+            for (step,sample) in convection.samples().iter().enumerate() {
+                let expected_t = if step == 0 {300.0} else {
+                    let c = expected_delta_h + config.internal_power_w*config.maximum_step_s/mass;
+                    let x = 2.0*c/(b+(b*b+2.0*cp_slope*c).sqrt());
+                    expected_delta_h = 467.69*x+0.5*cp_slope*x*x;
+                    300.0+x
+                };
+                assert!((sample.time_s-step as f64).abs()<1e-12);
+                // Conservative accumulation of the chart's interpolation error.
+                assert!((sample.phase_state.temperature_k()-expected_t).abs()<0.0005);
+                assert_eq!(sample.radiation_into_body_w,0.0);
+                assert!(sample.convection_into_body_w<=0.0);
+            }
+            let cooled_final = convection.samples().last().unwrap().phase_state.temperature_k();
+            assert!(cooled_final < final_t-1.0);
+            assert!(convection.cumulative_absolute_energy_residual_j()<1e-5);
+            let high_biot = LumpedEnthalpyBody::try_new_with_transport("high Biot",mass,0.01,200.0,0.01,transport.clone(),&curve).unwrap();
+            assert!(solve_lumped_enthalpy(&cx,&high_biot,BiotGate::corpus_default(),config).is_err());
+            eprintln!("NASA316 convection h=10W/m2/K final={cooled_final}K max_biot={} energy_residual={}J conductivity_receipts=3 radiation_disabled=1",convection.maximum_biot(),convection.cumulative_absolute_energy_residual_j());
+        });
+    }
+
     /// G1/G3: an isobaric liquid parcel heats using the sourced enthalpy curve,
     /// without fabricated melting endpoints or a frozen initial heat capacity.
     #[test]
