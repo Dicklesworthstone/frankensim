@@ -9,7 +9,11 @@ connects the existing IAPWS enthalpy data to the lumped enthalpy marcher through
 an explicit single-phase curve constructor. It models 0.1 kg of uniformly
 heated liquid at 0.1 MPa from 20 to 60 °C; fixed mass permits volume to change.
 Its checks cover every step's enthalpy and temperature, energy closure, replay
-and refusal beyond source coverage. Remote execution is pending. Temperature
+and refusal beyond source coverage. Required-remote execution passed on
+2026-09-10: five phase unit tests and this integration, with no failures or
+ignored tests. The 101 samples finish at 333.14999999975237 K after
+16724.0797503343 J of heating; accumulated absolute energy residual is
+1.0880609124797047e-7 J. The run retains 45 source query receipts. Temperature
 uses the source's sampled linear enthalpy interpolant; density uses linear
 specific volume against enthalpy between knots. This is not a spatial flow,
 free-surface, freezing or boiling model, and adds no new database records.

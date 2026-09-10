@@ -6,6 +6,19 @@ The largest everyday gaps at planning time were **liquid water, commodity plasti
 
 The catalog now has 180 source bundles, of which 162 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 162 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
+F01 follow-through (`frankensim-7sga6.2.8`) now connects the existing liquid-water
+enthalpy data to the existing lumped heating solver using an explicit
+single-phase constructor. The focused regression imports and reopens the
+source card, retains its query receipts, and heats a fixed 0.1 kg parcel at
+0.1 MPa from 20 to 60 °C with independent stepwise temperature and energy
+checks. Required-remote execution passed on 2026-09-10: five phase unit tests
+and the source integration, with no failures or ignored tests. The 101-step
+record ends at 333.14999999975237 K with accumulated absolute energy residual
+1.0880609124797047e-7 J. Log: `/tmp/greenosprey-single-phase-water.log`.
+This bounded uniform-temperature path
+does not supply freezing, boiling, free surfaces or the still-missing M03
+condition-compatible warm-metal properties.
+
 P01 has a first named HDPE acquisition in `ensinger-tecafine-pe300-natural-2017`:
 four producer comparison facts for density, tensile modulus, yield strength and
 yield strain. The source's internal 2017 AA revision is preserved. Unknown test
