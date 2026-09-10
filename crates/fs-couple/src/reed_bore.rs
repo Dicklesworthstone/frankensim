@@ -105,6 +105,13 @@ pub(crate) fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
     }
 }
 
+/// Positive velocity widens the opening and draws fluid out of the bore.
+/// Conjugate to F = -A (Pmouth - Pbore): F v = deltaP * Uswept.
+/// Silva et al., arXiv:0810.2870, Eq. 27: Ujet = Ubore + A dy/dt.
+pub(crate) fn reed_swept_flow(face_m2: f64, opening_velocity_m_s: f64) -> f64 {
+    -face_m2 * opening_velocity_m_s
+}
+
 /// Aperture-junction solver mode (bead frankensim-2s4i5).
 ///
 /// `Strict` is the certification default: the retained deterministic
@@ -310,22 +317,21 @@ pub(crate) fn step_massive_reed(
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     let face = reed_pressure_face(reed);
     let (k, r_damp) = reed_structural(reed);
-    let p_plus = match mode {
-        ReedSolverMode::Strict => {
-            solve_reed_wave(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus, u_body)?
-        }
-        ReedSolverMode::FastNewton => solve_reed_wave_fast(
-            reed,
-            rho,
-            zc,
-            0.0,
-            p_minus,
-            p_m,
-            2.0 * p_minus,
-            u_body,
-            stats,
-        )?,
-    };
+    // Pressure, aperture and face flow all use the current mechanical state.
+    // The following structural advance remains an explicit partitioned step.
+    let p_plus = solve_moving_aperture_wave(
+        reed.width_m,
+        y.max(0.0),
+        rho,
+        zc,
+        p_minus,
+        p_m,
+        reed_swept_flow(face, v) + u_body,
+    )?;
+    if mode == ReedSolverMode::FastNewton {
+        // The quasistatic Newton Jacobian does not describe a moving aperture.
+        stats.fallback_samples += 1;
+    }
     let p_bore = p_plus + p_minus;
     let dp = p_m - p_bore;
     let mut acc = (-k * (y - reed.rest_opening_m) - r_damp * v - face * dp) / reed.mass_kg;
@@ -345,6 +351,51 @@ pub(crate) fn step_massive_reed(
         });
     }
     Ok((p_plus, y1, v1))
+}
+
+/// Fixed-state characteristic junction, shared by any moving slit valve.
+/// `Uwave = Ujet + Umoving`, with `p = p+ + p-` and
+/// `Uwave = (p+ - p-)/Z`. At fixed opening the residual is monotone.
+/// Its root lies between zero jet flow and zero pressure drop, including
+/// reversed flow. No quasistatic closing-pressure law enters this solve.
+#[allow(clippy::too_many_arguments)]
+fn solve_moving_aperture_wave(
+    width: f64,
+    opening: f64,
+    rho: f64,
+    zc: f64,
+    p_minus: f64,
+    p_m: f64,
+    moving_flow: f64,
+) -> Result<f64, AcousticRealizeError> {
+    let no_jet = p_minus + zc * moving_flow;
+    let no_drop = p_m - p_minus;
+    if !no_jet.is_finite() || !no_drop.is_finite() || !opening.is_finite() {
+        return Err(AcousticRealizeError::Reed {
+            what: "moving aperture junction left the finite set",
+        });
+    }
+    if opening == 0.0 {
+        return Ok(no_jet);
+    }
+    let mut lo = no_jet.min(no_drop);
+    let mut hi = no_jet.max(no_drop);
+    for _ in 0..64 {
+        let p_plus = f64::midpoint(lo, hi);
+        let jet = fs_phs::bernoulli_volume_flow(width, opening, p_m - (p_plus + p_minus), rho);
+        let mismatch = jet + moving_flow - (p_plus - p_minus) / zc;
+        if !mismatch.is_finite() {
+            return Err(AcousticRealizeError::Reed {
+                what: "moving aperture flow left the finite set",
+            });
+        }
+        if mismatch > 0.0 {
+            lo = p_plus;
+        } else {
+            hi = p_plus;
+        }
+    }
+    Ok(f64::midpoint(lo, hi))
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent junction record
@@ -505,7 +556,8 @@ mod fast_mode_tests {
                 reed.rest_opening_m,
                 velocity,
                 dt,
-                0.0,
+                // Cancel swept-face flow to isolate structural damping.
+                reed_pressure_face(reed) * velocity,
                 None,
                 ReedSolverMode::Strict,
                 &mut FastSolveStats::default(),
@@ -519,6 +571,118 @@ mod fast_mode_tests {
                 assert_eq!(next_velocity, velocity);
             }
         }
+    }
+
+    #[test]
+    fn g1_massive_reed_junction_uses_actual_opening_and_face_flow() {
+        let gas = air20();
+        let reed = BeatingReed {
+            mass_kg: 1e-5,
+            stiffness_n_m: 500.0,
+            ..reed()
+        };
+        let zc = fixture_impedance(&gas);
+        let face = reed_pressure_face(reed);
+        for opening in [0.0, 0.25 * reed.rest_opening_m, reed.rest_opening_m] {
+            for velocity in [-0.1, 0.0, 0.1] {
+                for mouth in [-3000.0, 0.0, 12000.0] {
+                    let incoming = 70.0;
+                    let body_flow = 2e-7;
+                    let (outgoing, _, _) = step_massive_reed(
+                        reed,
+                        gas.density,
+                        zc,
+                        incoming,
+                        mouth,
+                        opening,
+                        velocity,
+                        1e-6,
+                        body_flow,
+                        None,
+                        ReedSolverMode::Strict,
+                        &mut FastSolveStats::default(),
+                    )
+                    .unwrap();
+                    let dp = mouth - (outgoing + incoming);
+                    // Independent signed Bernoulli reference, not the solver helper.
+                    let jet = reed.width_m
+                        * opening
+                        * (2.0 * dp.abs() / gas.density).sqrt()
+                        * dp.signum();
+                    let wave = (outgoing - incoming) / zc;
+                    assert!((wave - jet + face * velocity - body_flow).abs() < 1e-16);
+                    // Instantaneous pressure/face work cancels; jet loss is nonnegative.
+                    let pressure_force = -face * dp;
+                    let loss = dp * (wave - body_flow) - pressure_force * velocity;
+                    assert!((loss - dp * jet).abs() < 1e-12);
+                    assert!(dp * jet >= 0.0);
+                    if opening == 0.0 {
+                        assert_eq!(outgoing, incoming + zc * (-face * velocity + body_flow));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_massive_reed_mass_changes_dynamic_bore_pressure_at_fixed_compliance() {
+        let gas = air20();
+        let base = BeatingReed {
+            mass_kg: 1e-5,
+            stiffness_n_m: 500.0,
+            ..reed()
+        };
+        let omega = (base.stiffness_n_m / base.mass_kg).sqrt();
+        // A 10 mm radius load avoids the almost pressure-clamped limit of
+        // the narrow default fixture, which hides small-signal reed motion.
+        let zc = gas.characteristic_impedance / (core::f64::consts::PI * 0.01_f64.powi(2));
+        let dt = 1e-6;
+        let mut traces = Vec::new();
+        for mass in [base.mass_kg, 4.0 * base.mass_kg] {
+            let reed = BeatingReed {
+                mass_kg: mass,
+                ..base
+            };
+            assert_eq!(reed_pressure_face(reed), reed_pressure_face(base));
+            let (mut y, mut v) = (reed.rest_opening_m, 0.0);
+            let mut trace = Vec::new();
+            for sample in 0..20_000 {
+                // A matched characteristic load isolates the exciter response.
+                let mouth = 500.0 * (omega * f64::from(sample) * dt).sin();
+                let (pressure, next_y, next_v) = step_massive_reed(
+                    reed,
+                    gas.density,
+                    zc,
+                    0.0,
+                    mouth,
+                    y,
+                    v,
+                    dt,
+                    0.0,
+                    None,
+                    ReedSolverMode::Strict,
+                    &mut FastSolveStats::default(),
+                )
+                .unwrap();
+                (y, v) = (next_y, next_v);
+                assert!(y > 0.0, "driven fixture must avoid lay contact");
+                if sample >= 10_000 {
+                    trace.push(pressure);
+                }
+            }
+            traces.push(trace);
+        }
+        let difference: f64 = traces[0]
+            .iter()
+            .zip(&traces[1])
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+        let reference: f64 = traces[0].iter().map(|a| a * a).sum();
+        assert!(
+            difference > 1e-4 * reference,
+            "mass must change bore pressure, not just an unobserved displacement: relative squared difference {}",
+            difference / reference
+        );
     }
 
     #[test]

@@ -798,7 +798,22 @@ clarinet is one filling of those objects.
   0.35 substitution; authored fixture ratios remain explicit assumptions,
   not measurements. G1 covers actual velocity decay; G4 rejects invalid ratios.
   G1 tests exercise the force balance and actual moving-reed acceleration.
-  Characteristic-line aperture/face-motion feedback remains outside this fix.
+  The massive characteristic-line junction now uses the current opening and
+  swept-face flow `-A v`, plus body volume flow, in the pressure solve. Positive
+  velocity widens the opening: the ODE and characteristic paths share this
+  sign, conjugate to `F = -A (Pmouth - Pbore)`. It corrects the ODE's former
+  positive swept-flow sign; see Silva et al., arXiv:0810.2870, Eq. 27.
+  Its
+  fixed-opening residual is monotone, bracketed between zero jet flow and
+  zero pressure drop, and uses the same signed Bernoulli primitive as the ODE.
+  The massless solver and its Newton Jacobian are not used for massive reeds;
+  fast-mode massive samples count as strict fallbacks. G1 tests cover closed
+  apertures, reverse flow, and instantaneous pressure/face work cancellation;
+  G3 covers mass-dependent bore pressure at equal static compliance.
+  Structural motion still advances explicitly after the current-state junction.
+  This is not a time-discrete energy/passivity certificate or an implicit
+  contact solve; convergence, onset validation and full work accounting remain
+  MR68 obligations.
   Isolated
   cylindrical bores use the `acoustic_chain` ODE with a
   `ViscothermalPin` (massive

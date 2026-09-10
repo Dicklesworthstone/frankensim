@@ -10,7 +10,9 @@ use crate::modal_acoustic_time::{
     ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
 };
 use crate::pcm_wav::{WavError, encode_pcm16_wav};
-use crate::reed_bore::{blowing_envelope, realize_reed_bore, reed_pressure_face, reed_structural};
+use crate::reed_bore::{
+    blowing_envelope, realize_reed_bore, reed_pressure_face, reed_structural, reed_swept_flow,
+};
 use crate::thin_plate::{
     PlateBank, PlateChartRadiation, VkBody, certified_chart_radiators, certified_radiators,
     vk_plate_phs,
@@ -4003,7 +4005,7 @@ fn realize_reed_ode(
                 });
             }
             x_reed = rec_r.x;
-            u_jet + face * v
+            u_jet + reed_swept_flow(*face, v)
         } else {
             let h = quasistatic_aperture_opening(
                 reed.rest_opening_m,

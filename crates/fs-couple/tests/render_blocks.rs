@@ -70,6 +70,60 @@ fn reed_voice() -> ReedBoreVoice {
 }
 
 #[test]
+fn massive_reed_material_mass_reaches_rendered_pressure_across_blocks() {
+    let duct = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.01,
+            length: 0.50,
+        }],
+    };
+    let render = |mass, block_len| {
+        let mut voice = ReedBoreVoice::new(
+            &duct,
+            &air(),
+            BeatingReed {
+                mass_kg: mass,
+                stiffness_n_m: 500.0,
+                blowing_pressure_pa: 500.0,
+                attack_s: 0.001,
+                ..reed()
+            },
+            // Pressure release avoids extrapolating a low-ka radiation fit
+            // above its validity limit for this wider bore at audio rate.
+            Termination::IdealOpen,
+            PlateBank::default(),
+            1.0,
+            RATE,
+            N,
+            None,
+        )
+        .expect("massive voice admits");
+        let mut out = vec![0.0; N];
+        for block in out.chunks_mut(block_len) {
+            voice.step_block(block).expect("massive voice renders");
+        }
+        assert!(out.iter().all(|p| p.is_finite()));
+        out
+    };
+    let light = render(1e-5, N);
+    let blocked = render(1e-5, 37);
+    assert!(
+        light
+            .iter()
+            .zip(&blocked)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    );
+    let heavy = render(4e-5, N);
+    let energy: f64 = light.iter().map(|p| p * p).sum();
+    let difference: f64 = light.iter().zip(&heavy).map(|(a, b)| (a - b).powi(2)).sum();
+    assert!(energy > 0.0);
+    assert!(
+        difference > 1e-6 * energy,
+        "equal-compliance reeds with distinct masses must render different pressure"
+    );
+}
+
+#[test]
 fn reed_voice_refuses_invalid_damping_ratio() {
     for ratio in [-0.1, f64::NAN, f64::INFINITY] {
         let mut invalid = reed();
