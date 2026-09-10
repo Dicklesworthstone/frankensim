@@ -1192,9 +1192,12 @@ mod fast_mode_tests {
                             * dp.signum()
                             * (2.0 * dp.abs() / gas.density).sqrt();
                         let wave = (outgoing - returned) / zc;
-                        let scale = (jet.abs() + wave.abs() + body.abs()).max(1e-12);
+                        let scale = jet.abs() + wave.abs() + body.abs();
+                        // Even zero net flow subtracts two nonzero pressure
+                        // waves. Include their floating-point cancellation error.
+                        let roundoff = 32.0 * f64::EPSILON * (outgoing.abs() + returned.abs()) / zc;
                         assert!(
-                            (jet + body - wave).abs() <= 1e-10 * scale,
+                            (jet + body - wave).abs() <= 1e-10 * scale + roundoff,
                             "flow defect {} m^3/s, scale={scale}, r={reflection}, incoming={incoming}, mouth={mouth}",
                             jet + body - wave
                         );

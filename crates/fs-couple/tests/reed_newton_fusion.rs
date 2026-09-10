@@ -8,11 +8,10 @@
 //!
 //! 1. Junction-level root-agreement receipt — owned by the inline
 //!    `fast_mode_tests::
-//!    fast_newton_meets_the_strict_residual_contract_within_conditioning_band`
-//!    battery (64-point stimulus sweep): every Newton root satisfies the
-//!    strict path's own residual contract, and positional deviation is
-//!    bounded by per-sample solver conditioning (flow tolerance over
-//!    |Jacobian|) rather than a fixed number.
+//!    fast_newton_matches_resolved_strict_roots_and_conserves_flow`
+//!    battery (64-point stimulus sweep): both modes conserve flow against
+//!    a volume-flow scale, and Newton agrees with the resolved strict root
+//!    within a relative pressure band.
 //!    A full RENDER is a self-oscillating feedback loop: measured this
 //!    session, sample-wise |p_fast − p_strict| reaches O(kPa) within a
 //!    quarter-second because tiny per-sample root differences amplify
