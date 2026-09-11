@@ -11,8 +11,8 @@
 //!   sqrt(mu L / 2)`, stepped by the exact-ZOH [`ModalAcousticTimeModel`].
 //! - Bow: constant-velocity driver with EVENT-BASED COULOMB STICTION.
 //!   While stuck the contact is pinned to `v_str = v_bow` by exactly the
-//!   force the modal string demands (acceleration cancellation plus a
-//!   velocity-error correction), breaking away when that force exceeds
+//!   held force that reaches `v_str = v_bow` at the exact-ZOH endpoint,
+//!   breaking away when that force exceeds
 //!   `mu_static * F_n`; while slipping the traction follows the kinetic
 //!   Stribeck curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)`. Capture fires
 //!   when the relative velocity changes sign between sub-steps or is
@@ -23,9 +23,10 @@
 //!   a one-port [`CompactBody`] with the transmitted bridge force (rigid,
 //!   massless bridge approximation; the reaction is one-way and disclosed).
 //!
-//! Determinism class: ONE-HOST. The kinetic curve uses platform `exp`
-//! through the existing [`StribeckFriction`] coupling layer; bit-replay is
-//! guaranteed only on the same host/library, which every gate states.
+//! Determinism class: ONE-HOST for this composed fixture. The kinetic curve
+//! uses the shared fs-tribo owner's deterministic exponential through
+//! [`StribeckFriction`]; that alone does not certify every other operand
+//! in this fixture across hosts.
 
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
@@ -350,7 +351,6 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     let slopes_at_bridge: Vec<f64> = (0..card.mode_count)
         .map(|k| unit_shape_slope_at_bridge(k, card.length_m, mu))
         .collect();
-    let w_point: f64 = shapes_at_bow.iter().map(|phi| phi * phi).sum();
 
     let mut log = BowedRunLog {
         bow_point_velocity_m_s: Vec::with_capacity(config.steps),
@@ -405,30 +405,17 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
             let traction = match config.island {
                 FrictionIsland::Stribeck(law) => {
                     let hold_cap = law.mu_static * config.gesture.normal_force_n;
-                    // Total pinning force: cancel contact acceleration AND
-                    // drive the velocity error to zero this sub-step.
-                    // Minimum-norm projection through the mode shapes.
-                    let pin = || -> f64 {
-                        let accel_hold: f64 = model
-                            .modes()
-                            .iter()
-                            .zip(model.states())
-                            .zip(&shapes_at_bow)
-                            .map(|((m, s), phi)| {
-                                phi * (2.0
-                                    * m.damping_ratio
-                                    * m.angular_frequency_rad_s
-                                    * s.velocity_m_sqrt_kg_per_s
-                                    + m.angular_frequency_rad_s
-                                        * m.angular_frequency_rad_s
-                                        * s.displacement_m_sqrt_kg)
-                            })
-                            .sum::<f64>()
-                            / w_point;
-                        accel_hold + v_rel / (w_point * sub_dt)
+                    let pin = || {
+                        model
+                            .held_force_for_port_velocity(
+                                &shapes_at_bow,
+                                config.gesture.v_bow_m_s,
+                                sub_dt,
+                            )
+                            .map_err(BowedRunError::Model)
                     };
                     if stuck {
-                        let p = pin();
+                        let p = pin()?;
                         if p.abs() <= hold_cap {
                             p
                         } else {
@@ -437,7 +424,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
                                 .map_err(BowedRunError::Friction)?
                         }
                     } else if flipped || v_rel.abs() <= capture_tol {
-                        let p = pin();
+                        let p = pin()?;
                         if p.abs() <= hold_cap {
                             stuck = true;
                             p

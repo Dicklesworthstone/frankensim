@@ -197,6 +197,17 @@ uses a caller-supplied complex pressure-per-modal-velocity transfer at each
 natural frequency under `exp(-i omega t)`; no material names, digital gains,
 or mastering values occur in this layer. Energy/work diagnostics and
 transactional state/pressure budgets accompany every sample.
+`held_force_for_port_velocity` solves the exact-ZOH scalar endpoint constraint
+using free modal motion plus unit-port-force mobility, with conjugate force
+and velocity projections. It refuses invalid/nonpositive mobility and
+nonfinite inputs/results without changing state. The ordinary step still
+admits state and energy budgets. Bowed hold/capture uses this force under its
+existing static-friction cap; it no longer uses an Euler acceleration estimate
+with an exact-ZOH transition. G1 compares an independent oscillator solution
+and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
+in all damping regimes and full/half/subsample durations. This enforces only
+endpoint velocity: continuous no-slip motion, exact within-step event times,
+and a passive contact discretization are not claimed.
 Each frame additionally retains mode-local viscous work-minus-energy differences
 and their scale-aware roundoff allowances. Negative loss beyond a mode's allowance
 refuses the entire step, even when another mode could mask it in the aggregate.
@@ -772,7 +783,15 @@ clarinet is one filling of those objects.
   (Carcagno-band Sitka pair is a constructor, not a named guitar).
 - Bow: MWS regularized friction (steep stiction ramp + falling kinetic
   shoulder). Helmholtz motion is possible with enough modes; it is not
-  guaranteed and not a measured rosin curve.
+  guaranteed and not a measured rosin curve. `stribeck_friction` delegates
+  traction to `fs-tribo::FrictionLaw::regularized_traction_1d`, reversing the
+  port's driver-minus-body velocity to the owner's body-minus-driver
+  convention. The shared owner supplies deterministic exponential evaluation
+  and refuses malformed coefficients, negative/non-finite normal loads, and
+  unrepresentable force. G1/G3 checks compare the force with an independent
+  Stribeck formula and the work of equal-and-opposite contact forces.
+  This wiring neither admits sourced interface data nor replaces the bowed
+  fixture's event-based stiction algorithm or authored modal losses.
 - Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
   positive stiffness derive their effective pressure area from the
   declared closing relation `A = k H / Pc`. Characteristic-line motion and
