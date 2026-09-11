@@ -1859,49 +1859,126 @@ mod common_material_acquisition {
             BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, solve_lumped_enthalpy,
         };
         use fs_material::phase::{
-            EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
+            HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase,
         };
         let cp = claims.claims_for("specific-heat-capacity")[0].1;
         let rho = claims.claims_for("density")[0].1;
-        let PropertyValue::Curve { knots, .. } = &cp.value else {
-            panic!("source Cp curve required")
+        let lower = point(cp, &[("temperature", 273.0)]);
+        let upper = point(cp, &[("temperature", 400.0)]);
+        let source_query = HeatCapacitySourceQuery {
+            heat_capacity: &cp.key,
+            density: &rho.key,
+            temperature_axis: "temperature",
+            lower: &lower,
+            upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
         };
-        let mut thermal_knots = Vec::new();
-        let mut thermal_receipts = Vec::new();
-        for &(temperature, _) in knots {
-            let values: Vec<_> = [cp, rho]
-                .iter()
-                .map(|claim| {
-                    let answer = claims
-                        .query_typed(
-                            &claim.key,
-                            &point(claim, &[("temperature", temperature)]),
-                            SelectionPolicy::SingleClaimOnly,
-                        )
-                        .unwrap();
-                    claims.verify_receipt(&answer.receipt).unwrap();
-                    thermal_receipts.push(answer.receipt);
-                    answer.evidence.value.value
-                })
-                .collect();
-            thermal_knots.push(HeatCapacityKnot {
-                temperature_k: temperature,
-                specific_heat_capacity_j_kg_k: values[0],
-                bulk_density_kg_m3: values[1],
-            });
-        }
-        assert_eq!(thermal_receipts.len(), 6);
         // h=0 at273K is a declared relative reference, not an absolute source
         // enthalpy measurement. Linear Cp is the source-pack approximation.
         let error_j_kg = 0.001;
-        let curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
-            loaded.card().content_hash(),
+        let resolve = |query| {
+            ResolvedHeatCapacityCurve::try_new(
+                loaded.card(),
+                query,
+                SolidLiquidPhase::Solid,
+                0.0,
+                error_j_kg,
+            )
+        };
+        let resolved = resolve(source_query).unwrap();
+        assert_eq!(resolved, resolve(source_query).unwrap());
+        // Only endpoints were requested: the source's interior knot survives.
+        assert_eq!(resolved.receipts().len(), 6);
+        for receipt in resolved.receipts() {
+            claims.verify_receipt(receipt).unwrap();
+        }
+        assert!(
+            resolve(HeatCapacitySourceQuery {
+                heat_capacity: &rho.key,
+                ..source_query
+            })
+            .is_err()
+        );
+        let outside = point(cp, &[("temperature", 400.01)]);
+        assert!(
+            resolve(HeatCapacitySourceQuery {
+                upper: &outside,
+                ..source_query
+            })
+            .is_err()
+        );
+        let wrong_context = point(
+            cp,
+            &[("temperature", 400.0), ("source-pressure-known", 1.0)],
+        );
+        assert!(
+            resolve(HeatCapacitySourceQuery {
+                upper: &wrong_context,
+                ..source_query
+            })
+            .is_err()
+        );
+        assert!(
+            resolve(HeatCapacitySourceQuery {
+                lower: &upper,
+                upper: &lower,
+                ..source_query
+            })
+            .is_err()
+        );
+        let curve = resolved.curve();
+        // Synthetic perturbation, not new material evidence: a density-only
+        // source knot must survive even when Cp has no knot there.
+        let mut perturbed_rho = rho.clone();
+        perturbed_rho.observations.clear();
+        if let PropertyValue::Curve { knots, .. } = &mut perturbed_rho.value {
+            knots.insert(2, (350.0, 7000.0));
+        }
+        let make_probe_card = |mut heat_capacity: fs_matdb::PropertyClaim| {
+            heat_capacity.observations.clear();
+            let mut set = fs_matdb::ClaimSet::new();
+            set.insert_claim(heat_capacity).unwrap();
+            set.insert_claim(perturbed_rho.clone()).unwrap();
+            fs_matdb::MaterialCard::assemble(
+                fs_matdb::MaterialStateId {
+                    chemistry: "synthetic source-knot regression".into(),
+                    phase: "solid".into(),
+                    process: "test-only perturbation".into(),
+                    revision: 0,
+                },
+                set,
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        let probe = ResolvedHeatCapacityCurve::try_new(
+            &make_probe_card(cp.clone()),
+            source_query,
             SolidLiquidPhase::Solid,
             0.0,
-            &thermal_knots,
             error_j_kg,
         )
         .unwrap();
+        assert_eq!(probe.receipts().len(), 8);
+        assert!(
+            probe
+                .curve()
+                .knots()
+                .iter()
+                .any(|k| k.temperature_k == 350.0 && k.bulk_density_kg_m3 == 7000.0)
+        );
+        let mut discrete_cp = cp.clone();
+        discrete_cp.interpolation = fs_matdb::InterpolationPolicy::TabulatedOnly;
+        assert!(
+            ResolvedHeatCapacityCurve::try_new(
+                &make_probe_card(discrete_cp),
+                source_query,
+                SolidLiquidPhase::Solid,
+                0.0,
+                error_j_kg
+            )
+            .is_err()
+        );
         let initial_h = (456.39 + 467.69) * 27.0 / 2.0;
         let cp_slope = (502.87 - 467.69) / 100.0;
         let rise = 373.15 - 300.0;

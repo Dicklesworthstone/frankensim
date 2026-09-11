@@ -54,6 +54,22 @@ three retained conductivity receipts and context/domain/high-Biot refusals
 pass. Log: `/tmp/greenosprey-m03-sourced-convection.log`.
 Full DSR and the complete source runner were not rerun; this is not M03 closeout.
 
+M03's source-to-enthalpy lowering now has a production API,
+`fs_material::phase::ResolvedHeatCapacityCurve`, replacing manual Cp/density
+sampling in the warm-316 integration. It preserves continuous support, fixed
+typed context, the union of both source grids and six source receipts bound
+into the curve identity. The existing conduction, internal-heating and
+convective-heating regression uses this API. Required-remote verification on
+2026-09-10 passed eight phase unit tests (0.04 seconds) and the selected
+source/store/heating integration (1.49 seconds), zero failed or ignored, after
+a 19m44s build on vmi1152480; the wrapper exited zero. Both tested Rust files
+matched the final local source hashes. The existing temperature/energy results
+above are unchanged. A density-only source knot, discrete-only Cp refusal,
+wrong dimensions, changing context and unsupported temperature are also
+checked. Log: `/tmp/greenosprey-m03-source-enthalpy.log`. No source observations,
+warm elastic/expansion coverage, full DSR or experimental qualification are
+added by this wiring; M03 remains in progress.
+
 F01 follow-through (`frankensim-7sga6.2.8`) now connects the existing liquid-water
 enthalpy data to the existing lumped heating solver using an explicit
 single-phase constructor. The focused regression imports and reopens the
