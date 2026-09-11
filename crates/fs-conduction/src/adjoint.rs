@@ -28,9 +28,10 @@
 //! - Nothing about SHAPE derivatives. `ρ` is a coefficient, not a
 //!   geometry; mesh-motion sensitivity is `fs-adjoint`'s Hadamard path
 //!   and is not wired here.
-//! - Nothing about goal-oriented ERROR. A gradient is not a DWR
-//!   estimate; `fs-adjoint`'s `dwr-accept` feature is the place that
-//!   claim lives, and this crate does not make it.
+//! - No continuum goal-error bound. [`ConductivityDesign::discrete_goal_error`]
+//!   measures a linear goal discrepancy against this mesh's discrete solution.
+//!   Mesh error requires a separately constructed enriched space; a residual
+//!   on the original solved space is not a discretization estimate.
 
 use fs_adjoint::{AdjointReport, ift_gradient_matfree};
 use fs_exec::Cx;
@@ -67,6 +68,21 @@ pub struct DesignSolution {
     pub primal_relative_residual: f64,
     /// Krylov iterations spent on the primal solve.
     pub primal_iterations: usize,
+}
+
+/// Dual-weighted discrepancy to this mesh's linear discrete solution.
+/// This is not a continuum error certificate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscreteGoalError {
+    /// `J(T_discrete) - J(T_approximate)`, up to dual solver error.
+    pub signed_error: f64,
+    /// Signed `z_i (b - A T_approximate)_i`, in free-dof order and goal units.
+    /// These are algebraic contributions, not elementwise refinement indicators.
+    pub free_dof_contributions: Vec<f64>,
+    /// Recomputed relative residual of `Aᵀ z = weights`.
+    pub dual_relative_residual: f64,
+    /// Krylov iterations used by the dual solve.
+    pub dual_iterations: usize,
 }
 
 impl<'m> ConductivityDesign<'m> {
@@ -210,6 +226,121 @@ impl<'m> ConductivityDesign<'m> {
             self.element_materials,
         )?;
         Ok(reduce(&system, &self.dofs))
+    }
+
+    /// Evaluate a linear goal's discrepancy without another primal solve.
+    ///
+    /// Both vectors use this mesh's free-dof order. Prescribed temperatures
+    /// enter through the primal's Dirichlet lift. For `Aᵀ z = weights`,
+    /// `J(T_discrete) - J(T_approximate) = zᵀ(b - A T_approximate)`.
+    /// The SPD linear operator makes the transposed solve identical to PCG.
+    ///
+    /// An enriched-mesh caller must prolong the coarse field and assemble the
+    /// SAME goal there. This method neither constructs that enrichment nor
+    /// bounds the remaining continuum error or dual error.
+    ///
+    /// # Errors
+    /// Refuses invalid lengths, nonfinite inputs/results, a stalled dual,
+    /// cancellation, and every assembly refusal of [`Self::solve`].
+    pub fn discrete_goal_error(
+        &self,
+        cx: &Cx<'_>,
+        rho: &[f64],
+        approximate_free_temperature: &[f64],
+        weights: &[f64],
+    ) -> Result<DiscreteGoalError, ConductionError> {
+        if !self.linear.tolerance.is_finite() || self.linear.tolerance <= 0.0 {
+            return Err(ConductionError::Config {
+                parameter: "linear.tolerance",
+                what: "dual relative tolerance must be finite and positive".to_string(),
+            });
+        }
+        self.check_rho(rho)?;
+        for (field, values) in [
+            ("approximate free temperature", approximate_free_temperature),
+            ("goal weights", weights),
+        ] {
+            if values.len() != self.dofs.n() {
+                return Err(ConductionError::FieldLength {
+                    field,
+                    expected: self.dofs.n(),
+                    found: values.len(),
+                });
+            }
+            if let Some(value) = values.iter().find(|value| !value.is_finite()) {
+                return Err(ConductionError::NonFinite {
+                    field,
+                    bits: value.to_bits(),
+                });
+            }
+        }
+        let (matrix, rhs) = self.system(cx, rho)?;
+        let checkpoint = |at| {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "discrete-goal-dual",
+                at,
+            })
+        };
+        checkpoint(0)?;
+        // Scale the goal before Krylov norms to avoid weight under/overflow.
+        let scale = weights.iter().map(|w| w.abs()).fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            return Ok(DiscreteGoalError {
+                signed_error: 0.0,
+                free_dof_contributions: vec![0.0; self.dofs.n()],
+                dual_relative_residual: 0.0,
+                dual_iterations: 0,
+            });
+        }
+        let dual_rhs: Vec<f64> = weights.iter().map(|w| w / scale).collect();
+        let op = CsrOp::symmetric(matrix.clone());
+        let pre = crate::solve::spd_preconditioner(&matrix);
+        let mut state = fs_solver::CgState::new(&op, &pre, &dual_rhs);
+        while state.rel_residual() >= self.linear.tolerance
+            && state.iters < self.linear.max_iterations
+        {
+            checkpoint(state.iters)?;
+            let batch = (self.linear.max_iterations - state.iters).min(32);
+            state.run(&op, &pre, self.linear.tolerance, batch);
+        }
+        checkpoint(state.iters)?;
+        let mut applied = vec![0.0; self.dofs.n()];
+        matrix.spmv(&state.x, &mut applied);
+        let dual_residual: Vec<f64> = dual_rhs.iter().zip(&applied).map(|(b, a)| b - a).collect();
+        let dual_relative_residual = norm2(&dual_residual) / norm2(&dual_rhs);
+        if !dual_relative_residual.is_finite() || dual_relative_residual >= self.linear.tolerance {
+            return Err(ConductionError::LinearSolveFailed {
+                iteration: 0,
+                krylov_iterations: state.iters,
+                true_relative_residual: dual_relative_residual,
+                tolerance: self.linear.tolerance,
+            });
+        }
+        matrix.spmv(approximate_free_temperature, &mut applied);
+        let free_dof_contributions: Vec<f64> = state
+            .x
+            .iter()
+            .zip(rhs.iter().zip(&applied))
+            .map(|(z, (b, a))| (z * (b - a)) * scale)
+            .collect();
+        let signed_error: f64 = free_dof_contributions.iter().sum();
+        if let Some(value) = free_dof_contributions
+            .iter()
+            .chain(std::iter::once(&signed_error))
+            .find(|value| !value.is_finite())
+        {
+            return Err(ConductionError::NonFinite {
+                field: "discrete goal error",
+                bits: value.to_bits(),
+            });
+        }
+        checkpoint(state.iters)?;
+        Ok(DiscreteGoalError {
+            signed_error,
+            free_dof_contributions,
+            dual_relative_residual,
+            dual_iterations: state.iters,
+        })
     }
 
     /// The linear quantity of interest `J(ρ) = Σ_i w_i T_i` over FREE

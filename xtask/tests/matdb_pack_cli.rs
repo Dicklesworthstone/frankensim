@@ -1939,11 +1939,16 @@ mod common_material_acquisition {
         };
         assert_eq!(loaded, original);
         let card = loaded.card();
-        let property = "mean_linear_expansion_coefficient_from_20c";
+        let property = "mean-linear-expansion-coefficient-from-20c";
         let claims = card.claims().claims_for(property);
+        assert_eq!(
+            claims.len(),
+            5,
+            "five normalized interval-mean claims required"
+        );
         let key = &claims[0].1.key;
-        let reference_axis = "source_reference_temperature";
-        let endpoint_axis = "source_range_end_temperature";
+        let reference_axis = "source-reference-temperature";
+        let endpoint_axis = "source-range-end-temperature";
         let mut identities = Vec::new();
         let mut endpoint_strains = Vec::new();
         for (endpoint, expected_strain) in [
@@ -1982,7 +1987,7 @@ mod common_material_acquisition {
             for overrides in [
                 vec![(reference_axis, 294.15)],
                 vec![(endpoint_axis, endpoint + 0.01)],
-                vec![("source_pressure_known", 1.0)],
+                vec![("source-pressure-known", 1.0)],
             ] {
                 assert!(resolve(&point(claims[0].1, &overrides)).is_err());
             }

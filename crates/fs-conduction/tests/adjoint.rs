@@ -130,6 +130,207 @@ fn ladder_linear_config() -> LinearConfig {
     }
 }
 
+/// G1/G3: compare the dual residual against an independently solved primal
+/// goal difference, with anisotropy, nonzero Dirichlet lift and Robin loss.
+/// This checks a discrete identity, not continuum estimator effectivity.
+#[test]
+fn discrete_goal_error_matches_primal_difference_and_goal_scaling() {
+    let fixture = fixture(3);
+    let design = ConductivityDesign::new(fixture.problem(), linear_config()).unwrap();
+    let rho: Vec<f64> = (0..design.parameter_count())
+        .map(|i| 0.8 + 0.01 * (i % 17) as f64)
+        .collect();
+    let approximate: Vec<f64> = design
+        .dofs()
+        .free()
+        .iter()
+        .map(|&i| 300.0 + fixture.mesh.positions()[i][2] * 20.0)
+        .collect();
+    let weights: Vec<f64> = (0..design.dofs().n())
+        .map(|i| if i % 3 == 0 { -0.25 } else { 1.0 })
+        .collect();
+    with_cx(|cx| {
+        let solved = design.solve(cx, &rho).unwrap();
+        let expected: f64 = weights
+            .iter()
+            .zip(solved.free_temperature.iter().zip(&approximate))
+            .map(|(w, (t, a))| w * (t - a))
+            .sum();
+        assert!(
+            expected.abs() > 1.0,
+            "causal control must have a nonzero goal error"
+        );
+        for scale in [1.0, -2.0, 1e-200, 1e200] {
+            let scaled: Vec<f64> = weights.iter().map(|w| w * scale).collect();
+            let report = design
+                .discrete_goal_error(cx, &rho, &approximate, &scaled)
+                .unwrap();
+            assert!((report.signed_error / scale - expected).abs() < 1e-8 * expected.abs());
+            assert!(report.dual_relative_residual <= 10.0 * linear_config().tolerance);
+            assert_eq!(report.free_dof_contributions.len(), design.dofs().n());
+            assert_eq!(
+                report.free_dof_contributions.iter().sum::<f64>(),
+                report.signed_error
+            );
+        }
+        let resolved = design
+            .discrete_goal_error(cx, &rho, &solved.free_temperature, &weights)
+            .unwrap();
+        assert!(resolved.signed_error.abs() < 1e-8 * expected.abs());
+        let zero = design
+            .discrete_goal_error(cx, &rho, &approximate, &vec![0.0; weights.len()])
+            .unwrap();
+        assert_eq!(zero.signed_error, 0.0);
+        assert_eq!(zero.dual_iterations, 0);
+        assert!(zero.free_dof_contributions.iter().all(|&v| v == 0.0));
+    });
+}
+
+#[test]
+fn discrete_goal_error_refuses_invalid_inputs_budget_and_cancellation() {
+    let fixture = fixture(3);
+    let design = ConductivityDesign::new(fixture.problem(), linear_config()).unwrap();
+    let n = design.dofs().n();
+    let rho = vec![1.0; design.parameter_count()];
+    let approximate = vec![300.0; n];
+    let weights = vec![1.0; n];
+    with_cx(|cx| {
+        for tolerance in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            let invalid = ConductivityDesign::new(
+                fixture.problem(),
+                LinearConfig {
+                    tolerance,
+                    ..linear_config()
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                invalid.discrete_goal_error(cx, &rho, &approximate, &weights),
+                Err(fs_conduction::ConductionError::Config { .. })
+            ));
+        }
+        assert!(matches!(
+            design.discrete_goal_error(cx, &rho, &[], &weights),
+            Err(fs_conduction::ConductionError::FieldLength { .. })
+        ));
+        assert!(matches!(
+            design.discrete_goal_error(cx, &rho, &approximate, &[]),
+            Err(fs_conduction::ConductionError::FieldLength { .. })
+        ));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bad = weights.clone();
+            bad[0] = invalid;
+            assert!(matches!(
+                design.discrete_goal_error(cx, &rho, &approximate, &bad),
+                Err(fs_conduction::ConductionError::NonFinite { .. })
+            ));
+            assert!(matches!(
+                design.discrete_goal_error(cx, &rho, &bad, &weights),
+                Err(fs_conduction::ConductionError::NonFinite { .. })
+            ));
+        }
+        let limited = ConductivityDesign::new(
+            fixture.problem(),
+            LinearConfig {
+                max_iterations: 0,
+                ..linear_config()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            limited.discrete_goal_error(cx, &rho, &approximate, &weights),
+            Err(fs_conduction::ConductionError::LinearSolveFailed { .. })
+        ));
+    });
+    support::with_cancelled_cx(|cx| {
+        assert!(matches!(
+            design.discrete_goal_error(cx, &rho, &approximate, &weights),
+            Err(fs_conduction::ConductionError::Cancelled { .. })
+        ));
+    });
+}
+
+/// G1: on an enriched mesh, the residual detects interpolation error that
+/// vanishes at coarse nodes. The exact solution is 300 + z - z²/2 and the
+/// goal is the volume integral. Exact Dirichlet data are imposed on the fine
+/// boundary; only the free field is prolonged from the coarser z grid.
+#[test]
+fn discrete_goal_error_on_enriched_mesh_matches_analytic_goal_difference() {
+    for n in [4, 8] {
+        let (complex, positions) = unit_cube(n);
+        let mesh = ConductionMesh::new(complex, positions).unwrap();
+        let material = ConductivityModel::constant_tensor(UNIT_K).unwrap();
+        let exact = |z: f64| 300.0 + z - 0.5 * z * z;
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "exact-boundary",
+                |_| true,
+                ThermalBc::Dirichlet {
+                    temperature: ScalarField::Nodal(
+                        mesh.positions().iter().map(|p| exact(p[2])).collect(),
+                    ),
+                },
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let source = ScalarField::Uniform(1.0);
+        let design = ConductivityDesign::new(
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
+            linear_config(),
+        )
+        .unwrap();
+        let coarse_h = 2.0 / n as f64;
+        let approximate: Vec<f64> = design
+            .dofs()
+            .free()
+            .iter()
+            .map(|&i| {
+                let z = mesh.positions()[i][2];
+                let lo = (z / coarse_h).floor() * coarse_h;
+                let t = (z - lo) / coarse_h;
+                (1.0 - t) * exact(lo) + t * exact(lo + coarse_h)
+            })
+            .collect();
+        let mut weights = vec![0.0; design.dofs().n()];
+        for (e, tet) in mesh.complex().tets.iter().enumerate() {
+            for &v in tet {
+                if let Some(i) = design.dofs().slot_of(v as usize) {
+                    weights[i] += mesh.element_volume(e) / 4.0;
+                }
+            }
+        }
+        with_cx(|cx| {
+            let report = design
+                .discrete_goal_error(cx, &vec![1.0; mesh.element_count()], &approximate, &weights)
+                .unwrap();
+            // Quadratic nodal reproduction is separately checked by the
+            // conformance suite on these structured Dirichlet meshes.
+            let expected: f64 = design
+                .dofs()
+                .free()
+                .iter()
+                .zip(&approximate)
+                .zip(&weights)
+                .map(|((&i, a), w)| w * (exact(mesh.positions()[i][2]) - a))
+                .sum();
+            assert!(expected > 1e-4);
+            assert!(
+                (report.signed_error - expected).abs() < 1e-8,
+                "n={n}, dual={}, analytic={expected}",
+                report.signed_error
+            );
+        });
+    }
+}
+
 /// Deterministic probe directions: three one-hot picks spread across the
 /// element list, a global ramp, and an alternating pattern. Keyed by
 /// index, never by RNG, so a failure reproduces exactly.

@@ -978,8 +978,21 @@ authority.
   more than is there.
 - A residual is not an error bound. This crate reports residuals, an energy
   balance, and observed orders. It ships NO certified bound on `‖T − T_h‖` and
-  no goal-oriented (DWR) estimate. The `ConductionReport` deliberately has no
-  field that could be mistaken for one.
+  no continuum goal-oriented (DWR) estimate. The `ConductionReport` deliberately
+  has no field that could be mistaken for one.
+  `ConductivityDesign::discrete_goal_error` evaluates the discrete identity
+  `J(T_discrete) - J(T_approximate) = z^T (b - A T_approximate)` for a linear
+  free-dof goal, using the same operator and Dirichlet lift as the primal.
+  It recomputes and checks the dual residual, retains signed free-dof
+  contributions, and refuses cancellation, nonfinite data/results or a stalled
+  dual. Goal normalization protects Krylov norms under unit rescaling.
+  These contributions are not elementwise DWR indicators. A mesh-error caller
+  still needs an enriched space, coarse-field prolongation and consistent goal
+  assembly; evaluating the solved mesh alone cannot establish mesh convergence.
+  The focused `tests/adjoint.rs::discrete_goal_error_*` tests compare against an
+  independent primal goal difference and check scaling, resolved/zero goals,
+  invalid data, exhausted iterations and cancellation. They do not establish
+  continuum effectivity, a certified bound, or an adaptive CLI solve loop.
 - The fin case is a MODEL comparison against the 1-D fin equation, not a
   discretization check. Its 2% envelope carries the fin model's own error; the
   Biot number that bounds it is computed and printed by the test.
