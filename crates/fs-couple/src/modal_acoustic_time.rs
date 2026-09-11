@@ -260,6 +260,10 @@ impl ExactZohKernel {
 
 #[derive(Clone, Copy, Debug)]
 enum ExactZohCoefficients {
+    Undamped {
+        sine: f64,
+        one_minus_cosine: f64,
+    },
     Matrix {
         decay: f64,
         q_q0: f64,
@@ -784,6 +788,14 @@ fn modal_energy(mode: ModalAcousticMode, state: ModalAcousticState) -> f64 {
 fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficients {
     let omega = mode.angular_frequency_rad_s;
     let zeta = mode.damping_ratio;
+    if zeta == 0.0 {
+        let angle = omega * dt;
+        let half_sine = det::sin(0.5 * angle);
+        return ExactZohCoefficients::Undamped {
+            sine: det::sin(angle),
+            one_minus_cosine: 2.0 * half_sine * half_sine,
+        };
+    }
     let critical_delta = zeta - 1.0;
     if critical_delta.abs() <= 1.0e-8 {
         let decay = det::exp(-omega * dt);
@@ -835,6 +847,12 @@ fn advance_exact_zoh_cached(
     let q0 = state.displacement_m_sqrt_kg - equilibrium;
     let v0 = state.velocity_m_sqrt_kg_per_s;
     let (q, v) = match coefficients {
+        ExactZohCoefficients::Undamped {
+            sine,
+            one_minus_cosine,
+        } => {
+            return advance_undamped_zoh(mode, state, force, sine, one_minus_cosine);
+        }
         ExactZohCoefficients::Matrix {
             decay,
             q_q0,
@@ -866,6 +884,29 @@ fn advance_exact_zoh_cached(
     }
 }
 
+// Advance about the current displacement rather than subtracting and adding
+// the possibly much larger force equilibrium. In a short step, 1-cos(theta)
+// is evaluated by its half-angle identity, so force * delta_q retains the
+// precision needed by the unchanged work/energy check.
+fn advance_undamped_zoh(
+    mode: ModalAcousticMode,
+    state: ModalAcousticState,
+    force: f64,
+    sine: f64,
+    one_minus_cosine: f64,
+) -> ModalAcousticState {
+    let omega = mode.angular_frequency_rad_s;
+    let q = state.displacement_m_sqrt_kg;
+    let v = state.velocity_m_sqrt_kg_per_s;
+    let displacement_increment =
+        (v / omega) * sine + (force / (omega * omega) - q) * one_minus_cosine;
+    let velocity_increment = (force / omega - omega * q) * sine - v * one_minus_cosine;
+    ModalAcousticState {
+        displacement_m_sqrt_kg: q + displacement_increment,
+        velocity_m_sqrt_kg_per_s: v + velocity_increment,
+    }
+}
+
 fn advance_exact_zoh(
     mode: ModalAcousticMode,
     state: ModalAcousticState,
@@ -874,6 +915,9 @@ fn advance_exact_zoh(
 ) -> ModalAcousticState {
     let omega = mode.angular_frequency_rad_s;
     let zeta = mode.damping_ratio;
+    if zeta == 0.0 {
+        return advance_exact_zoh_cached(mode, state, force, exact_zoh_coefficients(mode, dt));
+    }
     let equilibrium = force / (omega * omega);
     let q0 = state.displacement_m_sqrt_kg - equilibrium;
     let v0 = state.velocity_m_sqrt_kg_per_s;
@@ -943,6 +987,85 @@ mod tests {
     }
 
     #[test]
+    fn g1_forced_undamped_steps_preserve_work_without_equilibrium_cancellation() {
+        let state = ModalAcousticState {
+            displacement_m_sqrt_kg: 0.0002,
+            velocity_m_sqrt_kg_per_s: -0.3,
+        };
+        // Independent Taylor solution of q'' = F - omega² q. Each parity
+        // advances by two derivative orders; no equilibrium subtraction or
+        // trigonometric implementation is shared with production.
+        let reference = |omega: f64, force: f64, dt: f64| {
+            let acceleration = force - omega * omega * state.displacement_m_sqrt_kg;
+            let theta_squared = (omega * dt).powi(2);
+            let mut q_odd = state.velocity_m_sqrt_kg_per_s * dt;
+            let mut q_even = 0.5 * acceleration * dt * dt;
+            let mut v_odd = acceleration * dt;
+            let mut v_even = -0.5 * omega * omega * state.velocity_m_sqrt_kg_per_s * dt * dt;
+            let mut q = state.displacement_m_sqrt_kg;
+            let mut v = state.velocity_m_sqrt_kg_per_s;
+            for pair in 0..6 {
+                q += q_odd + q_even;
+                v += v_odd + v_even;
+                let n = f64::from(2 * pair + 1);
+                q_odd *= -theta_squared / ((n + 1.0) * (n + 2.0));
+                v_odd *= -theta_squared / ((n + 1.0) * (n + 2.0));
+                q_even *= -theta_squared / ((n + 2.0) * (n + 3.0));
+                v_even *= -theta_squared / ((n + 2.0) * (n + 3.0));
+            }
+            (q, v)
+        };
+        for omega in [800.0, 1000.0, 3200.0] {
+            for force in [-24_200.0, 24_200.0] {
+                for fraction in [1.0, 0.5, 0.0625] {
+                    let mode = ModalAcousticMode {
+                        angular_frequency_rad_s: omega,
+                        damping_ratio: 0.0,
+                        pressure_per_modal_velocity: C64::ZERO,
+                    };
+                    let mut model =
+                        ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+                    model.restore_states(&[state]).unwrap();
+                    let dt = fraction * model.sample_period_s();
+                    let frame = model.step_duration(&[force], dt).unwrap();
+                    let (q, v) = reference(omega, force, dt);
+                    let actual = model.states()[0];
+                    assert!((actual.displacement_m_sqrt_kg - q).abs() < 1.0e-18);
+                    assert!((actual.velocity_m_sqrt_kg_per_s - v).abs() < 2.0e-15);
+                    assert!(
+                        frame.viscous_dissipation_j.abs() <= frame.dissipation_roundoff_tolerance_j
+                    );
+                }
+            }
+        }
+        // Reproduce the old formula's false energy rejection at the exact
+        // parameters exposed by the attempted contact constraint.
+        let omega = 1000.0;
+        let force = 24_200.0;
+        let dt = 1.0 / 48_000.0;
+        let equilibrium = force / (omega * omega);
+        let centered_q = state.displacement_m_sqrt_kg - equilibrium;
+        let (sine, cosine) = (det::sin(omega * dt), det::cos(omega * dt));
+        let old = ModalAcousticState {
+            displacement_m_sqrt_kg: cosine * centered_q
+                + sine / omega * state.velocity_m_sqrt_kg_per_s
+                + equilibrium,
+            velocity_m_sqrt_kg_per_s: -omega * sine * centered_q
+                + cosine * state.velocity_m_sqrt_kg_per_s,
+        };
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let before = modal_energy(mode, state);
+        let after = modal_energy(mode, old);
+        let work = force * (old.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
+        let allowance = 256.0 * f64::EPSILON * work.abs().max(before).max(after);
+        assert!(work - (after - before) < -allowance);
+    }
+
+    #[test]
     fn g0_cached_full_and_half_transitions_are_bit_exact_in_every_damping_regime() {
         let sample_period_s = f64::from(48_000_u32).recip();
         let state = ModalAcousticState {
@@ -950,6 +1073,7 @@ mod tests {
             velocity_m_sqrt_kg_per_s: 0.1875,
         };
         for damping_ratio in [
+            0.0,
             0.03,
             1.0 - 2.0e-8,
             1.0 - 0.5e-8,
