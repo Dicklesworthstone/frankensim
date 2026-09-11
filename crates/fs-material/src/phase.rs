@@ -13,6 +13,12 @@
 use core::fmt;
 
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_matdb::{
+    ClaimSelection, MaterialCard, PropertyKey, PropertyUsageReceipt, PropertyValue, QueryPoint,
+    SelectionPolicy,
+};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec};
 
 const EQUILIBRIUM_ENTHALPY_PHASE_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.equilibrium-enthalpy-phase.v1";
@@ -88,6 +94,206 @@ pub struct HeatCapacityKnot {
     /// while producing the enthalpy chart; the resulting chart retains its
     /// existing specific-volume interpolation between generated knots.
     pub bulk_density_kg_m3: f64,
+}
+
+/// Explicit source keys and complete endpoints for one fixed-context thermal span.
+#[derive(Clone, Copy, Debug)]
+pub struct HeatCapacitySourceQuery<'a> {
+    /// Specific heat capacity [J/(kg K)], not extensive heat capacity.
+    pub heat_capacity: &'a PropertyKey,
+    /// Bulk density [kg/m3].
+    pub density: &'a PropertyKey,
+    /// Absolute-temperature coordinate in kelvin.
+    pub temperature_axis: &'a str,
+    /// Lower-temperature endpoint with every source condition declared.
+    pub lower: &'a QueryPoint,
+    /// Upper endpoint; all non-temperature coordinates must remain fixed.
+    pub upper: &'a QueryPoint,
+    /// Source selection policy; sources cannot change within the span.
+    pub selection: SelectionPolicy,
+}
+
+/// A single-phase enthalpy chart and its retained Cp/density source receipts.
+/// Source conditions and receipt identities are bound into the chart identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedHeatCapacityCurve {
+    curve: EquilibriumEnthalpyPhaseCurve,
+    receipts: Vec<PropertyUsageReceipt>,
+}
+
+impl ResolvedHeatCapacityCurve {
+    /// Resolve continuously supported Cp and density from one immutable card.
+    /// Both source grids are retained before integrating piecewise-linear Cp.
+    /// The reference enthalpy is declared at the lower endpoint. Phase is an
+    /// explicit caller assumption: this does not discover phase boundaries.
+    /// The interpolation-only error limit has the same meaning as
+    /// [`EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity`].
+    pub fn try_new(
+        card: &MaterialCard,
+        query: HeatCapacitySourceQuery<'_>,
+        phase: SolidLiquidPhase,
+        reference_specific_enthalpy_j_kg: f64,
+        maximum_interpolation_error_j_kg: f64,
+    ) -> Result<Self, PhaseStateError> {
+        let invalid = |what| PhaseStateError::InvalidCurve { what };
+        single_phase_fraction(phase)?;
+        let keys = [query.heat_capacity, query.density];
+        for (key, dims) in keys
+            .iter()
+            .zip([Dims([2, 0, -2, -1, 0, 0]), Dims([-3, 1, 0, 0, 0, 0])])
+        {
+            if key.quantity() != QuantitySpec::dimensional(dims) {
+                return Err(invalid(
+                    "source keys must declare specific heat capacity and bulk density SI dimensions",
+                ));
+            }
+        }
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let mut endpoints = [0.0; 2];
+        for (index, point) in [query.lower, query.upper].iter().enumerate() {
+            let t = point
+                .axes()
+                .get(query.temperature_axis)
+                .copied()
+                .ok_or_else(|| invalid("source query lacks the temperature coordinate"))?;
+            if !t.is_finite()
+                || t <= 0.0
+                || point
+                    .axis_quantities()
+                    .get(query.temperature_axis)
+                    .is_some_and(|q| {
+                        *q != absolute && *q != QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0]))
+                    })
+            {
+                return Err(invalid(
+                    "source temperature must be positive absolute kelvin",
+                ));
+            }
+            endpoints[index] = t;
+        }
+        if endpoints[0] >= endpoints[1]
+            || query.lower.axis_quantities() != query.upper.axis_quantities()
+            || !query
+                .lower
+                .axes()
+                .iter()
+                .filter(|(axis, _)| axis.as_str() != query.temperature_axis)
+                .eq(query
+                    .upper
+                    .axes()
+                    .iter()
+                    .filter(|(axis, _)| axis.as_str() != query.temperature_axis))
+        {
+            return Err(invalid(
+                "source temperatures must increase with fixed non-temperature context and descriptors",
+            ));
+        }
+        let claims = card.claims();
+        let mut temperatures = endpoints.to_vec();
+        for key in keys {
+            let support = claims
+                .query_envelope_typed(
+                    key,
+                    query.lower,
+                    query.upper,
+                    ClaimSelection::Policy(query.selection),
+                )
+                .map_err(|error| PhaseStateError::SourceQuery {
+                    property: key.name().to_owned(),
+                    reason: format!("continuous support required: {error:?}"),
+                })?;
+            let claim = claims
+                .claim(support.lower.receipt.selected)
+                .expect("envelope selected an immutable claim");
+            if let PropertyValue::Curve {
+                abscissa, knots, ..
+            } = &claim.value
+                && abscissa == query.temperature_axis
+            {
+                for &(t, _) in knots {
+                    if t > endpoints[0] && t < endpoints[1] {
+                        if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                            temperatures.sort_by(f64::total_cmp);
+                            temperatures.dedup();
+                            if temperatures
+                                .binary_search_by(|value| value.total_cmp(&t))
+                                .is_ok()
+                            {
+                                continue;
+                            }
+                            if temperatures.len() == MAX_HEAT_CAPACITY_ENTHALPY_KNOTS {
+                                return Err(invalid(
+                                    "combined source temperature grid exceeds the knot budget",
+                                ));
+                            }
+                        }
+                        temperatures.push(t);
+                    }
+                }
+            }
+        }
+        temperatures.sort_by(f64::total_cmp);
+        temperatures.dedup();
+        let mut knots = Vec::with_capacity(temperatures.len());
+        let mut receipts = Vec::with_capacity(2 * temperatures.len());
+        for temperature in temperatures {
+            let point = query
+                .lower
+                .clone()
+                .with(query.temperature_axis, temperature)
+                .map_err(|error| PhaseStateError::SourceQuery {
+                    property: query.temperature_axis.to_owned(),
+                    reason: error.to_string(),
+                })?;
+            let mut values = [0.0; 2];
+            for (index, key) in keys.iter().enumerate() {
+                let answer = claims
+                    .query_typed(key, &point, query.selection)
+                    .map_err(|error| PhaseStateError::SourceQuery {
+                        property: key.name().to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                values[index] = answer.evidence.value.value;
+                receipts.push(answer.receipt);
+            }
+            knots.push(HeatCapacityKnot {
+                temperature_k: temperature,
+                specific_heat_capacity_j_kg_k: values[0],
+                bulk_density_kg_m3: values[1],
+            });
+        }
+        let mut curve = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+            card.content_hash(),
+            phase,
+            reference_specific_enthalpy_j_kg,
+            &knots,
+            maximum_interpolation_error_j_kg,
+        )?;
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-material.sourced-heat-capacity-curve.v1");
+        identity.update(curve.identity().as_bytes());
+        identity.update(&(receipts.len() as u64).to_le_bytes());
+        for receipt in &receipts {
+            identity.update(receipt.content_hash().as_bytes());
+        }
+        curve.identity = identity.finalize();
+        Ok(Self { curve, receipts })
+    }
+
+    /// The source-bound chart accepted by thermal and phase-state consumers.
+    #[must_use]
+    pub const fn curve(&self) -> &EquilibriumEnthalpyPhaseCurve {
+        &self.curve
+    }
+
+    /// Receipts in increasing temperature order, Cp then density at each knot.
+    #[must_use]
+    pub fn receipts(&self) -> &[PropertyUsageReceipt] {
+        &self.receipts
+    }
 }
 
 /// Coarse phase topology selected from an equilibrium mass fraction.
@@ -654,6 +860,13 @@ fn single_phase_fraction(phase: SolidLiquidPhase) -> Result<f64, PhaseStateError
 /// Typed refusal from equilibrium phase-state admission or evaluation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PhaseStateError {
+    /// A source query or its continuous support could not be admitted.
+    SourceQuery {
+        /// Requested source property or coordinate.
+        property: String,
+        /// Original query diagnosis.
+        reason: String,
+    },
     /// The source-provided curve violates a physical or ordering invariant.
     InvalidCurve {
         /// Failed curve invariant.

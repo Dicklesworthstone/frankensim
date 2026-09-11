@@ -225,6 +225,16 @@ homogenization, the P2 milestone.
   floating-point error and the linear-in-temperature density approximation.
   Generated charts cap at 4096 knots before allocation. This is bounded
   numerical construction, not experimental validation or a mechanical model.
+  `ResolvedHeatCapacityCurve::try_new` admits that chart directly from one
+  immutable material card using explicit Cp/density keys and complete typed
+  endpoint queries. Both properties require continuous support over the same
+  fixed-context temperature span. The union of their source knots is retained
+  (at most 4096 distinct temperatures), including density-only knots. Ordered
+  Cp/density receipts remain accessible and are bound into the curve identity.
+  Wrong dimensions, changing non-temperature conditions, unsupported spans and
+  discrete-only data refuse. The reference enthalpy and single-phase choice
+  remain caller assumptions; this ingress does not infer phase stability,
+  phase-transition endpoints, source accuracy or material compatibility.
   `UniformEnthalpyStepInput` and `UniformEnthalpyStep<R>` carry a proposed
   uniform-body heat-transfer step between physical owners without a reverse
   solver dependency. They include specimen mass/geometry, initial chart/state,
