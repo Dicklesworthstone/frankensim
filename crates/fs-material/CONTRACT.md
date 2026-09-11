@@ -147,6 +147,17 @@ homogenization, the P2 milestone.
   scalar and piecewise-linear material claims, requires every other state axis
   to remain fixed, pins both endpoints to one selected claim, and identity-binds
   the complete path and signed `integral(alpha(T) dT)` result.
+  `resolve_mean_thermal_expansion_strain` separately resolves source-declared
+  interval means as engineering strain `mean_alpha * (T_end - T_reference)`.
+  Both positive absolute-temperature coordinates must be typed and constrained
+  by the selected source validity. The derived result retains the parent
+  evidence and binds its reference/endpoint roles in its identity; it refuses
+  nonfinite results and nonpositive length ratios. Callers must explicitly
+  select a mean coefficient: equal dimensions do not establish that convention.
+  This endpoint consequence supplies no continuous alpha law, density law,
+  thermal stress, or propagated statistical uncertainty. The stored steel
+  source integration in `xtask/tests/matdb_pack_cli.rs` covers the five observed
+  intervals, receipt preservation, replay and unsupported-state refusals.
   `resolve_orthotropic_elastic_state_point`
   atomically resolves density plus the nine principal-axis engineering
   constants and refuses a non-positive-definite compliance. Spatial material

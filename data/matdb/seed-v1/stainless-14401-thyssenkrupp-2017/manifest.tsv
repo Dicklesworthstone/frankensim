@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	stainless-14401-thyssenkrupp-2017
+redistribution	permitted	Selected attributed numerical facts and original notes only; no source document, table layout, figures or publisher prose is redistributed
+citation	thyssenkrupp Materials (UK) Ltd, Stainless Steel 1.4401 Material Data Sheet, November 2017, page 2 reference physical properties; https://ucpcdn.thyssenkrupp.com/_legacy/UCPthyssenkruppBAMXUK/assets.files/material-data-sheets/stainless-steel/stainless-steel-1.4401-316.pdf
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	tk14401-physical-reference	properties.tsv	material-tsv-v1
+property	young_modulus	young-modulus	dimensional
+property	mean_linear_expansion_coefficient_from_20c	mean-linear-expansion-coefficient-from-20c	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	source_reference_temperature	source-reference-temperature	absolute-temperature
+axis	source_range_end_temperature	source-range-end-temperature	absolute-temperature
+axis	source_heat_treatment_known	source-heat-treatment-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional

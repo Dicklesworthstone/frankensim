@@ -1871,8 +1871,11 @@ mod common_material_acquisition {
                     let expected_t = base_t + 2.0 * heat / (base_cp + f64::sqrt(base_cp * base_cp + 2.0 * slope * heat));
                     let state = sample.phase_state;
                     assert!((state.specific_enthalpy_j_kg() - expected_h).abs() < 1e-5);
-                    // The Cp-to-enthalpy chart was admitted at 0.001 K above.
-                    assert!((state.temperature_k() - expected_t).abs() < 0.00101);
+                    // Convert chart and checked enthalpy errors [J/kg] to
+                    // temperature using the minimum source Cp [J/(kg K)].
+                    let temperature_tolerance_k = (0.001 + 1e-5) / 877.0 + 1e-8;
+                    assert!((state.temperature_k() - expected_t).abs() < temperature_tolerance_k,
+                        "T={} K, reference={expected_t} K, tolerance={temperature_tolerance_k} K", state.temperature_k());
                     assert_eq!(state.phase(), SolidLiquidPhase::Solid);
                     assert_eq!(state.material_card_identity(), card.card().content_hash());
                     assert_eq!(sample.convection_into_body_w, 0.0);
@@ -1897,6 +1900,125 @@ mod common_material_acquisition {
             "2024-T3 first heating: stored/reopened card, 3 curves, 9 source values, 6 enthalpy and 3 conductivity receipts; 298.15..373.15 K; pack={}",
             path.display()
         );
+    }
+
+    /// G1/G3: source interval means produce reference-length endpoint strains,
+    /// without inventing an instantaneous alpha curve between observations.
+    #[test]
+    fn g1_g3_stored_mean_expansion_reaches_endpoint_strain() {
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_mean_thermal_expansion_strain,
+        };
+
+        let (pack, _) = compile("stainless-14401-thyssenkrupp-2017");
+        let original = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "stainless steel 1.4401".into(),
+                phase: "solid".into(),
+                process: "thyssenkrupp 2017 physical reference; heat treatment unspecified".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let db = fixture_dir().join("steel-mean-expansion.sqlite");
+        {
+            let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(original.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) =
+            store.load_catalog_pack(original.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, original);
+        let card = loaded.card();
+        let property = "mean_linear_expansion_coefficient_from_20c";
+        let claims = card.claims().claims_for(property);
+        let key = &claims[0].1.key;
+        let reference_axis = "source_reference_temperature";
+        let endpoint_axis = "source_range_end_temperature";
+        let mut identities = Vec::new();
+        let mut endpoint_strains = Vec::new();
+        for (endpoint, expected_strain) in [
+            (373.15, 0.00128),
+            (473.15, 0.00297),
+            (573.15, 0.00476),
+            (673.15, 0.00665),
+            (773.15, 0.00864),
+        ] {
+            let at = point(claims[0].1, &[(endpoint_axis, endpoint)]);
+            let resolve = |query: &QueryPoint| {
+                resolve_mean_thermal_expansion_strain(
+                    card,
+                    key,
+                    query,
+                    reference_axis,
+                    endpoint_axis,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+            };
+            let strain = resolve(&at).unwrap();
+            endpoint_strains.push(strain.engineering_strain());
+            assert!((strain.engineering_strain() - expected_strain).abs() < 1e-14);
+            assert_eq!(strain.reference_temperature_k(), 293.15);
+            assert_eq!(strain.endpoint_temperature_k(), endpoint);
+            assert_eq!(strain.resolved().card_identity(), card.content_hash());
+            let parent = strain.resolved().property(property).unwrap();
+            card.claims()
+                .verify_receipt(&parent.answer().receipt)
+                .unwrap();
+            assert_eq!(strain, resolve(&at).unwrap());
+            assert!(!identities.contains(&strain.identity()));
+            identities.push(strain.identity());
+            // A different reference or an unmeasured endpoint cannot reuse
+            // the observed interval mean, even though its units would fit.
+            for overrides in [
+                vec![(reference_axis, 294.15)],
+                vec![(endpoint_axis, endpoint + 0.01)],
+                vec![("source_pressure_known", 1.0)],
+            ] {
+                assert!(resolve(&point(claims[0].1, &overrides)).is_err());
+            }
+            assert!(
+                resolve_mean_thermal_expansion_strain(
+                    card,
+                    key,
+                    &at,
+                    reference_axis,
+                    reference_axis,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+            let untyped = at
+                .axes()
+                .iter()
+                .fold(QueryPoint::new(), |p, (axis, value)| {
+                    p.with(axis, *value).unwrap()
+                });
+            assert!(resolve(&untyped).is_err());
+            eprintln!(
+                "steel interval reference=293.15K endpoint={endpoint}K engineering_strain={} parent={:?}",
+                strain.engineering_strain(),
+                parent.answer().receipt.selected
+            );
+        }
+        // Free expansion per metre at 500 C is 8.64 mm. Treating the mean
+        // coefficients as instantaneous alpha and trapezoid-integrating them
+        // would give 8.08 mm, even with the first interval held at 16e-6/K.
+        let wrong_instantaneous_integral = 80.0 * 16e-6
+            + [16e-6, 16.5e-6, 17e-6, 17.5e-6, 18e-6]
+                .windows(2)
+                .map(|pair| 100.0 * (pair[0] + pair[1]) / 2.0)
+                .sum::<f64>();
+        assert!((endpoint_strains[4] - wrong_instantaneous_integral).abs() > 0.0005);
     }
 
     /// G1/G3: the warm NASA 316 table drives a nonuniform-temperature solve.

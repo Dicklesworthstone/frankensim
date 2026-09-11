@@ -4,7 +4,24 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 182 source bundles, of which 164 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 164 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 183 source bundles, of which 165 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 165 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+
+M03 now also includes `stainless-14401-thyssenkrupp-2017`: the producer's
+reference modulus at 20/200/400/500 °C and five mean expansion coefficients
+from 20 °C to 100/200/300/400/500 °C. The modulus curve explicitly uses linear
+interpolation; expansion retains separate interval observations and cannot be
+passed to the instantaneous-alpha integrator. The first expansion interval
+implies endpoint engineering strain 0.00128 relative to the 20 °C length.
+Heat treatment and pressure are unknown in this physical reference table.
+No common specimen with NASA, continuous thermal strain, warm Cp or Poisson
+ratio is supplied. Next: source-compatible elastic/thermal assembly and a
+total-strain consumer; full M03 remains unfinished.
+Two prebuilt-compiler runs on vmi1152480 admitted all six claims and produced
+identical 16,629-byte packs, with content hash
+`2f580756c82f987938f79cce53ef994671414906db03ed30791a17cc70180fa6`.
+Log: `/tmp/greenosprey-m03-tk14401-prebuilt.log`. This verifies source parsing,
+normalization and pack reproducibility with the existing compiler executable;
+it is not an executed thermoelastic-consumer test.
 
 M03 has a bounded warm thermal addition in `stainless-316-nasa-tp216435`:
 three density/Cp/conductivity curves with nine literal NASA Table 23 values
@@ -34,11 +51,20 @@ existing Dow and Covestro packs. It does not redistribute the article, its
 prose or table layout. The publisher's 2026 CC BY announcement is not claimed
 as a license for this 2024 paper. The first-heating condition is query-enforced;
 the pack does not supply a model of precipitation or repeated thermal cycling.
-Its source-to-enthalpy regression is pending remote verification. The first
-required-remote run failed to compile the new test because it accessed a private
-temperature field. Both accesses now use the public accessor; formatting passes.
-The rerun is blocked by the disk preflight (13.85% free, below 14%). Failed-run
-log: `/tmp/greenosprey-m03-first-heating-2024.log`. No runtime pass is claimed.
+The source/store/reopen/enthalpy/heating regression passed on required-remote
+vmi1152480 on 2026-09-10: one test, zero failures or ignored tests, 0.47 s.
+At 40 s, 0.1 kg heated at 100 W reaches 343.0873876790647 K; doubling mass or
+halving power reaches 320.7798360107183 K. Every sample matches an independent
+piecewise-linear-Cp integral/inverse within the dimensionally derived temperature
+tolerance. Maximum cumulative absolute energy residual is 2.04937e-7 J.
+Source receipts, persistent-store reopening, replay, frozen-Cp causal negative,
+and out-of-domain refusal followed by a valid retry passed. Log:
+`/tmp/frankensim-m03-stored-heating-retry-20260911.log`; test source SHA-256:
+`7434ac4d9d4df8159e5241c9c285819df4c24b0e102a5b9e8312bad15f693af9`.
+This is an insulated uniform-body sensible-heating model, not deformation,
+aging kinetics, spatial gradients or experimental qualification. The earlier
+compile failure and aborted transfer remain historical failed attempts, not
+the status of this corrected test.
 Source-pack compilation has separate bounded evidence: on 2026-09-10 the
 prebuilt `xtask` executable on vmi1152480 compiled this exact source twice,
 admitted all three claims, and decoded both outputs under their content hash.
@@ -46,7 +72,8 @@ Both 10,852-byte outputs compared identical. Compiler executable SHA-256:
 `716e02808960ba94f5b2a3cac4e3c83a1775f17619b60ad494fbf576def3624e`;
 pack content hash: `a9990393297d0365df8a263f21e2b4ca9e264f3a21f44e84f9d1e44aa900f5f1`.
 Log: `/tmp/greenosprey-m03-km2024-prebuilt.log`. This small prebuilt-executable
-check required no Rust rebuild and does not verify the pending enthalpy test.
+check required no Rust rebuild; the separate heating regression above supplies
+the physical-consumer numerical evidence.
 The [2020 bare/clad study](https://pmc.ncbi.nlm.nih.gov/articles/PMC7435902/)
 does carry CC BY 4.0, but starts its thermal measurements at 50 °C and requires
 separate bare/clad and heating-history treatment. That alternative remains an

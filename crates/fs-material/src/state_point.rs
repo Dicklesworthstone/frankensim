@@ -908,6 +908,127 @@ pub fn resolve_isotropic_thermal_expansion_state_point(
     })
 }
 
+/// Endpoint engineering strain derived from a source-declared mean linear
+/// expansion coefficient. The denominator is the length at the reference
+/// temperature; this is neither an instantaneous coefficient nor a path law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeanThermalExpansionStrain {
+    resolved: ResolvedMaterialStatePoint,
+    reference_temperature_k: f64,
+    endpoint_temperature_k: f64,
+    engineering_strain: f64,
+    identity: ContentHash,
+}
+
+impl MeanThermalExpansionStrain {
+    /// Parent property evidence, including its unmodified uncertainty and receipt.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Temperature defining the reference length [K].
+    #[must_use]
+    pub const fn reference_temperature_k(&self) -> f64 {
+        self.reference_temperature_k
+    }
+
+    /// Temperature at which the endpoint strain applies [K].
+    #[must_use]
+    pub const fn endpoint_temperature_k(&self) -> f64 {
+        self.endpoint_temperature_k
+    }
+
+    /// `(L_endpoint - L_reference) / L_reference`.
+    #[must_use]
+    pub const fn engineering_strain(&self) -> f64 {
+        self.engineering_strain
+    }
+
+    /// Identity binding the source, axis roles and algebraic consequence.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Resolve `mean_alpha * (T_endpoint - T_reference)` for one admitted interval.
+///
+/// The caller selects a property documented as a mean engineering-length
+/// coefficient; dimensions alone cannot distinguish it from instantaneous alpha.
+/// Both named temperature coordinates must be explicit in the source validity
+/// and typed query. No continuous interpolation, density law, stress, or new
+/// statistical uncertainty claim is inferred from this endpoint consequence.
+pub fn resolve_mean_thermal_expansion_strain(
+    card: &MaterialCard,
+    mean_coefficient: &PropertyKey,
+    point: &QueryPoint,
+    reference_axis: &str,
+    endpoint_axis: &str,
+    selection: MaterialPropertySelection,
+) -> Result<MeanThermalExpansionStrain, MaterialStatePointError> {
+    if reference_axis == endpoint_axis || mean_coefficient.dims() != INVERSE_TEMPERATURE_DIMS {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "mean expansion requires distinct temperature axes and inverse-kelvin coefficient",
+        });
+    }
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let temperature = |axis: &str| -> Result<f64, MaterialStatePointError> {
+        let quantity = point.axis_quantities().get(axis);
+        let value = point.axes().get(axis).copied();
+        if !matches!(quantity, Some(q) if *q == absolute || *q == QuantitySpec::dimensional(fs_qty::Temperature::DIMS))
+            || !matches!(value, Some(t) if t.is_finite() && t > 0.0)
+        {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "mean expansion requires typed positive absolute temperatures",
+            });
+        }
+        Ok(value.expect("positive temperature validated"))
+    };
+    let reference_temperature_k = temperature(reference_axis)?;
+    let endpoint_temperature_k = temperature(endpoint_axis)?;
+    let requirement =
+        ScalarPropertyRequirement::try_with_key(mean_coefficient, ScalarAdmissibility::Finite)?;
+    let resolved = resolve_material_state_point(card, point, &[requirement], selection)?;
+    let parent = resolved
+        .property(mean_coefficient.name())
+        .expect("required mean coefficient resolved");
+    let claim = card
+        .claims()
+        .claim(parent.answer().receipt.selected)
+        .expect("immutable selected claim");
+    if claim.validity.bound(reference_axis).is_none()
+        || claim.validity.bound(endpoint_axis).is_none()
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "mean expansion interval must be constrained by source validity",
+        });
+    }
+    let engineering_strain = parent.value_si() * (endpoint_temperature_k - reference_temperature_k);
+    if !engineering_strain.is_finite() || engineering_strain <= -1.0 {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "mean expansion must yield a finite positive length ratio",
+        });
+    }
+    let mut identity = DomainHasher::new("org.frankensim.fs-material.mean-expansion-strain.v1");
+    identity.update(resolved.identity().as_bytes());
+    for axis in [reference_axis, endpoint_axis] {
+        identity.update(&(axis.len() as u64).to_le_bytes());
+        identity.update(axis.as_bytes());
+    }
+    identity.update(&engineering_strain.to_bits().to_le_bytes());
+    Ok(MeanThermalExpansionStrain {
+        resolved,
+        reference_temperature_k,
+        endpoint_temperature_k,
+        engineering_strain,
+        identity: identity.finalize(),
+    })
+}
+
 /// One complete material state for the isotropic Zener loss approximation.
 ///
 /// Property receipts retain their original uncertainty. The loss model is
