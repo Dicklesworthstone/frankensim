@@ -87,6 +87,18 @@ calculations through the existing material resolver. The temperatures differ,
 so comparing those calculations is not a controlled same-temperature material
 substitution, and neither point set authorizes a finite heating trajectory.
 
+`stainless-316-nasa-tp216435` retains three literal rows at 273, 300, and 400 K
+from NASA/TP-2010-216435 Table 23 for the report's generic “316 stainless
+steel”: density, specific heat, and thermal conductivity. Linear interpolation
+between the table knots is explicitly an engineering approximation. The NASA
+record is public and permits public use, but the report does not identify UNS
+designation, chemistry, product form, heat treatment, specimen, method,
+pressure, or uncertainty. This source therefore cannot be merged automatically
+with UNS S31600/316L records or the 316 20 °C engineering reference. It
+deliberately excludes the table's separate CTE column, and supplies no Young
+modulus, Poisson ratio, enthalpy, or complete heating profile. Discovery is
+available in [`warm-316-thermal.json`](../../../examples/material-discovery/warm-316-thermal.json).
+
 `dowtherm-sr1-eg50-40-60c` and `dowfrost-pg50-40-60c` retain density,
 specific heat, conductivity and dynamic viscosity from the Dow-authored
 2001 SR-1 and 2007 DOWFROST engineering guides. Each curve has five literal
@@ -203,6 +215,7 @@ check. This bounded dataset does not supply boiling, steam, ice or a fluid solve
 | NASA-CR-71699 | Annealed pure aluminum and copper; pure iron, nickel and titanium; 7075-T6 aluminum; X-750; 304A and 347 stainless; titanium A-110AT | Selected temperature/conductivity tables with explicit linear engineering interpolation, excluding source-marked extrapolation and unrepresented phase discontinuities |
 | NIST cryogenic material pages | 304 and 316 stainless, C26000 brass, 1100 aluminum | Stainless conductivity, heat-capacity, relative-expansion and model-derived instantaneous-expansion interpolation over 77–300 K; modulus over 77–293 K (304) or 77–294 K (316). Other materials retain exact temperatures. Complete coefficients, derivations and source ranges remain in the observations |
 | NASA/TP-3287/REV1 | Aluminum, copper, lead, tin and zinc crystalline, liquid and fusion records | Phase-specific heat capacity and enthalpy, plus fusion energy from paired rows at the same transition temperature and reference state |
+| NASA/TP-2010-216435, Table 23 | Generic “316 stainless steel” | Literal 273/300/400 K density, conductivity, and specific-heat rows with explicit linear engineering interpolation; no UNS/form/heat/pressure identity or complete thermoelastic profile |
 | NASA-CR-144016 | Elemental liquid lead | Compiled temperature-dependent density, conductivity, viscosity and surface-tension rows, retaining source pressure/purity/surface gaps and the explicit conductivity calorie conversion |
 | NBS RP500, Table 2 | Cast-lead sample 1144, 99.9% Pb, sand mold | Measured density at 25 °C and four mean linear-expansion coefficients from 20 °C to 60/100/200/300 °C on the first heating run; individual sample retained, without pooling heating/cooling histories |
 | NBS RP668, Table 5 | Lead conductivity reference standard L.S., cast in a bottom-feed cast-iron mold and machined | Published calibrated conductivity estimate over 0–300 °C, explicitly acknowledging the assumed absolute calibration; no numerical purity or pressure inferred |
@@ -378,6 +391,7 @@ Primary source corpus:
 
 - [NASA thermophysical tables, NASA-CR-71699](https://ntrs.nasa.gov/citations/19660014513)
 - [Thermodynamic Data for Fifty Reference Elements, NASA/TP-3287/REV1](https://ntrs.nasa.gov/citations/20010021116)
+- [Design of Refractory Metal Life Test Heat Pipe and Calorimeter, NASA/TP-2010-216435](https://ntrs.nasa.gov/citations/20100029805)
 - [Diffusion in Liquid Metal Systems, NASA-CR-144016](https://ntrs.nasa.gov/citations/19760003214)
 - [NIST cryogenic material-property index](https://trc.nist.gov/cryogenics/materials/materialproperties.htm)
 - [NBS RP500, cast-lead expansion and density](https://nvlpubs.nist.gov/nistpubs/jres/9/jresv9n5p703_A2b.pdf)

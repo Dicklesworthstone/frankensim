@@ -1685,6 +1685,220 @@ mod common_material_acquisition {
         }
     }
 
+    /// G1/G3: first-heating T3 source values reach the production enthalpy owner.
+    #[test]
+    fn g1_g3_first_heating_2024_t3_reaches_enthalpy() {
+        use fs_conduction::lumped::{
+            BiotGate, LumpedEnthalpyBody, LumpedEnthalpyMarchConfig, LumpedThermalTransport,
+            solve_lumped_enthalpy,
+        };
+        use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+        use fs_matdb::{MaterialStateId, NormalizedMaterialCardPack};
+        use fs_matdb_store::{CatalogPack, MaterialStore};
+        use fs_material::phase::{
+            HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase,
+        };
+
+        let (pack, path) = compile("aluminum-2024-t3-first-heating-km2024");
+        let card = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "EN AW 2024; KM 2024 Table 2 specimen".into(),
+                phase: "solid".into(),
+                process: "T3 sheet, as delivered, first heating".into(),
+                revision: 0,
+            },
+            pack,
+        )
+        .unwrap();
+        let db = fixture_dir().join("first-heating-2024-t3.sqlite");
+        {
+            let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+            store
+                .ingest_bundle(&[CatalogPack::MaterialCard(card.clone())])
+                .unwrap();
+            store.seal_corpus().unwrap();
+        }
+        let store = MaterialStore::open(db.to_str().unwrap()).unwrap();
+        let CatalogPack::MaterialCard(loaded) = store.load_catalog_pack(card.pack_id()).unwrap()
+        else {
+            panic!("wrong stored family")
+        };
+        assert_eq!(loaded, card);
+        let card = loaded;
+        let claims = card.card().claims();
+        for (name, values) in [
+            ("density", [2770.0, 2760.0, 2750.0]),
+            ("specific-heat-capacity", [877.0, 892.0, 918.0]),
+            ("thermal-conductivity", [121.1, 125.2, 133.0]),
+        ] {
+            let claim = claims.claims_for(name)[0].1;
+            for (t, expected) in [298.15, 323.15, 373.15].into_iter().zip(values) {
+                let answer = claims
+                    .query_typed(
+                        &claim.key,
+                        &point(claim, &[("temperature", t)]),
+                        SelectionPolicy::SingleClaimOnly,
+                    )
+                    .unwrap();
+                close(answer.evidence.value.value, expected);
+                claims.verify_receipt(&answer.receipt).unwrap();
+            }
+            for overrides in [
+                vec![("temperature", 293.15)],
+                vec![("temperature", 373.16)],
+                vec![("first-heating", 0.0)],
+                vec![("source-pressure-known", 1.0)],
+            ] {
+                assert!(
+                    claims
+                        .query_typed(
+                            &claim.key,
+                            &point(claim, &overrides),
+                            SelectionPolicy::SingleClaimOnly
+                        )
+                        .is_err()
+                );
+            }
+        }
+        let cp = claims.claims_for("specific-heat-capacity")[0].1;
+        let rho = claims.claims_for("density")[0].1;
+        let lower = point(cp, &[("temperature", 298.15)]);
+        let upper = point(cp, &[("temperature", 373.15)]);
+        let query = HeatCapacitySourceQuery {
+            heat_capacity: &cp.key,
+            density: &rho.key,
+            temperature_axis: "temperature",
+            lower: &lower,
+            upper: &upper,
+            selection: SelectionPolicy::SingleClaimOnly,
+        };
+        let resolved = ResolvedHeatCapacityCurve::try_new(
+            card.card(),
+            query,
+            SolidLiquidPhase::Solid,
+            0.0,
+            0.001,
+        )
+        .unwrap();
+        assert_eq!(resolved.receipts().len(), 6);
+        assert_eq!(
+            resolved,
+            ResolvedHeatCapacityCurve::try_new(
+                card.card(),
+                query,
+                SolidLiquidPhase::Solid,
+                0.0,
+                0.001
+            )
+            .unwrap()
+        );
+        // Independent integration of the literal piecewise-linear Cp ordinates.
+        // This chart is a sensible-heat model, not precipitation/aging kinetics.
+        for t in [298.15, 310.0, 323.15, 348.15, 373.15] {
+            let h = if t <= 323.15 {
+                let dt = t - 298.15;
+                877.0 * dt + 0.5 * (892.0 - 877.0) / 25.0 * dt * dt
+            } else {
+                let dt = t - 323.15;
+                25.0 * (877.0 + 892.0) / 2.0 + 892.0 * dt + 0.5 * (918.0 - 892.0) / 50.0 * dt * dt
+            };
+            let state = resolved.curve().state_at_specific_enthalpy(h).unwrap();
+            assert!(
+                (state.temperature_k() - t).abs() < 0.00001,
+                "T={t} K, h={h} J/kg, actual={} K",
+                state.temperature_k()
+            );
+        }
+        assert!(
+            resolved
+                .curve()
+                .state_at_specific_enthalpy(67363.0)
+                .is_err()
+        );
+        let k = claims.claims_for("thermal-conductivity")[0].1;
+        let transport = LumpedThermalTransport::from_material_card_without_radiation(
+            card.card(),
+            &k.key,
+            "temperature",
+            &[
+                point(k, &[("temperature", 298.15)]),
+                point(k, &[("temperature", 373.15)]),
+            ],
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(transport.conductivity_receipts().len(), 3);
+        for receipt in transport.conductivity_receipts() {
+            claims.verify_receipt(receipt).unwrap();
+        }
+        // Uniform internal heating of an insulated body: m dh/dt = P.
+        // Radiation is disabled as a boundary assumption, not an emissivity
+        // observation. This does not model aging, deformation or gradients.
+        let config = LumpedEnthalpyMarchConfig {
+            initial_specific_enthalpy_j_kg: 0.0,
+            ambient_temperature_k: 298.15,
+            radiation_temperature_k: 298.15,
+            internal_power_w: 100.0,
+            duration_s: 40.0,
+            maximum_step_s: 1.0,
+            maximum_steps: 40,
+            enthalpy_tolerance_j_kg: 1e-7,
+        };
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(&gate, arena, StreamKey { seed: 2024, kernel_id: 53, tile: 0, iteration: 0 }, Budget::INFINITE, ExecMode::Deterministic);
+            let mut final_temperatures = Vec::new();
+            for (mass, power) in [(0.1, 100.0), (0.2, 100.0), (0.1, 50.0)] {
+                let body = LumpedEnthalpyBody::try_new_with_transport(
+                    "first-heating-sheet", mass, 0.01, 0.0,
+                    mass / (2770.0 * 0.01), transport.clone(), resolved.curve(),
+                ).unwrap();
+                let config = LumpedEnthalpyMarchConfig { internal_power_w: power, ..config };
+                let march = solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap();
+                assert_eq!(march, solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap());
+                assert_eq!(march.samples().len(), 41);
+                for sample in march.samples() {
+                    let expected_h = power * sample.time_s / mass;
+                    // Independently invert the integral of the literal linear
+                    // Cp data, using the stable positive quadratic root.
+                    let first_interval_h = 25.0 * (877.0 + 892.0) / 2.0;
+                    let (base_t, base_cp, slope, heat) = if expected_h <= first_interval_h {
+                        (298.15, 877.0, 15.0 / 25.0, expected_h)
+                    } else {
+                        (323.15, 892.0, 26.0 / 50.0, expected_h - first_interval_h)
+                    };
+                    let expected_t = base_t + 2.0 * heat / (base_cp + f64::sqrt(base_cp * base_cp + 2.0 * slope * heat));
+                    let state = sample.phase_state;
+                    assert!((state.specific_enthalpy_j_kg() - expected_h).abs() < 1e-5);
+                    // The Cp-to-enthalpy chart was admitted at 0.001 K above.
+                    assert!((state.temperature_k() - expected_t).abs() < 0.00101);
+                    assert_eq!(state.phase(), SolidLiquidPhase::Solid);
+                    assert_eq!(state.material_card_identity(), card.card().content_hash());
+                    assert_eq!(sample.convection_into_body_w, 0.0);
+                    assert_eq!(sample.radiation_into_body_w, 0.0);
+                }
+                let final_t = march.samples().last().unwrap().phase_state.temperature_k();
+                final_temperatures.push(final_t);
+                assert!(march.cumulative_absolute_energy_residual_j() < 1e-5);
+                // A frozen room-temperature Cp must not pass this trajectory.
+                if mass == 0.1 && power == 100.0 {
+                    assert!((final_t - (298.15 + 40000.0 / 877.0)).abs() > 0.5);
+                }
+                let outside = LumpedEnthalpyMarchConfig { internal_power_w: mass * 70000.0 / config.duration_s, ..config };
+                assert!(solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), outside).is_err());
+                assert_eq!(march, solve_lumped_enthalpy(&cx, &body, BiotGate::corpus_default(), config).unwrap());
+                eprintln!("2024-T3 first heating mass={mass}kg power={power}W duration=40s final={final_t}K energy_residual={}J", march.cumulative_absolute_energy_residual_j());
+            }
+            assert!(final_temperatures[0] > final_temperatures[1] + 20.0);
+            assert!((final_temperatures[1] - final_temperatures[2]).abs() < 1e-7);
+        });
+        println!(
+            "2024-T3 first heating: stored/reopened card, 3 curves, 9 source values, 6 enthalpy and 3 conductivity receipts; 298.15..373.15 K; pack={}",
+            path.display()
+        );
+    }
+
     /// G1/G3: the warm NASA 316 table drives a nonuniform-temperature solve.
     /// This generic source condition is not the exact M02 mechanical specimen.
     #[test]

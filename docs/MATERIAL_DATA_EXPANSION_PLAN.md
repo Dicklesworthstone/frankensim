@@ -4,7 +4,7 @@ Planning snapshot: **2026-09-08**. Based on the current shared working tree, the
 
 The largest everyday gaps at planning time were **liquid water, commodity plastics, ordinary structural steel grades, and usable rubber compounds**. The first implementation now adds bounded liquid-water source data and demonstrates its use in steady conduction. The largest opportunity to reuse existing work is to complete **condition-compatible metal, wood, glass, and construction-material datasets** and connect them to actual consumers. Adding another isolated melting point or hardness reading usually delivers less than supplying the missing density, heat-capacity curve, or modulus that makes an existing simulation usable.
 
-The catalog now has 181 source bundles, of which 163 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 163 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
+The catalog now has 182 source bundles, of which 164 are bulk-material bundles. Those bulk bundles have a median of four populated property names. Multiple bundles can describe the same material under different conditions; these are not 164 complete materials. The [inventory](MATERIAL_DATA_INVENTORY.md) gives exact counts, sizes, paths, and every populated property. “Missing” below means missing from the sourced seed catalog, not absent from every Rust constant, model, example, or test fixture.
 
 M03 has a bounded warm thermal addition in `stainless-316-nasa-tp216435`:
 three density/Cp/conductivity curves with nine literal NASA Table 23 values
@@ -17,6 +17,40 @@ conditions passed, with relative energy closure 1.3703324189659064e-14.
 This generic 316 source cannot fill an exact M02 specimen by name, and supplies
 no elastic constants or expansion convention. Full two-metal transient
 thermoelastic acceptance remains unfinished.
+
+M03 acquisition follow-up (2026-09-10):
+[Manasijević et al., DOI 10.31577/km.2024.1.31](https://kovmat.sav.sk/full.php?cc=1&rr=62&ss=31),
+Table 2, printed page 35, supplies 2024-T3 sheet thermal values at 25, 50 and
+100 °C. At those temperatures, density is 2770/2760/2750 kg/m³, Cp is
+877/892/918 J/(kg K), and first-heating conductivity is 121.1/125.2/133.0 W/(m K).
+The methods matter: only room-temperature density is measured; warm density
+uses a literature expansion model, Cp is a CALPHAD calculation, and conductivity
+is calculated from measured diffusivity, density and Cp. Reheated specimens
+have different conductivity and must remain separate. The source does not fill
+20–25 °C or provide elastic constants. The new
+`aluminum-2024-t3-first-heating-km2024` bundle retains these nine numerical facts
+and original annotations under the same attributed-facts-only policy as the
+existing Dow and Covestro packs. It does not redistribute the article, its
+prose or table layout. The publisher's 2026 CC BY announcement is not claimed
+as a license for this 2024 paper. The first-heating condition is query-enforced;
+the pack does not supply a model of precipitation or repeated thermal cycling.
+Its source-to-enthalpy regression is pending remote verification. The first
+required-remote run failed to compile the new test because it accessed a private
+temperature field. Both accesses now use the public accessor; formatting passes.
+The rerun is blocked by the disk preflight (13.85% free, below 14%). Failed-run
+log: `/tmp/greenosprey-m03-first-heating-2024.log`. No runtime pass is claimed.
+Source-pack compilation has separate bounded evidence: on 2026-09-10 the
+prebuilt `xtask` executable on vmi1152480 compiled this exact source twice,
+admitted all three claims, and decoded both outputs under their content hash.
+Both 10,852-byte outputs compared identical. Compiler executable SHA-256:
+`716e02808960ba94f5b2a3cac4e3c83a1775f17619b60ad494fbf576def3624e`;
+pack content hash: `a9990393297d0365df8a263f21e2b4ca9e264f3a21f44e84f9d1e44aa900f5f1`.
+Log: `/tmp/greenosprey-m03-km2024-prebuilt.log`. This small prebuilt-executable
+check required no Rust rebuild and does not verify the pending enthalpy test.
+The [2020 bare/clad study](https://pmc.ncbi.nlm.nih.gov/articles/PMC7435902/)
+does carry CC BY 4.0, but starts its thermal measurements at 50 °C and requires
+separate bare/clad and heating-history treatment. That alternative remains an
+acquisition lead, not an additional catalog bundle.
 
 The next M03 thermal step now constructs a relative enthalpy chart by
 integrating the sourced linear Cp(T) segments, with an explicit straight-chord

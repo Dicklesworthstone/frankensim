@@ -1,0 +1,40 @@
+frankensim.matdb-source.v1
+observation	covestro-makrolon-2405	Makrolon 2405 injection-molded test specimens	Covestro Makrolon 2405 product data, typical values and processing conditions	This pack retains three attributed producer facts for the named Makrolon 2405 low-viscosity, easy-release polycarbonate injection-molding grade. The source gives typical, nonbinding values that may vary with mold/die, processing, and coloring/pigmentation. Mechanical data are explicitly at 23 C and 50 percent relative humidity; through-plane conductivity is explicitly at 23 C and 50 percent relative humidity. Density appears in the source's Other properties (23 C) section, which supplies a shared 23 C (296.15 K) context, but its row has no individual test-condition entry, so no row-specific density condition beyond that section heading is asserted. The source states injection-molding specimen conditions of 280 C melt, 80 C mold, and 200 mm/s injection velocity, but these processing recommendations do not establish every specimen's realized history. Exact pressure, specimen form, and most orientation details are unstated. The source publishes no specific heat capacity, so this pack cannot support a transient-heat claim. CLTE parallel and normal values are retained as observations over the stated interval without inferring a mean or instantaneous convention. This pack does not claim a temperature-dependent law, creep law, melting point, design allowable, or physical validation.
+observation	density	Makrolon 2405 injection-molded test specimens	Covestro product data, Other properties (23 C), Density, ISO 1183-1	The producer lists density 1200 kg/m3 under an Other properties (23 C) section, with a blank row-level test-condition cell. The section heading supplies a shared source-temperature context of 23 C (296.15 K), while the row-level test-condition cell is blank; source pressure, specimen form, conditioning, relative humidity, and uncertainty remain unstated.
+observation	tensile-modulus	Makrolon 2405 injection-molded test specimens	Covestro product data, Mechanical properties (23 C; 50 percent r. h.), Tensile Modulus, ISO 527-1,-2	The producer lists tensile modulus 2400 MPa at 1 mm/min, retained as 2.4e9 Pa. The source gives 23 C and 50 percent relative humidity for the mechanical table. Test pressure, specimen form, orientation, and uncertainty are unstated; this remains tensile modulus and is not promoted to isotropic Young modulus.
+observation	thermal-conductivity-through-plane	Makrolon 2405 injection-molded test specimens	Covestro product data, Thermal properties, Thermal Conductivity through-plane, ISO 8302	The producer lists through-plane thermal conductivity 0.2 W/(m K) at 23 C and 50 percent relative humidity. The source does not state test pressure, specimen form, or uncertainty; through-plane is the retained measured direction.
+observation	coefficient-linear-thermal-expansion-parallel	Makrolon 2405 injection-molded test specimens	Covestro product data, Thermal properties, CLTE parallel, ISO 11359-1,-2	The producer lists CLTE parallel 0.65e-4/K over 23–55 C. The source does not state a mean or instantaneous convention, so this remains an observation only and is not admitted as a scalar or expansion law.
+observation	coefficient-linear-thermal-expansion-normal	Makrolon 2405 injection-molded test specimens	Covestro product data, Thermal properties, CLTE normal, ISO 11359-1,-2	The producer lists CLTE normal 0.65e-4/K over 23–55 C. The source does not state a mean or instantaneous convention, so this remains an observation only and is not admitted as a scalar or expansion law.
+observation	specific-heat-capacity	Makrolon 2405 injection-molded test specimens	Covestro Makrolon 2405 product data, thermal properties	No specific heat capacity row is published for the exact Makrolon 2405 grade on this source page; no generic polycarbonate value is substituted. A transient heat consumer must refuse this pack unless an independently sourced Cp claim is supplied.
+scalar	density	covestro-makrolon-2405	density	1200	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	source_grade_makrolon_2405	1	1	1
+validity	density	source_temperature_known	1	1	1
+validity	density	source_relative_humidity_known	0	0	1
+validity	density	source_pressure_known	0	0	1
+validity	density	source_specimen_form_known	0	0	1
+validity	density	source_specimen_orientation_known	0	0	1
+validity	density	temperature	296.15	296.15	K
+scalar	tensile-modulus	covestro-makrolon-2405	tensile_modulus	2.4e9	Pa	constant
+uncertainty	tensile-modulus	unstated	-	-	-	-
+validity	tensile-modulus	source_grade_makrolon_2405	1	1	1
+validity	tensile-modulus	source_temperature_known	1	1	1
+validity	tensile-modulus	source_relative_humidity_known	1	1	1
+validity	tensile-modulus	source_pressure_known	0	0	1
+validity	tensile-modulus	source_specimen_form_known	0	0	1
+validity	tensile-modulus	source_specimen_orientation_known	0	0	1
+validity	tensile-modulus	source_test_speed_known	1	1	1
+validity	tensile-modulus	temperature	296.15	296.15	K
+validity	tensile-modulus	relative_humidity	0.5	0.5	1
+validity	tensile-modulus	test_speed	1.6666666666666667e-5	1.6666666666666667e-5	m/s
+scalar	thermal-conductivity	covestro-makrolon-2405	thermal_conductivity	0.2	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	source_grade_makrolon_2405	1	1	1
+validity	thermal-conductivity	source_temperature_known	1	1	1
+validity	thermal-conductivity	source_relative_humidity_known	1	1	1
+validity	thermal-conductivity	source_pressure_known	0	0	1
+validity	thermal-conductivity	source_specimen_form_known	0	0	1
+validity	thermal-conductivity	source_specimen_orientation_known	1	1	1
+validity	thermal-conductivity	temperature	296.15	296.15	K
+validity	thermal-conductivity	relative_humidity	0.5	0.5	1
+validity	thermal-conductivity	through_plane	1	1	1

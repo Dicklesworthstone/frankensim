@@ -1,0 +1,25 @@
+frankensim.matdb-source.v1
+observation	roechling-polystone-g-natural	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Polystone G natural Technical Data Sheet, PIM-ID 591262, pages 1–2	This pack selects three producer facts as nominal engineering inputs for a frozen 25–26 C calculation reference. The author-declared 298.15–299.15 K query domain is not source measurement coverage or a guaranteed-accuracy band. The sheet identifies Polystone G natural as PE-HD/PE 300 and supplies typical guideline values; it does not state a specific selected product form or manufacturing process for the table values. It warns that values vary with semi-finished-product dimensions and crystallization. Source temperature, relative humidity, pressure, specimen form, process, and uncertainty are unstated for these selected thermal facts. Thermal capacity is retained as mass-specific heat capacity because the source unit is kJ/(kg K). No generic polyethylene substitution, melting claim, creep law, pressure qualification, temperature law, design allowable, or physical validation is asserted. The source CLTE and tensile modulus remain observations only.
+observation	density	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Technical Data Sheet, General properties, Density, DIN EN ISO 1183-1	The producer lists density 0.95 g/cm3, converted to 950 kg/m3. The sheet gives no selected product form, process, test temperature, relative humidity, pressure, conditioning, or uncertainty for this value.
+observation	specific-heat-capacity	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Technical Data Sheet, Thermal properties, Thermal capacity, DIN 52612	The producer lists thermal capacity 1.90 kJ/(kg K), retained as mass-specific heat capacity 1900 J/(kg K) from the stated per-mass unit. Measurement temperature, relative humidity, pressure, specimen form, process, and uncertainty are unstated.
+observation	thermal-conductivity	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Technical Data Sheet, Thermal properties, Thermal conductivity, DIN 52612-1	The producer lists thermal conductivity 0.4 W/(m K). Measurement temperature, relative humidity, pressure, specimen form, process, and uncertainty are unstated.
+observation	tensile-modulus	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Technical Data Sheet, Mechanical properties, Tensile modulus of elasticity, DIN EN ISO 527	The producer lists tensile modulus of elasticity 1000 MPa. This is retained as an observation only; no tensile scalar is admitted by this pack. Test temperature, rate, pressure, specimen form, process, direction, and uncertainty are unstated.
+observation	linear-thermal-expansion	Polystone G natural PE-HD/PE 300 semi-finished product	Röchling Technical Data Sheet, Thermal properties, Coefficient of linear thermal expansion, DIN 53752	The producer prints a coefficient range of 150–230 ×10^-6/K. No interval or mean/instantaneous convention is stated, so it remains an observation only and is not admitted as a scalar or expansion law.
+scalar	density	roechling-polystone-g-natural	density	950	kg/m3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	engineering_reference_model	1	1	1
+validity	density	source_temperatures_matched	0	0	1
+validity	density	reference_roechling_polystone_g_natural	1	1	1
+validity	density	temperature	298.15	299.15	K
+scalar	specific-heat-capacity	roechling-polystone-g-natural	specific_heat_capacity	1900	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	engineering_reference_model	1	1	1
+validity	specific-heat-capacity	source_temperatures_matched	0	0	1
+validity	specific-heat-capacity	reference_roechling_polystone_g_natural	1	1	1
+validity	specific-heat-capacity	temperature	298.15	299.15	K
+scalar	thermal-conductivity	roechling-polystone-g-natural	thermal_conductivity	0.4	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	engineering_reference_model	1	1	1
+validity	thermal-conductivity	source_temperatures_matched	0	0	1
+validity	thermal-conductivity	reference_roechling_polystone_g_natural	1	1	1
+validity	thermal-conductivity	temperature	298.15	299.15	K

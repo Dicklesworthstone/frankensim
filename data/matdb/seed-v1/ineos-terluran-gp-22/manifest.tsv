@@ -1,0 +1,18 @@
+frankensim.matdb-manifest.v3
+pack_id	ineos-terluran-gp-22
+redistribution	permitted	Selected attributed numerical facts and original notes only; the INEOS source page and its table layout are not redistributed or licensed
+citation	INEOS Styrolution, TERLURAN GP-22 product page, Properties table; https://www.ineosstyrolutionindia.com/Product/Terluran-_TERLURAN-GP-22_SKU300600120827_lang_th_TH.html?SKU=300600120827&SelectedRegion=Region_Asia
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	ineos-terluran-gp22-properties	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_terluran_gp22	source-grade-terluran-gp22	dimensional
+axis	source_typical_uncolored	source-typical-uncolored	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_processing_condition_known	source-processing-condition-known	dimensional
+axis	source_specimen_condition_known	source-specimen-condition-known	dimensional
+axis	source_specimen_orientation_known	source-specimen-orientation-known	dimensional
+axis	source_test_rate_known	source-test-rate-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	temperature	temperature	absolute-temperature

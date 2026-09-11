@@ -1,0 +1,20 @@
+frankensim.matdb-manifest.v3
+pack_id	covestro-makrolon-2405
+redistribution	permitted	Selected attributed numerical facts and original notes only; the Covestro source page and its table layout are not redistributed or licensed
+citation	Covestro, Makrolon 2405 product data, https://solutions.covestro.com/en/products/makrolon/makrolon-2405_000000000000945088
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	covestro-makrolon-2405	properties.tsv	material-tsv-v1
+property	density	density	dimensional
+property	tensile_modulus	tensile-modulus	dimensional
+property	thermal_conductivity	thermal-conductivity	thermal-conductivity
+axis	source_grade_makrolon_2405	source-grade-makrolon-2405	dimensional
+axis	source_temperature_known	source-temperature-known	dimensional
+axis	source_relative_humidity_known	source-relative-humidity-known	dimensional
+axis	source_pressure_known	source-pressure-known	dimensional
+axis	source_specimen_form_known	source-specimen-form-known	dimensional
+axis	source_specimen_orientation_known	source-specimen-orientation-known	dimensional
+axis	source_test_speed_known	source-test-speed-known	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	relative_humidity	relative-humidity	dimensional
+axis	test_speed	test-speed	dimensional
+axis	through_plane	through-plane	dimensional
