@@ -13,7 +13,7 @@ checked by `xtask check-deps`.
   freezes probe temperatures into the reference TSV manifest. Runs
   known-answer self-checks before any freeze.
 * `pyproject.toml` + `uv.lock` — the pinned environment
-  (scikit-fem 11.0.0, numpy 2.3.1, scipy 1.16.0, blake3 1.0.5,
+  (scikit-fem 12.0.2, numpy 2.5.3, scipy 1.18.1, blake3 1.0.9,
   CPython 3.12).
 
 IMPORTANT: materialize the virtualenv OUTSIDE the repository. `xtask`'s

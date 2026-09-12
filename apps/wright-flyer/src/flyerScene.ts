@@ -86,7 +86,7 @@ export function createFlyerSceneRenderer(
   // until the shadow map existed; ACES keeps the low-sun highlights
   // from clipping to white.
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.12;
   container.appendChild(renderer.domElement);

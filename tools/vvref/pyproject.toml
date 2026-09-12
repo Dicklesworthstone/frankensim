@@ -4,8 +4,8 @@ version = "0.0.1"
 description = "Isolated external-FEM deck runner for Level-B cross-code frozen references (dev-only; never in the FrankenSim runtime dependency graph)."
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "scikit-fem==11.0.0",
-  "numpy==2.3.1",
-  "scipy==1.16.0",
-  "blake3==1.0.5",
+  "scikit-fem==12.0.2",
+  "numpy==2.5.3",
+  "scipy==1.18.1",
+  "blake3==1.0.9",
 ]
