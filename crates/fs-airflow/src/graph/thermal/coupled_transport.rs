@@ -180,3 +180,6 @@ fn at_iteration(error: TransportError, iteration: usize, reference: &[f64]) -> T
 
 #[cfg(test)]
 mod tests;
+
+/// Implicit FEM/air-network tangents and adjoints at a checked coupled state.
+pub mod sensitivity;
