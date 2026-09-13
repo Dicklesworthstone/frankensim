@@ -11,6 +11,8 @@
 //! branch cannot dilute a smaller branch's balance threshold. This composes
 //! the existing nominal model; it does not certify uncertainty or passivity.
 
+pub mod transport;
+
 use std::collections::BTreeSet;
 
 use fs_couple::AitkenRelaxation;
