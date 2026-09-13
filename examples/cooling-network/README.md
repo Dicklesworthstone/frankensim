@@ -89,3 +89,48 @@ All coefficients and mesh data are illustrative declarations. Results remain
 nominal estimates: no temperature-dependent flow, buoyancy, recirculation, contact,
 radiation, discretization bound, uncertainty certification, material-data authority
 or experimental validation is inferred. No new runtime dependency is introduced.
+
+## Adjoint-guided target sizing
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network examples/cooling-network/size-mixed-slab.json
+```
+
+The optional `design` object turns the same request into a design calculation.
+It selects one named surface's effective coefficient, a mean-temperature limit
+for the existing objective region, lower/upper coefficient bounds, a full coupled
+evaluation budget, and temperature/log-coefficient stopping tolerances:
+
+```json
+"design": {
+  "surface": "last-face",
+  "mean_temperature_limit_k": 323,
+  "min_htc_w_m2_k": 10,
+  "max_htc_w_m2_k": 1000,
+  "temperature_tolerance_k": 0.00001,
+  "log_htc_tolerance": 0.0001,
+  "max_evaluations": 80
+}
+```
+
+This requires `objective.gradient=true`. Each candidate changes h on both the
+FEM Robin operator and the air exchanger, solves the solid/mixed-air fixed point,
+and computes the fully coupled derivative. Hydraulics are solved once and held
+fixed. Safeguarded Newton proposals use d(mean wall temperature)/d(log h);
+proposals outside the central 80% of the retained bracket use bisection instead.
+
+The result contains the **passing evaluated field**, its actual coefficients,
+and a `design` summary with the selected h, limit, status, failing lower endpoint,
+log bracket width, all evaluated h/temperature pairs, evaluation count, and total
+shared-solid solves across the search. A feasible declared minimum returns as
+`minimum-feasible`; otherwise `target-bracketed` requires both design tolerances.
+Exhaustion returns exit 6 with no published partial field. The single wall budget
+covers the entire search, not each candidate independently.
+
+For an arbitrary network there is no assumed global monotonicity theorem. If
+both endpoints fail, the command reports a **missing passing endpoint**, not
+proof that no interior design exists. A returned bracket identifies one local
+crossing, not a globally minimal cooling coefficient. Derivative failures and
+unrepresentable steps refuse instead of being interpreted as feasibility.
+The 323 K slab inverse reference is approximately 194.501441754 W/(m² K).
+This sizes an effective coefficient, not a fan, fin geometry or validated part.

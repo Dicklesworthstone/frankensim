@@ -2,11 +2,11 @@ use super::*;
 
 const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/mixed-slab.json"));
 
-fn request() -> Request { Request::parse(FIXTURE).expect("explicit tetrahedral request") }
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn request() -> Request { Request::parse(FIXTURE).expect("explicit tetrahedral request") }
+pub(super) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!((actual - expected).abs() <= tolerance, "{actual:.16e} versus {expected:.16e}");
 }
-fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
+pub(super) fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
     let gate = CancelGate::new_clock_free();
     ArenaPool::new(ArenaConfig::default()).scope(|arena| f(&Cx::new(&gate, arena,
         StreamKey { seed: 41, kernel_id: 717, tile: 0, iteration: 0 }, Budget::INFINITE, ExecMode::Deterministic)))

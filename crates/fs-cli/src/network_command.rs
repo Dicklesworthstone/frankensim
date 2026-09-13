@@ -4,6 +4,7 @@
 
 #[path = "json_read.rs"]
 mod json;
+mod design;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -56,7 +57,7 @@ struct Request {
     seed: u64, graph: LossGraph, boundaries: Vec<FixedPressure>, inlets: Vec<TransportInlet>,
     region_paths: Vec<Vec<String>>, air: TransportAir, mesh: ConductionMesh,
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
-    objective: String, gradient: bool, limits: Limits,
+    objective: String, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
 struct Evaluation {
@@ -121,7 +122,7 @@ impl Request {
     fn parse(text: &str) -> Result<Self> {
         if text.len() as u64 > MAX_INPUT_BYTES { return Err(bad("request exceeds 16 MiB")); }
         let root = J::parse(text).map_err(bad_parse)?;
-        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective"], "request")?;
+        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design"], "request")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) || get(&root, "units")?.as_str() != Some("SI") {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
@@ -246,8 +247,10 @@ impl Request {
         let objective = string(get(o, "mean_wall_region")?, "mean_wall_region")?;
         if !names.contains(&objective) { return Err(bad("objective names an unknown solid surface")); }
         let gradient = boolean(get(o, "gradient")?, "gradient")?;
+        let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names)).transpose()?;
+        if design.is_some() && !gradient { return Err(bad("design requires objective.gradient=true")); }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, objective, gradient, limits })
+            conductivity, source, adiabatic, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -391,9 +394,14 @@ fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
             Budget::INFINITE, ExecMode::Deterministic);
         poll(&cx)?;
         let flow = request.flow(&cx)?;
-        let coefficients = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
-        let evaluated = request.evaluate(&cx, &flow, &coefficients, request.gradient)?;
-        let output = render(request, &flow, &evaluated)?;
+        let output = if let Some(design) = &request.design {
+            let designed = design::solve(request, &cx, &flow, design)?;
+            design::attach(render(request, &flow, &designed.passing)?, &designed)?
+        } else {
+            let coefficients = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
+            let evaluated = request.evaluate(&cx, &flow, &coefficients, request.gradient)?;
+            render(request, &flow, &evaluated)?
+        };
         poll(&cx)?;
         Ok(output)
     })
@@ -440,7 +448,10 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     }
     match result {
         Ok(stdout) => CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() },
-        Err(e) => diagnostic(exit::REFUSED, e, json_mode),
+        Err(e) => {
+            let class = if e.code == "cooling-network-design-budget" { exit::BUDGET } else { exit::REFUSED };
+            diagnostic(class, e, json_mode)
+        }
     }
 }
 
