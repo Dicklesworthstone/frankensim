@@ -18,12 +18,17 @@ pub(super) struct DesignRequest {
 }
 
 impl DesignRequest {
-    pub(super) fn parse(value: &J, surfaces: &BTreeSet<String>) -> Result<Self> {
-        object(value, &["surface", "mean_temperature_limit_k", "min_htc_w_m2_k", "max_htc_w_m2_k",
+    pub(super) fn parse(value: &J, surfaces: &BTreeSet<String>, mean_objective: bool) -> Result<Self> {
+        object(value, &["surface", "mean_temperature_limit_k", "temperature_limit_k", "min_htc_w_m2_k", "max_htc_w_m2_k",
             "temperature_tolerance_k", "log_htc_tolerance", "max_evaluations"], "design")?;
+        let limit = match (value.get("temperature_limit_k"), value.get("mean_temperature_limit_k")) {
+            (Some(limit), None) => positive(limit, "temperature_limit_k")?,
+            (None, Some(limit)) if mean_objective => positive(limit, "mean_temperature_limit_k")?,
+            _ => return Err(bad("design requires temperature_limit_k; the legacy mean_temperature_limit_k is only valid for a mean objective, and both cannot be supplied")),
+        };
         let result = Self {
             surface: string(get(value, "surface")?, "design.surface")?,
-            limit: positive(get(value, "mean_temperature_limit_k")?, "mean_temperature_limit_k")?,
+            limit,
             minimum: positive(get(value, "min_htc_w_m2_k")?, "min_htc_w_m2_k")?,
             maximum: positive(get(value, "max_htc_w_m2_k")?, "max_htc_w_m2_k")?,
             temperature_tolerance: positive(get(value, "temperature_tolerance_k")?, "design.temperature_tolerance_k")?,
@@ -46,6 +51,7 @@ pub(super) struct Designed {
     log_width: f64,
     history: Vec<(f64, f64)>,
     solid_solves: usize,
+    mean_objective: bool,
 }
 
 fn evaluate(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design: &DesignRequest,
@@ -71,12 +77,13 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design
     let lower = evaluate(request, cx, flow, design, design.minimum, &mut history, &mut solid_solves)?;
     if lower.objective <= design.limit {
         return Ok(Designed { passing: lower, surface: design.surface.clone(), limit: design.limit,
-            passing_h: design.minimum, failed_lower: None, log_width: 0.0, history, solid_solves });
+            passing_h: design.minimum, failed_lower: None, log_width: 0.0, history, solid_solves,
+            mean_objective: request.objective.is_mean() });
     }
     let mut passing = evaluate(request, cx, flow, design, design.maximum, &mut history, &mut solid_solves)?;
     if passing.objective > design.limit {
         return Err(Failure { code: "cooling-network-design-bracket", message: format!(
-            "neither endpoint meets the {} K mean-wall limit: lower {} K, upper {} K; this is not a proof of infeasibility between the bounds",
+            "neither endpoint meets the {} K temperature limit: lower {} K, upper {} K; this is not a proof of infeasibility between the bounds",
             design.limit, lower.objective, passing.objective) });
     }
     let mut low_h = design.minimum;
@@ -90,14 +97,15 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design
         let slack = design.limit - passing.objective;
         if width <= design.log_tolerance && slack <= design.temperature_tolerance {
             return Ok(Designed { passing, surface: design.surface.clone(), limit: design.limit,
-                passing_h: high_h, failed_lower: Some((low_h, low_value)), log_width: width, history, solid_solves });
+                passing_h: high_h, failed_lower: Some((low_h, low_value)), log_width: width, history, solid_solves,
+                mean_objective: request.objective.is_mean() });
         }
         let index = passing.coupled.solid.iter().position(|s| s.region == design.surface)
             .ok_or_else(|| bad("design surface missing from evaluated output"))?;
         let derivative = passing.gradient.as_ref().ok_or_else(|| bad("design adjoint was not computed"))?.log_htc[index];
-        // Both endpoints are evaluated. A Newton proposal must lie strictly in
-        // the central 80% of that log-space bracket; otherwise bisect. The
-        // derivative guides work, not the meaning of a passing endpoint.
+        // At a maximum kink this is one active-vertex derivative. It only
+        // proposes a trial; the exact maximum is reselected and evaluated for
+        // every trial, so a branch switch cannot relax the temperature limit.
         let newton = high - (passing.objective - design.limit) / derivative;
         let candidate = if derivative != 0.0 && newton.is_finite()
             && newton > low + 0.1 * width && newton < high - 0.1 * width { newton }
@@ -122,13 +130,15 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, flow: &GraphSolution, design
 
 pub(super) fn attach(result: String, designed: &Designed) -> Result<String> {
     let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-    let failed = match designed.failed_lower {
-        None => "null".to_string(),
-        Some((h, temperature)) => format!("{{\"htc_w_m2_k\":{},\"mean_temperature_k\":{}}}", num(h)?, num(temperature)?),
+    let trial = |h: f64, temperature: f64| -> Result<String> {
+        Ok(format!("{{\"htc_w_m2_k\":{},\"temperature_k\":{},\"mean_temperature_k\":{}}}",
+            num(h)?, num(temperature)?, optional(designed.mean_objective.then_some(temperature))?))
     };
-    let trials = designed.history.iter().map(|&(h, temperature)| {
-        Ok(format!("{{\"htc_w_m2_k\":{},\"mean_temperature_k\":{}}}", num(h)?, num(temperature)?))
-    }).collect::<Result<Vec<_>>>()?.join(",");
+    let failed = match designed.failed_lower {
+        None => "null".to_string(), Some((h, temperature)) => trial(h, temperature)?,
+    };
+    let trials = designed.history.iter().map(|&(h, temperature)| trial(h, temperature))
+        .collect::<Result<Vec<_>>>()?.join(",");
     Ok(format!("{prefix},\"design\":{{\"surface\":{},\"limit_k\":{},\"selected_htc_w_m2_k\":{},\"status\":{},\"failed_lower\":{},\"log_bracket_width\":{},\"evaluations\":{},\"total_solid_solves\":{},\"history\":[{}],\"search_claim\":\"evaluated passing endpoint of a local target bracket, or feasible declared minimum; no global optimality or infeasibility proof\"}}}}\n",
         quote(&designed.surface), num(designed.limit)?, num(designed.passing_h)?,
         quote(if designed.failed_lower.is_none() { "minimum-feasible" } else { "target-bracketed" }),

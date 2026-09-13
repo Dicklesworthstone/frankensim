@@ -102,7 +102,7 @@ fn incomplete_ambiguous_and_unbalanced_solid_inputs_refuse() {
         valid.replace("\"watts\":1", "\"watts\":-1"),
         valid.replace("\"component_power\":", "\"source_w_m3\":0,\"component_power\":"),
         layered(&r).replace("\"source_w_m3\":0", "\"conductivity_w_m_k\":10,\"source_w_m3\":0"),
-        layered(&r).replace("\"spreader\",", "\"missing\","),
+        layered(&r).replace("\"element_materials\":[\"spreader\"", "\"element_materials\":[\"missing\""),
         r#"{"materials":[],"element_materials":[],"source_w_m3":0}"#.to_string(),
     ] {
         assert!(SolidData::parse(&J::parse(&text).unwrap(), &r.mesh).is_err(), "accepted {text}");

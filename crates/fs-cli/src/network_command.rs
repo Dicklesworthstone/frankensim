@@ -6,6 +6,7 @@
 mod json;
 mod design;
 mod solid_data;
+mod objective;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -32,8 +33,8 @@ use json::JsonValue as J;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
-const NO_CLAIM: &str = "nominal fixed-geometry/fixed-flow linear-solid model; declared constant material, density, specific heat and Robin coefficients; no CFD, recirculation, contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve an explicitly declared pressure network and tetrahedral solid together,\nincluding downstream air heating, split/merge mixing and optional fully coupled\nmean-wall-temperature gradients. All quantities use coherent SI with unit-bearing\nfield names. Request schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md and mixed-slab.json.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
+const NO_CLAIM: &str = "nominal fixed-geometry/fixed-flow linear-solid model; caller-declared temperature-independent isotropic materials, density, specific heat and Robin coefficients; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a declared pressure network and heterogeneous tetrahedral solid together,\nincluding component heat sources, downstream mixing and optional fully coupled\nmean or peak temperature sensitivities and target sizing. All quantities use\ncoherent SI with unit-bearing fields. Request schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md and size-heterogeneous-hotspot.json.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -59,12 +60,13 @@ struct Request {
     region_paths: Vec<Vec<String>>, air: TransportAir, mesh: ConductionMesh,
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
     solid_data: solid_data::SolidData,
-    objective: String, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
+    objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
 struct Evaluation {
     coupled: CoupledTransportSolution, temperatures: Vec<f64>, gradient: Option<CoupledGradient>,
-    objective: f64, robin_total_w: f64, source_total_w: f64, htc: Vec<f64>,
+    objective: f64, objective_state: objective::ObjectiveState,
+    robin_total_w: f64, source_total_w: f64, htc: Vec<f64>,
 }
 
 fn object<'a>(value: &'a J, allowed: &[&str], path: &str) -> Result<&'a J> {
@@ -244,11 +246,10 @@ impl Request {
         }
         if owned_regions != names { return Err(bad("every solid surface must belong to exactly one branch")); }
         let graph = LossGraph::new(node_count, branches).map_err(producer)?;
-        let o = object(get(&root, "objective")?, &["mean_wall_region", "gradient"], "objective")?;
-        let objective = string(get(o, "mean_wall_region")?, "mean_wall_region")?;
-        if !names.contains(&objective) { return Err(bad("objective names an unknown solid surface")); }
+        let o = get(&root, "objective")?;
+        let objective = objective::Objective::parse(o, &surfaces, &mesh)?;
         let gradient = boolean(get(o, "gradient")?, "gradient")?;
-        let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names)).transpose()?;
+        let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names, objective.is_mean())).transpose()?;
         if design.is_some() && !gradient { return Err(bad("design requires objective.gradient=true")); }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
             conductivity, source, adiabatic, solid_data, objective, gradient, limits, design })
@@ -324,12 +325,12 @@ impl Request {
         if let Some(error) = failure { return Err(error); }
         let coupled = coupled.map_err(producer)?;
         let linear = final_linear.ok_or_else(|| bad("coupling produced no solid field"))?;
-        let objective_index = names.iter().position(|name| *name == self.objective.as_str()).ok_or_else(|| bad("missing objective surface"))?;
-        let objective = coupled.solid[objective_index].mean_wall_temperature_k;
+        let objective_state = self.objective.evaluate(cx, &linear.primal().temperature, &coupled.solid)?;
+        let objective = objective_state.value;
         let gradient = if want_gradient {
             let binding = CoupledLinearization::new(cx, &network, &linear, &gate).map_err(producer)?;
             let mut weights = binding.zero_objective();
-            weights.wall_temperatures[objective_index] = 1.0;
+            objective_state.seed(&mut weights);
             Some(binding.pullback(cx, &weights, InterfaceSolveConfig { max_iterations: self.limits.derivative,
                 absolute_tolerance: self.limits.relative, relative_tolerance: self.limits.relative,
                 relaxation: self.limits.relaxation }).map_err(producer)?)
@@ -348,7 +349,7 @@ impl Request {
         }
         poll(cx)?;
         Ok(Evaluation { coupled, temperatures: linear.primal().temperature.clone(), gradient,
-            objective, robin_total_w: robin, source_total_w: source_w,
+            objective, objective_state, robin_total_w: robin, source_total_w: source_w,
             htc: linear.ports().iter().map(|port| port.htc_w_m2_k).collect() })
     }
 }
@@ -375,11 +376,13 @@ fn numbers(values: &[f64]) -> Result<String> {
 fn optional(n: Option<f64>) -> Result<String> { n.map_or_else(|| Ok("null".into()), num) }
 
 fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Result<String> {
+    let mean = request.objective.is_mean();
     let mut walls = Vec::new();
     for (i, state) in evaluated.coupled.solid.iter().enumerate() {
-        walls.push(format!("{{\"region\":{},\"area_m2\":{},\"htc_w_m2_k\":{},\"mean_temperature_k\":{},\"reference_k\":{},\"outward_heat_w\":{},\"dmean_dlog_htc\":{}}}",
+        walls.push(format!("{{\"region\":{},\"area_m2\":{},\"htc_w_m2_k\":{},\"mean_temperature_k\":{},\"reference_k\":{},\"outward_heat_w\":{},\"dmean_dlog_htc\":{},\"dobjective_dlog_htc\":{}}}",
             quote(&state.region), num(state.area_m2)?, num(evaluated.htc[i])?, num(state.mean_wall_temperature_k)?,
             num(evaluated.coupled.reference_temperatures_k[i])?, num(state.heat_rate_w)?,
+            optional(evaluated.gradient.as_ref().filter(|_| mean).map(|g| g.log_htc[i]))?,
             optional(evaluated.gradient.as_ref().map(|g| g.log_htc[i]))?));
     }
     let mut branches = Vec::new();
@@ -389,14 +392,18 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
     }
     let nodes = evaluated.coupled.transport.node_temperatures_k.iter().copied().map(optional).collect::<Result<Vec<_>>>()?.join(",");
     Ok(format!("{{\"schema\":{},\"authority\":\"nominal-estimate\",\"no_claim\":{},\"seed\":{},\"objective_region\":{},\"objective_mean_k\":{},\"coupling_iterations\":{},\"graph_sweeps\":{},\"source_w\":{},\"robin_out_w\":{},\"air_heat_imbalance_w\":{},\"walls\":[{}],\"branches\":[{}],\"node_temperatures_k\":[{}],\"solid_temperatures_k\":{},\"dmean_dinlet_k\":{},\"adjoint_residual\":{}}}\n",
-        quote(RESULT_SCHEMA), quote(NO_CLAIM), quote(&request.seed.to_string()), quote(&request.objective), num(evaluated.objective)?,
+        quote(RESULT_SCHEMA), quote(NO_CLAIM), quote(&request.seed.to_string()),
+        request.objective.region().map_or_else(|| "null".into(), quote), optional(mean.then_some(evaluated.objective))?,
         evaluated.coupled.iterations, flow.sweeps, num(evaluated.source_total_w)?, num(evaluated.robin_total_w)?,
         num(evaluated.coupled.transport.heat_imbalance_w)?, walls.join(","), branches.join(","), nodes,
-        numbers(&evaluated.temperatures)?, evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
+        numbers(&evaluated.temperatures)?, evaluated.gradient.as_ref().filter(|_| mean).map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{}}}\n", request.solid_data.render(request.conductivity, request.source)?))
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{}}}\n",
+                request.solid_data.render(request.conductivity, request.source)?,
+                request.objective.render(&evaluated.objective_state, &request.mesh)?,
+                evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into())))
         })
 }
 
