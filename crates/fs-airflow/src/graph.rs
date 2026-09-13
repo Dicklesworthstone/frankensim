@@ -22,6 +22,9 @@ use fs_qty::{Pressure, VolumetricFlowRate};
 
 use crate::LossElement;
 
+mod fan;
+pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
+
 /// An oriented passive branch; its orientation does not constrain flow sign.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphBranch {
