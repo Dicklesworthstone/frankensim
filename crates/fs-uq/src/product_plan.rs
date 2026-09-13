@@ -155,7 +155,7 @@ pub enum PropagationMethod {
 /// Status of the uncertainty propagation execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UqStatus {
-    /// Completed all planned samples or reached target variance.
+    /// Completed all planned samples; no statistical stopping bound is claimed.
     Complete,
     /// Stopped honestly due to sample or time budget exhaustion.
     BudgetTruncated,
@@ -246,19 +246,21 @@ pub struct UqResult {
     pub qoi_name: String,
     /// Algorithm used for propagation.
     pub method_used: PropagationMethod,
-    /// Number of distinct evaluations completed.
+    /// Number of evaluator calls, including a terminal rejected evaluation.
     pub samples_evaluated: usize,
-    /// Sample mean.
+    /// Sample mean, absent when there are no observations or the run refused.
     pub mean: Option<f64>,
-    /// Sample standard deviation.
+    /// Sample standard deviation, absent when fewer than two observations exist
+    /// or a partial-run dispersion cannot be represented as a finite f64.
     pub std_dev: Option<f64>,
     /// Quantile percentiles [p05, p50, p95].
     pub percentiles: Option<[f64; 3]>,
-    /// Empirical min/max bounds observed.
+    /// Empirical min/max; [0, 0] is a placeholder when statistics are absent.
     pub interval_bounds: [f64; 2],
     /// Empirical probability of meeting compliance ceiling.
     pub probability_of_compliance: Option<f64>,
-    /// Standard error of the mean estimate.
+    /// Descriptive standard error; unavailable (numeric placeholder 0) when
+    /// `std_dev` is None. Not an optional-stopping confidence bound.
     pub sampling_error: f64,
     /// Assigned evidence color classification.
     pub evidence_color: Color,
@@ -286,128 +288,21 @@ impl UqResult {
 pub struct UqPropagator;
 
 impl UqPropagator {
-    /// Execute uncertainty propagation with an evaluation closure.
+    /// Execute the entire admitted plan. For fallible solvers, cancellation,
+    /// bounded work chunks, and resumption use [`crate::UqExecution`].
     pub fn run<F: Fn(&[f64]) -> f64>(plan: &UqPlan, evaluator: F) -> UqResult {
-        let factor = match admit_plan(plan) {
-            Ok(factor) => factor,
-            Err(reason) => return refused(plan, reason, 0),
-        };
-
-        // 2. Sample Generation
-        let n_samples = plan.budget_max_samples;
-        let mut qoi_values = Vec::with_capacity(n_samples);
-        let dim = plan.parameters.len();
-
-        for sample_index in 0..n_samples {
-            let mut stream = fs_rand::StreamKey {
-                seed: plan.seed,
-                kernel: 0x0517,
-                tile: sample_index as u32,
-            }
-            .stream();
-            let normals: Vec<f64> = if factor.is_some() {
-                (0..dim).map(|_| stream.next_normal()).collect()
-            } else {
-                Vec::new()
-            };
-            let mut sample_params = Vec::with_capacity(dim);
-            for (i, p) in plan.parameters.iter().enumerate() {
-                let val = match &p.kind {
-                    UncertaintyKind::AleatoryGaussian { mean, std_dev } => {
-                        let z = factor.as_ref().map_or_else(
-                            || stream.next_normal(),
-                            |l| (0..=i).map(|j| l[i][j] * normals[j]).sum(),
-                        );
-                        mean + std_dev * z
-                    }
-                    UncertaintyKind::AleatoryUniform { lo, hi } => {
-                        let u = stream.next_f64();
-                        (1.0 - u) * lo + u * hi
-                    }
-                    _ => unreachable!("admission requires an implemented probability measure"),
-                };
-                if !val.is_finite() {
-                    return refused(plan, "sampled parameter overflowed", sample_index);
-                }
-                sample_params.push(val);
-            }
-            let qoi_val = evaluator(&sample_params);
-            if !qoi_val.is_finite() {
-                return refused(plan, "model returned a non-finite QoI", sample_index + 1);
-            }
-            qoi_values.push(qoi_val);
-        }
-
-        // 3. Compute statistics
-        // Normalize before summation/differencing: finite constant outputs near
-        // f64::MAX must not overflow into a spurious successful statistic.
-        let scale = qoi_values.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-        let divisor = if scale == 0.0 { 1.0 } else { scale };
-        let normalized_mean =
-            qoi_values.iter().map(|x| x / divisor).sum::<f64>() / n_samples as f64;
-        let mean = normalized_mean * scale;
-        let variance = qoi_values
-            .iter()
-            .map(|x| (x / divisor - normalized_mean).powi(2))
-            .sum::<f64>()
-            / (n_samples - 1) as f64;
-        let std_dev = variance.sqrt() * scale;
-        if !mean.is_finite() || !std_dev.is_finite() {
-            return refused(plan, "QoI statistics exceed finite f64 range", n_samples);
-        }
-        let mut sorted = qoi_values.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-
-        let idx_05 = ((n_samples as f64 * 0.05) as usize).min(n_samples - 1);
-        let idx_50 = ((n_samples as f64 * 0.50) as usize).min(n_samples - 1);
-        let idx_95 = ((n_samples as f64 * 0.95) as usize).min(n_samples - 1);
-
-        let p05 = sorted[idx_05];
-        let p50 = sorted[idx_50];
-        let p95 = sorted[idx_95];
-
-        let min_val = sorted[0];
-        let max_val = sorted[n_samples - 1];
-
-        // Probability of compliance
-        let all_have_prob = plan
-            .parameters
-            .iter()
-            .all(|p| p.kind.has_probability_measure());
-        let probability_of_compliance = if all_have_prob {
-            plan.compliance_threshold.map(|thresh| {
-                let compliant_count = qoi_values.iter().filter(|&&v| v <= thresh).count();
-                (compliant_count as f64) / (n_samples as f64)
-            })
-        } else {
-            None // Strictly refuse P(compliance) if probability measure is missing or purely epistemic!
-        };
-
-        let sampling_error = std_dev / (n_samples as f64).sqrt();
-
-        let evidence_color = Color::Estimated {
-            estimator: "empirical-monte-carlo; no confidence or model-error bound".to_string(),
-            dispersion: sampling_error,
-        };
-
-        UqResult {
-            qoi_name: plan.target_qoi.clone(),
-            method_used: plan.method,
-            samples_evaluated: n_samples,
-            mean: Some(mean),
-            std_dev: Some(std_dev),
-            percentiles: Some([p05, p50, p95]),
-            interval_bounds: [min_val, max_val],
-            probability_of_compliance,
-            sampling_error,
-            evidence_color,
-            status: UqStatus::Complete,
-            rejection_reason: None,
+        match crate::UqExecution::new(plan) {
+            Ok(mut execution) => execution.advance(
+                plan.budget_max_samples,
+                || false,
+                |parameters| Ok::<f64, core::convert::Infallible>(evaluator(parameters)),
+            ),
+            Err(reason) => refused(plan, reason, 0),
         }
     }
 }
 
-fn refused(plan: &UqPlan, reason: impl Into<String>, evaluated: usize) -> UqResult {
+pub(crate) fn refused(plan: &UqPlan, reason: impl Into<String>, evaluated: usize) -> UqResult {
     UqResult {
         qoi_name: plan.target_qoi.clone(),
         method_used: plan.method,
@@ -430,7 +325,7 @@ fn refused(plan: &UqPlan, reason: impl Into<String>, evaluated: usize) -> UqResu
 /// Returns a numerical PSD factor for an explicitly joint Gaussian model.
 /// Correlation alone does not specify a non-Gaussian copula, so those models
 /// refuse. This is floating-point admission, not an interval PSD certificate.
-fn admit_plan(plan: &UqPlan) -> Result<Option<Vec<Vec<f64>>>, &'static str> {
+pub(crate) fn admit_plan(plan: &UqPlan) -> Result<Option<Vec<Vec<f64>>>, &'static str> {
     let dim = plan.parameters.len();
     if dim == 0 || dim > 256 || !(2..=1_000_000).contains(&plan.budget_max_samples) {
         return Err("supported envelope: 1..=256 parameters and 2..=1000000 samples");

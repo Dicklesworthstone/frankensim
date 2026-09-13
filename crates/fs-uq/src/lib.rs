@@ -17,10 +17,12 @@ pub mod chance;
 pub mod kl;
 pub mod mlmc;
 pub mod pce;
+pub mod product_execution;
 pub mod product_plan;
 pub mod seismic;
 
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
+pub use product_execution::UqExecution;
 pub use product_plan::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqPlan,
     UqPropagator, UqResult, UqStatus,
