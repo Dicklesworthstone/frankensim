@@ -8,6 +8,8 @@ mod design;
 mod solid_data;
 mod objective;
 mod fan_drive;
+mod convection;
+mod fan_speed;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -34,8 +36,8 @@ use json::JsonValue as J;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
-const NO_CLAIM: &str = "nominal fixed-geometry/fixed-flow linear-solid model; caller-declared temperature-independent isotropic materials, density, specific heat and Robin coefficients; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a declared pressure network and heterogeneous tetrahedral solid together,\nincluding component heat sources, downstream mixing and optional fully coupled\nmean or peak temperature sensitivities and target sizing. All quantities use\ncoherent SI with unit-bearing fields. Request schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md and size-heterogeneous-hotspot.json.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
+const NO_CLAIM: &str = "nominal fixed-geometry linear-solid model; hydraulics and coefficients frozen within each thermal solve; caller-declared temperature-independent isotropic materials and fluid properties; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, downstream mixing and declared or flow-derived\nduct convection. Compute mean/peak temperatures, conditional thermal gradients,\nand effective-h or full fan-speed target searches. All quantities use coherent\nSI. Request schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md and FAN_COOLING.md.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -49,7 +51,10 @@ fn producer(error: impl fmt::Display) -> Failure { Failure { code: "cooling-netw
 fn poll(cx: &Cx<'_>) -> Result<()> { cx.checkpoint().map_err(|_| Failure { code: "cooling-network-cancelled", message: "work cancelled before publication".into() }) }
 
 #[derive(Debug)]
-struct Surface { name: String, faces: BTreeSet<[u32; 3]>, h: f64, area: f64 }
+struct Surface {
+    name: String, faces: BTreeSet<[u32; 3]>, h: f64, area: f64,
+    convection: Option<convection::Law>,
+}
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     graph: usize, coupling: usize, linear: usize, derivative: usize, wall_seconds: f64,
@@ -62,6 +67,7 @@ struct Request {
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
     solid_data: solid_data::SolidData,
     fan: Option<fan_drive::FanDrive>,
+    fan_speed_design: Option<fan_speed::FanSpeedDesign>,
     objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
@@ -69,6 +75,7 @@ struct Evaluation {
     coupled: CoupledTransportSolution, temperatures: Vec<f64>, gradient: Option<CoupledGradient>,
     objective: f64, objective_state: objective::ObjectiveState,
     robin_total_w: f64, source_total_w: f64, htc: Vec<f64>,
+    convection: Vec<convection::Derived>,
 }
 
 fn object<'a>(value: &'a J, allowed: &[&str], path: &str) -> Result<&'a J> {
@@ -128,7 +135,7 @@ impl Request {
     fn parse(text: &str) -> Result<Self> {
         if text.len() as u64 > MAX_INPUT_BYTES { return Err(bad("request exceeds 16 MiB")); }
         let root = J::parse(text).map_err(bad_parse)?;
-        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design"], "request")?;
+        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design", "fan_speed_design"], "request")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) || get(&root, "units")?.as_str() != Some("SI") {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
@@ -186,10 +193,10 @@ impl Request {
         let mut owned_faces = BTreeSet::new();
         let mut surfaces = Vec::new();
         for entry in array(get(s, "surfaces")?, "surfaces", 4096)? {
-            object(entry, &["name", "faces", "htc_w_m2_k"], "surface")?;
+            object(entry, &["name", "faces", "htc_w_m2_k", "convection"], "surface")?;
             let name = string(get(entry, "name")?, "surface.name")?;
             if !names.insert(name.clone()) { return Err(bad(format!("duplicate surface {name}"))); }
-            let h = positive(get(entry, "htc_w_m2_k")?, "htc_w_m2_k")?;
+            let (h, convection) = convection::parse(entry)?;
             let mut faces = BTreeSet::new();
             for entry in array(get(entry, "faces")?, "surface.faces", 200_000)? {
                 let mut face = indices::<3>(entry, "surface face", mesh.vertex_count())?;
@@ -202,7 +209,7 @@ impl Request {
             if faces.is_empty() { return Err(bad(format!("surface {name} has no faces"))); }
             // Same order as the production boundary integrator and Robin ports.
             let area: f64 = mesh.boundary().iter().filter(|f| faces.contains(&f.vertices)).map(|f| f.area).sum();
-            surfaces.push(Surface { name, faces, h, area });
+            surfaces.push(Surface { name, faces, h, area, convection });
         }
         if surfaces.is_empty() { return Err(bad("at least one heat-exchanging surface required")); }
         let adiabatic = boolean(get(s, "adiabatic_remainder")?, "adiabatic_remainder")?;
@@ -240,10 +247,22 @@ impl Request {
         let o = get(&root, "objective")?;
         let objective = objective::Objective::parse(o, &surfaces, &mesh)?;
         let gradient = boolean(get(o, "gradient")?, "gradient")?;
+        if root.get("design").is_some() && root.get("fan_speed_design").is_some() {
+            return Err(bad("choose effective-h design or fan-speed design, not both"));
+        }
+        let fan_speed_design = root.get("fan_speed_design").map(|value| {
+            let drive = fan.as_ref().ok_or_else(|| bad("fan_speed_design requires hydraulics.fan"))?;
+            fan_speed::FanSpeedDesign::parse(value, drive)
+        }).transpose()?;
         let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names, objective.is_mean())).transpose()?;
         if design.is_some() && !gradient { return Err(bad("design requires objective.gradient=true")); }
+        if let Some(target) = root.get("design").and_then(|d| d.str_field("surface")) {
+            if surfaces.iter().any(|s| s.name == target && s.convection.is_some()) {
+                return Err(bad("effective-h design cannot override a flow-derived convection law"));
+            }
+        }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, solid_data, fan, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, fan, fan_speed_design, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -271,6 +290,8 @@ impl Request {
 
     fn evaluate(&self, cx: &Cx<'_>, flow: &GraphSolution, htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Evaluation> {
         poll(cx)?;
+        let (coefficients, convection) = convection::resolve(self, cx, flow, htc)?;
+        let htc = &coefficients;
         let by_name: BTreeMap<_, _> = self.surfaces.iter().map(|s| (s.name.as_str(), s)).collect();
         let models = self.region_paths.iter().map(|path| {
             if path.is_empty() { return Ok(BranchThermalModel::Adiabatic); }
@@ -318,6 +339,7 @@ impl Request {
         });
         if let Some(error) = failure { return Err(error); }
         let coupled = coupled.map_err(producer)?;
+        for derived in &convection { derived.check_direction(&coupled.solid, self.limits.heat)?; }
         let linear = final_linear.ok_or_else(|| bad("coupling produced no solid field"))?;
         let objective_state = self.objective.evaluate(cx, &linear.primal().temperature, &coupled.solid)?;
         let objective = objective_state.value;
@@ -344,7 +366,7 @@ impl Request {
         poll(cx)?;
         Ok(Evaluation { coupled, temperatures: linear.primal().temperature.clone(), gradient,
             objective, objective_state, robin_total_w: robin, source_total_w: source_w,
-            htc: linear.ports().iter().map(|port| port.htc_w_m2_k).collect() })
+            htc: linear.ports().iter().map(|port| port.htc_w_m2_k).collect(), convection })
     }
 }
 fn bad_parse(error: json::JsonReadError) -> Failure { bad(error.to_string()) }
@@ -394,10 +416,11 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{}}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"gradient_scope\":\"thermal inlet and effective-coefficient sensitivities at fixed hydraulics and frozen fluid properties; not fan-speed or channel-geometry derivatives\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
-                evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into())))
+                evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
+                evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(",")))
         })
 }
 
@@ -406,6 +429,9 @@ fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
         let cx = Cx::new(gate, arena, StreamKey { seed: request.seed, kernel_id: 717, tile: 0, iteration: 0 },
             Budget::INFINITE, ExecMode::Deterministic);
         poll(&cx)?;
+        if let Some(design) = &request.fan_speed_design {
+            return fan_speed::solve(request, &cx, design);
+        }
         let flow = request.flow(&cx)?;
         let output = if let Some(design) = &request.design {
             let designed = design::solve(request, &cx, &flow, design)?;
