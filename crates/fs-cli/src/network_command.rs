@@ -7,6 +7,7 @@ mod json;
 mod design;
 mod solid_data;
 mod objective;
+mod fan_drive;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -60,6 +61,7 @@ struct Request {
     region_paths: Vec<Vec<String>>, air: TransportAir, mesh: ConductionMesh,
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
     solid_data: solid_data::SolidData,
+    fan: Option<fan_drive::FanDrive>,
     objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
@@ -206,20 +208,9 @@ impl Request {
         let adiabatic = boolean(get(s, "adiabatic_remainder")?, "adiabatic_remainder")?;
         if !adiabatic && owned_faces.len() != exterior.len() { return Err(bad("every exterior face must be owned unless adiabatic_remainder is true")); }
         let (solid_data, conductivity, source) = solid_data::SolidData::parse(s, &mesh)?;
-        let hyd = object(get(&root, "hydraulics")?, &["node_count", "boundaries", "branches"], "hydraulics")?;
+        let hyd = object(get(&root, "hydraulics")?, &["node_count", "boundaries", "fan", "branches"], "hydraulics")?;
         let node_count = count(get(hyd, "node_count")?, "node_count", 4096)?;
-        let mut boundaries = Vec::new();
-        let mut inlets = Vec::new();
-        let mut fixed = BTreeSet::new();
-        for entry in array(get(hyd, "boundaries")?, "boundaries", node_count)? {
-            object(entry, &["node", "pressure_pa", "temperature_k"], "boundary")?;
-            let node = integer(get(entry, "node")?, "boundary.node", node_count - 1)?;
-            if !fixed.insert(node) { return Err(bad("duplicate hydraulic boundary")); }
-            boundaries.push(FixedPressure { node, pressure: Pressure::new(number(get(entry, "pressure_pa")?, "pressure_pa")?) });
-            if let Some(temp) = entry.get("temperature_k") {
-                inlets.push(TransportInlet { node, temperature: Temperature::new(positive(temp, "temperature_k")?) });
-            }
-        }
+        let (boundaries, inlets, fan) = fan_drive::parse(hyd, node_count)?;
         let mut branches = Vec::new();
         let mut region_paths = Vec::new();
         let mut owned_regions = BTreeSet::new();
@@ -252,10 +243,13 @@ impl Request {
         let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names, objective.is_mean())).transpose()?;
         if design.is_some() && !gradient { return Err(bad("design requires objective.gradient=true")); }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, solid_data, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, fan, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
+        if let Some(fan) = &self.fan {
+            return fan.solve(cx, &self.graph, self.limits, fan.speed_ratio);
+        }
         self.graph.solve(&self.boundaries, GraphSolveConfig { max_sweeps: self.limits.graph,
             max_node_iterations: 80, absolute_flow_tolerance: VolumetricFlowRate::new(self.limits.flow),
             relative_flow_tolerance: 0.0 }, cx).map_err(producer)
@@ -422,7 +416,10 @@ fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
             render(request, &flow, &evaluated)?
         };
         poll(&cx)?;
-        Ok(output)
+        match &request.fan {
+            Some(fan) => fan.attach(output, &flow, fan.speed_ratio),
+            None => Ok(output),
+        }
     })
 }
 
