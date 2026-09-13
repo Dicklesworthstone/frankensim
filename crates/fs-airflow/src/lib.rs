@@ -1,13 +1,16 @@
 //! Evidence-bearing fan curves and enclosure-airflow networks.
 //!
-//! The crate solves the intersection of a monotone piecewise-linear fan
-//! pressure curve and a quadratic loss network. Interval Newton certifies the
+//! The series/parallel path intersects a monotone piecewise-linear fan
+//! pressure curve with a quadratic loss network. Interval Newton certifies the
 //! unique root of the declared nominal model. Manufacturer tolerance, loss
 //! coefficients, and leakage remain model-form estimates; a numerical root
 //! certificate does not promote those physical uncertainties to an enclosure.
+//! The `graph` module adds arbitrary passive topologies as residual-bearing
+//! nominal estimates, without interval root certificates.
 
 pub mod composite;
 pub mod conjugate;
+pub mod graph;
 pub mod qoi;
 pub mod registered_qoi;
 pub mod requirement_composition;
