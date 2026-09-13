@@ -433,3 +433,6 @@ impl<'m> ConductivityDesign<'m> {
         out
     }
 }
+
+/// Linear Robin-boundary and assembled-load tangents and adjoints.
+pub mod robin;
