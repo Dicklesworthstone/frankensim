@@ -5,6 +5,7 @@
 #[path = "json_read.rs"]
 mod json;
 mod design;
+mod solid_data;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -57,6 +58,7 @@ struct Request {
     seed: u64, graph: LossGraph, boundaries: Vec<FixedPressure>, inlets: Vec<TransportInlet>,
     region_paths: Vec<Vec<String>>, air: TransportAir, mesh: ConductionMesh,
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
+    solid_data: solid_data::SolidData,
     objective: String, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
@@ -147,7 +149,7 @@ impl Request {
         let a = object(get(&root, "air")?, &["density_kg_m3", "specific_heat_j_kg_k"], "air")?;
         let air = TransportAir { density: Density::new(positive(get(a, "density_kg_m3")?, "density_kg_m3")?),
             specific_heat_j_kg_k: positive(get(a, "specific_heat_j_kg_k")?, "specific_heat_j_kg_k")? };
-        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "source_w_m3", "adiabatic_remainder", "surfaces"], "solid")?;
+        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "materials", "element_materials", "source_w_m3", "component_power", "adiabatic_remainder", "surfaces"], "solid")?;
         let mut positions = Vec::new();
         for point in array(get(s, "vertices_m")?, "vertices_m", 20_000)? {
             let xyz = array(point, "vertex", 3)?;
@@ -201,8 +203,7 @@ impl Request {
         if surfaces.is_empty() { return Err(bad("at least one heat-exchanging surface required")); }
         let adiabatic = boolean(get(s, "adiabatic_remainder")?, "adiabatic_remainder")?;
         if !adiabatic && owned_faces.len() != exterior.len() { return Err(bad("every exterior face must be owned unless adiabatic_remainder is true")); }
-        let conductivity = positive(get(s, "conductivity_w_m_k")?, "conductivity_w_m_k")?;
-        let source = number(get(s, "source_w_m3")?, "source_w_m3")?;
+        let (solid_data, conductivity, source) = solid_data::SolidData::parse(s, &mesh)?;
         let hyd = object(get(&root, "hydraulics")?, &["node_count", "boundaries", "branches"], "hydraulics")?;
         let node_count = count(get(hyd, "node_count")?, "node_count", 4096)?;
         let mut boundaries = Vec::new();
@@ -250,7 +251,7 @@ impl Request {
         let design = root.get("design").map(|value| design::DesignRequest::parse(value, &names)).transpose()?;
         if design.is_some() && !gradient { return Err(bad("design requires objective.gradient=true")); }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -289,7 +290,8 @@ impl Request {
         }).map_err(producer)?;
         let names = network.regions();
         let material = fs_conduction::ConductivityModel::isotropic_declared(self.conductivity).map_err(producer)?;
-        let source = ScalarField::Uniform(self.source);
+        let uniform_source = ScalarField::Uniform(self.source);
+        let source = self.solid_data.nodal_source.as_ref().unwrap_or(&uniform_source);
         let gate = ConjugateConfig { max_iterations: self.limits.coupling,
             temperature_tolerance_k: self.limits.temperature, balance_tolerance_w: self.limits.heat,
             balance_relative_tolerance: 0.0, relaxation: Relaxation::Fixed { omega: self.limits.relaxation } };
@@ -305,7 +307,8 @@ impl Request {
                 config.stop.residual_rtol = self.limits.relative;
                 config.stop.step_atol = 0.0;
                 let linear = RobinLinearization::new(cx, ConductionProblem { mesh: &self.mesh,
-                    boundary: &boundary, material: &material, element_materials: None, source: &source }, config, &names).map_err(producer)?;
+                    boundary: &boundary, material: &material,
+                    element_materials: self.solid_data.element_materials.as_ref(), source }, config, &names).map_err(producer)?;
                 let states = names.iter().map(|name| linear.primal().report.robin_fluxes.iter()
                     .find(|flux| flux.region == *name).map(SolidRegionState::from_robin_flux)
                     .ok_or_else(|| bad(format!("solid report lacks surface {name}"))))
@@ -337,6 +340,11 @@ impl Request {
         if !total_solid.is_finite() || !robin.is_finite() || !source_w.is_finite()
             || (total_solid - robin).abs() > self.limits.heat || (robin - source_w).abs() > self.limits.heat {
             return Err(producer("whole-domain solid energy/decomposition balance missed the declared watt tolerance"));
+        }
+        if let Some(audit) = &self.solid_data.power {
+            if (source_w - audit.delivered_total_w()).abs() > self.limits.heat {
+                return Err(producer("assembled solid source disagrees with the component power map"));
+            }
         }
         poll(cx)?;
         Ok(Evaluation { coupled, temperatures: linear.primal().temperature.clone(), gradient,
@@ -386,6 +394,10 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         num(evaluated.coupled.transport.heat_imbalance_w)?, walls.join(","), branches.join(","), nodes,
         numbers(&evaluated.temperatures)?, evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
+        .and_then(|result| {
+            let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
+            Ok(format!("{prefix},\"solid_inputs\":{}}}\n", request.solid_data.render(request.conductivity, request.source)?))
+        })
 }
 
 fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
