@@ -24,6 +24,8 @@ use crate::AirflowError;
 use crate::conjugate::{AirMarch, AirPath, AirSegment};
 use crate::graph::GraphSolution;
 
+pub mod sensitivity;
+
 /// One explicit thermal model for each hydraulic branch, in graph order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BranchThermalModel {
