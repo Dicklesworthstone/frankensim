@@ -24,6 +24,7 @@ use crate::LossElement;
 
 mod fan;
 pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
+pub mod thermal;
 
 /// An oriented passive branch; its orientation does not constrain flow sign.
 #[derive(Debug, Clone, PartialEq)]
