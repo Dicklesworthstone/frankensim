@@ -22,6 +22,8 @@ use fs_math::det;
 
 use super::{BranchThermalModel, TransportError, TransportMarch, TransportNetwork, finite, poll, positive};
 
+pub mod design;
+
 /// An input perturbation. Temperature entries are differences, not absolute K.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportDirection {
