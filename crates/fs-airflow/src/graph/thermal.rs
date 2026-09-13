@@ -12,6 +12,7 @@
 //! the existing nominal model; it does not certify uncertainty or passivity.
 
 pub mod transport;
+pub mod coupled_transport;
 
 use std::collections::BTreeSet;
 
