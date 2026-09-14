@@ -11,6 +11,7 @@ mod fan_drive;
 mod convection;
 mod fan_speed;
 mod contacts;
+mod transient;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -70,6 +71,7 @@ struct Request {
     contacts: Option<contacts::Contacts>,
     fan: Option<fan_drive::FanDrive>,
     fan_speed_design: Option<fan_speed::FanSpeedDesign>,
+    transient: Option<transient::Schedule>,
     objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
@@ -141,7 +143,7 @@ impl Request {
     fn parse(text: &str) -> Result<Self> {
         if text.len() as u64 > MAX_INPUT_BYTES { return Err(bad("request exceeds 16 MiB")); }
         let root = J::parse(text).map_err(bad_parse)?;
-        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design", "fan_speed_design"], "request")?;
+        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design", "fan_speed_design", "transient"], "request")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) || get(&root, "units")?.as_str() != Some("SI") {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
@@ -267,8 +269,14 @@ impl Request {
                 return Err(bad("effective-h design cannot override a flow-derived convection law"));
             }
         }
+        let transient = root.get("transient").map(|value| transient::Schedule::parse(
+            value, mesh.vertex_count(), mesh.element_count(), fan.as_ref(),
+        )).transpose()?;
+        if transient.is_some() && (gradient || design.is_some() || fan_speed_design.is_some()) {
+            return Err(bad("transient requires gradient=false and no steady design search"));
+        }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, transient, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -296,10 +304,8 @@ impl Request {
         builder.finish().map_err(producer)
     }
 
-    fn evaluate(&self, cx: &Cx<'_>, flow: &GraphSolution, htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Evaluation> {
+    fn transport<'f>(&self, cx: &Cx<'_>, flow: &'f GraphSolution, htc: &BTreeMap<String, f64>) -> Result<TransportNetwork<'f>> {
         poll(cx)?;
-        let (coefficients, convection) = convection::resolve(self, cx, flow, htc)?;
-        let htc = &coefficients;
         let by_name: BTreeMap<_, _> = self.surfaces.iter().map(|s| (s.name.as_str(), s)).collect();
         let models = self.region_paths.iter().map(|path| {
             if path.is_empty() { return Ok(BranchThermalModel::Adiabatic); }
@@ -308,10 +314,17 @@ impl Request {
                 AirSegment::new(name, surface.area, htc[name]).map_err(producer)
             }).collect::<Result<Vec<_>>>().map(BranchThermalModel::Exchange)
         }).collect::<Result<Vec<_>>>()?;
-        let network = TransportNetwork::new(cx, flow, self.air, models, &self.inlets, TransportConfig {
+        TransportNetwork::new(cx, flow, self.air, models, &self.inlets, TransportConfig {
             absolute_flow_tolerance: VolumetricFlowRate::new(self.limits.flow), relative_flow_tolerance: 0.0,
             absolute_heat_tolerance_w: self.limits.heat, relative_heat_tolerance: 0.0,
-        }).map_err(producer)?;
+        }).map_err(producer)
+    }
+
+    fn evaluate(&self, cx: &Cx<'_>, flow: &GraphSolution, htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Evaluation> {
+        poll(cx)?;
+        let (coefficients, convection) = convection::resolve(self, cx, flow, htc)?;
+        let htc = &coefficients;
+        let network = self.transport(cx, flow, htc)?;
         let names = network.regions();
         let material = fs_conduction::ConductivityModel::isotropic_declared(self.conductivity).map_err(producer)?;
         let uniform_source = ScalarField::Uniform(self.source);
@@ -444,6 +457,9 @@ fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
         let cx = Cx::new(gate, arena, StreamKey { seed: request.seed, kernel_id: 717, tile: 0, iteration: 0 },
             Budget::INFINITE, ExecMode::Deterministic);
         poll(&cx)?;
+        if let Some(schedule) = &request.transient {
+            return transient::solve(request, &cx, schedule);
+        }
         if let Some(design) = &request.fan_speed_design {
             return fan_speed::solve(request, &cx, design);
         }
@@ -486,7 +502,13 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
         Ok(text)
     })();
     let text = match read { Ok(t) => t, Err(e) => return diagnostic(exit::INPUT, e, json_mode) };
-    let request = match Request::parse(&text) { Ok(r) => r, Err(e) => return diagnostic(exit::REFUSED, e, json_mode) };
+    let request = match Request::parse(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            let class = if e.code == "cooling-network-transient-budget" { exit::BUDGET } else { exit::REFUSED };
+            return diagnostic(class, e, json_mode);
+        }
+    };
     let gate = CancelGate::new();
     let duration = Duration::from_secs_f64(request.limits.wall_seconds);
     let started = Instant::now();
@@ -506,7 +528,7 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     match result {
         Ok(stdout) => CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() },
         Err(e) => {
-            let class = if e.code == "cooling-network-design-budget" { exit::BUDGET } else { exit::REFUSED };
+            let class = if matches!(e.code, "cooling-network-design-budget" | "cooling-network-transient-budget") { exit::BUDGET } else { exit::REFUSED };
             diagnostic(class, e, json_mode)
         }
     }
