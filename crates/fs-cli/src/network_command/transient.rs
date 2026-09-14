@@ -3,6 +3,9 @@
 //! previous accepted solid field. No transient derivative or continuous-time
 //! peak bound is inferred from sampled temperatures.
 
+mod workload;
+use workload::Workload;
+
 use super::*;
 use fs_conduction::transient::backward_euler::{BackwardEuler, StepConfig, StepSolution};
 use fs_conduction::transient::VolumetricHeatCapacity;
@@ -10,7 +13,7 @@ use fs_conduction::transient::VolumetricHeatCapacity;
 #[derive(Debug)]
 pub(super) struct Interval {
     duration: f64,
-    power: f64,
+    workload: Workload,
     speed: Option<f64>,
     steps: usize,
 }
@@ -52,10 +55,9 @@ impl Schedule {
         let mut total_steps = 0_usize;
         let mut time = 0.0;
         for entry in array(get(value,"intervals")?,"intervals",4096)? {
-            object(entry,&["duration_s","power_scale","fan_speed_ratio"],"transient interval")?;
+            object(entry,&["duration_s","power_scale","component_powers_w","fan_speed_ratio"],"transient interval")?;
             let duration = positive(get(entry,"duration_s")?,"duration_s")?;
-            let power = number(get(entry,"power_scale")?,"power_scale")?;
-            if power < 0.0 { return Err(bad("power_scale must be nonnegative")); }
+            let workload = Workload::parse(entry)?;
             let speed = match (fan,entry.get("fan_speed_ratio")) {
                 (Some(fan),Some(s)) => {
                     let speed = positive(s,"fan_speed_ratio")?;
@@ -84,7 +86,7 @@ impl Schedule {
                 previous = endpoint;
             }
             time=end;
-            intervals.push(Interval {duration,power,speed,steps});
+            intervals.push(Interval {duration,workload,speed,steps});
         }
         if intervals.is_empty() { return Err(bad("at least one transient interval required")); }
         Ok(Self {initial,capacities,intervals,limit,total_steps})
@@ -165,6 +167,9 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
     }
+    // Bind every named load before any hydraulic or thermal work, including
+    // later intervals which might otherwise fail after a long simulation.
+    for interval in &schedule.intervals { interval.workload.validate(request,cx)?; }
     let engine=BackwardEuler::per_element(cx,&request.mesh,&schedule.capacities).map_err(producer)?;
     let mut old=schedule.initial.clone();
     let (initial,initial_vertex)=initial_objective(request,cx,&old)?;
@@ -190,21 +195,23 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
         let base=request.surfaces.iter().map(|s|(s.name.clone(),s.h)).collect();
         let (coefficients,mut derived)=convection::resolve(request,cx,&flow,&base)?;
         let network=request.transport(cx,&flow,&coefficients)?;
-        let source=scaled_source(request,interval.power)?;
+        let load=interval.workload.prepare(request,cx)?;
+        let workload_json=interval.workload.render()?;
+        let source=&load.source;
         let start=time;
         let end=finite(start+interval.duration)?;
         for i in 1..=interval.steps {
             poll(cx)?;
             let endpoint=if i==interval.steps {end}else{start+interval.duration*(i as f64/interval.steps as f64)};
             let dt=endpoint-time;
-            let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,&old,&source,dt)?;
+            let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,&old,source,dt)?;
             for c in &derived {c.check_direction(&coupled.solid,request.limits.heat)?;}
             if solid.temperature.iter().any(|&t|!t.is_finite()||t<=0.0) {
                 return Err(producer("transient FEM produced a nonpositive absolute temperature; refine the step/mesh"));
             }
-            if let Some(audit)=&request.solid_data.power {
-                if (solid.source_w-finite(audit.delivered_total_w()*interval.power)?).abs()>request.limits.heat {
-                    return Err(producer("transient source disagrees with scaled component power"));
+            if let Some(expected)=load.expected_power_w {
+                if (solid.source_w-expected).abs()>request.limits.heat {
+                    return Err(producer("transient source disagrees with the selected component workload"));
                 }
             }
             let state=request.objective.evaluate(cx,&solid.temperature,&coupled.solid)?;
@@ -215,8 +222,8 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
             exhaust=finite(exhaust+dt*coupled.transport.external_heat_gain_w)?;
             work=work.checked_add(coupled.iterations).ok_or_else(||budget("transient work count overflow"))?;
             completed+=1;
-            history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},\"power_scale\":{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{}}}",
-                num(endpoint)?,num(dt)?,ordinal,num(interval.power)?,optional(interval.speed)?,num(state.value)?,
+            history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{}}}",
+                num(endpoint)?,num(dt)?,ordinal,workload_json,optional(interval.speed)?,num(state.value)?,
                 state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solid.source_w)?,
                 num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
                 num(solid.stored_energy_change_j-dt*(solid.source_w-coupled.transport.external_heat_gain_w))?,coupled.iterations));
@@ -241,7 +248,7 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
     let prefix=result.strip_suffix("}\n").ok_or_else(||bad("internal transient result framing"))?;
-    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are unscaled base declarations, interval power_scale applies to them\"}}}}\n",
+    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
         num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
         num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","));
     poll(cx)?;

@@ -42,9 +42,10 @@ J/(m³ K) value per tetrahedron in input order. Capacities are explicit caller
 declarations, not inferred from conductivity or material names.
 
 `intervals` is nonempty, starts at zero, and contains consecutive positive
-durations. Power scale is a nonnegative multiplier on the complete original
-source field, including all component wattages; it is not independent per-die
-control. A fan-driven request must supply a positive admitted speed in every
+durations. Each interval selects exactly one of a nonnegative `power_scale`
+on the complete original source field, or `component_powers_w`, an object giving
+absolute nonnegative watts for every declared component. These modes never
+combine or inherit missing values from an earlier interval. A fan-driven request must supply a positive admitted speed in every
 interval. A pressure-driven request must omit `fan_speed_ratio`. A zero-speed
 fan and a zero-flow exchanger remain unsupported: this does not invent a
 natural-convection fallback for a stopped fan.
@@ -87,8 +88,8 @@ gate is `tolerances.heat_w * dt`; no time-integration error bound is inferred.
 
 The original result field is the **final accepted transient field**, with its
 matching fan speed, flows, coefficients and contact results. `solid_inputs`
-contains the unscaled base declarations; history records which `power_scale`
-was applied. The `transient` result includes time, total steps and solid solves,
+contains the base declarations; history records either the applied `power_scale`
+or the complete absolute `component_powers_w` map. The other field is `null`. The `transient` result includes time, total steps and solid solves,
 energy totals, every accepted endpoint's objective and heat/storage values,
 and the peak sampled objective with its sample time. The initial condition is
 included in the peak calculation. Full nodal history is not retained.
@@ -119,3 +120,43 @@ of the Rust implementation. Compilation, formatting and Rust tests have not
 been run in the authoring environment. Backward Euler is first-order in time;
 the supplied validation also compares refinements against the exact matrix
 exponential of the same semi-discrete linear model, not the continuum PDE.
+
+## Independent component workloads
+
+A workload can move between fixed component footprints without replacing the
+mesh or scaling every component together. Declare the footprints once in
+`solid.component_power`, including a zero nominal power for initially idle parts.
+Then each interval supplies **every component**, including explicit zeros:
+
+```json
+{"duration_s":30,"component_powers_w":{"cpu":20,"gpu":0},"fan_speed_ratio":1}
+{"duration_s":30,"component_powers_w":{"cpu":0,"gpu":20},"fan_speed_ratio":1.5}
+```
+
+These are alternative interval objects, not extra top-level declarations.
+Missing, extra and negative powers refuse; unknown names are checked across the
+whole schedule before any numerical work. Supplying `power_scale` together with
+`component_powers_w` also refuses. Named workloads require component footprints,
+so a uniform `source_w_m3` cannot be silently split into invented components.
+
+The existing `PowerMap` projects the new watts onto the same nodal P1 supports
+once per interval. It does not divide by nominal wattages or try to recover
+individual sources from an already combined field. Overlapping footprints still
+superpose, and a component with zero nominal watts can turn on normally. The
+projected and subsequently assembled powers are both checked. Only the current
+interval's source field is stored, not one full nodal vector per interval.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/transient-component-workloads.json
+```
+
+This example moves a 20 W pulse from the spreader-side CPU footprint to the
+substrate-side GPU footprint at 30 seconds, then turns both off at 60 seconds.
+The named parts are illustrative labels, not a resolved semiconductor model.
+Independent NumPy calculations place the sampled peak at approximately
+319.642150 K at 60 seconds, with 1200 J total input. The hottest vertex moves
+from 4 to 13. From the same cold initial condition and fan speed, a single 20 W,
+30-second pulse produces about 306.343159 K at the CPU footprint versus
+318.415974 K at the GPU footprint: equal total power is not equal hotspot risk.
+These are independent mathematical references, not executed Rust measurements.

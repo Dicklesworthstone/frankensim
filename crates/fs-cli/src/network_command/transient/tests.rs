@@ -37,7 +37,7 @@ fn pulse_contact_and_fan_schedule_match_independent_transient_fem() {
 fn equilibrium_remains_uniform_and_keeps_zero_storage_and_exhaust() {
     let mut r=request();
     let schedule=r.transient.as_mut().unwrap();
-    for interval in &mut schedule.intervals {interval.power=0.0;}
+    for interval in &mut schedule.intervals {interval.workload=Workload::Scale(0.0);}
     let doc=J::parse(&execute(&r,&CancelGate::new_clock_free()).unwrap()).unwrap();
     for t in final_field(&doc) {close(t,300.0,1e-8);}
     let run=doc.get("transient").unwrap();

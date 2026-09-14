@@ -15,6 +15,7 @@ pub(super) struct SolidData {
     pub element_materials: Option<ElementMaterials>,
     pub nodal_source: Option<ScalarField>,
     pub power: Option<PowerAudit>,
+    pub component_map: Option<PowerMap>,
     materials: Vec<MaterialDeclaration>,
 }
 
@@ -23,7 +24,7 @@ impl SolidData {
     /// keep the same uniform operator; mixed spellings never silently override.
     pub fn parse(solid: &J, mesh: &ConductionMesh) -> Result<(Self, f64, f64)> {
         let mut data = Self { element_materials: None, nodal_source: None,
-            power: None, materials: Vec::new() };
+            power: None, component_map: None, materials: Vec::new() };
         let uniform_k = solid.get("conductivity_w_m_k");
         let table = solid.get("materials");
         let assignment = solid.get("element_materials");
@@ -89,6 +90,7 @@ impl SolidData {
                 source.validate("component power source", mesh.vertex_count()).map_err(producer)?;
                 data.nodal_source = Some(source);
                 data.power = Some(audit);
+                data.component_map = Some(map);
                 // No additional uniform background source was declared.
                 0.0
             }
