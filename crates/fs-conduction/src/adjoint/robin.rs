@@ -1,13 +1,18 @@
-//! Linear FEM response to Robin references, log(h), and assembled nodal loads.
+//! FEM response to Robin references, log(h), and assembled nodal loads.
 //!
-//! A tangent solves A dT = db - dA T; a pullback solves A^T lambda = dJ/dT.
-//! The same production P1 operator and preconditioned CG serve both. Uniform
-//! Robin faces use their consistent mass matrix, NOT a lumped approximation.
-//! Prescribed temperatures enter dA T but their tangents/adjoints are zero.
+//! A tangent solves J dT = -R_control; a pullback solves J^T lambda = dJ/dT.
+//! For constant conductivity J is the existing SPD operator (PCG). For k(T),
+//! J includes the production K'(T) term and both solves use bounded FGMRES.
+//! Uniform Robin faces retain their consistent mass matrix. Prescribed
+//! temperatures enter R_control, but their tangents/adjoints are zero.
 //! This owns the solid half of a conjugate derivative, not the air fixed point.
-//! Geometry, conductivity and prescribed temperatures are held fixed; k(T),
-//! radiation coupling and continuum-error certification are not covered.
-//! Explicit matching-P1 contact is supported with its resistance held fixed.
+//! Geometry, material LAWS and prescribed temperatures remain fixed; no shape,
+//! material-parameter, radiation or continuum-error derivative is inferred.
+//! Matching-P1 contacts retain their fixed resistance in both J and J^T.
+//! At a material slope discontinuity or validity endpoint, a primal can be
+//! retained but derivative requests refuse rather than choosing a unique slope.
+
+mod nonlinear;
 
 use std::collections::BTreeSet;
 
@@ -83,13 +88,16 @@ pub struct RobinLinearization {
     dofs: DofMap,
     ports: Vec<RobinPort>,
     linear: LinearConfig,
+    nonlinear: Option<nonlinear::TangentSystem>,
 }
 
 impl RobinLinearization {
-    /// Solve a temperature-independent conduction problem and bind selected
-    /// uniform Robin regions. Non-selected boundaries remain in the operator.
-    /// Refuses unknown/duplicate/nonuniform ports, nonlinear materials, invalid
-    /// solve budgets, a failed true-residual gate, and cancellation.
+    /// Solve a conduction problem and bind selected uniform Robin regions.
+    /// Non-selected boundaries and heterogeneous k(T) laws remain in the
+    /// operator. The primal is checked against A(T)T-b, not against J(T)T-b.
+    /// Refuses invalid ports/budgets, material extrapolation, a failed primal
+    /// residual gate and cancellation. At a material kink the retained primal
+    /// remains usable, but `apply` and `pullback` refuse.
     pub fn new(
         cx: &Cx<'_>, problem: ConductionProblem<'_>, config: SolveConfig, regions: &[&str],
     ) -> Result<Self, ConductionError> {
@@ -123,16 +131,18 @@ impl RobinLinearization {
         {
             return Err(invalid("positive Krylov budget and a relative tolerance in (0, 1) required"));
         }
+        let mut temperature_dependent = false;
         if let Some(materials) = problem.element_materials {
             materials.validate_for(problem.mesh)?;
             for element in 0..problem.mesh.element_count() {
                 poll(cx, element)?;
-                if materials.model_for(element)?.is_temperature_dependent() {
-                    return Err(invalid("Robin sensitivities require temperature-independent materials"));
-                }
+                temperature_dependent |= materials.model_for(element)?.is_temperature_dependent();
             }
-        } else if problem.material.is_temperature_dependent() {
-            return Err(invalid("Robin sensitivities require temperature-independent materials"));
+        } else {
+            temperature_dependent = problem.material.is_temperature_dependent();
+        }
+        if temperature_dependent && config.linear.restart == 0 {
+            return Err(invalid("nonlinear Robin sensitivities require a positive FGMRES restart"));
         }
         let mut seen = BTreeSet::new();
         let mut ports = Vec::with_capacity(regions.len());
@@ -169,8 +179,12 @@ impl RobinLinearization {
         if relative >= linear.tolerance {
             return Err(failed(0, relative, linear));
         }
+        let (matrix, nonlinear) = if temperature_dependent {
+            let (jacobian, tangent) = nonlinear::prepare(cx, problem, interfaces, &primal.temperature, &dofs)?;
+            (jacobian, Some(tangent))
+        } else { (matrix, None) };
         poll(cx, 0)?;
-        Ok(Self { primal, matrix, dofs, ports, linear })
+        Ok(Self { primal, matrix, dofs, ports, linear, nonlinear })
     }
 
     /// Freshly executed primal; its references and coefficients define this map.
@@ -180,6 +194,18 @@ impl RobinLinearization {
     /// Selected regions in the exact order used by every input/output vector.
     #[must_use]
     pub fn ports(&self) -> &[RobinPort] { &self.ports }
+
+    /// Whether the tangent uses the full nonsymmetric material Jacobian.
+    #[must_use]
+    pub const fn uses_nonlinear_jacobian(&self) -> bool { self.nonlinear.is_some() }
+
+    /// False at an active piecewise-material slope discontinuity or sampled
+    /// validity endpoint. This is a local branch check, not a conditioning,
+    /// invertibility, uncertainty or distance-to-knot certificate.
+    #[must_use]
+    pub fn has_smooth_material_tangent(&self) -> bool {
+        self.nonlinear.as_ref().is_none_or(|system| system.smooth)
+    }
 
     /// Correctly sized zero perturbation.
     #[must_use]
@@ -202,7 +228,8 @@ impl RobinLinearization {
         }).collect()
     }
 
-    /// Apply db-dA*T and solve once; no perturbed primal or solver-iteration AD.
+    /// Apply -R_control and solve J dT once, including K'(T) feedback.
+    /// No perturbed primal or solver-iteration AD. Material kinks refuse.
     pub fn apply(&self, cx: &Cx<'_>, direction: &RobinDirection) -> Result<RobinDifferential, ConductionError> {
         vector(cx, &direction.references_k, self.ports.len())?;
         vector(cx, &direction.log_htc, self.ports.len())?;
@@ -221,7 +248,7 @@ impl RobinLinearization {
                 }
             }
         }
-        let (temperature_k, relative_residual, iterations) = self.solve_rhs(cx, &rhs)?;
+        let (temperature_k, relative_residual, iterations) = self.solve_rhs(cx, &rhs, false)?;
         let mean_wall_temperatures_k = self.wall_means(cx, &temperature_k)?;
         let means = self.wall_means(cx, &self.primal.temperature)?;
         let heat_rates_w = self.ports.iter().enumerate().map(|(i, port)| {
@@ -233,7 +260,8 @@ impl RobinLinearization {
     }
 
     /// One transposed solve for weights on full nodal temperature, selected
-    /// area-mean wall temperatures, and selected outward heat rates.
+    /// area-mean wall temperatures, and selected outward heat rates. The
+    /// nonlinear path solves the actual J^T, not J; material kinks refuse.
     pub fn pullback(
         &self, cx: &Cx<'_>, nodal_weights: &[f64], wall_weights: &[f64], heat_weights: &[f64],
     ) -> Result<RobinGradient, ConductionError> {
@@ -250,7 +278,7 @@ impl RobinLinearization {
                 }
             }
         }
-        let (lambda, relative_residual, iterations) = self.solve_rhs(cx, &rhs)?;
+        let (lambda, relative_residual, iterations) = self.solve_rhs(cx, &rhs, true)?;
         let means = self.wall_means(cx, &self.primal.temperature)?;
         let mut references = vec![0.0; self.ports.len()];
         let mut log_htc = vec![0.0; self.ports.len()];
@@ -273,8 +301,11 @@ impl RobinLinearization {
         Ok(RobinGradient { references, log_htc, nodal_load: lambda, relative_residual, iterations })
     }
 
-    fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<(Vec<f64>, f64, usize), ConductionError> {
+    fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64], transpose: bool) -> Result<(Vec<f64>, f64, usize), ConductionError> {
         poll(cx, 0)?;
+        if let Some(system) = &self.nonlinear {
+            return system.solve(cx, &self.matrix, &self.dofs, self.linear, rhs, transpose);
+        }
         let rhs = self.dofs.gather(rhs);
         let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         if scale == 0.0 { return Ok((vec![0.0; self.primal.temperature.len()], 0.0, 0)); }
