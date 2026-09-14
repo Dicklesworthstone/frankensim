@@ -10,6 +10,7 @@ mod objective;
 mod fan_drive;
 mod convection;
 mod fan_speed;
+mod contacts;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -36,8 +37,8 @@ use json::JsonValue as J;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
-const NO_CLAIM: &str = "nominal fixed-geometry linear-solid model; hydraulics and coefficients frozen within each thermal solve; caller-declared temperature-independent isotropic materials and fluid properties; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, downstream mixing and declared or flow-derived\nduct convection. Compute mean/peak temperatures, conditional thermal gradients,\nand effective-h or full fan-speed target searches. All quantities use coherent\nSI. Request schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md and FAN_COOLING.md.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
+const NO_CLAIM: &str = "nominal fixed-geometry linear-solid model; hydraulics and coefficients frozen within each thermal solve; caller-declared temperature-independent isotropic materials and fluid properties; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; explicit matching-P1 contacts have fixed caller-declared resistance; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, nonmatching contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, finite-resistance thermal contacts, downstream\nmixing and declared or flow-derived duct convection. Compute mean/peak\ntemperatures, conditional thermal gradients, and effective-h or full fan-speed\ntarget searches. All quantities use coherent SI.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, FAN_COOLING.md and CONTACT_COOLING.md.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -66,6 +67,7 @@ struct Request {
     region_paths: Vec<Vec<String>>, air: TransportAir, mesh: ConductionMesh,
     surfaces: Vec<Surface>, conductivity: f64, source: f64, adiabatic: bool,
     solid_data: solid_data::SolidData,
+    contacts: Option<contacts::Contacts>,
     fan: Option<fan_drive::FanDrive>,
     fan_speed_design: Option<fan_speed::FanSpeedDesign>,
     objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
@@ -76,6 +78,7 @@ struct Evaluation {
     objective: f64, objective_state: objective::ObjectiveState,
     robin_total_w: f64, source_total_w: f64, htc: Vec<f64>,
     convection: Vec<convection::Derived>,
+    contact_fluxes: Vec<fs_conduction::InterfaceFlux>,
 }
 
 fn object<'a>(value: &'a J, allowed: &[&str], path: &str) -> Result<&'a J> {
@@ -101,9 +104,12 @@ fn positive(value: &J, field: &str) -> Result<f64> {
     if n <= 0.0 { Err(bad(format!("{field} must be positive"))) } else { Ok(n) }
 }
 fn integer(value: &J, field: &str, max: usize) -> Result<usize> {
-    let n = value.number_raw().and_then(|s| s.parse::<usize>().ok())
-        .ok_or_else(|| bad(format!("{field} must use a nonnegative integer JSON spelling")))?;
+    let n = integer_raw(value, field)?;
     if n > max { Err(bad(format!("{field} exceeds {max}"))) } else { Ok(n) }
+}
+fn integer_raw(value: &J, field: &str) -> Result<usize> {
+    value.number_raw().and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| bad(format!("{field} must use a nonnegative integer JSON spelling")))
 }
 fn count(value: &J, field: &str, max: usize) -> Result<usize> {
     let n = integer(value, field, max)?;
@@ -160,7 +166,7 @@ impl Request {
         let a = object(get(&root, "air")?, &["density_kg_m3", "specific_heat_j_kg_k"], "air")?;
         let air = TransportAir { density: Density::new(positive(get(a, "density_kg_m3")?, "density_kg_m3")?),
             specific_heat_j_kg_k: positive(get(a, "specific_heat_j_kg_k")?, "specific_heat_j_kg_k")? };
-        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "materials", "element_materials", "source_w_m3", "component_power", "adiabatic_remainder", "surfaces"], "solid")?;
+        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "materials", "element_materials", "source_w_m3", "component_power", "adiabatic_remainder", "surfaces", "contacts"], "solid")?;
         let mut positions = Vec::new();
         for point in array(get(s, "vertices_m")?, "vertices_m", 20_000)? {
             let xyz = array(point, "vertex", 3)?;
@@ -213,7 +219,7 @@ impl Request {
         }
         if surfaces.is_empty() { return Err(bad("at least one heat-exchanging surface required")); }
         let adiabatic = boolean(get(s, "adiabatic_remainder")?, "adiabatic_remainder")?;
-        if !adiabatic && owned_faces.len() != exterior.len() { return Err(bad("every exterior face must be owned unless adiabatic_remainder is true")); }
+        let contacts = contacts::Contacts::parse(s.get("contacts"), &mesh, &surfaces, adiabatic)?;
         let (solid_data, conductivity, source) = solid_data::SolidData::parse(s, &mesh)?;
         let hyd = object(get(&root, "hydraulics")?, &["node_count", "boundaries", "fan", "branches"], "hydraulics")?;
         let node_count = count(get(hyd, "node_count")?, "node_count", 4096)?;
@@ -262,7 +268,7 @@ impl Request {
             }
         }
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, solid_data, fan, fan_speed_design, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -284,7 +290,9 @@ impl Request {
             builder = builder.region(&surface.name, |face| surface.faces.contains(&face.vertices),
                 ThermalBc::robin(h, reference).map_err(producer)?).map_err(producer)?;
         }
-        if self.adiabatic { builder = builder.adiabatic_remainder(); }
+        // Contacts own the untagged paired faces. Parse already checked every
+        // OTHER face when an adiabatic remainder was not requested.
+        if self.adiabatic || self.contacts.is_some() { builder = builder.adiabatic_remainder(); }
         builder.finish().map_err(producer)
     }
 
@@ -322,9 +330,12 @@ impl Request {
                 config.linear.max_iterations = self.limits.linear;
                 config.stop.residual_rtol = self.limits.relative;
                 config.stop.step_atol = 0.0;
-                let linear = RobinLinearization::new(cx, ConductionProblem { mesh: &self.mesh,
-                    boundary: &boundary, material: &material,
-                    element_materials: self.solid_data.element_materials.as_ref(), source }, config, &names).map_err(producer)?;
+                let problem = ConductionProblem { mesh: &self.mesh, boundary: &boundary, material: &material,
+                    element_materials: self.solid_data.element_materials.as_ref(), source };
+                let linear = match &self.contacts {
+                    Some(contacts) => RobinLinearization::new_with_interfaces(cx, problem, &contacts.interfaces, config, &names),
+                    None => RobinLinearization::new(cx, problem, config, &names),
+                }.map_err(producer)?;
                 let states = names.iter().map(|name| linear.primal().report.robin_fluxes.iter()
                     .find(|flux| flux.region == *name).map(SolidRegionState::from_robin_flux)
                     .ok_or_else(|| bad(format!("solid report lacks surface {name}"))))
@@ -363,10 +374,13 @@ impl Request {
                 return Err(producer("assembled solid source disagrees with the component power map"));
             }
         }
+        let contact_fluxes = self.contacts.as_ref().map(|contacts|
+            contacts.interfaces.fluxes(&linear.primal().temperature).map_err(producer))
+            .transpose()?.unwrap_or_default();
         poll(cx)?;
         Ok(Evaluation { coupled, temperatures: linear.primal().temperature.clone(), gradient,
             objective, objective_state, robin_total_w: robin, source_total_w: source_w,
-            htc: linear.ports().iter().map(|port| port.htc_w_m2_k).collect(), convection })
+            htc: linear.ports().iter().map(|port| port.htc_w_m2_k).collect(), convection, contact_fluxes })
     }
 }
 fn bad_parse(error: json::JsonReadError) -> Failure { bad(error.to_string()) }
@@ -416,11 +430,12 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"gradient_scope\":\"thermal inlet and effective-coefficient sensitivities at fixed hydraulics and frozen fluid properties; not fan-speed or channel-geometry derivatives\"}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"gradient_scope\":\"thermal inlet and effective-coefficient sensitivities at fixed hydraulics, contact resistance and frozen fluid properties; not fan-speed, contact-resistance or channel-geometry derivatives\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
                 evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
-                evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(",")))
+                evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(","),
+                request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into())))
         })
 }
 
