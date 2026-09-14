@@ -4,6 +4,7 @@
 //! peak bound is inferred from sampled temperatures.
 
 mod workload;
+mod adaptive;
 use workload::Workload;
 
 use super::*;
@@ -24,12 +25,15 @@ pub(super) struct Schedule {
     intervals: Vec<Interval>,
     limit: Option<f64>,
     total_steps: usize,
+    max_step_s: f64,
+    max_steps: usize,
+    adaptive: Option<adaptive::Config>,
 }
 
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive"], "transient")?;
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -50,6 +54,7 @@ impl Schedule {
         };
         let max_dt = positive(get(value,"max_step_s")?,"max_step_s")?;
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
+        let adaptive = value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?;
         let limit = value.get("temperature_limit_k").map(|t| positive(t,"temperature_limit_k")).transpose()?;
         let mut intervals = Vec::new();
         let mut total_steps = 0_usize;
@@ -89,7 +94,10 @@ impl Schedule {
             intervals.push(Interval {duration,workload,speed,steps});
         }
         if intervals.is_empty() { return Err(bad("at least one transient interval required")); }
-        Ok(Self {initial,capacities,intervals,limit,total_steps})
+        if adaptive.is_some() && total_steps > max_steps / 2 {
+            return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
+        }
+        Ok(Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive})
     }
 }
 
@@ -184,6 +192,7 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     let mut exhaust=0.0;
     let mut work=0_usize;
     let mut completed=0_usize;
+    let mut adaptive_stats=adaptive::Stats::default();
     let mut final_result=None;
     for (ordinal,interval) in schedule.intervals.iter().enumerate() {
         poll(cx)?;
@@ -200,57 +209,86 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
         let source=&load.source;
         let start=time;
         let end=finite(start+interval.duration)?;
-        for i in 1..=interval.steps {
+        let mut i=0_usize;
+        let mut suggested=interval.duration/interval.steps as f64;
+        while time < end {
             poll(cx)?;
-            let endpoint=if i==interval.steps {end}else{start+interval.duration*(i as f64/interval.steps as f64)};
-            let dt=endpoint-time;
-            let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,&old,source,dt)?;
-            for c in &derived {c.check_direction(&coupled.solid,request.limits.heat)?;}
-            if solid.temperature.iter().any(|&t|!t.is_finite()||t<=0.0) {
-                return Err(producer("transient FEM produced a nonpositive absolute temperature; refine the step/mesh"));
+            let needed=if schedule.adaptive.is_some(){2}else{1};
+            if completed > schedule.max_steps.saturating_sub(needed) || needed > schedule.max_steps {
+                return Err(budget("accepted transient endpoint budget exhausted; no partial trajectory published"));
             }
-            if let Some(expected)=load.expected_power_w {
-                if (solid.source_w-expected).abs()>request.limits.heat {
-                    return Err(producer("transient source disagrees with the selected component workload"));
+            // All trials, including discarded coarse/rejected ones, undergo the
+            // same physical gates. Count their work, never their heat as history.
+            let mut trial=|old:&[f64],dt:f64| {
+                let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,old,source,dt)?;
+                work=work.checked_add(coupled.iterations).ok_or_else(||budget("transient work count overflow"))?;
+                for c in &derived {c.check_direction(&coupled.solid,request.limits.heat)?;}
+                if solid.temperature.iter().any(|&t|!t.is_finite()||t<=0.0) {
+                    return Err(producer("transient FEM produced a nonpositive absolute temperature; refine the step/mesh"));
+                }
+                if let Some(expected)=load.expected_power_w {
+                    if (solid.source_w-expected).abs()>request.limits.heat {
+                        return Err(producer("transient source disagrees with the selected component workload"));
+                    }
+                }
+                Ok((coupled,solid))
+            };
+            let (samples,estimate)=if let Some(config)=schedule.adaptive {
+                let accepted=adaptive::step(cx,&old,time,end,suggested,schedule.max_step_s,
+                    config,&mut adaptive_stats,&mut trial)?;
+                suggested=accepted.next_trial_s;
+                (Vec::from(accepted.samples),Some(accepted.error_ratio))
+            } else {
+                i+=1;
+                let endpoint=if i==interval.steps {end}else{start+interval.duration*(i as f64/interval.steps as f64)};
+                (vec![(endpoint,trial(&old,endpoint-time)?)],None)
+            };
+            // The estimate concerns the pair's final endpoint. Its midpoint is
+            // retained for peak detection but has no separate local-error test.
+            let last_sample=samples.len()-1;
+            for (sample_index,(endpoint,(coupled,solid))) in samples.into_iter().enumerate() {
+                let dt=endpoint-time;
+                let state=request.objective.evaluate(cx,&solid.temperature,&coupled.solid)?;
+                if state.value>peak {peak=state.value;peak_time=endpoint;}
+                if first_violation.is_none() && schedule.limit.is_some_and(|limit|state.value>limit) {first_violation=Some(endpoint);}
+                stored=finite(stored+solid.stored_energy_change_j)?;
+                input=finite(input+dt*solid.source_w)?;
+                exhaust=finite(exhaust+dt*coupled.transport.external_heat_gain_w)?;
+                completed+=1;
+                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{}}}",
+                    num(endpoint)?,num(dt)?,ordinal,workload_json,optional(interval.speed)?,num(state.value)?,
+                    state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solid.source_w)?,
+                    num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
+                    num(solid.stored_energy_change_j-dt*(solid.source_w-coupled.transport.external_heat_gain_w))?,coupled.iterations,
+                    optional(estimate.filter(|_|sample_index==last_sample))?));
+                // Atomic numerical boundary: no history changes before every solid,
+                // air, objective and energy check for this step has passed.
+                old.clone_from(&solid.temperature);
+                time=endpoint;
+                if ordinal+1==schedule.intervals.len() && endpoint==end {
+                    let objective=state.value;
+                    let evaluated=Evaluation {coupled,temperatures:solid.temperature,gradient:None,
+                        objective,objective_state:state,robin_total_w:solid.robin_out_w,source_total_w:solid.source_w,
+                        htc:network.regions().iter().map(|name|coefficients[*name]).collect(),
+                        convection:std::mem::take(&mut derived),contact_fluxes:solid.contact_fluxes};
+                    let result=render(request,&flow,&evaluated)?;
+                    final_result=Some(match (&request.fan,interval.speed) {
+                        (Some(fan),Some(speed))=>fan.attach(result,&flow,speed)?,_=>result,
+                    });
                 }
             }
-            let state=request.objective.evaluate(cx,&solid.temperature,&coupled.solid)?;
-            if state.value>peak {peak=state.value;peak_time=endpoint;}
-            if first_violation.is_none() && schedule.limit.is_some_and(|limit|state.value>limit) {first_violation=Some(endpoint);}
-            stored=finite(stored+solid.stored_energy_change_j)?;
-            input=finite(input+dt*solid.source_w)?;
-            exhaust=finite(exhaust+dt*coupled.transport.external_heat_gain_w)?;
-            work=work.checked_add(coupled.iterations).ok_or_else(||budget("transient work count overflow"))?;
-            completed+=1;
-            history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{}}}",
-                num(endpoint)?,num(dt)?,ordinal,workload_json,optional(interval.speed)?,num(state.value)?,
-                state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solid.source_w)?,
-                num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
-                num(solid.stored_energy_change_j-dt*(solid.source_w-coupled.transport.external_heat_gain_w))?,coupled.iterations));
-            // Atomic numerical boundary: no history changes before every solid,
-            // air, objective and energy check for this step has passed.
-            old.clone_from(&solid.temperature);
-            time=endpoint;
-            if completed==schedule.total_steps {
-                let objective=state.value;
-                let evaluated=Evaluation {coupled,temperatures:solid.temperature,gradient:None,
-                    objective,objective_state:state,robin_total_w:solid.robin_out_w,source_total_w:solid.source_w,
-                    htc:network.regions().iter().map(|name|coefficients[*name]).collect(),
-                    convection:std::mem::take(&mut derived),contact_fluxes:solid.contact_fluxes};
-                let result=render(request,&flow,&evaluated)?;
-                final_result=Some(match (&request.fan,interval.speed) {
-                    (Some(fan),Some(speed))=>fan.attach(result,&flow,speed)?,_=>result,
-                });
-            }
         }
+    }
+    if schedule.adaptive.is_none() && completed!=schedule.total_steps {
+        return Err(bad("completed fixed timestep count differs from the admitted schedule"));
     }
     let residual=finite(stored-input+exhaust)?;
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
     let prefix=result.strip_suffix("}\n").ok_or_else(||bad("internal transient result framing"))?;
-    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
+    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
         num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
-        num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","));
+        num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?);
     poll(cx)?;
     Ok(output)
 }
