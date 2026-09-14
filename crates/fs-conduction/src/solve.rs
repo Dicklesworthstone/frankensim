@@ -1130,7 +1130,7 @@ fn robin_region_fluxes(
         .collect()
 }
 
-fn energy_balance(
+pub(crate) fn energy_balance(
     mesh: &ConductionMesh,
     boundary: &ThermalBoundary,
     source: &ScalarField,

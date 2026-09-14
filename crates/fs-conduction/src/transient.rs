@@ -52,6 +52,9 @@
 //! varies. This mirrors `fs-adjoint`, which refuses a `k(T)` material rather
 //! than linearizing it.
 
+/// Coupling-safe backward-Euler steps with explicit solid energy storage.
+pub mod backward_euler;
+
 use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
@@ -125,6 +128,15 @@ pub fn assemble_capacitance(
     mesh: &ConductionMesh,
     capacity: VolumetricHeatCapacity,
 ) -> Result<Csr, ConductionError> {
+    assemble_capacitance_from(cx, mesh, |_| capacity.value_j_per_m3_k())
+}
+
+// One P1 mass rule for uniform and explicitly heterogeneous heat capacities.
+fn assemble_capacitance_from(
+    cx: &Cx<'_>,
+    mesh: &ConductionMesh,
+    mut capacity: impl FnMut(usize) -> f64,
+) -> Result<Csr, ConductionError> {
     let n = mesh.vertex_count();
     let mut coo = Coo::new(n, n);
     for element in 0..mesh.element_count() {
@@ -135,11 +147,19 @@ pub fn assemble_capacitance(
             })?;
         }
         let volume = mesh.element_volume(element);
+        let volumetric = capacity(element);
         let vertices = mesh.complex().tets[element];
         for (a, &va) in vertices.iter().enumerate() {
             for (b, &vb) in vertices.iter().enumerate() {
                 let kronecker = if a == b { 1.0 } else { 0.0 };
-                let entry = capacity.value_j_per_m3_k * volume * (1.0 + kronecker) / 20.0;
+                let entry = volumetric * volume * (1.0 + kronecker) / 20.0;
+                crate::require_finite("capacitance entry", entry)?;
+                if entry <= 0.0 {
+                    return Err(ConductionError::Config {
+                        parameter: "capacitance",
+                        what: "positive capacity entry is not representable".to_string(),
+                    });
+                }
                 coo.push(va as usize, vb as usize, entry);
             }
         }
