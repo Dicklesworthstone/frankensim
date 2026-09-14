@@ -6,7 +6,8 @@
 //! Prescribed temperatures enter dA T but their tangents/adjoints are zero.
 //! This owns the solid half of a conjugate derivative, not the air fixed point.
 //! Geometry, conductivity and prescribed temperatures are held fixed; k(T),
-//! contact/radiation coupling and continuum-error certification are not covered.
+//! radiation coupling and continuum-error certification are not covered.
+//! Explicit matching-P1 contact is supported with its resistance held fixed.
 
 use std::collections::BTreeSet;
 
@@ -16,7 +17,7 @@ use fs_sparse::Csr;
 
 use crate::assemble::{DofMap, assemble_operator_scaled_with_interfaces, reduce};
 use crate::{ConductionError, ConductionProblem, ConductionSolution, LinearConfig, ScalarField,
-    SolveConfig, ThermalBc};
+    SolveConfig, ThermalBc, ThermalInterfaces};
 
 /// One selected uniform Robin region. Ordering is chosen by the caller.
 #[derive(Debug)]
@@ -92,6 +93,30 @@ impl RobinLinearization {
     pub fn new(
         cx: &Cx<'_>, problem: ConductionProblem<'_>, config: SolveConfig, regions: &[&str],
     ) -> Result<Self, ConductionError> {
+        Self::new_inner(cx, problem, None, config, regions)
+    }
+
+    /// Bind the same Robin derivatives through explicitly declared matching-P1
+    /// contacts. The primal, tangent and adjoint all contain the SAME contact
+    /// operator; temperatures on the two traces remain distinct unknowns.
+    /// Contact resistance is fixed, not a Robin log(h) control. This does not
+    /// differentiate contact geometry or resistance and does not infer perfect
+    /// contact. Interface ownership, geometry and missing-pair checks remain
+    /// the production ThermalInterfaces/solve_with_interfaces admission rules.
+    ///
+    /// # Errors
+    /// All errors from `new`, plus the production contact-binding refusals.
+    pub fn new_with_interfaces(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: &ThermalInterfaces,
+        config: SolveConfig, regions: &[&str],
+    ) -> Result<Self, ConductionError> {
+        Self::new_inner(cx, problem, Some(interfaces), config, regions)
+    }
+
+    fn new_inner(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        config: SolveConfig, regions: &[&str],
+    ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
         if !(config.linear.tolerance.is_finite() && config.linear.tolerance > 0.0
             && config.linear.tolerance < 1.0 && config.linear.max_iterations > 0)
@@ -132,9 +157,12 @@ impl RobinLinearization {
             ports.push(port);
         }
         let linear = config.linear;
-        let primal = crate::solve::solve(cx, problem, config)?;
+        let primal = match interfaces {
+            Some(interfaces) => crate::solve::solve_with_interfaces(cx, problem, interfaces, config)?,
+            None => crate::solve::solve(cx, problem, config)?,
+        };
         let system = assemble_operator_scaled_with_interfaces(cx, problem.mesh, problem.boundary,
-            problem.material, problem.source, &primal.temperature, None, None, problem.element_materials)?;
+            problem.material, problem.source, &primal.temperature, None, interfaces, problem.element_materials)?;
         let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
         let (matrix, rhs) = reduce(&system, &dofs);
         let relative = true_residual(&matrix, &dofs.gather(&primal.temperature), &rhs)?;
@@ -305,3 +333,5 @@ fn failed(iterations: usize, residual: f64, config: LinearConfig) -> ConductionE
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod contact_tests;
