@@ -30,12 +30,13 @@ pub(super) struct Schedule {
     max_steps: usize,
     adaptive: Option<adaptive::Config>,
     fan_speed_design: Option<sizing::Config>,
+    power_design: Option<sizing::Config>,
 }
 
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design", "power_design"], "transient")?;
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -57,6 +58,10 @@ impl Schedule {
         let max_dt = positive(get(value,"max_step_s")?,"max_step_s")?;
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
         let adaptive = value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?;
+        if value.get("fan_speed_design").is_some() && value.get("power_design").is_some() {
+            return Err(bad("choose transient fan-speed sizing or workload-power sizing, not both"));
+        }
+        let power_design = value.get("power_design").map(sizing::Config::parse_power).transpose()?;
         let fan_speed_design = value.get("fan_speed_design").map(sizing::Config::parse).transpose()?;
         let limit = value.get("temperature_limit_k").map(|t| positive(t,"temperature_limit_k")).transpose()?;
         let mut intervals = Vec::new();
@@ -100,8 +105,10 @@ impl Schedule {
         if adaptive.is_some() && total_steps > max_steps / 2 {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
-        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design};
-        if let Some(design) = &schedule.fan_speed_design { design.validate(&schedule,fan)?; }
+        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design,power_design};
+        for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
+            design.validate(&schedule,fan)?;
+        }
         Ok(schedule)
     }
 }
@@ -186,9 +193,10 @@ struct Trajectory {
 }
 
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
-    match &schedule.fan_speed_design {
-        Some(design) => sizing::solve(request,cx,schedule,design),
-        None => simulate(request,cx,schedule,1.0).map(|run|run.output),
+    match (&schedule.fan_speed_design,&schedule.power_design) {
+        (Some(design),None) | (None,Some(design)) => sizing::solve(request,cx,schedule,design),
+        (None,None) => simulate(request,cx,schedule,1.0).map(|run|run.output),
+        _ => Err(bad("transient design controls are mutually exclusive")),
     }
 }
 

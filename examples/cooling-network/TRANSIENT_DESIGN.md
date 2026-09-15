@@ -89,3 +89,58 @@ Results remain nominal discrete estimates, with quasi-steady air, frozen fluid
 properties, fixed geometry/contact resistance, no fan-off natural convection,
 and no native `.fsim`/ledger integration. Rust compilation and tests were not
 executed in the authoring environment.
+
+## Size workload power while keeping the cooling schedule fixed
+
+The complementary `transient.power_design` searches for a passing workload
+multiplier near the temperature crossing, with an evaluated **failing upper**
+endpoint. It is mutually exclusive with `transient.fan_speed_design` and with
+both existing steady design modes.
+
+```json
+"temperature_limit_k": 315,
+"power_design": {
+  "min_power_multiplier": 0,
+  "max_power_multiplier": 2,
+  "power_multiplier_tolerance": 0.0001,
+  "temperature_tolerance_k": 0.00001,
+  "max_evaluations": 64
+}
+```
+
+The common factor scales every interval's global `power_scale`, or every
+absolute wattage in that interval's `component_powers_w` map. This preserves
+the relative workload distribution, component footprints and durations. Zero
+powers remain zero; there is no division by nominal component power. Uniform
+signed source fields are scaled as declared, including cooling sources. Initial
+temperatures, inlet temperatures, thermal capacities, and fan speeds do not
+scale. Named watts are reprojected through the existing `PowerMap`, not guessed
+from the already summed source. Pressure-driven schedules are supported too.
+
+The search evaluates the requested maximum first. If it passes, it returns
+`maximum-feasible`. Otherwise a passing lower endpoint is required; bisection
+returns the **passing lower** field and workload, never the failing upper trial.
+Missing brackets and producer failures retain their previous meanings; no global
+monotonicity, throughput model, maximum safe hardware rating or continuum
+compliance certificate is inferred. The same fixed/adaptive sampled-trajectory
+limitations and whole-search wall/evaluation budgets apply.
+
+`transient_power_design` reports the selected power multiplier, failed upper
+endpoint, actual interval workload maps, peak/time and work totals. The main
+transient history reports the applied watts or global scales, while
+`solid_inputs` remains the base declaration. The final fan result corresponds
+to the original unscaled final interval speed. Only the chosen passing
+trajectory is retained in full.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/size-transient-power.json
+```
+
+This request uses explicit component watt maps, the same contact/duct/solid
+model, and the fixed 1 / 1.5 fan schedule. For a 315 K sampled-peak target,
+an independent adaptive NumPy reference selects a multiplier near 0.71838045:
+the 20 W pulse becomes approximately 14.367609 W, with a passing peak near
+314.999998 K and about 431.028271 J of input. Its cooled final maximum is
+302.149715 K. These are independent mathematical checks, not Rust execution.
+The added Rust tests for workload scaling and design remain unexecuted.

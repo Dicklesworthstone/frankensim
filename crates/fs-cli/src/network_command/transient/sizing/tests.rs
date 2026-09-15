@@ -3,7 +3,7 @@ use super::super::super::tests::{close,with_cx};
 
 const FIXTURE:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/size-transient-fan.json"));
 fn config()->Config {
-    Config {minimum:0.5,maximum:1.3,multiplier_tolerance:1e-4,temperature_tolerance_k:1e-5,max_evaluations:64}
+    Config {control:Control::FanSpeed,minimum:0.5,maximum:1.3,multiplier_tolerance:1e-4,temperature_tolerance_k:1e-5,max_evaluations:64}
 }
 fn numerical(peak:f64)->Trajectory {
     Trajectory {output:"{\"final_temperature_k\":300}\n".into(),peak_k:peak,peak_time_s:30.0,solid_solves:7,steps:3}
@@ -23,7 +23,7 @@ fn search_returns_the_evaluated_passing_peak_not_the_cool_final_field() {
         assert!(selected.passing.peak_k<=301.1);
         assert!(301.1-selected.passing.peak_k<=c.temperature_tolerance_k);
         assert!(selected.width<=c.multiplier_tolerance);
-        assert!(selected.failed_lower.unwrap().peak_k>301.1);
+        assert!(selected.failed.unwrap().peak_k>301.1);
         close(selected.passing.peak_k,response(selected.multiplier),0.0);
         assert!(selected.history.iter().any(|t|t.peak_k>301.1));
     });
@@ -34,7 +34,7 @@ fn minimum_bracket_budget_producer_and_cancellation_are_not_confused() {
     with_cx(|cx| {
         let mut c=config();c.max_evaluations=1;
         let selected=search(cx,&c,310.0,|_|Ok(numerical(300.0))).unwrap();
-        assert!(selected.failed_lower.is_none());assert_eq!(selected.history.len(),1);
+        assert!(selected.failed.is_none());assert_eq!(selected.history.len(),1);
         assert_eq!(search(cx,&c,310.0,|_|Ok(numerical(320.0))).err().unwrap().code,"cooling-network-transient-budget");
         c.max_evaluations=64;
         assert_eq!(search(cx,&c,310.0,|_|Ok(numerical(320.0))).err().unwrap().code,"cooling-network-transient-fan-bracket");
