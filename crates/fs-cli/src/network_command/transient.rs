@@ -6,6 +6,7 @@
 mod workload;
 mod adaptive;
 mod sizing;
+mod repeat;
 use workload::Workload;
 
 use super::*;
@@ -31,12 +32,13 @@ pub(super) struct Schedule {
     adaptive: Option<adaptive::Config>,
     fan_speed_design: Option<sizing::Config>,
     power_design: Option<sizing::Config>,
+    repeat: Option<repeat::Config>,
 }
 
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design", "power_design"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design", "power_design", "repeat"], "transient")?;
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -105,7 +107,8 @@ impl Schedule {
         if adaptive.is_some() && total_steps > max_steps / 2 {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
-        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design,power_design};
+        let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
+        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design,power_design,repeat};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
             design.validate(&schedule,fan)?;
         }
@@ -200,8 +203,31 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     }
 }
 
-/// Always begins from the declared initial field, never from another candidate.
+/// Every design candidate starts cold/as declared; only cycles WITHIN that
+/// candidate inherit the preceding accepted thermal state.
 fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)->Result<Trajectory> {
+    match schedule.repeat {
+        Some(config) => repeat::simulate(request,cx,schedule,speed_multiplier,config),
+        None => simulate_cycle(request,cx,schedule,speed_multiplier,&schedule.initial,schedule.max_steps)
+            .map(|cycle|cycle.trajectory),
+    }
+}
+
+/// Structured cycle state crosses the repetition boundary, never parsed JSON.
+struct Cycle {
+    trajectory: Trajectory,
+    final_temperature: Vec<f64>,
+    duration_s: f64,
+    input_j: f64,
+    stored_j: f64,
+    exhaust_j: f64,
+    first_violation_s: Option<f64>,
+}
+
+/// Run precisely one period from immutable, explicitly supplied history. Local
+/// time starts at zero so large global cycle counts cannot distort timesteps.
+fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
+    initial_field:&[f64],remaining_steps:usize)->Result<Cycle> {
     poll(cx)?;
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
@@ -210,7 +236,12 @@ fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)
     // later intervals which might otherwise fail after a long simulation.
     for interval in &schedule.intervals { interval.workload.validate(request,cx)?; }
     let engine=BackwardEuler::per_element(cx,&request.mesh,&schedule.capacities).map_err(producer)?;
-    let mut old=schedule.initial.clone();
+    if initial_field.len()!=request.mesh.vertex_count()
+        || initial_field.iter().any(|&t|!t.is_finite()||t<=0.0) {
+        return Err(bad("cycle history requires one positive finite temperature per solid vertex"));
+    }
+    let max_steps=schedule.max_steps.min(remaining_steps);
+    let mut old=initial_field.to_vec();
     let (initial,initial_vertex)=initial_objective(request,cx,&old)?;
     let mut peak=initial;
     let mut peak_time=0.0;
@@ -246,7 +277,7 @@ fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)
         while time < end {
             poll(cx)?;
             let needed=if schedule.adaptive.is_some(){2}else{1};
-            if completed > schedule.max_steps.saturating_sub(needed) || needed > schedule.max_steps {
+            if completed > max_steps.saturating_sub(needed) || needed > max_steps {
                 return Err(budget("accepted transient endpoint budget exhausted; no partial trajectory published"));
             }
             // All trials, including discarded coarse/rejected ones, undergo the
@@ -322,7 +353,11 @@ fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)
         num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
         num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?);
     poll(cx)?;
-    Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps:completed})
+    Ok(Cycle {
+        trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps:completed},
+        final_temperature:old,duration_s:time,input_j:input,stored_j:stored,exhaust_j:exhaust,
+        first_violation_s:first_violation,
+    })
 }
 
 #[cfg(test)]

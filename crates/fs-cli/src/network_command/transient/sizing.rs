@@ -180,9 +180,9 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, schedule: &Schedule, config:
     let status=if selected.failed.is_some(){"target-bracketed"}
         else if power {"maximum-feasible"}else{"minimum-feasible"};
     let scope=if power {
-        "passing evaluated sampled workload at fixed fan schedule; every source in every interval is multiplied, with fixed footprints and durations; no continuous-time compliance, globally maximal workload, electrical-power or transient-adjoint claim"
+        "passing evaluated sampled workload at fixed fan schedule; every source in every interval is multiplied, with fixed footprints and durations; repeated-cycle warm-up peaks remain part of feasibility; no continuous-time compliance, globally maximal workload, electrical-power or transient-adjoint claim"
     } else {
-        "passing evaluated sampled trajectory; each candidate restarts the same initial field and rescales the whole base fan schedule; no continuous-time compliance, global minimum-speed, electrical-power or fan-speed-adjoint claim"
+        "passing evaluated sampled trajectory; each candidate restarts the same initial field and rescales the whole base fan schedule; repeated cycles carry heat and all their samples enter feasibility; no continuous-time compliance, global minimum-speed, electrical-power or fan-speed-adjoint claim"
     };
     let prefix=selected.passing.output.strip_suffix("}\n").ok_or_else(||bad("internal trajectory framing"))?;
     let output=format!("{prefix},\"{name}\":{{\"selected_{multiplier_key}\":{},\"status\":{},\"temperature_limit_k\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"{failed_key}\":{},\"multiplier_bracket_width\":{},\"evaluations\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"schedule\":[{}],\"history\":[{}],\"scope\":{},\"time_comparison\":\"adaptive samples may differ between candidates; local estimates and parameter brackets are not trajectory error bounds\"}}}}\n",
@@ -211,7 +211,7 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
     }).collect::<Result<Vec<_>>>()?;
     Ok(Schedule {initial:schedule.initial.clone(),capacities:schedule.capacities.clone(),intervals,
         limit:schedule.limit,total_steps:schedule.total_steps,max_step_s:schedule.max_step_s,max_steps:schedule.max_steps,
-        adaptive:schedule.adaptive,fan_speed_design:None,power_design:None})
+        adaptive:schedule.adaptive,fan_speed_design:None,power_design:None,repeat:schedule.repeat})
 }
 
 fn render_trial(trial: &Trial, multiplier_key: &str) -> Result<String> {
