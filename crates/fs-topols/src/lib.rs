@@ -26,6 +26,9 @@
 //!   SDF, energy-density shape velocity with augmented-Lagrangian
 //!   volume control, extend → advect → redistance → audit → (maybe)
 //!   nucleate, everything ledgered.
+//! - [`checkpoint`]: exact durable single-load continuation from retained level
+//!   set, global iteration ordinal, and augmented-Lagrange multiplier without
+//!   replaying earlier geometry updates.
 //! - [`robust_descent`]: evaluated-state simultaneous independent-load compliance descent;
 //!   equilibrium is solved per scenario before shape fields are aggregated, and
 //!   complete evolved candidates are re-solved before trajectory publication.
@@ -41,6 +44,7 @@
 //! - [`robust_stress`]: worst-scenario sampled-stress admission across
 //!   simultaneous independent load cases with robust final replay.
 
+pub mod checkpoint;
 pub mod evaluated;
 pub mod fim;
 pub mod gridsdf;
@@ -55,6 +59,7 @@ pub mod topder;
 pub mod veloext;
 pub mod weno;
 
+pub use checkpoint::OptimizeCheckpoint;
 pub use evaluated::{
     EvaluatedFinalState, EvaluatedOptimizeReport, evaluate_compliance_design,
     optimize_compliance_evaluated,
