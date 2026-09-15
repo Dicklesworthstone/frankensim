@@ -19,7 +19,7 @@ use json::JsonValue as J;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
-use std::io::Read;
+use std::io::Read as _;
 
 const SCHEMA: &str = "frankensim.cooling-network-uq.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network-uq.result.v1";
