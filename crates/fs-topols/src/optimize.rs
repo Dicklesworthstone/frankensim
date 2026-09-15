@@ -78,7 +78,7 @@ impl Default for OptimizeSettings {
 /// The ledgered trajectory.
 #[derive(Debug, Clone, Default)]
 pub struct OptimizeReport {
-    /// Compliance per iteration.
+    /// Compliance of the successfully evaluated post-evolution geometry per iteration.
     pub compliance: Vec<f64>,
     /// Material volume per iteration.
     pub volume: Vec<f64>,
@@ -261,237 +261,8 @@ fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
     (mc.assemble(), kc.assemble())
 }
 
-/// Run the level-set compliance descent. Returns the report; the
-/// level set evolves in place.
-///
-/// # Errors
-/// Returns [`CutFemError::InvalidElasticityInput`] before mutating `phi` when the load,
-/// band, or material settings are outside the documented finite certified
-/// regime. Canonical fs-cutfem solve refusals otherwise propagate unchanged.
-///
-/// # Panics
-/// If `phi.n() != 2^level` (the SDF lattice must match the CutFEM
-/// grid so cells align).
-#[allow(clippy::too_many_lines)] // the descent loop is one narrative
-pub fn optimize_compliance(
-    phi: &mut GridSdf,
-    fixture: Cantilever,
-    settings: OptimizeSettings,
-) -> Result<OptimizeReport, CutFemError> {
-    let support = cantilever_support(fixture)?;
-    let (material, lambda, mu) = validated_plane_strain_material(settings)?;
-    let n = 1usize << settings.level;
-    assert_eq!(phi.n(), n, "SDF lattice must match the CutFEM grid");
-    let grid = Quadtree::uniform(settings.level);
-    let h = phi.h();
-    let stride = n + 1;
-    let (mass, stiffness) = mass_stiffness(n);
-    let mut ell = settings.ell0;
-    let mut report = OptimizeReport::default();
-    let clamp = |x: f64, _y: f64| x < 1e-9;
-    let load = fixture.load;
-    let traction = move |_: f64, _: f64| [0.0, -load];
-    for iter in 0..settings.iterations {
-        // 1. Physics on the level set (zero meshing).
-        let solver = CutElasticity {
-            grid: &grid,
-            sdf: phi,
-            material: &material,
-            nitsche_beta: 20.0,
-            ghost_gamma: 0.5,
-            stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
-            quad_depth: 2,
-            clamp: Some(&clamp),
-            boundary_traction: None,
-            traction_free_interface: true,
-            solver_tol: SOLVER_TOL,
-            solver_max_iters: SOLVER_MAX_ITERS,
-        };
-        let sol = solver.solve_with_boundary_traction(
-            &|_, _| [0.0, 0.0],
-            &|_, _| [0.0, 0.0],
-            BoundaryTraction::EdgeBand {
-                support,
-                value: &traction,
-            },
-        )?;
-        // 2. Exact discrete external work for the assembled typed load.
-        // Here f = g = 0 and the supported right-edge DOFs are unclamped, so
-        // canonical b^T u is the compliance of this discrete problem.
-        let compliance = sol.compliance();
-        // 3. Nodal strain-energy density w(x) = ½ σ:ε from adjacent
-        // material; seeds for the extension are band nodes.
-        let mut energy = vec![0.0f64; stride * stride];
-        let mut seeded = vec![false; stride * stride];
-        for j in 0..=n {
-            for i in 0..=n {
-                let k = i + j * stride;
-                let p = phi.pos(i, j);
-                // Sample slightly inside material along −∇φ.
-                let g = phi.gradient_at(p);
-                let gn = g[0].hypot(g[1]).max(1e-12);
-                let q = [
-                    (p[0] - 0.75 * h * g[0] / gn).clamp(0.0, 1.0),
-                    (p[1] - 0.75 * h * g[1] / gn).clamp(0.0, 1.0),
-                ];
-                if phi.value_at(q) > 0.0 {
-                    continue;
-                }
-                let (eps, ok) = strain_at(&grid, phi, &sol, q);
-                if !ok {
-                    continue;
-                }
-                let sxx = (lambda + 2.0 * mu) * eps[0] + lambda * eps[1];
-                let syy = lambda * eps[0] + (lambda + 2.0 * mu) * eps[1];
-                let sxy = 2.0 * mu * eps[2];
-                energy[k] = 0.5 * (sxx * eps[0] + syy * eps[1] + 2.0 * sxy * eps[2]);
-                seeded[k] = phi.node(i, j).abs() <= 2.0 * h;
-            }
-        }
-        // 4. Extend off the interface, smooth, form v_n = w − ℓ.
-        extend_velocity(phi, &mut energy, &seeded);
-        let (smooth, _iters) = fs_adjoint::sobolev::sobolev_smooth(
-            &mass,
-            &stiffness,
-            settings.sobolev_alpha * h * h,
-            &energy,
-            1e-10,
-        );
-        // The multiplier lives on the ENERGY-DENSITY scale: its
-        // update is normalized by the mean band energy so the volume
-        // feedback competes with the shape term instead of drowning it
-        // (an O(1) multiplier against O(J) energies shrinks the
-        // structure to nothing at full speed — measured failure mode).
-        let vn: Vec<f64> = smooth.iter().map(|w| w - ell).collect();
-        // 5. Advect one interface move, on the band.
-        let band = build_band(phi, settings.band_cells);
-        let vmax = vn.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-12);
-        advect(
-            phi,
-            &band,
-            &Velocity::Normal(&vn),
-            settings.move_cells * h / vmax,
-            0.45,
-        );
-        // The load pad is non-design geometry. Retain it before redistancing
-        // so its restored interface participates in the ordinary audit, then
-        // reassert the strict interior clearance after the scalar sweep.
-        let mut load_pad_nodes = retain_cantilever_load_pad(phi, support);
-        // 6. Redistance + audit.
-        let audit = redistance(phi, settings.band_cells);
-        load_pad_nodes += retain_cantilever_load_pad(phi, support);
-        // 7. Volume + multiplier update.
-        let volume = material_volume(&grid, phi);
-        #[allow(clippy::cast_precision_loss)]
-        let w_mean = smooth.iter().sum::<f64>() / smooth.len() as f64;
-        ell = (ell
-            + settings.mu_al * w_mean.abs().max(1e-30) * (volume - settings.volfrac)
-                / settings.volfrac)
-            .max(0.0);
-        // 8. Scheduled nucleation by topological derivative.
-        if settings.nucleation_period > 0 && iter > 0 && iter % settings.nucleation_period == 0 {
-            let mut dt_field = vec![f64::INFINITY; stride * stride];
-            for j in 0..=n {
-                for i in 0..=n {
-                    let k = i + j * stride;
-                    let p = phi.pos(i, j);
-                    if phi.value_at(p) > -2.0 * h {
-                        continue;
-                    }
-                    let (eps, ok) = strain_at(&grid, phi, &sol, p);
-                    if !ok {
-                        continue;
-                    }
-                    let sxx = (lambda + 2.0 * mu) * eps[0] + lambda * eps[1];
-                    let syy = lambda * eps[0] + (lambda + 2.0 * mu) * eps[1];
-                    let sxy = 2.0 * mu * eps[2];
-                    dt_field[k] = topological_derivative(lambda, mu, [sxx, syy, sxy], eps);
-                }
-            }
-            let events = nucleate(
-                phi,
-                &dt_field,
-                ell,
-                settings.hole_radius_cells * h,
-                6.0 * settings.hole_radius_cells * h,
-                2,
-            );
-            if !events.is_empty() {
-                load_pad_nodes += retain_cantilever_load_pad(phi, support);
-                let _ = redistance(phi, settings.band_cells);
-                load_pad_nodes += retain_cantilever_load_pad(phi, support);
-            }
-            report.events.extend(events);
-        }
-        // 9. Ledger.
-        let snap = fnv(phi);
-        let mut row = String::new();
-        let _ = write!(
-            row,
-            "{{\"iter\":{iter},\"compliance\":{compliance:.6e},\"volume\":{volume:.4},\
-             \"ell\":{ell:.4e},\"drift_h\":{:.2e},\"load_pad_nodes\":{load_pad_nodes},\
-             \"snapshot\":\"{snap:#018x}\"}}",
-            audit.interface_drift_h
-        );
-        report.rows.push(row);
-        report.compliance.push(compliance);
-        report.volume.push(volume);
-        report.ell.push(ell);
-        report.audits.push(audit);
-        report.snapshots.push(snap);
-        report.load_pad_nodes.push(load_pad_nodes);
-    }
-    Ok(report)
-}
-
-/// Strain at a point from the CutFEM solution (bilinear gradient on
-/// the containing cell); `ok = false` outside the active mesh.
-fn strain_at(
-    grid: &Quadtree,
-    phi: &GridSdf,
-    sol: &CutElasticitySolution,
-    p: [f64; 2],
-) -> ([f64; 3], bool) {
-    let level = grid.max_level();
-    let nf = f64::from(1u32 << level);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ci = ((p[0] * nf).floor().clamp(0.0, nf - 1.0)) as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cj = ((p[1] * nf).floor().clamp(0.0, nf - 1.0)) as u32;
-    let cell = (level, ci, cj);
-    let (lo, hi) = grid.rect(cell);
-    let corners = grid.corner_nodes(cell);
-    let nodal = sol.nodal();
-    let mut vals = [[0.0f64; 2]; 4];
-    for (a, c) in corners.iter().enumerate() {
-        match nodal.get(c) {
-            Some(u) => vals[a] = *u,
-            None => return ([0.0; 3], false),
-        }
-    }
-    let _ = phi;
-    let hx = hi[0] - lo[0];
-    let hy = hi[1] - lo[1];
-    let xi = ((p[0] - lo[0]) / hx).clamp(0.0, 1.0);
-    let et = ((p[1] - lo[1]) / hy).clamp(0.0, 1.0);
-    let g = [
-        [-(1.0 - et) / hx, -(1.0 - xi) / hy],
-        [(1.0 - et) / hx, -xi / hy],
-        [et / hx, xi / hy],
-        [-et / hx, (1.0 - xi) / hy],
-    ];
-    let mut gu = [[0.0f64; 2]; 2];
-    for a in 0..4 {
-        for c in 0..2 {
-            gu[c][0] += g[a][0] * vals[a][c];
-            gu[c][1] += g[a][1] * vals[a][c];
-        }
-    }
-    (
-        [gu[0][0], gu[1][1], f64::midpoint(gu[0][1], gu[1][0])],
-        true,
-    )
-}
+mod engine;
+pub use engine::optimize_compliance;
 
 #[cfg(test)]
 mod tests {
@@ -525,4 +296,81 @@ mod tests {
             "load-pad retention must not fill unrelated lattice columns"
         );
     }
+
+    fn beam(level: u32) -> GridSdf {
+        GridSdf::from_fn(1usize << level, &|_, y| (y - 0.5).abs() - 0.35)
+    }
+
+    fn oracle_compliance(phi: &GridSdf, level: u32) -> f64 {
+        let grid = Quadtree::uniform(level);
+        let material = IsotropicElastic::new(1.0, 0.3, 1.0).expect("fixture material");
+        let clamp = |x: f64, _: f64| x < 1e-9;
+        let traction = |_: f64, _: f64| [0.0, -1.0];
+        CutElasticity {
+            grid: &grid, sdf: phi, material: &material,
+            nitsche_beta: 20.0, ghost_gamma: 0.5,
+            stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
+            quad_depth: 2, clamp: Some(&clamp), boundary_traction: None,
+            traction_free_interface: true, solver_tol: 1e-12, solver_max_iters: 60_000,
+        }.solve_with_boundary_traction(
+            &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0],
+            BoundaryTraction::EdgeBand {
+                support: EdgeBand::new(DesignBoxEdge::Right, 0.375, 0.625).expect("fixture support"),
+                value: &traction,
+            },
+        ).expect("independent final-geometry solve").compliance()
+    }
+
+    #[test]
+    fn reported_compliance_and_snapshot_belong_to_the_returned_geometry() {
+        let settings = OptimizeSettings {
+            level: 4, iterations: 2, move_cells: 0.1, nucleation_period: 0,
+            ..OptimizeSettings::default()
+        };
+        let fixture = Cantilever { load: 1.0, band: 0.125 };
+        let mut phi = beam(settings.level);
+        let original_snapshot = fnv(&phi);
+        let report = optimize_compliance(&mut phi, fixture, settings).expect("real two-step run");
+        assert_eq!(report.compliance.len(), 2);
+        assert_ne!(fnv(&phi), original_snapshot, "the fixture must actually evolve");
+        assert_eq!(report.snapshots.last(), Some(&fnv(&phi)));
+        assert_eq!(report.compliance[1].to_bits(), oracle_compliance(&phi, settings.level).to_bits());
+        assert_eq!(report.volume[1].to_bits(), material_volume(&Quadtree::uniform(settings.level), &phi).to_bits());
+    }
+
+    #[test]
+    fn nucleation_volume_and_compliance_are_measured_after_the_holes() {
+        let settings = OptimizeSettings {
+            level: 5, iterations: 2, move_cells: 0.0, ell0: 1e6,
+            nucleation_period: 1, hole_radius_cells: 1.25,
+            ..OptimizeSettings::default()
+        };
+        let mut phi = beam(settings.level);
+        let report = optimize_compliance(&mut phi, Cantilever { load: 1.0, band: 0.125 }, settings)
+            .expect("real nucleation run");
+        assert!(!report.events.is_empty(), "the regression must punch actual holes");
+        assert!(report.volume[1] < report.volume[0]);
+        assert_eq!(report.volume[1].to_bits(), material_volume(&Quadtree::uniform(settings.level), &phi).to_bits());
+        assert_eq!(report.compliance[1].to_bits(), oracle_compliance(&phi, settings.level).to_bits());
+    }
+
+    #[test]
+    fn bad_evolution_controls_refuse_without_mutating_the_design() {
+        let original = beam(3);
+        let settings = OptimizeSettings { level: 3, iterations: 0, ..OptimizeSettings::default() };
+        for bad in [
+            OptimizeSettings { level: u32::MAX, ..settings },
+            OptimizeSettings { volfrac: 0.0, ..settings },
+            OptimizeSettings { volfrac: f64::NAN, ..settings },
+            OptimizeSettings { move_cells: f64::INFINITY, ..settings },
+            OptimizeSettings { band_cells: 0.0, ..settings },
+            OptimizeSettings { mu_al: 0.0, ..settings },
+            OptimizeSettings { sobolev_alpha: -1.0, ..settings },
+        ] {
+            let mut phi = original.clone();
+            assert!(optimize_compliance(&mut phi, Cantilever { load: 1.0, band: 0.125 }, bad).is_err());
+            assert_eq!(phi.nodes(), original.nodes());
+        }
+    }
+
 }
