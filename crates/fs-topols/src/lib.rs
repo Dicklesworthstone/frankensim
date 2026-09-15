@@ -31,8 +31,8 @@
 //!   snapshot are bound to one actually evaluated design.
 //! - [`guarded`]: bounded whole-trajectory candidate acceptance using only
 //!   independently evaluated final objectives and material areas.
-//! - [`robust`]: independent multi-load final evaluation; opposite scenarios
-//!   are solved separately and aggregated only after equilibrium.
+//! - [`robust`]: independent multi-load final evaluation and transactional
+//!   robust selection across bounded nominal-driver candidate trajectories.
 
 pub mod evaluated;
 pub mod fim;
@@ -56,7 +56,8 @@ pub use guarded::{
 };
 pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compliance};
 pub use robust::{
-    RobustAggregate, RobustEvaluation, RobustLoadCase, evaluate_robust_design,
+    RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
+    RobustStop, evaluate_robust_design, optimize_compliance_robust_guarded,
 };
 pub use topder::{NucleationEvent, nucleate, topological_derivative};
 pub use veloext::extend_velocity;
