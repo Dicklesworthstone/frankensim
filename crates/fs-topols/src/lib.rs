@@ -29,10 +29,13 @@
 //! - [`evaluated`]: transactional publication boundary that independently
 //!   re-solves the exact returned geometry so final compliance, area and
 //!   snapshot are bound to one actually evaluated design.
+//! - [`guarded`]: bounded whole-trajectory candidate acceptance using only
+//!   independently evaluated final objectives and material areas.
 
 pub mod evaluated;
 pub mod fim;
 pub mod gridsdf;
+pub mod guarded;
 pub mod optimize;
 pub mod topder;
 pub mod veloext;
@@ -44,6 +47,10 @@ pub use evaluated::{
 };
 pub use fim::{RedistanceAudit, hausdorff, redistance, zero_crossings};
 pub use gridsdf::GridSdf;
+pub use guarded::{
+    GuardedCandidate, GuardedOptimizeReport, GuardedSettings, GuardedStop,
+    optimize_compliance_guarded,
+};
 pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compliance};
 pub use topder::{NucleationEvent, nucleate, topological_derivative};
 pub use veloext::extend_velocity;
