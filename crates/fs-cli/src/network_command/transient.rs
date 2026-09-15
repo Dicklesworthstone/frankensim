@@ -5,6 +5,7 @@
 
 mod workload;
 mod adaptive;
+mod sizing;
 use workload::Workload;
 
 use super::*;
@@ -28,12 +29,13 @@ pub(super) struct Schedule {
     max_step_s: f64,
     max_steps: usize,
     adaptive: Option<adaptive::Config>,
+    fan_speed_design: Option<sizing::Config>,
 }
 
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design"], "transient")?;
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -55,6 +57,7 @@ impl Schedule {
         let max_dt = positive(get(value,"max_step_s")?,"max_step_s")?;
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
         let adaptive = value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?;
+        let fan_speed_design = value.get("fan_speed_design").map(sizing::Config::parse).transpose()?;
         let limit = value.get("temperature_limit_k").map(|t| positive(t,"temperature_limit_k")).transpose()?;
         let mut intervals = Vec::new();
         let mut total_steps = 0_usize;
@@ -97,7 +100,9 @@ impl Schedule {
         if adaptive.is_some() && total_steps > max_steps / 2 {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
-        Ok(Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive})
+        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design};
+        if let Some(design) = &schedule.fan_speed_design { design.validate(&schedule,fan)?; }
+        Ok(schedule)
     }
 }
 
@@ -170,7 +175,25 @@ fn advance(request:&Request,cx:&Cx<'_>,engine:&BackwardEuler<'_>,network:&Transp
     Ok((coupled,solid))
 }
 
+/// One fully admitted trajectory. Scalar design decisions do not parse JSON
+/// receipts or substitute the final-state objective for the sampled peak.
+struct Trajectory {
+    output: String,
+    peak_k: f64,
+    peak_time_s: f64,
+    solid_solves: usize,
+    steps: usize,
+}
+
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
+    match &schedule.fan_speed_design {
+        Some(design) => sizing::solve(request,cx,schedule,design),
+        None => simulate(request,cx,schedule,1.0).map(|run|run.output),
+    }
+}
+
+/// Always begins from the declared initial field, never from another candidate.
+fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)->Result<Trajectory> {
     poll(cx)?;
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
@@ -196,7 +219,8 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     let mut final_result=None;
     for (ordinal,interval) in schedule.intervals.iter().enumerate() {
         poll(cx)?;
-        let flow=match (&request.fan,interval.speed) {
+        let speed=interval.speed.map(|base|finite(base*speed_multiplier)).transpose()?;
+        let flow=match (&request.fan,speed) {
             (Some(fan),Some(speed))=>fan.solve(cx,&request.graph,request.limits,speed)?,
             (None,None)=>request.flow(cx)?,
             _=>return Err(bad("transient drive/speed mismatch")),
@@ -256,7 +280,7 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
                 exhaust=finite(exhaust+dt*coupled.transport.external_heat_gain_w)?;
                 completed+=1;
                 history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{}}}",
-                    num(endpoint)?,num(dt)?,ordinal,workload_json,optional(interval.speed)?,num(state.value)?,
+                    num(endpoint)?,num(dt)?,ordinal,workload_json,optional(speed)?,num(state.value)?,
                     state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solid.source_w)?,
                     num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
                     num(solid.stored_energy_change_j-dt*(solid.source_w-coupled.transport.external_heat_gain_w))?,coupled.iterations,
@@ -272,7 +296,7 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
                         htc:network.regions().iter().map(|name|coefficients[*name]).collect(),
                         convection:std::mem::take(&mut derived),contact_fluxes:solid.contact_fluxes};
                     let result=render(request,&flow,&evaluated)?;
-                    final_result=Some(match (&request.fan,interval.speed) {
+                    final_result=Some(match (&request.fan,speed) {
                         (Some(fan),Some(speed))=>fan.attach(result,&flow,speed)?,_=>result,
                     });
                 }
@@ -290,7 +314,7 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
         num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
         num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?);
     poll(cx)?;
-    Ok(output)
+    Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps:completed})
 }
 
 #[cfg(test)]
