@@ -66,6 +66,11 @@ name = "fs-marquee-elasticity-stress"
 path = "src/bin/elasticity_stress.rs"
 required-features = ["marquee"]
 
+[[bin]]
+name = "fs-marquee-elasticity-robust-stress"
+path = "src/bin/elasticity_robust_stress.rs"
+required-features = ["marquee"]
+
 [[test]]
 name = "cli"
 required-features = ["marquee"]
