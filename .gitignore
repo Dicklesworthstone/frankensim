@@ -160,3 +160,8 @@ target-sweep-ckpt/
 
 # Ephemeral debug dumps in fs-cmaes-viz-wasm
 /crates/fs-cmaes-viz-wasm/*.txt
+# wasm-pack output under public/wasm (regenerated; not source).
+/crates/fs-cmaes-viz-wasm/public/wasm/
+# Crate-local cargo target is often a symlink into off-disk scratch, so
+# `target/` (directory-only) does not match it.
+/crates/fs-cmaes-viz-wasm/target
