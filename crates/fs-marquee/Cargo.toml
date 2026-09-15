@@ -16,6 +16,7 @@ fs-dwr = { path = "../fs-dwr" }
 fs-evidence = { path = "../fs-evidence" }
 fs-ivl = { path = "../fs-ivl" }
 fs-ledger = { path = "../fs-ledger" }
+fs-topols = { path = "../fs-topols" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
@@ -48,6 +49,11 @@ required-features = ["marquee"]
 [[bin]]
 name = "fs-marquee"
 path = "src/main.rs"
+required-features = ["marquee"]
+
+[[bin]]
+name = "fs-marquee-elasticity"
+path = "src/bin/elasticity.rs"
 required-features = ["marquee"]
 
 [[test]]
