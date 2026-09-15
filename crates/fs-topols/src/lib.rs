@@ -26,8 +26,9 @@
 //!   SDF, energy-density shape velocity with augmented-Lagrangian
 //!   volume control, extend → advect → redistance → audit → (maybe)
 //!   nucleate, everything ledgered.
-//! - [`robust_descent`]: simultaneous independent-load compliance descent;
-//!   equilibrium is solved per scenario before shape fields are aggregated.
+//! - [`robust_descent`]: evaluated-state simultaneous independent-load compliance descent;
+//!   equilibrium is solved per scenario before shape fields are aggregated, and
+//!   complete evolved candidates are re-solved before trajectory publication.
 //! - [`evaluated`]: transactional publication boundary that independently
 //!   re-solves the exact returned geometry so final compliance, area and
 //!   snapshot are bound to one actually evaluated design.
@@ -42,6 +43,7 @@ pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
 pub mod robust;
+#[path = "robust_descent_v2.rs"]
 pub mod robust_descent;
 pub mod topder;
 pub mod veloext;
