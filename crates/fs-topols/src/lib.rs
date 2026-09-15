@@ -26,7 +26,11 @@
 //!   SDF, energy-density shape velocity with augmented-Lagrangian
 //!   volume control, extend → advect → redistance → audit → (maybe)
 //!   nucleate, everything ledgered.
+//! - [`evaluated`]: transactional publication boundary that independently
+//!   re-solves the exact returned geometry so final compliance, area and
+//!   snapshot are bound to one actually evaluated design.
 
+pub mod evaluated;
 pub mod fim;
 pub mod gridsdf;
 pub mod optimize;
@@ -34,9 +38,13 @@ pub mod topder;
 pub mod veloext;
 pub mod weno;
 
+pub use evaluated::{
+    EvaluatedFinalState, EvaluatedOptimizeReport, evaluate_compliance_design,
+    optimize_compliance_evaluated,
+};
 pub use fim::{RedistanceAudit, hausdorff, redistance, zero_crossings};
 pub use gridsdf::GridSdf;
-pub use optimize::{OptimizeReport, OptimizeSettings, optimize_compliance};
+pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compliance};
 pub use topder::{NucleationEvent, nucleate, topological_derivative};
 pub use veloext::extend_velocity;
 pub use weno::{Velocity, advect, build_band};
