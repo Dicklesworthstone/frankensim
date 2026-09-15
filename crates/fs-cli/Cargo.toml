@@ -25,6 +25,7 @@ fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
+fs-ir = { path = "../fs-ir" }
 fs-ledger = { path = "../fs-ledger" }
 fs-marquee = { path = "../fs-marquee" }
 fs-matdb = { path = "../fs-matdb" }
@@ -39,6 +40,7 @@ fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-report = { path = "../fs-report" }
 fs-session = { path = "../fs-session" }
+fs-topols = { path = "../fs-topols" }
 fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]
