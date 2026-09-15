@@ -36,6 +36,8 @@
 //!   independently evaluated final objectives and material areas.
 //! - [`robust`]: independent multi-load final evaluation and transactional
 //!   robust selection across bounded candidate trajectories.
+//! - [`stress`]: independent sampled plane-strain von Mises evaluation plus
+//!   transactional volume/stress-limited candidate publication.
 
 pub mod evaluated;
 pub mod fim;
@@ -45,6 +47,7 @@ pub mod optimize;
 pub mod robust;
 #[path = "robust_descent_v2.rs"]
 pub mod robust_descent;
+pub mod stress;
 pub mod topder;
 pub mod veloext;
 pub mod weno;
@@ -66,6 +69,10 @@ pub use robust::{
 };
 pub use robust_descent::{
     RobustDescentReport, optimize_compliance_multi_load, optimize_compliance_multi_load_guarded,
+};
+pub use stress::{
+    SampledStressEvaluation, SampledStressLimit, StressGuardedCandidate, StressGuardedReport,
+    StressGuardedStop, evaluate_sampled_stress, optimize_compliance_stress_guarded,
 };
 pub use topder::{NucleationEvent, nucleate, topological_derivative};
 pub use veloext::extend_velocity;
