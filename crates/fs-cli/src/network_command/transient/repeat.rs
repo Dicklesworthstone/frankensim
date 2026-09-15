@@ -8,17 +8,43 @@ use super::*;
 pub(super) struct Config {
     cycles: usize,
     max_total_steps: usize,
+    periodic: Option<Periodic>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Periodic { tolerance_k: f64, consecutive: usize }
+
+impl Periodic {
+    fn observe(self, residual: f64, streak: &mut usize) -> bool {
+        *streak = if residual <= self.tolerance_k { *streak + 1 } else { 0 };
+        *streak >= self.consecutive
+    }
 }
 
 impl Config {
     pub(super) fn parse(value: &J, planned_steps: usize, adaptive: bool) -> Result<Self> {
-        object(value, &["cycles", "max_total_steps"], "transient.repeat")?;
-        let config = Self {
-            cycles: count(get(value,"cycles")?,"repeat.cycles",4096)?,
+        object(value, &["cycles", "until_periodic", "max_total_steps"], "transient.repeat")?;
+        let (cycles, periodic) = match (value.get("cycles"), value.get("until_periodic")) {
+            (Some(cycles), None) => (count(cycles,"repeat.cycles",4096)?, None),
+            (None, Some(value)) => {
+                object(value, &["max_cycles", "temperature_tolerance_k", "consecutive_cycles"], "repeat.until_periodic")?;
+                let cycles = count(get(value,"max_cycles")?,"periodic.max_cycles",4096)?;
+                let periodic = Periodic {
+                    tolerance_k: positive(get(value,"temperature_tolerance_k")?,"periodic.temperature_tolerance_k")?,
+                    consecutive: count(get(value,"consecutive_cycles")?,"periodic.consecutive_cycles",4096)?,
+                };
+                if periodic.consecutive < 2 || periodic.consecutive > cycles {
+                    return Err(bad("periodic convergence requires 2 <= consecutive_cycles <= max_cycles"));
+                }
+                (cycles, Some(periodic))
+            }
+            _ => return Err(bad("repeat requires either cycles or until_periodic, not both")),
+        };
+        let config = Self { cycles, periodic,
             max_total_steps: count(get(value,"max_total_steps")?,"repeat.max_total_steps",1_000_000)?,
         };
         let minimum = planned_steps.checked_mul(if adaptive {2} else {1})
-            .and_then(|steps|steps.checked_mul(config.cycles))
+            .and_then(|steps|steps.checked_mul(config.periodic.map_or(config.cycles, |p|p.consecutive)))
             .ok_or_else(||budget("repeated-cycle step count overflow"))?;
         if minimum > config.max_total_steps {
             return Err(budget("planned repeated cycles exceed the total accepted-step budget"));
@@ -42,12 +68,19 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
     let mut stored = 0.0;
     let mut exhaust = 0.0;
     let mut summaries = Vec::new();
+    let mut streak = 0_usize;
+    let mut last_residual = None;
     for cycle_index in 0..config.cycles {
         poll(cx)?;
         let remaining = config.max_total_steps.checked_sub(steps)
             .filter(|&left|left>0).ok_or_else(||budget("repeated-cycle accepted-step budget exhausted"))?;
         let cycle = simulate_cycle(request,cx,schedule,speed_multiplier,&field,remaining)?;
         let residual = field_residual(cx,&field,&cycle.final_temperature)?;
+        last_residual = Some(residual);
+        let complete = match config.periodic {
+            Some(periodic) => periodic.observe(residual, &mut streak),
+            None => cycle_index+1==config.cycles,
+        };
         let end = finite(elapsed + cycle.duration_s)?;
         if end <= elapsed { return Err(bad("elapsed cycle time is no longer representable")); }
         let global_peak_time = finite(elapsed + cycle.trajectory.peak_time_s)?;
@@ -71,10 +104,16 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
             cycle_index+1,num(elapsed)?,num(end)?,num(cycle.trajectory.peak_k)?,num(global_peak_time)?,
             num(residual)?,num(cycle.stored_j)?,num(cycle.input_j)?,num(cycle.exhaust_j)?,
             cycle.trajectory.steps,cycle.trajectory.solid_solves));
-        if cycle_index+1==config.cycles {
+        if complete {
+            let status = if config.periodic.is_some() {"periodic-field-tolerance-met"} else {"fixed-count-complete"};
+            let periodic = match config.periodic {
+                None => "null".to_string(),
+                Some(p) => format!("{{\"temperature_tolerance_k\":{},\"full_field_residual_k\":{},\"consecutive_cycles_met\":{},\"required_consecutive_cycles\":{},\"max_cycles\":{},\"criterion\":\"same-phase maximum absolute nodal start/end difference; a cycle-map residual, not distance to the infinite-cycle solution\"}}",
+                    num(p.tolerance_k)?, num(residual)?, streak, p.consecutive, config.cycles),
+            };
             let prefix = cycle.trajectory.output.strip_suffix("}\n").ok_or_else(||bad("internal cycle result framing"))?;
-            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":\"fixed-count-complete\",\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"scope\":\"all cycles inherit the prior accepted nodal field; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; no settled-periodic, future-cycle or continuous-time bound\"}}}}\n",
-                config.cycles,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,num(peak)?,num(peak_time)?,
+            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"scope\":\"all cycles inherit the prior accepted nodal field; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; periodic stopping checks only the reported cycle-map residual; no infinite-cycle, future-peak or continuous-time bound\"}}}}\n",
+                quote(status),periodic,cycle_index+1,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,num(peak)?,num(peak_time)?,
                 optional(schedule.limit)?,optional(first_violation)?,num(input)?,num(stored)?,num(exhaust)?,num(energy_residual)?,summaries.join(","));
             poll(cx)?;
             return Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps});
@@ -82,7 +121,12 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
         field = cycle.final_temperature;
         elapsed = end;
     }
-    Err(bad("repeat.cycles must be positive"))
+    match (config.periodic, last_residual) {
+        (Some(p), Some(residual)) => Err(budget(&format!(
+            "periodic cycle budget exhausted after {} cycles: full-field residual {residual} K, tolerance {} K, consecutive passes {streak}/{}; no converged trajectory published",
+            config.cycles,p.tolerance_k,p.consecutive))),
+        _ => Err(bad("repeat.cycles must be positive")),
+    }
 }
 
 fn field_residual(cx: &Cx<'_>, start: &[f64], end: &[f64]) -> Result<f64> {
@@ -98,3 +142,6 @@ fn field_residual(cx: &Cx<'_>, start: &[f64], end: &[f64]) -> Result<f64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod periodic_tests;

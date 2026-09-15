@@ -70,3 +70,66 @@ power sizing and refusal behavior. Rust compilation, formatting and test executi
 were unavailable in the authoring environment. This remains the experimental
 JSON cooling command, not a native `.fsim`/ledger workflow. Repeating a specified
 number of cycles does not establish a settled periodic thermal state.
+
+## Run until successive cycles agree at the same phase
+
+Instead of `cycles`, supply `until_periodic`:
+
+```json
+"repeat": {
+  "until_periodic": {
+    "max_cycles":100,
+    "temperature_tolerance_k":0.0001,
+    "consecutive_cycles":2
+  },
+  "max_total_steps":10000
+}
+```
+
+The condition is `max_i |T_end[i] - T_start[i]| <= temperature_tolerance_k`
+over **every solid node**, checked at the same phase of each complete schedule.
+An unchanged surface mean or maximum does not pass this test when heat is still
+redistributing internally. The condition must pass on at least two consecutive
+cycles; a failure resets the streak. No relaxation or extrapolation alters the
+accepted field, and no endpoint from a partially completed cycle can pass.
+
+`max_cycles` is a hard cap from 2 through 4096. `consecutive_cycles` must be at
+least 2 and no greater than that cap. The total step cap must accommodate the
+minimum number of qualifying cycles; it can be smaller than the worst-case
+`max_cycles * max_steps`. Exhausting either budget returns a refusal rather than
+publishing an unconverged cycle as periodic. Solver and cancellation failures
+propagate through the same boundary. Capacities, source projection, contact,
+fan curves and correlation domains use the original producers on every cycle.
+
+The result status is `periodic-field-tolerance-met`. The `periodic` object retains
+the actual maximum nodal residual, tolerance and achieved consecutive count.
+`cycles_completed` is the number actually executed, not the declared cap.
+The small final-cycle stored energy and corresponding heat imbalance remain
+reported as computed: they are not forced to zero to manufacture periodicity.
+The full warm-up peak remains the design objective even when the final cycle
+is cooler, and every design candidate independently meets the periodic gate.
+
+**This is an observed residual of the discrete cycle map, not an error bound on
+the infinite-cycle solution.** A slowly contracting mode can have a small change
+per cycle while remaining farther from its limit. Adaptive sample times can
+also change between cycles. The gate is not a waveform-error bound, proof of
+uniqueness or stability, guarantee on later-cycle maxima, or physical temperature
+margin. Tightening it does not replace timestep or spatial refinement. A
+periodicity failure is not evidence that a proposed power or fan setting is
+thermally infeasible; sizing propagates that failure.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/periodic-contact-pulse.json
+cargo run -p fs-cli --bin frankensim -- --json cooling-network \
+  examples/cooling-network/size-periodic-power.json
+```
+
+The independent fixed-step P1 reference meets the 0.0001 K full-field criterion
+on cycles 51 and 52. The accepted cycle peaks near 311.672519 K. Direct solution
+of the independently assembled affine cycle fixed point gives approximately
+311.672953 K: even in this benign example, the distance to the limiting waveform
+is not the same as the accepted cycle-map residual. Power sizing against a
+308 K limit selects a multiplier near 0.6853, reducing the 20 W pulse to about
+13.71 W. A first cold pulse alone would have accepted the original 20 W.
+These numbers remain independent mathematical references, not Rust executions.
