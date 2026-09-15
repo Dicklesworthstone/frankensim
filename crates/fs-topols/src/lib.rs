@@ -22,17 +22,19 @@
 //! - [`topder`]: the topological derivative of compliance for hole
 //!   insertion, with NUMERICALLY GATED constants (nucleation events
 //!   predict the compliance change of an actually-punched hole).
-//! - [`optimize`]: the compliance descent loop — CutFEM solve on the
+//! - [`optimize`]: the single-load compliance descent loop — CutFEM solve on the
 //!   SDF, energy-density shape velocity with augmented-Lagrangian
 //!   volume control, extend → advect → redistance → audit → (maybe)
 //!   nucleate, everything ledgered.
+//! - [`robust_descent`]: simultaneous independent-load compliance descent;
+//!   equilibrium is solved per scenario before shape fields are aggregated.
 //! - [`evaluated`]: transactional publication boundary that independently
 //!   re-solves the exact returned geometry so final compliance, area and
 //!   snapshot are bound to one actually evaluated design.
 //! - [`guarded`]: bounded whole-trajectory candidate acceptance using only
 //!   independently evaluated final objectives and material areas.
 //! - [`robust`]: independent multi-load final evaluation and transactional
-//!   robust selection across bounded nominal-driver candidate trajectories.
+//!   robust selection across bounded candidate trajectories.
 
 pub mod evaluated;
 pub mod fim;
@@ -40,6 +42,7 @@ pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
 pub mod robust;
+pub mod robust_descent;
 pub mod topder;
 pub mod veloext;
 pub mod weno;
@@ -58,6 +61,9 @@ pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compli
 pub use robust::{
     RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
     RobustStop, evaluate_robust_design, optimize_compliance_robust_guarded,
+};
+pub use robust_descent::{
+    RobustDescentReport, optimize_compliance_multi_load, optimize_compliance_multi_load_guarded,
 };
 pub use topder::{NucleationEvent, nucleate, topological_derivative};
 pub use veloext::extend_velocity;
