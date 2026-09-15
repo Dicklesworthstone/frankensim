@@ -38,6 +38,8 @@
 //!   robust selection across bounded candidate trajectories.
 //! - [`stress`]: independent sampled plane-strain von Mises evaluation plus
 //!   transactional volume/stress-limited candidate publication.
+//! - [`robust_stress`]: worst-scenario sampled-stress admission across
+//!   simultaneous independent load cases with robust final replay.
 
 pub mod evaluated;
 pub mod fim;
@@ -47,6 +49,7 @@ pub mod optimize;
 pub mod robust;
 #[path = "robust_descent_v2.rs"]
 pub mod robust_descent;
+pub mod robust_stress;
 pub mod stress;
 pub mod topder;
 pub mod veloext;
@@ -69,6 +72,10 @@ pub use robust::{
 };
 pub use robust_descent::{
     RobustDescentReport, optimize_compliance_multi_load, optimize_compliance_multi_load_guarded,
+};
+pub use robust_stress::{
+    RobustSampledStressEvaluation, RobustStressCandidate, RobustStressReport, RobustStressStop,
+    evaluate_robust_sampled_stress, optimize_compliance_multi_load_stress_guarded,
 };
 pub use stress::{
     SampledStressEvaluation, SampledStressLimit, StressGuardedCandidate, StressGuardedReport,
