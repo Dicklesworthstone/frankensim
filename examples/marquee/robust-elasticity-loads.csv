@@ -1,0 +1,4 @@
+# edge,start,end,fx,fy,weight
+right,0.375,0.625,0,-1,0.4
+right,0.375,0.625,0,1,0.4
+top,0.75,1.0,1,0,0.2
