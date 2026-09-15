@@ -39,6 +39,7 @@ fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-report = { path = "../fs-report" }
 fs-session = { path = "../fs-session" }
+fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]
 fs-geom = { path = "../fs-geom" }
