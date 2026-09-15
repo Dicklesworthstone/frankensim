@@ -44,3 +44,12 @@ workspace = true
 [[test]]
 name = "study"
 required-features = ["marquee"]
+
+[[bin]]
+name = "fs-marquee"
+path = "src/main.rs"
+required-features = ["marquee"]
+
+[[test]]
+name = "cli"
+required-features = ["marquee"]
