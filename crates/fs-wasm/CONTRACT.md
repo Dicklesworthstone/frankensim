@@ -25,6 +25,12 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
   shared native marching-tetrahedra implementation.
 - The `#[wasm_bindgen]` JavaScript boundary is compiled only for
   `wasm32`; native builds exercise the same pure Rust functions.
+- `brownian` (`src/brownian.rs`) is the BM-01 / BM-05 1-D walk export.
+  Step kernels 0–3 follow `docs/FRANKENSIM_BINDING.md` `kernel-resolution`
+  (`distinct-meaning`: id 2 is unit-Gaussian teaching, id 3 is Gaussian
+  with exact D). Fallible entry points return a typed `Refusal`; they do
+  not clamp, do not return `NaN`, and do not treat an empty buffer as a
+  refusal. Streams use `StreamKey.kernel = 0x19050001` and `tile = particle`.
 
 ## Invariants
 

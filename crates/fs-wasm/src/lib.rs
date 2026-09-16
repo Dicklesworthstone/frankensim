@@ -41,6 +41,7 @@ use fs_sparse::{Coo, Csr};
 // public entry point is re-exported at the crate root and re-surfaced through
 // the `#[wasm_bindgen]` layer at the bottom of this file.
 // ---------------------------------------------------------------------------
+pub mod brownian;
 pub mod campaigns;
 pub mod certified;
 pub mod deep;
@@ -49,6 +50,11 @@ pub mod flagships;
 pub mod geom;
 pub mod pde;
 
+pub use brownian::{
+    BROWNIAN_MAX_OUTPUT_LEN, BROWNIAN_STREAM_KERNEL_ID, admit_brownian_checkpoint,
+    admit_brownian_frames, admit_brownian_frames_window, brownian_frames, brownian_frames_admitted,
+    brownian_frames_window,
+};
 pub use campaigns::{
     anytimebo, flowcert, fluttercert, grammarforge, metamatcert, neuroshape, proofrobust,
     schedule_campaign, sensorforge, sensorforge_with_cx, trusspath,
@@ -1202,5 +1208,73 @@ mod wasm {
         "fs-wasm · FrankenSim numerical kernels (fs-sparse · fs-cheb · fs-rand · fs-ivl · \
          fs-ad · fs-fft · fs-la · fs-ga · fs-math)"
             .into()
+    }
+
+    /// JS result of a fallible brownian export. `envelope` is always present.
+    /// `values` is empty only when `envelope` is a refusal; a successful call
+    /// always has length `n_particles * (steps + 1) >= 2`.
+    #[wasm_bindgen]
+    pub struct BrownianJs {
+        envelope: String,
+        values: Vec<f64>,
+    }
+
+    #[wasm_bindgen]
+    impl BrownianJs {
+        #[wasm_bindgen(getter)]
+        pub fn envelope(&self) -> String {
+            self.envelope.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn values(&self) -> Vec<f64> {
+            self.values.clone()
+        }
+    }
+
+    /// Admit-or-refuse JSON without packing the sample buffer as JSON numbers.
+    #[wasm_bindgen]
+    pub fn admit_brownian_frames(
+        n_particles: usize,
+        steps: usize,
+        step_kernel: u32,
+        seed: u64,
+        diffusion: f64,
+        dt: f64,
+    ) -> String {
+        match super::admit_brownian_frames(n_particles, steps, step_kernel, seed, diffusion, dt) {
+            Ok(spec) => {
+                let n = spec.n_particles() * (spec.steps() + 1);
+                super::brownian::ok_envelope_json(&spec, n)
+            }
+            Err(r) => r.to_json(),
+        }
+    }
+
+    /// One-shot frames. Refusals travel in `envelope`; `values` is then empty
+    /// because the envelope names the refusal, not because the buffer is the
+    /// refusal.
+    #[wasm_bindgen]
+    pub fn brownian_frames(
+        n_particles: usize,
+        steps: usize,
+        step_kernel: u32,
+        seed: u64,
+        diffusion: f64,
+        dt: f64,
+    ) -> BrownianJs {
+        match super::admit_brownian_frames(n_particles, steps, step_kernel, seed, diffusion, dt) {
+            Ok(spec) => {
+                let n = spec.n_particles() * (spec.steps() + 1);
+                BrownianJs {
+                    envelope: super::brownian::ok_envelope_json(&spec, n),
+                    values: super::brownian_frames_admitted(&spec),
+                }
+            }
+            Err(r) => BrownianJs {
+                envelope: r.to_json(),
+                values: Vec::new(),
+            },
+        }
     }
 }
