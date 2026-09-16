@@ -103,9 +103,9 @@ fn duplicate_solid_ownership_is_not_silently_overwritten_in_reference_map() {
 fn each_branch_derives_from_its_own_operating_flow_and_card_inputs() {
     let path = paths();
     assert_eq!(path.branches.len(), 2);
-    assert_eq!(path.segments[0].target, "cold-face");
     let cold = &path.branches[0];
     let hot = &path.branches[1];
+    assert_eq!(path.segments[0].target, "cold-face");
     assert_eq!(cold.path_name, "vent:cold");
     assert_eq!(hot.path_name, "vent:hot");
     assert!((hot.flow_mid_m3_s / cold.flow_mid_m3_s - 2.0).abs() < 1.0e-10);
@@ -193,6 +193,7 @@ fn shared_fem_slab_matches_two_independent_air_resistances_in_series_with_the_so
         assert!(receipt.contains("\"branch\":\"cold\""));
         assert!(receipt.contains("\"branch\":\"hot\""));
         assert_eq!(receipt.matches("\"decomposition_residual_w\":null").count(), 2);
+        assert_eq!(receipt.matches("\"method\":\"iqn-ils\"").count(), 3);
         assert!(receipt.contains("aggregate only"));
     });
 }
@@ -211,7 +212,7 @@ fn aggregate_publication_gate_detects_dropped_boundary_heat() {
 }
 
 #[test]
-fn single_branch_keeps_the_original_receipt_shape_and_driver_result() {
+fn single_branch_keeps_its_branch_fields_and_records_the_acceleration() {
     let path = derive_air_path(&[law("cold-face", "cold", 0, 290.0)],
         &operating(), 1.2, |_| Some(0.01)).expect("single path");
     let outcome = with_cx(|cx| run_exchange(cx, &path,
@@ -223,6 +224,7 @@ fn single_branch_keeps_the_original_receipt_shape_and_driver_result() {
     assert!(!receipt.contains("\"branches\":"));
     assert!(!receipt.contains("\"schema\":"));
     assert!(!receipt.contains("\"decomposition_residual_w\":null"));
+    assert_eq!(receipt.matches("\"method\":\"iqn-ils\"").count(), 1);
     assert!(receipt.contains(CONJUGATE_NO_CLAIM));
 }
 
@@ -234,4 +236,54 @@ fn shared_solid_refusals_keep_the_original_code_and_message() {
     })).unwrap_err();
     assert_eq!(error.code, "test-solid-refusal");
     assert_eq!(error.what, "sentinel solid diagnosis");
+}
+
+#[test]
+fn production_exchange_resolves_stiff_card_derived_paths_without_increasing_the_budget() {
+    // Real fan and correlation producers, with an analytic lumped solid.
+    // The deliberately large wetted area makes plain staggering nearly
+    // stationary. This is a numerical coupling fixture, not a geometry claim.
+    let path = derive_air_path(&[
+        law("cold-face", "cold", 0, 290.0),
+        law("hot-face", "hot", 0, 330.0),
+    ], &operating(), 1.2, |_| Some(10.0)).expect("stiff derived paths");
+    let solid = |refs: &BTreeMap<String, f64>| -> Vec<SolidRegionState> {
+        path.segments.iter().map(|segment| {
+            let power = if segment.target == "cold-face" { 5.0 } else { 3.0 };
+            let conductance = segment.htc_w_m2_k * segment.wetted_area_m2;
+            let reference = refs[&segment.target];
+            SolidRegionState {
+                region: segment.target.clone(),
+                area_m2: segment.wetted_area_m2,
+                mean_wall_temperature_k: reference + power / conductance,
+                heat_rate_w: power,
+                mean_reference_temperature_k: Some(reference),
+            }
+        }).collect()
+    };
+    with_cx(|cx| {
+        let air_paths: Vec<_> = path.branches.iter().map(|b| b.air_path.clone()).collect();
+        let plain = fs_airflow::graph::thermal::solve_conjugate_branches(
+            cx, &air_paths, &ConjugateConfig::default(), |_, references| {
+                let refs = path.segments.iter().zip(references)
+                    .map(|(segment, &value)| (segment.target.clone(), value)).collect();
+                Ok(solid(&refs))
+            },
+        );
+        assert!(matches!(plain, Err(AirflowError::ConjugateNotConverged { .. })));
+        let mut calls = 0;
+        let outcome = run_exchange(cx, &path, |_, refs| {
+            calls += 1;
+            Ok(solid(refs))
+        }).expect("production IQN exchange");
+        assert_eq!(outcome.solution.iterations, calls);
+        assert!(calls < 20, "bounded vector acceleration took {calls} solid solves");
+        let heat: f64 = outcome.solution.branches.iter().map(|b| b.balance.air_total_w).sum();
+        assert!((heat - 8.0).abs() < 1.0e-5);
+        let outcome = cross_check_decomposition(outcome, 8.0, 0.0).expect("lumped solid balance");
+        let receipt = receipt_fragment(&path, &outcome).expect("accelerated receipt");
+        assert!(receipt.contains("\"scope\":\"all-branch-interfaces\""));
+        assert!(receipt.contains(&format!("\"max_history\":{}", CONJUGATE_IQN_CONFIG.max_history)));
+        assert!(receipt.contains("\"fallback\":\"fixed\""));
+    });
 }
