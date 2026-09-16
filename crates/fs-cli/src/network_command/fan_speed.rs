@@ -1,6 +1,7 @@
 //! Fan-speed target search over actual hydraulic, convection and FEM evaluations.
-//! No fixed-h adjoint is mislabeled as dT/d(speed): bounded bisection re-solves
-//! the complete model, including every correlation domain check, at each trial.
+//! Available total fan derivatives guide safeguarded log-speed Newton proposals;
+//! bisection remains the fallback, including when gradients were not requested.
+//! Every trial re-solves the complete model and checks correlation validity.
 
 use super::*;
 
@@ -40,12 +41,14 @@ struct Trial {
     temperature: f64,
     flow: f64,
     active_vertex: Option<usize>,
+    log_speed_derivative: Option<f64>,
 }
 impl Trial {
     fn render(&self) -> Result<String> {
-        Ok(format!("{{\"speed_ratio\":{},\"temperature_k\":{},\"flow_m3_s\":{},\"active_vertex\":{}}}",
+        Ok(format!("{{\"speed_ratio\":{},\"temperature_k\":{},\"flow_m3_s\":{},\"active_vertex\":{},\"dtemperature_dlog_speed_ratio_k\":{}}}",
             num(self.speed)?, num(self.temperature)?, num(self.flow)?,
-            self.active_vertex.map_or_else(|| "null".into(), |v| v.to_string())))
+            self.active_vertex.map_or_else(|| "null".into(), |v| v.to_string()),
+            optional(self.log_speed_derivative)?))
     }
 }
 
@@ -55,6 +58,7 @@ struct Evaluator<'a> {
     fan: &'a fan_drive::FanDrive,
     history: Vec<Trial>,
     solid_solves: usize,
+    newton_trials: usize,
 }
 impl Evaluator<'_> {
     fn trial(&mut self, cx: &Cx<'_>, speed: f64) -> Result<(GraphSolution, Evaluation)> {
@@ -70,7 +74,8 @@ impl Evaluator<'_> {
         self.solid_solves = self.solid_solves.checked_add(value.coupled.iterations)
             .ok_or_else(|| bad("fan-speed work count overflow"))?;
         self.history.push(Trial { speed, temperature: value.objective,
-            flow: flow.node_outflows[self.fan.inlet].value(), active_vertex: value.objective_state.vertex });
+            flow: flow.node_outflows[self.fan.inlet].value(), active_vertex: value.objective_state.vertex,
+            log_speed_derivative: value.gradient.as_ref().and_then(|g| g.log_speed()) });
         poll(cx)?;
         Ok((flow, value))
     }
@@ -84,17 +89,31 @@ impl Evaluator<'_> {
         let trials = self.history.iter().map(Trial::render).collect::<Result<Vec<_>>>()?.join(",");
         let lower = failed.map(Trial::render).transpose()?.unwrap_or_else(|| "null".into());
         let width = failed.map_or(0.0, |lo| speed - lo.speed);
-        let result = format!("{prefix},\"fan_speed_design\":{{\"selected_speed_ratio\":{},\"temperature_limit_k\":{},\"status\":{},\"failed_lower\":{lower},\"speed_bracket_width\":{},\"evaluations\":{},\"total_solid_solves\":{},\"history\":[{trials}],\"search_claim\":\"evaluated passing endpoint of a local speed bracket or feasible declared minimum; no global monotonicity, minimum-speed or hardware-compliance certificate\"}}}}\n",
+        let result = format!("{prefix},\"fan_speed_design\":{{\"selected_speed_ratio\":{},\"temperature_limit_k\":{},\"status\":{},\"failed_lower\":{lower},\"speed_bracket_width\":{},\"evaluations\":{},\"total_solid_solves\":{},\"newton_trials\":{},\"history\":[{trials}],\"search_claim\":\"evaluated passing endpoint of a local speed bracket or feasible declared minimum; safeguarded derivative proposals never decide feasibility; no global monotonicity, minimum-speed or hardware-compliance certificate\"}}}}\n",
             num(speed)?, num(self.design.limit)?, quote(if failed.is_some() { "target-bracketed" } else { "minimum-feasible" }),
-            num(width)?, self.history.len(), self.solid_solves);
+            num(width)?, self.history.len(), self.solid_solves, self.newton_trials);
         poll(cx)?;
         Ok(result)
     }
 }
 
+/// A local slope suggests a trial, never a verdict. Staying strictly inside
+/// the central 80% contracts either surviving bracket by at least 10%, even
+/// when a peak changes active vertex or a Newton model is poor.
+fn newton_proposal(low: f64, high: f64, speed: f64, temperature: f64,
+    derivative: Option<f64>, limit: f64) -> Option<f64> {
+    let derivative = derivative.filter(|d| d.is_finite() && *d < 0.0)?;
+    let shift = -(temperature - limit) / derivative;
+    if !shift.is_finite() { return None; }
+    let candidate = speed * fs_math::det::exp(shift);
+    let guard = 0.1 * (high - low);
+    (candidate.is_finite() && candidate > low + guard && candidate < high - guard)
+        .then_some(candidate)
+}
+
 pub(super) fn solve(request: &Request, cx: &Cx<'_>, design: &FanSpeedDesign) -> Result<String> {
     let fan = request.fan.as_ref().ok_or_else(|| bad("fan-speed design requires a fan drive"))?;
-    let mut evaluator = Evaluator { request, design, fan, history: Vec::new(), solid_solves: 0 };
+    let mut evaluator = Evaluator { request, design, fan, history: Vec::new(), solid_solves: 0, newton_trials: 0 };
     let lower = evaluator.trial(cx, design.minimum)?;
     if lower.1.objective <= design.limit { return evaluator.finish(cx, lower, design.minimum, None); }
     let mut failed = evaluator.history.last().expect("lower evaluated").clone();
@@ -111,13 +130,24 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, design: &FanSpeedDesign) -> 
         if width <= design.speed_tolerance && design.limit - passing.1.objective <= design.temperature_tolerance {
             return evaluator.finish(cx, passing, high, Some(&failed));
         }
-        let middle = 0.5 * failed.speed + 0.5 * high;
+        let mut endpoints = [
+            (failed.speed, failed.temperature, failed.log_speed_derivative),
+            (high, passing.1.objective, passing.1.gradient.as_ref().and_then(|g| g.log_speed())),
+        ];
+        if (endpoints[1].1 - design.limit).abs() < (endpoints[0].1 - design.limit).abs() {
+            endpoints.swap(0, 1);
+        }
+        let proposal = endpoints.into_iter().find_map(|(speed, temperature, derivative)| {
+            newton_proposal(failed.speed, high, speed, temperature, derivative, design.limit)
+        });
+        let middle = proposal.unwrap_or(0.5 * failed.speed + 0.5 * high);
         if !(middle > failed.speed && middle < high) {
             return Err(Failure { code: "cooling-network-design-resolution",
                 message: "fan-speed floating-point resolution cannot meet both design tolerances".into() });
         }
         // Producer/domain failures propagate. They are not hot/cold verdicts.
         let value = evaluator.trial(cx, middle)?;
+        if proposal.is_some() { evaluator.newton_trials += 1; }
         if value.1.objective <= design.limit {
             high = middle;
             passing = value;
@@ -177,5 +207,16 @@ mod tests {
         assert!(execute(&r, &gate).is_err());
         let both = FIXTURE.replace("\"fan_speed_design\": {", "\"design\": {}, \"fan_speed_design\": {");
         assert!(Request::parse(&both).is_err());
+    }
+
+    #[test]
+    fn bad_or_outside_newton_steps_fall_back_without_changing_the_bracket() {
+        for derivative in [None, Some(0.0), Some(1.0), Some(f64::NAN), Some(-1e-300)] {
+            assert_eq!(newton_proposal(0.5, 2.0, 0.5, 310.0, derivative, 305.0), None);
+        }
+        assert_eq!(newton_proposal(0.5, 2.0, 2.0, 304.99999, Some(-10.0), 305.0), None);
+        let proposal = newton_proposal(0.5, 2.0, 1.0, 306.0, Some(-10.0), 305.0).unwrap();
+        close(proposal, 0.1_f64.exp(), 1e-14);
+        assert!(proposal > 0.65 && proposal < 1.85);
     }
 }
