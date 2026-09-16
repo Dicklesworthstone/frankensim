@@ -21,6 +21,7 @@ if [[ ! -x "$timeout_bin" ]]; then
   echo "FrankenSim DSR requires GNU timeout at '$timeout_bin'" >&2
   exit 1
 fi
+FRANKENSIM_APPLE_TARGET_DIR="$build_root/rust-target" "$repo_root/ios/build-rust.sh"
 xcodegen generate --spec project.yml
 git diff --exit-code -- FrankenSim.xcodeproj Sources/Info.plist
 display_name="$(plutil -extract CFBundleDisplayName raw Sources/Info.plist)"
