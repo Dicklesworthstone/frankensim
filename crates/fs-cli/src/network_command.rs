@@ -12,6 +12,7 @@ mod convection;
 mod fan_speed;
 mod contacts;
 mod transient;
+mod acceleration;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -20,8 +21,9 @@ use std::fs::File;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
+use acceleration::solve_coupled_transport;
 use fs_airflow::conjugate::{AirSegment, ConjugateConfig, Relaxation, SolidRegionState};
-use fs_airflow::graph::thermal::coupled_transport::{CoupledTransportSolution, solve_coupled_transport};
+use fs_airflow::graph::thermal::coupled_transport::CoupledTransportSolution;
 use fs_airflow::graph::thermal::coupled_transport::sensitivity::{CoupledGradient, CoupledLinearization, InterfaceSolveConfig};
 use fs_airflow::graph::thermal::transport::{BranchThermalModel, TransportAir, TransportConfig, TransportInlet, TransportNetwork};
 use fs_airflow::graph::{FixedPressure, GraphBranch, GraphSolution, GraphSolveConfig, LossGraph};
@@ -106,7 +108,7 @@ fn positive(value: &J, field: &str) -> Result<f64> {
     if n <= 0.0 { Err(bad(format!("{field} must be positive"))) } else { Ok(n) }
 }
 fn integer(value: &J, field: &str, max: usize) -> Result<usize> {
-    let n = integer_raw(value, field)?;
+    let n = integer(value, field, max)?;
     if n > max { Err(bad(format!("{field} exceeds {max}"))) } else { Ok(n) }
 }
 fn integer_raw(value: &J, field: &str) -> Result<usize> {
@@ -188,7 +190,7 @@ impl Request {
                 let face: Vec<_> = key.iter().enumerate().filter_map(|(i, &v)| (i != omitted).then_some(v)).collect();
                 let count = face_counts.entry(face).or_insert(0_usize);
                 *count += 1;
-                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells")); }
+                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells"))); }
             }
             tets.push(tet);
         }
@@ -371,9 +373,9 @@ impl Request {
             let binding = CoupledLinearization::new(cx, &network, &linear, &gate).map_err(producer)?;
             let mut weights = binding.zero_objective();
             objective_state.seed(&mut weights);
-            Some(binding.pullback(cx, &weights, InterfaceSolveConfig { max_iterations: self.limits.derivative,
+            Some(binding.pullback_iqn(cx, &weights, InterfaceSolveConfig { max_iterations: self.limits.derivative,
                 absolute_tolerance: self.limits.relative, relative_tolerance: self.limits.relative,
-                relaxation: self.limits.relaxation }).map_err(producer)?)
+                relaxation: self.limits.relaxation }, acceleration::POLICY).map_err(producer)?)
         } else { None };
         let total_solid: f64 = coupled.solid.iter().map(|s| s.heat_rate_w).sum();
         let robin = linear.primal().report.energy.robin_out_w;
@@ -443,13 +445,14 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; not fan-speed or channel-geometry derivatives; transient output has no adjoint\"}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"coupling_solver\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; not fan-speed or channel-geometry derivatives; transient output has no adjoint\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
                 evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
                 evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(","),
                 request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into()),
-                request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_ref())).transpose()?.unwrap_or_else(|| "null".into())))
+                request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_ref())).transpose()?.unwrap_or_else(|| "null".into()),
+                acceleration::render(request.limits.relaxation, evaluated.gradient.is_some())?))
         })
 }
 
