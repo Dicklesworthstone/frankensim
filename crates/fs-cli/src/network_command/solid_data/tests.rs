@@ -1,6 +1,8 @@
 use super::*;
 use super::super::tests::{close, request, with_cx};
 
+mod anisotropy;
+
 fn assign(r: &mut Request, text: &str) {
     let (data, k, source) = SolidData::parse(&J::parse(text).unwrap(), &r.mesh).unwrap();
     r.solid_data = data; r.conductivity = k; r.source = source;
