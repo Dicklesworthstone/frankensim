@@ -2,6 +2,9 @@ use super::*;
 use std::collections::BTreeSet;
 
 mod material;
+mod qoi;
+mod transient;
+pub(super) use qoi::Qoi;
 
 #[derive(Debug, Clone)]
 pub(super) enum Target {
@@ -12,6 +15,7 @@ pub(super) enum Target {
     SurfaceHtc(String),
     ComponentPower(String),
     Material(material::Target),
+    Transient(transient::Target),
 }
 impl Target {
     fn name(&self) -> String {
@@ -23,6 +27,7 @@ impl Target {
             Self::SurfaceHtc(name) => format!("surface[{name}].htc_w_m2_k"),
             Self::ComponentPower(name) => format!("component[{name}].power_w"),
             Self::Material(target) => target.name(),
+            Self::Transient(target) => target.name(),
         }
     }
     fn unit(&self) -> &'static str {
@@ -34,9 +39,16 @@ impl Target {
             Self::SurfaceHtc(_) => "W/(m2 K)",
             Self::ComponentPower(_) => "W",
             Self::Material(_) => "W/(m K)",
+            Self::Transient(target) => target.unit(),
         }
     }
-    fn allows_zero(&self) -> bool { matches!(self, Self::ComponentPower(_)) }
+    fn allows_zero(&self) -> bool {
+        match self {
+            Self::ComponentPower(_) => true,
+            Self::Transient(target) => target.allows_zero(),
+            _ => false,
+        }
+    }
     fn render(&self) -> String {
         match self {
             Self::AirDensity => "{\"kind\":\"air-density\"}".into(),
@@ -46,6 +58,7 @@ impl Target {
             Self::SurfaceHtc(name) => format!("{{\"kind\":\"surface-htc\",\"surface\":{}}}", quote(name)),
             Self::ComponentPower(name) => format!("{{\"kind\":\"component-power\",\"component\":{}}}", quote(name)),
             Self::Material(target) => target.render(),
+            Self::Transient(target) => target.render(),
         }
     }
 }
@@ -88,6 +101,7 @@ pub(super) struct Config {
     pub(super) samples: usize,
     pub(super) wall_seconds: f64,
     pub(super) threshold_k: Option<f64>,
+    pub(super) qoi: Qoi,
     correlation: CorrelationModel,
     pub(super) correlation_label: &'static str,
     parameters: Vec<ParameterSpec>,
@@ -97,7 +111,7 @@ impl Config {
     pub(super) fn parse(text: &str, base: &J) -> Result<Self> {
         if text.len() as u64 > MAX_UQ_BYTES { return Err(bad("UQ request exceeds 4 MiB")); }
         let root = J::parse(text).map_err(|error| bad(error.to_string()))?;
-        object(&root, &["schema", "seed", "samples", "wall_seconds", "temperature_limit_k", "correlation", "parameters"], "UQ request")?;
+        object(&root, &["schema", "seed", "samples", "wall_seconds", "temperature_limit_k", "correlation", "parameters", "qoi"], "UQ request")?;
         if field(&root, "schema")?.as_str() != Some(SCHEMA) { return Err(bad("expected schema frankensim.cooling-network-uq.v1")); }
         let seed = string(field(&root, "seed")?, "seed")?.parse::<u64>().map_err(|_| bad("seed must be a decimal u64 string"))?;
         let samples = integer(field(&root, "samples")?, "samples", MAX_PRODUCT_SAMPLES)?;
@@ -108,6 +122,7 @@ impl Config {
         let rows = array(field(&root, "parameters")?, "parameters", 256)?;
         if rows.is_empty() { return Err(bad("at least one uncertain parameter is required")); }
         validate_base(base)?;
+        let qoi = Qoi::parse(root.get("qoi"), base)?;
         let mut names = BTreeSet::new();
         let mut parameters = Vec::with_capacity(rows.len());
         for row in rows {
@@ -120,11 +135,11 @@ impl Config {
             parameters.push(ParameterSpec { target, distribution });
         }
         let (correlation, correlation_label) = parse_correlation(field(&root, "correlation")?, parameters.len())?;
-        Ok(Self { seed, samples, wall_seconds, threshold_k, correlation, correlation_label, parameters })
+        Ok(Self { seed, samples, wall_seconds, threshold_k, qoi, correlation, correlation_label, parameters })
     }
 
     pub(super) fn plan(&self) -> UqPlan {
-        let mut plan = UqPlan::new("cooling-objective-temperature-k", PropagationMethod::MonteCarlo, self.samples).with_correlation(self.correlation.clone());
+        let mut plan = UqPlan::new(self.qoi.plan_name(), PropagationMethod::MonteCarlo, self.samples).with_correlation(self.correlation.clone());
         plan.seed = self.seed;
         if let Some(threshold) = self.threshold_k { plan = plan.with_compliance_threshold(threshold); }
         for parameter in &self.parameters { plan = plan.with_parameter(parameter.distribution.parameter(&parameter.target)); }
@@ -156,8 +171,8 @@ impl Config {
 
 fn validate_base(base: &J) -> Result<()> {
     if field(base, "schema")?.as_str() != Some("frankensim.cooling-network.v1") { return Err(bad("base request must use frankensim.cooling-network.v1")); }
-    if base.get("transient").is_some() || base.get("design").is_some() || base.get("fan_speed_design").is_some() {
-        return Err(bad("cooling-network-uq currently requires a steady base request without design controls"));
+    if base.get("design").is_some() || base.get("fan_speed_design").is_some() {
+        return Err(bad("cooling-network-uq requires a base request without design controls"));
     }
     if field(field(base, "objective")?, "gradient")? != &J::Bool(false) { return Err(bad("set base objective.gradient=false for UQ sampling")); }
     Ok(())
@@ -169,6 +184,9 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
         Target::AirSpecificHeat => { field(field(base, "air")?, "specific_heat_j_kg_k")?; }
         Target::InletTemperature(index) => inlet_location(base, *index)?,
         Target::FanSpeedRatio => {
+            if base.get("transient").is_some() {
+                return Err(bad("transient intervals override the base fan speed; use interval-fan-speed-ratio"));
+            }
             let fan = field(base, "hydraulics")?.get("fan").ok_or_else(|| bad("fan-speed-ratio uncertainty requires hydraulics.fan"))?;
             field(fan, "speed_ratio")?;
         }
@@ -179,14 +197,23 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
                 return Err(bad(format!("surface {name} does not have a declared scalar h; do not override a correlation-derived coefficient")));
             }
         }
-        Target::ComponentPower(name) => component_location(base, name)?,
+        Target::ComponentPower(name) => {
+            component_location(base, name)?;
+            if base.get("transient").is_some()
+                && !array_path(base, &["transient", "intervals"])?.iter().any(|row| row.get("power_scale").is_some())
+            {
+                return Err(bad("absolute interval workloads override base component watts; use interval-component-power"));
+            }
+        }
         Target::Material(target) => target.validate(base)?,
+        Target::Transient(target) => target.validate(base)?,
     }
     Ok(())
 }
 
 fn parse_target(value: &J) -> Result<Target> {
     if let Some(target) = material::Target::parse(value)? { return Ok(Target::Material(target)); }
+    if let Some(target) = transient::Target::parse(value)? { return Ok(Target::Transient(target)); }
     object(value, &["kind", "index", "surface", "component"], "target")?;
     match field(value, "kind")?.as_str() {
         Some("air-density") => Ok(Target::AirDensity),
@@ -255,6 +282,7 @@ fn apply_target(root: &mut J, target: &Target, value: f64) -> Result<()> {
             set_member_number(component, "watts", value)
         }
         Target::Material(target) => target.apply(root, value),
+        Target::Transient(target) => target.apply(root, value),
     }
 }
 
