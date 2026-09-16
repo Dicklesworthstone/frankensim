@@ -24,6 +24,9 @@ use crate::conjugate::{ConjugateConfig, Relaxation, SolidRegionState, solve_conj
 use super::super::transport::{TransportError, TransportNetwork};
 use super::super::transport::sensitivity::{TransportDifferential, TransportLinearization, TransportObjective};
 
+mod flow_scale;
+pub use flow_scale::CoupledFlowScaleGradient;
+
 /// Explicit budget for the reduced interface linear equation.
 #[derive(Debug, Clone, Copy)]
 pub struct InterfaceSolveConfig {
