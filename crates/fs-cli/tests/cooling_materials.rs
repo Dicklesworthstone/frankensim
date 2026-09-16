@@ -118,3 +118,34 @@ fn scalarizing_a_directional_material_refuses_before_creating_a_checkpoint() {
     assert!(!checkpoint.exists());
     assert!(String::from_utf8_lossy(&result.stderr).contains("do not scalarize a tensor"));
 }
+
+#[test]
+fn nonlinear_material_reaches_the_real_solver_and_refuses_extrapolation() {
+    let dir = scratch("nonlinear");
+    let text = fs::read_to_string(example("orthotropic-hotspot.json")).unwrap();
+    let scalar = r#""name":"spreader","conductivity_w_m_k":20"#;
+    assert!(text.contains(scalar));
+    let curve = dir.join("curve.json");
+    fs::write(&curve, text.replace(scalar,
+        r#""name":"spreader","conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,2]}"#,
+    )).unwrap();
+    let nonlinear = document(&command("cooling-network", &curve).output().unwrap());
+    close(nonlinear.f64_field("source_w").unwrap(), 1.0, 1e-9);
+    close(nonlinear.f64_field("robin_out_w").unwrap(), 1.0, 1e-7);
+    let materials = nonlinear.path(&["solid_inputs", "constitutive", "materials"]).unwrap().as_array().unwrap();
+    let spreader = materials.iter().find(|row| row.str_field("name") == Some("spreader")).unwrap();
+    assert_eq!(spreader.str_field("temperature_extrapolation"), Some("refused"));
+    let frozen = dir.join("frozen.json");
+    fs::write(&frozen, text.replace(scalar, r#""name":"spreader","conductivity_w_m_k":17"#)).unwrap();
+    let constant = document(&command("cooling-network", &frozen).output().unwrap());
+    let qoi = |doc: &J| doc.path(&["objective", "value_k"]).and_then(J::as_f64).unwrap();
+    assert!((qoi(&nonlinear) - qoi(&constant)).abs() > 1e-5,
+        "the inactive first-knot scalar must not replace the temperature law");
+    let outside = dir.join("outside-span.json");
+    fs::write(&outside, text.replace(scalar,
+        r#""name":"spreader","conductivity_curve":{"temperature_k":[250,260],"conductivity_w_m_k":[17,16]}"#,
+    )).unwrap();
+    let refused = command("cooling-network", &outside).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+}
