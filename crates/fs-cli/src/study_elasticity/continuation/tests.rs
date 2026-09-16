@@ -4,10 +4,11 @@ const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/marquee/bracket-2d.fsim"));
 
 fn spec() -> ElasticitySpec {
-    parse(&FIXTURE.replace(":mesh-level 4", ":mesh-level 2")
+    parse(&FIXTURE.replace(":mesh-level 4", ":mesh-level 3")
         .replace(":max-iterations 8", ":max-iterations 3")
         .replace(":steps 8", ":steps 3")
         .replace(":move-cells 0.35", ":move-cells 0.05")
+        .replace(":hole-radius-cells 1.5", ":hole-radius-cells 0.5")
         .replace(":nucleation-period 4", ":nucleation-period 2"))
         .expect("admitted small native study")
 }
@@ -135,4 +136,39 @@ fn changed_executable_binding_refuses_without_extending_the_study() {
     let error = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap_err();
     assert!(error.message.contains("identical executable"));
     assert_eq!(integer(&load(&ledger, &output.pointer).unwrap().value, "iterations_completed").unwrap(), 1);
+}
+
+#[test]
+fn legacy_loaded_prefix_is_verified_once_then_uses_direct_continuation() {
+    let spec = spec();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
+    let mut legacy = load(&ledger, &first.pointer).unwrap();
+    // Model the already-loaded legacy envelope at the private driver seam;
+    // artifacts and their seal/lineage are real and are not changed in the DB.
+    let JsonValue::Object(ref mut members) = legacy.value else { panic!("receipt") };
+    members.retain(|(key, _)| key != "continuation");
+    let migrated = drive(&spec, &ledger, Some(1), &gate(), Some(&legacy)).unwrap();
+    assert_eq!(json(&migrated).path(&["continuation", "legacy_prefix_updates_replayed"]).and_then(JsonValue::as_f64), Some(1.0));
+    let loaded = load(&ledger, &migrated.pointer).unwrap();
+    let final_run = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap();
+    assert_eq!(json(&final_run).path(&["continuation", "legacy_prefix_updates_replayed"]).and_then(JsonValue::as_f64), Some(0.0));
+    assert_eq!(json(&final_run).path(&["continuation", "updates_this_invocation"]).and_then(JsonValue::as_f64), Some(1.0));
+    let oracle = run_prefix(&spec, spec.steps).unwrap();
+    assert_eq!(json(&final_run).str_field("trace_hash"), Some(trace_hash(&oracle.1.rows).to_hex().as_str()));
+}
+
+#[test]
+fn resume_does_not_reset_an_exhausted_lifetime_wall_budget() {
+    let spec = spec();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
+    let mut loaded = load(&ledger, &first.pointer).unwrap();
+    set(&mut loaded.value, "consumed_wall_s", JsonValue::Number {
+        value: spec.wall_s, raw: spec.wall_s.to_string(),
+    });
+    let error = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap_err();
+    assert_eq!(error.exit, exit::BUDGET);
+    assert!(error.message.contains(&first.pointer));
+    assert_eq!(integer(&load(&ledger, &first.pointer).unwrap().value, "iterations_completed").unwrap(), 1);
 }
