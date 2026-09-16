@@ -3,8 +3,8 @@
 //! This driver shares the `study` command, ledger artifact kinds, report/package
 //! surface, and receipt envelope with the retained thermal study driver, while
 //! keeping a distinct producer identity and explicit numerical no-claim boundary.
-//! Resume deterministically replays the declared initial design to a longer
-//! prefix and verifies the retained trace before publishing the extension.
+//! Resume restores exact geometry, multiplier and global iteration state under
+//! the same executable. Legacy receipts receive one verified prefix replay.
 
 use std::fmt::Write as _;
 use std::io::Read;
@@ -25,12 +25,16 @@ use crate::{
 };
 use super::STUDY_RUN_RECEIPT_SCHEMA;
 
+#[path = "study_elasticity/continuation.rs"]
+mod continuation;
+use continuation::drive;
+
 const DRIVER: &str = "free-boundary-elasticity-study-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 const TRACE_DOMAIN: &str = "org.frankensim.cli.elasticity-study.trace.v1";
 const ID_DOMAIN: &str = "org.frankensim.cli.free-boundary-elasticity-study.v1";
-const NO_CLAIM: &str = "2-D plane-strain CutFEM compliance on an evolving bilinear level set. Each retained trajectory row binds post-evolution compliance, cut-quadrature material area and geometry snapshot to the same canonically re-solved design. This is Estimated numerical design evidence: no physical validation, continuous stress certificate, KKT/global-optimum claim, 3-D claim, or guaranteed discretization-error bound. Cancellation and wall enforcement occur between bounded deterministic prefix replays, not inside one CutFEM solve.";
+const NO_CLAIM: &str = "2-D plane-strain CutFEM compliance on an evolving bilinear level set. Each retained trajectory row binds post-evolution compliance, cut-quadrature material area and geometry snapshot to the same canonically re-solved design. This is Estimated numerical design evidence: no physical validation, continuous stress certificate, KKT/global-optimum claim, 3-D claim, or guaranteed discretization-error bound. Cancellation and wall enforcement occur between accepted-state updates, not inside one CutFEM solve. Each accepted update is durably retained before more physics.";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -173,7 +177,7 @@ fn canonical(spec: &ElasticitySpec) -> String {
     let _ = writeln!(out, "    :created {:?}", metadata.created);
     let _ = writeln!(out, "    :context-of-use {:?}", metadata.context_of_use);
     let _ = writeln!(out, "    :intended-decision {:?}", metadata.intended_decision);
-    let _ = writeln!(out, "    :decision-gate {})", metadata.decision_gate.slug());
+    let _ = writeln!(out, "    :decision-gate {}", metadata.decision_gate.slug());
     let _ = writeln!(out, "    :consequence {})", metadata.consequence.slug());
     let _ = writeln!(out, "  (versions :schema {})", versions.schema);
     let _ = writeln!(out, "  (seeds :root {})", seeds.root);
@@ -636,6 +640,7 @@ fn geometry_svg(phi: &GridSdf) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist(
     spec: &ElasticitySpec,
     ledger: &Ledger,
@@ -644,7 +649,9 @@ fn persist(
     status: &'static str,
     wall_s: f64,
     predecessor: Option<ContentHash>,
+    evidence: &continuation::Evidence,
 ) -> Result<Outcome> {
+    let continuation = evidence.json();
     let count = report.rows.len();
     let trace = trace_hash(&report.rows);
     let mut rows = format!(
@@ -749,7 +756,7 @@ fn persist(
         }
         let previous_json = predecessor.map_or("null".to_string(), |hash| quoted(&hash.to_hex()));
         let receipt = format!(
-            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{count},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{wall_s},\"predecessor\":{previous_json}{refs}}}",
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{count},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{wall_s},\"predecessor\":{previous_json},\"continuation\":{continuation}{refs}}}",
             spec.id.to_hex(),
             source.hash.to_hex(),
             spec.steps,
@@ -910,110 +917,6 @@ fn run_prefix(spec: &ElasticitySpec, count: usize) -> Result<(GridSdf, OptimizeR
         ));
     }
     Ok((phi, report))
-}
-
-fn drive(
-    spec: &ElasticitySpec,
-    ledger: &Ledger,
-    cap: Option<usize>,
-    gate: &CancelGate,
-    prior: Option<&Loaded>,
-) -> Result<Outcome> {
-    if ledger.in_transaction() {
-        return Err(fail(
-            "cli-study-elasticity-transaction",
-            "study requires its own ledger transaction",
-        ));
-    }
-    let prior_count = prior.map_or(0, |loaded| {
-        integer(&loaded.value, "iterations_completed").unwrap_or(0)
-    });
-    if prior_count > spec.steps {
-        return Err(fail(
-            "cli-study-elasticity-resume",
-            "retained prefix exceeds declared steps",
-        ));
-    }
-    let id_hex = spec.id.to_hex();
-    if prior.is_some_and(|loaded| loaded.value.str_field("study_id") != Some(id_hex.as_str())) {
-        return Err(fail(
-            "cli-study-elasticity-resume",
-            "retained study identity changed",
-        ));
-    }
-    if prior_count == spec.steps {
-        let loaded = prior.expect("completed prefix came from a receipt");
-        return Ok(Outcome {
-            pointer: format!("study-{}", loaded.hash.to_hex()),
-            receipt: loaded.bytes.clone(),
-            status: "completed",
-        });
-    }
-    let requested = cap.unwrap_or(spec.steps - prior_count);
-    let target = spec.steps.min(prior_count.saturating_add(requested));
-    let retained_trace = prior
-        .and_then(|loaded| loaded.value.str_field("trace_hash"))
-        .map(str::to_string);
-    let retained_wall = prior
-        .and_then(|loaded| loaded.value.f64_field("consumed_wall_s"))
-        .unwrap_or(0.0);
-    if !retained_wall.is_finite() || retained_wall < 0.0 || retained_wall >= spec.wall_s {
-        return Err(Failure {
-            code: "cli-study-elasticity-resume-budget",
-            message: "retained wall charge exhausts the declared budget".into(),
-            exit: exit::BUDGET,
-        });
-    }
-    let start = Instant::now();
-    let mut completed = prior_count;
-    let mut latest = run_prefix(spec, prior_count)?;
-    if let Some(expected) = retained_trace.as_deref() {
-        if trace_hash(&latest.1.rows).to_hex() != expected {
-            return Err(fail(
-                "cli-study-elasticity-replay",
-                "replayed prefix does not reproduce the retained trace",
-            ));
-        }
-    }
-    let mut status = "running";
-    while completed < target {
-        if gate.is_requested() {
-            status = "cancelled";
-            break;
-        }
-        if retained_wall + start.elapsed().as_secs_f64() >= spec.wall_s {
-            status = "budget-exhausted";
-            break;
-        }
-        let next = completed + 1;
-        latest = run_prefix(spec, next)?;
-        if let Some(expected) = retained_trace.as_deref() {
-            if trace_hash(&latest.1.rows[..prior_count]).to_hex() != expected {
-                return Err(fail(
-                    "cli-study-elasticity-replay",
-                    "longer deterministic replay diverged from the retained prefix",
-                ));
-            }
-        }
-        completed = next;
-    }
-    if status == "running" {
-        status = if completed == spec.steps {
-            "completed"
-        } else {
-            "budget-exhausted"
-        };
-    }
-    let wall = retained_wall + start.elapsed().as_secs_f64();
-    persist(
-        spec,
-        ledger,
-        &latest.0,
-        &latest.1,
-        status,
-        wall,
-        prior.map(|loaded| loaded.hash),
-    )
 }
 
 pub(crate) fn study_path(
