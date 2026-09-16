@@ -1,7 +1,7 @@
 use super::*;
 use child::{EvaluationError, evaluate_sample, evaluate_sample_for};
 use compliance::Policy;
-use model::{Config, Qoi};
+use model::{Config, DesignControl, DesignGrid, Qoi};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 mod checkpoint;
 #[path = "compliance.rs"]
 mod compliance;
+mod design;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -16,6 +17,7 @@ pub(super) struct Options {
     resume: Option<PathBuf>,
     max_new_samples: Option<usize>,
     compliance: Option<Policy>,
+    design: Option<DesignGrid>,
 }
 
 impl Options {
@@ -40,6 +42,11 @@ impl Options {
                 alpha = Some(float_option(value, "--confidence-alpha")?);
             } else if flag == "--min-decision-samples" && minimum.is_none() {
                 minimum = Some(count_option(value, "--min-decision-samples")?);
+            } else if (flag == "--fan-speed-candidates" || flag == "--power-candidates") && options.design.is_none() {
+                let control = if flag == "--fan-speed-candidates" { DesignControl::FanSpeed }
+                    else { DesignControl::WorkloadPower };
+                options.design = Some(DesignGrid::parse(control,value.to_str()
+                    .ok_or_else(||bad("design candidate list must be UTF-8"))?)?);
             } else {
                 return Err(bad(format!("unknown or duplicate UQ option {}", flag.to_string_lossy())));
             }
@@ -50,6 +57,9 @@ impl Options {
             (Some(probability), Some(alpha), Some(minimum)) => Some(Policy::new(probability, alpha, minimum)?),
             _ => return Err(bad("sequential compliance requires --compliance-probability, --confidence-alpha and --min-decision-samples together")),
         };
+        if options.design.is_some() && options.compliance.is_none() {
+            return Err(bad("candidate selection requires --compliance-probability, --confidence-alpha and --min-decision-samples"));
+        }
         if options.max_new_samples.is_some() && options.checkpoint.is_none() {
             return Err(bad("--max-new-samples requires --checkpoint so the unfinished prefix is retained"));
         }
@@ -96,6 +106,9 @@ pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
 pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
+    if let Some(grid) = &options.design {
+        return design::execute(base_text,&base,&config,options,grid);
+    }
     let plan = config.plan();
     if let Some(policy) = options.compliance {
         policy.validate_plan(&plan)?;
@@ -268,5 +281,15 @@ mod options_tests {
         let mut duplicate = args(&complete);
         duplicate.extend(args(&["--confidence-alpha", "0.01"]));
         assert!(Options::parse(&duplicate).is_err());
+    }
+
+    #[test]
+    fn candidate_controls_are_exclusive_and_require_family_confidence() {
+        assert!(Options::parse(&args(&["--fan-speed-candidates","0.5,1,1.5"])).is_err());
+        let mut complete = args(&["--power-candidates","0,1,2","--compliance-probability","0.5",
+            "--confidence-alpha","0.05","--min-decision-samples","32"]);
+        assert!(Options::parse(&complete).unwrap().design.is_some());
+        complete.extend(args(&["--fan-speed-candidates","0.5,1"]));
+        assert!(Options::parse(&complete).is_err());
     }
 }
