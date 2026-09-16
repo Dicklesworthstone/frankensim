@@ -6,15 +6,18 @@
 //! every inlet, conductance and assembled-load gradient. The two existing
 //! producer linearizations do all FEM and transport differentiation.
 //!
-//! Bounded stationary interface iteration checks the UNRELAXED equation
-//! residual. It can refuse slowly converging/noncontractive cases; it does not
-//! claim a general-purpose Krylov solve, interval accuracy, or passivity.
-//! Hydraulics, mesh, material tensors and prescribed solid temperatures stay
+//! Both stationary and explicit vector IQN-ILS methods check the UNRELAXED
+//! equation residual using fresh producer evaluations. Acceleration solves the
+//! same affine interface map; it does not differentiate the primal iteration
+//! history or assemble a dense interface Jacobian. Either method may exhaust
+//! its budget; neither claims interval accuracy or passivity.
+//! Hydraulics, mesh, material laws and prescribed solid temperatures stay
 //! fixed. A log(h) control changes BOTH the Robin matrix and air-side hA.
 
 use std::fmt;
 use fs_conduction::ConductionError;
 use fs_conduction::adjoint::robin::{RobinDifferential, RobinLinearization};
+use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig, IqnIlsError};
 use fs_exec::Cx;
 
 use crate::conjugate::{ConjugateConfig, Relaxation, SolidRegionState, solve_conjugate_from};
@@ -31,7 +34,8 @@ pub struct InterfaceSolveConfig {
     pub absolute_tolerance: f64,
     /// Relative residual tolerance in [0,1), against max(|current|,|proposal|).
     pub relative_tolerance: f64,
-    /// Fixed relaxation in (0,1]. Convergence is tested before relaxation.
+    /// Fixed relaxation in (0,1], also the IQN startup/rank-zero fallback.
+    /// Convergence is tested before relaxation or vector acceleration.
     pub relaxation: f64,
 }
 
@@ -101,6 +105,8 @@ pub enum CoupledSensitivityError {
     Solid(ConductionError),
     /// Underlying transport or conjugate admission refusal.
     Air(TransportError),
+    /// Invalid acceleration policy or unrepresentable vector-update arithmetic.
+    Acceleration(IqnIlsError),
     /// A context checkpoint refused more work; no partial derivative is returned.
     Interrupted,
     /// The interface equation did not meet its budget.
@@ -185,11 +191,31 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
             air: self.air.zero_objective() }
     }
 
-    /// Solve the forward implicit interface equation with true, unrelaxed
-    /// residual checks. Returns a derivative, never a partially converged field.
+    /// Solve the forward implicit equation by stationary relaxation with true,
+    /// unrelaxed residual checks. No partially converged field is returned.
     pub fn apply(&self, cx: &Cx<'_>, direction: &CoupledDirection, config: InterfaceSolveConfig) -> Result<CoupledDifferential> {
+        self.apply_driver(cx, direction, config, None)
+    }
+
+    /// Solve the same forward equation using bounded vector IQN-ILS. All
+    /// secants belong to this tangent solve at the fixed admitted primal;
+    /// they are not recycled from primal or previous derivative iterations.
+    /// The true interface equation, not update size, decides convergence.
+    ///
+    /// # Errors
+    /// Producer, input, acceleration and interruption refusals propagate;
+    /// exhausting the declared sweep budget returns `DidNotConverge`.
+    pub fn apply_iqn(&self, cx: &Cx<'_>, direction: &CoupledDirection,
+        config: InterfaceSolveConfig, acceleration: IqnIlsConfig) -> Result<CoupledDifferential> {
+        self.apply_driver(cx, direction, config, Some(acceleration))
+    }
+
+    fn apply_driver(&self, cx: &Cx<'_>, direction: &CoupledDirection,
+        config: InterfaceSolveConfig, acceleration: Option<IqnIlsConfig>) -> Result<CoupledDifferential> {
         validate(config)?;
         poll(cx)?;
+        let mut accelerator = acceleration.map(|policy| IqnIls::new(self.solid.ports().len(), policy))
+            .transpose().map_err(CoupledSensitivityError::Acceleration)?;
         let mut current = vec![0.0; self.solid.ports().len()];
         for iteration in 1..=config.max_iterations {
             poll(cx)?;
@@ -212,17 +238,35 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
             if iteration == config.max_iterations {
                 return Err(CoupledSensitivityError::DidNotConverge { iterations: iteration, residual, tolerance });
             }
-            relax(&mut current, &air.reference_temperatures_k, config.relaxation)?;
+            update(cx, &mut current, &air.reference_temperatures_k, config.relaxation, &mut accelerator)?;
         }
         unreachable!("positive bounded iteration returns")
     }
 
-    /// Solve the transpose interface equation, then accumulate all controls.
-    /// This includes both direct heat-functional terms and feedback through the
-    /// solid. It never differentiates the primal fixed-point iteration history.
+    /// Solve the transpose interface equation by stationary relaxation, then
+    /// accumulate all controls, including direct heat-functional terms and
+    /// solid feedback. Never differentiate the primal iteration history.
     pub fn pullback(&self, cx: &Cx<'_>, objective: &CoupledObjective, config: InterfaceSolveConfig) -> Result<CoupledGradient> {
+        self.pullback_driver(cx, objective, config, None)
+    }
+
+    /// Solve the same transpose equation using its own bounded vector IQN-ILS
+    /// history. Direct solid/air objective terms and all coupled controls are
+    /// accumulated at the accepted adjoint, not at an unchecked extrapolation.
+    ///
+    /// # Errors
+    /// As for [`Self::apply_iqn`]; no partial gradient is published on failure.
+    pub fn pullback_iqn(&self, cx: &Cx<'_>, objective: &CoupledObjective,
+        config: InterfaceSolveConfig, acceleration: IqnIlsConfig) -> Result<CoupledGradient> {
+        self.pullback_driver(cx, objective, config, Some(acceleration))
+    }
+
+    fn pullback_driver(&self, cx: &Cx<'_>, objective: &CoupledObjective,
+        config: InterfaceSolveConfig, acceleration: Option<IqnIlsConfig>) -> Result<CoupledGradient> {
         validate(config)?;
         poll(cx)?;
+        let mut accelerator = acceleration.map(|policy| IqnIls::new(self.solid.ports().len(), policy))
+            .transpose().map_err(CoupledSensitivityError::Acceleration)?;
         // Validate every air objective slot before augmenting its references.
         self.air.pullback(cx, &objective.air)?;
         if objective.wall_temperatures.len() != self.solid.ports().len() {
@@ -248,10 +292,23 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
             if iteration == config.max_iterations {
                 return Err(CoupledSensitivityError::DidNotConverge { iterations: iteration, residual, tolerance });
             }
-            relax(&mut current, &solid.references, config.relaxation)?;
+            update(cx, &mut current, &solid.references, config.relaxation, &mut accelerator)?;
         }
         unreachable!("positive bounded iteration returns")
     }
+}
+fn update(cx: &Cx<'_>, current: &mut Vec<f64>, next: &[f64], omega: f64,
+    accelerator: &mut Option<IqnIls>) -> Result<()> {
+    poll(cx)?;
+    if let Some(accelerator) = accelerator.as_mut() {
+        let proposal = accelerator.step(current, next, omega)
+            .map_err(CoupledSensitivityError::Acceleration)?;
+        poll(cx)?;
+        *current = proposal.values;
+    } else {
+        relax(current, next, omega)?;
+    }
+    Ok(())
 }
 fn validate(config: InterfaceSolveConfig) -> Result<()> {
     if config.max_iterations == 0 || !config.absolute_tolerance.is_finite() || config.absolute_tolerance <= 0.0
