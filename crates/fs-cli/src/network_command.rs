@@ -195,8 +195,6 @@ impl Request {
         if tets.is_empty() { return Err(bad("at least one tetrahedron required")); }
         let used: BTreeSet<_> = tets.iter().flatten().copied().collect();
         if used.len() != positions.len() { return Err(bad("unused solid vertices would create unanchored degrees of freedom")); }
-            return Err(bad("unused solid vertices would create unanchored degrees of freedom"));
-        }
         let mesh = ConductionMesh::new(TetComplex::from_tets(positions.len(), tets), positions).map_err(producer)?;
         let exterior: BTreeMap<_, _> = mesh.boundary().iter().map(|f| (f.vertices, f.area)).collect();
         let mut names = BTreeSet::new();
