@@ -154,7 +154,8 @@ fn encode(executions: &[UqExecution], identity: ContentHash) -> Result<Vec<u8>> 
     let mut bytes = MAGIC.to_vec();
     bytes.extend_from_slice(&(executions.len() as u64).to_le_bytes());
     for (index,execution) in executions.iter().enumerate() {
-        let entry = execution.checkpoint(candidate_identity(identity,index)).map_err(bad)?;
+        let entry = execution.checkpoint(candidate_identity(identity,index))
+            .map_err(|error|bad(error.to_string()))?;
         bytes.extend_from_slice(&(entry.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&entry);
     }
@@ -191,7 +192,8 @@ fn decode(mut bytes: &[u8], plan: &UqPlan, identity: ContentHash, count: usize) 
     for index in 0..count {
         let n = integer(&mut bytes)?;
         let entry = take(&mut bytes,n)?;
-        executions.push(UqExecution::restore(plan,candidate_identity(identity,index),entry).map_err(bad)?);
+        executions.push(UqExecution::restore(plan,candidate_identity(identity,index),entry)
+            .map_err(|error|bad(error.to_string()))?);
     }
     if !bytes.is_empty() { return Err(bad("trailing bytes in design checkpoint")); }
     Ok(executions)
