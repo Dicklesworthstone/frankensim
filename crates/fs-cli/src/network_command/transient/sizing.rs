@@ -211,7 +211,8 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
     }).collect::<Result<Vec<_>>>()?;
     Ok(Schedule {initial:schedule.initial.clone(),capacities:schedule.capacities.clone(),intervals,
         limit:schedule.limit,total_steps:schedule.total_steps,max_step_s:schedule.max_step_s,max_steps:schedule.max_steps,
-        adaptive:schedule.adaptive,fan_speed_design:None,power_design:None,repeat:schedule.repeat})
+        adaptive:schedule.adaptive,nonlinear:schedule.nonlinear,
+        fan_speed_design:None,power_design:None,repeat:schedule.repeat})
 }
 
 fn render_trial(trial: &Trial, multiplier_key: &str) -> Result<String> {
