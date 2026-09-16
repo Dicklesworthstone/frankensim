@@ -80,15 +80,31 @@ pub struct RobinGradient {
     pub iterations: usize,
 }
 
-/// An owned operator bound to a newly solved and residual-checked primal.
-/// Publicly assembled ConductionSolution values cannot be substituted for it.
-pub struct RobinLinearization {
-    primal: ConductionSolution,
+/// An owned response operator bound only by this crate's checked producers.
+/// It retains endpoint temperatures and fluxes, not a fabricated steady report.
+/// Its matrix may include immutable-history storage; controls remain in watts.
+/// A response alone does not assert that the solid is in steady energy balance.
+pub struct RobinResponse {
+    temperature: Vec<f64>,
+    robin_fluxes: Vec<crate::RobinFlux>,
     matrix: Csr,
     dofs: DofMap,
     ports: Vec<RobinPort>,
     linear: LinearConfig,
     nonlinear: Option<nonlinear::TangentSystem>,
+}
+
+/// An owned operator bound to a newly solved and residual-checked STEADY primal.
+/// Publicly assembled ConductionSolution values cannot be substituted for it.
+/// The common response methods remain available through dereferencing.
+pub struct RobinLinearization {
+    primal: ConductionSolution,
+    response: RobinResponse,
+}
+
+impl std::ops::Deref for RobinLinearization {
+    type Target = RobinResponse;
+    fn deref(&self) -> &Self::Target { &self.response }
 }
 
 impl RobinLinearization {
@@ -126,46 +142,12 @@ impl RobinLinearization {
         config: SolveConfig, regions: &[&str],
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
-        if !(config.linear.tolerance.is_finite() && config.linear.tolerance > 0.0
-            && config.linear.tolerance < 1.0 && config.linear.max_iterations > 0)
-        {
-            return Err(invalid("positive Krylov budget and a relative tolerance in (0, 1) required"));
-        }
-        let mut temperature_dependent = false;
-        if let Some(materials) = problem.element_materials {
-            materials.validate_for(problem.mesh)?;
-            for element in 0..problem.mesh.element_count() {
-                poll(cx, element)?;
-                temperature_dependent |= materials.model_for(element)?.is_temperature_dependent();
-            }
-        } else {
-            temperature_dependent = problem.material.is_temperature_dependent();
-        }
+        admit_linear(config.linear)?;
+        let temperature_dependent = temperature_dependent(cx, problem)?;
         if temperature_dependent && config.linear.restart == 0 {
             return Err(invalid("nonlinear Robin sensitivities require a positive FGMRES restart"));
         }
-        let mut seen = BTreeSet::new();
-        let mut ports = Vec::with_capacity(regions.len());
-        for &name in regions {
-            poll(cx, ports.len())?;
-            if !seen.insert(name) { return Err(invalid("duplicate Robin sensitivity region")); }
-            let region = problem.boundary.region_names().iter().position(|n| n == name)
-                .ok_or_else(|| invalid("unknown Robin sensitivity region"))?;
-            let ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(r) }
-                = &problem.boundary.conditions()[region]
-            else { return Err(invalid("selected sensitivity regions require uniform Robin h and reference")); };
-            let mut port = RobinPort { name: name.to_string(), area_m2: 0.0,
-                htc_w_m2_k: *h, reference_k: *r, faces: Vec::new() };
-            for (slot, face) in problem.mesh.boundary().iter().enumerate() {
-                poll(cx, slot)?;
-                if problem.boundary.region_for(slot) == Some(region) {
-                    add(&mut port.area_m2, face.area)?;
-                    port.faces.push((face.vertices.map(|v| v as usize), face.area));
-                }
-            }
-            if port.area_m2 <= 0.0 { return Err(invalid("a Robin sensitivity region has no area")); }
-            ports.push(port);
-        }
+        let ports = bind_ports(cx, problem, regions)?;
         let linear = config.linear;
         let primal = match interfaces {
             Some(interfaces) => crate::solve::solve_with_interfaces(cx, problem, interfaces, config)?,
@@ -176,20 +158,30 @@ impl RobinLinearization {
         let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
         let (matrix, rhs) = reduce(&system, &dofs);
         let relative = true_residual(&matrix, &dofs.gather(&primal.temperature), &rhs)?;
-        if relative >= linear.tolerance {
-            return Err(failed(0, relative, linear));
-        }
+        if relative >= linear.tolerance { return Err(failed(0, relative, linear)); }
         let (matrix, nonlinear) = if temperature_dependent {
             let (jacobian, tangent) = nonlinear::prepare(cx, problem, interfaces, &primal.temperature, &dofs)?;
             (jacobian, Some(tangent))
         } else { (matrix, None) };
         poll(cx, 0)?;
-        Ok(Self { primal, matrix, dofs, ports, linear, nonlinear })
+        let response = RobinResponse { temperature: primal.temperature.clone(),
+            robin_fluxes: primal.report.robin_fluxes.clone(), matrix, dofs, ports, linear, nonlinear };
+        Ok(Self { primal, response })
     }
 
-    /// Freshly executed primal; its references and coefficients define this map.
+    /// Freshly executed steady primal; its references define this response.
     #[must_use]
     pub const fn primal(&self) -> &ConductionSolution { &self.primal }
+}
+
+impl RobinResponse {
+    /// Actual endpoint temperature field bound to this operator.
+    #[must_use]
+    pub fn temperature(&self) -> &[f64] { &self.temperature }
+
+    /// Actual endpoint external Robin exchanges from the same producer.
+    #[must_use]
+    pub fn robin_fluxes(&self) -> &[crate::RobinFlux] { &self.robin_fluxes }
 
     /// Selected regions in the exact order used by every input/output vector.
     #[must_use]
@@ -211,13 +203,13 @@ impl RobinLinearization {
     #[must_use]
     pub fn zero_direction(&self) -> RobinDirection {
         RobinDirection { references_k: vec![0.0; self.ports.len()], log_htc: vec![0.0; self.ports.len()],
-            nodal_load_w: vec![0.0; self.primal.temperature.len()] }
+            nodal_load_w: vec![0.0; self.temperature.len()] }
     }
 
     /// Area-average a full nodal field on the selected Robin traces.
     /// This accepts differences or absolute temperatures; it never adds a lift.
     pub fn wall_means(&self, cx: &Cx<'_>, field: &[f64]) -> Result<Vec<f64>, ConductionError> {
-        vector(cx, field, self.primal.temperature.len())?;
+        vector(cx, field, self.temperature.len())?;
         self.ports.iter().map(|port| {
             let mut mean = 0.0;
             for (vertices, area) in &port.faces {
@@ -233,7 +225,7 @@ impl RobinLinearization {
     pub fn apply(&self, cx: &Cx<'_>, direction: &RobinDirection) -> Result<RobinDifferential, ConductionError> {
         vector(cx, &direction.references_k, self.ports.len())?;
         vector(cx, &direction.log_htc, self.ports.len())?;
-        vector(cx, &direction.nodal_load_w, self.primal.temperature.len())?;
+        vector(cx, &direction.nodal_load_w, self.temperature.len())?;
         let mut rhs = direction.nodal_load_w.clone();
         for (index, port) in self.ports.iter().enumerate() {
             for (vertices, area) in &port.faces {
@@ -242,7 +234,7 @@ impl RobinLinearization {
                     let mut load = port.htc_w_m2_k * (area / 3.0) * direction.references_k[index];
                     for (b, &other) in vertices.iter().enumerate() {
                         let mass = port.htc_w_m2_k * (area / 12.0) * if a == b { 2.0 } else { 1.0 };
-                        add(&mut load, mass * (port.reference_k - self.primal.temperature[other]) * direction.log_htc[index])?;
+                        add(&mut load, mass * (port.reference_k - self.temperature[other]) * direction.log_htc[index])?;
                     }
                     add(&mut rhs[vertex], load)?;
                 }
@@ -250,7 +242,7 @@ impl RobinLinearization {
         }
         let (temperature_k, relative_residual, iterations) = self.solve_rhs(cx, &rhs, false)?;
         let mean_wall_temperatures_k = self.wall_means(cx, &temperature_k)?;
-        let means = self.wall_means(cx, &self.primal.temperature)?;
+        let means = self.wall_means(cx, &self.temperature)?;
         let heat_rates_w = self.ports.iter().enumerate().map(|(i, port)| {
             checked(port.htc_w_m2_k * port.area_m2 * (mean_wall_temperatures_k[i]
                 - direction.references_k[i] + (means[i] - port.reference_k) * direction.log_htc[i]))
@@ -265,7 +257,7 @@ impl RobinLinearization {
     pub fn pullback(
         &self, cx: &Cx<'_>, nodal_weights: &[f64], wall_weights: &[f64], heat_weights: &[f64],
     ) -> Result<RobinGradient, ConductionError> {
-        vector(cx, nodal_weights, self.primal.temperature.len())?;
+        vector(cx, nodal_weights, self.temperature.len())?;
         vector(cx, wall_weights, self.ports.len())?;
         vector(cx, heat_weights, self.ports.len())?;
         let mut rhs = nodal_weights.to_vec();
@@ -279,7 +271,7 @@ impl RobinLinearization {
             }
         }
         let (lambda, relative_residual, iterations) = self.solve_rhs(cx, &rhs, true)?;
-        let means = self.wall_means(cx, &self.primal.temperature)?;
+        let means = self.wall_means(cx, &self.temperature)?;
         let mut references = vec![0.0; self.ports.len()];
         let mut log_htc = vec![0.0; self.ports.len()];
         for (i, port) in self.ports.iter().enumerate() {
@@ -292,7 +284,7 @@ impl RobinLinearization {
                     add(&mut references[i], lambda[vertex] * port.htc_w_m2_k * (area / 3.0))?;
                     for (b, &other) in vertices.iter().enumerate() {
                         let mass = port.htc_w_m2_k * (area / 12.0) * if a == b { 2.0 } else { 1.0 };
-                        add(&mut log_htc[i], lambda[vertex] * mass * (port.reference_k - self.primal.temperature[other]))?;
+                        add(&mut log_htc[i], lambda[vertex] * mass * (port.reference_k - self.temperature[other]))?;
                     }
                 }
             }
@@ -308,7 +300,7 @@ impl RobinLinearization {
         }
         let rhs = self.dofs.gather(rhs);
         let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        if scale == 0.0 { return Ok((vec![0.0; self.primal.temperature.len()], 0.0, 0)); }
+        if scale == 0.0 { return Ok((vec![0.0; self.temperature.len()], 0.0, 0)); }
         let normalized: Vec<f64> = rhs.iter().map(|v| v / scale).collect();
         let op = CsrOp::symmetric(self.matrix.clone());
         let pre = crate::solve::spd_preconditioner(&self.matrix);
@@ -323,13 +315,58 @@ impl RobinLinearization {
         poll(cx, state.iters)?;
         let residual = true_residual(&self.matrix, &state.x, &normalized)?;
         if residual >= self.linear.tolerance { return Err(failed(state.iters, residual, self.linear)); }
-        let mut full = vec![0.0; self.primal.temperature.len()];
+        let mut full = vec![0.0; self.temperature.len()];
         for (i, &vertex) in self.dofs.free().iter().enumerate() {
             poll(cx, i)?;
             full[vertex] = checked(state.x[i] * scale)?;
         }
         Ok((full, residual, state.iters))
     }
+}
+
+fn admit_linear(linear: LinearConfig) -> Result<(), ConductionError> {
+    if !(linear.tolerance.is_finite() && linear.tolerance > 0.0
+        && linear.tolerance < 1.0 && linear.max_iterations > 0)
+    { return Err(invalid("positive Krylov budget and a relative tolerance in (0, 1) required")); }
+    Ok(())
+}
+
+fn temperature_dependent(cx: &Cx<'_>, problem: ConductionProblem<'_>) -> Result<bool, ConductionError> {
+    if let Some(materials) = problem.element_materials {
+        materials.validate_for(problem.mesh)?;
+        let mut dependent = false;
+        for element in 0..problem.mesh.element_count() {
+            poll(cx, element)?;
+            dependent |= materials.model_for(element)?.is_temperature_dependent();
+        }
+        Ok(dependent)
+    } else { Ok(problem.material.is_temperature_dependent()) }
+}
+
+fn bind_ports(cx: &Cx<'_>, problem: ConductionProblem<'_>, regions: &[&str]) -> Result<Vec<RobinPort>, ConductionError> {
+    let mut seen = BTreeSet::new();
+    let mut ports = Vec::with_capacity(regions.len());
+    for &name in regions {
+        poll(cx, ports.len())?;
+        if !seen.insert(name) { return Err(invalid("duplicate Robin sensitivity region")); }
+        let region = problem.boundary.region_names().iter().position(|n| n == name)
+            .ok_or_else(|| invalid("unknown Robin sensitivity region"))?;
+        let ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(r) }
+            = &problem.boundary.conditions()[region]
+        else { return Err(invalid("selected sensitivity regions require uniform Robin h and reference")); };
+        let mut port = RobinPort { name: name.to_string(), area_m2: 0.0,
+            htc_w_m2_k: *h, reference_k: *r, faces: Vec::new() };
+        for (slot, face) in problem.mesh.boundary().iter().enumerate() {
+            poll(cx, slot)?;
+            if problem.boundary.region_for(slot) == Some(region) {
+                add(&mut port.area_m2, face.area)?;
+                port.faces.push((face.vertices.map(|v| v as usize), face.area));
+            }
+        }
+        if port.area_m2 <= 0.0 { return Err(invalid("a Robin sensitivity region has no area")); }
+        ports.push(port);
+    }
+    Ok(ports)
 }
 
 fn true_residual(matrix: &Csr, x: &[f64], rhs: &[f64]) -> Result<f64, ConductionError> {
