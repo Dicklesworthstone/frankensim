@@ -1,12 +1,14 @@
 //! Piecewise-constant workload/fan schedules with backward-Euler solid storage.
 //! Air is quasi-steady at each endpoint. Coupling iterations always reuse the
-//! previous accepted solid field. No transient derivative or continuous-time
-//! peak bound is inferred from sampled temperatures.
+//! previous accepted solid field. An explicit nonlinear policy evaluates k(T)
+//! at the endpoint on every Newton trial, including adaptive/sizing trials.
+//! No transient derivative or continuous-time peak bound is inferred.
 
 mod workload;
 mod adaptive;
 mod sizing;
 mod repeat;
+mod nonlinear;
 use workload::Workload;
 
 use super::*;
@@ -30,6 +32,7 @@ pub(super) struct Schedule {
     max_step_s: f64,
     max_steps: usize,
     adaptive: Option<adaptive::Config>,
+    nonlinear: Option<nonlinear::Config>,
     fan_speed_design: Option<sizing::Config>,
     power_design: Option<sizing::Config>,
     repeat: Option<repeat::Config>,
@@ -38,7 +41,8 @@ pub(super) struct Schedule {
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "fan_speed_design", "power_design", "repeat"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "fan_speed_design", "power_design", "repeat"], "transient")?;
+        let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -108,7 +112,7 @@ impl Schedule {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
         let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
-        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,fan_speed_design,power_design,repeat};
+        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,nonlinear,fan_speed_design,power_design,repeat};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
             design.validate(&schedule,fan)?;
         }
@@ -146,8 +150,10 @@ fn initial_objective(request:&Request,cx:&Cx<'_>,field:&[f64])->Result<(f64,Opti
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn advance(request:&Request,cx:&Cx<'_>,engine:&BackwardEuler<'_>,network:&TransportNetwork<'_>,
-    coefficients:&BTreeMap<String,f64>,old:&[f64],source:&ScalarField,dt:f64)
+    coefficients:&BTreeMap<String,f64>,old:&[f64],source:&ScalarField,dt:f64,
+    nonlinear_config:Option<nonlinear::Config>,nonlinear_stats:&mut nonlinear::Stats)
     ->Result<(CoupledTransportSolution,StepSolution)>
 {
     let material=fs_conduction::ConductivityModel::isotropic_declared(request.conductivity).map_err(producer)?;
@@ -163,9 +169,9 @@ fn advance(request:&Request,cx:&Cx<'_>,engine:&BackwardEuler<'_>,network:&Transp
     let coupled=solve_coupled_transport(cx,network,&gate,|cx,references| {
         let evaluated=(||->Result<Vec<SolidRegionState>> {
             let boundary=request.boundary(&names,references,coefficients)?;
-            let solution=engine.advance(cx,ConductionProblem {mesh:&request.mesh,boundary:&boundary,
+            let solution=nonlinear::advance(engine,cx,ConductionProblem {mesh:&request.mesh,boundary:&boundary,
                 material:&material,element_materials:request.solid_data.element_materials.as_ref(),source},
-                request.contacts.as_ref().map(|c|&c.interfaces),old,dt,config).map_err(producer)?;
+                request.contacts.as_ref().map(|c|&c.interfaces),old,dt,config,nonlinear_config,nonlinear_stats)?;
             let states=names.iter().map(|name|solution.robin_fluxes.iter().find(|f|f.region==*name)
                 .map(SolidRegionState::from_robin_flux).ok_or_else(||bad("transient solid lacks a cooling region")))
                 .collect::<Result<Vec<_>>>()?;
@@ -232,6 +238,7 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
     }
+    nonlinear::admit(request,cx,schedule.nonlinear)?;
     // Bind every named load before any hydraulic or thermal work, including
     // later intervals which might otherwise fail after a long simulation.
     for interval in &schedule.intervals { interval.workload.validate(request,cx)?; }
@@ -255,6 +262,7 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     let mut work=0_usize;
     let mut completed=0_usize;
     let mut adaptive_stats=adaptive::Stats::default();
+    let mut nonlinear_stats=nonlinear::Stats::default();
     let mut final_result=None;
     for (ordinal,interval) in schedule.intervals.iter().enumerate() {
         poll(cx)?;
@@ -283,7 +291,8 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
             // All trials, including discarded coarse/rejected ones, undergo the
             // same physical gates. Count their work, never their heat as history.
             let mut trial=|old:&[f64],dt:f64| {
-                let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,old,source,dt)?;
+                let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,old,source,dt,
+                    schedule.nonlinear,&mut nonlinear_stats)?;
                 work=work.checked_add(coupled.iterations).ok_or_else(||budget("transient work count overflow"))?;
                 for c in &derived {c.check_direction(&coupled.solid,request.limits.heat)?;}
                 if solid.temperature.iter().any(|&t|!t.is_finite()||t<=0.0) {
@@ -349,9 +358,10 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
     let prefix=result.strip_suffix("}\n").ok_or_else(||bad("internal transient result framing"))?;
-    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
+    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"nonlinear\":{},\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
         num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
-        num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?);
+        num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?,
+        nonlinear_stats.render(schedule.nonlinear)?);
     poll(cx)?;
     Ok(Cycle {
         trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps:completed},
