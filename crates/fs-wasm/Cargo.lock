@@ -51,7 +51,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "asupersync"
-version = "0.4.10"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -480,7 +480,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fnx-classes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fnx-runtime",
  "indexmap",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "fnx-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -505,7 +505,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
@@ -560,6 +560,15 @@ dependencies = [
  "fs-rep-mesh",
  "fs-solver",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-aeroac"
+version = "0.0.1"
+dependencies = [
+ "fs-fft",
+ "fs-lbm",
+ "fs-math",
 ]
 
 [[package]]
@@ -657,6 +666,7 @@ dependencies = [
 name = "fs-couple"
 version = "0.0.1"
 dependencies = [
+ "fs-aeroac",
  "fs-blake3",
  "fs-dcontact",
  "fs-duct",
@@ -664,6 +674,7 @@ dependencies = [
  "fs-fft",
  "fs-iface",
  "fs-la",
+ "fs-matdb",
  "fs-material",
  "fs-math",
  "fs-modal",
@@ -671,6 +682,7 @@ dependencies = [
  "fs-phs",
  "fs-plate",
  "fs-qty",
+ "fs-rand",
  "fs-scenario",
  "fs-tribo",
  "fs-vfit",
@@ -733,6 +745,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-obs",
+ "fs-qty",
 ]
 
 [[package]]

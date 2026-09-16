@@ -11,7 +11,6 @@ description = "Two-lane executor: latency lane on asupersync, work-stealing tile
 layer = "L0"
 
 [dependencies]
-asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-obs = { path = "../fs-obs" }
@@ -22,3 +21,9 @@ fs-propcheck = { path = "../fs-propcheck" }
 
 [lints]
 workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+asupersync = { path = "../../../asupersync" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod", "runtime-core", "proc-macros", "nightly-outcome-try"] }
