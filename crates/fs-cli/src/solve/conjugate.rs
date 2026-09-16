@@ -14,13 +14,18 @@
 //! discipline. This adapter preserves its flat target/reference seam, while
 //! retaining branch identity in the solver and receipt instead of collapsing
 //! separate inlets or flows into a fictional single path.
+//!
+//! Global IQN-ILS accelerates the complete branch-major interface. Its bounded
+//! history, rank filter, and startup relaxation are recorded in the receipt;
+//! the temperature, branch watt, and decomposition gates remain independent.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_airflow::conjugate::{
-    AirPath, AirSegment, ConjugateConfig, ConjugateSolution, SolidRegionState,
+    AirPath, AirSegment, ConjugateConfig, ConjugateSolution, IqnIlsConfig,
+    Relaxation, SolidRegionState,
 };
-use fs_airflow::graph::thermal::{ConjugateBranchesSolution, solve_conjugate_branches};
+use fs_airflow::graph::thermal::{ConjugateBranchesSolution, solve_conjugate_branches_iqn};
 use fs_airflow::{AirflowError, OperatingPoint};
 use fs_convection::{CorrelationId, ThermalConductivity, evaluate};
 use fs_exec::Cx;
@@ -40,6 +45,14 @@ pub(super) const AIR_PRANDTL: f64 = 0.707;
 pub(super) const AIR_SPECIFIC_HEAT_J_KG_K: f64 = 1007.0;
 /// The provenance every receipt cites for the frozen transport properties.
 pub(super) const AIR_PROPERTY_SOURCE: &str = "dry air at 300 K, 1 atm (Incropera & DeWitt, Fundamentals of Heat and Mass Transfer, Table A.4); frozen across the exchange, not re-evaluated at film or bulk temperature";
+
+// One policy supplies BOTH the driver and receipt; no environment-dependent
+// selection or hidden solver retry can change the iteration/memory budget.
+const CONJUGATE_IQN_CONFIG: IqnIlsConfig = IqnIlsConfig {
+    max_history: 8,
+    relative_rank_tolerance: 1.0e-10,
+};
+const CONJUGATE_STARTUP_OMEGA: f64 = 1.0;
 
 /// Receipt-level authority statement for the exchange.
 pub(super) const CONJUGATE_AUTHORITY: &str = "partitioned solid/air fixed point over derived Robin rows: card-derived coefficient at the flow-network midpoint, exponential-law marched reference temperature, kelvin convergence plus an independent watt balance gate and an fs-conduction decomposition cross-check";
@@ -430,11 +443,14 @@ pub(super) fn run_exchange(
         &Cx<'_>, &BTreeMap<String, f64>,
     ) -> Result<Vec<SolidRegionState>, SolveRefusal>,
 ) -> Result<ConjugateOutcome, SolveRefusal> {
-    let config = ConjugateConfig::default();
+    let config = ConjugateConfig {
+        relaxation: Relaxation::Fixed { omega: CONJUGATE_STARTUP_OMEGA },
+        ..ConjugateConfig::default()
+    };
     let mut stashed: Option<SolveRefusal> = None;
     let targets: Vec<String> = path.segments.iter().map(|s| s.target.clone()).collect();
     let air_paths: Vec<AirPath> = path.branches.iter().map(|b| b.air_path.clone()).collect();
-    let result = solve_conjugate_branches(cx, &air_paths, &config, |cx, references| {
+    let result = solve_conjugate_branches_iqn(cx, &air_paths, &config, CONJUGATE_IQN_CONFIG, |cx, references| {
         let by_target: BTreeMap<String, f64> = targets.iter().cloned()
             .zip(references.iter().copied()).collect();
         match solid(cx, &by_target) {
@@ -543,9 +559,19 @@ fn finite_total(values: impl IntoIterator<Item = f64>, what: &str) -> Result<f64
     Ok(total)
 }
 
-/// Existing single-branch receipts keep their original shape. Multiple
-/// branches use an explicit tagged object, never a misleading scalar inlet,
-/// outlet, or mass flow. The aggregate must have passed the publication gate.
+fn acceleration_receipt_fragment() -> Result<String, SolveRefusal> {
+    Ok(format!(
+        "{{\"method\":\"iqn-ils\",\"scope\":\"all-branch-interfaces\",\"max_history\":{},\"relative_rank_tolerance\":{},\"fallback\":\"fixed\",\"fallback_omega\":{}}}",
+        CONJUGATE_IQN_CONFIG.max_history,
+        num(CONJUGATE_IQN_CONFIG.relative_rank_tolerance, "IQN rank tolerance")?,
+        num(CONJUGATE_STARTUP_OMEGA, "IQN fallback omega")?,
+    ))
+}
+
+/// Single-branch receipts retain their branch fields; both forms now record
+/// the acceleration policy. Multiple branches use an explicit tagged object,
+/// never a misleading scalar inlet, outlet, or mass flow. The aggregate must
+/// have passed the publication gate.
 pub(super) fn receipt_fragment(
     path: &ConjugatePath,
     outcome: &ConjugateOutcome,
@@ -577,12 +603,13 @@ pub(super) fn receipt_fragment(
     let solid_total = finite_total(outcome.solution.branches.iter().map(|b| b.balance.solid_total_w), "solid_total_w")?;
     let air_total = finite_total(outcome.solution.branches.iter().map(|b| b.balance.air_total_w), "air_total_w")?;
     Ok(format!(
-        "{{\"schema\":\"independent-branches-shared-solid-v1\",\"branch_count\":{},\"branches\":[{}],\"iterations\":{},\"solid_total_w\":{},\"air_total_w\":{},\"interface_imbalance_w\":{},\"decomposition_residual_w\":{},\"balance_tolerance_w\":{},\"authority\":{},\"no_claim\":{}}}",
+        "{{\"schema\":\"independent-branches-shared-solid-v1\",\"branch_count\":{},\"branches\":[{}],\"iterations\":{},\"solid_total_w\":{},\"air_total_w\":{},\"interface_imbalance_w\":{},\"decomposition_residual_w\":{},\"balance_tolerance_w\":{},\"acceleration\":{},\"authority\":{},\"no_claim\":{}}}",
         path.branches.len(), fragments.join(","), outcome.solution.iterations,
         num(solid_total, "solid_total_w")?, num(air_total, "air_total_w")?,
         num(solid_total - air_total, "interface_imbalance_w")?,
         num(residual, "decomposition_residual_w")?,
         num(outcome.balance_tolerance_w, "balance_tolerance_w")?,
+        acceleration_receipt_fragment()?,
         json_string(CONJUGATE_AUTHORITY), json_string(BRANCHES_NO_CLAIM),
     ))
 }
@@ -638,7 +665,7 @@ fn branch_receipt_fragment(
         None => "null".to_string(),
     };
     Ok(format!(
-        "{{\"branch\":{},\"path\":{},\"flow_m3_s\":{{\"lo\":{},\"mid\":{},\"hi\":{}}},\"air_density_kg_m3\":{},\"mass_flow_kg_s\":{},\"inlet_k\":{},\"outlet_k\":{},\"air_properties\":{{\"dynamic_viscosity_pa_s\":{},\"thermal_conductivity_w_m_k\":{},\"prandtl\":{},\"specific_heat_j_kg_k\":{},\"source\":{}}},\"segments\":[{}],\"iterations\":{},\"solid_total_w\":{},\"air_total_w\":{},\"interface_imbalance_w\":{},\"max_region_imbalance_w\":{},\"worst_recorded_imbalance_w\":{},\"decomposition_residual_w\":{},\"balance_tolerance_w\":{},\"authority\":{},\"no_claim\":{}}}",
+        "{{\"branch\":{},\"path\":{},\"flow_m3_s\":{{\"lo\":{},\"mid\":{},\"hi\":{}}},\"air_density_kg_m3\":{},\"mass_flow_kg_s\":{},\"inlet_k\":{},\"outlet_k\":{},\"air_properties\":{{\"dynamic_viscosity_pa_s\":{},\"thermal_conductivity_w_m_k\":{},\"prandtl\":{},\"specific_heat_j_kg_k\":{},\"source\":{}}},\"segments\":[{}],\"iterations\":{},\"solid_total_w\":{},\"air_total_w\":{},\"interface_imbalance_w\":{},\"max_region_imbalance_w\":{},\"worst_recorded_imbalance_w\":{},\"decomposition_residual_w\":{},\"balance_tolerance_w\":{},\"acceleration\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(&path.branch), json_string(&path.path_name),
         num(path.flow_lo_m3_s, "flow_lo")?, num(path.flow_mid_m3_s, "flow_mid")?,
         num(path.flow_hi_m3_s, "flow_hi")?, num(path.air_density_kg_m3, "air_density")?,
@@ -652,6 +679,7 @@ fn branch_receipt_fragment(
         num(audit.max_region_imbalance_w, "max_region_imbalance_w")?,
         num(solution.worst_recorded_imbalance_w, "worst_recorded_imbalance_w")?,
         decomposition, num(balance_tolerance_w, "balance_tolerance_w")?,
+        acceleration_receipt_fragment()?,
         json_string(CONJUGATE_AUTHORITY), json_string(no_claim),
     ))
 }
