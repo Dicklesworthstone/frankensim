@@ -131,7 +131,8 @@ impl TetRefinement {
         }
         for (i,&[a,b]) in midpoint_parents.iter().enumerate() {
             if i % 256 == 0 { checkpoint(cx)?; }
-            let midpoint = positions[a as usize].map_with(positions[b as usize], |x,y| f64::midpoint(x,y));
+            let midpoint: [f64;3] = std::array::from_fn(|axis|
+                f64::midpoint(positions[a as usize][axis],positions[b as usize][axis]));
             let actual = split.positions[positions.len()+i];
             if actual != midpoint || actual == positions[a as usize] || actual == positions[b as usize] {
                 return Err(TetRefinementError::UnrepresentableSplit);
