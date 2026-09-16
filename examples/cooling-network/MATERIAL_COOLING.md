@@ -68,7 +68,7 @@ operator. No material-parameter, orientation or geometry adjoint is added.
 
 ## Bounded nonlinear scalar conductivity
 
-A steady material can instead declare a piecewise-linear `k(T)` law:
+A material can instead declare a piecewise-linear `k(T)` law:
 
 ```json
 {
@@ -88,16 +88,21 @@ The initial guess and subsequent solver evaluations must remain within the
 material's supported temperature span; no endpoint clamping is performed.
 
 The full temperature-dependent law reaches the production nonlinear solver.
-Its implicit tangent and adjoint include `K'(T)` through the existing
+Its steady implicit tangent and adjoint include `K'(T)` through the existing
 `RobinLinearization`; this is not an adjoint of a frozen representative
 conductivity. Existing derivative refusals at slope discontinuities or validity
 endpoints remain in force. Multiple material laws may be assigned to different
 elements, with source and contact terms retained.
 
-**Nonlinear conductivity is steady-only in this product.** The existing
-backward-Euler producer rejects temperature-dependent conductivity. A transient
-request is not silently evaluated using a frozen curve. Fluid properties and
-convection coefficients remain frozen during each thermal solve in either mode.
+**Transient k(T) requires an explicit `transient.nonlinear` policy.** The
+nonlinear backward-Euler endpoint evaluates conductivity at the new field and
+retains the same old field across Newton and air-coupling trials. See
+`NONLINEAR_TRANSIENT_COOLING.md` and `nonlinear-contact-pulse.json` for the
+required Newton/Armijo budgets and joule-residual tolerances. Heat capacity and
+contact resistance remain temperature independent; no transient adjoint is
+added. Without that policy the linear timestep path still refuses curves rather
+than silently freezing them. Fluid properties and convection coefficients
+remain frozen during each thermal solve in either mode.
 
 ## Material uncertainty through real cooling solves
 
@@ -132,7 +137,7 @@ entire execution; they are not clipped, redrawn or skipped. A scalar uncertainty
 target cannot overwrite an anisotropic tensor or a temperature-dependent law.
 Independent tensor-entry sampling, orientation uncertainty and uncertain curve
 knots are not implemented. A fixed `k(T)` law may coexist with other supported
-uncertain parameters in a steady base model.
+uncertain parameters in a steady base model. Transient UQ remains unsupported.
 
 ## Focused checks
 
@@ -140,14 +145,17 @@ uncertain parameters in a steady base model.
 cargo test -p fs-cli --bin frankensim network_command::solid_data
 cargo test -p fs-cli --bin frankensim uq_command::model::material
 cargo test -p fs-cli --test cooling_materials
+cargo test -p fs-conduction --test nonlinear_backward_euler
+cargo test -p fs-cli --test cooling_nonlinear_transient
 ```
 
 The tests compare directional heat flow against an independent slab resistance
 solution, rotate material and geometry together, compare implicit derivatives
 with perturbed coupled solves, and use a manufactured nonlinear field with
 known source and boundary heat rates. Actual-binary regressions also cover
-material UQ and checkpoint replay. Source availability is not an assertion that
-these tests have been executed on a particular checkout.
+material UQ, checkpoint replay and nonlinear transient contact cooling. Source
+availability is not an assertion that these tests have been executed on a
+particular checkout.
 
 All these constitutive inputs are caller declarations, not material-database
 receipts or physical uncertainty certificates. Reported temperatures remain
