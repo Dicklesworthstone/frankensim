@@ -13,10 +13,14 @@
 //! its budget; neither claims interval accuracy or passivity.
 //! Hydraulics, mesh, material laws and prescribed solid temperatures stay
 //! fixed. A log(h) control changes BOTH the Robin matrix and air-side hA.
+//! A checked backward-Euler RobinResponse may include C/dt in its Jacobian;
+//! its previous physical state stays fixed during this endpoint calculation.
 
 use std::fmt;
 use fs_conduction::ConductionError;
-use fs_conduction::adjoint::robin::{RobinDifferential, RobinLinearization};
+use fs_conduction::adjoint::robin::{RobinDifferential, RobinResponse};
+#[cfg(test)]
+use fs_conduction::adjoint::robin::RobinLinearization;
 use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig, IqnIlsError};
 use fs_exec::Cx;
 
@@ -127,25 +131,26 @@ impl From<TransportError> for CoupledSensitivityError {
 }
 type Result<T> = std::result::Result<T, CoupledSensitivityError>;
 
-/// Concrete FEM/air binding at a checked coupled fixed point. No user-supplied
-/// derivative callback or publicly assembled primal result can replace a side.
+/// Concrete FEM/air binding at a checked coupled fixed point. Steady and
+/// transient producers dereference to the same privately constructed response.
+/// No public primal report or user derivative callback can replace either side.
 pub struct CoupledLinearization<'a, 'flow> {
-    solid: &'a RobinLinearization,
+    solid: &'a RobinResponse,
     air: TransportLinearization<'a, 'flow>,
 }
 impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
     /// Bind the same names, order, area and h on both sides, and recheck primal
     /// temperature and per-branch watt balance with the existing conjugate gate.
-    /// The solid must have been solved against its actual final references,
-    /// e.g. those returned by solve_coupled_transport, not the next proposal.
-    pub fn new(cx: &Cx<'_>, network: &'a TransportNetwork<'flow>, solid: &'a RobinLinearization,
+    /// The solid must use its actual final references, not the next proposal.
+    /// These are interface gates, not a claim of zero solid energy storage.
+    pub fn new(cx: &Cx<'_>, network: &'a TransportNetwork<'flow>, solid: &'a RobinResponse,
         primal_gate: &ConjugateConfig) -> Result<Self> {
         poll(cx)?;
         let names = network.regions();
         if names.is_empty() || names.len() != solid.ports().len()
             || names.iter().zip(solid.ports()).any(|(a,b)| *a != b.name.as_str())
         { return Err(bad("solid ports must equal all network regions in exact order")); }
-        let walls = solid.wall_means(cx, &solid.primal().temperature)?;
+        let walls = solid.wall_means(cx, solid.temperature())?;
         let air = network.linearize(cx, &walls)?;
         let probe = ConjugateConfig { max_iterations: 1, relaxation: Relaxation::Fixed { omega: 1.0 }, ..*primal_gate };
         for branch in 0..network.hydraulics().branches.len() {
@@ -163,7 +168,7 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
                 if port.htc_w_m2_k != segment.htc_w_per_m2_k()
                     || (port.area_m2 - segment.area_m2()).abs() > 128.0*f64::EPSILON*port.area_m2.max(segment.area_m2())
                 { return Err(bad("solid and air must share h and area, not merely a region name")); }
-                let flux = solid.primal().report.robin_fluxes.iter().find(|flux| flux.region == port.name)
+                let flux = solid.robin_fluxes().iter().find(|flux| flux.region == port.name)
                     .ok_or_else(|| bad("solid report is missing the bound Robin region"))?;
                 states.push(SolidRegionState::from_robin_flux(flux));
                 refs.push(port.reference_k);
@@ -183,13 +188,13 @@ impl<'a, 'flow> CoupledLinearization<'a, 'flow> {
     pub fn zero_direction(&self) -> CoupledDirection {
         let d = self.air.zero_direction();
         CoupledDirection { inlets_k: d.inlets_k, log_htc: d.log_conductances,
-            nodal_load_w: vec![0.0; self.solid.primal().temperature.len()] }
+            nodal_load_w: vec![0.0; self.solid.temperature().len()] }
     }
 
     /// Correctly sized zero solid/air objective.
     #[must_use]
     pub fn zero_objective(&self) -> CoupledObjective {
-        CoupledObjective { nodal_temperatures: vec![0.0; self.solid.primal().temperature.len()],
+        CoupledObjective { nodal_temperatures: vec![0.0; self.solid.temperature().len()],
             wall_temperatures: vec![0.0; self.solid.ports().len()], solid_heat_rates: vec![0.0; self.solid.ports().len()],
             air: self.air.zero_objective() }
     }
