@@ -7,10 +7,13 @@
 //!
 //! Both paths share exact P1 capacity, steady assembly, contact operators,
 //! boundary integrals and discrete energy accounting. Heat capacity and contact
-//! resistance are temperature independent. No fluid storage or transient adjoint.
+//! resistance are temperature independent. [`StepLinearization`] adds discrete
+//! endpoint/history derivatives; fluid storage is not introduced.
 
 mod nonlinear;
 pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
+mod adjoint;
+pub use adjoint::StepLinearization;
 
 use fs_exec::Cx;
 use fs_solver::{CgState, CsrOp, norm2};
