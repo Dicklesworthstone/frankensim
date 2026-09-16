@@ -7,7 +7,7 @@ cargo test -p fs-cli --bin frankensim network_command::transient::sizing
 ```
 
 The existing steady `fan_speed_design` cannot answer whether a changing workload
-stays below a temperature limit before it cools down. A new **nested**
+stays below a temperature limit before it cools down. A **nested**
 `transient.fan_speed_design` searches against the peak sampled objective over
 the complete transient. Its objective can be a surface mean, surface maximum,
 whole-solid maximum, or selected-node maximum, as in the existing command.
@@ -41,19 +41,19 @@ under adaptive integration. Neither the final field nor a steady-state
 surrogate decides whether a trial passes.
 
 The bracket begins with an evaluated failing lower multiplier and passing upper
-multiplier. Bisection retains the passing trial, returning it only when both
-the multiplier width and passing-side temperature slack meet their tolerances.
-A passing declared minimum returns after one complete evaluation. If neither
-endpoint passes, the result is a missing bracket, not a proof that every
-interior speed fails. The result is not a global minimum-speed certificate.
+multiplier. By default, bisection retains the passing trial, returning it only
+when both the multiplier width and passing-side temperature slack meet their
+tolerances. A passing declared minimum returns after one complete evaluation.
+If neither endpoint passes, the result is a missing bracket, not a proof that
+every interior speed fails. The result is not a global minimum-speed certificate.
 
 The output contains the passing trial's complete transient history and final
 field, including matching final fan flow and coefficients. Its
 `transient_fan_speed_design` object adds the multiplier, actual interval speeds,
 failed lower endpoint, evaluated peak/time history, and work totals across all
 candidates. Only the passing trajectory is retained; other trial histories are
-scalar summaries. Steady adjoints remain disabled, and no fan-speed gradient or
-electrical-energy claim is implied.
+scalar summaries. Steady adjoints remain disabled. Transient peak adjoints are
+separately opt-in as described below; no electrical-energy claim is implied.
 
 `max_evaluations` is a whole-trajectory budget (at most 256). Existing step and
 adaptive-trial limits apply separately to each candidate. The original single
@@ -61,12 +61,41 @@ wall budget covers the entire design search. A numerical/domain/cancellation
 failure aborts instead of being treated as a failing temperature candidate.
 Evaluation exhaustion publishes no partial trajectory and uses exit class 6.
 
+## Optional sampled-peak adjoint guidance
+
+A fixed-grid, fixed-cycle-count design may add an explicit
+`"adjoint":{"qoi":"sampled-peak","max_checkpoint_bytes":1048576}` beside its
+fan or workload design object. Keep `objective.gradient` false. This enables
+candidate-specific discrete trajectory adjoints and guarded Newton proposals,
+with bisection fallback. It does not change either acceptance tolerance, allow
+predicted feasibility, or silently increase the resource budgets.
+
+```bash
+frankensim --json cooling-network examples/cooling-network/size-transient-adjoint-fan.json
+frankensim --json cooling-network examples/cooling-network/size-transient-adjoint-power.json
+```
+
+Every candidate binds its actual schedule to both the forward simulation and
+reverse reconstruction. Repeated warm-up history contributes to the gradient
+and to feasibility. `search_method`, `newton_trials`, and each history row's
+`dpeak_dmultiplier_k` expose the policy and local outer-coordinate slope.
+Without the explicit adjoint policy, bisection remains and no reverse work is
+performed. Guidance is not guaranteed to reduce evaluation count or runtime.
+
+Final-state adjoints, adaptive grids, periodic stopping and hysteretic controller
+adjoints cannot be used for this peak design path. Ordinary derivative-free
+runs retain those existing simulation capabilities. Requested adjoint failures
+abort; an unavailable or unsuitable proposal slope falls back to bisection.
+See [TRANSIENT_ADJOINT.md](TRANSIENT_ADJOINT.md) for candidate-relative versus
+outer-multiplier units, repeated controls, memory accounting and exact replay.
+
 ## Time resolution changes the engineering decision
 
-The sample is a two-material, contact-coupled slab heated locally with 20 W
-for 30 seconds, then cooled for 120 seconds. It uses the existing duct
-correlations and a 1 / 1.5 base fan schedule. Illustrative heat capacities are
-200,000 and 100,000 J/(m3 K); they are declarations, not material-card claims.
+The `size-transient-fan.json` sample is a two-material, contact-coupled slab
+heated locally with 20 W for 30 seconds, then cooled for 120 seconds. It uses
+the existing duct correlations and a 1 / 1.5 base fan schedule. Illustrative
+heat capacities are 200,000 and 100,000 J/(m3 K); they are declarations, not
+material-card claims.
 
 Independent NumPy P1/contact/air calculations give approximately:
 
@@ -118,12 +147,14 @@ scale. Named watts are reprojected through the existing `PowerMap`, not guessed
 from the already summed source. Pressure-driven schedules are supported too.
 
 The search evaluates the requested maximum first. If it passes, it returns
-`maximum-feasible`. Otherwise a passing lower endpoint is required; bisection
+`maximum-feasible`. Otherwise a passing lower endpoint is required. The search
 returns the **passing lower** field and workload, never the failing upper trial.
-Missing brackets and producer failures retain their previous meanings; no global
-monotonicity, throughput model, maximum safe hardware rating or continuum
-compliance certificate is inferred. The same fixed/adaptive sampled-trajectory
-limitations and whole-search wall/evaluation budgets apply.
+Bisection is the default; the explicit sampled-peak adjoint policy can guide
+interior trials under the same acceptance rules. Missing brackets and producer
+failures retain their previous meanings; no global monotonicity, throughput
+model, maximum safe hardware rating or continuum compliance certificate is
+inferred. The same sampled-trajectory limitations and whole-search wall and
+evaluation budgets apply.
 
 `transient_power_design` reports the selected power multiplier, failed upper
 endpoint, actual interval workload maps, peak/time and work totals. The main
