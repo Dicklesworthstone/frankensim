@@ -1,0 +1,26 @@
+{
+  "schema": "frankensim.cooling-network-uq.v1",
+  "seed": "73",
+  "samples": 2048,
+  "wall_seconds": 300,
+  "temperature_limit_k": 303,
+  "correlation": {"kind": "independent"},
+  "parameters": [
+    {
+      "target": {"kind": "air-density"},
+      "distribution": {"kind": "uniform", "lo": 1.15, "hi": 1.25}
+    },
+    {
+      "target": {"kind": "inlet-temperature", "index": 0},
+      "distribution": {"kind": "uniform", "lo": 299, "hi": 301}
+    },
+    {
+      "target": {"kind": "fan-speed-ratio"},
+      "distribution": {"kind": "uniform", "lo": 0.9, "hi": 1.1}
+    },
+    {
+      "target": {"kind": "component-power", "component": "chip"},
+      "distribution": {"kind": "uniform", "lo": 0.8, "hi": 1.2}
+    }
+  ]
+}
