@@ -16,8 +16,8 @@ fs-lbm = { path = "../fs-lbm" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
-fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.1.0" }
-fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "=0.1.0" }
+fsci-special = { path = "../../../frankenscipy/crates/fsci-special", version = "=0.2.0" }
+fsci-runtime = { path = "../../../frankenscipy/crates/fsci-runtime", version = "=0.2.0" }
 
 [lints]
 workspace = true

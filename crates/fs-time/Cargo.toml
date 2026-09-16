@@ -23,7 +23,7 @@ fs-solver = { path = "../fs-solver" }
 fs-alloc = { path = "../fs-alloc" }
 fs-casebook = { path = "../fs-casebook" }
 fs-vvreg = { path = "../fs-vvreg" }
-fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.1.0" }
+fsci-integrate = { path = "../../../frankenscipy/crates/fsci-integrate", version = "=0.2.0" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule (bead bk0o.7, Proposal 4).

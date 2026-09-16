@@ -32,7 +32,7 @@ fs-roofline = { path = "../fs-roofline" }
 fs-substrate = { path = "../fs-substrate" }
 # Constellation reference oracle (test-only): SciPy-compatible complex FFT
 # semantics and backward normalization for the BEDROCK transform battery.
-fsci-fft = { path = "../../../frankenscipy/crates/fsci-fft", version = "=0.1.0" }
+fsci-fft = { path = "../../../frankenscipy/crates/fsci-fft", version = "=0.2.0" }
 
 [lints]
 workspace = true
