@@ -2,13 +2,18 @@
 //! Reuses fs-conduction's checked element assignment and power-preserving P1
 //! source projection. Nodal component footprints are not sharp cellwise sources:
 //! their support extends over incident tetrahedra, including material interfaces.
+//! Constant isotropic, full-tensor, and oriented orthotropic materials share the
+//! same FEM assembly and implicit derivative path; no scalar averaging occurs.
 
+mod constitutive;
+
+use constitutive::Conductivity;
 use fs_conduction::{ComponentPower, ConductivityModel, ElementMaterials, MaterialId,
     MaterialTable, PowerAudit, PowerMap, PowerUncertainty};
 use super::*;
 
 #[derive(Debug)]
-struct MaterialDeclaration { name: String, conductivity: f64, source: String }
+struct MaterialDeclaration { name: String, conductivity: Conductivity, source: String }
 
 #[derive(Debug)]
 pub(super) struct SolidData {
@@ -33,9 +38,9 @@ impl SolidData {
             (None, Some(table), Some(assignment)) => {
                 let mut declarations = BTreeMap::new();
                 for row in array(table, "materials", 4096)? {
-                    object(row, &["name", "conductivity_w_m_k", "source"], "material")?;
+                    object(row, &["name", "conductivity_w_m_k", "conductivity_tensor_w_m_k", "orthotropic", "source"], "material")?;
                     let name = string(get(row, "name")?, "material.name")?;
-                    let conductivity = positive(get(row, "conductivity_w_m_k")?, "material.conductivity_w_m_k")?;
+                    let conductivity = Conductivity::parse(row)?;
                     let source = string(get(row, "source")?, "material.source")?;
                     if declarations.insert(name.clone(), MaterialDeclaration { name, conductivity, source }).is_some() {
                         return Err(bad("duplicate material name"));
@@ -54,14 +59,15 @@ impl SolidData {
                     ids.get(name.as_str()).copied().ok_or_else(|| bad(format!("unknown element material {name}")))
                 }).collect::<Result<Vec<_>>>()?;
                 let entries = data.materials.iter().enumerate().map(|(i, material)| {
-                    Ok((MaterialId(i as u32), ConductivityModel::isotropic_declared(material.conductivity).map_err(producer)?))
+                    Ok((MaterialId(i as u32), material.conductivity.model()?))
                 }).collect::<Result<Vec<_>>>()?;
                 let assigned = ElementMaterials::new(MaterialTable::new(entries).map_err(producer)?, of_element).map_err(producer)?;
                 assigned.validate_for(mesh).map_err(producer)?;
                 data.element_materials = Some(assigned);
-                // This field is ignored by the producer when the assignment is
-                // present; retain a declared model, never an invented material.
-                data.materials[0].conductivity
+                // The fallback slot is ignored whenever element assignment is
+                // present. It is not a homogenized or averaged conductivity;
+                // the actual operator always receives the full tensor model.
+                data.materials[0].conductivity.inactive_scalar()
             }
             _ => return Err(bad("use either conductivity_w_m_k or both materials and element_materials, never a mixture")),
         };
@@ -104,8 +110,8 @@ impl SolidData {
     pub fn render(&self, uniform_k: f64, uniform_source: f64) -> Result<String> {
         let materials = if let Some(assignment) = &self.element_materials {
             let rows = self.materials.iter().map(|m| Ok(format!(
-                "{{\"name\":{},\"conductivity_w_m_k\":{},\"source\":{}}}",
-                quote(&m.name), num(m.conductivity)?, quote(&m.source))))
+                "{{\"name\":{},{},\"source\":{}}}",
+                quote(&m.name), m.conductivity.render_fields()?, quote(&m.source))))
                 .collect::<Result<Vec<_>>>()?.join(",");
             let names = assignment.of_element().iter().map(|id| quote(&self.materials[id.0 as usize].name))
                 .collect::<Vec<_>>().join(",");
