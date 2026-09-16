@@ -2,8 +2,9 @@
 //! Reuses fs-conduction's checked element assignment and power-preserving P1
 //! source projection. Nodal component footprints are not sharp cellwise sources:
 //! their support extends over incident tetrahedra, including material interfaces.
-//! Constant isotropic, full-tensor, and oriented orthotropic materials share the
-//! same FEM assembly and implicit derivative path; no scalar averaging occurs.
+//! Constant isotropic/tensor/orthotropic materials and bounded scalar k(T)
+//! curves share the same FEM and derivative owners. No scalar averaging or
+//! frozen-temperature substitution occurs.
 
 mod constitutive;
 
@@ -38,7 +39,7 @@ impl SolidData {
             (None, Some(table), Some(assignment)) => {
                 let mut declarations = BTreeMap::new();
                 for row in array(table, "materials", 4096)? {
-                    object(row, &["name", "conductivity_w_m_k", "conductivity_tensor_w_m_k", "orthotropic", "source"], "material")?;
+                    object(row, &["name", "conductivity_w_m_k", "conductivity_tensor_w_m_k", "orthotropic", "conductivity_curve", "source"], "material")?;
                     let name = string(get(row, "name")?, "material.name")?;
                     let conductivity = Conductivity::parse(row)?;
                     let source = string(get(row, "source")?, "material.source")?;
@@ -66,7 +67,7 @@ impl SolidData {
                 data.element_materials = Some(assigned);
                 // The fallback slot is ignored whenever element assignment is
                 // present. It is not a homogenized or averaged conductivity;
-                // the actual operator always receives the full tensor model.
+                // the actual operator always receives the full material law.
                 data.materials[0].conductivity.inactive_scalar()
             }
             _ => return Err(bad("use either conductivity_w_m_k or both materials and element_materials, never a mixture")),
