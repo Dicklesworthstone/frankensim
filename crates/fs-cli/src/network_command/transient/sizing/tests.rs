@@ -6,7 +6,7 @@ fn config()->Config {
     Config {control:Control::FanSpeed,minimum:0.5,maximum:1.3,multiplier_tolerance:1e-4,temperature_tolerance_k:1e-5,max_evaluations:64}
 }
 fn numerical(peak:f64)->Trajectory {
-    Trajectory {output:"{\"final_temperature_k\":300}\n".into(),peak_k:peak,peak_time_s:30.0,solid_solves:7,steps:3}
+    Trajectory {output:"{\"final_temperature_k\":300}\n".into(),peak_k:peak,peak_time_s:30.0,solid_solves:7,steps:3,design_gradient:None}
 }
 fn doc(r:&Request)->J {J::parse(&execute(r,&CancelGate::new_clock_free()).unwrap()).unwrap()}
 fn values(doc:&J)->Vec<f64> {

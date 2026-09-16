@@ -1,7 +1,9 @@
 //! Size cooling or workload power against a complete transient, not steady state.
-//! Only actually evaluated sampled peaks decide feasibility. Adaptive samples
-//! may differ between candidates; neither local estimates nor a tight parameter
-//! bracket certify a continuous-time peak or global optimality.
+//! Only actually evaluated sampled peaks decide feasibility. An explicitly
+//! requested sampled-peak adjoint may suggest safeguarded Newton candidates;
+//! missing/unusable slopes fall back to bisection, never predicted feasibility.
+//! Adaptive samples may differ between derivative-free candidates; neither
+//! local estimates nor a tight bracket certify continuous peaks or optimality.
 
 use super::*;
 
@@ -51,10 +53,15 @@ impl Config {
         Ok(result)
     }
 
-    /// Validate the entire schedule's endpoint speeds before running any trial.
-    /// A valid speed domain does not waive flow/correlation admission at runtime.
+    /// Validate the complete schedule before running any candidate. A final
+    /// gradient cannot stand in for a peak derivative; adaptive/controller
+    /// decisions and variable periodic horizons are not differentiated.
     pub(super) fn validate(&self, schedule: &Schedule, fan: Option<&fan_drive::FanDrive>) -> Result<()> {
-        if schedule.adjoint.is_some() { return Err(bad("transient adjoints cannot be nested inside sizing")); }
+        if let Some(adjoint) = schedule.adjoint {
+            adjoint.validate_design()?;
+            if schedule.adaptive.is_some() { return Err(bad("adjoint sizing requires fixed timesteps")); }
+            if let Some(repeat) = schedule.repeat { repeat.validate_adjoint()?; }
+        }
         if schedule.limit.is_none() { return Err(bad("transient sizing requires transient.temperature_limit_k")); }
         if self.control == Control::WorkloadPower {
             for interval in &schedule.intervals { scaled_workload(&interval.workload,self.maximum)?; }
@@ -78,6 +85,7 @@ struct Trial {
     peak_time_s: f64,
     steps: usize,
     solid_solves: usize,
+    derivative_k: Option<f64>,
 }
 
 struct Selected {
@@ -86,6 +94,12 @@ struct Selected {
     failed: Option<Trial>,
     width: f64,
     history: Vec<Trial>,
+    newton_trials: usize,
+}
+
+fn derivative(trajectory: &Trajectory, multiplier: f64, power: bool) -> Result<Option<f64>> {
+    trajectory.design_gradient.map(|gradient|
+        gradient.derivative(trajectory.peak_k, multiplier, power)).transpose().map(Option::flatten)
 }
 
 fn evaluate(cx: &Cx<'_>, config: &Config, multiplier: f64, history: &mut Vec<Trial>,
@@ -99,8 +113,9 @@ fn evaluate(cx: &Cx<'_>, config: &Config, multiplier: f64, history: &mut Vec<Tri
     if !evaluated.peak_k.is_finite() || !evaluated.peak_time_s.is_finite() {
         return Err(producer("nonfinite transient design objective"));
     }
+    let derivative_k = derivative(&evaluated, multiplier, config.control == Control::WorkloadPower)?;
     history.push(Trial {multiplier,peak_k:evaluated.peak_k,peak_time_s:evaluated.peak_time_s,
-        steps:evaluated.steps,solid_solves:evaluated.solid_solves});
+        steps:evaluated.steps,solid_solves:evaluated.solid_solves,derivative_k});
     poll(cx)?;
     Ok(evaluated)
 }
@@ -111,12 +126,13 @@ fn search(cx: &Cx<'_>, config: &Config, limit: f64,
     mut run: impl FnMut(f64) -> Result<Trajectory>) -> Result<Selected>
 {
     let mut history = Vec::new();
+    let mut newton_trials = 0;
     let power = config.control == Control::WorkloadPower;
     let preferred = if power {config.maximum}else{config.minimum};
     let fallback = if power {config.minimum}else{config.maximum};
     let first = evaluate(cx,config,preferred,&mut history,&mut run)?;
     if first.peak_k <= limit {
-        return Ok(Selected {passing:first,multiplier:preferred,failed:None,width:0.0,history});
+        return Ok(Selected {passing:first,multiplier:preferred,failed:None,width:0.0,history,newton_trials});
     }
     let mut failed = history[0];
     drop(first);
@@ -132,14 +148,26 @@ fn search(cx: &Cx<'_>, config: &Config, limit: f64,
         let width = finite(chosen-failed.multiplier)?.abs();
         let slack = finite(limit-passing.peak_k)?;
         if width <= config.multiplier_tolerance && slack <= config.temperature_tolerance_k {
-            return Ok(Selected {passing,multiplier:chosen,failed:Some(failed),width,history});
+            return Ok(Selected {passing,multiplier:chosen,failed:Some(failed),width,history,newton_trials});
         }
-        let candidate = 0.5*failed.multiplier + 0.5*chosen;
-        if !(candidate > chosen.min(failed.multiplier) && candidate < chosen.max(failed.multiplier)) {
+        let low = chosen.min(failed.multiplier);
+        let high = chosen.max(failed.multiplier);
+        let mut endpoints = [
+            (failed.multiplier, failed.peak_k, failed.derivative_k),
+            (chosen, passing.peak_k, derivative(&passing, chosen, power)?),
+        ];
+        if (endpoints[1].1-limit).abs() < (endpoints[0].1-limit).abs() { endpoints.swap(0,1); }
+        let proposal = endpoints.into_iter().find_map(|(at, temperature, slope)|
+            design_sensitivity::newton_proposal(low,high,at,temperature,slope,limit,power));
+        let candidate = proposal.unwrap_or(0.5*failed.multiplier + 0.5*chosen);
+        if !(candidate > low && candidate < high) {
             return Err(Failure {code:if power {"cooling-network-transient-power-resolution"}else{"cooling-network-transient-fan-resolution"},
                 message:"no representable multiplier can meet both design tolerances".into()});
         }
+        // Errors from the forward model OR a requested adjoint propagate.
+        // A bad producer is never classified as an infeasible design point.
         let evaluated = evaluate(cx,config,candidate,&mut history,&mut run)?;
+        if proposal.is_some() { newton_trials += 1; }
         if evaluated.peak_k <= limit { chosen=candidate; passing=evaluated; }
         else { failed=*history.last().ok_or_else(||bad("missing transient design trial"))?; }
     }
@@ -151,10 +179,23 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, schedule: &Schedule, config:
     let limit = schedule.limit.ok_or_else(||bad("missing transient design temperature limit"))?;
     let power = config.control == Control::WorkloadPower;
     let selected = search(cx,config,limit,|multiplier| {
-        if power {
+        let evaluated = if power {
             let scaled = power_schedule(cx,schedule,multiplier)?;
-            simulate(request,cx,&scaled,1.0)
-        } else { simulate(request,cx,schedule,multiplier) }
+            simulate(request,cx,&scaled,1.0)?
+        } else if schedule.adjoint.is_some() {
+            // Bind BOTH traversals to the actual candidate speeds. Passing an
+            // outer factor only to the forward solver would reconstruct base
+            // speed endpoints and give the wrong trajectory derivative.
+            let scaled = speed_schedule(cx,schedule,multiplier)?;
+            simulate(request,cx,&scaled,1.0)?
+        } else {
+            // Preserve existing adaptive/thermostat and derivative-free paths.
+            simulate(request,cx,schedule,multiplier)?
+        };
+        if schedule.adjoint.is_some() && evaluated.design_gradient.is_none() {
+            return Err(producer("requested sampled-peak design adjoint is missing"));
+        }
+        Ok(evaluated)
     })?;
     let multiplier_key = if power {"power_multiplier"}else{"speed_multiplier"};
     let failed = selected.failed.map(|trial|render_trial(&trial,multiplier_key)).transpose()?.unwrap_or_else(||"null".into());
@@ -181,14 +222,15 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, schedule: &Schedule, config:
     let status=if selected.failed.is_some(){"target-bracketed"}
         else if power {"maximum-feasible"}else{"minimum-feasible"};
     let scope=if power {
-        "passing evaluated sampled workload at fixed fan schedule; every source in every interval is multiplied, with fixed footprints and durations; repeated-cycle warm-up peaks remain part of feasibility; no continuous-time compliance, globally maximal workload, electrical-power or transient-adjoint claim"
+        "passing evaluated sampled workload at fixed fan schedule; every source in every interval is multiplied, with fixed footprints and durations; repeated-cycle warm-up peaks remain part of feasibility; requested sampled-peak adjoints guide trials, never feasibility; no continuous-time compliance, globally maximal workload or electrical-power claim"
     } else {
-        "passing evaluated sampled trajectory; each candidate restarts the same initial field and rescales the whole base fan schedule; repeated cycles carry heat and all their samples enter feasibility; no continuous-time compliance, global minimum-speed, electrical-power or fan-speed-adjoint claim"
+        "passing evaluated sampled trajectory; each candidate restarts the same initial field and rescales the whole base fan schedule; repeated cycles carry heat and all their samples enter feasibility; requested sampled-peak adjoints guide trials, never feasibility; no continuous-time compliance, global minimum-speed or electrical-power claim"
     };
+    let method=if schedule.adjoint.is_some(){"safeguarded-adjoint-newton-bisection"}else{"bisection"};
     let prefix=selected.passing.output.strip_suffix("}\n").ok_or_else(||bad("internal trajectory framing"))?;
-    let output=format!("{prefix},\"{name}\":{{\"selected_{multiplier_key}\":{},\"status\":{},\"temperature_limit_k\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"{failed_key}\":{},\"multiplier_bracket_width\":{},\"evaluations\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"schedule\":[{}],\"history\":[{}],\"scope\":{},\"time_comparison\":\"adaptive samples may differ between candidates; local estimates and parameter brackets are not trajectory error bounds\"}}}}\n",
+    let output=format!("{prefix},\"{name}\":{{\"selected_{multiplier_key}\":{},\"status\":{},\"temperature_limit_k\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"{failed_key}\":{},\"multiplier_bracket_width\":{},\"evaluations\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"search_method\":{},\"newton_trials\":{},\"schedule\":[{}],\"history\":[{}],\"scope\":{},\"time_comparison\":\"adaptive samples may differ between derivative-free candidates; local estimates and parameter brackets are not trajectory error bounds; adjoints require fixed timesteps and cycle counts\"}}}}\n",
         num(selected.multiplier)?,quote(status),num(limit)?,num(selected.passing.peak_k)?,num(selected.passing.peak_time_s)?,
-        failed,num(selected.width)?,selected.history.len(),total_steps,total_solves,applied,trials,quote(scope));
+        failed,num(selected.width)?,selected.history.len(),total_steps,total_solves,quote(method),selected.newton_trials,applied,trials,quote(scope));
     poll(cx)?;
     Ok(output)
 }
@@ -216,9 +258,23 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
         fan_speed_design:None,power_design:None,repeat:schedule.repeat})
 }
 
+/// An immutable candidate schedule gives forward and reverse the SAME fan
+/// controls. Clear search directives only; preserve every physical and solver
+/// policy. Each candidate starts at the original field, including repetitions.
+fn speed_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<Schedule> {
+    if !(multiplier.is_finite() && multiplier > 0.0) { return Err(bad("positive fan multiplier required")); }
+    let mut candidate = power_schedule(cx,schedule,1.0)?;
+    for interval in &mut candidate.intervals {
+        poll(cx)?;
+        let base=interval.speed.ok_or_else(||bad("fan sizing requires every interval's speed"))?;
+        interval.speed=Some(finite(base*multiplier)?);
+    }
+    Ok(candidate)
+}
+
 fn render_trial(trial: &Trial, multiplier_key: &str) -> Result<String> {
-    Ok(format!("{{\"{multiplier_key}\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"accepted_steps\":{},\"solid_solves\":{}}}",
-        num(trial.multiplier)?,num(trial.peak_k)?,num(trial.peak_time_s)?,trial.steps,trial.solid_solves))
+    Ok(format!("{{\"{multiplier_key}\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"accepted_steps\":{},\"solid_solves\":{},\"dpeak_dmultiplier_k\":{}}}",
+        num(trial.multiplier)?,num(trial.peak_k)?,num(trial.peak_time_s)?,trial.steps,trial.solid_solves,optional(trial.derivative_k)?))
 }
 
 #[cfg(test)]

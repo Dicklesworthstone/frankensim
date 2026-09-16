@@ -11,6 +11,7 @@ mod sizing;
 mod repeat;
 mod nonlinear;
 mod adjoint;
+mod design_sensitivity;
 use workload::Workload;
 
 use super::*;
@@ -48,8 +49,8 @@ impl Schedule {
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
         if adjoint.is_some() {
-            if ["adaptive","fan_speed_design","power_design"].iter().any(|key| value.get(key).is_some()) {
-                return Err(bad("transient adjoints require fixed timesteps without nested design searches"));
+            if value.get("adaptive").is_some() {
+                return Err(bad("transient adjoints require fixed timesteps"));
             }
             if let Some(repeated) = value.get("repeat") {
                 if repeated.get("cycles").is_none() || repeated.get("until_periodic").is_some()
@@ -213,6 +214,7 @@ struct Trajectory {
     peak_time_s: f64,
     solid_solves: usize,
     steps: usize,
+    design_gradient: Option<design_sensitivity::DesignSensitivity>,
 }
 
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
@@ -387,8 +389,8 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
     }
     let residual=finite(stored-input+exhaust)?;
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
-    let (adjoint,reverse_work)=match tape {
-        Some(tape)=>tape.reverse(request,cx,schedule,&engine)?, None=>("null".into(),0),
+    let (adjoint,reverse_work,design_gradient)=match tape {
+        Some(tape)=>tape.reverse(request,cx,schedule,&engine)?, None=>("null".into(),0,None),
     };
     let total_work=work.checked_add(reverse_work).ok_or_else(||budget("transient total work overflow"))?;
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
@@ -399,7 +401,7 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
         nonlinear_stats.render(schedule.nonlinear)?,adjoint);
     poll(cx)?;
     Ok(Cycle {
-        trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:total_work,steps:completed},
+        trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:total_work,steps:completed,design_gradient},
         final_temperature:old,duration_s:time,input_j:input,stored_j:stored,exhaust_j:exhaust,
         first_violation_s:first_violation,
     })

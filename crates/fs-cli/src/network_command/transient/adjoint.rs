@@ -23,6 +23,13 @@ impl Config {
         Ok(Self { observable, max_checkpoint_bytes: count(get(value,"max_checkpoint_bytes")?,
             "adjoint.max_checkpoint_bytes", 512 * 1024 * 1024)? })
     }
+
+    pub(super) fn validate_design(self) -> Result<()> {
+        if self.observable != Observable::SampledPeak {
+            return Err(bad("transient sizing requires adjoint.qoi=sampled-peak; a final-temperature derivative cannot guide a peak constraint"));
+        }
+        Ok(())
+    }
 }
 
 struct Frame {
@@ -125,7 +132,7 @@ impl Tape {
     }
 
     pub(super) fn reverse(self, request: &Request, cx: &Cx<'_>, schedule: &Schedule,
-        engine: &BackwardEuler<'_>) -> Result<(String, usize)> {
+        engine: &BackwardEuler<'_>) -> Result<(String, usize, Option<design_sensitivity::DesignSensitivity>)> {
         poll(cx)?;
         if self.frames.len() != self.planned { return Err(bad("incomplete trajectory has no adjoint")); }
         let selected = match self.config.observable {
@@ -238,6 +245,11 @@ impl Tape {
         let rows = powers.iter().zip(&fan_speeds).enumerate().map(|(i,(power,speed))| Ok(format!(
             "{{\"interval\":{i},\"dtemperature_dpower_multiplier_k\":{},\"dtemperature_dlog_fan_speed_ratio_k\":{}}}",
             num(*power)?, optional(*speed)?))).collect::<Result<Vec<_>>>()?.join(",");
+        // Carry the exact producer result into sizing before rendering loses
+        // its typed identity. Final-state gradients are never peak gradients.
+        let design_gradient = if self.config.observable == Observable::SampledPeak {
+            Some(design_sensitivity::DesignSensitivity::from_intervals(selected.value, &powers, &fan_speeds)?)
+        } else { None };
         poll(cx)?;
         let report = format!(
             "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries; each interval control changes every occurrence of that base interval, including earlier warm-up cycles; initial controls change only the original initial field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear iteration budgets apply per reverse endpoint under the original wall deadline; checkpoint bytes bound all retained fields/references and frame storage, not total solver workspace; separate from the null steady-gradient fields\"}}",
@@ -247,7 +259,7 @@ impl Tape {
             numbers(&carry)?,num(uniform_initial)?,num(capacity)?,numbers(&inlets)?,rows,
             self.charged_bytes,reconstructed,adjoint_sweeps,num(worst_residual)?,
         );
-        Ok((report, reconstructed))
+        Ok((report, reconstructed, design_gradient))
     }
 }
 

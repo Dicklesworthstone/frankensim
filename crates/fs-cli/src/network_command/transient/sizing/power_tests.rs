@@ -7,7 +7,7 @@ fn config()->Config {
         temperature_tolerance_k:1e-5,max_evaluations:64}
 }
 fn numerical(peak:f64)->Trajectory {
-    Trajectory {output:"{}\n".into(),peak_k:peak,peak_time_s:30.0,solid_solves:1,steps:1}
+    Trajectory {output:"{}\n".into(),peak_k:peak,peak_time_s:30.0,solid_solves:1,steps:1,design_gradient:None}
 }
 
 #[test]

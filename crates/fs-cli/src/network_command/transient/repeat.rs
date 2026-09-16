@@ -138,6 +138,13 @@ impl Config {
         }
         Ok(config)
     }
+
+    pub(super) fn validate_adjoint(self) -> Result<()> {
+        if self.periodic.is_some() || self.controller.is_some() {
+            return Err(bad("repeated adjoints require fixed cycles without periodic stopping or a controller"));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
@@ -257,12 +264,12 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
             // Every forward cycle and the cumulative energy gate have passed.
             // Reverse reconstructs endpoints but never advances physical history.
             let forward_work = work;
-            let (adjoint,reverse_work) = match tape.take() {
+            let (adjoint,reverse_work,design_gradient) = match tape.take() {
                 Some(tape) => {
                     let engine = BackwardEuler::per_element(cx,&request.mesh,&schedule.capacities).map_err(producer)?;
                     tape.reverse(request,cx,schedule,&engine)?
                 }
-                None => ("null".into(),0),
+                None => ("null".into(),0,None),
             };
             work = work.checked_add(reverse_work).ok_or_else(||budget("repeated adjoint work count overflow"))?;
             let prefix = cycle.trajectory.output.strip_suffix("}\n").ok_or_else(||bad("internal cycle result framing"))?;
@@ -270,7 +277,7 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
                 quote(status),periodic,fan_controller,cycle_index+1,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,forward_work,num(peak)?,num(peak_time)?,
                 optional(schedule.limit)?,optional(first_violation)?,num(input)?,num(stored)?,num(exhaust)?,num(energy_residual)?,summaries.join(","),adjoint);
             poll(cx)?;
-            return Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps});
+            return Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps,design_gradient});
         }
         field = cycle.final_temperature;
         elapsed = end;
