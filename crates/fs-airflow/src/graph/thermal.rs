@@ -10,6 +10,11 @@
 //! reuses those checks without rerunning the solid. In particular a high-power
 //! branch cannot dilute a smaller branch's balance threshold. This composes
 //! the existing nominal model; it does not certify uncertainty or passivity.
+//!
+//! [`solve_conjugate_branches_iqn`] additionally learns a bounded inverse
+//! interface Jacobian across ALL branches. This captures their coupling through
+//! the solid without reducing opposing residuals to one scalar or treating
+//! branch acceleration as independent. It does not change the physical model.
 
 pub mod transport;
 pub mod coupled_transport;
@@ -17,12 +22,13 @@ pub mod coupled_transport;
 use std::collections::BTreeSet;
 
 use fs_couple::AitkenRelaxation;
+use fs_couple::iqn_ils::{IqnIls, IqnIlsError};
 use fs_exec::Cx;
 
 use crate::AirflowError;
 use crate::conjugate::{
-    AirPath, ConjugateConfig, ConjugateIteration, ConjugateSolution, Relaxation,
-    SolidRegionState, solve_conjugate_from,
+    AirPath, ConjugateConfig, ConjugateIteration, ConjugateSolution, IqnIlsConfig,
+    Relaxation, SolidRegionState, solve_conjugate_from, solve_conjugate_iqn_from,
 };
 
 /// A common-solid fixed point, retaining each branch's independent air state.
@@ -80,6 +86,67 @@ pub fn solve_conjugate_branches_from<F>(
     paths: &[AirPath],
     config: &ConjugateConfig,
     initial_references_k: &[f64],
+    solid: F,
+) -> Result<ConjugateBranchesSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_branches_driver(cx, paths, config, initial_references_k, None, solid)
+}
+
+/// Solve a common-solid exchange using one vector IQN-ILS history across all
+/// branch interfaces. Startup and rank-zero steps retain the configured
+/// per-branch relaxation; independent watt gates remain mandatory.
+///
+/// # Errors
+/// The refusals of [`solve_conjugate_branches`], plus invalid acceleration
+/// policy or non-finite secant/factorization/update arithmetic.
+pub fn solve_conjugate_branches_iqn<F>(
+    cx: &Cx<'_>,
+    paths: &[AirPath],
+    config: &ConjugateConfig,
+    acceleration_config: IqnIlsConfig,
+    solid: F,
+) -> Result<ConjugateBranchesSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    let initial: Vec<f64> = paths
+        .iter()
+        .flat_map(|path| vec![path.inlet_temperature_k(); path.segments().len()])
+        .collect();
+    solve_conjugate_branches_iqn_from(cx, paths, config, &initial, acceleration_config, solid)
+}
+
+/// Warm-start global IQN-ILS from a complete branch-major reference vector.
+/// The secant and Aitken histories start empty; this is not a bitwise replay
+/// of an interrupted accelerated exchange.
+///
+/// # Errors
+/// The refusals of [`solve_conjugate_branches_iqn`], including a malformed
+/// initial reference vector before the solid callback can run.
+pub fn solve_conjugate_branches_iqn_from<F>(
+    cx: &Cx<'_>,
+    paths: &[AirPath],
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+    acceleration_config: IqnIlsConfig,
+    solid: F,
+) -> Result<ConjugateBranchesSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_branches_driver(
+        cx, paths, config, initial_references_k, Some(acceleration_config), solid,
+    )
+}
+
+fn solve_branches_driver<F>(
+    cx: &Cx<'_>,
+    paths: &[AirPath],
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+    acceleration_config: Option<IqnIlsConfig>,
     mut solid: F,
 ) -> Result<ConjugateBranchesSolution, AirflowError>
 where
@@ -87,13 +154,22 @@ where
 {
     let offsets = admit(paths, config, initial_references_k)?;
     if paths.len() == 1 {
-        let solution = solve_conjugate_from(cx, &paths[0], config, initial_references_k, solid)?;
+        let solution = match acceleration_config {
+            Some(iqn) => solve_conjugate_iqn_from(
+                cx, &paths[0], config, initial_references_k, iqn, solid,
+            )?,
+            None => solve_conjugate_from(cx, &paths[0], config, initial_references_k, solid)?,
+        };
         return Ok(ConjugateBranchesSolution {
             reference_temperatures_k: solution.reference_temperatures_k.clone(),
             iterations: solution.iterations,
             branches: vec![solution],
         });
     }
+    let mut acceleration = acceleration_config
+        .map(|iqn| IqnIls::new(initial_references_k.len(), iqn))
+        .transpose()
+        .map_err(iqn_error)?;
     let probe_config = ConjugateConfig {
         max_iterations: 1,
         relaxation: Relaxation::Fixed { omega: 1.0 },
@@ -201,6 +277,22 @@ where
                 iterations: iteration + 1,
             });
         }
+        if let Some(accelerator) = acceleration.as_mut() {
+            // A zero fallback keeps this proposal a no-op when rank is zero.
+            // The configured, potentially DIFFERENT branch omegas below then
+            // supply startup relaxation. Secants store the actual map samples,
+            // not the fallback proposal, so both cases share the same history.
+            let step = accelerator.step(&reference, &updated, 0.0).map_err(iqn_error)?;
+            if step.used_columns > 0 {
+                reference = step.values;
+                for history in &mut histories {
+                    if let Some(record) = history.last_mut() {
+                        record.relaxation_omega = 1.0;
+                    }
+                }
+                continue;
+            }
+        }
         // Even an individually converged branch moves again: another branch
         // can change its wall temperature through the shared solid next time.
         for (index, &omega) in omegas.iter().enumerate() {
@@ -215,6 +307,22 @@ where
         max_change_bits: last_change.to_bits(),
         tolerance_bits: config.temperature_tolerance_k.to_bits(),
     })
+}
+
+fn iqn_error(error: IqnIlsError) -> AirflowError {
+    let (field, value_bits) = match error {
+        IqnIlsError::NonFinite { stage, value_bits } => {
+            return AirflowError::NonFiniteCoupling { stage, value_bits };
+        }
+        IqnIlsError::DimensionMismatch { expected, found } => {
+            return AirflowError::SolidResponseArity { expected, found };
+        }
+        IqnIlsError::EmptyInterface => ("IQN interface dimension", 0),
+        IqnIlsError::InvalidHistoryLimit(limit) => ("IQN history limit", (limit as f64).to_bits()),
+        IqnIlsError::InvalidRankTolerance(bits) => ("IQN rank tolerance", bits),
+        IqnIlsError::InvalidRelaxation(bits) => ("IQN fallback relaxation", bits),
+    };
+    AirflowError::InvalidConjugateInput { field, value_bits }
 }
 
 fn admit(paths: &[AirPath], config: &ConjugateConfig, initial: &[f64]) -> Result<Vec<usize>, AirflowError> {
