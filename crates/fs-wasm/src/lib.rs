@@ -69,6 +69,10 @@ pub use dynamics::{ga_motor_orbit, lorenz_points, symplectic_vs_euler};
 pub use flagships::{run_frame, run_ornithoid, run_vessel};
 pub use geom::{marching_cubes, sdf_volume};
 pub use pde::{fluid_frames, gray_scott_frames, topopt_frames, wave2d_frames};
+pub use philox_normals::{
+    admit_philox_normals, philox_normals, philox_normals_admitted, philox_normals_envelope_json,
+    PHILOX_NORMALS_MAX_COUNT,
+};
 
 /// One admitted audio-rate callback block. The renderer keeps its state in the
 /// calling browser/Apple thread and accepts one control-rate gesture between
@@ -1274,6 +1278,82 @@ mod wasm {
             }
             Err(r) => BrownianJs {
                 envelope: r.to_json(),
+                values: Vec::new(),
+            },
+        }
+    }
+
+    /// JS result of `philox_normals`. Empty `values` only when `envelope` names
+    /// a refusal or budget miss; the empty buffer is not itself the refusal.
+    #[wasm_bindgen]
+    pub struct PhiloxNormalsJs {
+        envelope: String,
+        values: Vec<f64>,
+    }
+
+    #[wasm_bindgen]
+    impl PhiloxNormalsJs {
+        #[wasm_bindgen(getter)]
+        pub fn envelope(&self) -> String {
+            self.envelope.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn values(&self) -> Vec<f64> {
+            self.values.clone()
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn admit_philox_normals(
+        seed: u64,
+        stream_kernel: u32,
+        tile: u32,
+        start_index: u64,
+        count: usize,
+    ) -> String {
+        match super::admit_philox_normals(seed, stream_kernel, tile, start_index, count) {
+            Ok(_) => format!(
+                "{{\"ok\":{{\"kernel\":\"{}\",\"export\":\"philox_normals\"}}}}",
+                fs_rand::philox_normals::KERNEL_VERSION
+            ),
+            Err(_) => super::philox_normals_envelope_json(
+                seed,
+                stream_kernel,
+                tile,
+                start_index,
+                count,
+            ),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn philox_normals(
+        seed: u64,
+        stream_kernel: u32,
+        tile: u32,
+        start_index: u64,
+        count: usize,
+    ) -> PhiloxNormalsJs {
+        match super::philox_normals(seed, stream_kernel, tile, start_index, count) {
+            Ok(values) => PhiloxNormalsJs {
+                envelope: super::philox_normals_envelope_json(
+                    seed,
+                    stream_kernel,
+                    tile,
+                    start_index,
+                    count,
+                ),
+                values,
+            },
+            Err(_) => PhiloxNormalsJs {
+                envelope: super::philox_normals_envelope_json(
+                    seed,
+                    stream_kernel,
+                    tile,
+                    start_index,
+                    count,
+                ),
                 values: Vec::new(),
             },
         }
