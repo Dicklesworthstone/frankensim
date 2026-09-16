@@ -42,6 +42,7 @@ use fs_sparse::{Coo, Csr};
 // the `#[wasm_bindgen]` layer at the bottom of this file.
 // ---------------------------------------------------------------------------
 pub mod brownian;
+pub mod diffusion1d;
 pub mod campaigns;
 pub mod certified;
 pub mod deep;
@@ -55,6 +56,10 @@ pub use brownian::{
     BROWNIAN_MAX_OUTPUT_LEN, BROWNIAN_STREAM_KERNEL_ID, admit_brownian_checkpoint,
     admit_brownian_frames, admit_brownian_frames_window, brownian_frames, brownian_frames_admitted,
     brownian_frames_window,
+};
+pub use diffusion1d::{
+    DIFFUSION1D_MAX_OUTPUT_LEN, DIFFUSION1D_MAX_TOTAL_STEPS, admit_diffusion1d_frames,
+    assemble_zero_flux_laplacian, diffusion1d_frames, diffusion1d_frames_admitted, stability_ratio,
 };
 pub use campaigns::{
     anytimebo, flowcert, fluttercert, grammarforge, metamatcert, neuroshape, proofrobust,
@@ -1354,6 +1359,73 @@ mod wasm {
                     start_index,
                     count,
                 ),
+                values: Vec::new(),
+            },
+        }
+    }
+
+    /// JS result of `diffusion1d_frames`. Empty `values` only when `envelope`
+    /// names a refusal; the empty buffer is not itself the refusal.
+    #[wasm_bindgen]
+    pub struct Diffusion1dJs {
+        envelope: String,
+        values: Vec<f64>,
+    }
+
+    #[wasm_bindgen]
+    impl Diffusion1dJs {
+        #[wasm_bindgen(getter)]
+        pub fn envelope(&self) -> String {
+            self.envelope.clone()
+        }
+
+        #[wasm_bindgen(getter)]
+        pub fn values(&self) -> Vec<f64> {
+            self.values.clone()
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn admit_diffusion1d_frames(
+        n: usize,
+        frames: usize,
+        steps_per_frame: usize,
+        diffusion: f64,
+        dx: f64,
+        dt: f64,
+        profile: u32,
+    ) -> String {
+        match super::admit_diffusion1d_frames(n, frames, steps_per_frame, diffusion, dx, dt, profile)
+        {
+            Ok(spec) => super::diffusion1d::ok_envelope_json(&spec, spec.frames() * spec.n()),
+            Err(r) => r.to_json(),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn diffusion1d_frames(
+        n: usize,
+        frames: usize,
+        steps_per_frame: usize,
+        diffusion: f64,
+        dx: f64,
+        dt: f64,
+        profile: u32,
+    ) -> Diffusion1dJs {
+        match super::admit_diffusion1d_frames(n, frames, steps_per_frame, diffusion, dx, dt, profile)
+        {
+            Ok(spec) => match super::diffusion1d_frames_admitted(&spec) {
+                Ok(values) => Diffusion1dJs {
+                    envelope: super::diffusion1d::ok_envelope_json(&spec, values.len()),
+                    values,
+                },
+                Err(r) => Diffusion1dJs {
+                    envelope: r.to_json(),
+                    values: Vec::new(),
+                },
+            },
+            Err(r) => Diffusion1dJs {
+                envelope: r.to_json(),
                 values: Vec::new(),
             },
         }

@@ -31,6 +31,22 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
   with exact D). Fallible entry points return a typed `Refusal`; they do
   not clamp, do not return `NaN`, and do not treat an empty buffer as a
   refusal. Streams use `StreamKey.kernel = 0x19050001` and `tile = particle`.
+- `diffusion1d` (`src/diffusion1d.rs`) is the BM-06 explicit FTCS 1-D
+  diffusion export. Operator `L` is the mirrored-ghost zero-flux
+  discretisation of `+Δ` without `1/dx²` (entries `-1,+1` on the first
+  row; `+1,-2,+1` interior; `+1,-1` on the last row), assembled with
+  `fs_sparse::Coo` in ascending column order. This is the opposite sign
+  of `laplacian_5pt` (`-Δ`). Each step is `y = L u` via `Csr::spmv`, then
+  `u_i <- u_i + r * y_i` with unfused multiply and add. The ratio is
+  `r = (diffusion * dt) / (dx * dx)` in that order; `r = 0.5` is
+  admissible and `r > 0.5` refuses as `ftcs-unstable` (never a blown-up
+  field, never an empty buffer as the refusal). Profiles: 0 spike (unit
+  mass at `floor(n/2)`), 1 unnormalised step, 2 two unit-mass-together
+  spikes. `diffusion = 0` returns constant frames. No variable
+  coefficients, no drift, no implicit schemes, no accuracy claim beyond
+  the scheme's order. Determinism class: addition, subtraction,
+  multiplication by exact stencil coefficients, one multiply by `r`, and
+  one division — plausible `Deterministic` pending FrankenSim G5 evidence.
 
 ## Invariants
 
