@@ -27,7 +27,13 @@ fn run(text: &str) -> J {
 }
 fn base(repeated: bool) -> String {
     assert!(FIXTURE.contains(ADJOINT) && FIXTURE.contains(REPEAT));
-    if repeated { FIXTURE.to_owned() } else { FIXTURE.replace(REPEAT, "") }
+    let source = if repeated { FIXTURE.to_owned() } else { FIXTURE.replace(REPEAT, "") };
+    // A longer pulse makes the fan response measurable instead of testing a
+    // nearly flow-independent initial heating transient. Twelve steps/cycle.
+    source.replace("\"duration_s\":6,", "\"duration_s\":120,")
+        .replace("\"duration_s\":8,", "\"duration_s\":120,")
+        .replace("\"max_step_s\":2,", "\"max_step_s\":20,")
+        .replace("\"max_total_steps\":21", "\"max_total_steps\":36")
 }
 fn at<'a>(value: &'a J, path: &[&str]) -> &'a J { value.path(path).unwrap() }
 fn n(value: &J, name: &str) -> f64 { value.f64_field(name).unwrap() }
