@@ -11,6 +11,9 @@ use fs_matdb::{ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialState
     PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
     SurfaceSpec, SystemContext, UncertaintyModel};
 
+mod sensitivity;
+use sensitivity::Trace;
+
 #[derive(Debug)]
 struct Declaration {
     name: String,
@@ -19,12 +22,14 @@ struct Declaration {
     side_b_material: String,
     resistance: f64,
     pair_count: usize,
+    traces: Vec<Trace>,
 }
 
 #[derive(Debug)]
 pub(super) struct Contacts {
     pub interfaces: ThermalInterfaces,
     declarations: Vec<Declaration>,
+    vertex_count: usize,
 }
 
 impl Contacts {
@@ -48,6 +53,7 @@ impl Contacts {
         let mut names: BTreeSet<_> = surfaces.iter().map(|s| s.name.clone()).collect();
         let mut declarations = Vec::new();
         let mut bound = Vec::new();
+        let mut pending_traces = Vec::new();
         for entry in entries {
             object(entry, &["name", "source", "side_a_material", "side_b_material",
                 "resistance_m2_k_w", "face_pairs"], "contact")?;
@@ -58,6 +64,7 @@ impl Contacts {
                 side_b_material: string(get(entry, "side_b_material")?, "contact.side_b_material")?,
                 resistance: positive(get(entry, "resistance_m2_k_w")?, "contact.resistance_m2_k_w")?,
                 pair_count: 0,
+                traces: Vec::new(),
             };
             if !names.insert(row.name.clone()) { return Err(bad("contact and cooling surface names must be distinct")); }
             if !(1.0 / row.resistance).is_finite() { return Err(bad("contact conductance density is not representable")); }
@@ -76,6 +83,7 @@ impl Contacts {
             }
             if pairs.is_empty() { return Err(bad("a contact requires at least one face pair")); }
             row.pair_count = pairs.len();
+            pending_traces.push(pairs.clone());
             bound.push(InterfaceSurface::new(row.name.clone(), pairs, resistance(&row)?).map_err(producer)?);
             declarations.push(row);
         }
@@ -91,8 +99,13 @@ impl Contacts {
         }
         let boundary = boundary.adiabatic_remainder().finish().map_err(producer)?;
         let interfaces = ThermalInterfaces::new(mesh, &boundary, bound).map_err(producer)?;
+        // Preserve the complete admitted pairing; do not infer an effective
+        // scalar surface from aggregate heat or a representative jump.
+        for (row, pairs) in declarations.iter_mut().zip(pending_traces) {
+            row.traces = Trace::bind(mesh, &pairs)?;
+        }
         declarations.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(Some(Self { interfaces, declarations }))
+        Ok(Some(Self { interfaces, declarations, vertex_count: mesh.vertex_count() }))
     }
 
     pub fn render(&self, fluxes: &[InterfaceFlux]) -> Result<String> {
