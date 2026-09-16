@@ -1,6 +1,7 @@
 //! Fixed-grid discrete trajectory adjoint. Only accepted fields/references
 //! are retained; matrices and coupled adjoints are reconstructed one endpoint
-//! at a time. No primal iteration or discarded adaptive trial is differentiated.
+//! at a time. Repeated schedules share ONE chronological history: equal
+//! interval labels in different cycles must never reorder the reverse sweep.
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,51 +35,90 @@ struct Frame {
     vertex: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct Selection {
+    state: usize,
+    time: f64,
+    value: f64,
+    vertex: Option<usize>,
+    // Cycle starts reuse the prior accepted field but evaluate their spatial
+    // objective directly. Preserve that rounding/selection path at a boundary.
+    boundary: bool,
+}
+
 pub(super) struct Tape {
     config: Config,
     frames: Vec<Frame>,
     planned: usize,
+    cycles: usize,
     vertices: usize,
     regions: usize,
     charged_bytes: usize,
-    peak: f64,
-    selected_peak: usize,
-    initial_vertex: Option<usize>,
+    peak: Selection,
 }
 
 impl Tape {
     pub(super) fn new(request: &Request, schedule: &Schedule, initial: f64,
         initial_vertex: Option<usize>) -> Result<Option<Self>> {
-        let Some(config) = schedule.adjoint else { return Ok(None); };
-        if schedule.adaptive.is_some() || schedule.repeat.is_some()
-            || schedule.power_design.is_some() || schedule.fan_speed_design.is_some() {
-            return Err(bad("transient adjoints require a fixed, nonrepeated schedule without nested design searches"));
+        if schedule.adjoint.is_some() && schedule.repeat.is_some() {
+            return Err(bad("repeated adjoints require the complete duty-cycle tape"));
         }
+        Self::for_cycles(request, schedule, initial, initial_vertex, 1)
+    }
+
+    /// The repeated driver admits a fixed count and rejects controllers or
+    /// periodic stopping before calling. Charge ALL cycles before a PDE solve.
+    pub(super) fn for_cycles(request: &Request, schedule: &Schedule, initial: f64,
+        initial_vertex: Option<usize>, cycles: usize) -> Result<Option<Self>> {
+        let Some(config) = schedule.adjoint else { return Ok(None); };
+        if schedule.adaptive.is_some() || schedule.power_design.is_some()
+            || schedule.fan_speed_design.is_some() || cycles == 0 {
+            return Err(bad("transient adjoints require fixed timesteps and an admitted cycle count without nested design searches"));
+        }
+        let planned = schedule.total_steps.checked_mul(cycles)
+            .ok_or_else(|| budget("transient adjoint endpoint count overflow"))?;
         let vertices = request.mesh.vertex_count();
         let regions = request.surfaces.len();
         let charged_bytes = vertices.checked_add(regions)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
             .and_then(|n| n.checked_add(std::mem::size_of::<Frame>()))
-            .and_then(|n| n.checked_mul(schedule.total_steps))
+            .and_then(|n| n.checked_mul(planned))
             .ok_or_else(|| budget("transient adjoint checkpoint size overflow"))?;
         if charged_bytes > config.max_checkpoint_bytes {
             return Err(budget("accepted-field adjoint checkpoints exceed max_checkpoint_bytes"));
         }
         let mut frames = Vec::new();
-        frames.try_reserve_exact(schedule.total_steps)
+        frames.try_reserve_exact(planned)
             .map_err(|_| budget("cannot allocate admitted transient adjoint checkpoints"))?;
-        Ok(Some(Self { config, frames, planned: schedule.total_steps, vertices, regions,
-            charged_bytes, peak: initial, selected_peak: 0, initial_vertex }))
+        Ok(Some(Self { config, frames, planned, cycles, vertices, regions, charged_bytes,
+            peak: Selection { state: 0, time: 0.0, value: finite(initial)?,
+                vertex: initial_vertex, boundary: true } }))
+    }
+
+    /// Do not discard cycle-start samples used by the existing forward peak
+    /// calculation. They have no new physical step and need no copied field.
+    pub(super) fn begin_cycle(&mut self, initial: f64, vertex: Option<usize>, time: f64) -> Result<()> {
+        finite(initial)?;
+        finite(time)?;
+        if initial > self.peak.value {
+            self.peak = Selection { state: self.frames.len(), time, value: initial, vertex, boundary: true };
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record(&mut self, temperature: &[f64], references: &[f64], time: f64,
         dt: f64, interval: usize, objective: f64, vertex: Option<usize>) -> Result<()> {
         if self.frames.len() == self.planned || temperature.len() != self.vertices
-            || references.len() != self.regions {
+            || references.len() != self.regions || !dt.is_finite() || dt <= 0.0 {
             return Err(bad("accepted endpoint does not match the admitted adjoint tape"));
         }
-        if objective > self.peak { self.peak = objective; self.selected_peak = self.frames.len() + 1; }
+        finite(time)?;
+        finite(objective)?;
+        if objective > self.peak.value {
+            self.peak = Selection { state: self.frames.len() + 1, time,
+                value: objective, vertex, boundary: false };
+        }
         self.frames.push(Frame { temperature: temperature.to_vec(), references: references.to_vec(),
             time, dt, interval, objective, vertex });
         Ok(())
@@ -89,7 +129,12 @@ impl Tape {
         poll(cx)?;
         if self.frames.len() != self.planned { return Err(bad("incomplete trajectory has no adjoint")); }
         let selected = match self.config.observable {
-            Observable::Final => self.frames.len(), Observable::SampledPeak => self.selected_peak,
+            Observable::SampledPeak => self.peak,
+            Observable::Final => {
+                let frame = self.frames.last().ok_or_else(|| bad("empty trajectory has no final adjoint"))?;
+                Selection { state: self.frames.len(), time: frame.time,
+                    value: frame.objective, vertex: frame.vertex, boundary: false }
+            }
         };
         let mut carry = vec![0.0; self.vertices];
         let mut powers = vec![0.0; schedule.intervals.len()];
@@ -99,13 +144,21 @@ impl Tape {
         let mut reconstructed = 0_usize;
         let mut adjoint_sweeps = 0_usize;
         let mut worst_residual = 0.0_f64;
-        if selected == 0 {
-            seed_initial(request, cx, self.initial_vertex, &mut carry)?;
+        if selected.state == 0 {
+            seed_initial(request, cx, selected.vertex, &mut carry)?;
         } else {
             let material = fs_conduction::ConductivityModel::isotropic_declared(request.conductivity).map_err(producer)?;
-            for ordinal in (0..=self.frames[selected-1].interval).rev() {
+            let mut end = selected.state;
+            while end > 0 {
                 poll(cx)?;
-                let interval = &schedule.intervals[ordinal];
+                let ordinal = self.frames[end-1].interval;
+                let interval = schedule.intervals.get(ordinal)
+                    .ok_or_else(|| bad("retained endpoint names an unknown interval"))?;
+                // Only CONTIGUOUS occurrences can share this reverse block.
+                // Grouping all equal labels would reverse cycle 3/interval 1,
+                // then cycle 2/interval 1 before cycle 3/interval 0: wrong history.
+                let mut start = end - 1;
+                while start > 0 && self.frames[start-1].interval == ordinal { start -= 1; }
                 let flow = match (&request.fan, interval.speed) {
                     (Some(fan), Some(speed)) => fan.solve(cx, &request.graph, request.limits, speed)?,
                     (None, None) => request.flow(cx)?,
@@ -121,7 +174,7 @@ impl Tape {
                     balance_tolerance_w: request.limits.heat/(names.len() as f64+1.0),
                     balance_relative_tolerance: 0.0,
                     relaxation: Relaxation::Fixed { omega: request.limits.relaxation } };
-                for index in (0..selected).rev().filter(|&i| self.frames[i].interval == ordinal) {
+                for index in (start..end).rev() {
                     poll(cx)?;
                     let frame = &self.frames[index];
                     let old = if index == 0 { &schedule.initial } else { &self.frames[index-1].temperature };
@@ -134,33 +187,35 @@ impl Tape {
                         element_materials: request.solid_data.element_materials.as_ref(), source: &load.source },
                         request.contacts.as_ref().map(|c| &c.interfaces), old, frame.dt, config,
                         schedule.nonlinear.map(|c| c.policy), &names).map_err(producer)?;
-                    // An operator at a nearby field is not the adjoint of the
-                    // retained trajectory. Re-execute the same endpoint only,
-                    // then insist on exact same-profile temperature replay.
-                    if step.primal().temperature.iter().zip(&frame.temperature)
-                        .any(|(a,b)| a.to_bits() != b.to_bits()) {
+                    if step.primal().temperature.len() != frame.temperature.len()
+                        || step.primal().temperature.iter().zip(&frame.temperature)
+                            .any(|(a,b)| a.to_bits() != b.to_bits()) {
                         return Err(producer("transient adjoint endpoint reconstruction changed accepted temperature bits"));
                     }
                     reconstructed += 1;
                     let binding = CoupledLinearization::new(cx,&network,&step,&gate).map_err(producer)?;
                     let mut weights = binding.zero_objective();
                     weights.nodal_temperatures.clone_from(&carry);
-                    if index + 1 == selected {
-                        // The port vectors use NETWORK order, which can differ
-                        // from the boundary declaration order in the report.
-                        let states = names.iter().map(|name| step.primal().robin_fluxes.iter()
-                            .find(|flux| flux.region == *name)
-                            .map(SolidRegionState::from_robin_flux)
-                            .ok_or_else(|| bad("reconstructed endpoint lacks an objective port")))
-                            .collect::<Result<Vec<_>>>()?;
-                        let objective = request.objective.evaluate(cx,&frame.temperature,&states)?;
-                        if objective.vertex != frame.vertex || objective.value.to_bits() != frame.objective.to_bits() {
-                            return Err(producer("transient adjoint objective branch changed during reconstruction"));
+                    if index + 1 == selected.state {
+                        if selected.boundary {
+                            let (value, vertex) = initial_objective(request,cx,&frame.temperature)?;
+                            if vertex != selected.vertex || value.to_bits() != selected.value.to_bits() {
+                                return Err(producer("cycle-boundary objective changed during adjoint reconstruction"));
+                            }
+                            seed_initial(request,cx,vertex,&mut weights.nodal_temperatures)?;
+                        } else {
+                            let states = names.iter().map(|name| step.primal().robin_fluxes.iter()
+                                .find(|flux| flux.region == *name)
+                                .map(SolidRegionState::from_robin_flux)
+                                .ok_or_else(|| bad("reconstructed endpoint lacks an objective port")))
+                                .collect::<Result<Vec<_>>>()?;
+                            let objective = request.objective.evaluate(cx,&frame.temperature,&states)?;
+                            if objective.vertex != frame.vertex || objective.value.to_bits() != frame.objective.to_bits() {
+                                return Err(producer("transient adjoint objective branch changed during reconstruction"));
+                            }
+                            objective.seed(&mut weights);
                         }
-                        objective.seed(&mut weights);
                     }
-                    // The existing fan chain rule also applies to an endpoint
-                    // response containing storage, at fixed OLD temperature.
                     let gradient = fan_gradient::pullback(request,cx,&binding,&weights,&names,&derived)?;
                     powers[ordinal] = finite(powers[ordinal]
                         + step.source_multiplier_pullback(cx,&gradient.nodal_load).map_err(producer)?)?;
@@ -176,19 +231,19 @@ impl Tape {
                         .ok_or_else(|| budget("transient adjoint sweep count overflow"))?;
                     worst_residual = worst_residual.max(gradient.interface_residual);
                 }
+                end = start;
             }
         }
         let uniform_initial = carry.iter().try_fold(0.0, |sum,value| finite(sum+value))?;
         let rows = powers.iter().zip(&fan_speeds).enumerate().map(|(i,(power,speed))| Ok(format!(
             "{{\"interval\":{i},\"dtemperature_dpower_multiplier_k\":{},\"dtemperature_dlog_fan_speed_ratio_k\":{}}}",
             num(*power)?, optional(*speed)?))).collect::<Result<Vec<_>>>()?.join(",");
-        let (time,value,vertex) = if selected == 0 { (0.0,self.peak,self.initial_vertex) }
-            else { let frame = &self.frames[selected-1]; (frame.time,frame.objective,frame.vertex) };
         poll(cx)?;
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted time grid; selected final or earliest sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback; interval power multiplies its entire declared load at multiplier one, capacity multiplies the complete matrix at one; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear iteration budgets apply per reverse endpoint under the original wall deadline; checkpoint bytes bound retained fields/references and frame storage, not total solver workspace; separate from the null steady-gradient fields\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries; each interval control changes every occurrence of that base interval, including earlier warm-up cycles; initial controls change only the original initial field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear iteration budgets apply per reverse endpoint under the original wall deadline; checkpoint bytes bound all retained fields/references and frame storage, not total solver workspace; separate from the null steady-gradient fields\"}}",
             quote(match self.config.observable { Observable::Final => "final", Observable::SampledPeak => "sampled-peak" }),
-            num(value)?,num(time)?,selected,vertex.map_or_else(||"null".into(),|v|v.to_string()),
+            num(selected.value)?,num(selected.time)?,selected.state,
+            selected.vertex.map_or_else(||"null".into(),|v|v.to_string()),self.cycles,
             numbers(&carry)?,num(uniform_initial)?,num(capacity)?,numbers(&inlets)?,rows,
             self.charged_bytes,reconstructed,adjoint_sweeps,num(worst_residual)?,
         );
@@ -208,7 +263,7 @@ fn seed_initial(request: &Request, cx: &Cx<'_>, vertex: Option<usize>, weights: 
         }
     } else {
         let vertex = vertex.filter(|&v|v<weights.len()).ok_or_else(||bad("missing initial objective vertex"))?;
-        weights[vertex] = 1.0;
+        weights[vertex] = finite(weights[vertex] + 1.0)?;
     }
     Ok(())
 }
