@@ -81,11 +81,12 @@
 //!   temperature vector only. Air properties are not re-evaluated at the drifting
 //!   film or bulk temperature, so a temperature-dependent `h` is outside this
 //!   model. A caller wanting that must re-run the driver with a new [`AirPath`].
-//! * **Relaxation is scalar.** [`fs_couple::AitkenRelaxation`] is a scalar Δ²
-//!   relaxer; this driver projects the vector residual onto one area-weighted
-//!   scalar and applies a single `ω` to the whole vector. This is NOT a vector
-//!   interface accelerator: interface quasi-Newton (IQN-ILS) does not exist in
-//!   `fs-couple` and is not called here.
+//! * **Acceleration is explicit.** [`solve_conjugate`] retains its fixed or
+//!   scalar Aitken relaxation. [`solve_conjugate_iqn`] instead accelerates the
+//!   full reference-temperature vector with bounded, rank-filtered IQN-ILS.
+//!   Neither scheme proves convergence or conservation: the same temperature
+//!   and per-region watt gates apply to both. The scalar residual remains a
+//!   diagnostic, never the IQN-ILS convergence criterion.
 //! * **One-dimensional air.** The path is a stream-wise chain of well-mixed
 //!   segments. There is no lateral mixing, recirculation, buoyancy, or flow
 //!   redistribution driven by heating, and no momentum coupling back to the
@@ -98,6 +99,8 @@
 
 use core::cmp::Ordering;
 
+pub use fs_couple::iqn_ils::IqnIlsConfig;
+use fs_couple::iqn_ils::{IqnIls, IqnIlsError};
 use fs_couple::{AitkenRelaxation, EnergyAudit, PortKind};
 use fs_exec::Cx;
 use fs_math::det;
@@ -568,7 +571,7 @@ pub struct ConjugateConfig {
     /// every wattage. `0.0` disables the relative term and gates on the
     /// absolute floor alone.
     pub balance_relative_tolerance: f64,
-    /// Relaxation scheme.
+    /// Relaxation scheme; also the startup/rank-zero fallback for IQN-ILS.
     pub relaxation: Relaxation,
 }
 
@@ -593,7 +596,10 @@ pub struct ConjugateIteration {
     pub max_reference_change_k: f64,
     /// The signed area-weighted mean residual driving scalar relaxation, K.
     pub scalar_residual_k: f64,
-    /// The `ω` applied this iteration.
+    /// Scalar relaxation factor, or one for an IQN-ILS map-plus-vector
+    /// correction. The latter is not a scalar relaxation of the residual.
+    /// The next record retains the actual next reference vector; a reference
+    /// vector alone does not retain IQN-ILS secant history for bitwise replay.
     pub relaxation_omega: f64,
     /// Air temperature leaving the path this iteration, K.
     pub air_outlet_temperature_k: f64,
@@ -758,6 +764,92 @@ pub fn solve_conjugate_from<F>(
     path: &AirPath,
     config: &ConjugateConfig,
     initial_references_k: &[f64],
+    solid: F,
+) -> Result<ConjugateSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_conjugate_driver(cx, path, config, initial_references_k, None, solid)
+}
+
+/// Solve the same solid-air fixed point with bounded vector IQN-ILS.
+///
+/// Unlike the scalar Aitken projection, the least-squares update retains every
+/// interface residual component. `config.relaxation` supplies the startup and
+/// rank-zero fallback. The same per-region temperature and watt checks still
+/// decide whether the result is admissible; acceleration is not a certificate.
+///
+/// # Errors
+/// The refusals of [`solve_conjugate`], plus invalid IQN history/rank policy or
+/// non-finite arithmetic attributed to the accelerator's producing stage.
+pub fn solve_conjugate_iqn<F>(
+    cx: &Cx<'_>,
+    path: &AirPath,
+    config: &ConjugateConfig,
+    acceleration_config: IqnIlsConfig,
+    solid: F,
+) -> Result<ConjugateSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    let seed = vec![path.inlet_temperature_k(); path.segments().len()];
+    solve_conjugate_iqn_from(cx, path, config, &seed, acceleration_config, solid)
+}
+
+/// Start an IQN-ILS exchange from an explicit reference-temperature vector.
+///
+/// Secant history is deliberately empty. This is a warm start, not bitwise
+/// replay of an interrupted IQN-ILS solve: a full replay also requires the
+/// accelerator history and any scalar fallback relaxer's state.
+///
+/// # Errors
+/// The refusals of [`solve_conjugate_iqn`] and an initial vector with the wrong
+/// length or non-finite coordinates.
+pub fn solve_conjugate_iqn_from<F>(
+    cx: &Cx<'_>,
+    path: &AirPath,
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+    acceleration_config: IqnIlsConfig,
+    solid: F,
+) -> Result<ConjugateSolution, AirflowError>
+where
+    F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    let acceleration = IqnIls::new(path.segments().len(), acceleration_config)
+        .map_err(conjugate_iqn_error)?;
+    solve_conjugate_driver(
+        cx,
+        path,
+        config,
+        initial_references_k,
+        Some(acceleration),
+        solid,
+    )
+}
+
+fn conjugate_iqn_error(error: IqnIlsError) -> AirflowError {
+    let (field, value_bits) = match error {
+        IqnIlsError::NonFinite { stage, value_bits } => {
+            return AirflowError::NonFiniteCoupling { stage, value_bits };
+        }
+        IqnIlsError::DimensionMismatch { expected, found } => {
+            return AirflowError::SolidResponseArity { expected, found };
+        }
+        IqnIlsError::EmptyInterface => ("IQN interface dimension", 0),
+        IqnIlsError::InvalidHistoryLimit(limit) => ("IQN history limit", (limit as f64).to_bits()),
+        IqnIlsError::InvalidRankTolerance(bits) => ("IQN rank tolerance", bits),
+        IqnIlsError::InvalidRelaxation(bits) => ("IQN fallback relaxation", bits),
+    };
+    AirflowError::InvalidConjugateInput { field, value_bits }
+}
+
+fn solve_conjugate_driver<F>(
+    cx: &Cx<'_>,
+    path: &AirPath,
+    config: &ConjugateConfig,
+    initial_references_k: &[f64],
+    mut acceleration: Option<IqnIls>,
     mut solid: F,
 ) -> Result<ConjugateSolution, AirflowError>
 where
@@ -801,7 +893,7 @@ where
         let (max_change, scalar_residual) =
             fixed_point_residual(path, &reference, &updated, total_area)?;
 
-        let omega = finite_coupling(
+        let fallback_omega = finite_coupling(
             "relaxation omega",
             match (&config.relaxation, aitken.as_mut()) {
                 (Relaxation::Fixed { omega }, _) => *omega,
@@ -810,6 +902,18 @@ where
                 (Relaxation::Aitken { omega_init, .. }, None) => *omega_init,
             },
         )?;
+        let proposal = if max_change > config.temperature_tolerance_k {
+            acceleration
+                .as_mut()
+                .map(|accelerator| accelerator.step(&reference, &updated, fallback_omega))
+                .transpose()
+                .map_err(conjugate_iqn_error)?
+        } else {
+            None
+        };
+        let omega = proposal
+            .as_ref()
+            .map_or(fallback_omega, |step| step.relaxation_omega);
 
         history.push(ConjugateIteration {
             iteration,
@@ -845,7 +949,11 @@ where
             );
         }
 
-        relax_references(&mut reference, &updated, omega)?;
+        if let Some(step) = proposal {
+            reference = step.values;
+        } else {
+            relax_references(&mut reference, &updated, omega)?;
+        }
     }
 
     let last = history
