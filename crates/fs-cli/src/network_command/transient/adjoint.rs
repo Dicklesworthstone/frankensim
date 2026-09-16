@@ -85,7 +85,7 @@ impl Tape {
     }
 
     pub(super) fn reverse(self, request: &Request, cx: &Cx<'_>, schedule: &Schedule,
-        engine: &BackwardEuler<'_>) -> Result<String> {
+        engine: &BackwardEuler<'_>) -> Result<(String, usize)> {
         poll(cx)?;
         if self.frames.len() != self.planned { return Err(bad("incomplete trajectory has no adjoint")); }
         let selected = match self.config.observable {
@@ -180,13 +180,14 @@ impl Tape {
         let (time,value,vertex) = if selected == 0 { (0.0,self.peak,self.initial_vertex) }
             else { let frame = &self.frames[selected-1]; (frame.time,frame.objective,frame.vertex) };
         poll(cx)?;
-        Ok(format!(
+        let report = format!(
             "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted time grid; selected final or earliest sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback; interval power multiplies its entire declared load at multiplier one, capacity multiplies the complete matrix at one; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear iteration budgets apply per reverse endpoint under the original wall deadline; checkpoint bytes bound retained fields/references and frame storage, not total solver workspace; separate from the null steady-gradient fields\"}}",
             quote(match self.config.observable { Observable::Final => "final", Observable::SampledPeak => "sampled-peak" }),
             num(value)?,num(time)?,selected,vertex.map_or_else(||"null".into(),|v|v.to_string()),
             numbers(&carry)?,num(uniform_initial)?,num(capacity)?,numbers(&inlets)?,rows,
             self.charged_bytes,reconstructed,adjoint_sweeps,num(worst_residual)?,
-        ))
+        );
+        Ok((report, reconstructed))
     }
 }
 
