@@ -5,14 +5,20 @@
 //! Existing single-path probes enforce region ownership, applied references,
 //! area, temperature and heat-rate consistency; they never rerun the solid.
 //! Hydraulics remain frozen, and fixed-point convergence is not validation.
+//!
+//! The explicit IQN-ILS entry points retain vector secants across the ENTIRE
+//! network, including feedback through mixing junctions and the common solid.
+//! They use the same unrelaxed temperature and branch-local watt gates as the
+//! fixed/Aitken entry points. Acceleration never supplies a stopping criterion.
 
 use fs_couple::AitkenRelaxation;
+use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig};
 use fs_exec::Cx;
 
 use crate::AirflowError;
 use crate::conjugate::{ConjugateConfig, RegionBalance, Relaxation, SolidRegionState, solve_conjugate_from};
 use super::transport::{TransportError, TransportMarch, TransportNetwork};
-use super::{admit, checked, checked_sum};
+use super::{admit, checked, checked_sum, iqn_error};
 
 /// A mutually consistent solid response and transported air state.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +66,53 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 /// As for `solve_coupled_transport`, plus invalid resumed temperatures or arity.
 pub fn solve_coupled_transport_from<F>(
     cx: &Cx<'_>, network: &TransportNetwork<'_>, config: &ConjugateConfig,
-    initial_references_k: &[f64], mut solid: F,
+    initial_references_k: &[f64], solid: F,
+) -> Result<CoupledTransportSolution, TransportError>
+where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_driver(cx, network, config, initial_references_k, None, solid)
+}
+
+/// Accelerate the complete shared-solid/mixed-air fixed point with bounded
+/// vector IQN-ILS. A single history spans all branches, not one scalar per
+/// branch or per mixing node. Startup and rank-zero steps use the configured
+/// relaxation. A nonpositive extrapolated absolute temperature discards the
+/// secants and falls back to that same relaxation; invalid arithmetic refuses.
+/// No rejected extrapolation invokes the solid callback.
+///
+/// # Errors
+/// All refusals of [`solve_coupled_transport`], plus invalid acceleration policy
+/// and attributed non-finite accelerator arithmetic. A real solid or transport
+/// refusal remains terminal, never a request to retry with different physics.
+pub fn solve_coupled_transport_iqn<F>(
+    cx: &Cx<'_>, network: &TransportNetwork<'_>, config: &ConjugateConfig,
+    acceleration: IqnIlsConfig, solid: F,
+) -> Result<CoupledTransportSolution, TransportError>
+where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    let initial = network.initial_references(cx)?;
+    solve_coupled_transport_iqn_from(cx, network, config, &initial, acceleration, solid)
+}
+
+/// Warm-start IQN-ILS from a complete reference vector with EMPTY secant and
+/// Aitken histories. This is valid continuation, not bitwise replay of an
+/// interrupted accelerated solve. Cancellation always retains the exact
+/// references used by the current solid callback, never half an update.
+///
+/// # Errors
+/// As for [`solve_coupled_transport_iqn`], plus malformed initial references.
+pub fn solve_coupled_transport_iqn_from<F>(
+    cx: &Cx<'_>, network: &TransportNetwork<'_>, config: &ConjugateConfig,
+    initial_references_k: &[f64], acceleration: IqnIlsConfig, solid: F,
+) -> Result<CoupledTransportSolution, TransportError>
+where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
+{
+    solve_driver(cx, network, config, initial_references_k, Some(acceleration), solid)
+}
+
+fn solve_driver<F>(
+    cx: &Cx<'_>, network: &TransportNetwork<'_>, config: &ConjugateConfig,
+    initial_references_k: &[f64], acceleration: Option<IqnIlsConfig>, mut solid: F,
 ) -> Result<CoupledTransportSolution, TransportError>
 where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
 {
@@ -83,6 +135,8 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             return Err(TransportError::InvalidInput("resumed absolute reference temperatures must be positive"));
         }
     }
+    let mut accelerator = acceleration.map(|policy| IqnIls::new(initial_references_k.len(), policy))
+        .transpose().map_err(iqn_error)?;
     let probe_config = ConjugateConfig {
         max_iterations: 1, relaxation: Relaxation::Fixed { omega: 1.0 }, ..*config
     };
@@ -128,7 +182,7 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             }
             let omega = checked("transport relaxation omega", match config.relaxation {
                 Relaxation::Fixed { omega } => omega,
-                Relaxation::Aitken { omega_init, .. } => relaxers[ordinal].as_mut()
+                Relaxation::Aitken { omega_init, omega_max: _ } => relaxers[ordinal].as_mut()
                     .map_or(omega_init, |relaxer| relaxer.next_omega(scalar)),
             })?;
             omegas.push(omega);
@@ -142,6 +196,22 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
                 region_balances: balances, iterations: iteration + 1,
                 max_reference_change_k: last_change,
             });
+        }
+        if let Some(iqn) = accelerator.as_mut() {
+            // Zero fallback makes the rank-zero proposal a no-op; branch-local
+            // omegas below still own startup. History stores ACTUAL map samples.
+            let step = iqn.step(&reference, next, 0.0).map_err(iqn_error)?;
+            checkpoint(cx, iteration, &reference)?;
+            if step.used_columns > 0 {
+                if step.values.iter().all(|&value| value > 0.0) {
+                    reference = step.values;
+                    continue;
+                }
+                // Do not clip a vector extrapolation: clipping would mix
+                // unrelated states and keep history that already left the
+                // absolute-temperature domain. Restart with declared relaxation.
+                iqn.reset();
+            }
         }
         // Stage the entire relaxation. A cancelled update resumes the old
         // iteration, never a vector containing half old and half new entries.
