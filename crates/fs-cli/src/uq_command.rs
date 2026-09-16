@@ -26,7 +26,7 @@ const RESULT_SCHEMA: &str = "frankensim.cooling-network-uq.result.v1";
 const MAX_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_UQ_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PRODUCT_SAMPLES: usize = 10_000;
-const HELP: &str = "Usage: frankensim [--json] cooling-network-uq <base-request.json> <uq-request.json>\n\nRun fixed-count empirical Monte Carlo by invoking the actual steady cooling-network\nproducer once per sample. See examples/cooling-network/COOLING_UQ.md.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network-uq <base-request.json> <uq-request.json> [--checkpoint NEW-PATH] [--resume SAVED-PATH] [--max-new-samples N]\n\nRun fixed-count empirical Monte Carlo through actual steady cooling-network solves.\n--checkpoint writes a new model-bound checkpoint and updates it atomically after\nevery completed sample. Existing destinations are refused, never overwritten.\n--resume restores a trusted checkpoint under the identical base request, plan and\nexecutable. Use a fresh --checkpoint path to retain further progress.\n--max-new-samples limits this invocation (zero is allowed) and requires --checkpoint.\nThe request's wall_seconds is a fresh evaluation-time allowance per invocation;\nthe original lifetime sample count never resets. Interrupted samples retry the\nsame ordinal. Partial runs emit progress, not a distribution, and exit BUDGET.\nSee examples/cooling-network/COOLING_UQ.md.\n";
 
 #[derive(Debug)]
 struct Failure {
@@ -63,9 +63,13 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
             stderr: String::new(),
         };
     }
-    if args.len() != 2 {
+    if args.len() < 2 {
         return diagnostic(exit::USAGE, bad(HELP), json_mode);
     }
+    let options = match execute::Options::parse(&args[2..]) {
+        Ok(options) => options,
+        Err(error) => return diagnostic(exit::USAGE, error, json_mode),
+    };
     let base = match read(&args[0], MAX_BASE_BYTES) {
         Ok(value) => value,
         Err(error) => return diagnostic(exit::INPUT, error, json_mode),
@@ -74,8 +78,15 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
         Ok(value) => value,
         Err(error) => return diagnostic(exit::INPUT, error, json_mode),
     };
-    match execute::execute(&base, &uq) {
-        Ok(stdout) => CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() },
+    let result = if args.len() == 2 {
+        execute::execute(&base, &uq).map(|stdout| execute::ExecutionOutput {
+            stdout, exit_code: exit::SUCCESS,
+        })
+    } else {
+        execute::execute_with_options(&base, &uq, &options)
+    };
+    match result {
+        Ok(output) => CommandOutput { exit_code: output.exit_code, stdout: output.stdout, stderr: String::new() },
         Err(error) => {
             let class = if error.code == "cooling-network-uq-budget" {
                 exit::BUDGET
