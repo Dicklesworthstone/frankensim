@@ -732,6 +732,92 @@ impl ModalAcousticTimeModel {
             dissipation_roundoff_tolerance_j,
         })
     }
+
+    /// Solve the exact-ZOH held generalized force that drives one physical
+    /// port to `target_port_velocity_m_s` after `duration_s`, without
+    /// advancing state.
+    ///
+    /// `port_shapes` are the same conjugate mode-shape weights used both to
+    /// project a physical port force into each mode's generalized force
+    /// (`generalized_force_k = port_shapes[k] * port_force`) and to recover
+    /// physical port velocity from modal velocities
+    /// (`port_velocity = sum_k port_shapes[k] * velocity_k`). The
+    /// zero-order-held transition is affine in the applied force, so this
+    /// evaluates the same transition used by [`Self::step_duration`] at
+    /// force `0` (free modal motion) and force `1` (unit-port-force
+    /// mobility) per mode, then inverts the resulting scalar affine equation
+    /// for the port force. Use that force as `port_shapes[k] * force` when
+    /// actually stepping, to reach the same endpoint this solved for.
+    ///
+    /// # Errors
+    /// Refuses a wrong-length shape vector, a nonpositive/nonfinite
+    /// duration, nonfinite shapes or target velocity, or a nonpositive or
+    /// nonfinite port mobility (for example an undamped port sampled at a
+    /// duration where a held force does not change the endpoint velocity at
+    /// all). Never mutates state.
+    pub fn held_force_for_port_velocity(
+        &self,
+        port_shapes: &[f64],
+        target_port_velocity_m_s: f64,
+        duration_s: f64,
+    ) -> Result<f64, ModalAcousticTimeError> {
+        if !(duration_s > 0.0 && duration_s.is_finite()) {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force duration must be positive and finite",
+            });
+        }
+        if port_shapes.len() != self.modes.len() {
+            return Err(ModalAcousticTimeError::ForceCountMismatch {
+                expected: self.modes.len(),
+                found: port_shapes.len(),
+            });
+        }
+        if !target_port_velocity_m_s.is_finite()
+            || port_shapes.iter().any(|phi| !phi.is_finite())
+        {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force port shapes and target velocity must be finite",
+            });
+        }
+        let transition_coefficients = self.transition_kernel.for_duration(duration_s);
+        let mut free_port_velocity_m_s = 0.0;
+        let mut port_mobility_m_s_per_n = 0.0;
+        for (mode_index, (mode, state)) in self.modes.iter().zip(&self.states).enumerate() {
+            let phi = port_shapes[mode_index];
+            let (free, unit) = match transition_coefficients {
+                Some(coefficients) => (
+                    advance_exact_zoh_cached(*mode, *state, 0.0, coefficients[mode_index]),
+                    advance_exact_zoh_cached(*mode, *state, 1.0, coefficients[mode_index]),
+                ),
+                None => (
+                    advance_exact_zoh(*mode, *state, 0.0, duration_s),
+                    advance_exact_zoh(*mode, *state, 1.0, duration_s),
+                ),
+            };
+            let mode_mobility =
+                unit.velocity_m_sqrt_kg_per_s - free.velocity_m_sqrt_kg_per_s;
+            free_port_velocity_m_s += phi * free.velocity_m_sqrt_kg_per_s;
+            port_mobility_m_s_per_n += phi * phi * mode_mobility;
+        }
+        if !free_port_velocity_m_s.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "free port velocity evaluation produced a non-finite result",
+            });
+        }
+        if !(port_mobility_m_s_per_n > 0.0 && port_mobility_m_s_per_n.is_finite()) {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "port mobility must be positive and finite",
+            });
+        }
+        let held_force_n =
+            (target_port_velocity_m_s - free_port_velocity_m_s) / port_mobility_m_s_per_n;
+        if !held_force_n.is_finite() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force solve produced a non-finite result",
+            });
+        }
+        Ok(held_force_n)
+    }
 }
 
 fn validate_budget(budget: ModalAcousticTimeBudget) -> Result<(), ModalAcousticTimeError> {
@@ -1485,5 +1571,214 @@ mod tests {
             Err(ModalAcousticTimeError::InvalidInput { .. })
         ));
         assert_eq!(model.states(), before);
+    }
+
+    #[test]
+    fn g3_held_force_for_port_velocity_reaches_target_in_every_damping_regime() {
+        // Mixed-sign multimode port (CONTRACT.md's own G3 scope), every
+        // canonical damping regime, and full/half/subsample durations.
+        for damping_ratio in [0.0_f64, 1.0e-9, 0.12, 1.0, 1.7] {
+            let modes = vec![
+                ModalAcousticMode {
+                    angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 220.0,
+                    damping_ratio,
+                    pressure_per_modal_velocity: C64::ZERO,
+                },
+                ModalAcousticMode {
+                    angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 880.0,
+                    damping_ratio,
+                    pressure_per_modal_velocity: C64::ZERO,
+                },
+            ];
+            let mut model = ModalAcousticTimeModel::try_new(48_000, modes, budget()).unwrap();
+            model
+                .restore_states(&[
+                    ModalAcousticState {
+                        displacement_m_sqrt_kg: 3.0e-4,
+                        velocity_m_sqrt_kg_per_s: -0.2,
+                    },
+                    ModalAcousticState {
+                        displacement_m_sqrt_kg: -1.5e-4,
+                        velocity_m_sqrt_kg_per_s: 0.05,
+                    },
+                ])
+                .unwrap();
+            let shapes = [0.8_f64, -0.6];
+            let before = model.states().to_vec();
+            let dt = model.sample_period_s();
+            for duration_s in [dt, 0.5 * dt, 0.37 * dt] {
+                let target_port_velocity_m_s = 0.75;
+                let force = model
+                    .held_force_for_port_velocity(&shapes, target_port_velocity_m_s, duration_s)
+                    .unwrap();
+                let mut probe = model.clone();
+                let generalized_forces: Vec<f64> =
+                    shapes.iter().map(|phi| phi * force).collect();
+                probe.step_duration(&generalized_forces, duration_s).unwrap();
+                let achieved_port_velocity_m_s: f64 = probe
+                    .states()
+                    .iter()
+                    .zip(&shapes)
+                    .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
+                    .sum();
+                assert!(
+                    (achieved_port_velocity_m_s - target_port_velocity_m_s).abs() < 1.0e-9,
+                    "damping_ratio={damping_ratio} duration_s={duration_s} achieved={achieved_port_velocity_m_s}"
+                );
+            }
+            assert_eq!(model.states(), before, "solve must never mutate state");
+        }
+    }
+
+    #[test]
+    fn g1_held_force_for_port_velocity_beats_the_old_acceleration_cancellation_heuristic() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 300.0,
+            damping_ratio: 0.05,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        model
+            .restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: 2.0e-3,
+                velocity_m_sqrt_kg_per_s: -0.4,
+            }])
+            .unwrap();
+        let shapes = [1.0_f64];
+        // A deliberately non-small sub-step (omega * duration_s = 1 rad),
+        // where the old small-angle "acceleration cancellation" estimate is
+        // no longer a good approximation of the exact-ZOH endpoint
+        // constraint this method solves exactly.
+        let duration_s = 1.0 / mode.angular_frequency_rad_s;
+        let target_port_velocity_m_s = 0.6;
+
+        let exact_force = model
+            .held_force_for_port_velocity(&shapes, target_port_velocity_m_s, duration_s)
+            .unwrap();
+        let mut exact_probe = model.clone();
+        exact_probe
+            .step_duration(&[shapes[0] * exact_force], duration_s)
+            .unwrap();
+        let exact_velocity = exact_probe.states()[0].velocity_m_sqrt_kg_per_s;
+        assert!((exact_velocity - target_port_velocity_m_s).abs() < 1.0e-9);
+
+        // The formula bowed_string.rs used before this bead: cancel the
+        // current contact acceleration and correct the sub-step velocity
+        // error linearly. Reproduced verbatim from the pre-fix source (see
+        // frankensim commit e8589b00) to demonstrate its pinning error.
+        let w_point: f64 = shapes.iter().map(|phi| phi * phi).sum();
+        let v_rel = target_port_velocity_m_s
+            - model
+                .states()
+                .iter()
+                .zip(&shapes)
+                .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
+                .sum::<f64>();
+        let accel_hold: f64 = model
+            .modes()
+            .iter()
+            .zip(model.states())
+            .zip(&shapes)
+            .map(|((m, s), phi)| {
+                phi * (2.0
+                    * m.damping_ratio
+                    * m.angular_frequency_rad_s
+                    * s.velocity_m_sqrt_kg_per_s
+                    + m.angular_frequency_rad_s * m.angular_frequency_rad_s * s.displacement_m_sqrt_kg)
+            })
+            .sum::<f64>()
+            / w_point;
+        let old_force = accel_hold + v_rel / (w_point * duration_s);
+        let mut old_probe = model.clone();
+        old_probe
+            .step_duration(&[shapes[0] * old_force], duration_s)
+            .unwrap();
+        let old_velocity = old_probe.states()[0].velocity_m_sqrt_kg_per_s;
+
+        // The old heuristic materially misses the endpoint target over this
+        // non-small step; the new exact solve does not.
+        assert!(
+            (old_velocity - target_port_velocity_m_s).abs() > 1.0e-4,
+            "old_velocity={old_velocity} target={target_port_velocity_m_s}"
+        );
+    }
+
+    #[test]
+    fn g0_held_force_for_port_velocity_refuses_malformed_inputs_and_never_mutates() {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 500.0,
+            damping_ratio: 0.1,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(48_000, vec![mode], budget()).unwrap();
+        model
+            .restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: 1.0e-4,
+                velocity_m_sqrt_kg_per_s: 0.02,
+            }])
+            .unwrap();
+        let before = model.states().to_vec();
+        let dt = model.sample_period_s();
+
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[1.0], 0.5, 0.0),
+            Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force duration must be positive and finite"
+            })
+        ));
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[1.0], 0.5, -dt),
+            Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force duration must be positive and finite"
+            })
+        ));
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[1.0], 0.5, f64::NAN),
+            Err(ModalAcousticTimeError::InvalidInput {
+                what: "held-force duration must be positive and finite"
+            })
+        ));
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[], 0.5, dt),
+            Err(ModalAcousticTimeError::ForceCountMismatch {
+                expected: 1,
+                found: 0
+            })
+        ));
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[f64::NAN], 0.5, dt),
+            Err(ModalAcousticTimeError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            model.held_force_for_port_velocity(&[1.0], f64::NAN, dt),
+            Err(ModalAcousticTimeError::InvalidInput { .. })
+        ));
+
+        // An undamped port sampled after exactly 3/4 of one period has
+        // strictly negative unit-force mobility (sin(3*pi/2) = -1): a held
+        // force there does not move the endpoint velocity the way the port
+        // needs, and the solve must refuse rather than return a poisoned
+        // answer.
+        let undamped = ModalAcousticMode {
+            angular_frequency_rad_s: 2.0 * core::f64::consts::PI * 440.0,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let negative_mobility_model =
+            ModalAcousticTimeModel::try_new(48_000, vec![undamped], budget()).unwrap();
+        let three_quarter_period_s =
+            1.5 * core::f64::consts::PI / undamped.angular_frequency_rad_s;
+        assert!(matches!(
+            negative_mobility_model.held_force_for_port_velocity(
+                &[1.0],
+                0.5,
+                three_quarter_period_s
+            ),
+            Err(ModalAcousticTimeError::InvalidInput {
+                what: "port mobility must be positive and finite"
+            })
+        ));
+
+        assert_eq!(model.states(), before, "every refusal must leave state untouched");
     }
 }
