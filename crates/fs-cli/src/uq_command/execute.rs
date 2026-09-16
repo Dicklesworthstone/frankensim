@@ -1,7 +1,7 @@
 use super::*;
-use child::{EvaluationError, evaluate_sample};
+use child::{EvaluationError, evaluate_sample, evaluate_sample_for};
 use compliance::Policy;
-use model::Config;
+use model::{Config, Qoi};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -58,9 +58,8 @@ impl Options {
 
     fn checkpoint_binding(&self, config: &Config) -> Result<String> {
         let parameters = config.render_parameters()?;
-        // Preserve the existing fixed-count identity exactly. Adding, removing
-        // or changing a sequential policy yields a different identity and is
-        // refused BEFORE reserving an output or evaluating a cooling sample.
+        // The library plan binds the observable, while the file adapter binds
+        // the complete base schedule. Preserve the fixed-count binding here.
         Ok(self.compliance.map_or_else(
             || parameters.clone(), |policy| policy.checkpoint_binding(&parameters),
         ))
@@ -128,7 +127,13 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         if assessment.as_ref().is_some_and(|value| value.reached()) { break; }
         let report = execution.advance_interruptible(1, || Instant::now() >= deadline, |values| {
             let request = config.sample_request(&base, values)?;
-            match evaluate_sample(&request, deadline) {
+            // One observation is one COMPLETED model evaluation. A transient
+            // may contain many accepted steps, but contributes only its peak.
+            let evaluated = match config.qoi {
+                Qoi::Steady => evaluate_sample(&request, deadline),
+                qoi => evaluate_sample_for(&request, deadline, qoi),
+            };
+            match evaluated {
                 Ok(value) => Ok(Some(value)),
                 Err(EvaluationError::Budget) => Ok(None),
                 Err(EvaluationError::Child(message)) => Err(model_failure(message)),
@@ -182,11 +187,15 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         return Err(budget(format!("UQ wall-time budget exhausted after {} model evaluations; no partial distribution published; use --checkpoint to retain completed samples", report.samples_evaluated)));
     };
     let termination = if report.status == UqStatus::Cancelled { "wall-time-budget" } else { "sample-chunk" };
+    let observable = match config.qoi {
+        Qoi::Steady => String::new(),
+        qoi => format!(",\"qoi\":{}", qoi.render(objective_kind(&base)?)),
+    };
     let stdout = format!(
-        "{{\"schema\":\"frankensim.cooling-network-uq.progress.v1\",\"status\":\"budget-truncated\",\"termination\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"samples_evaluated_this_run\":{},\"next_sample_ordinal\":{},\"checkpoint\":{},\"no_claim\":\"retained prefix only; no completed distribution or compliance decision; resume with the same base request, UQ plan and executable on the same deterministic runtime profile\"}}\n",
+        "{{\"schema\":\"frankensim.cooling-network-uq.progress.v1\",\"status\":\"budget-truncated\",\"termination\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"samples_evaluated_this_run\":{},\"next_sample_ordinal\":{},\"checkpoint\":{}{},\"no_claim\":\"retained prefix only; no completed distribution or compliance decision; resume with the same base request, UQ plan and executable on the same deterministic runtime profile\"}}\n",
         quote(termination), config.samples, report.samples_evaluated,
         report.samples_evaluated - initial_count, report.samples_evaluated,
-        quote(&path.to_string_lossy()),
+        quote(&path.to_string_lossy()), observable,
     );
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
 }
@@ -210,13 +219,13 @@ fn render_result(config: &Config, base: &J, result: &fs_uq::UqResult) -> Result<
     let bounds = if result.mean.is_some() {
         format!("[{},{}]", number_json(result.interval_bounds[0])?, number_json(result.interval_bounds[1])?)
     } else { "null".into() };
-    let objective_kind = objective_kind(base)?;
     Ok(format!(
-        "{{\"schema\":{},\"authority\":\"estimated-empirical-monte-carlo\",\"status\":{},\"qoi\":{{\"kind\":{},\"unit\":\"K\"}},\"seed\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"mean_k\":{},\"std_dev_k\":{},\"percentiles_p05_p50_p95_k\":{},\"empirical_bounds_k\":{},\"temperature_limit_k\":{},\"empirical_probability_of_compliance\":{},\"sampling_standard_error_k\":{},\"correlation\":{},\"parameters\":[{}],\"no_claim\":\"fixed-count empirical propagation through actual cooling-network child solves; no confidence sequence, optional-stopping guarantee, physical/model-form uncertainty bound, mesh-convergence certificate, experimental validation, or native .fsim/ledger package claim\"}}\n",
-        quote(RESULT_SCHEMA), quote(result.status.label()), quote(objective_kind), quote(&config.seed.to_string()),
+        "{{\"schema\":{},\"authority\":\"estimated-empirical-monte-carlo\",\"status\":{},\"qoi\":{},\"seed\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"mean_k\":{},\"std_dev_k\":{},\"percentiles_p05_p50_p95_k\":{},\"empirical_bounds_k\":{},\"temperature_limit_k\":{},\"empirical_probability_of_compliance\":{},\"sampling_standard_error_k\":{},\"correlation\":{},\"parameters\":[{}],\"no_claim\":{}}}\n",
+        quote(RESULT_SCHEMA), quote(result.status.label()), config.qoi.render(objective_kind(base)?), quote(&config.seed.to_string()),
         config.samples, result.samples_evaluated, optional_number(result.mean)?, optional_number(result.std_dev)?,
         percentiles, bounds, optional_number(config.threshold_k)?, optional_number(result.probability_of_compliance)?,
-        number_json(result.sampling_error)?, quote(config.correlation_label), config.render_parameters()?
+        number_json(result.sampling_error)?, quote(config.correlation_label), config.render_parameters()?,
+        quote(config.qoi.no_claim()),
     ))
 }
 
