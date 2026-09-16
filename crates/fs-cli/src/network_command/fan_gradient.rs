@@ -32,6 +32,14 @@ enum SpeedGradient {
 }
 
 impl CoolingGradient {
+    /// Local derivative at this evaluation, never a feasibility prediction.
+    pub(super) fn log_speed(&self) -> Option<f64> {
+        match &self.speed {
+            Some(SpeedGradient::Available { total, .. }) => Some(*total),
+            _ => None,
+        }
+    }
+
     pub(super) fn speed_json(&self) -> Result<String> {
         match &self.speed {
             None => Ok("null".into()),
