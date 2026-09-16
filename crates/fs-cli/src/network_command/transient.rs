@@ -2,13 +2,15 @@
 //! Air is quasi-steady at each endpoint. Coupling iterations always reuse the
 //! previous accepted solid field. An explicit nonlinear policy evaluates k(T)
 //! at the endpoint on every Newton trial, including adaptive/sizing trials.
-//! No transient derivative or continuous-time peak bound is inferred.
+//! An explicit adjoint policy differentiates fixed nonrepeated schedules.
+//! No continuous-time peak bound or adaptive-time-grid derivative is inferred.
 
 mod workload;
 mod adaptive;
 mod sizing;
 mod repeat;
 mod nonlinear;
+mod adjoint;
 use workload::Workload;
 
 use super::*;
@@ -33,6 +35,7 @@ pub(super) struct Schedule {
     max_steps: usize,
     adaptive: Option<adaptive::Config>,
     nonlinear: Option<nonlinear::Config>,
+    adjoint: Option<adjoint::Config>,
     fan_speed_design: Option<sizing::Config>,
     power_design: Option<sizing::Config>,
     repeat: Option<repeat::Config>,
@@ -41,8 +44,12 @@ pub(super) struct Schedule {
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "fan_speed_design", "power_design", "repeat"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "fan_speed_design", "power_design", "repeat"], "transient")?;
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
+        let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
+        if adjoint.is_some() && ["adaptive","repeat","fan_speed_design","power_design"].iter().any(|key| value.get(key).is_some()) {
+            return Err(bad("transient adjoints require a fixed, nonrepeated schedule without nested design searches"));
+        }
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
             (None,Some(ts)) => {
@@ -94,8 +101,6 @@ impl Schedule {
             total_steps = total_steps.checked_add(steps).ok_or_else(|| budget("transient step count overflow"))?;
             if total_steps > max_steps { return Err(budget("planned transient steps exceed max_steps")); }
             let end = finite(time+duration)?;
-            // Check the exact endpoint formula used during execution before
-            // doing physics. Tiny intervals must not become zero-duration steps.
             let mut previous = time;
             for i in 1..=steps {
                 let endpoint = if i==steps { end } else { time+duration*(i as f64/steps as f64) };
@@ -112,7 +117,8 @@ impl Schedule {
             return Err(budget("adaptive half-step endpoints require at least twice the planned full-step count"));
         }
         let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
-        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,adaptive,nonlinear,fan_speed_design,power_design,repeat};
+        let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,
+            adaptive,nonlinear,adjoint,fan_speed_design,power_design,repeat};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
             design.validate(&schedule,fan)?;
         }
@@ -238,9 +244,10 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
     }
+    if schedule.adjoint.is_some() && (speed_multiplier != 1.0 || initial_field != schedule.initial.as_slice()) {
+        return Err(bad("transient adjoints require the declared initial state and fixed schedule speeds"));
+    }
     nonlinear::admit(request,cx,schedule.nonlinear)?;
-    // Bind every named load before any hydraulic or thermal work, including
-    // later intervals which might otherwise fail after a long simulation.
     for interval in &schedule.intervals { interval.workload.validate(request,cx)?; }
     let engine=BackwardEuler::per_element(cx,&request.mesh,&schedule.capacities).map_err(producer)?;
     if initial_field.len()!=request.mesh.vertex_count()
@@ -250,6 +257,7 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     let max_steps=schedule.max_steps.min(remaining_steps);
     let mut old=initial_field.to_vec();
     let (initial,initial_vertex)=initial_objective(request,cx,&old)?;
+    let mut tape=adjoint::Tape::new(request,schedule,initial,initial_vertex)?;
     let mut peak=initial;
     let mut peak_time=0.0;
     let mut first_violation=schedule.limit.filter(|&limit|initial>limit).map(|_|0.0);
@@ -288,8 +296,6 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
             if completed > max_steps.saturating_sub(needed) || needed > max_steps {
                 return Err(budget("accepted transient endpoint budget exhausted; no partial trajectory published"));
             }
-            // All trials, including discarded coarse/rejected ones, undergo the
-            // same physical gates. Count their work, never their heat as history.
             let mut trial=|old:&[f64],dt:f64| {
                 let (coupled,solid)=advance(request,cx,&engine,&network,&coefficients,old,source,dt,
                     schedule.nonlinear,&mut nonlinear_stats)?;
@@ -315,8 +321,6 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
                 let endpoint=if i==interval.steps {end}else{start+interval.duration*(i as f64/interval.steps as f64)};
                 (vec![(endpoint,trial(&old,endpoint-time)?)],None)
             };
-            // The estimate concerns the pair's final endpoint. Its midpoint is
-            // retained for peak detection but has no separate local-error test.
             let last_sample=samples.len()-1;
             for (sample_index,(endpoint,(coupled,solid))) in samples.into_iter().enumerate() {
                 let dt=endpoint-time;
@@ -333,8 +337,10 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
                     num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
                     num(solid.stored_energy_change_j-dt*(solid.source_w-coupled.transport.external_heat_gain_w))?,coupled.iterations,
                     optional(estimate.filter(|_|sample_index==last_sample))?));
-                // Atomic numerical boundary: no history changes before every solid,
-                // air, objective and energy check for this step has passed.
+                if let Some(tape)=tape.as_mut() {
+                    tape.record(&solid.temperature,&coupled.reference_temperatures_k,endpoint,dt,ordinal,state.value,state.vertex)?;
+                }
+                // Only accepted primal endpoints enter physical history or the tape.
                 old.clone_from(&solid.temperature);
                 time=endpoint;
                 if ordinal+1==schedule.intervals.len() && endpoint==end {
@@ -356,15 +362,19 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     }
     let residual=finite(stored-input+exhaust)?;
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
+    let (adjoint,reverse_work)=match tape {
+        Some(tape)=>tape.reverse(request,cx,schedule,&engine)?, None=>("null".into(),0),
+    };
+    let total_work=work.checked_add(reverse_work).ok_or_else(||budget("transient total work overflow"))?;
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
     let prefix=result.strip_suffix("}\n").ok_or_else(||bad("internal transient result framing"))?;
-    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"nonlinear\":{},\"scope\":\"initial state and accepted endpoints only; no inter-step peak/crossing certificate, transient adjoint, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
-        num(time)?,completed,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
+    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"nonlinear\":{},\"adjoint\":{},\"scope\":\"initial state and accepted endpoints only; fixed-grid discrete adjoints are separately disclosed when requested; no inter-step peak/crossing certificate, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
+        num(time)?,completed,total_work,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
         num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?,
-        nonlinear_stats.render(schedule.nonlinear)?);
+        nonlinear_stats.render(schedule.nonlinear)?,adjoint);
     poll(cx)?;
     Ok(Cycle {
-        trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps:completed},
+        trajectory:Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:total_work,steps:completed},
         final_temperature:old,duration_s:time,input_j:input,stored_j:stored,exhaust_j:exhaust,
         first_violation_s:first_violation,
     })
