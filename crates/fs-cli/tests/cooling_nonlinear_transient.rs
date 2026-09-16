@@ -63,8 +63,12 @@ fn a_constant_curve_matches_the_original_linear_material_trajectory() {
     close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),306.3431585002163,3e-5);
     close(doc.path(&["objective","value_k"]).and_then(J::as_f64).unwrap(),301.46723362812094,3e-5);
     close(trajectory.f64_field("stored_energy_change_j").unwrap(),536.2871880825311,3e-5);
-    let legacy=constant.replace(POLICY,"");
-    assert_ne!(legacy,constant);
+    // Even a flat sampled table retains its finite validity span. The old
+    // linear API intentionally refuses tables; use real scalar declarations.
+    let legacy=constant.replace(POLICY,"")
+        .replace(r#""conductivity_curve":{"temperature_k":[280,400],"conductivity_w_m_k":[20,20]}"#,r#""conductivity_w_m_k":20"#)
+        .replace(r#""conductivity_curve":{"temperature_k":[280,400],"conductivity_w_m_k":[2,2]}"#,r#""conductivity_w_m_k":2"#);
+    assert!(!legacy.contains("conductivity_curve"));
     let linear=document(&run(&write(&dir,"legacy.json",&legacy)));
     let a=doc.get("solid_temperatures_k").unwrap().as_array().unwrap();
     let b=linear.get("solid_temperatures_k").unwrap().as_array().unwrap();
