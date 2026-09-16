@@ -1,19 +1,22 @@
-//! One immutable-history backward-Euler step for partitioned thermal coupling.
+//! Immutable-history backward-Euler steps for partitioned thermal coupling.
 //!
-//! Every call solves `(C + dt K) delta = dt (b - K T_old)` from the SAME old
-//! field. A caller may iterate Robin references without advancing physical time
-//! repeatedly. Only its accepted coupled field becomes the next history.
+//! [`BackwardEuler::advance`] solves a linear correction from the SAME old
+//! field. [`BackwardEuler::advance_nonlinear`] solves the endpoint k(T) law
+//! with Newton/FGMRES. A caller may iterate Robin references without advancing
+//! physical time repeatedly. Only its accepted field becomes the next history.
 //!
-//! The exact P1 capacity, steady assembly, contact operator, boundary integrals
-//! and CG preconditioner are shared with the existing conduction implementation.
-//! Conductivity, heat capacity and contact laws are temperature independent.
-//! Air storage and a transient adjoint are not part of this solid-side API.
+//! Both paths share exact P1 capacity, steady assembly, contact operators,
+//! boundary integrals and discrete energy accounting. Heat capacity and contact
+//! resistance are temperature independent. No fluid storage or transient adjoint.
+
+mod nonlinear;
+pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
 
 use fs_exec::Cx;
 use fs_solver::{CgState, CsrOp, norm2};
 use fs_sparse::Csr;
 
-use crate::assemble::{assemble_operator_scaled_with_interfaces, reduce_matrix_and_lift, DofMap};
+use crate::assemble::{AssembledSystem, assemble_operator_scaled_with_interfaces, reduce_matrix_and_lift, DofMap};
 use crate::solve::{energy_balance, spd_preconditioner};
 use crate::{ConductionError, ConductionMesh, ConductionProblem, InterfaceFlux, LinearConfig,
     RobinFlux, ThermalInterfaces};
@@ -22,7 +25,8 @@ use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, Volumetri
 /// Work and absolute discrete energy-closure budgets for one solid step.
 #[derive(Debug, Clone, Copy)]
 pub struct StepConfig {
-    /// Krylov tolerance/budget, applied to the temperature-correction equation.
+    /// Krylov tolerance/budget. For the nonlinear entry point the iteration
+    /// cap covers ALL Newton corrections, not each correction separately.
     pub linear: LinearConfig,
     /// Maximum absolute storage-minus-net-input mismatch in joules.
     pub energy_tolerance_j: f64,
@@ -49,10 +53,11 @@ pub struct StepSolution {
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, joules; checked independently.
     pub energy_residual_j: f64,
-    /// Recomputed relative residual of the normalized correction solve.
+    /// Recomputed relative residual of the normalized correction solve (or
+    /// the worst such inner residual over nonlinear Newton corrections).
     /// Final absolute-temperature rounding is checked by the separate energy gate.
     pub relative_residual: f64,
-    /// Number of CG iterations for this solid response.
+    /// Total Krylov iterations for this solid response.
     pub krylov_iterations: usize,
 }
 
@@ -89,16 +94,51 @@ impl<'m> BackwardEuler<'m> {
         Ok(Self { mesh, capacity })
     }
 
-    /// Evaluate one endpoint, retaining the old state across every coupling trial.
+    /// Evaluate one constant-conductivity endpoint from immutable history.
     ///
     /// Existing Dirichlet values must already match history: an instantaneous
     /// prescribed-temperature jump is not silently assigned an energy impulse.
     /// Pure-Neumann transient problems are allowed because capacity anchors them.
     /// Invalid fields, nonlinear materials, nonconvergence and failed energy
-    /// closure return no new state. Constant matching-face contact is supported.
+    /// closure return no new state. Use [`Self::advance_nonlinear`] with an
+    /// explicit policy for k(T). Constant matching-face contact is supported.
     pub fn advance(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
         interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64, config: StepConfig)
         -> Result<StepSolution, ConductionError>
+    {
+        let dofs = self.admit_step(cx, problem, old, dt_s, config)?;
+        for e in 0..self.mesh.element_count() {
+            if e % 512 == 0 { poll(cx, e)?; }
+            let model = match problem.element_materials {
+                Some(materials) => materials.model_for(e)?, None => problem.material,
+            };
+            if model.is_temperature_dependent() {
+                return Err(invalid("linear backward Euler requires temperature-independent conductivity; use advance_nonlinear with an explicit nonlinear policy"));
+            }
+        }
+        let system = assemble_operator_scaled_with_interfaces(cx, self.mesh, problem.boundary,
+            problem.material, problem.source, old, None, interfaces, problem.element_materials)?;
+        let lhs = axpy_csr(&self.capacity, 1.0, &system.operator, dt_s);
+        // The unknown is a CORRECTION. Its fixed entries are zero; the absolute
+        // Dirichlet lift must not be added again to this right-hand side.
+        let (matrix, _) = reduce_matrix_and_lift(&lhs, &dofs);
+        let mut applied = vec![0.0; self.mesh.vertex_count()];
+        system.operator.spmv(old, &mut applied);
+        poll(cx, 0)?;
+        let rhs: Vec<f64> = dofs.free().iter().map(|&v| finite(dt_s * (system.load[v] - applied[v])))
+            .collect::<Result<_, _>>()?;
+        let (correction, relative_residual, krylov_iterations) = solve(cx, &matrix, &rhs, config.linear)?;
+        let mut temperature = old.to_vec();
+        for (slot, &v) in dofs.free().iter().enumerate() {
+            if slot % 512 == 0 { poll(cx, slot)?; }
+            temperature[v] = finite(old[v] + correction[slot])?;
+        }
+        self.finish_step(cx, problem, interfaces, old, dt_s, config, &dofs,
+            &system, temperature, relative_residual, krylov_iterations)
+    }
+
+    fn admit_step(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        old: &[f64], dt_s: f64, config: StepConfig) -> Result<DofMap, ConductionError>
     {
         poll(cx, 0)?;
         if !std::ptr::eq(self.mesh, problem.mesh) {
@@ -115,46 +155,30 @@ impl<'m> BackwardEuler<'m> {
         }
         for (i, &t) in old.iter().enumerate() { if i % 512 == 0 { poll(cx, i)?; } finite(t)?; }
         if let Some(materials) = problem.element_materials { materials.validate_for(self.mesh)?; }
-        for e in 0..self.mesh.element_count() {
-            if e % 512 == 0 { poll(cx, e)?; }
-            let model = match problem.element_materials {
-                Some(materials) => materials.model_for(e)?, None => problem.material,
-            };
-            if model.is_temperature_dependent() {
-                return Err(invalid("backward-Euler coupling requires temperature-independent conductivity"));
-            }
-        }
         let dofs = DofMap::new(problem.boundary, n)?;
         for &v in dofs.fixed() {
             if old[v] != dofs.prescribed()[v] {
                 return Err(invalid("history must match constant Dirichlet values; boundary jumps need an explicit impulse model"));
             }
         }
-        let system = assemble_operator_scaled_with_interfaces(cx, self.mesh, problem.boundary,
-            problem.material, problem.source, old, None, interfaces, problem.element_materials)?;
-        let lhs = axpy_csr(&self.capacity, 1.0, &system.operator, dt_s);
-        // The unknown is a CORRECTION. Its fixed entries are zero; the absolute
-        // Dirichlet lift must not be added again to this right-hand side.
-        let (matrix, _) = reduce_matrix_and_lift(&lhs, &dofs);
-        let mut applied = vec![0.0; n];
-        system.operator.spmv(old, &mut applied);
-        poll(cx, 0)?;
-        let rhs: Vec<f64> = dofs.free().iter().map(|&v| finite(dt_s * (system.load[v] - applied[v])))
-            .collect::<Result<_, _>>()?;
-        let (correction, relative_residual, krylov_iterations) = solve(cx, &matrix, &rhs, config.linear)?;
-        let mut temperature = old.to_vec();
-        for (slot, &v) in dofs.free().iter().enumerate() {
-            if slot % 512 == 0 { poll(cx, slot)?; }
-            temperature[v] = finite(old[v] + correction[slot])?;
-        }
+        Ok(dofs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_step(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64, config: StepConfig,
+        dofs: &DofMap, system: &AssembledSystem, temperature: Vec<f64>,
+        relative_residual: f64, krylov_iterations: usize) -> Result<StepSolution, ConductionError>
+    {
         // Account using the rounded temperature field that the caller actually
         // receives, not an unpublished high-accuracy correction vector.
         let delta: Vec<f64> = temperature.iter().zip(old).map(|(a,b)| a-b).collect();
+        let mut applied = vec![0.0; temperature.len()];
         self.capacity.spmv(&delta, &mut applied);
         poll(cx, 0)?;
         let stored_energy_change_j = sum(applied.iter().copied())?;
         let (energy, robin_fluxes) = energy_balance(self.mesh, problem.boundary, problem.source,
-            &system, &dofs, &temperature);
+            system, dofs, &temperature);
         let dirichlet_in_w = finite(energy.dirichlet_in_w
             + sum(dofs.fixed().iter().map(|&v| applied[v]))? / dt_s)?;
         let net = finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
