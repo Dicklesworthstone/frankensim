@@ -69,7 +69,8 @@ fn number<'a>(row: &'a JsonValue, key: &str) -> Result<(f64, &'a str)> {
 fn decode(spec: &ElasticitySpec, receipt: &JsonValue, design: &JsonValue,
     iterations: &JsonValue) -> Result<(GridSdf, OptimizeReport)> {
     let count = integer(receipt, "iterations_completed")?;
-    if count > spec.steps || integer(receipt, "target_iterations")? != spec.steps {
+    if count > spec.steps || integer(receipt, "target_iterations")? != spec.steps
+        || (receipt.str_field("status") == Some("completed") && count != spec.steps) {
         return Err(malformed("retained iteration count disagrees with the study"));
     }
     if iterations.str_field("schema") != Some("elasticity-study-iterations-v1")
@@ -206,7 +207,7 @@ pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         }
     };
     let completed = report.rows.len();
-    if completed == spec.steps {
+    if completed == spec.steps && last.as_ref().is_some_and(|out| out.status == "completed") {
         return last.ok_or_else(|| malformed("complete study has no retained receipt"));
     }
     if retained_wall >= spec.wall_s {
