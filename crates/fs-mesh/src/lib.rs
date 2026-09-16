@@ -36,6 +36,7 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+mod tet_refinement;
 mod uniform;
 mod volumetric;
 
@@ -61,6 +62,7 @@ pub use rounded_cylinder::{
     BoundaryPanelMesh, RoundedCylinderMeshError, RoundedCylinderMeshSpec, RoundedCylinderTetMesh,
     rounded_cylinder_tet_mesh,
 };
+pub use tet_refinement::{TetRefinement, TetRefinementError, TetRefinementLimits};
 pub use volumetric::{
     AdmittedPlc, AuditedLabeledTetComplex, ConstraintRecoveredPlc, FlatTetRepair,
     LabeledTetComplex, QualityCensus, RecoveryEvidence, RefinementEvidence, RefinementOptions,
