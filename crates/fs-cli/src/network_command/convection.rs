@@ -70,12 +70,12 @@ pub(super) fn parse(surface: &J) -> Result<(f64, Option<Law>)> {
 
 #[derive(Debug)]
 pub(super) struct Derived {
-    surface: String,
+    pub(super) surface: String,
     branch: String,
     flow: f64,
     velocity: f64,
     law: Law,
-    nu: NusseltEvaluation,
+    pub(super) nu: NusseltEvaluation,
     h: f64,
 }
 
