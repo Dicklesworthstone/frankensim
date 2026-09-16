@@ -5,7 +5,7 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub(super) enum Target {
+pub(crate) enum Target {
     Uniform,
     Isotropic(String),
     Principal { material: String, axis: usize },
@@ -62,14 +62,18 @@ impl Target {
             }
             Self::Isotropic(name) => {
                 let material = material(base, name)?;
-                if material.get("orthotropic").is_some() || material.get("conductivity_tensor_w_m_k").is_some() {
-                    return Err(bad("material-conductivity requires an isotropic scalar material; do not scalarize a tensor"));
+                if material.get("orthotropic").is_some() || material.get("conductivity_tensor_w_m_k").is_some()
+                    || material.get("conductivity_curve").is_some()
+                {
+                    return Err(bad("material-conductivity requires an isotropic scalar material; do not scalarize a tensor or temperature law"));
                 }
                 positive(field(material, "conductivity_w_m_k")?, "material conductivity")?;
             }
             Self::Principal { material: name, axis } => {
                 let material = material(base, name)?;
-                if material.get("conductivity_w_m_k").is_some() || material.get("conductivity_tensor_w_m_k").is_some() {
+                if material.get("conductivity_w_m_k").is_some() || material.get("conductivity_tensor_w_m_k").is_some()
+                    || material.get("conductivity_curve").is_some()
+                {
                     return Err(bad("material-principal-conductivity requires an explicit orthotropic declaration"));
                 }
                 let values = array(field(field(material, "orthotropic")?, "conductivity_w_m_k")?, "principal conductivities", 3)?;
@@ -153,6 +157,8 @@ mod tests {
         assert!(Target::Isotropic("missing".into()).validate(&base).is_err());
         assert!(Target::parse(&J::parse(r#"{"kind":"material-principal-conductivity","material":"board","axis":3}"#).unwrap()).is_err());
         assert!(Target::parse(&J::parse(r#"{"kind":"material-conductivity","material":"metal","axis":0}"#).unwrap()).is_err());
+        let curve = J::parse(r#"{"solid":{"materials":[{"name":"metal","conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,2]}}],"element_materials":["metal"]}}"#).unwrap();
+        assert!(Target::Isotropic("metal".into()).validate(&curve).is_err());
         let original = base.clone();
         for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(Target::Isotropic("metal".into()).apply(&mut base, value).is_err());
