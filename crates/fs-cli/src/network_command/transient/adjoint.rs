@@ -146,8 +146,13 @@ impl Tape {
                     let mut weights = binding.zero_objective();
                     weights.nodal_temperatures.clone_from(&carry);
                     if index + 1 == selected {
-                        let states: Vec<_> = step.primal().robin_fluxes.iter()
-                            .map(SolidRegionState::from_robin_flux).collect();
+                        // The port vectors use NETWORK order, which can differ
+                        // from the boundary declaration order in the report.
+                        let states = names.iter().map(|name| step.primal().robin_fluxes.iter()
+                            .find(|flux| flux.region == *name)
+                            .map(SolidRegionState::from_robin_flux)
+                            .ok_or_else(|| bad("reconstructed endpoint lacks an objective port")))
+                            .collect::<Result<Vec<_>>>()?;
                         let objective = request.objective.evaluate(cx,&frame.temperature,&states)?;
                         if objective.vertex != frame.vertex || objective.value.to_bits() != frame.objective.to_bits() {
                             return Err(producer("transient adjoint objective branch changed during reconstruction"));
