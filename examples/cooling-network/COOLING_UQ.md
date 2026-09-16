@@ -13,8 +13,8 @@ cargo run -p fs-cli --bin frankensim -- --json cooling-network-uq \
 The first argument is an ordinary **steady** cooling-network request. It must
 have `objective.gradient=false` and may not contain transient or design controls.
 The second document uses schema `frankensim.cooling-network-uq.v1` and declares a
-fixed sample count, deterministic seed, whole-run wall budget, optional
-temperature limit, explicit dependence, and uncertain parameters.
+fixed lifetime sample count, deterministic seed, per-invocation evaluation-time
+budget, optional temperature limit, explicit dependence, and uncertain parameters.
 
 Supported parameter targets are:
 
@@ -60,11 +60,82 @@ Each sample is handed to a child invocation of the same `frankensim
 --json cooling-network /dev/stdin` binary. This deliberately spends process
 startup time to ensure the parser and physics product boundary are identical to a
 normal cooling run. The present handoff therefore targets the repository's Unix
-platforms (Linux/macOS). The parent drains bounded child output concurrently and
-kills the active child if the declared whole-UQ wall budget expires. No partial
-distribution is published after budget exhaustion or a failed model sample.
+platforms (Linux/macOS). The parent feeds stdin and drains bounded child output
+concurrently, so a blocked request write cannot disable its deadline watchdog.
+The active child is killed and reaped when the invocation's evaluation budget
+expires. Input parsing, executable hashing, and final filesystem synchronization
+are outside that evaluation-time allowance; this is not a hard real-time bound
+on process startup or I/O.
+
+## Checkpoint and resume expensive runs
+
+Add `--checkpoint NEW-PATH` to retain each completed sample using the existing
+`fs-uq` checkpoint format. The destination must not exist. Each update is written
+to a sibling staging file, synced, and atomically renamed over the output that
+this invocation reserved. Unix directory synchronization persists the rename.
+A staging/write error refuses the command rather than reporting saved work.
+An abrupt stop can leave a `.pending` file; the previously published checkpoint
+remains the last accepted prefix. Resume to a fresh destination rather than
+removing or reusing that staging file automatically.
+
+For example, pause the eight-sample example after three actual cooling solves:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-fan-hotspot.json \
+  --checkpoint first.uqcp --max-new-samples 3
+```
+
+This deliberately returns the `BUDGET` exit status and a
+`frankensim.cooling-network-uq.progress.v1` document: three samples retained,
+next ordinal three, and termination `sample-chunk`. It does **not** publish a
+partial distribution or a compliance decision. `--max-new-samples 0` is allowed
+for admitting and checkpointing an empty prefix; a chunk limit always requires
+`--checkpoint` so paid work is not discarded.
+
+Continue the same plan, without rerunning the three accepted solves:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-fan-hotspot.json \
+  --resume first.uqcp --checkpoint completed.uqcp
+```
+
+A wall-time interruption also retains a checkpoint and returns progress with
+termination `wall-time-budget`. If the child was interrupted before delivering
+its QoI, that sample is retried with the **same seed and ordinal** on resume.
+Completed samples are not rerun; interrupted samples are never skipped or
+replaced by zeros. A real child refusal or non-finite result is different: it
+permanently refuses the execution and invalidates this invocation's output with
+a retained failure diagnosis that the checkpoint decoder rejects.
+
+The original sample count, parameter ordering, distributions, dependence,
+threshold and seed remain immutable across resume. `wall_seconds` is a new
+per-invocation evaluation allowance and may be changed without changing the
+sample sequence; `--max-new-samples` also does not reset the lifetime count.
+A completed checkpoint is terminal and returns the completed report without
+additional cooling evaluations.
+
+Resume binds the exact base-request bytes (even whitespace), parameter-target
+lowering, and executable content, as well as every library plan field. A changed
+base model, seed, plan, executable, corrupt payload, or excessive observation
+count refuses before any child evaluation or new output reservation. The resume
+input is never overwritten; use a new checkpoint path for further progress.
+Without `--checkpoint`, the legacy two-argument command still refuses budget
+exhaustion without publishing partial statistics.
+
+Checkpoints must come from a trusted source. BLAKE3 detects accidental corruption
+and identity mismatch; it does not authenticate the producer or prove that stored
+observations came from the model. Do not replace the installation during a run;
+Linux pins hashing and child launch to `/proc/self/exe`, while other platforms
+use the current executable pathname. The same deterministic software/hardware
+profile is still required for bitwise numerical replay.
 
 For deterministic replay, the Philox sample ordinal is keyed to the UQ seed and
 fixed plan. Running the same base model and UQ document produces the same sample
 vectors; deterministic cooling mode then provides the same empirical reduction
-on the same admitted software/hardware profile.
+on the same admitted software/hardware profile. The integration regression
+compares both final result bytes and final checkpoint bytes for uninterrupted
+execution versus a 3+2+3 split through real cooling child solves.
