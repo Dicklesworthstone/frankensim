@@ -6,7 +6,7 @@ use fs_conduction::transient::backward_euler::{NonlinearStepConfig, NonlinearSte
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Config {
-    policy: NonlinearStepConfig,
+    pub(super) policy: NonlinearStepConfig,
 }
 
 impl Config {
