@@ -2,7 +2,7 @@
 //! Air is quasi-steady at each endpoint. Coupling iterations always reuse the
 //! previous accepted solid field. An explicit nonlinear policy evaluates k(T)
 //! at the endpoint on every Newton trial, including adaptive/sizing trials.
-//! An explicit adjoint policy differentiates fixed nonrepeated schedules.
+//! An explicit adjoint policy differentiates fixed schedules and cycle counts.
 //! No continuous-time peak bound or adaptive-time-grid derivative is inferred.
 
 mod workload;
@@ -47,8 +47,16 @@ impl Schedule {
             "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "fan_speed_design", "power_design", "repeat"], "transient")?;
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
-        if adjoint.is_some() && ["adaptive","repeat","fan_speed_design","power_design"].iter().any(|key| value.get(key).is_some()) {
-            return Err(bad("transient adjoints require a fixed, nonrepeated schedule without nested design searches"));
+        if adjoint.is_some() {
+            if ["adaptive","fan_speed_design","power_design"].iter().any(|key| value.get(key).is_some()) {
+                return Err(bad("transient adjoints require fixed timesteps without nested design searches"));
+            }
+            if let Some(repeated) = value.get("repeat") {
+                if repeated.get("cycles").is_none() || repeated.get("until_periodic").is_some()
+                    || repeated.get("fan_controller").is_some() {
+                    return Err(bad("repeated adjoints require a fixed cycle count without periodic stopping or a fan controller"));
+                }
+            }
         }
         let initial = match (value.get("initial_temperature_k"), value.get("initial_temperatures_k")) {
             (Some(t),None) => vec![positive(t,"initial_temperature_k")?;vertices],
@@ -240,12 +248,21 @@ struct Cycle {
 /// time starts at zero so large global cycle counts cannot distort timesteps.
 fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
     initial_field:&[f64],remaining_steps:usize)->Result<Cycle> {
+    simulate_cycle_recorded(request,cx,schedule,speed_multiplier,initial_field,remaining_steps,None)
+}
+
+/// The optional caller-owned tape spans complete fixed cycles. Its offset is
+/// only a reporting coordinate: dt and every physical solve stay in local time.
+fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
+    initial_field:&[f64],remaining_steps:usize,
+    mut recording:Option<(&mut adjoint::Tape,f64)>)->Result<Cycle> {
     poll(cx)?;
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
     }
-    if schedule.adjoint.is_some() && (speed_multiplier != 1.0 || initial_field != schedule.initial.as_slice()) {
-        return Err(bad("transient adjoints require the declared initial state and fixed schedule speeds"));
+    if schedule.adjoint.is_some() && (speed_multiplier != 1.0
+        || (recording.is_none() && initial_field != schedule.initial.as_slice())) {
+        return Err(bad("transient adjoints require the declared schedule or its accepted repeated history"));
     }
     nonlinear::admit(request,cx,schedule.nonlinear)?;
     for interval in &schedule.intervals { interval.workload.validate(request,cx)?; }
@@ -257,7 +274,11 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
     let max_steps=schedule.max_steps.min(remaining_steps);
     let mut old=initial_field.to_vec();
     let (initial,initial_vertex)=initial_objective(request,cx,&old)?;
-    let mut tape=adjoint::Tape::new(request,schedule,initial,initial_vertex)?;
+    let mut tape=if recording.is_some() { None }
+        else { adjoint::Tape::new(request,schedule,initial,initial_vertex)? };
+    if let Some((tape,offset))=recording.as_mut() {
+        tape.begin_cycle(initial,initial_vertex,*offset)?;
+    }
     let mut peak=initial;
     let mut peak_time=0.0;
     let mut first_violation=schedule.limit.filter(|&limit|initial>limit).map(|_|0.0);
@@ -280,7 +301,7 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
             (None,None)=>request.flow(cx)?,
             _=>return Err(bad("transient drive/speed mismatch")),
         };
-        let base=request.surfaces.iter().map(|s|(s.name.clone(),s.h)).collect();
+        let base=request.surfaces.iter().map(|s|(s.name.clone(),s.h)) .collect();
         let (coefficients,mut derived)=convection::resolve(request,cx,&flow,&base)?;
         let network=request.transport(cx,&flow,&coefficients)?;
         let load=interval.workload.prepare(request,cx)?;
@@ -339,6 +360,10 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
                     optional(estimate.filter(|_|sample_index==last_sample))?));
                 if let Some(tape)=tape.as_mut() {
                     tape.record(&solid.temperature,&coupled.reference_temperatures_k,endpoint,dt,ordinal,state.value,state.vertex)?;
+                }
+                if let Some((tape,offset))=recording.as_mut() {
+                    tape.record(&solid.temperature,&coupled.reference_temperatures_k,
+                        finite(*offset+endpoint)?,dt,ordinal,state.value,state.vertex)?;
                 }
                 // Only accepted primal endpoints enter physical history or the tape.
                 old.clone_from(&solid.temperature);
