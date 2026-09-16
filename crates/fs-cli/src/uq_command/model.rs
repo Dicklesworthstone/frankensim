@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::BTreeSet;
 
+mod contact;
 mod material;
 mod qoi;
 mod transient;
@@ -14,6 +15,7 @@ pub(super) enum Target {
     FanSpeedRatio,
     SurfaceHtc(String),
     ComponentPower(String),
+    Contact(contact::Target),
     Material(material::Target),
     Transient(transient::Target),
 }
@@ -26,6 +28,7 @@ impl Target {
             Self::FanSpeedRatio => "hydraulics.fan.speed_ratio".into(),
             Self::SurfaceHtc(name) => format!("surface[{name}].htc_w_m2_k"),
             Self::ComponentPower(name) => format!("component[{name}].power_w"),
+            Self::Contact(target) => target.name(),
             Self::Material(target) => target.name(),
             Self::Transient(target) => target.name(),
         }
@@ -38,6 +41,7 @@ impl Target {
             Self::FanSpeedRatio => "1",
             Self::SurfaceHtc(_) => "W/(m2 K)",
             Self::ComponentPower(_) => "W",
+            Self::Contact(_) => "m2 K/W",
             Self::Material(_) => "W/(m K)",
             Self::Transient(target) => target.unit(),
         }
@@ -57,6 +61,7 @@ impl Target {
             Self::FanSpeedRatio => "{\"kind\":\"fan-speed-ratio\"}".into(),
             Self::SurfaceHtc(name) => format!("{{\"kind\":\"surface-htc\",\"surface\":{}}}", quote(name)),
             Self::ComponentPower(name) => format!("{{\"kind\":\"component-power\",\"component\":{}}}", quote(name)),
+            Self::Contact(target) => target.render(),
             Self::Material(target) => target.render(),
             Self::Transient(target) => target.render(),
         }
@@ -205,6 +210,7 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
                 return Err(bad("absolute interval workloads override base component watts; use interval-component-power"));
             }
         }
+        Target::Contact(target) => target.validate(base)?,
         Target::Material(target) => target.validate(base)?,
         Target::Transient(target) => target.validate(base)?,
     }
@@ -212,6 +218,7 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
 }
 
 fn parse_target(value: &J) -> Result<Target> {
+    if let Some(target) = contact::Target::parse(value)? { return Ok(Target::Contact(target)); }
     if let Some(target) = material::Target::parse(value)? { return Ok(Target::Material(target)); }
     if let Some(target) = transient::Target::parse(value)? { return Ok(Target::Transient(target)); }
     object(value, &["kind", "index", "surface", "component"], "target")?;
@@ -281,6 +288,7 @@ fn apply_target(root: &mut J, target: &Target, value: f64) -> Result<()> {
             let component = components.iter_mut().find(|component| component.str_field("name") == Some(name.as_str())).ok_or_else(|| bad("sample target component disappeared"))?;
             set_member_number(component, "watts", value)
         }
+        Target::Contact(target) => target.apply(root, value),
         Target::Material(target) => target.apply(root, value),
         Target::Transient(target) => target.apply(root, value),
     }
