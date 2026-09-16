@@ -54,6 +54,7 @@ impl Config {
     /// Validate the entire schedule's endpoint speeds before running any trial.
     /// A valid speed domain does not waive flow/correlation admission at runtime.
     pub(super) fn validate(&self, schedule: &Schedule, fan: Option<&fan_drive::FanDrive>) -> Result<()> {
+        if schedule.adjoint.is_some() { return Err(bad("transient adjoints cannot be nested inside sizing")); }
         if schedule.limit.is_none() { return Err(bad("transient sizing requires transient.temperature_limit_k")); }
         if self.control == Control::WorkloadPower {
             for interval in &schedule.intervals { scaled_workload(&interval.workload,self.maximum)?; }
@@ -211,7 +212,7 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
     }).collect::<Result<Vec<_>>>()?;
     Ok(Schedule {initial:schedule.initial.clone(),capacities:schedule.capacities.clone(),intervals,
         limit:schedule.limit,total_steps:schedule.total_steps,max_step_s:schedule.max_step_s,max_steps:schedule.max_steps,
-        adaptive:schedule.adaptive,nonlinear:schedule.nonlinear,
+        adaptive:schedule.adaptive,nonlinear:schedule.nonlinear,adjoint:schedule.adjoint,
         fan_speed_design:None,power_design:None,repeat:schedule.repeat})
 }
 
