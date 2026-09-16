@@ -72,9 +72,20 @@ impl SolidData {
             }
             _ => return Err(bad("use either conductivity_w_m_k or both materials and element_materials, never a mixture")),
         };
-        let source = match (solid.get("source_w_m3"), solid.get("component_power")) {
-            (Some(value), None) => number(value, "source_w_m3")?,
-            (None, Some(value)) => {
+        let source = match (solid.get("source_w_m3"), solid.get("component_power"), solid.get("nodal_source_w_m3")) {
+            (Some(value), None, None) => number(value, "source_w_m3")?,
+            (None, None, Some(value)) => {
+                let entries = array(value,"nodal_source_w_m3",mesh.vertex_count())?;
+                if entries.len()!=mesh.vertex_count() {
+                    return Err(bad("nodal_source_w_m3 requires exactly one density per solid vertex"));
+                }
+                let source = ScalarField::Nodal(entries.iter().map(|v|number(v,"nodal source density"))
+                    .collect::<Result<Vec<_>>>()?);
+                source.validate("nodal source density",mesh.vertex_count()).map_err(producer)?;
+                data.nodal_source=Some(source);
+                0.0
+            }
+            (None, Some(value), None) => {
                 object(value, &["total_w", "relative_tolerance", "components"], "component_power")?;
                 let total = number(get(value, "total_w")?, "component_power.total_w")?;
                 let tolerance = number(get(value, "relative_tolerance")?, "component_power.relative_tolerance")?;
@@ -101,7 +112,7 @@ impl SolidData {
                 // No additional uniform background source was declared.
                 0.0
             }
-            _ => return Err(bad("use exactly one of source_w_m3 and component_power")),
+            _ => return Err(bad("use exactly one of source_w_m3, nodal_source_w_m3 and component_power")),
         };
         Ok((data, fallback, source))
     }
@@ -126,6 +137,8 @@ impl SolidData {
                 .collect::<Result<Vec<_>>>()?.join(",");
             format!("{{\"mode\":\"component-power\",\"projection\":\"lumped-volume-normalized nodal P1 support\",\"declared_total_w\":{},\"delivered_total_w\":{},\"uncertainty_w\":null,\"components\":[{rows}]}}",
                 num(audit.declared_total_w())?, num(audit.delivered_total_w())?)
+        } else if let Some(ScalarField::Nodal(values)) = &self.nodal_source {
+            format!("{{\"mode\":\"nodal-p1-density\",\"nodal_source_w_m3\":{},\"scope\":\"piecewise-linear volumetric source; values are densities, not nodal watts\"}}",numbers(values)?)
         } else { format!("{{\"mode\":\"uniform\",\"source_w_m3\":{}}}", num(uniform_source)?) };
         Ok(format!("{{\"constitutive\":{materials},\"heating\":{heating}}}"))
     }
