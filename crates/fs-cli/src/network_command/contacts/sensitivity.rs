@@ -62,7 +62,7 @@ impl Trace {
 impl Contacts {
     /// The supplied gradient must be the coupled load pullback at THIS field.
     /// Production calls this only from Evaluation's retained primal/adjoint.
-    pub(super) fn log_resistance_gradients(&self, temperature: &[f64], adjoint: &[f64]) -> Result<Vec<f64>> {
+    pub(crate) fn log_resistance_gradients(&self, temperature: &[f64], adjoint: &[f64]) -> Result<Vec<f64>> {
         if temperature.len() != self.vertex_count || adjoint.len() != self.vertex_count {
             return Err(bad("contact sensitivity requires the complete primal and coupled nodal-load adjoint"));
         }
@@ -74,7 +74,7 @@ impl Contacts {
         }).collect()
     }
 
-    pub(super) fn sensitivity_json(&self, temperature: &[f64], gradient: Option<&CoupledGradient>) -> Result<String> {
+    pub(crate) fn sensitivity_json(&self, temperature: &[f64], gradient: Option<&CoupledGradient>) -> Result<String> {
         let Some(gradient) = gradient else { return Ok("null".into()); };
         let values = self.log_resistance_gradients(temperature, &gradient.nodal_load)?;
         let rows = self.declarations.iter().zip(values).map(|(row, value)| {
