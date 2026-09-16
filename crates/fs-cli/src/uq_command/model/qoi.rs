@@ -71,8 +71,8 @@ impl Qoi {
             Self::TransientPeak { repeated_cycles } => {
                 let cycle_peak = result_number(document.path(&["transient", "sampled_peak_objective_k"]),
                     "transient.sampled_peak_objective_k")?;
-                if cycle_peak < final_value {
-                    return Err(model_failure("transient sampled peak is below its final objective"));
+                if final_value <= 0.0 || cycle_peak < final_value {
+                    return Err(model_failure("transient sampled peak is below its final objective or has invalid absolute temperatures"));
                 }
                 match repeated_cycles {
                     None => {
@@ -101,20 +101,16 @@ impl Qoi {
         }
     }
 
-    pub(crate) fn render(self, base: &J) -> Result<String> {
-        let objective = field(base, "objective")?;
-        let spatial = if objective.get("mean_wall_region").is_some() { "mean_wall_region" }
-            else if objective.get("max_wall_region").is_some() { "max_wall_region" }
-            else if objective.get("max_solid_temperature").is_some() { "max_solid_temperature" }
-            else { "max_vertices" };
-        Ok(match self {
-            // Preserve the established steady result shape and bytes.
+    /// Both result forms use the same temporal/spatial interpretation. The
+    /// spatial label comes from the existing admitted objective selector.
+    pub(crate) fn render(self, spatial: &str) -> String {
+        match self {
             Self::Steady => format!("{{\"kind\":{},\"unit\":\"K\"}}", quote(spatial)),
             Self::TransientPeak { repeated_cycles } => format!(
                 "{{\"kind\":\"transient-sampled-peak\",\"spatial_kind\":{},\"unit\":\"K\",\"observation\":\"one-completed-trajectory\",\"temporal_scope\":\"initial-state-and-accepted-endpoints\",\"cycles\":{},\"continuous_time_bound\":false}}",
                 quote(spatial), repeated_cycles.unwrap_or(1),
             ),
-        })
+        }
     }
 
     pub(crate) fn no_claim(self) -> &'static str {
@@ -126,8 +122,8 @@ impl Qoi {
 }
 
 fn result_number(value: Option<&J>, name: &str) -> Result<f64> {
-    value.and_then(J::as_f64).filter(|v| v.is_finite() && *v > 0.0)
-        .ok_or_else(|| model_failure(format!("cooling sample has no positive finite {name}")))
+    value.and_then(J::as_f64).filter(|v| v.is_finite())
+        .ok_or_else(|| model_failure(format!("cooling sample has no finite {name}")))
 }
 
 #[cfg(test)]
