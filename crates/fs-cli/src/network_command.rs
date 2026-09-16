@@ -315,7 +315,7 @@ impl Request {
             path.iter().map(|name| {
                 let surface = by_name[name.as_str()];
                 AirSegment::new(name, surface.area, htc[name]).map_err(producer)
-            }).collect::<Result<Vec<_>>>()?;
+            }).collect::<Result<Vec<_>>>().map(BranchThermalModel::Exchange)
         }).collect::<Result<Vec<_>>>()?;
         TransportNetwork::new(cx, flow, self.air, models, &self.inlets, TransportConfig {
             absolute_flow_tolerance: VolumetricFlowRate::new(self.limits.flow), relative_flow_tolerance: 0.0,
