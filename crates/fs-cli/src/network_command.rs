@@ -108,7 +108,7 @@ fn positive(value: &J, field: &str) -> Result<f64> {
     if n <= 0.0 { Err(bad(format!("{field} must be positive"))) } else { Ok(n) }
 }
 fn integer(value: &J, field: &str, max: usize) -> Result<usize> {
-    let n = integer(value, field, max)?;
+    let n = integer_raw(value, field)?;
     if n > max { Err(bad(format!("{field} exceeds {max}"))) } else { Ok(n) }
 }
 fn integer_raw(value: &J, field: &str) -> Result<usize> {
@@ -190,7 +190,7 @@ impl Request {
                 let face: Vec<_> = key.iter().enumerate().filter_map(|(i, &v)| (i != omitted).then_some(v)).collect();
                 let count = face_counts.entry(face).or_insert(0_usize);
                 *count += 1;
-                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells"))); }
+                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells")); }
             }
             tets.push(tet);
         }
