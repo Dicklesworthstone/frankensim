@@ -1,7 +1,7 @@
 //! Shared production policy for steady solves and immutable-old-state transient
 //! coupling trials. No hidden retry, added physics solve, or enlarged budget.
 use super::*;
-use fs_couple::iqn_ils::IqnIlsConfig;
+use fs_airflow::conjugate::IqnIlsConfig;
 use fs_airflow::graph::thermal::transport::TransportError;
 
 pub(super) const POLICY: IqnIlsConfig = IqnIlsConfig {
