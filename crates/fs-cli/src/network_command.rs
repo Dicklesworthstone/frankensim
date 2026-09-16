@@ -14,6 +14,7 @@ mod contacts;
 mod transient;
 mod acceleration;
 mod fan_gradient;
+mod mesh_convergence;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -41,8 +42,8 @@ use json::JsonValue as J;
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
-const NO_CLAIM: &str = "nominal fixed-geometry solid model; hydraulics and convection coefficients frozen within each thermal solve; caller-declared constant isotropic/anisotropic or bounded scalar k(T) materials and frozen fluid properties; k(T) transients require explicit Newton/Armijo settings and temperature-independent heat capacity; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; explicit matching-P1 contacts have fixed caller-declared resistance; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, nonmatching contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients (including contact resistance), and effective-h or full\nfan-speed target searches. All quantities use coherent SI. Transient k(T)\nrequires explicit transient.nonlinear settings; heat capacity remains constant.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md and CONTACT_COOLING.md. Results are nominal\nestimates, not validated hardware or ledger-backed .fsim runs.\n";
+const NO_CLAIM: &str = "nominal fixed-geometry solid model; hydraulics and convection coefficients frozen within each thermal solve; caller-declared constant isotropic/anisotropic or bounded scalar k(T) materials and frozen fluid properties; k(T) transients require explicit Newton/Armijo settings and temperature-independent heat capacity; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; explicit matching-P1 contacts have fixed caller-declared resistance; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, nonmatching contact, radiation, uncertainty certification, certified mesh-error or experimental-validation claim; not a .fsim or ledger-backed solve";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients (including contact resistance), and effective-h or full\nfan-speed target searches. All quantities use coherent SI. Transient k(T)\nrequires explicit transient.nonlinear settings; heat capacity remains constant.\nOptional mesh_convergence runs successive steady meshes with preserved P1\nsource fields; repeated agreement is measured, not a continuum error bound.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md, CONTACT_COOLING.md and MESH_CONVERGENCE.md.\nResults are nominal estimates, not validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -75,6 +76,7 @@ struct Request {
     fan: Option<fan_drive::FanDrive>,
     fan_speed_design: Option<fan_speed::FanSpeedDesign>,
     transient: Option<transient::Schedule>,
+    mesh_convergence: Option<mesh_convergence::Study>,
     objective: objective::Objective, gradient: bool, limits: Limits, design: Option<design::DesignRequest>,
 }
 #[derive(Debug)]
@@ -146,7 +148,7 @@ impl Request {
     fn parse(text: &str) -> Result<Self> {
         if text.len() as u64 > MAX_INPUT_BYTES { return Err(bad("request exceeds 16 MiB")); }
         let root = J::parse(text).map_err(bad_parse)?;
-        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design", "fan_speed_design", "transient"], "request")?;
+        object(&root, &["schema", "units", "seed", "budgets", "tolerances", "air", "hydraulics", "solid", "objective", "design", "fan_speed_design", "transient", "mesh_convergence"], "request")?;
         if get(&root, "schema")?.as_str() != Some(SCHEMA) || get(&root, "units")?.as_str() != Some("SI") {
             return Err(bad("expected schema frankensim.cooling-network.v1 and units SI"));
         }
@@ -171,11 +173,11 @@ impl Request {
         let a = object(get(&root, "air")?, &["density_kg_m3", "specific_heat_j_kg_k"], "air")?;
         let air = TransportAir { density: Density::new(positive(get(a, "density_kg_m3")?, "density_kg_m3")?),
             specific_heat_j_kg_k: positive(get(a, "specific_heat_j_kg_k")?, "specific_heat_j_kg_k")? };
-        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "materials", "element_materials", "source_w_m3", "component_power", "adiabatic_remainder", "surfaces", "contacts"], "solid")?;
+        let s = object(get(&root, "solid")?, &["vertices_m", "tetrahedra", "conductivity_w_m_k", "materials", "element_materials", "source_w_m3", "nodal_source_w_m3", "component_power", "adiabatic_remainder", "surfaces", "contacts"], "solid")?;
         let mut positions = Vec::new();
         for point in array(get(s, "vertices_m")?, "vertices_m", 20_000)? {
             let xyz = array(point, "vertex", 3)?;
-            if xyz.len() != 3 { return Err(bad("each vertex requires three metre coordinates")); }
+            if xyz.len() != 3 { return Err(bad("each vertex requires three metre coordinates"))); }
             positions.push([number(&xyz[0], "x")?, number(&xyz[1], "y")?, number(&xyz[2], "z")?]);
         }
         if positions.len() < 4 { return Err(bad("at least four vertices required")); }
@@ -191,7 +193,7 @@ impl Request {
                 let face: Vec<_> = key.iter().enumerate().filter_map(|(i, &v)| (i != omitted).then_some(v)).collect();
                 let count = face_counts.entry(face).or_insert(0_usize);
                 *count += 1;
-                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells")); }
+                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells"))); }
             }
             tets.push(tet);
         }
@@ -278,8 +280,11 @@ impl Request {
         if transient.is_some() && (gradient || design.is_some() || fan_speed_design.is_some()) {
             return Err(bad("transient requires gradient=false and no steady design search"));
         }
+        let mesh_convergence = root.get("mesh_convergence")
+            .map(|value|mesh_convergence::Study::parse(value,&root)).transpose()?;
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
-            conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, transient, objective, gradient, limits, design })
+            conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, transient,
+            mesh_convergence, objective, gradient, limits, design })
     }
 
     fn flow(&self, cx: &Cx<'_>) -> Result<GraphSolution> {
@@ -457,6 +462,7 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
 }
 
 fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
+    if let Some(study)=&request.mesh_convergence { return study.solve(gate); }
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
         let cx = Cx::new(gate, arena, StreamKey { seed: request.seed, kernel_id: 717, tile: 0, iteration: 0 },
             Budget::INFINITE, ExecMode::Deterministic);
@@ -509,7 +515,7 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     let request = match Request::parse(&text) {
         Ok(r) => r,
         Err(e) => {
-            let class = if e.code == "cooling-network-transient-budget" { exit::BUDGET } else { exit::REFUSED };
+            let class = if matches!(e.code,"cooling-network-transient-budget"|"cooling-network-mesh-budget") { exit::BUDGET } else { exit::REFUSED };
             return diagnostic(class, e, json_mode);
         }
     };
@@ -532,7 +538,7 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     match result {
         Ok(stdout) => CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() },
         Err(e) => {
-            let class = if matches!(e.code, "cooling-network-design-budget" | "cooling-network-transient-budget") { exit::BUDGET } else { exit::REFUSED };
+            let class = if matches!(e.code, "cooling-network-design-budget" | "cooling-network-transient-budget" | "cooling-network-mesh-budget") { exit::BUDGET } else { exit::REFUSED };
             diagnostic(class, e, json_mode)
         }
     }
