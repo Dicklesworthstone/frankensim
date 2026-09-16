@@ -10,6 +10,16 @@ sbh check --need 20G "$build_root"
 command -v xcodegen >/dev/null
 xcodegen generate --spec project.yml
 git diff --exit-code -- FrankenSim.xcodeproj Sources/Info.plist
+display_name="$(plutil -extract CFBundleDisplayName raw Sources/Info.plist)"
+if [[ "$display_name" != "FrankenSim" ]]; then
+  echo "FrankenSim identity drift: expected CFBundleDisplayName=FrankenSim, got '$display_name'" >&2
+  exit 1
+fi
+bundle_version="$(plutil -extract CFBundleVersion raw Sources/Info.plist)"
+if [[ "$bundle_version" != '$(CURRENT_PROJECT_VERSION)' ]]; then
+  echo "FrankenSim build-number drift: CFBundleVersion must derive from CURRENT_PROJECT_VERSION, got '$bundle_version'" >&2
+  exit 1
+fi
 git ls-files -z -- '*.swift' | xargs -0 xcrun swiftc -parse
 plutil -lint Sources/Info.plist
 plutil -lint Sources/PrivacyInfo.xcprivacy
