@@ -92,7 +92,7 @@ impl Output {
         self.publish(format!("FRANKENSIM-UQ-FAILED\n{message}\n").as_bytes())
     }
 
-    fn publish(&self, bytes: &[u8]) -> Result<()> {
+    pub(super) fn publish(&self, bytes: &[u8]) -> Result<()> {
         let mut staging = OpenOptions::new().write(true).create_new(true).open(&self.staging)
             .map_err(|error| failure(format!("cannot stage checkpoint: {error}")))?;
         staging.write_all(bytes).and_then(|()| staging.sync_all())
