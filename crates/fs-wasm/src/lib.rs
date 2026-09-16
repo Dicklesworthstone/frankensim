@@ -49,6 +49,7 @@ pub mod dynamics;
 pub mod flagships;
 pub mod geom;
 pub mod pde;
+pub mod philox_normals;
 
 pub use brownian::{
     BROWNIAN_MAX_OUTPUT_LEN, BROWNIAN_STREAM_KERNEL_ID, admit_brownian_checkpoint,

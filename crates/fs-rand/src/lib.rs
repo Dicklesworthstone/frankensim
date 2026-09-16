@@ -22,6 +22,7 @@ pub mod cbc_exec;
 pub mod cbc_limb;
 pub mod dist;
 pub mod philox;
+pub mod philox_normals;
 pub mod qmc;
 pub mod ziggurat;
 
@@ -64,7 +65,7 @@ pub const STREAM_POSITION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=none",
     "semantic_fields=seed-low,seed-high,kernel,tile,index-low,index-high",
     "excluded_fields=worker:execution-order-only,thread:execution-order-only,schedule:execution-order-only",
-    "consumers=Stream::at,Stream::next_u64,Stream::next_f64,Stream::next_below,Stream::next_normal,Stream::next_normal_ziggurat,Stream::next_exponential,Stream::fill_u64,Stream::fill_f64,fs-rand::dist,fs-rand::qmc,fs-rand:distribution-stream-golden,fs-rand:ziggurat-stream-golden",
+    "consumers=Stream::at,Stream::next_u64,Stream::next_f64,Stream::next_below,Stream::next_normal,Stream::next_normal_ziggurat,Stream::next_exponential,Stream::fill_u64,Stream::fill_f64,fs-rand::dist,fs-rand::qmc,fs-rand:distribution-stream-golden,fs-rand:ziggurat-stream-golden,fs-rand::philox_normals",
     "mutations=seed-low:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery,seed-high:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery,kernel:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery,tile:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery,index-low:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery,index-high:crates/fs-rand/src/lib.rs#stream_identity_mutation_battery",
     "nonsemantic_mutations=worker:crates/fs-rand/src/lib.rs#worker_shuffle_invariance,thread:crates/fs-rand/src/lib.rs#worker_shuffle_invariance,schedule:crates/fs-rand/src/lib.rs#worker_shuffle_invariance",
     "field_guard=classify_stream_key_identity_fields",

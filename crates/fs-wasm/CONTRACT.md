@@ -39,7 +39,10 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
 2. Public demo inputs are clamped or bounded before allocating or
    iterating so browser calls cannot request unbounded work.
 3. Fallible demo paths return `NaN`, empty vectors, or bounded fallback
-   values rather than trapping across the WASM boundary. The vessel CVaR
+   values rather than trapping across the WASM boundary. The
+   `philox_normals` export is an exception: it returns a typed JSON
+   envelope (`ok` / `refusal` / `execution`) and never treats an
+   unexplained empty buffer as a scientific refusal. The vessel CVaR
    surface maps canonical `fs-robust` validation errors to `NaN` here instead
    of reintroducing a panic-only risk implementation. A fallback must not be a
    value the payload's own documented meaning would read as a successful
