@@ -39,7 +39,7 @@ const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-network.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-network.result.v1";
 const NO_CLAIM: &str = "nominal fixed-geometry solid model; hydraulics and convection coefficients frozen within each thermal solve; caller-declared constant isotropic/anisotropic or bounded scalar k(T) materials and frozen fluid properties; k(T) transients require explicit Newton/Armijo settings and temperature-independent heat capacity; coefficients declared or derived from validity-gated duct correlations, without coupled boundary-layer evolution; explicit matching-P1 contacts have fixed caller-declared resistance; component sources use nodal P1 support; maxima concern the discrete field only; no CFD, recirculation, fan heating, nonmatching contact, radiation, uncertainty certification, mesh-convergence or experimental-validation claim; not a .fsim or ledger-backed solve";
-const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients, and effective-h or full fan-speed target searches.\nAll quantities use coherent SI. Transient k(T) requires an explicit\ntransient.nonlinear policy; heat capacity remains temperature independent.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md and CONTACT_COOLING.md. Results are nominal\nestimates, not validated hardware or ledger-backed .fsim runs.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-network <request.json>\n\nSolve a prescribed-pressure or fan-driven network and heterogeneous solid,\nincluding component heating, directional conductivity, bounded scalar k(T),\nfinite-resistance thermal contacts, downstream mixing and declared or\nflow-derived duct convection. Compute mean/peak temperatures, conditional\nthermal gradients (including contact resistance), and effective-h or full\nfan-speed target searches. All quantities use coherent SI. Transient k(T)\nrequires explicit transient.nonlinear settings; heat capacity remains constant.\nRequest schema: frankensim.cooling-network.v1.\n\nSee examples/cooling-network/README.md, MATERIAL_COOLING.md, FAN_COOLING.md,\nNONLINEAR_TRANSIENT_COOLING.md and CONTACT_COOLING.md. Results are nominal\nestimates, not validated hardware or ledger-backed .fsim runs.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -195,6 +195,8 @@ impl Request {
         if tets.is_empty() { return Err(bad("at least one tetrahedron required")); }
         let used: BTreeSet<_> = tets.iter().flatten().copied().collect();
         if used.len() != positions.len() { return Err(bad("unused solid vertices would create unanchored degrees of freedom")); }
+            return Err(bad("unused solid vertices would create unanchored degrees of freedom"));
+        }
         let mesh = ConductionMesh::new(TetComplex::from_tets(positions.len(), tets), positions).map_err(producer)?;
         let exterior: BTreeMap<_, _> = mesh.boundary().iter().map(|f| (f.vertices, f.area)).collect();
         let mut names = BTreeSet::new();
@@ -443,12 +445,13 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"gradient_scope\":\"thermal inlet and effective-coefficient sensitivities at fixed hydraulics, contact resistance and frozen fluid properties; not fan-speed, contact-resistance or channel-geometry derivatives\"}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; not fan-speed or channel-geometry derivatives; transient output has no adjoint\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
                 evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
                 evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(","),
-                request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into())))
+                request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into()),
+                request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_ref())).transpose()?.unwrap_or_else(|| "null".into())))
         })
 }
 
