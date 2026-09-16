@@ -1,6 +1,7 @@
 //! Repeated duty cycles use the actual transient map, not repeated cold starts.
 //! Only the last cycle keeps full output; bounded scalar summaries retain the
 //! warm-up peaks and energy of every completed cycle for design decisions.
+//! Fixed-count adjoints additionally retain one admitted global state tape.
 //!
 //! An optional cycle-rate thermostat samples one explicit solid vertex at the
 //! start of each complete cycle and selects a declared low/high fan multiplier.
@@ -143,6 +144,13 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
     speed_multiplier: f64, config: Config) -> Result<Trajectory>
 {
     poll(cx)?;
+    let mut tape = if schedule.adjoint.is_some() {
+        if config.periodic.is_some() || config.controller.is_some() || speed_multiplier != 1.0 {
+            return Err(bad("repeated adjoints require fixed cycles and declared speeds without periodic stopping or a controller"));
+        }
+        let (initial,vertex) = initial_objective(request,cx,&schedule.initial)?;
+        adjoint::Tape::for_cycles(request,schedule,initial,vertex,config.cycles)?
+    } else { None };
     let mut field = schedule.initial.clone();
     let mut elapsed = 0.0;
     let mut peak = f64::NEG_INFINITY;
@@ -186,7 +194,8 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
         }
         let remaining = config.max_total_steps.checked_sub(steps)
             .filter(|&left|left>0).ok_or_else(||budget("repeated-cycle accepted-step budget exhausted"))?;
-        let cycle = simulate_cycle(request,cx,schedule,applied_multiplier,&field,remaining)?;
+        let cycle = simulate_cycle_recorded(request,cx,schedule,applied_multiplier,&field,remaining,
+            tape.as_mut().map(|tape| (tape,elapsed)))?;
         let residual = field_residual(cx,&field,&cycle.final_temperature)?;
         last_residual = Some(residual);
         let sensor_end = config.controller.map(|controller| cycle.final_temperature[controller.sensor_vertex]);
@@ -245,10 +254,21 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
                     num(controller.initial_speed_multiplier)?,num(state.multiplier)?,state.switches),
                 _ => return Err(bad("internal fan-controller state mismatch")),
             };
+            // Every forward cycle and the cumulative energy gate have passed.
+            // Reverse reconstructs endpoints but never advances physical history.
+            let forward_work = work;
+            let (adjoint,reverse_work) = match tape.take() {
+                Some(tape) => {
+                    let engine = BackwardEuler::per_element(cx,&request.mesh,&schedule.capacities).map_err(producer)?;
+                    tape.reverse(request,cx,schedule,&engine)?
+                }
+                None => ("null".into(),0),
+            };
+            work = work.checked_add(reverse_work).ok_or_else(||budget("repeated adjoint work count overflow"))?;
             let prefix = cycle.trajectory.output.strip_suffix("}\n").ok_or_else(||bad("internal cycle result framing"))?;
-            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":{},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"scope\":\"all cycles inherit the prior accepted nodal field; optional hysteretic fan control samples one declared vertex at cycle start and holds speed through that cycle; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; periodic stopping checks field and controller state; no infinite-cycle, future-peak or continuous-time bound\"}}}}\n",
-                quote(status),periodic,fan_controller,cycle_index+1,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,num(peak)?,num(peak_time)?,
-                optional(schedule.limit)?,optional(first_violation)?,num(input)?,num(stored)?,num(exhaust)?,num(energy_residual)?,summaries.join(","));
+            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":{},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{},\"scope\":\"all cycles inherit the prior accepted nodal field; optional hysteretic fan control samples one declared vertex at cycle start and holds speed through that cycle; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; periodic stopping checks field and controller state; an optional fixed-count adjoint uses the complete history and global time, not just the last cycle; no infinite-cycle, future-peak or continuous-time bound\"}}}}\n",
+                quote(status),periodic,fan_controller,cycle_index+1,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,forward_work,num(peak)?,num(peak_time)?,
+                optional(schedule.limit)?,optional(first_violation)?,num(input)?,num(stored)?,num(exhaust)?,num(energy_residual)?,summaries.join(","),adjoint);
             poll(cx)?;
             return Ok(Trajectory {output,peak_k:peak,peak_time_s:peak_time,solid_solves:work,steps});
         }
