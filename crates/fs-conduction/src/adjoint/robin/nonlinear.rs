@@ -15,10 +15,8 @@ pub(super) struct TangentSystem {
     pub(super) smooth: bool,
 }
 
-pub(super) fn prepare(
-    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
-    temperature: &[f64], dofs: &DofMap,
-) -> Result<(Csr, TangentSystem), ConductionError> {
+fn material_is_smooth(cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64])
+    -> Result<bool, ConductionError> {
     let mut smooth = true;
     for element in 0..problem.mesh.element_count() {
         poll(cx, element)?;
@@ -45,6 +43,14 @@ pub(super) fn prepare(
             }
         }
     }
+    Ok(smooth)
+}
+
+pub(super) fn prepare(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    temperature: &[f64], dofs: &DofMap,
+) -> Result<(Csr, TangentSystem), ConductionError> {
+    let smooth = material_is_smooth(cx, problem, temperature)?;
     let full = assemble_jacobian_with_optional_interfaces(cx, problem.mesh,
         problem.boundary, problem.material, temperature, interfaces, problem.element_materials)?;
     // Prescribed temperatures have zero perturbation: discard the PRIMAL lift.
@@ -53,6 +59,30 @@ pub(super) fn prepare(
     let transpose = ops::transpose(&jacobian);
     poll(cx, 0)?;
     Ok((jacobian, TangentSystem { transpose, smooth }))
+}
+
+impl super::RobinResponse {
+    /// Crate-private constructor for the actual backward-Euler producer. The
+    /// supplied matrix is its reduced C/dt + J(T), already including contact.
+    /// External callers cannot attach a fabricated public StepSolution here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_endpoint(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        primal: &crate::transient::backward_euler::StepSolution,
+        matrix: Csr, dofs: DofMap, linear: LinearConfig, regions: &[&str],
+    ) -> Result<Self, ConductionError> {
+        super::admit_linear(linear)?;
+        super::vector(cx, &primal.temperature, problem.mesh.vertex_count())?;
+        let ports = super::bind_ports(cx, problem, regions)?;
+        let nonlinear = if super::temperature_dependent(cx, problem)? {
+            if linear.restart == 0 { return Err(invalid("transient tangent requires a positive FGMRES restart")); }
+            Some(TangentSystem { transpose: ops::transpose(&matrix),
+                smooth: material_is_smooth(cx, problem, &primal.temperature)? })
+        } else { None };
+        poll(cx, 0)?;
+        Ok(Self { temperature: primal.temperature.clone(), robin_fluxes: primal.robin_fluxes.clone(),
+            matrix, dofs, ports, linear, nonlinear })
+    }
 }
 
 /// Borrow both orientations, avoiding a matrix/transpose clone per derivative.
