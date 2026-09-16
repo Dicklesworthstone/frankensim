@@ -2,9 +2,11 @@ use super::*;
 use std::collections::BTreeSet;
 
 mod contact;
+mod design;
 mod material;
 mod qoi;
 mod transient;
+pub(super) use design::{DesignControl, DesignGrid};
 pub(super) use qoi::Qoi;
 
 #[derive(Debug, Clone)]
