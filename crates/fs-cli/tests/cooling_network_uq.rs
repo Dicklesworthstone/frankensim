@@ -180,3 +180,154 @@ fn a_refused_cooling_sample_invalidates_the_current_resumable_output() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("cooling-network-uq-checkpoint"));
 }
+
+fn compliance_request(dir: &Path, name: &str, samples: usize, ceiling: Option<f64>, seconds: f64) -> PathBuf {
+    let limit = ceiling.map_or_else(String::new, |value| format!(",\"temperature_limit_k\":{value}"));
+    let path = dir.join(name);
+    // Degenerate uncertainty makes the real child objective identical across
+    // ordinals. The stopping calculation still has to earn its confidence.
+    fs::write(&path, format!(
+        "{{\"schema\":\"frankensim.cooling-network-uq.v1\",\"seed\":\"73\",\"samples\":{samples},\"wall_seconds\":{seconds}{limit},\"correlation\":{{\"kind\":\"independent\"}},\"parameters\":[{{\"target\":{{\"kind\":\"air-density\"}},\"distribution\":{{\"kind\":\"uniform\",\"lo\":1.2,\"hi\":1.2}}}}]}}"
+    )).unwrap();
+    path
+}
+
+fn sequential(request: &Path, probability: &str, alpha: &str, minimum: &str) -> Command {
+    let mut command = uq(&example("fan-correlated-hotspot.json"), request);
+    command.args(["--compliance-probability", probability, "--confidence-alpha", alpha, "--min-decision-samples", minimum]);
+    command
+}
+
+fn assert_inconclusive(output: &Output, count: usize, termination: &str) {
+    assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::BUDGET)), "{}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("frankensim.cooling-network-uq.compliance.v1"));
+    assert!(text.contains("\"status\":\"inconclusive\""));
+    assert!(text.contains("\"decision\":\"indeterminate\""));
+    assert!(text.contains(&format!("\"samples_evaluated\":{count},")));
+    assert!(text.contains(&format!("\"termination\":\"{termination}\"")));
+    assert!(!text.contains("\"status\":\"complete\""));
+}
+
+#[test]
+fn real_cooling_confidence_decides_both_sides_before_the_sample_cap() {
+    let dir = scratch("sequential-decisions");
+    for (index, (ceiling, decision)) in [
+        (1.0e6, "meets-probability-target"), (1.0, "below-probability-target"),
+    ].into_iter().enumerate() {
+        let request = compliance_request(&dir, &format!("request-{index}.json"), 64, Some(ceiling), 300.0);
+        let output = sequential(&request, "0.5", "0.05", "16").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("\"status\":\"decision-reached\""));
+        assert!(text.contains(&format!("\"decision\":\"{decision}\"")));
+        assert!(text.contains("\"samples_evaluated\":16,"));
+        assert!(text.contains("\"samples_planned\":64,"));
+        assert!(text.contains("\"scope\":\"probability-of-declared-numerical-model\""));
+        assert!(!text.contains("\"status\":\"complete\""));
+        assert!(!text.contains("sampling_standard_error_k"));
+    }
+}
+
+#[test]
+fn sequential_chunks_and_terminal_resume_reproduce_the_first_decision_bytes() {
+    let dir = scratch("sequential-replay");
+    let request = compliance_request(&dir, "request.json", 64, Some(1.0e6), 300.0);
+    let full_path = dir.join("full.bin");
+    let full = sequential(&request, "0.5", "0.05", "16")
+        .arg("--checkpoint").arg(&full_path).output().unwrap();
+    assert!(full.status.success(), "{}", String::from_utf8_lossy(&full.stderr));
+    let first_path = dir.join("first.bin");
+    let first = sequential(&request, "0.5", "0.05", "16")
+        .arg("--checkpoint").arg(&first_path).args(["--max-new-samples", "5"]).output().unwrap();
+    assert_inconclusive(&first, 5, "sample-chunk");
+    let second_path = dir.join("second.bin");
+    let second = sequential(&request, "0.5", "0.05", "16")
+        .arg("--resume").arg(&first_path).arg("--checkpoint").arg(&second_path)
+        .args(["--max-new-samples", "4"]).output().unwrap();
+    assert_inconclusive(&second, 9, "sample-chunk");
+    let final_path = dir.join("final.bin");
+    let resumed = sequential(&request, "0.5", "0.05", "16")
+        .arg("--resume").arg(&second_path).arg("--checkpoint").arg(&final_path).output().unwrap();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(full.stdout, resumed.stdout);
+    assert_eq!(fs::read(&full_path).unwrap(), fs::read(&final_path).unwrap());
+    // No time for another real solve: a stopped checkpoint must already be
+    // terminal under its unchanged policy, before launching any child.
+    let short = compliance_request(&dir, "short.json", 64, Some(1.0e6), 1.0e-9);
+    let terminal = sequential(&short, "0.5", "0.05", "16")
+        .arg("--resume").arg(&final_path).output().unwrap();
+    assert!(terminal.status.success(), "{}", String::from_utf8_lossy(&terminal.stderr));
+    assert_eq!(terminal.stdout, full.stdout);
+}
+
+#[test]
+fn sequential_sample_and_time_budgets_cannot_manufacture_a_decision() {
+    let dir = scratch("sequential-inconclusive");
+    let small = compliance_request(&dir, "small.json", 2, Some(1.0e6), 300.0);
+    let output = sequential(&small, "0.99", "0.05", "2").output().unwrap();
+    assert_inconclusive(&output, 2, "sample-budget");
+    let short = compliance_request(&dir, "short.json", 64, Some(1.0e6), 1.0e-9);
+    let output = sequential(&short, "0.5", "0.05", "16").output().unwrap();
+    assert_inconclusive(&output, 0, "wall-time-budget");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("\"probability_confidence_sequence\":null"));
+    assert!(text.contains("\"empirical_probability_of_compliance\":null"));
+}
+
+#[test]
+fn changed_or_removed_sequential_policy_refuses_before_output_reservation() {
+    let dir = scratch("sequential-policy-binding");
+    let request = compliance_request(&dir, "request.json", 64, Some(1.0e6), 300.0);
+    let prefix = dir.join("prefix.bin");
+    let output = sequential(&request, "0.5", "0.05", "16")
+        .arg("--checkpoint").arg(&prefix).args(["--max-new-samples", "0"]).output().unwrap();
+    assert_inconclusive(&output, 0, "sample-chunk");
+    let retained = fs::read(&prefix).unwrap();
+    let mut commands = vec![
+        sequential(&request, "0.6", "0.05", "16"),
+        sequential(&request, "0.5", "0.01", "16"),
+        sequential(&request, "0.5", "0.05", "17"),
+        uq(&example("fan-correlated-hotspot.json"), &request),
+    ];
+    for (index, command) in commands.iter_mut().enumerate() {
+        let destination = dir.join(format!("must-not-exist-{index}.bin"));
+        let output = command.arg("--resume").arg(&prefix).arg("--checkpoint").arg(&destination).output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("identity differs"));
+        assert!(!destination.exists());
+    }
+    assert_eq!(fs::read(prefix).unwrap(), retained);
+}
+
+#[test]
+fn sequential_admission_needs_a_ceiling_and_an_achievable_minimum_sample_count() {
+    let dir = scratch("sequential-admission");
+    for (index, (samples, ceiling)) in [(64, None), (8, Some(1.0e6))].into_iter().enumerate() {
+        let request = compliance_request(&dir, &format!("request-{index}.json"), samples, ceiling, 300.0);
+        let destination = dir.join(format!("must-not-exist-{index}.bin"));
+        let output = sequential(&request, "0.5", "0.05", "16")
+            .arg("--checkpoint").arg(&destination).output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn sequential_model_refusal_does_not_publish_confidence_from_a_filtered_run() {
+    let dir = scratch("sequential-model-refusal");
+    let source = fs::read_to_string(example("fan-correlated-hotspot.json")).unwrap();
+    assert!(source.contains("\"linear_iterations\": 20000"));
+    let base = dir.join("bad-budget.json");
+    fs::write(&base, source.replace("\"linear_iterations\": 20000", "\"linear_iterations\": 0")).unwrap();
+    let request = compliance_request(&dir, "request.json", 64, Some(1.0e6), 300.0);
+    let checkpoint = dir.join("failed.bin");
+    let output = uq(&base, &request).args([
+        "--compliance-probability", "0.5", "--confidence-alpha", "0.05", "--min-decision-samples", "16",
+    ]).arg("--checkpoint").arg(&checkpoint).output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(fs::read(&checkpoint).unwrap().starts_with(b"FRANKENSIM-UQ-FAILED\n"));
+}
