@@ -104,3 +104,54 @@ fn off_diagonal_tensor_adjoint_matches_full_perturbed_cooling_solves() {
         close(result.gradient.unwrap().log_htc[1], (plus - minus) / (2.0 * delta), 5e-5);
     });
 }
+
+#[test]
+fn nonlinear_manufactured_field_and_adjoint_use_the_actual_k_prime_term() {
+    let mut r = request();
+    one_material(&mut r, r#""conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,2]}"#);
+    // k(T)=42-0.1*T and T=320+200*x give -div(k grad T)=4000.
+    // This affine T is in P1, and its linear material coefficient is integrated
+    // exactly by the production element-average rule. No grid-error allowance
+    // is needed to hide a frozen-k implementation.
+    r.source = 4000.0;
+    let first_capacity = 1.2 * 0.003 * 1007.0_f64;
+    let mixed_capacity = 1.2 * 0.004 * 1007.0_f64;
+    let first_film = first_capacity * -(-0.5 / first_capacity).exp_m1();
+    let last_film = mixed_capacity * -(-0.8 / mixed_capacity).exp_m1();
+    // Outward solid rates are +20 W and -18 W; their sum is the 2 W source.
+    let first_inlet = 320.0 - 20.0 / first_film;
+    let first_outlet = first_inlet + 20.0 / first_capacity;
+    let last_inlet = 330.0 + 18.0 / last_film;
+    r.inlets[0].temperature = Temperature::new(first_inlet);
+    r.inlets[1].temperature = Temperature::new(4.0 * last_inlet - 3.0 * first_outlet);
+    with_cx(|cx| {
+        let flow = r.flow(cx).unwrap();
+        let mut h: BTreeMap<_, _> = r.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
+        let result = r.evaluate(cx, &flow, &h, true).unwrap();
+        for (p, &t) in r.mesh.positions().iter().zip(&result.temperatures) {
+            close(t, 320.0 + 200.0 * p[0], 1e-5);
+        }
+        close(result.source_total_w, 2.0, 1e-9);
+        close(result.coupled.solid[0].heat_rate_w, 20.0, 1e-5);
+        close(result.coupled.solid[1].heat_rate_w, -18.0, 1e-5);
+        let delta = 1e-4_f64;
+        h.insert("last-face".into(), 80.0 * delta.exp());
+        let plus = r.evaluate(cx, &flow, &h, false).unwrap().objective;
+        h.insert("last-face".into(), 80.0 * (-delta).exp());
+        let minus = r.evaluate(cx, &flow, &h, false).unwrap().objective;
+        close(result.gradient.unwrap().log_htc[1], (plus - minus) / (2.0 * delta), 5e-5);
+    });
+}
+
+#[test]
+fn material_extrapolation_is_not_replaced_by_the_inactive_scalar() {
+    let mut r = request();
+    one_material(&mut r, r#""conductivity_curve":{"temperature_k":[250,260],"conductivity_w_m_k":[17,16]}"#);
+    r.conductivity = 10.0;
+    with_cx(|cx| {
+        let flow = r.flow(cx).unwrap();
+        let h = r.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
+        assert!(r.evaluate(cx, &flow, &h, false).is_err(),
+            "a curve outside its declared span must refuse, not freeze or extrapolate");
+    });
+}
