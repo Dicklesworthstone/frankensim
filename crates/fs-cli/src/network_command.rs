@@ -13,6 +13,7 @@ mod fan_speed;
 mod contacts;
 mod transient;
 mod acceleration;
+mod fan_gradient;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -78,7 +79,7 @@ struct Request {
 }
 #[derive(Debug)]
 struct Evaluation {
-    coupled: CoupledTransportSolution, temperatures: Vec<f64>, gradient: Option<CoupledGradient>,
+    coupled: CoupledTransportSolution, temperatures: Vec<f64>, gradient: Option<fan_gradient::CoolingGradient>,
     objective: f64, objective_state: objective::ObjectiveState,
     robin_total_w: f64, source_total_w: f64, htc: Vec<f64>,
     convection: Vec<convection::Derived>,
@@ -314,7 +315,7 @@ impl Request {
             path.iter().map(|name| {
                 let surface = by_name[name.as_str()];
                 AirSegment::new(name, surface.area, htc[name]).map_err(producer)
-            }).collect::<Result<Vec<_>>>().map(BranchThermalModel::Exchange)
+            }).collect::<Result<Vec<_>>>()?;
         }).collect::<Result<Vec<_>>>()?;
         TransportNetwork::new(cx, flow, self.air, models, &self.inlets, TransportConfig {
             absolute_flow_tolerance: VolumetricFlowRate::new(self.limits.flow), relative_flow_tolerance: 0.0,
@@ -373,9 +374,7 @@ impl Request {
             let binding = CoupledLinearization::new(cx, &network, &linear, &gate).map_err(producer)?;
             let mut weights = binding.zero_objective();
             objective_state.seed(&mut weights);
-            Some(binding.pullback_iqn(cx, &weights, InterfaceSolveConfig { max_iterations: self.limits.derivative,
-                absolute_tolerance: self.limits.relative, relative_tolerance: self.limits.relative,
-                relaxation: self.limits.relaxation }, acceleration::POLICY).map_err(producer)?)
+            Some(fan_gradient::pullback(self, cx, &binding, &weights, &names, &convection)?)
         } else { None };
         let total_solid: f64 = coupled.solid.iter().map(|s| s.heat_rate_w).sum();
         let robin = linear.primal().report.energy.robin_out_w;
@@ -445,14 +444,15 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
         optional(evaluated.gradient.as_ref().map(|g| g.interface_residual))?))
         .and_then(|result| {
             let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"coupling_solver\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; not fan-speed or channel-geometry derivatives; transient output has no adjoint\"}}\n",
+            Ok(format!("{prefix},\"solid_inputs\":{},\"objective\":{},\"dobjective_dinlet_k\":{},\"convection\":[{}],\"contacts\":{},\"contact_sensitivities\":{},\"coupling_solver\":{},\"fan_speed_sensitivity\":{},\"gradient_scope\":\"steady thermal inlet, effective-coefficient and named contact-resistance sensitivities at fixed hydraulics, geometry, material laws and fluid properties; fan_speed_sensitivity separately includes fan/flow/convection response when available; no channel-geometry or transient adjoint\"}}\n",
                 request.solid_data.render(request.conductivity, request.source)?,
                 request.objective.render(&evaluated.objective_state, &request.mesh)?,
                 evaluated.gradient.as_ref().map(|g| numbers(&g.inlets)).transpose()?.unwrap_or_else(|| "null".into()),
                 evaluated.convection.iter().map(convection::Derived::render).collect::<Result<Vec<_>>>()?.join(","),
                 request.contacts.as_ref().map(|contacts| contacts.render(&evaluated.contact_fluxes)).transpose()?.unwrap_or_else(|| "[]".into()),
-                request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_ref())).transpose()?.unwrap_or_else(|| "null".into()),
-                acceleration::render(request.limits.relaxation, evaluated.gradient.is_some())?))
+                request.contacts.as_ref().map(|contacts| contacts.sensitivity_json(&evaluated.temperatures, evaluated.gradient.as_deref())).transpose()?.unwrap_or_else(|| "null".into()),
+                acceleration::render(request.limits.relaxation, evaluated.gradient.is_some())?,
+                evaluated.gradient.as_ref().map(fan_gradient::CoolingGradient::speed_json).transpose()?.unwrap_or_else(|| "null".into())))
         })
 }
 
