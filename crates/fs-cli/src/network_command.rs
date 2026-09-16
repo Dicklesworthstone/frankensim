@@ -177,7 +177,7 @@ impl Request {
         let mut positions = Vec::new();
         for point in array(get(s, "vertices_m")?, "vertices_m", 20_000)? {
             let xyz = array(point, "vertex", 3)?;
-            if xyz.len() != 3 { return Err(bad("each vertex requires three metre coordinates"))); }
+            if xyz.len() != 3 { return Err(bad("each vertex requires three metre coordinates")); }
             positions.push([number(&xyz[0], "x")?, number(&xyz[1], "y")?, number(&xyz[2], "z")?]);
         }
         if positions.len() < 4 { return Err(bad("at least four vertices required")); }
@@ -193,7 +193,7 @@ impl Request {
                 let face: Vec<_> = key.iter().enumerate().filter_map(|(i, &v)| (i != omitted).then_some(v)).collect();
                 let count = face_counts.entry(face).or_insert(0_usize);
                 *count += 1;
-                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells"))); }
+                if *count > 2 { return Err(bad("a tetrahedral face has more than two incident cells")); }
             }
             tets.push(tet);
         }
