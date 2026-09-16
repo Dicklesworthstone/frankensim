@@ -1,4 +1,5 @@
 use super::*;
+use model::Qoi;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -38,13 +39,17 @@ impl Drop for RunningChild {
 }
 
 pub(super) fn evaluate_sample(request: &str, deadline: Instant) -> std::result::Result<f64, EvaluationError> {
+    evaluate_sample_for(request, deadline, Qoi::Steady)
+}
+
+pub(super) fn evaluate_sample_for(request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
     let executable = executable_path().map_err(|error| EvaluationError::Child(format!("cannot locate frankensim executable: {error}")))?;
     let mut command = Command::new(executable);
     command.arg("--json").arg("cooling-network").arg("/dev/stdin");
-    evaluate_process(command, request, deadline)
+    evaluate_process(command, request, deadline, qoi)
 }
 
-fn evaluate_process(mut command: Command, request: &str, deadline: Instant) -> std::result::Result<f64, EvaluationError> {
+fn evaluate_process(mut command: Command, request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
     if Instant::now() >= deadline { return Err(EvaluationError::Budget); }
     let mut child = RunningChild(command
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -84,8 +89,7 @@ fn evaluate_process(mut command: Command, request: &str, deadline: Instant) -> s
         .map_err(|error| EvaluationError::Child(format!("cannot send cooling sample: {error}")))?;
     let text = std::str::from_utf8(&stdout).map_err(|_| EvaluationError::Child("cooling sample output is not UTF-8".into()))?;
     let document = J::parse(text).map_err(|error| EvaluationError::Child(format!("cooling sample emitted invalid JSON: {error}")))?;
-    document.path(&["objective", "value_k"]).and_then(J::as_f64).filter(|value| value.is_finite())
-        .ok_or_else(|| EvaluationError::Child("cooling sample has no finite objective.value_k".into()))
+    qoi.extract(&document).map_err(|error| EvaluationError::Child(error.to_string()))
 }
 
 fn drain(mut reader: impl Read, cap: usize) -> std::result::Result<Vec<u8>, String> {
@@ -114,7 +118,7 @@ mod tests {
         // exec avoids a grandchild inheriting the pipes after the child dies.
         command.arg("-c").arg("exec sleep 2");
         let request = "x".repeat(2 * 1024 * 1024);
-        let result = evaluate_process(command, &request, Instant::now() + Duration::from_millis(30));
+        let result = evaluate_process(command, &request, Instant::now() + Duration::from_millis(30), Qoi::Steady);
         assert!(matches!(result, Err(EvaluationError::Budget)));
     }
 
@@ -122,7 +126,7 @@ mod tests {
     fn a_real_child_refusal_stays_a_model_failure() {
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg("printf 'solver-refusal-sentinel' >&2; exit 7");
-        let result = evaluate_process(command, "", Instant::now() + Duration::from_secs(2));
+        let result = evaluate_process(command, "", Instant::now() + Duration::from_secs(2), Qoi::Steady);
         match result {
             Err(EvaluationError::Child(message)) => assert!(message.contains("solver-refusal-sentinel")),
             other => panic!("expected model refusal, got {other:?}"),
