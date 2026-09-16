@@ -1,6 +1,7 @@
-//! Constant anisotropic material declarations for the actual cooling producer.
-//! All tensor entries and principal-axis rows use the mesh's Cartesian frame.
-//! Constitutive validation and tensor construction belong to fs-conduction.
+//! Directional and temperature-dependent materials for the cooling producer.
+//! Tensor entries and principal-axis rows use the mesh's Cartesian frame.
+//! Constitutive validation, interpolation, K'(T), and assembly belong to
+//! fs-conduction; this adapter never freezes a curve at a representative T.
 
 use super::*;
 use fs_conduction::material::ConductivityTable;
@@ -8,6 +9,7 @@ use fs_conduction::material::ConductivityTable;
 #[derive(Debug, Clone)]
 pub(super) enum Conductivity {
     Isotropic(f64),
+    Curve(Vec<(f64, f64)>),
     Tensor([[f64; 3]; 3]),
     Orthotropic { axes: [[f64; 3]; 3], principal: [f64; 3] },
 }
@@ -18,16 +20,18 @@ impl Conductivity {
             row.get("conductivity_w_m_k"),
             row.get("conductivity_tensor_w_m_k"),
             row.get("orthotropic"),
+            row.get("conductivity_curve"),
         ) {
-            (Some(value), None, None) => Self::Isotropic(positive(value, "material.conductivity_w_m_k")?),
-            (None, Some(value), None) => Self::Tensor(matrix(value, "conductivity_tensor_w_m_k")?),
-            (None, None, Some(value)) => {
+            (Some(value), None, None, None) => Self::Isotropic(positive(value, "material.conductivity_w_m_k")?),
+            (None, Some(value), None, None) => Self::Tensor(matrix(value, "conductivity_tensor_w_m_k")?),
+            (None, None, Some(value), None) => {
                 object(value, &["principal_axes", "conductivity_w_m_k"], "material.orthotropic")?;
                 let axes = matrix(get(value, "principal_axes")?, "orthotropic.principal_axes")?;
                 let principal = triple(get(value, "conductivity_w_m_k")?, "orthotropic.conductivity_w_m_k")?;
                 Self::Orthotropic { axes, principal }
             }
-            _ => return Err(bad("each material requires exactly one of conductivity_w_m_k, conductivity_tensor_w_m_k, or orthotropic")),
+            (None, None, None, Some(value)) => Self::Curve(curve(value)?),
+            _ => return Err(bad("each material requires exactly one of conductivity_w_m_k, conductivity_tensor_w_m_k, orthotropic, or conductivity_curve")),
         };
         // Refuse invalid constitutive data before mesh assignment or any solve.
         model.model()?;
@@ -35,11 +39,14 @@ impl Conductivity {
     }
 
     pub(super) fn model(&self) -> Result<ConductivityModel> {
-        match *self {
-            Self::Isotropic(k) => ConductivityModel::isotropic_declared(k).map_err(producer),
-            Self::Tensor(k) => ConductivityModel::constant_tensor(k).map_err(producer),
+        match self {
+            Self::Isotropic(k) => ConductivityModel::isotropic_declared(*k).map_err(producer),
+            Self::Curve(knots) => Ok(ConductivityModel::isotropic(
+                ConductivityTable::declared_curve(knots.clone()).map_err(producer)?,
+            )),
+            Self::Tensor(k) => ConductivityModel::constant_tensor(*k).map_err(producer),
             Self::Orthotropic { axes, principal: k } => {
-                let model = ConductivityModel::orthotropic(axes, [
+                let model = ConductivityModel::orthotropic(*axes, [
                     ConductivityTable::declared(k[0]).map_err(producer)?,
                     ConductivityTable::declared(k[1]).map_err(producer)?,
                     ConductivityTable::declared(k[2]).map_err(producer)?,
@@ -57,27 +64,47 @@ impl Conductivity {
     /// Compatibility slot in Request: ignored whenever ElementMaterials exists.
     /// This is NOT an effective isotropic coefficient used by any solve.
     pub(super) fn inactive_scalar(&self) -> f64 {
-        match *self {
-            Self::Isotropic(k) => k,
+        match self {
+            Self::Isotropic(k) => *k,
+            Self::Curve(knots) => knots[0].1,
             Self::Tensor(k) => k[0][0],
             Self::Orthotropic { principal, .. } => principal[0],
         }
     }
 
     pub(super) fn render_fields(&self) -> Result<String> {
-        match *self {
-            Self::Isotropic(k) => Ok(format!("\"conductivity_w_m_k\":{}", num(k)?)),
+        match self {
+            Self::Isotropic(k) => Ok(format!("\"conductivity_w_m_k\":{}", num(*k)?)),
+            Self::Curve(knots) => {
+                let (temperatures, conductivities): (Vec<f64>, Vec<f64>) = knots.iter().copied().unzip();
+                Ok(format!(
+                    "\"conductivity_curve\":{{\"temperature_k\":{},\"conductivity_w_m_k\":{}}},\"temperature_extrapolation\":\"refused\"",
+                    numbers(&temperatures)?, numbers(&conductivities)?,
+                ))
+            }
             Self::Tensor(k) => Ok(format!(
                 "\"conductivity_tensor_w_m_k\":{},\"coordinate_frame\":\"mesh-cartesian\"",
-                matrix_json(k)?,
+                matrix_json(*k)?,
             )),
             Self::Orthotropic { axes, principal } => Ok(format!(
                 "\"orthotropic\":{{\"principal_axes\":{},\"conductivity_w_m_k\":{}}},\"coordinate_frame\":\"mesh-cartesian\",\"resolved_conductivity_tensor_w_m_k\":{}",
-                matrix_json(axes)?, numbers(&principal)?,
+                matrix_json(*axes)?, numbers(principal)?,
                 matrix_json(self.model()?.tensor_at(0.0).map_err(producer)?)?,
             )),
         }
     }
+}
+
+fn curve(value: &J) -> Result<Vec<(f64, f64)>> {
+    object(value, &["temperature_k", "conductivity_w_m_k"], "material.conductivity_curve")?;
+    let temperatures = array(get(value, "temperature_k")?, "curve.temperature_k", 256)?;
+    let conductivities = array(get(value, "conductivity_w_m_k")?, "curve.conductivity_w_m_k", 256)?;
+    if temperatures.len() < 2 || temperatures.len() != conductivities.len() {
+        return Err(bad("a conductivity curve needs two to 256 matching temperature/conductivity entries"));
+    }
+    temperatures.iter().zip(conductivities).map(|(t, k)| {
+        Ok((positive(t, "curve.temperature_k")?, positive(k, "curve.conductivity_w_m_k")?))
+    }).collect()
 }
 
 fn triple(value: &J, name: &str) -> Result<[f64; 3]> {
@@ -123,6 +150,25 @@ mod tests {
         let tensor = parsed(r#"{"conductivity_tensor_w_m_k":[[2,0,0],[0,20,0],[0,0,1]]}"#).unwrap();
         let axes = parsed(r#"{"orthotropic":{"principal_axes":[[0,1,0],[-1,0,0],[0,0,1]],"conductivity_w_m_k":[20,2,1]}}"#).unwrap();
         assert_eq!(tensor.model().unwrap().tensor_at(300.0).unwrap(), axes.model().unwrap().tensor_at(300.0).unwrap());
+    }
+
+    #[test]
+    fn nonlinear_curve_retains_its_slope_and_refuses_extrapolation() {
+        let curve = parsed(r#"{"conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,2]}}"#).unwrap();
+        let model = curve.model().unwrap();
+        assert!(model.is_temperature_dependent());
+        assert!((model.tensor_at(325.0).unwrap()[0][0] - 9.5).abs() < 1e-12);
+        assert!((model.tensor_derivative_at(325.0).unwrap()[0][0] + 0.1).abs() < 1e-12);
+        assert!(model.tensor_at(249.0).is_err());
+        assert!(model.tensor_at(401.0).is_err());
+        assert!(J::parse(&format!("{{{}}}", curve.render_fields().unwrap())).is_ok());
+        for text in [
+            r#"{"conductivity_curve":{"temperature_k":[250],"conductivity_w_m_k":[17]}}"#,
+            r#"{"conductivity_curve":{"temperature_k":[250,250],"conductivity_w_m_k":[17,2]}}"#,
+            r#"{"conductivity_curve":{"temperature_k":[400,250],"conductivity_w_m_k":[17,2]}}"#,
+            r#"{"conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,0]}}"#,
+            r#"{"conductivity_w_m_k":10,"conductivity_curve":{"temperature_k":[250,400],"conductivity_w_m_k":[17,2]}}"#,
+        ] { assert!(parsed(text).is_err(), "accepted {text}"); }
     }
 
     #[test]
