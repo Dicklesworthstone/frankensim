@@ -59,8 +59,8 @@ fn layout_and_initial_positions() {
 fn per_kernel_step_rules() {
     let d = 1.25e-13;
     let dt = 0.1;
-    let s = (2.0 * d * dt).sqrt();
-    let h = (6.0 * d * dt).sqrt();
+    let s = (2.0_f64 * d * dt).sqrt();
+    let h = (6.0_f64 * d * dt).sqrt();
     let n = 400usize;
     let buf0 = brownian_frames(n, 1, 0, 7, d, dt).unwrap();
     let mut m2 = 0.0;
