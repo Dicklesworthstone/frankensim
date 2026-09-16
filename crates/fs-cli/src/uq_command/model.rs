@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeSet;
 
+mod material;
+
 #[derive(Debug, Clone)]
 pub(super) enum Target {
     AirDensity,
@@ -9,6 +11,7 @@ pub(super) enum Target {
     FanSpeedRatio,
     SurfaceHtc(String),
     ComponentPower(String),
+    Material(material::Target),
 }
 impl Target {
     fn name(&self) -> String {
@@ -19,6 +22,7 @@ impl Target {
             Self::FanSpeedRatio => "hydraulics.fan.speed_ratio".into(),
             Self::SurfaceHtc(name) => format!("surface[{name}].htc_w_m2_k"),
             Self::ComponentPower(name) => format!("component[{name}].power_w"),
+            Self::Material(target) => target.name(),
         }
     }
     fn unit(&self) -> &'static str {
@@ -29,6 +33,7 @@ impl Target {
             Self::FanSpeedRatio => "1",
             Self::SurfaceHtc(_) => "W/(m2 K)",
             Self::ComponentPower(_) => "W",
+            Self::Material(_) => "W/(m K)",
         }
     }
     fn allows_zero(&self) -> bool { matches!(self, Self::ComponentPower(_)) }
@@ -40,6 +45,7 @@ impl Target {
             Self::FanSpeedRatio => "{\"kind\":\"fan-speed-ratio\"}".into(),
             Self::SurfaceHtc(name) => format!("{{\"kind\":\"surface-htc\",\"surface\":{}}}", quote(name)),
             Self::ComponentPower(name) => format!("{{\"kind\":\"component-power\",\"component\":{}}}", quote(name)),
+            Self::Material(target) => target.render(),
         }
     }
 }
@@ -174,11 +180,13 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
             }
         }
         Target::ComponentPower(name) => component_location(base, name)?,
+        Target::Material(target) => target.validate(base)?,
     }
     Ok(())
 }
 
 fn parse_target(value: &J) -> Result<Target> {
+    if let Some(target) = material::Target::parse(value)? { return Ok(Target::Material(target)); }
     object(value, &["kind", "index", "surface", "component"], "target")?;
     match field(value, "kind")?.as_str() {
         Some("air-density") => Ok(Target::AirDensity),
@@ -246,6 +254,7 @@ fn apply_target(root: &mut J, target: &Target, value: f64) -> Result<()> {
             let component = components.iter_mut().find(|component| component.str_field("name") == Some(name.as_str())).ok_or_else(|| bad("sample target component disappeared"))?;
             set_member_number(component, "watts", value)
         }
+        Target::Material(target) => target.apply(root, value),
     }
 }
 
