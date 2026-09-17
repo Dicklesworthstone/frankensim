@@ -65,7 +65,7 @@ fn energy(result: &J, key: &str) {
 fn manufactured(ambient: f64) -> (J, f64) {
     let opposite = [3.0_f64.sqrt()/2.0, 0.5, 0.5, 0.5];
     let area: f64 = opposite.iter().sum();
-    let ntu = 2.0*area; // capacity rate 1 W/K, h=2 W/(m2 K)
+    let ntu = 2.0*area;
     let q_air_density = 10.0*(1.0-(-ntu).exp())/area;
     let q_rad_density = 0.8*SIGMA*(310.0_f64.powi(4)-ambient.powi(4));
     let surface_load: Vec<f64> = opposite.iter().map(|a| (area-a)/3.0*(q_air_density+q_rad_density)).collect();
@@ -184,12 +184,13 @@ fn radiative_transient_replay_and_patch_order_are_identical() {
 }
 
 #[test]
-fn unsupported_derivatives_missing_material_policy_and_budgets_do_not_publish() {
+fn unsupported_time_derivatives_missing_material_policy_and_budgets_do_not_publish() {
     let input=short();
     let mut derivative=input.clone();
     put(member(&mut derivative,"transient"),"adjoint",J::parse(r#"{"qoi":"sampled-peak","max_checkpoint_bytes":1048576}"#).unwrap());
+    put(member(&mut derivative,"transient"),"adaptive",J::parse(r#"{"absolute_tolerance_k":0.01,"relative_tolerance":0,"minimum_trial_step_s":0.001,"max_trials":100}"#).unwrap());
     let result=output(&derivative);assert!(!result.status.success());assert!(result.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("radiative transient adjoints"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("fixed timesteps"));
     let mut missing=input.clone();remove(member(&mut missing,"transient"),"nonlinear");
     let result=output(&missing);assert!(!result.status.success());assert!(result.stdout.is_empty());
     let mut cancelled=input.clone();put(member(&mut cancelled,"budgets"),"wall_seconds",num(1e-12));
@@ -246,3 +247,5 @@ fn interrupted_radiative_trajectory_does_not_become_a_partial_peak_observation()
     let done=dir.uq(&uq_plan(true),&["--resume","empty.uqcp"]);success(&done);
     assert_eq!(full.stdout,done.stdout);
 }
+
+mod adjoint;
