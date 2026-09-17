@@ -168,6 +168,7 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
     let mut input = 0.0;
     let mut stored = 0.0;
     let mut exhaust = 0.0;
+    let mut radiative = 0.0;
     let mut summaries = Vec::new();
     let mut streak = 0_usize;
     let mut last_residual = None;
@@ -232,11 +233,13 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
         input = finite(input+cycle.input_j)?;
         stored = finite(stored+cycle.stored_j)?;
         exhaust = finite(exhaust+cycle.exhaust_j)?;
-        let energy_residual = finite(stored-input+exhaust)?;
+        radiative = finite(radiative+cycle.radiative_j)?;
+        let energy_residual = finite(stored-input+exhaust+radiative)?;
         if energy_residual.abs()>finite(request.limits.heat*end)? {
             return Err(producer("repeated-cycle cumulative energy gate failed"));
         }
-        summaries.push(format!("{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"controller_sensor_start_k\":{},\"controller_sensor_end_k\":{},\"controller_speed_multiplier\":{},\"applied_speed_multiplier\":{},\"controller_switched\":{},\"controller_state_stable\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}}}",
+        let radiation_field=if request.radiation.is_some(){format!(",\"radiative_energy_loss_j\":{}",num(cycle.radiative_j)?)}else{String::new()};
+        summaries.push(format!("{{\"cycle\":{},\"start_time_s\":{},\"end_time_s\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"start_to_end_field_residual_k\":{},\"controller_sensor_start_k\":{},\"controller_sensor_end_k\":{},\"controller_speed_multiplier\":{},\"applied_speed_multiplier\":{},\"controller_switched\":{},\"controller_state_stable\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"accepted_steps\":{},\"solid_solves\":{}{radiation_field}}}",
             cycle_index+1,num(elapsed)?,num(end)?,num(cycle.trajectory.peak_k)?,num(global_peak_time)?,
             num(residual)?,optional(sensor_start)?,optional(sensor_end)?,
             if config.controller.is_some(){num(controller_multiplier)?}else{"null".into()},
@@ -273,7 +276,8 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
             };
             work = work.checked_add(reverse_work).ok_or_else(||budget("repeated adjoint work count overflow"))?;
             let prefix = cycle.trajectory.output.strip_suffix("}\n").ok_or_else(||bad("internal cycle result framing"))?;
-            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":{},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{},\"scope\":\"all cycles inherit the prior accepted nodal field; optional hysteretic fan control samples one declared vertex at cycle start and holds speed through that cycle; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; periodic stopping checks field and controller state; an optional fixed-count adjoint uses the complete history and global time, not just the last cycle; no infinite-cycle, future-peak or continuous-time bound\"}}}}\n",
+            let radiation_field=if request.radiation.is_some(){format!(",\"radiative_energy_loss_j\":{}",num(radiative)?)}else{String::new()};
+            let output = format!("{prefix},\"repeated_cycles\":{{\"status\":{},\"periodic\":{},\"fan_controller\":{},\"cycles_completed\":{},\"cycle_duration_s\":{},\"elapsed_time_s\":{},\"last_cycle_start_time_s\":{},\"total_accepted_steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"input_energy_j\":{},\"stored_energy_change_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"cycles\":[{}],\"adjoint\":{}{radiation_field},\"scope\":\"all cycles inherit the prior accepted nodal field; optional hysteretic fan control samples one declared vertex at cycle start and holds speed through that cycle; peaks include initial state and every accepted sample; transient contains only the final cycle in local time; periodic stopping checks field and controller state; an optional fixed-count adjoint uses the complete history and global time, not just the last cycle; no infinite-cycle, future-peak or continuous-time bound\"}}}}\n",
                 quote(status),periodic,fan_controller,cycle_index+1,num(cycle.duration_s)?,num(end)?,num(elapsed)?,steps,work,forward_work,num(peak)?,num(peak_time)?,
                 optional(schedule.limit)?,optional(first_violation)?,num(input)?,num(stored)?,num(exhaust)?,num(energy_residual)?,summaries.join(","),adjoint);
             poll(cx)?;
