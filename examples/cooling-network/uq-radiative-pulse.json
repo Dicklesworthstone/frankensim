@@ -1,0 +1,13 @@
+{
+  "schema":"frankensim.cooling-network-uq.v1",
+  "seed":"73",
+  "samples":16,
+  "wall_seconds":1800,
+  "qoi":{"kind":"transient-sampled-peak"},
+  "temperature_limit_k":307,
+  "correlation":{"kind":"independent"},
+  "parameters":[
+    {"target":{"kind":"radiation-emissivity","surface":"first-face"},"distribution":{"kind":"uniform","lo":0.75,"hi":0.95}},
+    {"target":{"kind":"radiation-ambient-temperature","surface":"last-face"},"distribution":{"kind":"uniform","lo":285,"hi":305}}
+  ]
+}
