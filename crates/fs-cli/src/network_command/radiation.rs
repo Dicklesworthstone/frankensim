@@ -11,6 +11,7 @@
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
 //! Transient endpoints use the same law implicitly with fixed old solid state.
+//! Requested steady adjoints include both radiative and mixed-air feedback.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
     SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
@@ -19,6 +20,7 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, SelectionPolicy, UncertaintyModel};
 
 mod endpoint;
+mod sensitivity;
 
 #[derive(Debug)]
 struct Patch {
@@ -69,6 +71,7 @@ struct Inner {
     iterations: usize,
     max_change_k: f64,
     max_mismatch_w: f64,
+    binding: Option<sensitivity::Binding>,
 }
 
 fn finite(value: f64, stage: &str) -> Result<f64> {
@@ -78,13 +81,11 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
-        // Forward transients share the implicit endpoint law and heat ledger.
-        // Their derivatives do not: never supply a frozen-radiation adjoint.
+        // Steady derivatives include radiation. Mesh/design orchestration still
+        // needs a radiation-aware evaluation seam; never silently bypass it.
         if ["mesh_convergence", "design", "fan_speed_design"].iter()
-            .any(|key| root.get(key).is_some())
-            || get(get(root, "objective")?, "gradient")? != &J::Bool(false)
-        {
-            return Err(bad("radiation requires a primal request without gradients, mesh studies or steady design searches"));
+            .any(|key| root.get(key).is_some()) {
+            return Err(bad("radiation currently excludes mesh studies and steady design searches"));
         }
         if root.get("transient").is_some_and(|schedule| schedule.get("adjoint").is_some()) {
             return Err(bad("radiative transient adjoints are not implemented; omit transient.adjoint rather than freezing radiation"));
@@ -151,6 +152,10 @@ impl Policy {
             config.linear.max_iterations = request.limits.linear;
             config.stop.residual_rtol = request.limits.relative;
             config.stop.step_atol = 0.0;
+            let binding = request.gradient.then(|| sensitivity::Binding {
+                htc: combined_h.clone(), references: combined_ref.clone(), driving: driving.clone(),
+                radiative_htc: applied_h.clone(), config: config.clone(),
+            });
             let problem = ConductionProblem { mesh: &request.mesh, boundary: &boundary,
                 material: &material, element_materials: request.solid_data.element_materials.as_ref(), source };
             let conduction = match &request.contacts {
@@ -198,7 +203,7 @@ impl Policy {
             }
             if max_change <= self.tolerance_k && max_mismatch <= request.limits.heat {
                 return Ok(Inner { conduction, convective, heats, iterations: iteration + 1,
-                    max_change_k: max_change, max_mismatch_w: max_mismatch });
+                    max_change_k: max_change, max_mismatch_w: max_mismatch, binding });
             }
             // These models have only Robin/natural/contact rows; all nodal DOFs
             // are free. Reuse the field as a guess, never as accepted physics.
@@ -257,12 +262,20 @@ impl Policy {
                 return Err(producer("radiative source disagrees with component power map"));
             }
         }
+        let objective_state = request.objective.evaluate(cx, &inner.conduction.temperature, &coupled.solid)?;
+        let (gradient, adjoint) = if request.gradient {
+            let (gradient, report) = sensitivity::pullback(self, request, cx, &network, &inner,
+                &coupled.reference_temperatures_k, &htc, &objective_state, &convection)?;
+            (Some(gradient),report)
+        } else { (None,"null".into()) };
+        let reconstruction_solves = usize::from(gradient.is_some());
+        let total_solves = solid_solves.checked_add(reconstruction_solves)
+            .ok_or_else(|| producer("radiation work count overflow"))?;
         let temperatures = inner.conduction.temperature;
-        let objective_state = request.objective.evaluate(cx, &temperatures, &coupled.solid)?;
         let contact_fluxes = request.contacts.as_ref().map(|contact|
             contact.interfaces.fluxes(&temperatures).map_err(producer)).transpose()?.unwrap_or_default();
         let evaluated = Evaluation { objective: objective_state.value, objective_state,
-            coupled, temperatures, gradient: None, robin_total_w: robin, source_total_w: source,
+            coupled, temperatures, gradient, robin_total_w: robin, source_total_w: source,
             htc: names.iter().map(|name| htc[*name]).collect(), convection, contact_fluxes };
         let result = render(request, &flow, &evaluated)?;
         let result = match &request.fan { Some(fan) => fan.attach(result, &flow, fan.speed_ratio)?, None => result };
@@ -274,8 +287,8 @@ impl Policy {
         }).collect::<Result<Vec<_>>>()?.join(",");
         let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("radiation result framing"))?;
         poll(cx)?;
-        Ok(format!("{prefix},\"radiation\":{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; no enclosure reflection, occlusion, participating medium, radiation gradient or physical validation\"}}}}\n",
-            num(radiative)?, num(convective)?, num(balance)?, solid_solves, inner.iterations,
+        Ok(format!("{prefix},\"radiation\":{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{total_solves},\"forward_solid_solves\":{solid_solves},\"reconstruction_solid_solves\":{reconstruction_solves},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"adjoint\":{adjoint},\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; requested steady derivatives include radiative and air feedback; no enclosure reflection, occlusion, participating medium or physical validation\"}}}}\n",
+            num(radiative)?, num(convective)?, num(balance)?, inner.iterations,
             num(inner.max_change_k)?, num(inner.max_mismatch_w)?, rows))
     }
 }
