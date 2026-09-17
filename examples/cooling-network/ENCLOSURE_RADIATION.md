@@ -3,6 +3,9 @@
 ```bash
 frankensim --json cooling-network \
   examples/cooling-network/enclosure-radiation-gap.json
+
+frankensim --json cooling-network \
+  examples/cooling-network/enclosure-radiation-pulse.json
 ```
 
 Two separate solids exchange radiation across a gap while air cools both.
@@ -12,8 +15,8 @@ remove energy from their combined closed enclosure. Only convection exports
 heat to the air network. Materials, emissivities and fan data are illustrative,
 not measured or experimentally validated.
 
-The example explicitly declares the ideal infinite-parallel-plate view-factor
-limit. Its finite P1 faces represent equal-area samples of that idealization.
+The examples explicitly declare the ideal infinite-parallel-plate view-factor
+limit. Their finite P1 faces represent equal-area samples of that idealization.
 Their finite-geometry visibility, edge leakage and occlusion have NOT been
 computed. Admitting a reciprocal matrix does not prove it describes the mesh.
 
@@ -41,14 +44,14 @@ of independent fixed-temperature surroundings. Supplying both refuses.
 ```
 
 Each named patch must already be a nonempty cooling surface. Areas come from
-those mesh traces, not separately entered numbers. This first integration
-requires convection on the radiating patches; it is not a pure-vacuum solver.
-Between 2 and 64 patches are admitted. Matrix rows AND columns follow the
-input surface order; the complete system is canonicalized by name before use.
-Coefficients must lie in [0,1], rows must close to one, and area-weighted
-reciprocity must pass the existing fs-conduction admission. Both numerical
-tolerances must be explicitly supplied in [0,1e-8]. No factors are clipped or
-renormalized to make an invalid enclosure pass. Emissivity lies in (0,1].
+those mesh traces, not separately entered numbers. This integration requires
+convection on the radiating patches; it is not a pure-vacuum solver. Between 2
+and 64 patches are admitted. Matrix rows AND columns follow the input surface
+order; the complete system is canonicalized by name before use. Coefficients
+must lie in [0,1], rows must close to one, and area-weighted reciprocity must
+pass the existing fs-conduction admission. Both numerical tolerances must be
+explicitly supplied in [0,1e-8]. No factors are clipped or renormalized to make
+an invalid enclosure pass. Emissivity lies in (0,1].
 
 `evidence` may alternatively be an externally generated QMC matrix's retained
 coordinates: `{"kind":"external-qmc","seed":"73","samples":"100000",
@@ -88,17 +91,54 @@ and the full source/air/solid energy gates still apply.
 irradiation, signed outward heat and applied heat. Negative outward heat is
 absorption by that solid, not an error or value to clip. `radiative_out_w` is
 the near-zero closed-enclosure balance residual, NOT an external energy sink.
-`iterations` refers to the last inner radiation solve; `total_solid_solves`
-counts all inner solid evaluations across air coupling. All iterations share
-the original command wall deadline. Exhaustion returns no partial success.
+In a steady result, `iterations` refers to the last inner radiation solve and
+`total_solid_solves` counts all inner solid evaluations across air coupling.
+All iterations share the original command wall deadline. Exhaustion returns
+no partial success.
 
-Steady nonlinear materials, existing contact models, derivative-free fan sizing,
-and uniform mesh studies use the same producer. The existing reservoir mode is
-unchanged. Enclosure adjoints, goal-recovery marking and transient trajectories
-currently refuse explicitly; none returns a frozen-radiosity derivative or
-silently falls back to the old reservoir model. General view-factor generation,
-occlusion, participating media, changing geometry, and native .fsim lowering
-are not implemented by this adapter.
+## Transient heating, cooldown and repeated cycles
+
+The pulse example uses two 30-second cycles, each with ten seconds at five watts
+and twenty seconds at zero watts. It has nonlinear conductivity and different
+constant heat capacities in the two bodies. The deliberately small declared
+capacities (20,000 and 10,000 J/(m3 K)) expose storage effects over a short example;
+they are not measured material properties. The second cycle starts from the
+first cycle's accepted final field, not from a fresh 300 K state.
+
+No additional radiation option is needed: the ordinary `transient` declaration
+selects the existing backward-Euler driver. Every inner radiation and air trial
+uses the SAME immutable previous physical temperature field. The old surface
+means initialize radiation iteration, but emission is recomputed at the NEW
+solved means. Freezing radiation at the old temperature is not this model.
+The timestep acceptance equation is
+
+```
+stored-energy change = dt * (input power - air heat gain - enclosure residual).
+```
+
+Signed patch transfers cancel internally. The existing
+`radiative_energy_loss_j` field therefore accumulates only the near-zero closure
+residual for this CLOSED model, not the emitter's positive transfer or the sum
+of absolute patch transfers. It is not a measure of heat exported by radiation.
+The final `radiation` report retains both individual signed patch powers and
+`temporal_scope: "final-accepted-endpoint"`. Its `iterations` and
+`total_solid_solves` are null: final-field heat recomputation cannot recover
+those counts. The trajectory's work counters already count every actual solid
+callback, including inner radiation iterations and discarded adaptive trials.
+
+Adaptive full steps and rejected half-step pairs never enter accepted storage
+or energy history. Fixed-count repetition, ordinary periodic/controller runs,
+derivative-free workload/fan sizing, and full-trajectory timestep studies all
+reach the same endpoint producer; none substitutes a convection-only trajectory.
+Their original timestep, cycle, trial, refinement, solver and wall limits remain
+in effect. Complete trajectories retain their usual independent energy checks.
+
+Enclosure steady/trajectory adjoints and goal-recovery spatial marking still
+refuse explicitly, including direct attempts to reconstruct a derivative.
+There is no frozen-radiosity gradient fallback. Existing reservoir-radiation
+adjoints and other non-enclosure workflows are unchanged. General view-factor
+generation, occlusion, participating media, changing geometry, continuous-time
+peak certification and native .fsim lowering are not implemented by this adapter.
 
 ## Uncertain surface finish
 
@@ -107,42 +147,53 @@ frankensim --json cooling-network-uq \
   examples/cooling-network/enclosure-radiation-gap.json \
   examples/cooling-network/uq-enclosure-finish.json \
   --checkpoint enclosure-finish.uqcp
+
+frankensim --json cooling-network-uq \
+  examples/cooling-network/enclosure-radiation-pulse.json \
+  examples/cooling-network/uq-enclosure-pulse.json \
+  --checkpoint enclosure-pulse.uqcp
 ```
 
-The checkpoint destination must be new. The existing `radiation-emissivity`
+Each checkpoint destination must be new. The existing `radiation-emissivity`
 target resolves against the named enclosure patch and changes the actual input
 before each cooling solve. Geometry, view factors, power and other emissivities
-stay fixed. A reservoir-temperature target refuses for an enclosure. Nonphysical
-samples are terminal model failures, not clipped or redrawn. Existing checkpoint,
-exact-ordinal retry and candidate/confidence policies remain in use. The example
-probability distribution is illustrative, not empirical uncertainty evidence.
+stay fixed. For transient UQ, one draw applies throughout the entire trajectory
+and its repeated cycles. The observable is the all-cycle sampled peak, not the
+cooled final temperature. An interrupted trajectory contributes no partial peak
+and retries the same ordinal on resume. A surroundings-temperature target
+refuses for an enclosure; nonphysical samples are terminal errors, not clipped
+or redrawn. Existing checkpoint and confidence policies remain in use. The
+example probability distributions are illustrative, not empirical evidence.
 
 ## Focused checks and boundaries
 
 ```bash
 cargo test -p fs-cli --test cooling_enclosure_radiation
+cargo test -p fs-cli --test cooling_enclosure_transient
 cargo test -p fs-cli --bin frankensim uq_command::model::radiation
 ```
 
-Eight new Rust regressions include six actual-command tests and two target
-mutation tests. They cover independently eliminated two-plate/mixed-air balances,
-black and near-mirror limits, nonlinear material influence, matrix-axis replay,
-uniform refined-field replay, physical and iteration-budget refusals, actual
-uncertain samples and byte-identical checkpoint/result continuation. These tests
-have NOT been executed in the authoring environment, which lacks Rust. Compilation
-and actual CLI behavior remain unverified.
+The original eight enclosure regressions remain. Eight additional command tests
+cover manufactured time endpoints with reversed heat flow, nonlinear repeated
+storage, unrolled and matrix-axis replay, adaptive accepted-history replay,
+whole-trajectory time refinement, actual workload candidates, exhausted budgets,
+unsupported derivatives, and byte-identical transient-UQ checkpoint continuation.
+These Rust tests have NOT been executed in the authoring environment, which
+lacks Rust and network access for installing it. Compilation and actual CLI
+behavior remain unverified.
 
-Independent Python calculations assembled the P1 volume and boundary operators,
-solved the coupled equations directly, and compared against a separate nested
-mathematical implementation plus analytic two-plate heat balances. Twelve full
-thermal comparisons and nine formula/null-mode cases passed. The largest
-whole-field discrepancy between direct and nested methods was 2.70e-10 K.
+Independent Python P1 calculations use direct endpoint equations with analytic
+two-plate radiation and air elimination, and a separate nested radiosity/solid
+iteration. Twelve transient endpoint comparisons had at most 3.65e-11 K field
+difference. Two manufactured endpoints had at most 1.71e-13 K field error;
+freezing radiation at the old field instead caused 0.09831 and 0.60137 K errors.
 
-For the example, the independent reference peak is 338.496251 K. The emitter
-and receiver means are 337.883111 K and 305.958702 K, with 1.263461 W crossing
-the gap and five watts exported by convection in total. Black finishes increase
-internal exchange to 1.809428 W; lowering emitter emissivity to 0.2 reduces it
-to 0.569927 W. A deliberately DIFFERENT model replacing mutual exchange with
-two 300 K reservoirs exports 1.860575 W by radiation and is not equivalent.
-These are independent numerical references, not FrankenSim executions, accuracy
-certificates, measured performance or physical validation.
+For the two-cycle nonlinear pulse example, the independent sampled peak is
+315.427903 K at 40 seconds. Its 100 J input splits into 35.006204 J stored and
+64.993796 J exported by air. About 15.594296 J is redistributed internally from
+emitter to receiver, with zero net radiative export in the analytic reference.
+Freezing old-temperature radiation changes the peak by 0.10510 K. Refining from
+30 to 60 and 120 total steps gives reference peaks 315.427903, 315.564990 and
+315.634980 K, illustrating why a successful algebraic solve is not a timestep
+error bound. These are independent numerical references, NOT executions of
+FrankenSim, runtime speedups, continuum certificates or physical validation.
