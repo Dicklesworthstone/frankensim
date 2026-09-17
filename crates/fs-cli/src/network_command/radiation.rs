@@ -11,7 +11,7 @@
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
 //! Transient endpoints use the same law implicitly with fixed old solid state.
-//! Requested steady adjoints include both radiative and mixed-air feedback.
+//! Steady and fixed-trajectory adjoints include radiative and mixed-air feedback.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
     SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
@@ -31,8 +31,6 @@ struct Patch {
 }
 
 impl Patch {
-    /// Factor the fourth-power difference rather than subtracting nearly equal
-    /// fourth powers. At equal temperatures this is the finite tangent limit.
     fn coefficient(&self, temperature: f64) -> Result<f64> {
         if !(temperature.is_finite() && temperature > 0.0) {
             return Err(producer("radiation requires positive absolute surface temperature"));
@@ -81,14 +79,11 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
-        // The explicit fan-search adapter below evaluates the complete model.
-        // Other consumers must not bypass radiation through the ordinary seam.
         if ["mesh_convergence", "design"].iter().any(|key| root.get(key).is_some()) {
             return Err(bad("radiation currently excludes mesh studies and effective-h design searches"));
         }
-        if root.get("transient").is_some_and(|schedule| schedule.get("adjoint").is_some()) {
-            return Err(bad("radiative transient adjoints are not implemented; omit transient.adjoint rather than freezing radiation"));
-        }
+        // The existing transient parser owns fixed-grid/fixed-cycle derivative
+        // admission. Do not bypass it or silently freeze radiative feedback.
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
         let tolerance_k = positive(get(value, "temperature_tolerance_k")?, "radiation.temperature_tolerance_k")?;
         let relaxation = positive(get(value, "relaxation")?, "radiation.relaxation")?;
@@ -116,8 +111,6 @@ impl Policy {
         Ok(Self { patches, max_iterations, tolerance_k, relaxation })
     }
 
-    /// One inner solve at fixed AIR references. The combined Robin reference is
-    /// only an assembly device; the air callback receives convective heat alone.
     #[allow(clippy::too_many_arguments)]
     fn solid(&self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
         htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Inner>
@@ -148,7 +141,7 @@ impl Policy {
             let mut config = SolveConfig::default();
             config.initial = initial;
             config.linear.tolerance = request.limits.relative;
-            config.linear.max_iterations = request.limits.linear;
+            config.linear.max_iterations = self.limits_linear(request);
             config.stop.residual_rtol = request.limits.relative;
             config.stop.step_atol = 0.0;
             let binding = want_gradient.then(|| sensitivity::Binding {
@@ -208,6 +201,8 @@ impl Policy {
             "radiation did not satisfy both temperature and nonlinear watt gates within {} solid solves at the current air reference; no partial result published", self.max_iterations) })
     }
 
+    fn limits_linear(&self, request: &Request) -> usize { request.limits.linear }
+
     pub(super) fn solve(&self, request: &Request, cx: &Cx<'_>) -> Result<String> {
         poll(cx)?;
         if let Some(schedule) = &request.transient {
@@ -224,9 +219,6 @@ impl Policy {
         match &request.fan { Some(fan) => fan.attach(result,&flow,fan.speed_ratio), None => Ok(result) }
     }
 
-    /// One complete radiating evaluation at the ACTUAL candidate hydraulics.
-    /// Neither the forward radiation state nor adjoint history is shared across
-    /// candidates. The serialized radiation report is never used by the search.
     fn evaluate(&self, request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
         declared: &BTreeMap<String,f64>, want_gradient: bool) -> Result<fan_speed::ThermalEvaluation> {
         poll(cx)?;
