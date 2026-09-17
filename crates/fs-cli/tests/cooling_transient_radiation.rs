@@ -102,7 +102,7 @@ fn manufactured_endpoint_uses_new_temperature_radiation_and_immutable_old_storag
         }
         let time=result.get("transient").unwrap();
         near(n(time,"stored_energy_change_j"),1000.0/6.0*10.0,1e-4);
-        near(n(time,"radiative_energy_loss_j"),10.0*expected_radiation,1e-4);
+        near(n(time,"radiative_energy_loss_j"),10.0*expected_radiation,1e-5);
         near(n(result.get("radiation").unwrap(),"radiative_out_w"),expected_radiation,1e-5);
         assert_eq!(n(time,"steps"),1.0);
         let mut frozen=input.clone();put(member(&mut frozen,"radiation"),"max_iterations",num(1.0));
@@ -248,4 +248,5 @@ fn interrupted_radiative_trajectory_does_not_become_a_partial_peak_observation()
     assert_eq!(full.stdout,done.stdout);
 }
 
+#[path = "cooling_transient_radiation/adjoint.rs"]
 mod adjoint;
