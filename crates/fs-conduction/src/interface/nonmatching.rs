@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_exec::Cx;
 use fs_sparse::Coo;
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
-use super::{InterfaceFacePair, InterfaceFlux, InterfaceResistance};
+use super::{InterfaceFlux, InterfaceResistance};
 
 /// Explicit geometry/work policy for one planar contact.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -206,13 +206,16 @@ impl Bound {
                     let p = [0,1].map(|d| (2.0/3.0)*points[q][d]
                         +(1.0/6.0)*points[(q+1)%3][d]+(1.0/6.0)*points[(q+2)%3][d]);
                     let l = barycentric(left,p,name)?; let r = barycentric(right,p,name)?;
-                    for k in 0..3 { row[k]=l[k]; row[k+3]=-r[k]; }
-                    if row.iter().any(|x| x.abs()>1.0+32.0*tolerance) {
-                        return Err(error(name,"unstable barycentric evaluation on a contact overlap"));
+                    if l.iter().chain(&r).any(|x| *x < -32.0*tolerance || *x > 1.0+32.0*tolerance) {
+                        return Err(error(name,"unstable or extrapolated basis evaluation on a contact overlap"));
                     }
+                    for k in 0..3 { row[k]=l[k]; row[k+3]=-r[k]; }
                 }
                 let weight_m2 = finite(area/3.0,name)?;
-                if weight_m2 <= 0.0 { return Err(error(name,"contact quadrature weight underflow")); }
+                let weighted_conductance = finite(weight_m2/surface.resistance.value_m2_k_per_w(),name)?;
+                if weight_m2 <= 0.0 || weighted_conductance <= 0.0 {
+                    return Err(error(name,"contact quadrature weight or conductance underflow"));
+                }
                 let key = (left.slot.min(right.slot),left.slot.max(right.slot));
                 stencils.push(Stencil { vertices:[left.ids[0],left.ids[1],left.ids[2],right.ids[0],right.ids[1],right.ids[2]],
                     basis, weight_m2, delegated:exact.contains(&key) });
