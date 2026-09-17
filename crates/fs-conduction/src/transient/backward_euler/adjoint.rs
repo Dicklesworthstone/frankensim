@@ -17,6 +17,7 @@ pub struct StepLinearization<'a> {
     primal: StepSolution,
     response: RobinResponse,
     capacity: &'a Csr,
+    mesh: &'a ConductionMesh,
     dofs: DofMap,
     old: Vec<f64>,
     dt_s: f64,
@@ -76,7 +77,7 @@ impl BackwardEuler<'_> {
             }
         }
         poll(cx, 0)?;
-        Ok(StepLinearization { primal, response, capacity: &self.capacity, dofs,
+        Ok(StepLinearization { primal, response, capacity: &self.capacity, mesh: self.mesh, dofs,
             old: old.to_vec(), dt_s, source_load_w })
     }
 }
@@ -113,6 +114,45 @@ impl StepLinearization<'_> {
             *value = finite(*value / self.dt_s)?;
         }
         for &vertex in self.dofs.fixed() { result[vertex] = 0.0; }
+        poll(cx, 0)?;
+        Ok(result)
+    }
+
+    /// Pull a TOTAL endpoint load adjoint back to P1 nodal source densities.
+    ///
+    /// The returned vector is `M_source^T lambda`, with the same consistent
+    /// tetrahedral integration `M_ab = V(1+delta_ab)/20` as the primal source.
+    /// For a temperature objective its units are K per (W/m3), not K/W.
+    /// Contract with a density derivative to obtain a component-watt or other
+    /// source control. This requires no solve and no nonzero baseline source.
+    /// The endpoint Jacobian already contains C/dt; multiplying by dt again
+    /// would give an incorrect trajectory derivative.
+    ///
+    /// Prescribed equation multipliers are zeroed, but source-density entries
+    /// on prescribed vertices are NOT: their P1 support can load neighboring
+    /// free equations. This is distinct from changing prescribed temperatures.
+    ///
+    /// # Errors
+    /// Refuses a malformed/nonfinite multiplier, arithmetic overflow, or
+    /// cancellation. No partially accumulated vector is returned.
+    pub fn source_density_pullback(&self, cx: &Cx<'_>, nodal_load_adjoint: &[f64])
+        -> Result<Vec<f64>, ConductionError> {
+        let lambda = self.multiplier(cx, nodal_load_adjoint)?;
+        let mut result = vec![0.0; lambda.len()];
+        for element in 0..self.mesh.element_count() {
+            if element % 512 == 0 { poll(cx, element)?; }
+            let tet = self.mesh.complex().tets[element];
+            let volume = self.mesh.element_volume(element);
+            for (b, &vertex) in tet.iter().enumerate() {
+                let mut value = 0.0;
+                for (a, &row) in tet.iter().enumerate() {
+                    let mass = if a == b { volume / 10.0 } else { volume / 20.0 };
+                    value = finite(mass.mul_add(lambda[row as usize], value))?;
+                }
+                let slot = &mut result[vertex as usize];
+                *slot = finite(*slot + value)?;
+            }
+        }
         poll(cx, 0)?;
         Ok(result)
     }
