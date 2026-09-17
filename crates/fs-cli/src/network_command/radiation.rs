@@ -1,4 +1,4 @@
-//! Steady gray surface-to-surroundings radiation alongside convective cooling.
+//! Gray surface-to-surroundings radiation alongside convective cooling.
 //!
 //! Each selected surface is a lumped radiating patch: its AREA-MEAN P1
 //! temperature drives eps*sigma*A*(T_mean^4 - T_surroundings^4). A positive
@@ -10,12 +10,15 @@
 //!
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
+//! Transient endpoints use the same law implicitly with fixed old solid state.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
     SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, SelectionPolicy, UncertaintyModel};
+
+mod endpoint;
 
 #[derive(Debug)]
 struct Patch {
@@ -75,13 +78,16 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
-        // No frozen-radiation gradients or silently incomplete transient/mesh
-        // accounting. These consumers need their own total radiation operators.
-        if ["transient", "mesh_convergence", "design", "fan_speed_design"].iter()
+        // Forward transients share the implicit endpoint law and heat ledger.
+        // Their derivatives do not: never supply a frozen-radiation adjoint.
+        if ["mesh_convergence", "design", "fan_speed_design"].iter()
             .any(|key| root.get(key).is_some())
             || get(get(root, "objective")?, "gradient")? != &J::Bool(false)
         {
-            return Err(bad("radiation currently requires a steady primal request without gradients, mesh studies or nested design searches"));
+            return Err(bad("radiation requires a primal request without gradients, mesh studies or steady design searches"));
+        }
+        if root.get("transient").is_some_and(|schedule| schedule.get("adjoint").is_some()) {
+            return Err(bad("radiative transient adjoints are not implemented; omit transient.adjoint rather than freezing radiation"));
         }
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
         let tolerance_k = positive(get(value, "temperature_tolerance_k")?, "radiation.temperature_tolerance_k")?;
@@ -204,6 +210,9 @@ impl Policy {
 
     pub(super) fn solve(&self, request: &Request, cx: &Cx<'_>) -> Result<String> {
         poll(cx)?;
+        if let Some(schedule) = &request.transient {
+            return super::transient::solve(request, cx, schedule);
+        }
         let flow = request.flow(cx)?;
         let declared = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
         let (htc, convection) = convection::resolve(request, cx, &flow, &declared)?;
@@ -265,7 +274,7 @@ impl Policy {
         }).collect::<Result<Vec<_>>>()?.join(",");
         let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("radiation result framing"))?;
         poll(cx)?;
-        Ok(format!("{prefix},\"radiation\":{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; no enclosure reflection, occlusion, participating medium, radiation gradient, transient radiation or physical validation\"}}}}\n",
+        Ok(format!("{prefix},\"radiation\":{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; no enclosure reflection, occlusion, participating medium, radiation gradient or physical validation\"}}}}\n",
             num(radiative)?, num(convective)?, num(balance)?, solid_solves, inner.iterations,
             num(inner.max_change_k)?, num(inner.max_mismatch_w)?, rows))
     }
