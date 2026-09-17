@@ -3,6 +3,7 @@
 #[allow(dead_code)]
 #[path="../src/json_read.rs"]
 mod json;
+mod mesh;
 use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command,Output,Stdio};
@@ -139,7 +140,7 @@ fn radiating_repeated_trajectory_keeps_contact_in_forward_and_storage_adjoint() 
 }
 
 #[test]
-fn missing_coverage_real_gaps_and_unimplemented_mesh_transfer_never_publish() {
+fn missing_coverage_real_gaps_and_exhausted_geometry_budgets_never_publish() {
     let input=J::parse(BASE).unwrap();let mut variants=Vec::new();
     let mut missing=input.clone();
     rows(member(member(contact(&mut missing),"nonmatching"),"side_b_faces")).pop();variants.push(missing);
@@ -156,8 +157,8 @@ fn missing_coverage_real_gaps_and_unimplemented_mesh_transfer_never_publish() {
     }
     let mut mesh=input.clone();put(member(&mut mesh,"objective"),"gradient",J::Bool(false));
     put(&mut mesh,"mesh_convergence",J::parse(r#"{"max_refinements":2,"consecutive_passes":2,"temperature_tolerance_k":1,"max_vertices":20000,"max_tetrahedra":100000}"#).unwrap());
-    let result=output(&mesh);assert!(!result.status.success());assert!(result.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("nonmatching contact"));
+    let result=output(&mesh);assert_eq!(result.status.code(),Some(6));assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("max_pair_tests=10000"));
 }
 
 static NEXT:AtomicU64=AtomicU64::new(0);
