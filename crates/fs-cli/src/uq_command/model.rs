@@ -5,6 +5,7 @@ mod contact;
 mod design;
 mod material;
 mod qoi;
+mod radiation;
 mod transient;
 pub(super) use design::{DesignControl, DesignGrid};
 pub(super) use qoi::Qoi;
@@ -19,6 +20,7 @@ pub(super) enum Target {
     ComponentPower(String),
     Contact(contact::Target),
     Material(material::Target),
+    Radiation(radiation::Target),
     Transient(transient::Target),
 }
 impl Target {
@@ -32,6 +34,7 @@ impl Target {
             Self::ComponentPower(name) => format!("component[{name}].power_w"),
             Self::Contact(target) => target.name(),
             Self::Material(target) => target.name(),
+            Self::Radiation(target) => target.name(),
             Self::Transient(target) => target.name(),
         }
     }
@@ -45,6 +48,7 @@ impl Target {
             Self::ComponentPower(_) => "W",
             Self::Contact(_) => "m2 K/W",
             Self::Material(_) => "W/(m K)",
+            Self::Radiation(target) => target.unit(),
             Self::Transient(target) => target.unit(),
         }
     }
@@ -65,6 +69,7 @@ impl Target {
             Self::ComponentPower(name) => format!("{{\"kind\":\"component-power\",\"component\":{}}}", quote(name)),
             Self::Contact(target) => target.render(),
             Self::Material(target) => target.render(),
+            Self::Radiation(target) => target.render(),
             Self::Transient(target) => target.render(),
         }
     }
@@ -89,6 +94,7 @@ impl Distribution {
                 return Err(bad(format!("uniform support for {} leaves its admitted physical domain", target.name())));
             }
         }
+        if let Target::Radiation(target) = target { target.validate_support(self)?; }
         Ok(())
     }
     fn render(&self) -> Result<String> {
@@ -214,6 +220,7 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
         }
         Target::Contact(target) => target.validate(base)?,
         Target::Material(target) => target.validate(base)?,
+        Target::Radiation(target) => target.validate(base)?,
         Target::Transient(target) => target.validate(base)?,
     }
     Ok(())
@@ -222,6 +229,7 @@ fn validate_target(base: &J, target: &Target) -> Result<()> {
 fn parse_target(value: &J) -> Result<Target> {
     if let Some(target) = contact::Target::parse(value)? { return Ok(Target::Contact(target)); }
     if let Some(target) = material::Target::parse(value)? { return Ok(Target::Material(target)); }
+    if let Some(target) = radiation::Target::parse(value)? { return Ok(Target::Radiation(target)); }
     if let Some(target) = transient::Target::parse(value)? { return Ok(Target::Transient(target)); }
     object(value, &["kind", "index", "surface", "component"], "target")?;
     match field(value, "kind")?.as_str() {
@@ -292,6 +300,7 @@ fn apply_target(root: &mut J, target: &Target, value: f64) -> Result<()> {
         }
         Target::Contact(target) => target.apply(root, value),
         Target::Material(target) => target.apply(root, value),
+        Target::Radiation(target) => target.apply(root, value),
         Target::Transient(target) => target.apply(root, value),
     }
 }
