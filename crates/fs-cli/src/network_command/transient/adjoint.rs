@@ -3,6 +3,7 @@
 //! at a time. Repeated schedules share ONE chronological history. Radiation
 //! replays the accepted inner boundary loop before preparing its total response.
 use super::*;
+mod controls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Observable { Final, SampledPeak }
@@ -11,17 +12,19 @@ enum Observable { Final, SampledPeak }
 pub(super) struct Config {
     observable: Observable,
     max_checkpoint_bytes: usize,
+    controls: controls::Options,
 }
 impl Config {
     pub(super) fn parse(value: &J) -> Result<Self> {
-        object(value, &["qoi", "max_checkpoint_bytes"], "transient.adjoint")?;
+        object(value, &["qoi", "max_checkpoint_bytes", "component_power", "contact_resistance"], "transient.adjoint")?;
         let observable = match get(value, "qoi")?.as_str() {
             Some("final") => Observable::Final,
             Some("sampled-peak") => Observable::SampledPeak,
             _ => return Err(bad("transient.adjoint.qoi must be final or sampled-peak")),
         };
         Ok(Self { observable, max_checkpoint_bytes: count(get(value,"max_checkpoint_bytes")?,
-            "adjoint.max_checkpoint_bytes", 512 * 1024 * 1024)? })
+            "adjoint.max_checkpoint_bytes", 512 * 1024 * 1024)?,
+            controls: controls::Options::parse(value)? })
     }
     pub(super) fn validate_design(self) -> Result<()> {
         if self.observable != Observable::SampledPeak {
@@ -67,13 +70,15 @@ impl Tape {
             .ok_or_else(|| budget("transient adjoint endpoint count overflow"))?;
         let vertices = request.mesh.vertex_count();
         let regions = request.surfaces.len();
+        let control_bytes = config.controls.storage_bytes(request,schedule)?;
         let charged_bytes = vertices.checked_add(regions)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
             .and_then(|n| n.checked_add(std::mem::size_of::<Frame>()))
             .and_then(|n| n.checked_mul(planned))
+            .and_then(|n| n.checked_add(control_bytes))
             .ok_or_else(|| budget("transient adjoint checkpoint size overflow"))?;
         if charged_bytes > config.max_checkpoint_bytes {
-            return Err(budget("accepted-field adjoint checkpoints exceed max_checkpoint_bytes"));
+            return Err(budget("accepted-field adjoint checkpoints and requested controls exceed max_checkpoint_bytes"));
         }
         let mut frames = Vec::new();
         frames.try_reserve_exact(planned)
@@ -125,6 +130,7 @@ impl Tape {
         let mut fan_speeds = vec![request.fan.as_ref().map(|_| 0.0); schedule.intervals.len()];
         let mut inlets = vec![0.0; request.graph.node_count()];
         let mut radiation = request.radiation.as_ref().map(|policy| policy.zero_trajectory_gradient());
+        let mut controls = controls::Accumulation::new(self.config.controls,request,schedule)?;
         let mut capacity = 0.0;
         let mut reconstructed = 0_usize;
         let mut reconstruction_solves = 0_usize;
@@ -246,6 +252,7 @@ impl Tape {
                     };
                     if inlets.len() != gradient.inlets.len() { return Err(bad("adjoint inlet arity changed")); }
                     for (sum,value) in inlets.iter_mut().zip(&gradient.inlets) { *sum = finite(*sum+value)?; }
+                    controls.record(request,cx,step,ordinal,&gradient.nodal_load)?;
                     carry = step.previous_temperature_pullback(cx,&gradient.nodal_load).map_err(producer)?;
                     adjoint_sweeps = adjoint_sweeps.checked_add(gradient.iterations)
                         .ok_or_else(|| budget("transient adjoint sweep count overflow"))?;
@@ -266,9 +273,10 @@ impl Tape {
             (None,None) => "null".into(),
             _ => return Err(bad("trajectory radiation gradient policy mismatch")),
         };
+        let controls_fragment = controls.report_fragment(request,cx,schedule)?;
         poll(cx)?;
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"radiation\":{},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries, with total mean-patch radiation feedback when declared; each interval control changes every occurrence, including earlier warm-up cycles; initial controls change only the original field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear budgets apply per reverse endpoint under the original wall deadline; radiating endpoints replay their inner boundary iterations before exact-row linearization and count all reconstruction solves; checkpoint bytes bound retained fields/references and frame storage, not total workspace; separate from null steady-gradient fields\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"radiation\":{}{controls_fragment},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries, with total mean-patch radiation feedback when declared; each interval control changes every occurrence, including earlier warm-up cycles; initial controls change only the original field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/fluid properties; separately requested component and contact controls report their own units and scope; derivative and linear budgets apply per reverse endpoint under the original wall deadline; radiating endpoints replay their inner boundary iterations before exact-row linearization and count all reconstruction solves; checkpoint bytes bound retained fields/references, frame storage and requested control accumulators, not total workspace; separate from null steady-gradient fields\"}}",
             quote(match self.config.observable { Observable::Final => "final", Observable::SampledPeak => "sampled-peak" }),
             num(selected.value)?,num(selected.time)?,selected.state,
             selected.vertex.map_or_else(||"null".into(),|v|v.to_string()),self.cycles,
