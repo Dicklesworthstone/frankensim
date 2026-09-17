@@ -5,7 +5,7 @@
 use super::*;
 use fs_conduction::{ComponentPower, PowerMap, PowerUncertainty};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) enum Workload {
     Scale(f64),
     Components(BTreeMap<String, f64>),

@@ -5,6 +5,7 @@
 //! Radiation, when declared, is also implicit at the new endpoint. Its energy
 //! is distinct from air exhaust and only accepted endpoints enter the window.
 //! An explicit adjoint differentiates fixed schedules, including radiation.
+//! Optional time_convergence reruns nested grids and compares accepted fields.
 //! No continuous-time peak bound or adaptive-time-grid derivative is inferred.
 
 mod workload;
@@ -14,6 +15,7 @@ mod repeat;
 mod nonlinear;
 mod adjoint;
 mod design_sensitivity;
+mod time_convergence;
 use workload::Workload;
 
 use super::*;
@@ -39,6 +41,7 @@ pub(super) struct Schedule {
     adaptive: Option<adaptive::Config>,
     nonlinear: Option<nonlinear::Config>,
     adjoint: Option<adjoint::Config>,
+    time_convergence: Option<time_convergence::Config>,
     fan_speed_design: Option<sizing::Config>,
     power_design: Option<sizing::Config>,
     repeat: Option<repeat::Config>,
@@ -47,7 +50,7 @@ pub(super) struct Schedule {
 impl Schedule {
     pub(super) fn parse(value: &J, vertices: usize, elements: usize, fan: Option<&fan_drive::FanDrive>) -> Result<Self> {
         object(value, &["initial_temperature_k", "initial_temperatures_k", "volumetric_heat_capacity_j_m3_k",
-            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "fan_speed_design", "power_design", "repeat"], "transient")?;
+            "element_heat_capacities_j_m3_k", "max_step_s", "max_steps", "intervals", "temperature_limit_k", "adaptive", "nonlinear", "adjoint", "time_convergence", "fan_speed_design", "power_design", "repeat"], "transient")?;
         let nonlinear = value.get("nonlinear").map(nonlinear::Config::parse).transpose()?;
         let adjoint = value.get("adjoint").map(adjoint::Config::parse).transpose()?;
         if adjoint.is_some() {
@@ -81,6 +84,8 @@ impl Schedule {
         };
         let max_dt = positive(get(value,"max_step_s")?,"max_step_s")?;
         let max_steps = count(get(value,"max_steps")?,"max_steps",10_000)?;
+        let time_convergence = value.get("time_convergence")
+            .map(|policy| time_convergence::Config::parse(policy,value,max_steps)).transpose()?;
         let adaptive = value.get("adaptive").map(|v| adaptive::Config::parse(v, max_dt)).transpose()?;
         if value.get("fan_speed_design").is_some() && value.get("power_design").is_some() {
             return Err(bad("choose transient fan-speed sizing or workload-power sizing, not both"));
@@ -92,7 +97,7 @@ impl Schedule {
         let mut total_steps = 0_usize;
         let mut time = 0.0;
         for entry in array(get(value,"intervals")?,"intervals",4096)? {
-            object(entry,&["duration_s","power_scale","component_powers_w","fan_speed_ratio"],"transient interval")?;
+            object(entry,&["duration_s","power_scale","component_powers_w","fan_speed_ratio","steps"],"transient interval")?;
             let duration = positive(get(entry,"duration_s")?,"duration_s")?;
             let workload = Workload::parse(entry)?;
             let speed = match (fan,entry.get("fan_speed_ratio")) {
@@ -108,7 +113,13 @@ impl Schedule {
             if !count_f.is_finite() || count_f > max_steps as f64 {
                 return Err(budget("planned transient steps exceed max_steps"));
             }
-            let steps = count_f as usize;
+            // Explicit counts preserve nested grids even when duration/max_dt
+            // is not an integer. They may refine, never relax, max_step_s.
+            let steps = match entry.get("steps") {
+                Some(value) => count(value,"interval.steps",max_steps)?,
+                None => count_f as usize,
+            };
+            if steps < count_f as usize { return Err(bad("interval.steps violates transient.max_step_s")); }
             total_steps = total_steps.checked_add(steps).ok_or_else(|| budget("transient step count overflow"))?;
             if total_steps > max_steps { return Err(budget("planned transient steps exceed max_steps")); }
             let end = finite(time+duration)?;
@@ -129,7 +140,7 @@ impl Schedule {
         }
         let repeat = value.get("repeat").map(|v| repeat::Config::parse(v, total_steps, adaptive.is_some())).transpose()?;
         let schedule = Self {initial,capacities,intervals,limit,total_steps,max_step_s:max_dt,max_steps,
-            adaptive,nonlinear,adjoint,fan_speed_design,power_design,repeat};
+            adaptive,nonlinear,adjoint,time_convergence,fan_speed_design,power_design,repeat};
         for design in [&schedule.fan_speed_design,&schedule.power_design].into_iter().flatten() {
             design.validate(&schedule,fan)?;
         }
@@ -233,6 +244,9 @@ struct Trajectory {
 }
 
 pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<String> {
+    if let Some(config)=schedule.time_convergence {
+        return time_convergence::solve(request,cx,schedule,config);
+    }
     match (&schedule.fan_speed_design,&schedule.power_design) {
         (Some(design),None) | (None,Some(design)) => sizing::solve(request,cx,schedule,design),
         (None,None) => simulate(request,cx,schedule,1.0).map(|run|run.output),
@@ -240,13 +254,22 @@ pub(super) fn solve(request:&Request,cx:&Cx<'_>,schedule:&Schedule)->Result<Stri
     }
 }
 
+/// Read-only observations of accepted endpoints. The callback cannot mutate
+/// physical history, references, workloads or the integration policy.
+type SampleObserver<'a> = dyn FnMut(f64,&[f64])->Result<()> + 'a;
+
 /// Every design candidate starts cold/as declared; only cycles WITHIN that
 /// candidate inherit the preceding accepted thermal state.
 fn simulate(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64)->Result<Trajectory> {
+    simulate_observed(request,cx,schedule,speed_multiplier,None)
+}
+
+fn simulate_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
+    observer:Option<&mut SampleObserver<'_>>)->Result<Trajectory> {
     match schedule.repeat {
-        Some(config) => repeat::simulate(request,cx,schedule,speed_multiplier,config),
-        None => simulate_cycle(request,cx,schedule,speed_multiplier,&schedule.initial,schedule.max_steps)
-            .map(|cycle|cycle.trajectory),
+        Some(config) => repeat::simulate_observed(request,cx,schedule,speed_multiplier,config,observer),
+        None => simulate_cycle_observed(request,cx,schedule,speed_multiplier,&schedule.initial,
+            schedule.max_steps,None,observer.map(|o|(o,0.0))).map(|cycle|cycle.trajectory),
     }
 }
 
@@ -273,7 +296,15 @@ fn simulate_cycle(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplie
 /// only a reporting coordinate: dt and every physical solve stay in local time.
 fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
     initial_field:&[f64],remaining_steps:usize,
-    mut recording:Option<(&mut adjoint::Tape,f64)>)->Result<Cycle> {
+    recording:Option<(&mut adjoint::Tape,f64)>)->Result<Cycle> {
+    simulate_cycle_observed(request,cx,schedule,speed_multiplier,initial_field,remaining_steps,recording,None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_cycle_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_multiplier:f64,
+    initial_field:&[f64],remaining_steps:usize,
+    mut recording:Option<(&mut adjoint::Tape,f64)>,
+    mut observation:Option<(&mut SampleObserver<'_>,f64)>)->Result<Cycle> {
     poll(cx)?;
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
@@ -390,6 +421,9 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
                 if let Some((tape,offset))=recording.as_mut() {
                     tape.record(&solid.temperature,&coupled.reference_temperatures_k,
                         finite(*offset+endpoint)?,dt,ordinal,state.value,state.vertex)?;
+                }
+                if let Some((observer,offset))=observation.as_mut() {
+                    observer(finite(*offset+endpoint)?,&solid.temperature)?;
                 }
                 // Only accepted primal endpoints enter physical history or the tape.
                 old.clone_from(&solid.temperature);

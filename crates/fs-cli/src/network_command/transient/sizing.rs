@@ -57,6 +57,9 @@ impl Config {
     /// gradient cannot stand in for a peak derivative; adaptive/controller
     /// decisions and variable periodic horizons are not differentiated.
     pub(super) fn validate(&self, schedule: &Schedule, fan: Option<&fan_drive::FanDrive>) -> Result<()> {
+        if schedule.time_convergence.is_some() {
+            return Err(bad("time_convergence does not nest design searches"));
+        }
         if let Some(adjoint) = schedule.adjoint {
             adjoint.validate_design()?;
             if schedule.adaptive.is_some() { return Err(bad("adjoint sizing requires fixed timesteps")); }
@@ -255,7 +258,7 @@ fn power_schedule(cx: &Cx<'_>, schedule: &Schedule, multiplier: f64) -> Result<S
     Ok(Schedule {initial:schedule.initial.clone(),capacities:schedule.capacities.clone(),intervals,
         limit:schedule.limit,total_steps:schedule.total_steps,max_step_s:schedule.max_step_s,max_steps:schedule.max_steps,
         adaptive:schedule.adaptive,nonlinear:schedule.nonlinear,adjoint:schedule.adjoint,
-        fan_speed_design:None,power_design:None,repeat:schedule.repeat})
+        time_convergence:None,fan_speed_design:None,power_design:None,repeat:schedule.repeat})
 }
 
 /// An immutable candidate schedule gives forward and reverse the SAME fan

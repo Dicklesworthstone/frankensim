@@ -150,6 +150,12 @@ impl Config {
 pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
     speed_multiplier: f64, config: Config) -> Result<Trajectory>
 {
+    simulate_observed(request,cx,schedule,speed_multiplier,config,None)
+}
+
+pub(super) fn simulate_observed(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
+    speed_multiplier: f64, config: Config, mut observer: Option<&mut SampleObserver<'_>>) -> Result<Trajectory>
+{
     poll(cx)?;
     let mut tape = if schedule.adjoint.is_some() {
         if config.periodic.is_some() || config.controller.is_some() || speed_multiplier != 1.0 {
@@ -202,8 +208,14 @@ pub(super) fn simulate(request: &Request, cx: &Cx<'_>, schedule: &Schedule,
         }
         let remaining = config.max_total_steps.checked_sub(steps)
             .filter(|&left|left>0).ok_or_else(||budget("repeated-cycle accepted-step budget exhausted"))?;
-        let cycle = simulate_cycle_recorded(request,cx,schedule,applied_multiplier,&field,remaining,
-            tape.as_mut().map(|tape| (tape,elapsed)))?;
+        // Only reporting time receives the global offset. Every physical dt
+        // and inherited field follows the unchanged cycle-local producer.
+        let observation = match observer.as_mut() {
+            Some(callback) => Some((&mut **callback,elapsed)),
+            None => None,
+        };
+        let cycle = simulate_cycle_observed(request,cx,schedule,applied_multiplier,&field,remaining,
+            tape.as_mut().map(|tape| (tape,elapsed)),observation)?;
         let residual = field_residual(cx,&field,&cycle.final_temperature)?;
         last_residual = Some(residual);
         let sensor_end = config.controller.map(|controller| cycle.final_temperature[controller.sensor_vertex]);
