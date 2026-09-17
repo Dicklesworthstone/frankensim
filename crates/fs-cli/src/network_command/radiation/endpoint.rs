@@ -1,4 +1,4 @@
-//! Implicit endpoint exchange for the existing mean-patch radiation model.
+//! Implicit endpoint exchange for the declared radiation model.
 //! The callback owns backward Euler, heat capacity, k(T), contacts and source.
 //! Every callback invocation must use the SAME previous accepted physical field.
 use super::*;
@@ -19,6 +19,7 @@ pub(in crate::network_command) struct EndpointHeat {
     applied_w: f64,
     max_mismatch_w: f64,
     rows: Vec<PatchHeat>,
+    enclosure_report: Option<String>,
 }
 
 impl Policy {
@@ -30,6 +31,9 @@ impl Policy {
         htc: &BTreeMap<String, f64>, old: &[f64],
         solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
     ) -> Result<(StepSolution, Vec<SolidRegionState>)> {
+        if let Some(enclosure) = &self.enclosure {
+            return enclosure.advance_endpoint(self, request, cx, names, references, htc, old, solve);
+        }
         self.endpoint_inner(request,cx,names,references,htc,old,false,solve)
             .map(|(step,states,_)| (step,states))
     }
@@ -40,6 +44,9 @@ impl Policy {
         htc: &BTreeMap<String, f64>, old: &[f64],
         solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
     ) -> Result<(StepSolution, Vec<SolidRegionState>, SolvedRows)> {
+        if self.enclosure.is_some() {
+            return Err(bad("enclosure-radiation trajectory adjoints are not implemented; no frozen-radiosity derivative is returned"));
+        }
         let (step,states,rows) = self.endpoint_inner(request,cx,names,references,htc,old,true,solve)?;
         Ok((step,states,rows.ok_or_else(|| bad("radiative replay did not retain its accepted rows"))?))
     }
@@ -139,6 +146,14 @@ impl Policy {
     fn collect_endpoint_heat(
         &self, request: &Request, cx: &Cx<'_>, states: &[SolidRegionState], step: &StepSolution,
     ) -> Result<EndpointHeat> {
+        if let Some(enclosure) = &self.enclosure {
+            // The enclosure producer checks its stricter per-patch budget and
+            // closed heat sum. It must not be treated as an empty reservoir list.
+            let heat = enclosure.endpoint_heat(request, cx, states, step)?;
+            return Ok(EndpointHeat { outward_w: heat.outward_w, applied_w: heat.applied_w,
+                max_mismatch_w: heat.max_mismatch_w, rows: Vec::new(),
+                enclosure_report: Some(heat.report) });
+        }
         if states.len() != step.robin_fluxes.len() || states.len() != request.surfaces.len() {
             return Err(bad("endpoint radiation/Robin decomposition arity mismatch"));
         }
@@ -171,10 +186,11 @@ impl Policy {
         {
             return Err(producer("radiative endpoint boundary partition does not close"));
         }
-        Ok(EndpointHeat { outward_w, applied_w, max_mismatch_w, rows })
+        Ok(EndpointHeat { outward_w, applied_w, max_mismatch_w, rows, enclosure_report: None })
     }
 
     pub(in crate::network_command) fn endpoint_report(&self, heat: &EndpointHeat) -> Result<String> {
+        if let Some(report) = &heat.enclosure_report { return Ok(report.clone()); }
         let rows = heat.rows.iter().map(|heat| {
             let patch = &self.patches[&heat.surface];
             Ok(format!("{{\"surface\":{},\"emissivity\":{},\"ambient_temperature_k\":{},\"mean_temperature_k\":{},\"secant_htc_w_m2_k\":{},\"applied_heat_w\":{},\"nonlinear_heat_w\":{},\"source\":{}}}",

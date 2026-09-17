@@ -14,8 +14,8 @@
 //!
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
-//! Transient endpoints use the same law implicitly with fixed old solid state.
-//! Steady and fixed-trajectory adjoints include radiative and mixed-air feedback.
+//! Both models support implicit transient endpoints with fixed old solid state.
+//! Only the reservoir model currently supports steady/trajectory adjoints.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
     SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
@@ -97,9 +97,9 @@ impl Policy {
                 return Err(bad("choose radiation.surfaces or radiation.enclosure, not both"));
             }
             if get(get(root,"objective")?,"gradient")? != &J::Bool(false)
-                || root.get("transient").is_some()
+                || root.get("transient").is_some_and(|t|t.get("adjoint").is_some())
                 || root.get("mesh_convergence").is_some_and(|m|m.str_field("strategy")==Some("goal-recovery")) {
-                return Err(bad("enclosure radiation currently requires a steady request without gradients or adjoint mesh marking"));
+                return Err(bad("enclosure radiation does not yet support steady or trajectory adjoints or adjoint mesh marking"));
             }
             return Ok(Self {patches:BTreeMap::new(),enclosure:Some(enclosure::Enclosure::parse(enclosure,surfaces)?),
                 max_iterations,tolerance_k,relaxation});

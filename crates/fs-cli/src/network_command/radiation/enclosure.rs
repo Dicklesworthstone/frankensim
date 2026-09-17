@@ -6,6 +6,8 @@ use super::*;
 use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, RadiosityReport,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance};
 
+mod transient;
+
 #[derive(Debug)]
 struct SurfaceSpec {
     name: String,
@@ -171,7 +173,7 @@ impl Enclosure {
         }
         let objective_state=request.objective.evaluate(cx,&result.solid.temperature,&coupled.solid)?;
         let report=self.report(&result.radiosity,&result.applied_w,result.max_mismatch_w,
-            result.iterations,Some(solid_solves))?;
+            Some(result.iterations),Some(solid_solves))?;
         let contact_fluxes=request.contacts.as_ref().map(|c|c.interfaces.fluxes(&result.solid.temperature)
             .map_err(producer)).transpose()?.unwrap_or_default();
         let ordered_htc=names.iter().map(|name|htc[*name]).collect();
@@ -182,7 +184,7 @@ impl Enclosure {
     }
 
     pub(super) fn report(&self, report: &RadiosityReport, applied: &[f64], mismatch: f64,
-        iterations: usize, solves: Option<usize>) -> Result<String> {
+        iterations: Option<usize>, solves: Option<usize>) -> Result<String> {
         if applied.len()!=self.surfaces.len() {return Err(bad("enclosure report arity mismatch"));}
         let rows=self.surfaces.iter().enumerate().map(|(i,s)|Ok(format!(
             "{{\"surface\":{},\"emissivity\":{},\"area_m2\":{},\"mean_temperature_k\":{},\"radiosity_w_m2\":{},\"irradiation_w_m2\":{},\"outward_heat_w\":{},\"applied_heat_w\":{},\"source\":{}}}",
@@ -191,7 +193,8 @@ impl Enclosure {
             num(report.net_outward_heat_w[i])?,num(applied[i])?,quote(&s.source)))).collect::<Result<Vec<_>>>()?.join(",");
         let matrix=self.factors.factors().iter().map(|row|numbers(row)).collect::<Result<Vec<_>>>()?.join(",");
         Ok(format!("{{\"model\":\"closed-gray-diffuse-enclosure\",\"radiative_out_w\":{},\"max_nonlinear_mismatch_w\":{},\"radiosity_residual_w_m2\":{},\"iterations\":{},\"total_solid_solves\":{},\"view_factors\":[{}],\"view_factor_evidence\":{},\"max_reciprocity_residual\":{},\"surfaces\":[{}],\"scope\":\"closed fixed view-factor patch model; each area-mean temperature drives emission and each radiative flux is uniform on its patch; internal exchange, not heat lost to ambient or air; supplied analytic/QMC provenance is retained, not independently verified against mesh geometry; no occlusion computation, pointwise T(x)^4 law, radiation absorption in air, or physical validation\"}}",
-            num(report.enclosure_energy_closure_w)?,num(mismatch)?,num(report.linear_residual_max_w_m2)?,iterations,
+            num(report.enclosure_energy_closure_w)?,num(mismatch)?,num(report.linear_residual_max_w_m2)?,
+            iterations.map_or_else(||"null".into(),|n|n.to_string()),
             solves.map_or_else(||"null".into(),|n|n.to_string()),matrix,self.evidence_json,
             num(report.max_reciprocity_residual)?,rows))
     }
