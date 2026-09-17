@@ -1,6 +1,7 @@
 //! Radiation controls modify the declared physical input, not the solved heat.
-//! Emissivity and surroundings temperature are distinct from convective h and
-//! air inlet temperature. Neither changes source footprints or surface faces.
+//! Emissivity may belong to reservoir patches or a closed enclosure. Only the
+//! reservoir model has a surroundings-temperature control. Neither changes
+//! source footprints, surface faces or a declared view-factor matrix.
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +41,21 @@ impl Target {
         format!("{{\"kind\":{},\"surface\":{}}}", quote(kind), quote(self.surface()))
     }
 
+    fn path(&self, base: &J) -> Result<&'static [&'static str]> {
+        let radiation=field(base,"radiation")?;
+        if radiation.get("enclosure").is_some() {
+            if radiation.get("surfaces").is_some() {
+                return Err(bad("ambiguous reservoir/enclosure radiation declaration"));
+            }
+            if matches!(self,Self::AmbientTemperature(_)) {
+                return Err(bad("closed enclosures have no ambient-temperature control"));
+            }
+            Ok(&["radiation","enclosure","surfaces"])
+        } else { Ok(&["radiation","surfaces"]) }
+    }
+
     fn row(&self, base: &J) -> Result<usize> {
-        let rows = array_path(base, &["radiation", "surfaces"])?;
+        let rows = array_path(base, self.path(base)?)?;
         let indices = rows.iter().enumerate().filter(|(_, row)| row.str_field("surface") == Some(self.surface()))
             .map(|(index, _)| index).collect::<Vec<_>>();
         if indices.len() != 1 {
@@ -54,7 +68,7 @@ impl Target {
     }
     pub(super) fn validate(&self, base: &J) -> Result<()> {
         let index = self.row(base)?;
-        let rows = array_path(base, &["radiation", "surfaces"])?;
+        let rows = array_path(base, self.path(base)?)?;
         let value = number(field(&rows[index], self.key())?, self.key())?;
         if !self.admitted(value) { return Err(bad("base radiation target is outside its physical domain")); }
         Ok(())
@@ -72,7 +86,8 @@ impl Target {
             return Err(model_failure(format!("sampled {}={} leaves its physical domain; never clip or redraw", self.name(), value)));
         }
         let index = self.row(base)?;
-        let rows = array_mut_path(base, &["radiation", "surfaces"])?;
+        let path=self.path(base)?;
+        let rows = array_mut_path(base, path)?;
         set_member_number(&mut rows[index], self.key(), value)
     }
 }
@@ -120,5 +135,33 @@ mod tests {
         let rows = array_mut_path(&mut base,&["radiation","surfaces"]).unwrap();
         rows.push(rows[0].clone());
         assert!(Target::Emissivity("first-face".into()).validate(&base).is_err());
+    }
+
+    const ENCLOSURE:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/cooling-network/enclosure-radiation-gap.json"));
+
+    #[test]
+    fn enclosure_samples_change_finish_not_view_factors_or_the_other_surface() {
+        let mut base=J::parse(ENCLOSURE).unwrap();let original=base.clone();
+        let target=Target::Emissivity("emitter".into());
+        target.validate(&base).unwrap();target.apply(&mut base,0.4).unwrap();
+        assert_eq!(array_path(&base,target.path(&base).unwrap()).unwrap()[0].f64_field("emissivity"),Some(0.4));
+        assert_eq!(base.path(&["radiation","enclosure","view_factors"]),
+            original.path(&["radiation","enclosure","view_factors"]));
+        assert_eq!(base.get("solid"),original.get("solid"));
+        target.apply(&mut base,0.8).unwrap();assert_eq!(base,original);
+    }
+
+    #[test]
+    fn closed_enclosures_refuse_ambient_controls_and_invalid_draws_transactionally() {
+        let original=J::parse(ENCLOSURE).unwrap();
+        let ambient=Target::AmbientTemperature("emitter".into());
+        assert!(ambient.validate(&original).is_err());
+        let mut base=original.clone();assert!(ambient.apply(&mut base,310.0).is_err());
+        assert_eq!(base,original);
+        for v in [0.0,-0.1,1.01,f64::NAN] {
+            assert!(Target::Emissivity("emitter".into()).apply(&mut base,v).is_err());
+            assert_eq!(base,original);
+        }
     }
 }
