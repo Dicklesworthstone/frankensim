@@ -1,5 +1,6 @@
-//! Uncertainty in the actual matching-contact resistance, not effective h.
-//! One draw applies to the named contact throughout a complete trajectory.
+//! Uncertainty in the actual contact resistance, not an effective h.
+//! One draw applies to the named matching or planar nonmatching contact
+//! throughout a complete solve/trajectory. The child owns geometry admission.
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -30,8 +31,20 @@ impl Target {
         if matches.next().is_some() { return Err(bad("uncertain contact name is ambiguous")); }
         let resistance = number(field(row, "resistance_m2_k_w")?, "contact resistance")?;
         admit(resistance)?;
-        if array(field(row, "face_pairs")?, "contact.face_pairs", 200_000)?.is_empty() {
-            return Err(bad("uncertain contact must own at least one declared face pair"));
+        match (row.get("face_pairs"),row.get("nonmatching")) {
+            (Some(pairs),None) => {
+                if array(pairs,"contact.face_pairs",200_000)?.is_empty() {
+                    return Err(bad("uncertain contact must own at least one declared face pair"));
+                }
+            }
+            (None,Some(sides)) => {
+                for key in ["side_a_faces","side_b_faces"] {
+                    if array(field(sides,key)?,key,200_000)?.is_empty() {
+                        return Err(bad("uncertain nonmatching contact requires both complete face sets"));
+                    }
+                }
+            }
+            _ => return Err(bad("uncertain contact requires exactly one matching or nonmatching trace declaration")),
         }
         Ok(index)
     }
@@ -41,7 +54,6 @@ impl Target {
     }
 
     pub(super) fn apply(&self, base: &mut J, value: f64) -> Result<()> {
-        // A real invalid model draw is terminal, not a request to redraw.
         admit(value).map_err(|error| model_failure(error.message))?;
         let index = self.index(base)?;
         let contacts = array_mut_path(base, &["solid", "contacts"])?;
@@ -107,5 +119,18 @@ mod tests {
         assert!(parameters.contains("contact[bondline].resistance_m2_k_w"));
         assert!(parameters.contains("m2 K/W"));
         assert!(Config::parse(&text.replace("\"lo\":0.005", "\"lo\":0"), &base).is_err());
+    }
+
+    #[test]
+    fn nonmatching_samples_keep_both_meshes_and_all_geometry_admission_controls() {
+        let original=J::parse(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/cooling-network/nonmatching-contact-hotspot.json"))).unwrap();
+        let mut changed=original.clone();
+        target().validate(&changed).unwrap();target().apply(&mut changed,0.025).unwrap();
+        let old=&array_path(&original,&["solid","contacts"]).unwrap()[0];
+        let new=&array_path(&changed,&["solid","contacts"]).unwrap()[0];
+        assert_eq!(old.get("nonmatching"),new.get("nonmatching"));
+        assert_eq!(new.f64_field("resistance_m2_k_w"),Some(0.025));
+        target().apply(&mut changed,0.01).unwrap();assert_eq!(changed,original);
     }
 }
