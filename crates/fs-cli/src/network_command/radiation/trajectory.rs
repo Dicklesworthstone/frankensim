@@ -7,11 +7,16 @@ use fs_conduction::transient::backward_euler::{
     BackwardEuler, NonlinearStepConfig, StepConfig, StepLinearization,
 };
 
+enum Point {
+    Reservoir(feedback::Point),
+    Enclosure { shifted_references: Vec<f64> },
+}
+
 pub(in crate::network_command) struct Reconstructed<'a> {
     pub step: StepLinearization<'a>,
     pub states: Vec<SolidRegionState>,
     pub solid_solves: usize,
-    point: feedback::Point,
+    point: Point,
 }
 
 fn check_field(actual: &[f64], expected: &[f64]) -> Result<()> {
@@ -31,6 +36,11 @@ impl Policy {
         nonlinear: Option<NonlinearStepConfig>, expected: &[f64],
     ) -> Result<Reconstructed<'a>> {
         poll(cx)?;
+        if let Some(enclosure)=&self.enclosure {
+            let (step,states,shifted_references,solid_solves)=enclosure.reconstruct_endpoint(
+                self,request,cx,engine,network,references,htc,old,source,dt,config,nonlinear,expected)?;
+            return Ok(Reconstructed {step,states,solid_solves,point:Point::Enclosure {shifted_references}});
+        }
         let names = network.regions();
         let material = fs_conduction::ConductivityModel::isotropic_declared(request.conductivity)
             .map_err(producer)?;
@@ -66,20 +76,22 @@ impl Policy {
         check_field(&step.primal().temperature,expected)?;
         self.endpoint_heat(request,cx,&states,step.primal())?;
         poll(cx)?;
-        Ok(Reconstructed { step, states, solid_solves, point: feedback::Point {
+        Ok(Reconstructed { step, states, solid_solves, point: Point::Reservoir(feedback::Point {
             htc: rows.htc, references: rows.references, driving: rows.driving,
             radiative_htc: rows.radiative_htc,
-        } })
+        }) })
     }
 
     /// Shared patch controls act throughout the complete fixed trajectory.
     pub(in crate::network_command) fn zero_trajectory_gradient(&self) -> BTreeMap<String,[f64;2]> {
+        if let Some(enclosure)=&self.enclosure {return enclosure.zero_trajectory_gradient();}
         self.patches.keys().map(|name| (name.clone(),[0.0;2])).collect()
     }
 
     pub(in crate::network_command) fn trajectory_gradient_report(
         &self, gradients: &BTreeMap<String,[f64;2]>,
     ) -> Result<String> {
+        if let Some(enclosure)=&self.enclosure {return enclosure.trajectory_gradient_report(gradients);}
         if gradients.len() != self.patches.len() {
             return Err(bad("trajectory radiation gradient has the wrong patch set"));
         }
@@ -115,8 +127,13 @@ impl Reconstructed<'_> {
         if weights.solid_heat_rates.iter().any(|&w| w != 0.0) {
             return Err(bad("radiative trajectory adjoints admit temperature objectives only"));
         }
-        feedback::pullback(policy,request,cx,network,&self.step,&self.point,references,htc,
-            &weights.nodal_temperatures,&weights.wall_temperatures,derived)
+        match &self.point {
+            Point::Reservoir(point)=>feedback::pullback(policy,request,cx,network,&self.step,point,references,htc,
+                &weights.nodal_temperatures,&weights.wall_temperatures,derived),
+            Point::Enclosure {shifted_references}=>policy.enclosure.as_ref()
+                .ok_or_else(||bad("reconstructed enclosure no longer matches its radiation policy"))?
+                .pullback_endpoint(request,cx,network,&self.step,shifted_references,references,htc,weights,derived),
+        }
     }
 }
 
