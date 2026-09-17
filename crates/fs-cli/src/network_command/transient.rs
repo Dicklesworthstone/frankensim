@@ -389,8 +389,9 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
                 }
                 if let Some((tape,offset))=recording.as_mut() {
                     tape.record(&solid.temperature,&coupled.reference_temperatures_k,
-                        finite(*offset+endpoint),dt,ordinal,state.value,state.vertex)?;
+                        finite(*offset+endpoint)?,dt,ordinal,state.value,state.vertex)?;
                 }
+                // Only accepted primal endpoints enter physical history or the tape.
                 old.clone_from(&solid.temperature);
                 time=endpoint;
                 if ordinal+1==schedule.intervals.len() && endpoint==end {
