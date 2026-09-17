@@ -4,6 +4,15 @@
 use super::*;
 use fs_conduction::transient::backward_euler::StepSolution;
 
+/// Exact rows of the accepted callback, not coefficients recomputed later at a
+/// slightly different, finite-tolerance wall. Retained only during adjoint replay.
+pub(in crate::network_command::radiation) struct SolvedRows {
+    pub htc: BTreeMap<String, f64>,
+    pub references: Vec<f64>,
+    pub driving: Vec<f64>,
+    pub radiative_htc: Vec<f64>,
+}
+
 /// Recomputed endpoint heat, never accumulated until its timestep is accepted.
 pub(in crate::network_command) struct EndpointHeat {
     pub outward_w: f64,
@@ -19,15 +28,33 @@ impl Policy {
     pub(in crate::network_command) fn advance_endpoint(
         &self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
         htc: &BTreeMap<String, f64>, old: &[f64],
-        mut solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
+        solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
     ) -> Result<(StepSolution, Vec<SolidRegionState>)> {
+        self.endpoint_inner(request,cx,names,references,htc,old,false,solve)
+            .map(|(step,states,_)| (step,states))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::network_command::radiation) fn advance_endpoint_bound(
+        &self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
+        htc: &BTreeMap<String, f64>, old: &[f64],
+        solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
+    ) -> Result<(StepSolution, Vec<SolidRegionState>, SolvedRows)> {
+        let (step,states,rows) = self.endpoint_inner(request,cx,names,references,htc,old,true,solve)?;
+        Ok((step,states,rows.ok_or_else(|| bad("radiative replay did not retain its accepted rows"))?))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn endpoint_inner(
+        &self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
+        htc: &BTreeMap<String, f64>, old: &[f64], retain_rows: bool,
+        mut solve: impl FnMut(&ThermalBoundary) -> Result<StepSolution>,
+    ) -> Result<(StepSolution, Vec<SolidRegionState>, Option<SolvedRows>)> {
         if names.len() != references.len() || old.len() != request.mesh.vertex_count()
             || old.iter().any(|t| !t.is_finite() || *t <= 0.0)
         {
             return Err(bad("radiative endpoint requires complete positive physical history and air references"));
         }
-        // Seed from the previous physical wall, not a fictitious air-only state.
-        // This seed affects iteration only; storage remains in the callback.
         let mut driving = references.to_vec();
         for (i, &name) in names.iter().enumerate() {
             if !self.patches.contains_key(name) { continue; }
@@ -50,6 +77,7 @@ impl Policy {
             poll(cx)?;
             let mut combined_h = htc.clone();
             let mut combined_ref = references.to_vec();
+            let mut applied_h = vec![0.0; names.len()];
             for (i, &name) in names.iter().enumerate() {
                 if let Some(patch) = self.patches.get(name) {
                     let hr = patch.coefficient(driving[i])?;
@@ -58,9 +86,12 @@ impl Policy {
                     combined_h.insert(name.to_string(), total);
                     combined_ref[i] = finite((ha / total) * references[i]
                         + (hr / total) * patch.ambient_k, "endpoint combined reference")?;
+                    applied_h[i] = hr;
                 }
             }
             let boundary = request.boundary(names, &combined_ref, &combined_h)?;
+            let rows = retain_rows.then(|| SolvedRows { htc: combined_h, references: combined_ref,
+                driving: driving.clone(), radiative_htc: applied_h });
             let step = solve(&boundary)?;
             poll(cx)?;
             let mut states = Vec::with_capacity(names.len());
@@ -87,7 +118,7 @@ impl Policy {
                 && heat.max_mismatch_w <= request.limits.heat / (self.patches.len() as f64 + 1.0)
             {
                 poll(cx)?;
-                return Ok((step, states));
+                return Ok((step, states, rows));
             }
         }
         Err(Failure { code: "cooling-network-radiation-budget", message: format!(
@@ -95,8 +126,6 @@ impl Policy {
             self.max_iterations) })
     }
 
-    /// Reconstruct the nonlinear heat of an accepted endpoint from its actual
-    /// surface means and independently accumulated combined Robin fluxes.
     pub(in crate::network_command) fn endpoint_heat(
         &self, request: &Request, cx: &Cx<'_>, states: &[SolidRegionState], step: &StepSolution,
     ) -> Result<EndpointHeat> {
@@ -145,7 +174,6 @@ impl Policy {
         Ok(EndpointHeat { outward_w, applied_w, max_mismatch_w, rows })
     }
 
-    /// The final endpoint is not an integrated window or all-cycle report.
     pub(in crate::network_command) fn endpoint_report(&self, heat: &EndpointHeat) -> Result<String> {
         let rows = heat.rows.iter().map(|heat| {
             let patch = &self.patches[&heat.surface];
@@ -153,7 +181,7 @@ impl Policy {
                 quote(&patch.surface), num(patch.emissivity.value())?, num(patch.ambient_k)?, num(heat.mean_k)?,
                 num(heat.secant_h)?, num(heat.applied_w)?, num(heat.nonlinear_w)?, quote(&patch.source)))
         }).collect::<Result<Vec<_>>>()?.join(",");
-        Ok(format!("{{\"model\":\"mean-patch-gray-to-isothermal-surroundings\",\"temporal_scope\":\"final-accepted-endpoint\",\"radiative_out_w\":{},\"applied_radiative_out_w\":{},\"max_nonlinear_mismatch_w\":{},\"patches\":[{}],\"scope\":\"implicit new-temperature radiation alongside convection; mean-patch Robin closure, not pointwise T(x)^4 integration; no fluid radiation absorption, enclosure reflections, moving surroundings, radiative adjoint or continuous-time peak bound\"}}",
+        Ok(format!("{{\"model\":\"mean-patch-gray-to-isothermal-surroundings\",\"temporal_scope\":\"final-accepted-endpoint\",\"radiative_out_w\":{},\"applied_radiative_out_w\":{},\"max_nonlinear_mismatch_w\":{},\"patches\":[{}],\"scope\":\"implicit new-temperature radiation alongside convection; mean-patch Robin closure, not pointwise T(x)^4 integration; no fluid radiation absorption, enclosure reflections, moving surroundings or continuous-time peak bound; trajectory derivatives, when requested, are reported separately\"}}",
             num(heat.outward_w)?, num(heat.applied_w)?, num(heat.max_mismatch_w)?, rows))
     }
 }
