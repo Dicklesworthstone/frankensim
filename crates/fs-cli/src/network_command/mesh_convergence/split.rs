@@ -13,6 +13,10 @@ impl Split {
         let mut links=Vec::new();
         if let Some(contacts)=get(root,"solid")?.get("contacts") {
             for contact in array(contacts,"contacts",4096)? {
+                // Independent planar traces need no synchronized edges. Their
+                // overlap integration is rebuilt after transferring each side.
+                // Exact subpatches may cease to match without changing the law.
+                if contact.get("nonmatching").is_some() { continue; }
                 for pair in array(get(contact,"face_pairs")?,"face_pairs",200_000)? {
                     poll(cx)?;
                     let a=indices::<3>(get(pair,"side_a")?,"side_a",request.mesh.vertex_count())?;

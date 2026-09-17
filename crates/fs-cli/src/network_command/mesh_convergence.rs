@@ -7,6 +7,7 @@ use fs_mesh::{TetRefinement,TetRefinementError,TetRefinementLimits};
 mod mark;
 mod split;
 mod physics;
+mod contact_transfer;
 
 #[derive(Debug)]
 pub(super) struct Study {
@@ -109,7 +110,7 @@ impl Study {
                 let prefix=output.strip_suffix("}\n").ok_or_else(||bad("internal mesh-study result framing"))?;
                 let resolved=encode(&input)?;
                 let method=if self.marking.is_some(){"goal-recovery-edge-bisection"}else{"uniform-red-tet-refinement"};
-                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":{},\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"total_adjoint_sweeps\":{total_adjoint_sweeps},\"global_confirmation\":{},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; goal-recovery scores prioritize cells and are not a DWR or continuum error bound, maximum-norm certificate, or physical validation; local refinement is conforming but carries no shape-regularity theorem; an adaptive success includes a complete uniform-refinement comparison; base P1 source is prolonged without renormalization, material laws inherit by parent cell, matching contact traces remain separate; radiation patch partition and constitutive law remain unchanged and its total adjoint drives marking when present; solid work includes nested radiation and reconstruction solves; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
+                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":{},\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"total_adjoint_sweeps\":{total_adjoint_sweeps},\"global_confirmation\":{},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; goal-recovery scores prioritize cells and are not a DWR or continuum error bound, maximum-norm certificate, or physical validation; local refinement is conforming but carries no shape-regularity theorem; an adaptive success includes a complete uniform-refinement comparison; base P1 source is prolonged without renormalization, material laws inherit by parent cell, contact traces remain separate; independently meshed planar contact sides rebuild overlap integration under unchanged geometry budgets; radiation patch partition and constitutive law remain unchanged and its total adjoint drives marking when present; solid work includes nested radiation and reconstruction solves; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
                     quote(method),history.len(),num(self.tolerance_k)?,self.consecutive,optional(change)?,
                     if self.marking.is_some(){"true"}else{"null"},history.join(","),resolved.trim_end()));
             }
@@ -184,16 +185,7 @@ fn refine_request_selected(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinem
     if solid.get("contacts").is_some() {
         let J::Array(contacts)=member_mut(solid,"contacts")? else {return Err(bad("contacts must be an array"));};
         for contact in contacts {
-            let mut children=Vec::new();
-            for pair in array(get(contact,"face_pairs")?,"contact face pairs",200_000)? {
-                poll(cx)?;
-                let a=indices::<3>(get(pair,"side_a")?,"side_a",old_vertices)?;
-                let b=indices::<3>(get(pair,"side_b")?,"side_b",old_vertices)?;
-                for (a,b) in split.contact_children(a,b)? {
-                    children.push(J::Object(vec![("side_a".into(),jindices(&a)),("side_b".into(),jindices(&b))]));
-                }
-            }
-            replace(contact,"face_pairs",J::Array(children))?;
+            contact_transfer::refine(cx,contact,&split,old_vertices)?;
         }
     }
     poll(cx)?;

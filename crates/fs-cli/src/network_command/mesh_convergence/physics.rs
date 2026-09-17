@@ -14,9 +14,6 @@ pub(super) struct Solved {
 
 pub(super) fn solve(request: &Request, cx: &Cx<'_>, fraction: Option<f64>) -> Result<Solved> {
     poll(cx)?;
-    if request.contacts.as_ref().is_some_and(|c| c.has_nonmatching()) {
-        return Err(bad("mesh_convergence does not yet transfer nonmatching contact-side declarations; solve explicit meshes separately rather than dropping contact"));
-    }
     let flow = request.flow(cx)?;
     let coefficients = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
     let mut evaluated = match &request.radiation {
