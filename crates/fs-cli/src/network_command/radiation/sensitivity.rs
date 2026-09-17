@@ -8,6 +8,8 @@ use fs_airflow::graph::thermal::coupled_transport::sensitivity::CoupledObjective
 // without introducing a second radiation derivative or public numerical model.
 #[path = "feedback.rs"]
 pub(super) mod feedback;
+#[path = "trajectory.rs"]
+mod trajectory;
 
 /// Exact inputs to the final steady solid evaluation, retained on gradient runs.
 pub(super) struct Binding {
