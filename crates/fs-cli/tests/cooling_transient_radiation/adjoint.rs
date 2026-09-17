@@ -134,12 +134,15 @@ fn repeated_and_unrolled_radiative_adjoints_share_the_same_chronological_history
 #[test]
 fn an_initial_maximum_has_no_radiation_or_future_workload_sensitivity() {
     let mut root = input("sampled-peak",2);
+    // A consistent capacity matrix does not assert an interior-node maximum
+    // principle. The directly cooled patch mean is verified to decrease here.
+    put(&mut root,"objective",J::parse(r#"{"mean_wall_region":"first-face","gradient":false}"#).unwrap());
     put(member(&mut root,"transient"),"initial_temperature_k",num(350.0));
     for i in 0..2 { put(interval(&mut root,i),"power_scale",num(0.0)); }
     let result = run(&root); let g = gradient(&result);
     assert_eq!(n(g,"state_index"),0.0);
     assert_eq!(n(g,"reconstruction_solid_solves"),0.0);
-    assert_eq!(n(g,"dtemperature_duniform_initial_k"),1.0);
+    near(n(g,"dtemperature_duniform_initial_k"),1.0,1e-14);
     for name in ["first-face","last-face"] {
         assert_eq!(n(patch(&result,name),"dtemperature_dlog_emissivity_k"),0.0);
         assert_eq!(n(patch(&result,name),"dtemperature_dambient_temperature"),0.0);
