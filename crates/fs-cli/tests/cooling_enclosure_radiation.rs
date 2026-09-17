@@ -94,7 +94,6 @@ fn reflected_heat_crosses_the_gap_but_is_not_an_external_energy_sink() {
     assert!(n(patch(&black,"emitter"),"outward_heat_w")>n(patch(&result,"emitter"),"outward_heat_w"));
     let mut absent=input.clone();remove(&mut absent,"radiation");let absent=run(&absent);
     assert!(n(absent.get("objective").unwrap(),"value_k")>n(result.get("objective").unwrap(),"value_k")+5.0);
-    // Near mirrors approach zero exchange, not blackbody exchange.
     let mut mirrors=input;finish(&mut mirrors,1e-5,1e-5);let mirrors=check_reference(&mirrors,1e-5,1e-5);
     near(n(mirrors.get("objective").unwrap(),"value_k"),n(absent.get("objective").unwrap(),"value_k"),1e-3);
 }
@@ -134,13 +133,11 @@ fn uniform_mesh_study_preserves_the_closed_model_and_final_field_replay() {
 }
 
 #[test]
-fn incomplete_matrices_conflicting_models_and_unimplemented_gradients_refuse() {
+fn incomplete_matrices_and_conflicting_models_refuse() {
     let input=J::parse(BASE).unwrap();let mut cases=Vec::new();
     let mut unclosed=input.clone();put(enclosure(&mut unclosed),"view_factors",J::parse("[[0,0.9],[1,0]]").unwrap());cases.push(unclosed);
     let mut nonreciprocal=input.clone();put(enclosure(&mut nonreciprocal),"view_factors",J::parse("[[0,1],[0.5,0.5]]").unwrap());cases.push(nonreciprocal);
     let mut both=input.clone();put(member(&mut both,"radiation"),"surfaces",J::Array(Vec::new()));cases.push(both);
-    let mut gradient=input.clone();put(member(&mut gradient,"objective"),"gradient",J::Bool(true));cases.push(gradient);
-    let mut marking=input.clone();put(&mut marking,"mesh_convergence",J::parse(r#"{"strategy":"goal-recovery","marking_fraction":0.5,"max_refinements":3,"consecutive_passes":2,"temperature_tolerance_k":2,"max_vertices":10000,"max_tetrahedra":10000}"#).unwrap());cases.push(marking);
     for input in cases {let output=output(&input);assert!(!output.status.success());assert!(output.stdout.is_empty());}
     let mut exhausted=input;
     put(member(&mut exhausted,"radiation"),"max_iterations",num(1.0));
@@ -149,3 +146,5 @@ fn incomplete_matrices_conflicting_models_and_unimplemented_gradients_refuse() {
 
 #[path="cooling_enclosure_radiation/uq.rs"]
 mod uq;
+#[path="cooling_enclosure_radiation/adjoint.rs"]
+mod adjoint;

@@ -7,6 +7,8 @@ use fs_conduction::radiation::{GrayDiffuseEnclosure, RadiationSurface, Radiosity
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance};
 
 mod transient;
+mod radiosity_adjoint;
+mod sensitivity;
 
 #[derive(Debug)]
 struct SurfaceSpec {
@@ -104,7 +106,6 @@ impl Enclosure {
     pub(super) fn evaluate(&self, policy: &Policy, request: &Request, cx: &Cx<'_>,
         flow: &GraphSolution, declared: &BTreeMap<String,f64>, want_gradient: bool)
         -> Result<fan_speed::ThermalEvaluation> {
-        if want_gradient { return Err(bad("enclosure-radiation adjoints are not implemented; no frozen-radiosity gradient is returned")); }
         let enclosure = self.bind(request,cx)?;
         let (htc,convection) = convection::resolve(request,cx,flow,declared)?;
         let network = request.transport(cx,flow,&htc)?;
@@ -172,13 +173,24 @@ impl Enclosure {
             }
         }
         let objective_state=request.objective.evaluate(cx,&result.solid.temperature,&coupled.solid)?;
+        let (gradient,adjoint)=if want_gradient {
+            let (gradient,report)=sensitivity::pullback(self,request,cx,&network,&enclosure,&result,
+                &coupled.reference_temperatures_k,&htc,&objective_state,&convection)?;
+            (Some(gradient),if request.gradient {report} else {"null".into()})
+        } else {(None,"null".into())};
+        let reconstruction_solves=usize::from(gradient.is_some());
+        let total_solves=solid_solves.checked_add(reconstruction_solves)
+            .ok_or_else(||producer("enclosure total solve count overflow"))?;
         let report=self.report(&result.radiosity,&result.applied_w,result.max_mismatch_w,
-            Some(result.iterations),Some(solid_solves))?;
+            Some(result.iterations),Some(total_solves))?;
+        let prefix=report.strip_suffix('}').ok_or_else(||bad("enclosure report framing"))?;
+        let report=format!("{prefix},\"forward_solid_solves\":{solid_solves},\"reconstruction_solid_solves\":{reconstruction_solves},\"adjoint\":{adjoint}}}");
         let contact_fluxes=request.contacts.as_ref().map(|c|c.interfaces.fluxes(&result.solid.temperature)
             .map_err(producer)).transpose()?.unwrap_or_default();
         let ordered_htc=names.iter().map(|name|htc[*name]).collect();
-        Ok(fan_speed::ThermalEvaluation {solid_solves,radiation:Some(report),value:Evaluation {
-            coupled,temperatures:result.solid.temperature,gradient:None,objective:objective_state.value,
+        poll(cx)?;
+        Ok(fan_speed::ThermalEvaluation {solid_solves:total_solves,radiation:Some(report),value:Evaluation {
+            coupled,temperatures:result.solid.temperature,gradient,objective:objective_state.value,
             objective_state,robin_total_w:robin,source_total_w:source,htc:ordered_htc,convection,contact_fluxes,
         }})
     }
@@ -222,6 +234,9 @@ pub(super) struct Exchange<T> {
     pub states:Vec<SolidRegionState>,
     pub radiosity:RadiosityReport,
     pub applied_w:Vec<f64>,
+    /// Exact boundary inputs of the accepted callback, not recovered from
+    /// rounded patch watts or recomputed at a slightly different temperature.
+    pub shifted_references:Vec<f64>,
     pub max_mismatch_w:f64,
     pub iterations:usize,
 }
@@ -282,7 +297,7 @@ pub(super) fn exchange<T:Response>(policy:&Policy,request:&Request,cx:&Cx<'_>,
         if change<=policy.tolerance_k && max_mismatch<=budget {
             poll(cx)?;
             return Ok(Exchange {solid,states,radiosity:recomputed,applied_w:applied.net_outward_heat_w,
-                max_mismatch_w:max_mismatch,iterations:iteration+1});
+                shifted_references:shifted,max_mismatch_w:max_mismatch,iterations:iteration+1});
         }
     }
     Err(Failure {code:"cooling-network-radiation-budget",message:format!(
