@@ -1,7 +1,7 @@
 //! Fixed-grid discrete trajectory adjoint. Only accepted fields/references
 //! are retained; matrices and coupled adjoints are reconstructed one endpoint
-//! at a time. Repeated schedules share ONE chronological history: equal
-//! interval labels in different cycles must never reorder the reverse sweep.
+//! at a time. Repeated schedules share ONE chronological history. Radiation
+//! replays the accepted inner boundary loop before preparing its total response.
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +23,6 @@ impl Config {
         Ok(Self { observable, max_checkpoint_bytes: count(get(value,"max_checkpoint_bytes")?,
             "adjoint.max_checkpoint_bytes", 512 * 1024 * 1024)? })
     }
-
     pub(super) fn validate_design(self) -> Result<()> {
         if self.observable != Observable::SampledPeak {
             return Err(bad("transient sizing requires adjoint.qoi=sampled-peak; a final-temperature derivative cannot guide a peak constraint"));
@@ -33,35 +32,19 @@ impl Config {
 }
 
 struct Frame {
-    temperature: Vec<f64>,
-    references: Vec<f64>,
-    time: f64,
-    dt: f64,
-    interval: usize,
-    objective: f64,
-    vertex: Option<usize>,
+    temperature: Vec<f64>, references: Vec<f64>, time: f64, dt: f64,
+    interval: usize, objective: f64, vertex: Option<usize>,
 }
-
 #[derive(Clone, Copy)]
 struct Selection {
-    state: usize,
-    time: f64,
-    value: f64,
-    vertex: Option<usize>,
-    // Cycle starts reuse the prior accepted field but evaluate their spatial
-    // objective directly. Preserve that rounding/selection path at a boundary.
+    state: usize, time: f64, value: f64, vertex: Option<usize>,
+    // Cycle-start objectives use the existing direct spatial evaluation path.
     boundary: bool,
 }
 
 pub(super) struct Tape {
-    config: Config,
-    frames: Vec<Frame>,
-    planned: usize,
-    cycles: usize,
-    vertices: usize,
-    regions: usize,
-    charged_bytes: usize,
-    peak: Selection,
+    config: Config, frames: Vec<Frame>, planned: usize, cycles: usize,
+    vertices: usize, regions: usize, charged_bytes: usize, peak: Selection,
 }
 
 impl Tape {
@@ -73,8 +56,6 @@ impl Tape {
         Self::for_cycles(request, schedule, initial, initial_vertex, 1)
     }
 
-    /// The repeated driver admits a fixed count and rejects controllers or
-    /// periodic stopping before calling. Charge ALL cycles before a PDE solve.
     pub(super) fn for_cycles(request: &Request, schedule: &Schedule, initial: f64,
         initial_vertex: Option<usize>, cycles: usize) -> Result<Option<Self>> {
         let Some(config) = schedule.adjoint else { return Ok(None); };
@@ -102,11 +83,8 @@ impl Tape {
                 vertex: initial_vertex, boundary: true } }))
     }
 
-    /// Do not discard cycle-start samples used by the existing forward peak
-    /// calculation. They have no new physical step and need no copied field.
     pub(super) fn begin_cycle(&mut self, initial: f64, vertex: Option<usize>, time: f64) -> Result<()> {
-        finite(initial)?;
-        finite(time)?;
+        finite(initial)?; finite(time)?;
         if initial > self.peak.value {
             self.peak = Selection { state: self.frames.len(), time, value: initial, vertex, boundary: true };
         }
@@ -120,8 +98,7 @@ impl Tape {
             || references.len() != self.regions || !dt.is_finite() || dt <= 0.0 {
             return Err(bad("accepted endpoint does not match the admitted adjoint tape"));
         }
-        finite(time)?;
-        finite(objective)?;
+        finite(time)?; finite(objective)?;
         if objective > self.peak.value {
             self.peak = Selection { state: self.frames.len() + 1, time,
                 value: objective, vertex, boundary: false };
@@ -147,8 +124,10 @@ impl Tape {
         let mut powers = vec![0.0; schedule.intervals.len()];
         let mut fan_speeds = vec![request.fan.as_ref().map(|_| 0.0); schedule.intervals.len()];
         let mut inlets = vec![0.0; request.graph.node_count()];
+        let mut radiation = request.radiation.as_ref().map(|policy| policy.zero_trajectory_gradient());
         let mut capacity = 0.0;
         let mut reconstructed = 0_usize;
+        let mut reconstruction_solves = 0_usize;
         let mut adjoint_sweeps = 0_usize;
         let mut worst_residual = 0.0_f64;
         if selected.state == 0 {
@@ -161,9 +140,7 @@ impl Tape {
                 let ordinal = self.frames[end-1].interval;
                 let interval = schedule.intervals.get(ordinal)
                     .ok_or_else(|| bad("retained endpoint names an unknown interval"))?;
-                // Only CONTIGUOUS occurrences can share this reverse block.
-                // Grouping all equal labels would reverse cycle 3/interval 1,
-                // then cycle 2/interval 1 before cycle 3/interval 0: wrong history.
+                // Group only contiguous occurrences: cycle order is physical history.
                 let mut start = end - 1;
                 while start > 0 && self.frames[start-1].interval == ordinal { start -= 1; }
                 let flow = match (&request.fan, interval.speed) {
@@ -185,23 +162,41 @@ impl Tape {
                     poll(cx)?;
                     let frame = &self.frames[index];
                     let old = if index == 0 { &schedule.initial } else { &self.frames[index-1].temperature };
-                    let boundary = request.boundary(&names,&frame.references,&coefficients)?;
                     let config = StepConfig { linear: fs_conduction::LinearConfig {
                         tolerance: request.limits.relative, max_iterations: request.limits.linear, restart: 60 },
                         energy_tolerance_j: finite(request.limits.heat*frame.dt)? };
-                    let step = engine.linearize_step(cx,ConductionProblem { mesh: &request.mesh,
-                        boundary: &boundary, material: &material,
-                        element_materials: request.solid_data.element_materials.as_ref(), source: &load.source },
-                        request.contacts.as_ref().map(|c| &c.interfaces), old, frame.dt, config,
-                        schedule.nonlinear.map(|c| c.policy), &names).map_err(producer)?;
+                    let radiative = request.radiation.as_ref().map(|policy|
+                        policy.reconstruct_endpoint(request,cx,engine,&network,&frame.references,
+                            &coefficients,old,&load.source,frame.dt,config,
+                            schedule.nonlinear.map(|c| c.policy),&frame.temperature)).transpose()?;
+                    let ordinary = if radiative.is_none() {
+                        let boundary = request.boundary(&names,&frame.references,&coefficients)?;
+                        Some(engine.linearize_step(cx,ConductionProblem { mesh: &request.mesh,
+                            boundary: &boundary, material: &material,
+                            element_materials: request.solid_data.element_materials.as_ref(), source: &load.source },
+                            request.contacts.as_ref().map(|c| &c.interfaces),old,frame.dt,config,
+                            schedule.nonlinear.map(|c| c.policy),&names).map_err(producer)?)
+                    } else { None };
+                    let step = match &radiative {
+                        Some(endpoint) => &endpoint.step,
+                        None => ordinary.as_ref().ok_or_else(|| bad("missing reconstructed endpoint"))?,
+                    };
                     if step.primal().temperature.len() != frame.temperature.len()
                         || step.primal().temperature.iter().zip(&frame.temperature)
                             .any(|(a,b)| a.to_bits() != b.to_bits()) {
                         return Err(producer("transient adjoint endpoint reconstruction changed accepted temperature bits"));
                     }
                     reconstructed += 1;
-                    let binding = CoupledLinearization::new(cx,&network,&step,&gate).map_err(producer)?;
-                    let mut weights = binding.zero_objective();
+                    reconstruction_solves = reconstruction_solves.checked_add(
+                        radiative.as_ref().map_or(1,|endpoint| endpoint.solid_solves))
+                        .ok_or_else(|| budget("transient adjoint reconstruction work overflow"))?;
+                    let binding = if radiative.is_none() {
+                        Some(CoupledLinearization::new(cx,&network,step,&gate).map_err(producer)?)
+                    } else { None };
+                    let mut weights = match &radiative {
+                        Some(endpoint) => endpoint.zero_objective(cx,&network)?,
+                        None => binding.as_ref().ok_or_else(|| bad("missing ordinary adjoint binding"))?.zero_objective(),
+                    };
                     weights.nodal_temperatures.clone_from(&carry);
                     if index + 1 == selected.state {
                         if selected.boundary {
@@ -211,11 +206,13 @@ impl Tape {
                             }
                             seed_initial(request,cx,vertex,&mut weights.nodal_temperatures)?;
                         } else {
-                            let states = names.iter().map(|name| step.primal().robin_fluxes.iter()
-                                .find(|flux| flux.region == *name)
-                                .map(SolidRegionState::from_robin_flux)
-                                .ok_or_else(|| bad("reconstructed endpoint lacks an objective port")))
-                                .collect::<Result<Vec<_>>>()?;
+                            let states = match &radiative {
+                                Some(endpoint) => endpoint.states.clone(),
+                                None => names.iter().map(|name| step.primal().robin_fluxes.iter()
+                                    .find(|flux| flux.region == *name).map(SolidRegionState::from_robin_flux)
+                                    .ok_or_else(|| bad("reconstructed endpoint lacks an objective port")))
+                                    .collect::<Result<Vec<_>>>()?,
+                            };
                             let objective = request.objective.evaluate(cx,&frame.temperature,&states)?;
                             if objective.vertex != frame.vertex || objective.value.to_bits() != frame.objective.to_bits() {
                                 return Err(producer("transient adjoint objective branch changed during reconstruction"));
@@ -223,7 +220,23 @@ impl Tape {
                             objective.seed(&mut weights);
                         }
                     }
-                    let gradient = fan_gradient::pullback(request,cx,&binding,&weights,&names,&derived)?;
+                    let gradient = match &radiative {
+                        Some(endpoint) => {
+                            let policy = request.radiation.as_ref().ok_or_else(|| bad("missing radiation policy"))?;
+                            let gradient = endpoint.pullback(policy,request,cx,&network,&frame.references,
+                                &coefficients,&weights,&derived)?;
+                            let sums = radiation.as_mut().ok_or_else(|| bad("missing radiation gradient accumulator"))?;
+                            for patch in &gradient.patches {
+                                let sum = sums.get_mut(&patch.surface).ok_or_else(|| bad("unknown radiation derivative patch"))?;
+                                sum[0] = finite(sum[0]+patch.log_emissivity)?;
+                                sum[1] = finite(sum[1]+patch.ambient_temperature)?;
+                            }
+                            gradient.thermal
+                        }
+                        None => fan_gradient::pullback(request,cx,
+                            binding.as_ref().ok_or_else(|| bad("missing ordinary adjoint binding"))?,
+                            &weights,&names,&derived)?,
+                    };
                     powers[ordinal] = finite(powers[ordinal]
                         + step.source_multiplier_pullback(cx,&gradient.nodal_load).map_err(producer)?)?;
                     capacity = finite(capacity
@@ -245,21 +258,24 @@ impl Tape {
         let rows = powers.iter().zip(&fan_speeds).enumerate().map(|(i,(power,speed))| Ok(format!(
             "{{\"interval\":{i},\"dtemperature_dpower_multiplier_k\":{},\"dtemperature_dlog_fan_speed_ratio_k\":{}}}",
             num(*power)?, optional(*speed)?))).collect::<Result<Vec<_>>>()?.join(",");
-        // Carry the exact producer result into sizing before rendering loses
-        // its typed identity. Final-state gradients are never peak gradients.
         let design_gradient = if self.config.observable == Observable::SampledPeak {
             Some(design_sensitivity::DesignSensitivity::from_intervals(selected.value, &powers, &fan_speeds)?)
         } else { None };
+        let radiation_report = match (&request.radiation,&radiation) {
+            (Some(policy),Some(gradients)) => policy.trajectory_gradient_report(gradients)?,
+            (None,None) => "null".into(),
+            _ => return Err(bad("trajectory radiation gradient policy mismatch")),
+        };
         poll(cx)?;
         let report = format!(
-            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries; each interval control changes every occurrence of that base interval, including earlier warm-up cycles; initial controls change only the original initial field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear iteration budgets apply per reverse endpoint under the original wall deadline; checkpoint bytes bound all retained fields/references and frame storage, not total solver workspace; separate from the null steady-gradient fields\"}}",
+            "{{\"method\":\"discrete-backward-euler-coupled-adjoint\",\"qoi\":{},\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"cycles\":{},\"dtemperature_dinitial_temperatures\":{},\"dtemperature_duniform_initial_k\":{},\"dtemperature_dcapacity_multiplier_k\":{},\"dtemperature_dinlet_temperatures\":{},\"intervals\":[{}],\"checkpoint_bytes\":{},\"reconstructed_solid_endpoints\":{},\"reconstruction_solid_solves\":{},\"adjoint_sweeps\":{},\"max_interface_residual\":{},\"radiation\":{},\"scope\":\"fixed accepted time grid and cycle count; selected final or earliest all-cycle sampled-maximum branch, not a continuous-time maximum or unique derivative at ties; full storage, material K-prime, contact and mixed-air feedback across cycle boundaries, with total mean-patch radiation feedback when declared; each interval control changes every occurrence, including earlier warm-up cycles; initial controls change only the original field, capacity and inlets apply throughout; fan controls include single-bank affinity and supported convection response, null when unavailable; fixed geometry/material laws/contact resistance/fluid properties; derivative and linear budgets apply per reverse endpoint under the original wall deadline; radiating endpoints replay their inner boundary iterations before exact-row linearization and count all reconstruction solves; checkpoint bytes bound retained fields/references and frame storage, not total workspace; separate from null steady-gradient fields\"}}",
             quote(match self.config.observable { Observable::Final => "final", Observable::SampledPeak => "sampled-peak" }),
             num(selected.value)?,num(selected.time)?,selected.state,
             selected.vertex.map_or_else(||"null".into(),|v|v.to_string()),self.cycles,
             numbers(&carry)?,num(uniform_initial)?,num(capacity)?,numbers(&inlets)?,rows,
-            self.charged_bytes,reconstructed,adjoint_sweeps,num(worst_residual)?,
+            self.charged_bytes,reconstructed,reconstruction_solves,adjoint_sweeps,num(worst_residual)?,radiation_report,
         );
-        Ok((report, reconstructed, design_gradient))
+        Ok((report, reconstruction_solves, design_gradient))
     }
 }
 
