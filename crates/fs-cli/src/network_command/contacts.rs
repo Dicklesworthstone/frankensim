@@ -1,7 +1,8 @@
-//! Explicit fixed-resistance contacts between matching, separately owned P1
-//! traces. Reuses fs-conduction's contact geometry, assembly and flux reporting.
-//! Inline cards encode CALLER DECLARATIONS, not independently measured material
-//! authority. No contact heat is counted as an external source or air exchange.
+//! Explicit fixed-resistance contacts between separately owned P1 traces.
+//! Matching pairs retain their original path; explicit nonmatching planar
+//! sides use common-refinement integration without changing either solid mesh.
+//! Inline cards encode caller declarations, not measured material authority.
+//! Contact heat is internal, never an external source or an air exchange.
 use super::*;
 use fs_conduction::{InterfaceFacePair, InterfaceFlux, InterfaceResistance,
     InterfaceSurface, ThermalInterfaces, AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as RD,
@@ -12,6 +13,7 @@ use fs_matdb::{ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialState
     SurfaceSpec, SystemContext, UncertaintyModel};
 
 mod sensitivity;
+mod nonmatching;
 use sensitivity::Trace;
 
 #[derive(Debug)]
@@ -33,9 +35,8 @@ pub(super) struct Contacts {
 }
 
 impl Contacts {
-    /// Check every coincident pair and all external/contact face ownership
-    /// before numerical work. An absent declaration never means perfect contact
-    /// or an insulated gap between duplicated coincident faces.
+    /// Exact coincident pairs require an owner. Nonmatching partners are
+    /// explicitly declared, never inferred by a global proximity search.
     pub fn parse(value: Option<&J>, mesh: &ConductionMesh, surfaces: &[Surface],
         adiabatic: bool) -> Result<Option<Self>> {
         let candidates = ThermalInterfaces::coincident_face_pairs(mesh).map_err(producer)?;
@@ -53,59 +54,68 @@ impl Contacts {
         let mut names: BTreeSet<_> = surfaces.iter().map(|s| s.name.clone()).collect();
         let mut declarations = Vec::new();
         let mut bound = Vec::new();
+        let mut nonmatching_surfaces = Vec::new();
         let mut pending_traces = Vec::new();
         for entry in entries {
             object(entry, &["name", "source", "side_a_material", "side_b_material",
-                "resistance_m2_k_w", "face_pairs"], "contact")?;
+                "resistance_m2_k_w", "face_pairs", "nonmatching"], "contact")?;
             let mut row = Declaration {
                 name: string(get(entry, "name")?, "contact.name")?,
                 source: string(get(entry, "source")?, "contact.source")?,
                 side_a_material: string(get(entry, "side_a_material")?, "contact.side_a_material")?,
                 side_b_material: string(get(entry, "side_b_material")?, "contact.side_b_material")?,
                 resistance: positive(get(entry, "resistance_m2_k_w")?, "contact.resistance_m2_k_w")?,
-                pair_count: 0,
-                traces: Vec::new(),
+                pair_count: 0, traces: Vec::new(),
             };
             if !names.insert(row.name.clone()) { return Err(bad("contact and cooling surface names must be distinct")); }
             if !(1.0 / row.resistance).is_finite() { return Err(bad("contact conductance density is not representable")); }
-            let mut pairs = Vec::new();
-            for pair in array(get(entry, "face_pairs")?, "contact.face_pairs", mesh.boundary().len()/2)? {
-                object(pair, &["side_a", "side_b"], "contact face pair")?;
-                let mut side_a = indices::<3>(get(pair, "side_a")?, "contact.side_a", mesh.vertex_count())?;
-                let mut side_b = indices::<3>(get(pair, "side_b")?, "contact.side_b", mesh.vertex_count())?;
-                side_a.sort_unstable(); side_b.sort_unstable();
-                let a = *slots.get(&side_a).ok_or_else(|| bad("contact side A is not an exterior trace triangle"))?;
-                let b = *slots.get(&side_b).ok_or_else(|| bad("contact side B is not an exterior trace triangle"))?;
-                if !owned.insert(side_a) || !owned.insert(side_b) {
-                    return Err(bad("a contact face is repeated or also has an external cooling owner"));
+            match (entry.get("face_pairs"),entry.get("nonmatching")) {
+                (None,Some(sides)) => {
+                    nonmatching_surfaces.push(nonmatching::parse(sides,&row,mesh,&slots,&mut owned)?);
+                    pending_traces.push(None);
                 }
-                pairs.push(InterfaceFacePair { side_a: a, side_b: b });
+                (Some(declared),None) => {
+                    let mut pairs = Vec::new();
+                    for pair in array(declared, "contact.face_pairs", mesh.boundary().len()/2)? {
+                        object(pair, &["side_a", "side_b"], "contact face pair")?;
+                        let mut side_a = indices::<3>(get(pair, "side_a")?, "contact.side_a", mesh.vertex_count())?;
+                        let mut side_b = indices::<3>(get(pair, "side_b")?, "contact.side_b", mesh.vertex_count())?;
+                        side_a.sort_unstable(); side_b.sort_unstable();
+                        let a = *slots.get(&side_a).ok_or_else(|| bad("contact side A is not an exterior trace triangle"))?;
+                        let b = *slots.get(&side_b).ok_or_else(|| bad("contact side B is not an exterior trace triangle"))?;
+                        if !owned.insert(side_a) || !owned.insert(side_b) {
+                            return Err(bad("a contact face is repeated or also has an external cooling owner"));
+                        }
+                        pairs.push(InterfaceFacePair { side_a: a, side_b: b });
+                    }
+                    if pairs.is_empty() { return Err(bad("a contact requires at least one face pair")); }
+                    row.pair_count = pairs.len();
+                    pending_traces.push(Some(pairs.clone()));
+                    bound.push(InterfaceSurface::new(row.name.clone(), pairs, resistance(&row)?).map_err(producer)?);
+                }
+                _ => return Err(bad("each contact requires exactly one of face_pairs or nonmatching")),
             }
-            if pairs.is_empty() { return Err(bad("a contact requires at least one face pair")); }
-            row.pair_count = pairs.len();
-            pending_traces.push(pairs.clone());
-            bound.push(InterfaceSurface::new(row.name.clone(), pairs, resistance(&row)?).map_err(producer)?);
             declarations.push(row);
         }
         if !adiabatic && owned.len() != mesh.boundary().len() {
             return Err(bad("every non-contact exterior face must be cooled unless adiabatic_remainder is true"));
         }
-        // Only ownership is being bound here, not a physical solve. Coefficients
-        // and references change later, but the selected trace faces do not.
         let mut boundary = ThermalBoundaryBuilder::new(mesh);
         for surface in surfaces {
             boundary = boundary.region(&surface.name, |face| surface.faces.contains(&face.vertices),
                 ThermalBc::robin(1.0, 300.0).map_err(producer)?).map_err(producer)?;
         }
         let boundary = boundary.adiabatic_remainder().finish().map_err(producer)?;
-        let interfaces = ThermalInterfaces::new(mesh, &boundary, bound).map_err(producer)?;
-        // Preserve the complete admitted pairing; do not infer an effective
-        // scalar surface from aggregate heat or a representative jump.
+        let interfaces = nonmatching::bind(mesh,&boundary,bound,nonmatching_surfaces)?;
         for (row, pairs) in declarations.iter_mut().zip(pending_traces) {
-            row.traces = Trace::bind(mesh, &pairs)?;
+            if let Some(pairs)=pairs {row.traces = Trace::bind(mesh, &pairs)?;}
         }
         declarations.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Some(Self { interfaces, declarations, vertex_count: mesh.vertex_count() }))
+    }
+
+    pub(super) fn has_nonmatching(&self)->bool {
+        self.declarations.iter().any(|d|self.interfaces.surface_is_nonmatching(&d.name))
     }
 
     pub fn render(&self, fluxes: &[InterfaceFlux]) -> Result<String> {
@@ -114,9 +124,12 @@ impl Contacts {
         for row in &self.declarations {
             let flux = fluxes.iter().find(|flux| flux.interface == row.name)
                 .ok_or_else(|| bad("contact is missing its evaluated flux"))?;
-            rows.push(format!("{{\"name\":{},\"source\":{},\"side_a_material\":{},\"side_b_material\":{},\"resistance_m2_k_w\":{},\"face_pairs\":{},\"area_m2\":{},\"conductance_w_k\":{},\"mean_jump_a_minus_b_k\":{},\"heat_a_to_b_w\":{},\"authority\":\"caller-declared constant contact; inline card does not add measured material authority\",\"uncertainty\":null}}",
+            let nonmatching=self.interfaces.surface_is_nonmatching(&row.name);
+            let pairs=if nonmatching {"null".to_string()}else{row.pair_count.to_string()};
+            let mode=if nonmatching {",\"discretization\":\"planar-common-refinement-P1\",\"geometry_authority\":\"explicit tolerance-based coplanarity and per-face coverage; not a certified intersection or contact search\""}else{""};
+            rows.push(format!("{{\"name\":{},\"source\":{},\"side_a_material\":{},\"side_b_material\":{},\"resistance_m2_k_w\":{},\"face_pairs\":{pairs},\"area_m2\":{},\"conductance_w_k\":{},\"mean_jump_a_minus_b_k\":{},\"heat_a_to_b_w\":{},\"authority\":\"caller-declared constant contact; inline card does not add measured material authority\",\"uncertainty\":null{mode}}}",
                 quote(&row.name), quote(&row.source), quote(&row.side_a_material), quote(&row.side_b_material),
-                num(row.resistance)?, row.pair_count, num(flux.area_m2)?, num(flux.conductance_w_per_k)?,
+                num(row.resistance)?, num(flux.area_m2)?, num(flux.conductance_w_per_k)?,
                 num(flux.mean_jump_k)?, num(flux.heat_rate_a_to_b_w)?));
         }
         Ok(format!("[{}]", rows.join(",")))
@@ -124,9 +137,6 @@ impl Contacts {
 }
 
 fn resistance(row: &Declaration) -> Result<InterfaceResistance> {
-    // A real inline claim whose provenance explicitly says caller declaration.
-    // No fabricated experiment, material-data license, validity measurement or
-    // uncertainty band is used to get past the card-backed contact API.
     let mut claims = ClaimSet::new();
     claims.insert_claim(PropertyClaim { key: PropertyKey::new(RP, RD),
         value: PropertyValue::Scalar { value: row.resistance, dims: RD },
