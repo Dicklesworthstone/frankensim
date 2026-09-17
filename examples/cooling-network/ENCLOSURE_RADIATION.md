@@ -20,6 +20,11 @@ limit. Their finite P1 faces represent equal-area samples of that idealization.
 Their finite-geometry visibility, edge leakage and occlusion have NOT been
 computed. Admitting a reciprocal matrix does not prove it describes the mesh.
 
+For steady/trajectory derivatives, gradient-guided sizing and goal-recovery
+marking, see [ENCLOSURE_ADJOINTS.md](ENCLOSURE_ADJOINTS.md) and the runnable
+`adjoint-enclosure-pulse.json`. Both models now have total adjoints within the
+existing fixed-grid, fixed-cycle derivative domain.
+
 ## Declare the radiation model
 
 Choose `radiation.enclosure` instead of the existing `radiation.surfaces` list
@@ -91,8 +96,9 @@ and the full source/air/solid energy gates still apply.
 irradiation, signed outward heat and applied heat. Negative outward heat is
 absorption by that solid, not an error or value to clip. `radiative_out_w` is
 the near-zero closed-enclosure balance residual, NOT an external energy sink.
-In a steady result, `iterations` refers to the last inner radiation solve and
-`total_solid_solves` counts all inner solid evaluations across air coupling.
+In a steady result, `iterations` refers to the last inner radiation solve.
+`forward_solid_solves` counts inner solid evaluations across air coupling;
+`total_solid_solves` also includes any requested adjoint reconstruction.
 All iterations share the original command wall deadline. Exhaustion returns
 no partial success.
 
@@ -123,22 +129,23 @@ of absolute patch transfers. It is not a measure of heat exported by radiation.
 The final `radiation` report retains both individual signed patch powers and
 `temporal_scope: "final-accepted-endpoint"`. Its `iterations` and
 `total_solid_solves` are null: final-field heat recomputation cannot recover
-those counts. The trajectory's work counters already count every actual solid
-callback, including inner radiation iterations and discarded adaptive trials.
+those counts. The trajectory's work counters count every actual solid callback,
+including inner radiation iterations, discarded adaptive trials and any requested
+adjoint reconstruction. Physical energy belongs only to accepted forward steps.
 
 Adaptive full steps and rejected half-step pairs never enter accepted storage
 or energy history. Fixed-count repetition, ordinary periodic/controller runs,
-derivative-free workload/fan sizing, and full-trajectory timestep studies all
-reach the same endpoint producer; none substitutes a convection-only trajectory.
-Their original timestep, cycle, trial, refinement, solver and wall limits remain
-in effect. Complete trajectories retain their usual independent energy checks.
+workload/fan sizing, and full-trajectory timestep studies all reach the same
+endpoint producer; none substitutes a convection-only trajectory. Their original
+timestep, cycle, trial, refinement, solver and wall limits remain in effect.
+Complete trajectories retain their usual independent energy checks.
 
-Enclosure steady/trajectory adjoints and goal-recovery spatial marking still
-refuse explicitly, including direct attempts to reconstruct a derivative.
-There is no frozen-radiosity gradient fallback. Existing reservoir-radiation
-adjoints and other non-enclosure workflows are unchanged. General view-factor
-generation, occlusion, participating media, changing geometry, continuous-time
-peak certification and native .fsim lowering are not implemented by this adapter.
+Steady enclosure adjoints and goal-recovery spatial marking are supported, as
+are fixed-grid, fixed-count trajectory adjoints and their sizing consumers.
+Adaptive-time-grid, automatic timestep-selection, periodic-stop and controller
+derivatives still refuse explicitly. There is no frozen-radiosity fallback.
+General view-factor generation, occlusion, participating media, changing geometry,
+continuous-time peak certification and native .fsim lowering are not implemented.
 
 ## Uncertain surface finish
 
@@ -170,17 +177,16 @@ example probability distributions are illustrative, not empirical evidence.
 ```bash
 cargo test -p fs-cli --test cooling_enclosure_radiation
 cargo test -p fs-cli --test cooling_enclosure_transient
+cargo test -p fs-cli --test enclosure_radiosity_adjoint
 cargo test -p fs-cli --bin frankensim uq_command::model::radiation
 ```
 
-The original eight enclosure regressions remain. Eight additional command tests
-cover manufactured time endpoints with reversed heat flow, nonlinear repeated
-storage, unrolled and matrix-axis replay, adaptive accepted-history replay,
-whole-trajectory time refinement, actual workload candidates, exhausted budgets,
-unsupported derivatives, and byte-identical transient-UQ checkpoint continuation.
-These Rust tests have NOT been executed in the authoring environment, which
-lacks Rust and network access for installing it. Compilation and actual CLI
-behavior remain unverified.
+The original sixteen enclosure forward/UQ regressions remain. Former missing-
+adjoint checks now exercise the still-unsupported adaptive derivative policy.
+Thirteen additional derivative/consumer regressions are described in
+ENCLOSURE_ADJOINTS.md. These Rust tests have NOT been executed in the authoring
+environment, which lacks Rust and network access for installing it. Compilation
+and actual CLI behavior remain unverified.
 
 Independent Python P1 calculations use direct endpoint equations with analytic
 two-plate radiation and air elimination, and a separate nested radiosity/solid
