@@ -28,10 +28,32 @@ impl FanSpeedDesign {
             evaluations: count(get(value, "max_evaluations")?, "fan_speed_design.max_evaluations", 4096)?,
         };
         if design.minimum >= design.maximum { return Err(bad("fan-speed bounds must be strictly ordered")); }
-        // Domain admission precedes every expensive hydraulic or solid solve.
         fan.bank(design.minimum)?;
         fan.bank(design.maximum)?;
         Ok(design)
+    }
+}
+
+/// Complete evaluated physics retained with a candidate. The search consumes
+/// typed temperatures/gradients, never parses a serialized mechanism report.
+/// Only the selected candidate's actual report is rendered at publication.
+pub(super) struct ThermalEvaluation {
+    pub(super) value: Evaluation,
+    pub(super) radiation: Option<String>,
+    /// Primal/reconstruction FEM evaluations, not individual Krylov iterations.
+    pub(super) solid_solves: usize,
+}
+
+impl ThermalEvaluation {
+    pub(super) fn render(&self, request: &Request, flow: &GraphSolution) -> Result<String> {
+        let result = render(request, flow, &self.value)?;
+        match &self.radiation {
+            None => Ok(result),
+            Some(report) => {
+                let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("thermal result framing"))?;
+                Ok(format!("{prefix},\"radiation\":{report}}}\n"))
+            }
+        }
     }
 }
 
@@ -52,16 +74,19 @@ impl Trial {
     }
 }
 
-struct Evaluator<'a> {
+struct Evaluator<'a, F> {
     request: &'a Request,
     design: &'a FanSpeedDesign,
     fan: &'a fan_drive::FanDrive,
+    evaluate: F,
     history: Vec<Trial>,
     solid_solves: usize,
     newton_trials: usize,
 }
-impl Evaluator<'_> {
-    fn trial(&mut self, cx: &Cx<'_>, speed: f64) -> Result<(GraphSolution, Evaluation)> {
+impl<F> Evaluator<'_, F>
+where F: FnMut(&Cx<'_>, &GraphSolution, &BTreeMap<String, f64>, bool) -> Result<ThermalEvaluation>
+{
+    fn trial(&mut self, cx: &Cx<'_>, speed: f64) -> Result<(GraphSolution, ThermalEvaluation)> {
         poll(cx)?;
         if self.history.len() >= self.design.evaluations {
             return Err(Failure { code: "cooling-network-design-budget",
@@ -69,22 +94,23 @@ impl Evaluator<'_> {
         }
         let flow = self.fan.solve(cx, &self.request.graph, self.request.limits, speed)?;
         let slots = self.request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
-        let value = self.request.evaluate(cx, &flow, &slots, self.request.gradient)?;
+        let evaluated = (self.evaluate)(cx, &flow, &slots, self.request.gradient)?;
+        let value = &evaluated.value;
         if !value.objective.is_finite() { return Err(producer("nonfinite fan-speed objective")); }
-        self.solid_solves = self.solid_solves.checked_add(value.coupled.iterations)
+        self.solid_solves = self.solid_solves.checked_add(evaluated.solid_solves)
             .ok_or_else(|| bad("fan-speed work count overflow"))?;
         self.history.push(Trial { speed, temperature: value.objective,
             flow: flow.node_outflows[self.fan.inlet].value(), active_vertex: value.objective_state.vertex,
             log_speed_derivative: value.gradient.as_ref().and_then(|g| g.log_speed()) });
         poll(cx)?;
-        Ok((flow, value))
+        Ok((flow, evaluated))
     }
 
-    fn finish(&self, cx: &Cx<'_>, passing: (GraphSolution, Evaluation), speed: f64,
+    fn finish(&self, cx: &Cx<'_>, passing: (GraphSolution, ThermalEvaluation), speed: f64,
         failed: Option<&Trial>) -> Result<String> {
-        let (flow, value) = passing;
-        if value.objective > self.design.limit { return Err(producer("internal fan-speed feasibility mismatch")); }
-        let output = self.fan.attach(render(self.request, &flow, &value)?, &flow, speed)?;
+        let (flow, evaluated) = passing;
+        if evaluated.value.objective > self.design.limit { return Err(producer("internal fan-speed feasibility mismatch")); }
+        let output = self.fan.attach(evaluated.render(self.request, &flow)?, &flow, speed)?;
         let prefix = output.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
         let trials = self.history.iter().map(Trial::render).collect::<Result<Vec<_>>>()?.join(",");
         let lower = failed.map(Trial::render).transpose()?.unwrap_or_else(|| "null".into());
@@ -112,27 +138,42 @@ fn newton_proposal(low: f64, high: f64, speed: f64, temperature: f64,
 }
 
 pub(super) fn solve(request: &Request, cx: &Cx<'_>, design: &FanSpeedDesign) -> Result<String> {
+    solve_with(request, cx, design, |cx, flow, slots, gradient| {
+        let value = request.evaluate(cx, flow, slots, gradient)?;
+        let solid_solves = value.coupled.iterations;
+        Ok(ThermalEvaluation { value, radiation: None, solid_solves })
+    })
+}
+
+/// Reuse the same bounded search with a complete model-specific thermal
+/// evaluation. Actual hydraulics are solved HERE at every proposed speed.
+/// Producer errors propagate; an invalid model evaluation is never a verdict.
+pub(super) fn solve_with<F>(request: &Request, cx: &Cx<'_>, design: &FanSpeedDesign,
+    evaluate: F) -> Result<String>
+where F: FnMut(&Cx<'_>, &GraphSolution, &BTreeMap<String, f64>, bool) -> Result<ThermalEvaluation>
+{
     let fan = request.fan.as_ref().ok_or_else(|| bad("fan-speed design requires a fan drive"))?;
-    let mut evaluator = Evaluator { request, design, fan, history: Vec::new(), solid_solves: 0, newton_trials: 0 };
+    let mut evaluator = Evaluator { request, design, fan, evaluate,
+        history: Vec::new(), solid_solves: 0, newton_trials: 0 };
     let lower = evaluator.trial(cx, design.minimum)?;
-    if lower.1.objective <= design.limit { return evaluator.finish(cx, lower, design.minimum, None); }
+    if lower.1.value.objective <= design.limit { return evaluator.finish(cx, lower, design.minimum, None); }
     let mut failed = evaluator.history.last().expect("lower evaluated").clone();
     let mut passing = evaluator.trial(cx, design.maximum)?;
-    if passing.1.objective > design.limit {
+    if passing.1.value.objective > design.limit {
         return Err(Failure { code: "cooling-network-design-bracket", message: format!(
             "neither fan-speed endpoint meets {} K: lower {} K, upper {} K; no interior infeasibility claim is made",
-            design.limit, failed.temperature, passing.1.objective) });
+            design.limit, failed.temperature, passing.1.value.objective) });
     }
     let mut high = design.maximum;
     loop {
         poll(cx)?;
         let width = high - failed.speed;
-        if width <= design.speed_tolerance && design.limit - passing.1.objective <= design.temperature_tolerance {
+        if width <= design.speed_tolerance && design.limit - passing.1.value.objective <= design.temperature_tolerance {
             return evaluator.finish(cx, passing, high, Some(&failed));
         }
         let mut endpoints = [
             (failed.speed, failed.temperature, failed.log_speed_derivative),
-            (high, passing.1.objective, passing.1.gradient.as_ref().and_then(|g| g.log_speed())),
+            (high, passing.1.value.objective, passing.1.value.gradient.as_ref().and_then(|g| g.log_speed())),
         ];
         if (endpoints[1].1 - design.limit).abs() < (endpoints[0].1 - design.limit).abs() {
             endpoints.swap(0, 1);
@@ -145,10 +186,9 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, design: &FanSpeedDesign) -> 
             return Err(Failure { code: "cooling-network-design-resolution",
                 message: "fan-speed floating-point resolution cannot meet both design tolerances".into() });
         }
-        // Producer/domain failures propagate. They are not hot/cold verdicts.
         let value = evaluator.trial(cx, middle)?;
         if proposal.is_some() { evaluator.newton_trials += 1; }
-        if value.1.objective <= design.limit {
+        if value.1.value.objective <= design.limit {
             high = middle;
             passing = value;
         } else {
