@@ -46,9 +46,10 @@ pub(super) fn admit(request: &Request, cx: &Cx<'_>, config: Option<Config>) -> R
 }
 
 /// Work from every successful solid endpoint evaluation, including discarded
-/// coupling and adaptive trials. Their heat never enters physical history.
+/// coupling, radiation and adaptive trials. Their heat never enters history.
 #[derive(Debug, Default)]
 pub(super) struct Stats {
+    evaluations: usize,
     solves: usize,
     updates: usize,
     krylov: usize,
@@ -57,6 +58,9 @@ pub(super) struct Stats {
 }
 
 impl Stats {
+    /// Linear and nonlinear completed FEM solves, not physical timesteps.
+    pub(super) fn evaluations(&self) -> usize { self.evaluations }
+
     fn observe(&mut self, result: &NonlinearStepSolution) -> Result<()> {
         fn add(a: usize, b: usize) -> Result<usize> {
             a.checked_add(b).ok_or_else(|| budget("nonlinear transient work counter overflow"))
@@ -75,7 +79,7 @@ impl Stats {
         let Some(config) = config else { return Ok("null".into()); };
         let p = config.policy;
         Ok(format!(
-            "{{\"method\":\"endpoint-newton-fgmres\",\"max_iterations_per_solid_solve\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"armijo_c\":{},\"shrink\":{},\"max_backtracks_per_update\":{},\"solid_solves\":{},\"newton_updates\":{},\"krylov_iterations\":{},\"backtracks\":{},\"worst_accepted_residual_ratio\":{},\"scope\":\"endpoint k(T), constant heat capacity and contact resistance; includes successful discarded coupling/adaptive trial work; no history advance before physical acceptance; linear_iterations caps all inner iterations of each solid endpoint solve\"}}",
+            "{{\"method\":\"endpoint-newton-fgmres\",\"max_iterations_per_solid_solve\":{},\"residual_rtol\":{},\"residual_atol_j\":{},\"armijo_c\":{},\"shrink\":{},\"max_backtracks_per_update\":{},\"solid_solves\":{},\"newton_updates\":{},\"krylov_iterations\":{},\"backtracks\":{},\"worst_accepted_residual_ratio\":{},\"scope\":\"endpoint k(T), constant heat capacity and contact resistance; includes successful discarded coupling/radiation/adaptive trial work; no history advance before physical acceptance; linear_iterations caps all inner iterations of each solid endpoint solve\"}}",
             p.max_iterations,num(p.residual_rtol)?,num(p.residual_atol_j)?,
             num(p.line_search.armijo_c)?,num(p.line_search.shrink)?,p.line_search.max_backtracks,
             self.solves,self.updates,self.krylov,self.backtracks,num(self.worst_residual_ratio)?,
@@ -89,8 +93,8 @@ pub(super) fn advance(
     interfaces: Option<&fs_conduction::ThermalInterfaces>, old: &[f64], dt: f64,
     linear: StepConfig, config: Option<Config>, stats: &mut Stats,
 ) -> Result<StepSolution> {
-    match config {
-        None => engine.advance(cx,problem,interfaces,old,dt,linear).map_err(producer),
+    let step = match config {
+        None => engine.advance(cx,problem,interfaces,old,dt,linear).map_err(producer)?,
         Some(config) => {
             let result = engine.advance_nonlinear(cx,problem,interfaces,old,dt,linear,config.policy)
                 .map_err(|error| match error {
@@ -100,7 +104,10 @@ pub(super) fn advance(
                     other => producer(other),
                 })?;
             stats.observe(&result)?;
-            Ok(result.step)
+            result.step
         }
-    }
+    };
+    stats.evaluations = stats.evaluations.checked_add(1)
+        .ok_or_else(|| budget("transient solid evaluation count overflow"))?;
+    Ok(step)
 }
