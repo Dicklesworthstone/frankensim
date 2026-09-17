@@ -163,7 +163,11 @@ fn exhausted_or_unsupported_radiation_never_publishes_partial_cooling() {
         let result=output(&bad);assert!(!result.status.success());assert!(result.stdout.is_empty());
     }
     let mut derivative=input.clone();put(member(&mut derivative,"objective"),"gradient",J::Bool(true));
-    let result=output(&derivative);assert!(!result.status.success());assert!(result.stdout.is_empty());
+    put(member(&mut derivative,"budgets"),"derivative_iterations",number(1.0));
+    let result=output(&derivative);assert_eq!(result.status.code(),Some(6));assert!(result.stdout.is_empty());
     let mut cancelled=input.clone();put(member(&mut cancelled,"budgets"),"wall_seconds",number(1e-12));
     let result=output(&cancelled);assert_eq!(result.status.code(),Some(6));assert!(result.stdout.is_empty());
 }
+
+#[path = "cooling_radiation/adjoint.rs"]
+mod adjoint;
