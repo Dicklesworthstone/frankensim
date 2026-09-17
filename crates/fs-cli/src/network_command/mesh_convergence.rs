@@ -6,6 +6,7 @@ use super::*;
 use fs_mesh::{TetRefinement,TetRefinementError,TetRefinementLimits};
 mod mark;
 mod split;
+mod physics;
 
 #[derive(Debug)]
 pub(super) struct Study {
@@ -81,25 +82,9 @@ impl Study {
         let mut total_adjoint_sweeps=0_usize;
         let mut arrived_by="base";
         for level in 0..=self.max_refinements {
-            let (output,value,power,solves,marking,adjoint_sweeps)=with_context(&request,gate,|cx| {
-                let flow=request.flow(cx)?;
-                let coefficients=request.surfaces.iter().map(|s|(s.name.clone(),s.h)).collect();
-                let mut evaluated=request.evaluate(cx,&flow,&coefficients,self.marking.is_some())?;
-                let marking=self.marking.map(|fraction| {
-                    let gradient=evaluated.gradient.as_ref().ok_or_else(||producer("adaptive solve has no coupled adjoint"))?;
-                    mark::evaluate(cx,&request,&evaluated.temperatures,&gradient.nodal_load,fraction)
-                }).transpose()?;
-                let adjoint_sweeps=evaluated.gradient.as_ref().map_or(0,|g|g.iterations);
-                // The marker requested its own derivative; the resolved ordinary
-                // request still has gradient=false and keeps those output fields null.
-                evaluated.gradient=None;
-                let result=render(&request,&flow,&evaluated)?;
-                let result=match &request.fan {
-                    Some(fan)=>fan.attach(result,&flow,fan.speed_ratio)?,None=>result,
-                };
-                poll(cx)?;
-                Ok((result,evaluated.objective,evaluated.source_total_w,evaluated.coupled.iterations,marking,adjoint_sweeps))
-            })?;
+            let physics::Solved { output, objective_k:value, source_w:power,
+                solid_solves:solves, marking, adjoint_sweeps } =
+                with_context(&request,gate,|cx|physics::solve(&request,cx,self.marking))?;
             let base_power=*original_power.get_or_insert(power);
             if !(power-base_power).is_finite() || (power-base_power).abs()>request.limits.heat {
                 return Err(producer("refinement changed integrated source power beyond the original watt tolerance"));
@@ -124,7 +109,7 @@ impl Study {
                 let prefix=output.strip_suffix("}\n").ok_or_else(||bad("internal mesh-study result framing"))?;
                 let resolved=encode(&input)?;
                 let method=if self.marking.is_some(){"goal-recovery-edge-bisection"}else{"uniform-red-tet-refinement"};
-                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":{},\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"total_adjoint_sweeps\":{total_adjoint_sweeps},\"global_confirmation\":{},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; goal-recovery scores prioritize cells and are not a DWR or continuum error bound, maximum-norm certificate, or physical validation; local refinement is conforming but carries no shape-regularity theorem; an adaptive success includes a complete uniform-refinement comparison; base P1 source is prolonged without renormalization, material laws inherit by parent cell, matching contact traces remain separate; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
+                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":{},\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"total_adjoint_sweeps\":{total_adjoint_sweeps},\"global_confirmation\":{},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; goal-recovery scores prioritize cells and are not a DWR or continuum error bound, maximum-norm certificate, or physical validation; local refinement is conforming but carries no shape-regularity theorem; an adaptive success includes a complete uniform-refinement comparison; base P1 source is prolonged without renormalization, material laws inherit by parent cell, matching contact traces remain separate; radiation patch partition and constitutive law remain unchanged and its total adjoint drives marking when present; solid work includes nested radiation and reconstruction solves; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
                     quote(method),history.len(),num(self.tolerance_k)?,self.consecutive,optional(change)?,
                     if self.marking.is_some(){"true"}else{"null"},history.join(","),resolved.trim_end()));
             }

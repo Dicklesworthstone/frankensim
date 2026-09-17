@@ -79,11 +79,12 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
-        if ["mesh_convergence", "design"].iter().any(|key| root.get(key).is_some()) {
-            return Err(bad("radiation currently excludes mesh studies and effective-h design searches"));
+        if root.get("design").is_some() {
+            return Err(bad("radiation currently excludes effective-h design searches"));
         }
-        // The existing transient parser owns fixed-grid/fixed-cycle derivative
-        // admission. Do not bypass it or silently freeze radiative feedback.
+        // Mesh studies use this complete producer, preserving the patch names
+        // and partition while refining their faces. The transient parser still
+        // owns fixed-grid/fixed-cycle derivative admission.
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
         let tolerance_k = positive(get(value, "temperature_tolerance_k")?, "radiation.temperature_tolerance_k")?;
         let relaxation = positive(get(value, "relaxation")?, "radiation.relaxation")?;
@@ -219,7 +220,9 @@ impl Policy {
         match &request.fan { Some(fan) => fan.attach(result,&flow,fan.speed_ratio), None => Ok(result) }
     }
 
-    fn evaluate(&self, request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
+    /// Complete physical evaluation for fan candidates and mesh studies alike.
+    /// The optional total derivative may be consumed internally by a marker.
+    pub(super) fn evaluate(&self, request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
         declared: &BTreeMap<String,f64>, want_gradient: bool) -> Result<fan_speed::ThermalEvaluation> {
         poll(cx)?;
         let (htc, convection) = convection::resolve(request, cx, flow, declared)?;
@@ -268,7 +271,9 @@ impl Policy {
         let (gradient, adjoint) = if want_gradient {
             let (gradient, report) = sensitivity::pullback(self, request, cx, &network, &inner,
                 &coupled.reference_temperatures_k, &htc, &objective_state, &convection)?;
-            (Some(gradient),report)
+            // A mesh marker needs the derivative, but gradient=false still
+            // means the published primal does not claim requested sensitivities.
+            (Some(gradient), if request.gradient { report } else { "null".into() })
         } else { (None,"null".into()) };
         let reconstruction_solves = usize::from(gradient.is_some());
         let total_solves = solid_solves.checked_add(reconstruction_solves)
