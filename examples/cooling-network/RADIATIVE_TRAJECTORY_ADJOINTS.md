@@ -92,7 +92,7 @@ fixed controls of this transient adjoint.
 
 ```bash
 cargo test -p fs-cli --test cooling_transient_radiation
-cargo test -p fs-cli --test cooling_radiation_adjoint
+cargo test -p fs-cli --test cooling_radiation adjoint
 cargo test -p fs-cli --bin frankensim radiation
 ```
 
