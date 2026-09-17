@@ -7,10 +7,10 @@ frankensim --json cooling-network \
 
 This example has 32 vertices and 42 tetrahedra: six cells in one solid and
 36 in the other. The common 0.01 m2 contact has two triangles on side A and
-twelve on side B. Neither volume mesh is remeshed or welded. A 1 W localized
-P1 heat source, two materials and fan-driven bypass/mixing complete the actual
-cooling problem. Hardware, material and resistance inputs are illustrative,
-not measured or experimentally validated data.
+twelve on side B. Neither volume mesh is remeshed or welded for contact binding.
+A 1 W localized P1 heat source, two materials and fan-driven bypass/mixing
+complete the actual cooling problem. Hardware, material and resistance inputs
+are illustrative, not measured or experimentally validated data.
 
 ## Declare both complete traces
 
@@ -52,9 +52,9 @@ independent material evidence.
 
 ## What the operator does
 
-The new `fs_conduction::interface::NonmatchingSurface` and
-`ThermalInterfaces::with_nonmatching` construct the common refinement of the
-selected trace triangles. On each overlap, the contribution is
+The `fs_conduction::interface::NonmatchingSurface` and
+`ThermalInterfaces::with_nonmatching` producers construct the common refinement
+of the selected trace triangles. On each overlap, the contribution is
 
 ```
 integral (T_A - T_B) * (v_A - v_B) / R'' dA.
@@ -105,51 +105,95 @@ A transient holds one draw throughout its trajectory. Existing checkpoint,
 exact-ordinal resume and confidence-decision semantics apply. Invalid physical
 samples refuse; they are not clipped, filtered or replaced by redraws.
 
+## Uniform and locally adaptive mesh studies
+
+```bash
+frankensim --json cooling-network \
+  examples/cooling-network/adaptive-nonmatching-radiative-hotspot.json
+```
+
+Steady `mesh_convergence` now supports these independent side declarations,
+including nonlinear materials, radiation and total-adjoint goal-recovery marking.
+Each contact side follows its OWN volume refinement. A mark in one solid does
+not create linked edges in its nonmatching partner; the partner may remain
+coarse. Matching-only contacts still synchronize their paired edges as before.
+The same contact binder reconstructs overlap quadrature on every refined mesh,
+including any subpatch that changes between exact matching and nonmatching.
+Cached quadrature points are not prolonged or reused on a changed mesh.
+
+The original source field is prolonged in P1 without shrinking its footprint or
+renormalizing it. Materials inherit by parent cell. Contact resistance, side
+labels, patch areas, radiation declarations and geometry tolerances are not
+rescaled. Independently numbered nodes remain separate even when their physical
+coordinates coincide. `resolved_request` retains the final side faces, mesh and
+source for ordinary `cooling-network` replay, with no recursive mesh study.
+
+The example requests two consecutive temperature changes below 0.05 K and a
+complete uniform-refinement confirmation after local agreement. It explicitly
+allocates 1,000,000 pair tests and 100,000 overlap triangles per binding. These
+are example INPUT budgets, not automatic solver increases. A refined interface
+with n total side faces requires n*(n-1)/2 pair tests, including same-side
+checks. That count is admitted before rebinding; exhaustion returns a mesh-budget
+refusal rather than accepting an unconfirmed result. Overlap-output, derivative,
+mesh-size and original wall budgets also retain their existing refusals.
+
+Both strategies use the full same-model cooling producer on every mesh. Internal
+marker derivatives include contact and radiative feedback but are not published
+as user-requested sensitivities when `objective.gradient=false`. Repeated mesh
+agreement and the global probe are observations, not a continuum error bound,
+point-maximum certificate, monotonicity guarantee or proof of physical accuracy.
+
 ## Resource and scope boundaries
 
 Pair tests include both same-side disjointness checks and cross-side overlaps.
 The complete pair count is admitted before clipping. Overlap output has its own
 explicit cap. The CLI caps these at 1,000,000 pair tests and 100,000 overlap
 triangles per interface. Core binding accepts a cancellation context and polls
-it. CLI geometry binding occurs during existing request parsing, BEFORE the
-thermal solve wall watchdog; its pair/output caps bound this preprocessing,
-not a newly claimed parse-time deadline. Solve assembly then uses the existing
-solve cancellation, residual, energy and iteration budgets.
+it. Initial CLI geometry binding occurs during request parsing, BEFORE the
+thermal solve wall watchdog. Geometry rebinding during mesh studies also uses
+the parser's bounded preprocessing context rather than an independently timed
+clipping deadline. Its pair/output caps bound that work; thermal solves and
+refinement polls still use the original study deadline. No new per-level time
+allowance is created.
 
-`mesh_convergence` currently refuses this new side-declaration form before its
-first physical solve: its transfer code only knows matching face pairs.
-Explicit nonmatching meshes may be solved separately. No `.fsim` nonmatching
-contact lowering, curved contact, pressure-dependent resistance, general mortar
-constraint, contact detection or automatic volume-mesh repair is added.
-Exact coincident matching triangles still require ownership everywhere; the
-new path does NOT search the whole mesh for undeclared nonmatching partners.
-This narrowly scoped explicit path extends the older matching-only summaries.
+No `.fsim` nonmatching contact lowering, curved contact, pressure-dependent
+resistance, general mortar constraint, contact detection or automatic volume-mesh
+repair is added. Exact coincident matching triangles still require ownership
+everywhere; this explicit path does NOT search the whole mesh for undeclared
+nonmatching partners. Transient mesh studies and space-time adaptation remain
+unsupported.
 
 ## Focused verification
 
 ```bash
 cargo test -p fs-conduction --test nonmatching_contact
 cargo test -p fs-cli --test cooling_nonmatching_contact
-cargo test -p fs-cli --bin frankensim uq_command::model::contact
+cargo test -p fs-cli --bin frankensim contact_transfer
+cargo test -p fs-cli --test cooling_adaptive_mesh
+cargo test -p fs-cli --test cooling_radiation_mesh
 ```
 
-Thirteen new Rust tests include six numerical-library regressions, six
-actual-command regressions and one target-mutation regression. They cover
-unequal meshes and analytic slab fields, mean-zero contact modes, exact-pair
-delegation, signed heat under side reversal, geometry/budget refusals,
-nonlinear/radiative steady gradients, repeated radiating storage adjoints,
-unchanged forward fields, actual uncertain samples and exact chunked replay.
-These Rust tests have NOT been executed in the authoring environment, which
-has no Rust toolchain. Compilation and actual CLI behavior remain unverified.
+The original thirteen nonmatching-contact Rust regressions remain. Six additional
+tests cover one-sided local refinement, nonuniform contact bilinear forms,
+source conservation, complete uniform/adaptive radiative command runs, exact
+refined-field replay, face-order determinism, global confirmation and unchanged
+contact work caps. An older mesh-refusal test now checks actual pair-budget
+exhaustion rather than missing functionality. These Rust tests have NOT been
+executed in the authoring environment, which lacks Rust/RCH. Compilation and
+actual command behavior remain unverified.
 
-Independent Python calculations use exact-rational intersection enumeration
-and analytic polynomial moments as an oracle for the clipping/quadrature
-mathematical mirror. Five slab/scale cases had at most 6.82e-13 K field error
-against the independent analytic solution. The largest scaled matrix
-discrepancy against the exact-moment oracle was 6.66e-16. Four complete cooling
-finite-difference comparisons, including nonlinear material and radiation
-feedback, differed by at most 2.70e-9 K per unit log-resistance change.
+Independent Python calculations use exact-rational contact intersections and
+analytic polynomial moments with sparse volume FEM and direct transpose solves.
+Sixteen signed-field refinement checks preserved the contact bilinear form to
+within 1.67e-16. Refining only the first volume produced 2, 4 and 8 contact
+triangles while the other side stayed at 12; its zero-mean nonuniform jump still
+integrated to the analytic value 1/12, not zero.
 
-The example's independent reference peak is 301.810057 K; its contact carries
-0.359936 W and d(peak)/dln(R'') is 0.168944 K. These calculations are NOT
-executions of FrankenSim, mesh-error certificates or physical validation.
+For the new nonlinear radiative example, the independent local ladder used
+42, 48, 60 and 480 cells with peaks 301.699226, 301.691196, 301.709776 and
+301.690594 K. The last mesh is the complete global probe; its change was
+0.019182 K. A separate uniform ladder used 42, 336 and 2688 cells, ending at
+301.686480 K. These are observed comparisons, NOT Rust execution, certified
+error bounds or measured speedups. Removing radiation on the final local mesh
+raised the reference peak to 301.792381 K. The retained source is one watt,
+with separate air and radiation accounting throughout.
