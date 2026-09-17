@@ -79,3 +79,6 @@ fn side_children(
     }
     Ok(children.iter().map(jindices).collect())
 }
+
+#[cfg(test)]
+mod tests;
