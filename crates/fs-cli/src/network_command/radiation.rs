@@ -81,11 +81,10 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
-        // Steady derivatives include radiation. Mesh/design orchestration still
-        // needs a radiation-aware evaluation seam; never silently bypass it.
-        if ["mesh_convergence", "design", "fan_speed_design"].iter()
-            .any(|key| root.get(key).is_some()) {
-            return Err(bad("radiation currently excludes mesh studies and steady design searches"));
+        // The explicit fan-search adapter below evaluates the complete model.
+        // Other consumers must not bypass radiation through the ordinary seam.
+        if ["mesh_convergence", "design"].iter().any(|key| root.get(key).is_some()) {
+            return Err(bad("radiation currently excludes mesh studies and effective-h design searches"));
         }
         if root.get("transient").is_some_and(|schedule| schedule.get("adjoint").is_some()) {
             return Err(bad("radiative transient adjoints are not implemented; omit transient.adjoint rather than freezing radiation"));
@@ -119,8 +118,9 @@ impl Policy {
 
     /// One inner solve at fixed AIR references. The combined Robin reference is
     /// only an assembly device; the air callback receives convective heat alone.
+    #[allow(clippy::too_many_arguments)]
     fn solid(&self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
-        htc: &BTreeMap<String, f64>) -> Result<Inner>
+        htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Inner>
     {
         if names.len() != references.len() { return Err(bad("radiation air-reference arity mismatch")); }
         let mut driving = references.to_vec();
@@ -138,7 +138,6 @@ impl Policy {
                     let h_rad = patch.coefficient(driving[i])?;
                     let h_air = htc[name];
                     let h = finite(h_air + h_rad, "combined radiation/convection coefficient")?;
-                    // Convex weights avoid multiplying temperature by a large h.
                     combined_ref[i] = finite((h_air / h) * references[i]
                         + (h_rad / h) * patch.ambient_k, "combined Robin reference")?;
                     combined_h.insert(name.to_string(), h);
@@ -152,7 +151,7 @@ impl Policy {
             config.linear.max_iterations = request.limits.linear;
             config.stop.residual_rtol = request.limits.relative;
             config.stop.step_atol = 0.0;
-            let binding = request.gradient.then(|| sensitivity::Binding {
+            let binding = want_gradient.then(|| sensitivity::Binding {
                 htc: combined_h.clone(), references: combined_ref.clone(), driving: driving.clone(),
                 radiative_htc: applied_h.clone(), config: config.clone(),
             });
@@ -188,8 +187,6 @@ impl Policy {
                     driving[i] = finite((1.0 - self.relaxation) * driving[i] + self.relaxation * mean,
                         "relaxed radiation temperature")?;
                 }
-                // Independently accumulated FEM Robin heat must split into the
-                // exact two mechanisms, even before the nonlinear iteration closes.
                 if finite(flux.heat_rate_w - q_air - q_applied, "Robin heat split")?.abs() > request.limits.heat {
                     return Err(producer("radiation/convection split disagrees with assembled Robin heat"));
                 }
@@ -205,8 +202,6 @@ impl Policy {
                 return Ok(Inner { conduction, convective, heats, iterations: iteration + 1,
                     max_change_k: max_change, max_mismatch_w: max_mismatch, binding });
             }
-            // These models have only Robin/natural/contact rows; all nodal DOFs
-            // are free. Reuse the field as a guess, never as accepted physics.
             initial = InitialGuess::Free(conduction.temperature);
         }
         Err(Failure { code: "cooling-network-radiation-budget", message: format!(
@@ -218,10 +213,25 @@ impl Policy {
         if let Some(schedule) = &request.transient {
             return super::transient::solve(request, cx, schedule);
         }
+        if let Some(design) = &request.fan_speed_design {
+            return fan_speed::solve_with(request, cx, design, |cx,flow,htc,want_gradient|
+                self.evaluate(request,cx,flow,htc,want_gradient));
+        }
         let flow = request.flow(cx)?;
         let declared = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
-        let (htc, convection) = convection::resolve(request, cx, &flow, &declared)?;
-        let network = request.transport(cx, &flow, &htc)?;
+        let evaluated = self.evaluate(request,cx,&flow,&declared,request.gradient)?;
+        let result = evaluated.render(request,&flow)?;
+        match &request.fan { Some(fan) => fan.attach(result,&flow,fan.speed_ratio), None => Ok(result) }
+    }
+
+    /// One complete radiating evaluation at the ACTUAL candidate hydraulics.
+    /// Neither the forward radiation state nor adjoint history is shared across
+    /// candidates. The serialized radiation report is never used by the search.
+    fn evaluate(&self, request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
+        declared: &BTreeMap<String,f64>, want_gradient: bool) -> Result<fan_speed::ThermalEvaluation> {
+        poll(cx)?;
+        let (htc, convection) = convection::resolve(request, cx, flow, declared)?;
+        let network = request.transport(cx, flow, &htc)?;
         let names = network.regions();
         let gate = ConjugateConfig { max_iterations: request.limits.coupling,
             temperature_tolerance_k: request.limits.temperature, balance_tolerance_w: request.limits.heat,
@@ -230,7 +240,7 @@ impl Policy {
         let mut last = None;
         let mut solid_solves = 0_usize;
         let coupled = solve_coupled_transport(cx, &network, &gate, |cx, references| {
-            match self.solid(request, cx, &names, references, &htc) {
+            match self.solid(request, cx, &names, references, &htc, want_gradient) {
                 Ok(inner) => {
                     solid_solves = match solid_solves.checked_add(inner.iterations) {
                         Some(n) => n,
@@ -263,7 +273,7 @@ impl Policy {
             }
         }
         let objective_state = request.objective.evaluate(cx, &inner.conduction.temperature, &coupled.solid)?;
-        let (gradient, adjoint) = if request.gradient {
+        let (gradient, adjoint) = if want_gradient {
             let (gradient, report) = sensitivity::pullback(self, request, cx, &network, &inner,
                 &coupled.reference_temperatures_k, &htc, &objective_state, &convection)?;
             (Some(gradient),report)
@@ -277,19 +287,17 @@ impl Policy {
         let evaluated = Evaluation { objective: objective_state.value, objective_state,
             coupled, temperatures, gradient, robin_total_w: robin, source_total_w: source,
             htc: names.iter().map(|name| htc[*name]).collect(), convection, contact_fluxes };
-        let result = render(request, &flow, &evaluated)?;
-        let result = match &request.fan { Some(fan) => fan.attach(result, &flow, fan.speed_ratio)?, None => result };
         let rows = inner.heats.iter().map(|heat| {
             let patch = &self.patches[&heat.surface];
             Ok(format!("{{\"surface\":{},\"emissivity\":{},\"ambient_temperature_k\":{},\"mean_temperature_k\":{},\"secant_htc_w_m2_k\":{},\"applied_heat_w\":{},\"nonlinear_heat_w\":{},\"source\":{}}}",
                 quote(&patch.surface), num(patch.emissivity.value())?, num(patch.ambient_k)?, num(heat.mean_k)?,
                 num(heat.secant_h)?, num(heat.applied_w)?, num(heat.nonlinear_w)?, quote(&patch.source)))
         }).collect::<Result<Vec<_>>>()?.join(",");
-        let prefix = result.strip_suffix("}\n").ok_or_else(|| bad("radiation result framing"))?;
-        poll(cx)?;
-        Ok(format!("{prefix},\"radiation\":{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{total_solves},\"forward_solid_solves\":{solid_solves},\"reconstruction_solid_solves\":{reconstruction_solves},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"adjoint\":{adjoint},\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; requested steady derivatives include radiative and air feedback; no enclosure reflection, occlusion, participating medium or physical validation\"}}}}\n",
+        let report = format!("{{\"model\":\"surface-mean-gray-to-isothermal-surroundings\",\"radiative_out_w\":{},\"convective_out_w\":{},\"energy_residual_w\":{},\"solid_solves\":{total_solves},\"forward_solid_solves\":{solid_solves},\"reconstruction_solid_solves\":{reconstruction_solves},\"final_inner_iterations\":{},\"final_temperature_change_k\":{},\"max_nonlinear_heat_mismatch_w\":{},\"surfaces\":[{}],\"adjoint\":{adjoint},\"scope\":\"caller-declared constant gray emissivity; fourth power of each surface's area-mean temperature, not pointwise T^4 integration; unit view factor to an isothermal black reservoir; convection and radiation share the declared faces but only convective heat enters the air; requested steady derivatives include radiative and air feedback; no enclosure reflection, occlusion, participating medium or physical validation\"}}",
             num(radiative)?, num(convective)?, num(balance)?, inner.iterations,
-            num(inner.max_change_k)?, num(inner.max_mismatch_w)?, rows))
+            num(inner.max_change_k)?, num(inner.max_mismatch_w)?, rows);
+        poll(cx)?;
+        Ok(fan_speed::ThermalEvaluation { value:evaluated, radiation:Some(report), solid_solves:total_solves })
     }
 }
 
