@@ -137,7 +137,6 @@ fn enclosure_goal_marking_requires_global_confirmation_and_preserves_final_physi
     let history=mesh.get("history").unwrap().as_array().unwrap();
     assert_eq!(history.last().unwrap().str_field("arrived_by"),Some("uniform"));
     let mut insufficient=input;put(member(&mut insufficient,"mesh_convergence"),"max_refinements",num(2.0));
-    // A nonzero marker cannot publish locally agreed fields without the probe.
     let attempted=output(&insufficient);
     if attempted.status.success() {
         let doc=success(&attempted);let h=doc.path(&["mesh_convergence","history"]).unwrap().as_array().unwrap();
@@ -146,13 +145,16 @@ fn enclosure_goal_marking_requires_global_confirmation_and_preserves_final_physi
 }
 
 #[test]
-fn derivative_budgets_and_unimplemented_trajectory_derivatives_publish_no_partial_gradient() {
+fn derivative_budgets_and_adaptive_trajectory_derivatives_publish_no_partial_gradient() {
     let mut input=differentiated();put(member(&mut input,"budgets"),"derivative_iterations",num(1.0));
     let result=output(&input);assert_eq!(result.status.code(),Some(6));assert!(result.stdout.is_empty());
     assert!(String::from_utf8_lossy(&result.stderr).contains("adjoint"));
     run(&primal(&input));
     let mut transient=primal(&input);
-    put(&mut transient,"transient",J::parse(r#"{"initial_temperature_k":300,"volumetric_heat_capacity_j_m3_k":1000000,"max_step_s":1,"max_steps":2,"intervals":[{"duration_s":1,"power_scale":1,"fan_speed_ratio":1}],"adjoint":{"qoi":"final","max_checkpoint_bytes":1048576}}"#).unwrap());
+    put(&mut transient,"transient",J::parse(r#"{"initial_temperature_k":300,"volumetric_heat_capacity_j_m3_k":1000000,"max_step_s":1,"max_steps":2,"intervals":[{"duration_s":1,"power_scale":1,"fan_speed_ratio":1}],"adjoint":{"qoi":"final","max_checkpoint_bytes":1048576},"adaptive":{"absolute_tolerance_k":0.01,"relative_tolerance":0,"minimum_trial_step_s":0.001,"max_trials":10}}"#).unwrap());
     let result=output(&transient);assert!(!result.status.success());assert!(result.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("trajectory adjoints"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("fixed timesteps"));
 }
+
+#[path="trajectory.rs"]
+mod trajectory;

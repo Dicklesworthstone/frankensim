@@ -15,7 +15,7 @@
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
 //! Both models support implicit transient endpoints and total steady adjoints.
-//! Enclosure trajectory adjoints remain separately gated.
+//! Fixed-grid trajectory adjoints retain each model's complete feedback.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
     SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
@@ -95,9 +95,6 @@ impl Policy {
         if let Some(enclosure) = value.get("enclosure") {
             if value.get("surfaces").is_some() {
                 return Err(bad("choose radiation.surfaces or radiation.enclosure, not both"));
-            }
-            if root.get("transient").is_some_and(|t|t.get("adjoint").is_some()) {
-                return Err(bad("enclosure radiation does not yet support trajectory adjoints"));
             }
             return Ok(Self {patches:BTreeMap::new(),enclosure:Some(enclosure::Enclosure::parse(enclosure,surfaces)?),
                 max_iterations,tolerance_k,relaxation});
@@ -290,8 +287,6 @@ impl Policy {
         let (gradient, adjoint) = if want_gradient {
             let (gradient, report) = sensitivity::pullback(self, request, cx, &network, &inner,
                 &coupled.reference_temperatures_k, &htc, &objective_state, &convection)?;
-            // A mesh marker needs the derivative, but gradient=false still
-            // means the published primal does not claim requested sensitivities.
             (Some(gradient), if request.gradient { report } else { "null".into() })
         } else { (None,"null".into()) };
         let reconstruction_solves = usize::from(gradient.is_some());

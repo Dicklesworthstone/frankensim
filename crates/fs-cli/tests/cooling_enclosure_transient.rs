@@ -84,7 +84,10 @@ fn manufactured_new_endpoints_use_implicit_radiation_in_both_heat_directions() {
             337.2367981079883,323.47040023650146,355.59199526997054,311.2336021285134]),
     ] {
         let mut input = J::parse(STEADY).unwrap();
-        let mut schedule = J::parse(r#"{"max_step_s":1,"max_steps":1,"element_heat_capacities_j_m3_k":[20000,20000,20000,20000,20000,20000,10000,10000,10000,10000,10000,10000],"intervals":[{"duration_s":1,"power_scale":1,"fan_speed_ratio":1}]}"#).unwrap();
+        let mut schedule = J::parse(r#"{"max_step_s":1,"max_steps":1,"element_heat_capacities_j_m3_k":[20000,20000,20000,20000,20000,20000,20000,10000,10000,10000,10000,10000],"intervals":[{"duration_s":1,"power_scale":1,"fan_speed_ratio":1}]}"#).unwrap();
+        // Six elements belong to each of the two independent bodies.
+        put(&mut schedule,"element_heat_capacities_j_m3_k",J::Array(
+            (0..12).map(|i|num(if i<6 {20000.0}else{10000.0})).collect()));
         put(&mut schedule, "initial_temperatures_k", J::Array(old.into_iter().map(num).collect()));
         put(&mut input, "transient", schedule);
         let result = run(&input); energy(&result);
@@ -195,13 +198,14 @@ fn workload_sizing_rechecks_complete_radiating_candidates() {
 }
 
 #[test]
-fn enclosure_adjoint_and_exhausted_radiation_step_or_time_budgets_never_publish() {
+fn adaptive_adjoint_and_exhausted_radiation_step_or_time_budgets_never_publish() {
     let input = single();
     let mut gradient = input.clone();
     put(member(&mut gradient, "transient"), "adjoint", J::parse(r#"{"qoi":"final","max_checkpoint_bytes":1048576}"#).unwrap());
+    put(member(&mut gradient,"transient"),"adaptive",J::parse(r#"{"absolute_tolerance_k":0.01,"relative_tolerance":0,"minimum_trial_step_s":0.001,"max_trials":100}"#).unwrap());
     let rejected = output(&gradient);
     assert!(!rejected.status.success()); assert!(rejected.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("adjoint"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("fixed timesteps"));
     for (section, key, value) in [("radiation", "max_iterations", 1.0),
         ("transient", "max_steps", 1.0), ("budgets", "wall_seconds", 1e-9)] {
         let mut failed = input.clone(); put(member(&mut failed, section), key, num(value));
