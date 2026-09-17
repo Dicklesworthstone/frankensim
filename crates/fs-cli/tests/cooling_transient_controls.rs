@@ -122,6 +122,13 @@ fn every_component_has_its_own_absolute_watt_derivative_including_dormant_chips(
         assert_eq!(n(dormant,"applied_power_w"),0.0);
         assert_eq!(n(dormant,"dtemperature_dpower_multiplier_k"),0.0);
         assert!(n(dormant,"dtemperature_dpower_w_k_per_w").abs()>1e-4);
+        if qoi=="sampled-peak" {
+            // Independent P1 volume/face integration and direct implicit
+            // transpose with analytic air elimination, not a second CLI call.
+            near(value(&result,qoi),302.286668764270,2e-5);
+            near(n(component(&result,0,"chip"),"dtemperature_dpower_w_k_per_w"),0.150444865984,2e-5);
+            near(n(dormant,"dtemperature_dpower_w_k_per_w"),0.071983013651,2e-5);
+        }
     }
 }
 
@@ -228,8 +235,8 @@ fn initial_peaks_zero_future_controls_and_control_memory_is_admitted_before_publ
     let old=run(&plain);let bytes=n(adjoint(&old),"checkpoint_bytes");
     let mut exhausted=case("final");
     put(member(member(&mut exhausted,"transient"),"adjoint"),"max_checkpoint_bytes",num(bytes));
-    let output=output(&exhausted);assert_eq!(output.status.code(),Some(6));assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("max_checkpoint_bytes"));
+    let failure=output(&exhausted);assert_eq!(failure.status.code(),Some(6));assert!(failure.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("max_checkpoint_bytes"));
     let mut missing=case("final");
     let solid=member(&mut missing,"solid");remove(solid,"component_power");put(solid,"source_w_m3",num(0.0));
     for interval in rows(member(member(&mut missing,"transient"),"intervals")) {
