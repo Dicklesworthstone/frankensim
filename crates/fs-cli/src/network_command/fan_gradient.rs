@@ -54,6 +54,37 @@ impl CoolingGradient {
     }
 }
 
+/// Complete the SAME fan-affinity chain rule for a checked total thermal
+/// gradient supplied by the radiation wall-feedback solve. The capacity term
+/// must already include that feedback. No frozen-radiation reconstruction or
+/// second solid adjoint is performed here.
+pub(super) fn from_flow_response(
+    request: &Request, cx: &Cx<'_>, names: &[&str], derivations: &[convection::Derived],
+    thermal: CoupledGradient, log_flow_scale: f64,
+) -> Result<CoolingGradient> {
+    poll(cx)?;
+    if request.fan.is_none() { return Ok(CoolingGradient { thermal, speed: None }); }
+    if names.len() != thermal.log_htc.len() {
+        return Err(bad("fan derivative requires the exact coupled region ordering"));
+    }
+    let mut slopes = BTreeMap::new();
+    for derived in derivations {
+        poll(cx)?;
+        let Some(slope) = reynolds_elasticity(&derived.nu)? else {
+            return Ok(CoolingGradient { thermal, speed: Some(SpeedGradient::Unavailable) });
+        };
+        slopes.insert(derived.surface.as_str(), slope);
+    }
+    let mut convection = 0.0;
+    for (name, gradient) in names.iter().zip(&thermal.log_htc) {
+        poll(cx)?;
+        convection = checked(convection + checked(gradient * slopes.get(name).copied().unwrap_or(0.0))?)?;
+    }
+    let total = checked(log_flow_scale + convection)?;
+    Ok(CoolingGradient { thermal,
+        speed: Some(SpeedGradient::Available { flow: log_flow_scale, convection, total }) })
+}
+
 /// Use exactly one coupled adjoint. The common-flow extension needs one extra
 /// air-only reverse sweep, not additional perturbed hydraulic or solid solves.
 #[allow(clippy::too_many_arguments)]
