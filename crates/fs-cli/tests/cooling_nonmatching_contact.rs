@@ -3,6 +3,7 @@
 #[allow(dead_code)]
 #[path="../src/json_read.rs"]
 mod json;
+#[path="cooling_nonmatching_contact/mesh.rs"]
 mod mesh;
 use json::JsonValue as J;
 use std::io::Write;
