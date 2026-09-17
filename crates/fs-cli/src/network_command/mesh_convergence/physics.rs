@@ -14,6 +14,9 @@ pub(super) struct Solved {
 
 pub(super) fn solve(request: &Request, cx: &Cx<'_>, fraction: Option<f64>) -> Result<Solved> {
     poll(cx)?;
+    if request.contacts.as_ref().is_some_and(|c| c.has_nonmatching()) {
+        return Err(bad("mesh_convergence does not yet transfer nonmatching contact-side declarations; solve explicit meshes separately rather than dropping contact"));
+    }
     let flow = request.flow(cx)?;
     let coefficients = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
     let mut evaluated = match &request.radiation {
@@ -30,9 +33,6 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, fraction: Option<f64>) -> Re
         mark::evaluate(cx, request, &evaluated.value.temperatures, &gradient.nodal_load, fraction)
     }).transpose()?;
     let adjoint_sweeps = evaluated.value.gradient.as_ref().map_or(0, |g| g.iterations);
-    // The explicit mesh strategy owns this derivative. Keep ordinary output
-    // gradient fields null; neither the temperatures nor mechanism report is
-    // recomputed with different physics to render the primal result.
     evaluated.value.gradient = None;
     let output = evaluated.render(request, &flow)?;
     let output = match &request.fan {
@@ -40,12 +40,7 @@ pub(super) fn solve(request: &Request, cx: &Cx<'_>, fraction: Option<f64>) -> Re
         None => output,
     };
     poll(cx)?;
-    Ok(Solved {
-        output,
-        objective_k: evaluated.value.objective,
-        source_w: evaluated.value.source_total_w,
-        solid_solves: evaluated.solid_solves,
-        adjoint_sweeps,
-        marking,
-    })
+    Ok(Solved { output, objective_k: evaluated.value.objective,
+        source_w: evaluated.value.source_total_w, solid_solves: evaluated.solid_solves,
+        adjoint_sweeps, marking })
 }
