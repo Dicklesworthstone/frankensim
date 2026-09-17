@@ -63,6 +63,50 @@ impl Contacts {
             }
         }).collect()
     }
+
+    /// A local contribution to a trajectory derivative. The supplied load
+    /// multiplier already includes storage and total air/radiation feedback.
+    /// Use the original solve gate, not a fresh preprocessing context.
+    pub(crate) fn trajectory_log_resistance_gradients(&self, cx: &Cx<'_>,
+        temperature: &[f64], adjoint: &[f64]) -> Result<Vec<f64>> {
+        poll(cx)?;
+        if temperature.len() != self.vertex_count || adjoint.len() != self.vertex_count {
+            return Err(bad("trajectory contact sensitivity requires complete primal and adjoint fields"));
+        }
+        for (index,&value) in temperature.iter().chain(adjoint).enumerate() {
+            if index % 512 == 0 { poll(cx)?; }
+            checked(value)?;
+        }
+        let values = self.declarations.iter().map(|row| {
+            poll(cx)?;
+            if self.interfaces.surface_is_nonmatching(&row.name) {
+                self.interfaces.nonmatching_log_resistance_pullback(cx,&row.name,temperature,adjoint)
+                    .map_err(producer)?.ok_or_else(|| bad("missing admitted nonmatching trajectory contact"))
+            } else {
+                let mut sum = 0.0;
+                for trace in &row.traces {
+                    poll(cx)?;
+                    sum = checked(sum + trace.contraction(temperature,adjoint,row.resistance)?)?;
+                }
+                Ok(sum)
+            }
+        }).collect::<Result<Vec<_>>>()?;
+        poll(cx)?;
+        Ok(values)
+    }
+
+    pub(crate) fn trajectory_sensitivity_json(&self, gradients: &[f64]) -> Result<String> {
+        if gradients.len() != self.declarations.len() {
+            return Err(bad("trajectory contact gradient/declaration arity mismatch"));
+        }
+        let rows = self.declarations.iter().zip(gradients).map(|(row,&value)| {
+            Ok(format!("{{\"contact\":{},\"resistance_m2_k_w\":{},\"dtemperature_dlog_resistance_k\":{},\"dtemperature_dresistance_w_m2\":{}}}",
+                quote(&row.name),num(row.resistance)?,num(checked(value)?)?,
+                num(checked(value/row.resistance)?)?))
+        }).collect::<Result<Vec<_>>>()?.join(",");
+        Ok(format!("{{\"method\":\"trajectory-coupled-adjoint-contact-bilinear-form\",\"rows\":[{rows}],\"scope\":\"one persistent scalar resistance per named matching or planar nonmatching contact, changed throughout the complete trajectory; sum of full contact bilinear contractions over reverse endpoints including earlier cycles; no extra dt factor, geometry/overlap derivative or contact-flux objective; all other controls held fixed; selected sampled-maximum branch is not a unique derivative at ties\"}}"))
+    }
+
     pub(crate) fn sensitivity_json(&self, temperature: &[f64], gradient: Option<&CoupledGradient>) -> Result<String> {
         let Some(gradient) = gradient else { return Ok("null".into()); };
         let values = self.log_resistance_gradients(temperature, &gradient.nodal_load)?;
