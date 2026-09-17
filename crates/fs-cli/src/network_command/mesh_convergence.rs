@@ -1,8 +1,11 @@
-//! An observed uniform h-ladder for the existing steady cooling model.
-//! Each rung executes the real coupled producer. Agreement between meshes is
-//! an empirical stopping condition, not a continuum bound or DWR adaptation.
+//! Observed mesh ladders for the existing steady coupled cooling model.
+//! Optional goal-recovery marking uses the actual coupled adjoint to prioritize
+//! local refinement. Scores only choose cells; measured objective differences
+//! and a global confirmation govern stopping, never a claimed error bound.
 use super::*;
 use fs_mesh::{TetRefinement,TetRefinementError,TetRefinementLimits};
+mod mark;
+mod split;
 
 #[derive(Debug)]
 pub(super) struct Study {
@@ -11,6 +14,7 @@ pub(super) struct Study {
     consecutive: usize,
     tolerance_k: f64,
     limits: TetRefinementLimits,
+    marking: Option<f64>,
 }
 
 fn exhausted(message: impl Into<String>)->Failure {
@@ -26,13 +30,27 @@ fn refinement_error(error:TetRefinementError)->Failure {
 
 impl Study {
     pub(super) fn parse(value:&J,root:&J)->Result<Self> {
-        object(value,&["max_refinements","consecutive_passes","temperature_tolerance_k","max_vertices","max_tetrahedra"],"mesh_convergence")?;
+        object(value,&["max_refinements","consecutive_passes","temperature_tolerance_k","max_vertices","max_tetrahedra","strategy","marking_fraction"],"mesh_convergence")?;
         if ["transient","design","fan_speed_design"].iter().any(|key|root.get(key).is_some())
             || get(get(root,"objective")?,"gradient")?!=&J::Bool(false) {
             return Err(bad("mesh_convergence requires a steady request with gradient=false and no design search"));
         }
-        let max_refinements=count(get(value,"max_refinements")?,"mesh max_refinements",6)?;
-        let consecutive=count(get(value,"consecutive_passes")?,"mesh consecutive_passes",6)?;
+        let marking=match value.get("strategy") {
+            None | Some(J::Str(_)) if value.get("strategy").is_none()
+                || value.str_field("strategy")==Some("uniform") => {
+                if value.get("marking_fraction").is_some() { return Err(bad("marking_fraction requires strategy=goal-recovery")); }
+                None
+            }
+            Some(J::Str(strategy)) if strategy=="goal-recovery" => {
+                let fraction=positive(get(value,"marking_fraction")?,"mesh marking_fraction")?;
+                if fraction>1.0 { return Err(bad("mesh marking_fraction must be in (0,1]")); }
+                Some(fraction)
+            }
+            _=>return Err(bad("mesh strategy must be uniform or goal-recovery")),
+        };
+        let cap=if marking.is_some(){32}else{6};
+        let max_refinements=count(get(value,"max_refinements")?,"mesh max_refinements",cap)?;
+        let consecutive=count(get(value,"consecutive_passes")?,"mesh consecutive_passes",cap)?;
         if consecutive<2 || consecutive>max_refinements {
             return Err(bad("mesh convergence requires 2 <= consecutive_passes <= max_refinements"));
         }
@@ -48,7 +66,7 @@ impl Study {
         }
         let mut input=root.clone();
         members(&mut input)?.retain(|(key,_)|key!="mesh_convergence");
-        Ok(Self{input,max_refinements,consecutive,tolerance_k,limits})
+        Ok(Self{input,max_refinements,consecutive,tolerance_k,limits,marking})
     }
 
     pub(super) fn solve(&self,gate:&CancelGate)->Result<String> {
@@ -60,17 +78,27 @@ impl Study {
         let mut history=Vec::new();
         let mut last_change=None;
         let mut total_solves=0_usize;
+        let mut total_adjoint_sweeps=0_usize;
+        let mut arrived_by="base";
         for level in 0..=self.max_refinements {
-            let (output,value,power,solves)=with_context(&request,gate,|cx| {
+            let (output,value,power,solves,marking,adjoint_sweeps)=with_context(&request,gate,|cx| {
                 let flow=request.flow(cx)?;
                 let coefficients=request.surfaces.iter().map(|s|(s.name.clone(),s.h)).collect();
-                let evaluated=request.evaluate(cx,&flow,&coefficients,false)?;
+                let mut evaluated=request.evaluate(cx,&flow,&coefficients,self.marking.is_some())?;
+                let marking=self.marking.map(|fraction| {
+                    let gradient=evaluated.gradient.as_ref().ok_or_else(||producer("adaptive solve has no coupled adjoint"))?;
+                    mark::evaluate(cx,&request,&evaluated.temperatures,&gradient.nodal_load,fraction)
+                }).transpose()?;
+                let adjoint_sweeps=evaluated.gradient.as_ref().map_or(0,|g|g.iterations);
+                // The marker requested its own derivative; the resolved ordinary
+                // request still has gradient=false and keeps those output fields null.
+                evaluated.gradient=None;
                 let result=render(&request,&flow,&evaluated)?;
                 let result=match &request.fan {
                     Some(fan)=>fan.attach(result,&flow,fan.speed_ratio)?,None=>result,
                 };
                 poll(cx)?;
-                Ok((result,evaluated.objective,evaluated.source_total_w,evaluated.coupled.iterations))
+                Ok((result,evaluated.objective,evaluated.source_total_w,evaluated.coupled.iterations,marking,adjoint_sweeps))
             })?;
             let base_power=*original_power.get_or_insert(power);
             if !(power-base_power).is_finite() || (power-base_power).abs()>request.limits.heat {
@@ -80,21 +108,38 @@ impl Study {
             if change.is_some_and(|d|!d.is_finite()) {return Err(producer("nonfinite mesh objective change"));}
             streak=if change.is_some_and(|d|d<=self.tolerance_k){streak+1}else{0};
             total_solves=total_solves.checked_add(solves).ok_or_else(||exhausted("mesh study work overflow"))?;
-            history.push(format!("{{\"level\":{level},\"vertices\":{},\"tetrahedra\":{},\"objective_k\":{},\"successive_change_k\":{},\"source_w\":{},\"source_change_w\":{},\"solid_solves\":{solves},\"consecutive_passes\":{streak}}}",
-                request.mesh.vertex_count(),request.mesh.element_count(),num(value)?,optional(change)?,num(power)?,num(power-base_power)?));
-            if streak>=self.consecutive {
+            total_adjoint_sweeps=total_adjoint_sweeps.checked_add(adjoint_sweeps).ok_or_else(||exhausted("mesh study adjoint work overflow"))?;
+            let marker=match &marking {
+                None=>"null".into(),
+                Some(m)=>format!("{{\"method\":\"goal-weighted-gradient-recovery\",\"marked_cells\":{},\"normalized_score_sum\":{},\"captured_fraction\":{},\"adjoint_sweeps\":{},\"score_is_error_bound\":false}}",
+                    m.cells.len(),num(m.total)?,num(m.captured_fraction)?,adjoint_sweeps),
+            };
+            history.push(format!("{{\"level\":{level},\"vertices\":{},\"tetrahedra\":{},\"objective_k\":{},\"successive_change_k\":{},\"source_w\":{},\"source_change_w\":{},\"solid_solves\":{solves},\"consecutive_passes\":{streak},\"arrived_by\":{},\"marking\":{marker}}}",
+                request.mesh.vertex_count(),request.mesh.element_count(),num(value)?,optional(change)?,num(power)?,num(power-base_power)?,quote(arrived_by)));
+            // Local agreement can miss an unmarked region. Before accepting an
+            // adaptive result require one complete uniform refinement from the
+            // locally agreed mesh. This is still an observed check, not a bound.
+            let confirmed=self.marking.is_none() || arrived_by=="uniform";
+            if streak>=self.consecutive && confirmed {
                 let prefix=output.strip_suffix("}\n").ok_or_else(||bad("internal mesh-study result framing"))?;
                 let resolved=encode(&input)?;
-                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":\"uniform-red-tet-refinement\",\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; not a continuum error bound, maximum-norm certificate, goal-oriented adaptation or physical validation; base P1 source is prolonged without renormalization, material laws inherit by parent cell, matching contact traces remain separate; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
-                    history.len(),num(self.tolerance_k)?,self.consecutive,optional(change)?,history.join(","),resolved.trim_end()));
+                let method=if self.marking.is_some(){"goal-recovery-edge-bisection"}else{"uniform-red-tet-refinement"};
+                return Ok(format!("{prefix},\"mesh_convergence\":{{\"status\":\"successive-mesh-tolerance-met\",\"method\":{},\"meshes_solved\":{},\"refinements\":{level},\"temperature_tolerance_k\":{},\"required_consecutive_passes\":{},\"achieved_change_k\":{},\"total_solid_solves\":{total_solves},\"total_adjoint_sweeps\":{total_adjoint_sweeps},\"global_confirmation\":{},\"history\":[{}],\"resolved_request\":{},\"scope\":\"observed same-model successive-mesh agreement only; goal-recovery scores prioritize cells and are not a DWR or continuum error bound, maximum-norm certificate, or physical validation; local refinement is conforming but carries no shape-regularity theorem; an adaptive success includes a complete uniform-refinement comparison; base P1 source is prolonged without renormalization, material laws inherit by parent cell, matching contact traces remain separate; point-set objectives retain original vertices; resolved_request owns the published field's mesh and may be solved independently\"}}}}\n",
+                    quote(method),history.len(),num(self.tolerance_k)?,self.consecutive,optional(change)?,
+                    if self.marking.is_some(){"true"}else{"null"},history.join(","),resolved.trim_end()));
             }
             last_change=change;
             previous=Some(value);
             if level==self.max_refinements {break;}
-            input=with_context(&request,gate,|cx|refine_request(cx,&input,&request,self.limits))?;
+            // No recovery signal requests a global probe, never early success.
+            // A pending global confirmation also overrides local marking.
+            let marks=marking.as_ref().filter(|m|!m.cells.is_empty() && streak<self.consecutive)
+                .map(|m|m.cells.as_slice());
+            input=with_context(&request,gate,|cx|refine_request_selected(cx,&input,&request,self.limits,marks))?;
+            arrived_by=if marks.is_some(){"marked-edge-stars"}else{"uniform"};
             request=Request::parse(&encode(&input)?)?;
         }
-        Err(exhausted(format!("mesh refinement budget exhausted after {} solved meshes: last change {:?} K, tolerance {} K, consecutive passes {streak}/{}; no convergence result published",
+        Err(exhausted(format!("mesh refinement budget exhausted after {} solved meshes: last change {:?} K, tolerance {} K, consecutive passes {streak}/{}; any required global confirmation is still part of the budget; no convergence result published",
             history.len(),last_change,self.tolerance_k,self.consecutive)))
     }
 }
@@ -107,16 +152,22 @@ fn with_context<T>(request:&Request,gate:&CancelGate,run:impl FnOnce(&Cx<'_>)->R
     })
 }
 
-/// Transfer the DECLARED problem, not just node coordinates. In particular,
-/// recreating a component's original vertex set on a finer mesh would shrink
-/// its support and silently turn a convergence study into a changed-load study.
+/// Uniform compatibility entry point used by the existing transfer tests.
+#[cfg(test)]
 fn refine_request(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinementLimits)->Result<J> {
+    refine_request_selected(cx,root,request,limits,None)
+}
+
+/// Transfer the DECLARED problem, not just node coordinates. Recreating the
+/// old component vertex set on a finer mesh would shrink its source support.
+fn refine_request_selected(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinementLimits,
+    marked:Option<&[usize]>)->Result<J> {
     poll(cx)?;
     let solid=get(root,"solid")?;
     let old_vertices=request.mesh.vertex_count();
     let tets=array(get(solid,"tetrahedra")?,"tetrahedra",100_000)?.iter()
         .map(|t|indices::<4>(t,"tetrahedron",old_vertices)).collect::<Result<Vec<_>>>()?;
-    let split=TetRefinement::build(cx,request.mesh.positions(),&tets,limits).map_err(refinement_error)?;
+    let split=split::Split::build(cx,root,request,&tets,limits,marked)?;
     let mut next=root.clone();
     let solid=member_mut(&mut next,"solid")?;
     replace(solid,"vertices_m",J::Array(split.positions().iter()
@@ -125,12 +176,12 @@ fn refine_request(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinementLimits
     if let Some(assignment)=solid.get("element_materials") {
         let rows=array(assignment,"element_materials",tets.len())?;
         if rows.len()!=tets.len(){return Err(bad("material assignment changed during refinement"));}
-        let refined=rows.iter().flat_map(|row|std::iter::repeat_n(row.clone(),8)).collect();
+        let refined=(0..split.tetrahedra().len()).map(|i|rows[split.parent(i)].clone()).collect();
         replace(solid,"element_materials",J::Array(refined))?;
     }
     if let Some(source)=&request.solid_data.nodal_source {
         let old:Vec<f64>=(0..old_vertices).map(|i|source.at(i)).collect();
-        let values=split.prolongate(cx,&old).map_err(refinement_error)?;
+        let values=split.prolongate(cx,&old)?;
         let fields=members(solid)?;
         fields.retain(|(key,_)|key!="component_power" && key!="nodal_source_w_m3");
         fields.push(("nodal_source_w_m3".into(),J::Array(values.into_iter().map(jnum).collect())));
@@ -141,7 +192,7 @@ fn refine_request(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinementLimits
         let mut children=Vec::new();
         for face in array(get(surface,"faces")?,"surface faces",200_000)? {
             let face=indices::<3>(face,"surface face",old_vertices)?;
-            children.extend(split.face_children(face).map_err(refinement_error)?.iter().map(|f|jindices(f)));
+            children.extend(split.face_children(face)?.iter().map(|f|jindices(f)));
         }
         replace(surface,"faces",J::Array(children))?;
     }
@@ -153,23 +204,13 @@ fn refine_request(cx:&Cx<'_>,root:&J,request:&Request,limits:TetRefinementLimits
                 poll(cx)?;
                 let a=indices::<3>(get(pair,"side_a")?,"side_a",old_vertices)?;
                 let b=indices::<3>(get(pair,"side_b")?,"side_b",old_vertices)?;
-                let mut matched=[0;3];
-                for (i,&vertex) in a.iter().enumerate() {
-                    matched[i]=b.iter().copied().find(|&other|
-                        request.mesh.positions()[vertex as usize]==request.mesh.positions()[other as usize])
-                        .ok_or_else(||bad("mesh refinement requires exactly coincident matching contact vertices"))?;
-                }
-                let aa=split.face_children(a).map_err(refinement_error)?;
-                let bb=split.face_children(matched).map_err(refinement_error)?;
-                for (a,b) in aa.iter().zip(bb.iter()) {
-                    children.push(J::Object(vec![("side_a".into(),jindices(a)),("side_b".into(),jindices(b))]));
+                for (a,b) in split.contact_children(a,b)? {
+                    children.push(J::Object(vec![("side_a".into(),jindices(&a)),("side_b".into(),jindices(&b))]));
                 }
             }
             replace(contact,"face_pairs",J::Array(children))?;
         }
     }
-    // Refined source/material/contact inputs go through the original parser.
-    // Existing max_vertices IDs intentionally remain fixed observation points.
     poll(cx)?;
     Ok(next)
 }
