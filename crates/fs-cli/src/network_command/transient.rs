@@ -4,7 +4,7 @@
 //! at the endpoint on every Newton trial, including adaptive/sizing trials.
 //! Radiation, when declared, is also implicit at the new endpoint. Its energy
 //! is distinct from air exhaust and only accepted endpoints enter the window.
-//! An explicit adjoint policy differentiates fixed nonradiating schedules.
+//! An explicit adjoint differentiates fixed schedules, including radiation.
 //! No continuous-time peak bound or adaptive-time-grid derivative is inferred.
 
 mod workload;
@@ -278,9 +278,6 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
     if request.gradient || request.design.is_some() || request.fan_speed_design.is_some() {
         return Err(bad("transient runs do not reuse steady adjoints or steady target searches"));
     }
-    if request.radiation.is_some() && (schedule.adjoint.is_some() || recording.is_some()) {
-        return Err(bad("radiative transient adjoints are not implemented; never freeze radiation for a derivative"));
-    }
     if schedule.adjoint.is_some() && (speed_multiplier != 1.0
         || (recording.is_none() && initial_field != schedule.initial.as_slice())) {
         return Err(bad("transient adjoints require the declared schedule or its accepted repeated history"));
@@ -392,9 +389,8 @@ fn simulate_cycle_recorded(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
                 }
                 if let Some((tape,offset))=recording.as_mut() {
                     tape.record(&solid.temperature,&coupled.reference_temperatures_k,
-                        finite(*offset+endpoint)?,dt,ordinal,state.value,state.vertex)?;
+                        finite(*offset+endpoint),dt,ordinal,state.value,state.vertex)?;
                 }
-                // Only accepted primal endpoints enter physical history or the tape.
                 old.clone_from(&solid.temperature);
                 time=endpoint;
                 if ordinal+1==schedule.intervals.len() && endpoint==end {
