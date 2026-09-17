@@ -31,6 +31,7 @@ mod delaunay;
 mod exude;
 #[cfg(feature = "frontier-hexmesh")]
 pub mod hexdom;
+mod marked_tet;
 mod parallel;
 mod recovery;
 mod refine;
@@ -47,10 +48,11 @@ pub use adaptivity::{
     ConservativeRemapReport, LineageRecordId, MAX_REMAP_AUXILIARY_BYTES, MAX_REMAP_CONTRIBUTIONS,
     MAX_REMAP_SOURCE_CELLS, MAX_REMAP_SOURCE_COVERAGE_TOLERANCE, MAX_REMAP_TARGET_CELLS,
     MeshStateId, QoiBoundSnapshot, QoiBoundTrend, QoiEvidenceId, QoiId, RemapAccounting,
-    RemapContribution, RemapEvidenceId, RemapInvariantId, TopologyLineage, conservative_cell_remap,
+    RemapContribution, RemapEvidenceId, TopologyLineage, conservative_cell_remap,
 };
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use exude::{ExudeOptions, ExudeStats, exude};
+pub use marked_tet::MarkedTetRefinement;
 pub use parallel::{ColoredStats, delaunay_colored, delaunay_colored_reversed};
 pub use recovery::{
     Correspondence, FacetCorrespondence, FacetRecoveryStats, RecoveryOptions, RecoveryStats,
