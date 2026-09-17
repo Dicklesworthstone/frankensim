@@ -8,6 +8,10 @@
 //! The surroundings are a large isothermal black reservoir with view factor
 //! one; no inter-surface exchange, occlusion or participating medium is modeled.
 //!
+//! Alternatively, `enclosure` selects explicitly supplied closed view factors
+//! and gray-diffuse reflection between solved surfaces. Its uniform patch flux
+//! and internal heat accounting remain distinct from the reservoir model.
+//!
 //! Existing FEM, material, contact, air transport and cancellation producers
 //! remain the numerical owners. Radiative heat never enters an air branch.
 //! Transient endpoints use the same law implicitly with fixed old solid state.
@@ -21,6 +25,7 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
 
 mod endpoint;
 mod sensitivity;
+mod enclosure;
 
 #[derive(Debug)]
 struct Patch {
@@ -48,6 +53,7 @@ impl Patch {
 #[derive(Debug)]
 pub(super) struct Policy {
     patches: BTreeMap<String, Patch>,
+    enclosure: Option<enclosure::Enclosure>,
     max_iterations: usize,
     tolerance_k: f64,
     relaxation: f64,
@@ -78,17 +84,29 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 
 impl Policy {
     pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
-        object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces"], "radiation")?;
+        object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces", "enclosure"], "radiation")?;
         if root.get("design").is_some() {
             return Err(bad("radiation currently excludes effective-h design searches"));
         }
-        // Mesh studies use this complete producer, preserving the patch names
-        // and partition while refining their faces. The transient parser still
-        // owns fixed-grid/fixed-cycle derivative admission.
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
         let tolerance_k = positive(get(value, "temperature_tolerance_k")?, "radiation.temperature_tolerance_k")?;
         let relaxation = positive(get(value, "relaxation")?, "radiation.relaxation")?;
         if relaxation > 1.0 { return Err(bad("radiation.relaxation must be in (0,1]")); }
+        if let Some(enclosure) = value.get("enclosure") {
+            if value.get("surfaces").is_some() {
+                return Err(bad("choose radiation.surfaces or radiation.enclosure, not both"));
+            }
+            if get(get(root,"objective")?,"gradient")? != &J::Bool(false)
+                || root.get("transient").is_some()
+                || root.get("mesh_convergence").is_some_and(|m|m.str_field("strategy")==Some("goal-recovery")) {
+                return Err(bad("enclosure radiation currently requires a steady request without gradients or adjoint mesh marking"));
+            }
+            return Ok(Self {patches:BTreeMap::new(),enclosure:Some(enclosure::Enclosure::parse(enclosure,surfaces)?),
+                max_iterations,tolerance_k,relaxation});
+        }
+        // Mesh studies use this complete producer, preserving the patch names
+        // and partition while refining their faces. The transient parser still
+        // owns fixed-grid/fixed-cycle derivative admission.
         let rows = array(get(value, "surfaces")?, "radiation.surfaces", surfaces.len())?;
         if rows.is_empty() { return Err(bad("radiation.surfaces must be nonempty")); }
         let mut patches = BTreeMap::new();
@@ -109,7 +127,7 @@ impl Policy {
                 return Err(bad("a cooling surface has multiple radiation owners"));
             }
         }
-        Ok(Self { patches, max_iterations, tolerance_k, relaxation })
+        Ok(Self { patches, enclosure:None, max_iterations, tolerance_k, relaxation })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -225,6 +243,9 @@ impl Policy {
     pub(super) fn evaluate(&self, request: &Request, cx: &Cx<'_>, flow: &GraphSolution,
         declared: &BTreeMap<String,f64>, want_gradient: bool) -> Result<fan_speed::ThermalEvaluation> {
         poll(cx)?;
+        if let Some(enclosure)=&self.enclosure {
+            return enclosure.evaluate(self,request,cx,flow,declared,want_gradient);
+        }
         let (htc, convection) = convection::resolve(request, cx, flow, declared)?;
         let network = request.transport(cx, flow, &htc)?;
         let names = network.regions();
