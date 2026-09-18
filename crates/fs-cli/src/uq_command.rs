@@ -12,6 +12,7 @@ mod json;
 mod child;
 mod execute;
 mod model;
+pub(super) mod component_design;
 
 use fs_cli::{CommandOutput, exit};
 use fs_uq::{

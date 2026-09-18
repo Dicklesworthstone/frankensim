@@ -14,13 +14,15 @@ fn main() -> ExitCode {
         network_command::run(&args[command + 1..], json)
     } else if args.get(command).is_some_and(|arg| arg == "cooling-network-uq") {
         uq_command::run(&args[command + 1..], json)
+    } else if args.get(command).is_some_and(|arg| arg == "cooling-component-design") {
+        uq_command::component_design::run(&args[command + 1..], json)
     } else {
         fs_cli::run_os(args.clone())
     };
     if !json && output.exit_code == 0
         && (args.is_empty() || (args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h" | "help"))))
     {
-        output.stdout.push_str("\nExperimental coupled workflows:\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json>\nUse each command's --help for its file-driven interface.\n");
+        output.stdout.push_str("\nExperimental coupled workflows:\n  cooling-network <request.json>\n  cooling-network-uq <base-request.json> <uq-request.json>\n  cooling-component-design <base-request.json> <allocation.json>\nUse each command's --help for its file-driven interface.\n");
     }
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
