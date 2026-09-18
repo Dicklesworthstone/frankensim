@@ -83,11 +83,8 @@ fn finite(value: f64, stage: &str) -> Result<f64> {
 }
 
 impl Policy {
-    pub(super) fn parse(value: &J, root: &J, surfaces: &[Surface]) -> Result<Self> {
+    pub(super) fn parse(value: &J, _root: &J, surfaces: &[Surface]) -> Result<Self> {
         object(value, &["max_iterations", "temperature_tolerance_k", "relaxation", "surfaces", "enclosure"], "radiation")?;
-        if root.get("design").is_some() {
-            return Err(bad("radiation currently excludes effective-h design searches"));
-        }
         let max_iterations = count(get(value, "max_iterations")?, "radiation.max_iterations", 1000)?;
         let tolerance_k = positive(get(value, "temperature_tolerance_k")?, "radiation.temperature_tolerance_k")?;
         let relaxation = positive(get(value, "relaxation")?, "radiation.relaxation")?;
@@ -227,9 +224,16 @@ impl Policy {
                 self.evaluate(request,cx,flow,htc,want_gradient));
         }
         let flow = request.flow(cx)?;
-        let declared = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
-        let evaluated = self.evaluate(request,cx,&flow,&declared,request.gradient)?;
-        let result = evaluated.render(request,&flow)?;
+        let result = if let Some(design) = &request.design {
+            let designed = design::solve_with(request, cx, &flow, design, |cx, flow, htc, gradient|
+                self.evaluate(request, cx, flow, htc, gradient))?;
+            design::attach(designed.passing.render(request, &flow)?, &designed)?
+        } else {
+            let declared = request.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect();
+            let evaluated = self.evaluate(request,cx,&flow,&declared,request.gradient)?;
+            evaluated.render(request,&flow)?
+        };
+        poll(cx)?;
         match &request.fan { Some(fan) => fan.attach(result,&flow,fan.speed_ratio), None => Ok(result) }
     }
 
