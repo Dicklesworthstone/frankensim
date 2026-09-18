@@ -105,3 +105,39 @@ fn gradient_proposals_handle_zero_watts_and_reject_wrong_signs_without_predictin
     assert!(result.passing.peak<=p.limit);
     assert!(search::allocate(&p,Instant::now(),|v|Ok(fake(&p,v))).is_err());
 }
+
+#[test]
+fn result_binding_rejects_wrong_peak_watts_cycles_or_ambiguous_gradients() {
+    let p=plan();
+    let data=J::parse(r#"{"schema":"frankensim.cooling-network.result.v1",
+        "objective":{"value_k":301},"transient":{"sampled_peak_objective_k":310},
+        "repeated_cycles":{"status":"fixed-count-complete","cycles_completed":2,
+          "total_accepted_steps":14,"total_solid_solves":7,"sampled_peak_objective_k":310,
+          "sampled_peak_time_s":20,"adjoint":{"method":"discrete-backward-euler-coupled-adjoint",
+            "qoi":"sampled-peak","value_k":310,"time_s":20,"cycles":2,
+            "component_power_sensitivities":{"intervals":[
+              {"interval":0,"rows":[{"component":"chip","applied_power_w":0,"dtemperature_dpower_w_k_per_w":1},
+                {"component":"memory","applied_power_w":0,"dtemperature_dpower_w_k_per_w":0.25}]},
+              {"interval":1,"rows":[]}]}}}}"#).unwrap();
+    assert_eq!(inspect(&p,&[0.0,0.0],data.clone()).unwrap().slopes,vec![Some(1.0),Some(0.25)]);
+    for (key,value) in [("value_k",311.0),("time_s",21.0),("cycles",1.0)] {
+        let mut changed=data.clone();
+        let adjoint=input::member_mut(input::member_mut(&mut changed,"repeated_cycles").unwrap(),"adjoint").unwrap();
+        input::put(adjoint,key,number_value(value).unwrap()).unwrap();
+        assert!(inspect(&p,&[0.0,0.0],changed).is_err());
+    }
+    assert!(inspect(&p,&[1.0,0.0],data.clone()).is_err());
+    let encoded=serialize(&data).unwrap();
+    let ambiguous=J::parse(&encoded.replace("\"component\":\"memory\"","\"component\":\"chip\"")).unwrap();
+    assert!(inspect(&p,&[0.0,0.0],ambiguous).is_err());
+}
+
+#[test]
+fn expired_result_serialization_preserves_the_allocation_but_not_success_status() {
+    let doc=J::parse(r#"{"status":"priority-allocation-complete","selected":[3,0],"reason":null}"#).unwrap();
+    let (code,text)=publish(doc,true,Instant::now()).unwrap();
+    assert_eq!(code,exit::BUDGET);
+    let doc=J::parse(&text).unwrap();
+    assert_eq!(doc.str_field("status"),Some("budget-exhausted"));
+    assert_eq!(doc.get("selected").unwrap().as_array().unwrap().len(),2);
+}

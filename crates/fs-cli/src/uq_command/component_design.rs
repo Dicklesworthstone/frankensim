@@ -57,12 +57,25 @@ pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
             ("cooling_result".into(),result.passing.document),
             ("scope".into(),J::Str("declared-order local coordinate allocation; every selected vector actually passes the all-cycle sampled peak on the fixed numerical model; later loads can change earlier conditional brackets; no global or lexicographic optimality, monotonicity, continuous-time peak, mesh/time error or physical validation certificate; unfinished child work is not included in completed-trajectory counters; budget output retains only the last completed passing allocation; resolved_request is replayable but not a durable optimizer checkpoint".into())),
         ]);
-        Ok((if complete { exit::SUCCESS } else { exit::BUDGET }, serialize(&document)?))
+        publish(document, complete, deadline)
     })();
     match result {
         Ok((exit_code,stdout)) => CommandOutput { exit_code, stdout, stderr: String::new() },
         Err(error) => failure(if error.code == "cooling-network-uq-budget" { exit::BUDGET } else { exit::REFUSED },error,json_mode),
     }
+}
+
+// Formatting a retained field can outlast the last numerical poll. Keep the
+// already accepted allocation, but never turn an expired budget into success.
+fn publish(mut document: J, complete: bool, deadline: Instant) -> Result<(u8,String)> {
+    let mut stdout = serialize(&document)?;
+    if complete && Instant::now() >= deadline {
+        input::put(&mut document,"status",J::Str("budget-exhausted".into()))?;
+        input::put(&mut document,"reason",J::Str("allocation deadline exhausted during result serialization".into()))?;
+        stdout = serialize(&document)?;
+        return Ok((exit::BUDGET,stdout));
+    }
+    Ok((if complete {exit::SUCCESS} else {exit::BUDGET},stdout))
 }
 
 fn failure(exit_code: u8, error: Failure, json_mode: bool) -> CommandOutput {
