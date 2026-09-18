@@ -118,7 +118,11 @@ impl<'flow> TransportNetwork<'flow> {
             poll(cx)?;
             if let Some(value) = temperature { inlets.push(TransportInlet { node, temperature: Temperature::new(*value) }); }
         }
-        Self::new(cx, self.flow, self.air, models, &inlets, self.config)
+        let network = Self::new(cx, self.flow, self.air, models, &inlets, self.config)?;
+        match &self.feedback {
+            Some(feedback) => network.with_recirculation(cx, feedback.links.clone(), feedback.tolerance_k),
+            None => Ok(network),
+        }
     }
 
     /// Find the least nominally passing uniform conductance scale within the

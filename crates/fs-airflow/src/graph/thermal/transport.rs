@@ -4,10 +4,11 @@
 //! Every outgoing branch receives that mixture, then applies the existing
 //! exponential `AirPath` law. A passive nonzero flow strictly descends pressure,
 //! so its directed graph is acyclic even when the undirected loss graph loops.
-//! A deterministic topological pass therefore needs no thermal matrix solve.
+//! Without return links a deterministic topological pass needs no thermal
+//! matrix solve. Optional imposed return links close a bounded supply system.
 //!
 //! Density, specific heat, hydraulics and heat-transfer coefficients are frozen.
-//! This is a nominal dry-air network model, not CFD, a recirculation solver,
+//! This is a nominal dry-air network model, not CFD, solved return hydraulics,
 //! buoyancy feedback, an uncertainty enclosure, or experimental validation.
 //! The node sensible-enthalpy balance follows EnergyPlus Engineering Reference,
 //! "AirflowNetwork Model / Node Temperature Calculations"; no EnergyPlus code
@@ -25,6 +26,8 @@ use crate::conjugate::{AirMarch, AirPath, AirSegment};
 use crate::graph::GraphSolution;
 
 pub mod sensitivity;
+pub mod recirculation;
+use recirculation::{Feedback, RecirculationReport};
 
 /// One explicit thermal model for each hydraulic branch, in graph order.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +103,8 @@ pub struct TransportMarch {
     pub hydraulic_energy_defect_w: f64,
     /// Common reference for sensible enthalpy, K; not a boundary condition.
     pub enthalpy_reference_k: f64,
+    /// Fresh/return mixtures and the independent outer balance, when requested.
+    pub recirculation: Option<RecirculationReport>,
 }
 
 /// Input, transport, thermal-balance and cancellation failures.
@@ -154,6 +159,7 @@ pub struct TransportNetwork<'a> {
     inlet_temperatures: Vec<Option<f64>>,
     reference_k: f64,
     config: TransportConfig,
+    feedback: Option<Feedback>,
 }
 
 impl<'a> TransportNetwork<'a> {
@@ -301,7 +307,7 @@ impl<'a> TransportNetwork<'a> {
         let reference_k = inlet_temperatures.iter().flatten().next().copied().unwrap_or(0.0);
         let network = Self { flow, air, models, offsets, outgoing, downstream, order,
             mass_flows, capacities, external_capacity, capacity_residual, inlet_temperatures,
-            reference_k, config };
+            reference_k, config, feedback: None };
         // Admit the very same channel arithmetic before any caller solid work.
         for branch in 0..network.models.len() {
             poll(cx)?;
@@ -355,10 +361,19 @@ impl<'a> TransportNetwork<'a> {
     }
 
     fn march_inner(&self, cx: &Cx<'_>, walls: Option<&[f64]>) -> Result<TransportMarch, TransportError> {
+        match &self.feedback {
+            Some(feedback) => feedback.march(self, cx, walls),
+            None => self.march_once(cx, walls, &self.inlet_temperatures),
+        }
+    }
+
+    fn march_once(&self, cx: &Cx<'_>, walls: Option<&[f64]>,
+        inlets: &[Option<f64>]) -> Result<TransportMarch, TransportError> {
         poll(cx)?;
+        let reference_k = inlets.iter().flatten().next().copied().unwrap_or(0.0);
         let n = self.order.len();
         let mut mixers = vec![Mixer::default(); n];
-        for (node, &temperature) in self.inlet_temperatures.iter().enumerate() {
+        for (node, &temperature) in inlets.iter().enumerate() {
             poll(cx)?;
             if let Some(temperature) = temperature {
                 mixers[node].add(self.external_capacity[node], temperature)?;
@@ -369,7 +384,7 @@ impl<'a> TransportNetwork<'a> {
             branches: vec![BranchTransport { inlet_temperature_k: None, outlet_temperature_k: None, march: None }; self.models.len()],
             reference_temperatures_k: vec![0.0; self.offsets.last().copied().unwrap_or(0)],
             wall_heat_rate_w: 0.0, external_heat_gain_w: 0.0, heat_imbalance_w: 0.0,
-            hydraulic_energy_defect_w: 0.0, enthalpy_reference_k: self.reference_k,
+            hydraulic_energy_defect_w: 0.0, enthalpy_reference_k: reference_k, recirculation: None,
         };
         let mut gross_wall = 0.0;
         let mut gross_external = 0.0;
@@ -383,12 +398,12 @@ impl<'a> TransportNetwork<'a> {
             };
             result.node_temperatures_k[node] = Some(temperature);
             let external = self.external_capacity[node];
-            let entering_temperature = self.inlet_temperatures[node].unwrap_or(temperature);
-            let external_heat = finite(-external * (if external > 0.0 { entering_temperature } else { temperature } - self.reference_k), "external sensible enthalpy")?;
+            let entering_temperature = inlets[node].unwrap_or(temperature);
+            let external_heat = finite(-external * (if external > 0.0 { entering_temperature } else { temperature } - reference_k), "external sensible enthalpy")?;
             result.external_heat_gain_w = finite(result.external_heat_gain_w + external_heat, "external heat gain")?;
             gross_external = finite(gross_external + external_heat.abs(), "gross external enthalpy")?;
             result.hydraulic_energy_defect_w = finite(result.hydraulic_energy_defect_w
-                + self.capacity_residual[node] * (temperature - self.reference_k), "hydraulic energy defect")?;
+                + self.capacity_residual[node] * (temperature - reference_k), "hydraulic energy defect")?;
             for &branch in &self.outgoing[node] {
                 poll(cx)?;
                 let mut outlet = temperature;

@@ -3,7 +3,9 @@
 //! The controls are wall temperatures, external supply temperatures, and
 //! `ln(U)` for each segment conductance `U = h A`. One forward sweep applies
 //! the Jacobian; one reverse sweep applies its transpose, independent of the
-//! number of controls. Neither sweep reruns the primal march or a solid solve.
+//! number of controls. Return links add a bounded reduced supply solve and
+//! its transpose, including implicit intake feedback. Neither derivative
+//! reruns a primal march or a solid solve. Inlet controls then denote FRESH air.
 //!
 //! With `x = U/C`, `a = exp(-x)`, `e = 1-a`, `g = e/x`, and `D = Tw-Tin`,
 //! the segment derivatives with respect to `(Tin, Tw, ln(U))` are
@@ -23,6 +25,7 @@ use fs_math::det;
 use super::{BranchThermalModel, TransportError, TransportMarch, TransportNetwork, finite, poll, positive};
 
 pub mod design;
+mod feedback;
 
 /// An input perturbation. Temperature entries are differences, not absolute K.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,8 +104,8 @@ struct MixingRow {
 }
 
 /// A linearization bound to an immutable network and an actually admitted march.
-/// Storage and every tangent/adjoint sweep are linear in nodes, edges and
-/// segments. Publicly assembled or mismatched `TransportMarch` values cannot
+/// Once-through storage and sweeps are linear in nodes, edges and segments.
+/// Return links additionally solve at most 64 coupled supply unknowns. Publicly assembled or mismatched `TransportMarch` values cannot
 /// be substituted for the private primal used to construct these derivatives.
 #[derive(Debug)]
 pub struct TransportLinearization<'network, 'flow> {
@@ -186,8 +189,14 @@ impl TransportLinearization<'_, '_> {
             wall_heat_rate: 0.0, external_heat_gain: 0.0, heat_imbalance: 0.0, hydraulic_energy_defect: 0.0 }
     }
 
-    /// Apply the full transport Jacobian in one topological pass.
+    /// Apply the full transport Jacobian, including any imposed return feedback.
+    /// Supply directions denote fresh makeup temperatures when returns are bound.
     pub fn apply(&self, cx: &Cx<'_>, direction: &TransportDirection) -> Result<TransportDifferential, TransportError> {
+        if self.network.feedback.is_some() { feedback::apply(self, cx, direction) }
+        else { self.apply_open(cx, direction) }
+    }
+
+    fn apply_open(&self, cx: &Cx<'_>, direction: &TransportDirection) -> Result<TransportDifferential, TransportError> {
         self.check_direction(cx, direction)?;
         let mut result = TransportDifferential {
             node_temperatures_k: vec![None; self.mixers.len()], branch_outlets_k: vec![None; self.upstream.len()],
@@ -231,9 +240,14 @@ impl TransportLinearization<'_, '_> {
         Ok(result)
     }
 
-    /// Differentiate one weighted output with respect to ALL controls in one
-    /// reverse pass. No dense Jacobian or per-control primal runs are needed.
+    /// Differentiate one weighted output with respect to ALL controls, including
+    /// imposed return feedback. No per-control primal runs are needed.
     pub fn pullback(&self, cx: &Cx<'_>, objective: &TransportObjective) -> Result<TransportGradient, TransportError> {
+        if self.network.feedback.is_some() { feedback::pullback(self, cx, objective) }
+        else { self.pullback_open(cx, objective) }
+    }
+
+    fn pullback_open(&self, cx: &Cx<'_>, objective: &TransportObjective) -> Result<TransportGradient, TransportError> {
         self.check_objective(cx, objective)?;
         let mut gradient = TransportGradient { walls: vec![0.0; self.segments.len()],
             inlets: vec![0.0; self.mixers.len()], log_conductances: vec![0.0; self.segments.len()] };
