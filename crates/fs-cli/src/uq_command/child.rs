@@ -30,12 +30,16 @@ pub(super) fn executable_path() -> std::io::Result<PathBuf> {
 struct RunningChild(Child);
 impl Drop for RunningChild {
     fn drop(&mut self) {
-        // Best-effort cleanup also covers early pipe/write/read errors. A
-        // reaped child simply returns an error from kill; never mask the
-        // original numerical or I/O diagnosis with a cleanup error.
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+fn cooling_command() -> std::result::Result<Command, EvaluationError> {
+    let executable = executable_path().map_err(|error| EvaluationError::Child(format!("cannot locate frankensim executable: {error}")))?;
+    let mut command = Command::new(executable);
+    command.arg("--json").arg("cooling-network").arg("/dev/stdin");
+    Ok(command)
 }
 
 pub(super) fn evaluate_sample(request: &str, deadline: Instant) -> std::result::Result<f64, EvaluationError> {
@@ -43,13 +47,22 @@ pub(super) fn evaluate_sample(request: &str, deadline: Instant) -> std::result::
 }
 
 pub(super) fn evaluate_sample_for(request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
-    let executable = executable_path().map_err(|error| EvaluationError::Child(format!("cannot locate frankensim executable: {error}")))?;
-    let mut command = Command::new(executable);
-    command.arg("--json").arg("cooling-network").arg("/dev/stdin");
-    evaluate_process(command, request, deadline, qoi)
+    evaluate_process(cooling_command()?, request, deadline, qoi)
 }
 
-fn evaluate_process(mut command: Command, request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
+/// Complete same-binary output for consumers that need controls or a retained
+/// selected trajectory. This is the SAME watchdog and output cap as scalar UQ;
+/// each consumer must validate its own expected result schema and observable.
+pub(super) fn evaluate_document(request: &str, deadline: Instant) -> std::result::Result<J, EvaluationError> {
+    evaluate_document_process(cooling_command()?, request, deadline)
+}
+
+fn evaluate_process(command: Command, request: &str, deadline: Instant, qoi: Qoi) -> std::result::Result<f64, EvaluationError> {
+    let document = evaluate_document_process(command, request, deadline)?;
+    qoi.extract(&document).map_err(|error| EvaluationError::Child(error.to_string()))
+}
+
+fn evaluate_document_process(mut command: Command, request: &str, deadline: Instant) -> std::result::Result<J, EvaluationError> {
     if Instant::now() >= deadline { return Err(EvaluationError::Budget); }
     let mut child = RunningChild(command
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -59,8 +72,7 @@ fn evaluate_process(mut command: Command, request: &str, deadline: Instant, qoi:
     let stderr = child.0.stderr.take().ok_or_else(|| EvaluationError::Child("cooling child stderr unavailable".into()))?;
     let stdout_reader = std::thread::spawn(move || drain(stdout, MAX_CHILD_OUTPUT_BYTES));
     let stderr_reader = std::thread::spawn(move || drain(stderr, MAX_CHILD_OUTPUT_BYTES));
-    // A request can be much larger than a pipe. Never write it on the watchdog
-    // thread: a blocked write would make the declared timeout unenforceable.
+    // Never block the watchdog on a request larger than a pipe.
     let request = request.as_bytes().to_vec();
     let input_writer = std::thread::spawn(move || stdin.write_all(&request));
     let status = loop {
@@ -73,8 +85,8 @@ fn evaluate_process(mut command: Command, request: &str, deadline: Instant, qoi:
             Err(error) => break Err(EvaluationError::Child(format!("cannot poll cooling child: {error}"))),
         }
     };
-    // Termination closes all pipes in this same-binary producer; join every
-    // I/O thread only AFTER killing/reaping on timeout or polling failure.
+    // Kill/reap BEFORE joining: termination closes this same-binary producer's
+    // pipes on timeout or failure. No I/O worker survives the evaluation.
     drop(child);
     let input = input_writer.join();
     let stdout = stdout_reader.join();
@@ -89,7 +101,8 @@ fn evaluate_process(mut command: Command, request: &str, deadline: Instant, qoi:
         .map_err(|error| EvaluationError::Child(format!("cannot send cooling sample: {error}")))?;
     let text = std::str::from_utf8(&stdout).map_err(|_| EvaluationError::Child("cooling sample output is not UTF-8".into()))?;
     let document = J::parse(text).map_err(|error| EvaluationError::Child(format!("cooling sample emitted invalid JSON: {error}")))?;
-    qoi.extract(&document).map_err(|error| EvaluationError::Child(error.to_string()))
+    if Instant::now() >= deadline { return Err(EvaluationError::Budget); }
+    Ok(document)
 }
 
 fn drain(mut reader: impl Read, cap: usize) -> std::result::Result<Vec<u8>, String> {
@@ -115,7 +128,6 @@ mod tests {
     #[test]
     fn a_child_that_never_reads_a_large_request_cannot_block_the_watchdog() {
         let mut command = Command::new("/bin/sh");
-        // exec avoids a grandchild inheriting the pipes after the child dies.
         command.arg("-c").arg("exec sleep 2");
         let request = "x".repeat(2 * 1024 * 1024);
         let result = evaluate_process(command, &request, Instant::now() + Duration::from_millis(30), Qoi::Steady);
@@ -131,5 +143,14 @@ mod tests {
             Err(EvaluationError::Child(message)) => assert!(message.contains("solver-refusal-sentinel")),
             other => panic!("expected model refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn complete_document_retains_fields_instead_of_replacing_them_by_an_objective() {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("printf '%s' '{\"objective\":{\"value_k\":301},\"retained\":[1,2,3]}'");
+        let document = evaluate_document_process(command, "", Instant::now() + Duration::from_secs(2)).unwrap();
+        assert_eq!(document.get("retained").unwrap().as_array().unwrap().len(), 3);
+        assert!(Qoi::Steady.extract(&document).is_err(), "consumers must still reject an absent schema");
     }
 }
