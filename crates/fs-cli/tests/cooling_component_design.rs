@@ -168,3 +168,6 @@ fn enclosure_reflections_remain_in_allocation_and_selected_trajectory_adjoints()
     assert_eq!(result.path(&["resolved_request","radiation"]),base.get("radiation"));
     assert!(result.path(&["cooling_result","repeated_cycles","adjoint","radiation"]).unwrap().as_object().is_some());
 }
+
+#[path = "cooling_component_design/multi_limits.rs"]
+mod multi_limits;

@@ -62,13 +62,15 @@ impl<F: FnMut(&[f64], &mut Work) -> Result<Evaluation>> Runner<'_, F> {
         }
         let margin = result.margin(self.plan)?;
         if proposal == "newton" { self.newton_trials += 1; }
+        // Keep trial history O(controls), not O(observed vertices * criteria).
+        // Full selectors and per-criterion derivatives belong to the selected
+        // result only; repeating them here can multiply a large input by 4096.
         self.history.push(J::Object(vec![
             ("power_w".into(), number_array(values)?),
             ("sampled_peak_k".into(), number_value(result.peak)?),
             ("sampled_peak_time_s".into(), number_value(result.peak_time)?),
             ("maximum_temperature_excess_k".into(), number_value(margin)?),
             ("active_constraint".into(), J::Str(result.active_constraint().into())),
-            ("thermal_constraints".into(), result.constraint_report()?),
             ("passing".into(), J::Bool(margin <= 0.0)),
             ("proposal".into(), J::Str(proposal.into())),
             ("accepted_steps".into(), usize_value(result.steps)),
@@ -164,7 +166,7 @@ pub(super) fn allocate_with_work(plan: &Plan, deadline: Instant, criteria: usize
             }
         }
         let (failed_power,failed_peak,failed_excess,failed_constraint,width) = match &failed {
-            Some((power,peak,excess,name)) => (number_value(*power)?,number_value(*peak)?,number_value(*excess)?,J::Str(name.clone()),power-values[index]),
+            Some((power,peak,excess,name)) => (number_value(*power)?,number_value(*peak)?,number_value(*excess)?,J::Str(name.clone()),*power-values[index]),
             None => (J::Null,J::Null,J::Null,J::Null,0.0),
         };
         decisions.push(J::Object(vec![
