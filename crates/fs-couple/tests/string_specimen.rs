@@ -4928,6 +4928,125 @@ fn g1_material_bending_viscosity_follows_geometry_and_retains_sources() {
     );
 }
 
+/// G1/G3: one specimen feeds the same modal losses under pluck and bow.
+#[test]
+fn g1_material_bow_card_uses_shared_losses_and_material_geometry() {
+    use fs_couple::bowed_string::{
+        BowGesture, BowedRunConfig, BowedStringCard, FrictionIsland, Termination, run_bowed,
+    };
+    with_string_cx(|cx, gate| {
+        let mut cards = Vec::new();
+        let mut bridge_histories = Vec::new();
+        for eta in [0.0, 3.0e7] {
+            let material = viscous_material(
+                eta,
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                (1.0, 20_000.0),
+            );
+            let mut description = loss_template();
+            description.n_modes = 3;
+            let specimen = with_uniform_circular_material_state(description, 0.0005, &material)
+                .unwrap()
+                .with_kelvin_voigt_bending_loss()
+                .unwrap();
+            let card = BowedStringCard::from_material_specimen(
+                cx,
+                &specimen,
+                incremental_ambient(),
+                48_000,
+            )
+            .unwrap();
+            let runtime = LinearMaterialStringRuntime::try_new(
+                cx,
+                specimen.clone(),
+                None,
+                incremental_ambient(),
+                1.0,
+                48_000,
+            )
+            .unwrap();
+            close(
+                card.linear_density_kg_m,
+                1000.0 * core::f64::consts::PI * 0.0005_f64.powi(2),
+            );
+            close(
+                card.bending_stiffness_n_m2,
+                2.0e9 * specimen.second_moment_m4(),
+            );
+            for (k, mode) in runtime.modes().iter().enumerate() {
+                assert_eq!(card.zetas[k], mode.damping_ratio);
+                assert_eq!(card.mode_omega_rad_s(k + 1), mode.angular_frequency_rad_s);
+            }
+            let mut thin_air = incremental_ambient();
+            thin_air.pressure_pa *= 0.5;
+            let thin =
+                BowedStringCard::from_material_specimen(cx, &specimen, thin_air, 48_000).unwrap();
+            assert!(thin.zetas.iter().zip(&card.zetas).all(|(a, b)| a < b));
+            assert!(
+                BowedStringCard::from_material_specimen(cx, &specimen, incremental_ambient(), 100)
+                    .is_err()
+            );
+            let run = run_bowed(&BowedRunConfig {
+                card: card.clone(),
+                island: FrictionIsland::ViscousOnly {
+                    viscous_n_s_per_m: 0.0001,
+                },
+                gesture: BowGesture::admit(0.2, 1.0, 0.2).unwrap(),
+                steps: 64,
+                subsamples: 4,
+                termination: Termination::Rigid,
+                listener_m: 1.0,
+            })
+            .unwrap();
+            assert!(run.bridge_force_n.iter().all(|f| f.is_finite()));
+            bridge_histories.push(run.bridge_force_n);
+            cards.push(card);
+        }
+        assert_ne!(bridge_histories[0], bridge_histories[1]);
+        for k in 1..=3 {
+            let card = &cards[1];
+            let wave = k as f64 * core::f64::consts::PI / card.length_m;
+            let expected = card.viscous_bending_n_m2_s * wave.powi(4)
+                / (2.0 * card.linear_density_kg_m * card.mode_omega_rad_s(k));
+            close(cards[1].zetas[k - 1] - cards[0].zetas[k - 1], expected);
+        }
+        let material = viscous_material(
+            3.0e7,
+            QuantitySpec::dimensional(DynViscosity::DIMS),
+            (1.0, 20_000.0),
+        );
+        let bare =
+            with_uniform_circular_material_state(loss_template(), 0.0005, &material).unwrap();
+        assert!(
+            BowedStringCard::from_material_specimen(cx, &bare, incremental_ambient(), 48_000)
+                .is_err()
+        );
+        for moving in [false, true] {
+            let mut description = loss_template();
+            description.moving_end = moving;
+            description.polarization_detune = if moving { 0.0 } else { 0.01 };
+            let specimen = with_uniform_circular_material_state(description, 0.0005, &material)
+                .unwrap()
+                .with_kelvin_voigt_bending_loss()
+                .unwrap();
+            assert!(
+                BowedStringCard::from_material_specimen(
+                    cx,
+                    &specimen,
+                    incremental_ambient(),
+                    48_000
+                )
+                .is_err()
+            );
+        }
+        gate.request();
+        assert!(matches!(
+            BowedStringCard::from_material_specimen(cx, &bare, incremental_ambient(), 48_000),
+            Err(AcousticRealizeError::Cancelled)
+        ));
+    });
+}
+
 #[test]
 fn g3_material_viscosity_changes_pressure_decay_without_changing_elastic_modes() {
     let pi = core::f64::consts::PI;

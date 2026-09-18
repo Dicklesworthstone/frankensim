@@ -7,6 +7,7 @@
 //! `fs-vfit`, not a named instrument radiator.
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, advance_exact_zoh};
 use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::gas::GasState;
@@ -79,13 +80,33 @@ impl CompactBody {
         })
     }
 
-    /// Advance under a generalized force and return acceleration.
+    /// Advance under a held generalized force and return endpoint acceleration.
+    /// Uses the shared exact-ZOH oscillator transition. When present, the
+    /// radiation filter supplies a reaction held over this step; the coupled
+    /// filter/structure evolution is still a sampled approximation.
     ///
     /// # Errors
+    /// Refuses invalid force, duration, mass, frequency or damping and
+    /// non-finite motion. A filter already advanced before a motion refusal
+    /// is not rolled back; callers must discard a refused coupled run.
     /// Propagates the radiation-filter step refusal instead of silently
     /// demoting the reaction force to zero (which would mask model
     /// instability as benign decay).
     pub fn drive(&mut self, force_n: f64, dt: f64) -> Result<f64, AcousticRealizeError> {
+        if !(force_n.is_finite()
+            && dt.is_finite()
+            && dt > 0.0
+            && self.mass_kg.is_finite()
+            && self.mass_kg > 0.0
+            && self.omega.is_finite()
+            && self.omega > 0.0
+            && self.zeta.is_finite()
+            && self.zeta >= 0.0)
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "compact radiator step requires finite force, positive duration/mass/frequency and nonnegative damping",
+            });
+        }
         let f_rad = if let Some((filter, state)) = self.rad.as_mut() {
             // p = Z_face * mean surface velocity, Q = area_modal * q_dot.
             // Generalized reaction is -area_modal * p, preserving work and
@@ -97,11 +118,32 @@ impl CompactBody {
         } else {
             0.0
         };
+        let root_mass = self.mass_kg.sqrt();
+        let next = advance_exact_zoh(
+            ModalAcousticMode {
+                angular_frequency_rad_s: self.omega,
+                damping_ratio: self.zeta,
+                pressure_per_modal_velocity: C64::new(0.0, 0.0),
+            },
+            ModalAcousticState {
+                displacement_m_sqrt_kg: self.y * root_mass,
+                velocity_m_sqrt_kg_per_s: self.v * root_mass,
+            },
+            (force_n + f_rad) / root_mass,
+            dt,
+        );
+        let y = next.displacement_m_sqrt_kg / root_mass;
+        let v = next.velocity_m_sqrt_kg_per_s / root_mass;
         let acc = (force_n + f_rad) / self.mass_kg
-            - 2.0 * self.zeta * self.omega * self.v
-            - self.omega * self.omega * self.y;
-        self.v += dt * acc;
-        self.y += dt * self.v;
+            - 2.0 * self.zeta * self.omega * v
+            - self.omega * self.omega * y;
+        if !(y.is_finite() && v.is_finite() && acc.is_finite()) {
+            return Err(AcousticRealizeError::Nonlinear(
+                "compact radiator transition is not finite".to_string(),
+            ));
+        }
+        self.v = v;
+        self.y = y;
         Ok(acc)
     }
 
@@ -1857,6 +1899,81 @@ fn map_plate(err: PlateError) -> AcousticRealizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compact_zoh_fixture(zeta: f64) -> CompactBody {
+        CompactBody::from_radiator(RadiatingPlate {
+            area_m2: 0.03,
+            mass_kg: 0.25,
+            frequency_hz: 1000.0 / core::f64::consts::TAU,
+            damping_ratio: zeta,
+        })
+        .unwrap()
+    }
+
+    /// G1: independent constant-force solution, including endpoint pressure.
+    /// The step exceeds the undamped Euler stability limit omega*dt=2.
+    #[test]
+    fn compact_zoh_matches_undamped_oscillator_and_endpoint_pressure() {
+        let mut body = compact_zoh_fixture(0.0);
+        let dt = 0.003;
+        let force = 2.0;
+        let acceleration = force / body.mass_kg;
+        let angle = body.omega * dt;
+        let expected_y = acceleration / body.omega.powi(2) * (1.0 - angle.cos());
+        let expected_v = acceleration / body.omega * angle.sin();
+        let expected_acc = acceleration * angle.cos();
+        let pressure = body.drive_and_radiate(force, dt, 1.2, 2.0).unwrap();
+        assert!((body.y - expected_y).abs() < 1.0e-15);
+        assert!((body.v - expected_v).abs() < 1.0e-12);
+        let expected_pressure = 1.2 * 0.03 * expected_acc / (4.0 * core::f64::consts::PI);
+        assert!((pressure - expected_pressure).abs() < 1.0e-12);
+        // Prior semi-implicit Euler gives y = a*dt^2, not this solution.
+        assert!((acceleration * dt * dt - expected_y).abs() > 1.0e-5);
+    }
+
+    /// G1/G3: damped analytical step and held-force subdivision invariance.
+    /// Subdivision equivalence applies without a sampled radiation filter.
+    #[test]
+    fn compact_zoh_damped_solution_and_subdivision_agree() {
+        let dt = 0.003;
+        for zeta in [0.0, 0.2, 1.0, 2.0] {
+            let mut whole = compact_zoh_fixture(zeta);
+            let mut split = whole.clone();
+            let acc = whole.drive(2.0, dt).unwrap();
+            let mut split_acc = 0.0;
+            for _ in 0..16 {
+                split_acc = split.drive(2.0, dt / 16.0).unwrap();
+            }
+            assert!((whole.y - split.y).abs() < 1.0e-14, "zeta={zeta}");
+            assert!((whole.v - split.v).abs() < 1.0e-11, "zeta={zeta}");
+            assert!((acc - split_acc).abs() < 1.0e-8, "zeta={zeta}");
+            if zeta == 0.2 {
+                let wd = whole.omega * (1.0 - zeta * zeta).sqrt();
+                let decay = (-zeta * whole.omega * dt).exp();
+                let expected_y = 2.0 / (whole.mass_kg * whole.omega.powi(2))
+                    * (1.0 - decay * ((wd * dt).cos() + zeta * whole.omega / wd * (wd * dt).sin()));
+                let expected_v = 2.0 / (whole.mass_kg * wd) * decay * (wd * dt).sin();
+                assert!((whole.y - expected_y).abs() < 1.0e-14);
+                assert!((whole.v - expected_v).abs() < 1.0e-11);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_zoh_refuses_invalid_step_before_changing_motion() {
+        let mut body = compact_zoh_fixture(0.1);
+        body.drive(2.0, 0.001).unwrap();
+        let before = (body.y.to_bits(), body.v.to_bits());
+        for (force, dt) in [
+            (f64::NAN, 0.001),
+            (1.0, 0.0),
+            (1.0, -0.1),
+            (1.0, f64::INFINITY),
+        ] {
+            assert!(body.drive(force, dt).is_err());
+            assert_eq!((body.y.to_bits(), body.v.to_bits()), before);
+        }
+    }
 
     fn projection_fixture() -> (PlateMesh, fs_plate::PlateModel, PlateProjection) {
         let mesh = PlateMesh::rectangle(2.0, 1.0, 2, 1);

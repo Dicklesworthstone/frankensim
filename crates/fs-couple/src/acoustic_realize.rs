@@ -926,7 +926,7 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
     }
 }
 
-fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
+pub(crate) fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
     if !(ambient.relative_humidity >= 0.0 && ambient.relative_humidity <= 1.0) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "relative humidity must be an explicit fraction in [0, 1]",
@@ -1073,7 +1073,7 @@ fn assemble_kc(
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
-fn mode_zeta(
+pub(crate) fn mode_zeta(
     string: &PrestressedString,
     omega: f64,
     wave_number: f64,
@@ -3482,7 +3482,9 @@ fn next_string_epoch(epoch: u64) -> Result<u64, AcousticRealizeError> {
         })
 }
 
-fn validate_incremental_string(string: &PrestressedString) -> Result<(), AcousticRealizeError> {
+pub(crate) fn validate_incremental_string(
+    string: &PrestressedString,
+) -> Result<(), AcousticRealizeError> {
     validate_string(string, None, None)?;
     if string.moving_end
         || string.polarization_detune != 0.0

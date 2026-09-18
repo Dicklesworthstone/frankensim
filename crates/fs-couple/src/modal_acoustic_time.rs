@@ -993,7 +993,7 @@ fn advance_undamped_zoh(
     }
 }
 
-fn advance_exact_zoh(
+pub(crate) fn advance_exact_zoh(
     mode: ModalAcousticMode,
     state: ModalAcousticState,
     force: f64,

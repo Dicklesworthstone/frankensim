@@ -31,6 +31,8 @@ fn card() -> BowedStringCard {
         length_m: 0.65,
         tension_n: 60.0,
         linear_density_kg_m: 6.0e-4,
+        bending_stiffness_n_m2: 0.0,
+        viscous_bending_n_m2_s: 0.0,
         mode_count: 16,
         zetas: (0..16).map(|k| 1.0e-3 + 1.5e-4 * f64::from(k)).collect(),
         sample_rate_hz: 48_000,

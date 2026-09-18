@@ -201,9 +201,10 @@ transactional state/pressure budgets accompany every sample.
 using free modal motion plus unit-port-force mobility, with conjugate force
 and velocity projections. It refuses invalid/nonpositive mobility and
 nonfinite inputs/results without changing state. The ordinary step still
-admits state and energy budgets. Bowed hold/capture uses this force under its
-existing static-friction cap; it no longer uses an Euler acceleration estimate
-with an exact-ZOH transition. G1 compares an independent oscillator solution
+admits state and energy budgets. The bowed consumer of this query was withdrawn:
+endpoint matching alone failed its playable-motion gate. Bowed hold/capture
+retains its approximate acceleration/velocity correction under the static cap.
+G1 compares an independent oscillator solution
 and demonstrates the old pinning error; G3 checks mixed-sign multimode ports
 in all damping regimes and full/half/subsample durations. This enforces only
 endpoint velocity: continuous no-slip motion, exact within-step event times,
@@ -833,6 +834,34 @@ clarinet is one filling of those objects.
   Stribeck formula and the work of equal-and-opposite contact forces.
   This wiring neither admits sourced interface data nor replaces the bowed
   fixture's event-based stiction algorithm or authored modal losses.
+  `BowedStringCard::from_material_specimen` lowers a resolved circular specimen
+  using the shared pinned-beam dispersion, Kelvin–Voigt loss and cylinder-air
+  drag owners. It requires a matching loss/material identity and frequency
+  band, rejects memory, moving supports and polarization splitting, and applies
+  runtime bandwidth admission. The caller retains the source receipts; this
+  fixed-state, small-amplitude card grants no new material authority.
+  Elastic and viscous support shear are evaluated at the bridge, `x = 0`:
+  `T y'(0) - EI y'''(0) - eta I y'''_t(0)`. Explicit cards must include the
+  viscous bending contribution in their modal damping ratios. Bow velocity
+  and bridge-force histories observe the same completed sample endpoint.
+  G1 tests compare independent held-load motion, energy and support shear;
+  G3 checks shared pluck/bow losses and sensitivity to material viscosity and
+  ambient pressure. This does not evolve material state, route damping heat,
+  model nonlinear stretch, or establish bow-contact convergence/passivity.
+  `FrictionIsland::InterfaceStribeck` consumes an ordered dry-interface card
+  through `fs-tribo`, retaining its identity, history and caller authority.
+  The complete sliding law, including velocity strengthening, drives force;
+  other friction families refuse. Fixed temperature, load/nominal-area pressure
+  and actual slip must remain inside the card domain at admission and both
+  endpoints of each substep, including sticking. These sampled checks do not
+  bound interior extrema. G1/G3 compare signed, load-dependent motion to an
+  independent oscillator and check runtime domain departure. This path supplies
+  neither measured-data admission nor heating, wear or evolving contact area.
+  Bowed plate outputs report signed volume velocity in m³/s, not point velocity.
+  Plate observers admit positive finite listener distance before stepping and
+  refuse non-finite volume flow or pressure. G0/G3 checks cover malformed
+  distances and inverse-distance pressure scaling with identical motion.
+  This compact observer adds no propagation delay or general near-field claim.
 - Reed path: quasistatic or massive Bernoulli valve. Reeds with explicit
   positive stiffness derive their effective pressure area from the
   declared closing relation `A = k H / Pc`. Characteristic-line motion and
@@ -1150,6 +1179,14 @@ clarinet is one filling of those objects.
   produces `FarFieldTable` as a **dev-dependency** only (the
   production cycle `couple → bem → solver → feec → couple` is
   refused).
+  `CompactBody::drive` reuses the shared exact-ZOH modal transition under
+  held force, converting through mass-normalized coordinates. Acceleration,
+  volume velocity and pressure describe the completed endpoint. G1/G3 tests
+  compare analytical damped/undamped motion and held-force subdivision,
+  including a step beyond the former Euler stability limit. Radiation-filter
+  reaction remains sampled and held, not an exact continuous coupled solution.
+  If motion refuses after the filter advances, the caller must discard the run;
+  the filter memory is not rolled back.
   The finished pressure history is passed through ISO 9613-1
   absorption (`air_path`) with the assembly's explicit humidity;
   Stokes–Kirchhoff is only the fallback outside the ISO window.

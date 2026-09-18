@@ -6,14 +6,15 @@
 //! oscillator (the program NEVER list forbids that neighbor explicitly).
 //!
 //! Physics summary:
-//! - String: mass-normalized retained modes `omega_k = k pi c / L`,
-//!   `c = sqrt(T/mu)`, unit-mass shapes `phi_k(x) = sin(k pi x / L) /
-//!   sqrt(mu L / 2)`, stepped by the exact-ZOH [`ModalAcousticTimeModel`].
+//! - String: mass-normalized pinned Euler–Bernoulli modes with
+//!   `omega_k² = (T kappa² + EI kappa⁴)/mu`, `kappa = k pi/L`.
+//!   Unit-mass shapes `phi_k(x) = sin(k pi x / L) / sqrt(mu L / 2)`
+//!   are stepped by the exact-ZOH [`ModalAcousticTimeModel`].
 //! - Bow: constant-velocity driver with EVENT-BASED COULOMB STICTION.
-//!   While stuck the contact is pinned to `v_str = v_bow` by exactly the
-//!   held force that reaches `v_str = v_bow` at the exact-ZOH endpoint,
-//!   breaking away when that force exceeds
-//!   `mu_static * F_n`; while slipping the traction follows the kinetic
+//!   While stuck, a first-order acceleration/velocity correction approximates
+//!   `v_str = v_bow`, breaking away when that force exceeds `mu_static * F_n`.
+//!   The actual modal step is exact ZOH, so this is not an exact no-slip
+//!   constraint. While slipping the traction follows the regularized kinetic
 //!   Stribeck curve `mu_k + (mu_s - mu_k) exp(-(v/v0)^2)`. Capture fires
 //!   when the relative velocity changes sign between sub-steps or is
 //!   already inside `stiction_m_s`: a regularized ramp alone can never
@@ -108,6 +109,13 @@ pub struct BowedStringCard {
     pub tension_n: f64,
     /// Linear mass density [kg/m].
     pub linear_density_kg_m: f64,
+    /// Flexural stiffness `E I` [N m²]. Zero is the flexible-string limit.
+    /// Constant small-strain bending at the declared material state; this
+    /// does not supply bending loss or nonlinear tension changes.
+    pub bending_stiffness_n_m2: f64,
+    /// Viscous bending stiffness `eta I` [N m² s], used in support shear.
+    /// `zetas` must already include this law's modal damping contribution.
+    pub viscous_bending_n_m2_s: f64,
     /// Retained transverse modes (all below the Nyquist guard).
     pub mode_count: usize,
     /// Per-mode viscous damping ratios, length `mode_count`.
@@ -117,7 +125,83 @@ pub struct BowedStringCard {
 }
 
 impl BowedStringCard {
-    /// Wave speed `sqrt(T/mu)` [m/s].
+    /// Lower a resolved specimen to a fixed-state, small-amplitude bow model.
+    /// Reuses the shared string admission, Kelvin–Voigt loss and cylinder-air
+    /// drag owners. Axial stretching is linearized out; moving supports,
+    /// polarization splitting and relaxation memory are refused. The caller
+    /// retains the specimen's source receipts; this card grants no authority.
+    /// Friction is still an independently declared interface law.
+    pub fn from_material_specimen(
+        cx: &fs_exec::Cx<'_>,
+        specimen: &crate::string_specimen::ResolvedStringSpecimen,
+        ambient: fs_scenario::AmbientGas,
+        sample_rate_hz: u32,
+    ) -> Result<Self, crate::acoustic_realize::AcousticRealizeError> {
+        use crate::acoustic_realize::{
+            AcousticRealizeError, gas_state, mode_zeta, validate_incremental_string,
+        };
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let string = specimen.string();
+        validate_incremental_string(&string)?;
+        let law = string
+            .kelvin_voigt_bending
+            .ok_or(AcousticRealizeError::InvalidDescription {
+                what: "material bow card requires a resolved Kelvin-Voigt bending law",
+            })?;
+        if law.material_state_identity != Some(specimen.material().identity()) {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "bow bending loss must belong to the resolved material state",
+            });
+        }
+        let gas = gas_state(ambient)?;
+        let mut card = Self {
+            length_m: string.length_m,
+            tension_n: string.tension_n,
+            linear_density_kg_m: string.lin_density_kg_m,
+            bending_stiffness_n_m2: string.bending_stiffness_n_m2,
+            viscous_bending_n_m2_s: law.viscous_stiffness_n_m2_s,
+            mode_count: string.n_modes,
+            zetas: Vec::with_capacity(string.n_modes),
+            sample_rate_hz,
+        };
+        let mut modes = Vec::with_capacity(string.n_modes);
+        for k in 1..=string.n_modes {
+            cx.checkpoint()
+                .map_err(|_| AcousticRealizeError::Cancelled)?;
+            let omega = card.mode_omega_rad_s(k);
+            let zeta = mode_zeta(
+                &string,
+                omega,
+                k as f64 * core::f64::consts::PI / string.length_m,
+                &gas,
+            )?;
+            card.zetas.push(zeta);
+            modes.push(ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: zeta,
+                pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+            });
+        }
+        // Apply the same bandwidth and scalar admission as the actual runtime.
+        ModalAcousticTimeModel::try_new(
+            sample_rate_hz,
+            modes,
+            ModalAcousticTimeBudget::audible_reference(),
+        )
+        .map_err(|_| AcousticRealizeError::InvalidDescription {
+            what: "material bow modes violate time-domain admission",
+        })?;
+        card.validate()
+            .map_err(|_| AcousticRealizeError::InvalidDescription {
+                what: "material bow card is not physically representable",
+            })?;
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        Ok(card)
+    }
+
+    /// Flexible-limit wave speed `sqrt(T/mu)` [m/s].
     #[must_use]
     pub fn wave_speed_m_s(&self) -> f64 {
         (self.tension_n / self.linear_density_kg_m).sqrt()
@@ -126,7 +210,20 @@ impl BowedStringCard {
     /// Transverse fundamental [Hz].
     #[must_use]
     pub fn fundamental_hz(&self) -> f64 {
-        self.wave_speed_m_s() / (2.0 * self.length_m)
+        self.mode_omega_rad_s(1) / core::f64::consts::TAU
+    }
+
+    /// Angular frequency of a pinned mode (1-based), including bending.
+    /// Uses the shared prestressed-beam dispersion owner.
+    #[must_use]
+    pub fn mode_omega_rad_s(&self, mode: usize) -> f64 {
+        fs_nlmodal::prestressed_beam_omega(
+            self.length_m,
+            self.tension_n,
+            self.linear_density_kg_m,
+            self.bending_stiffness_n_m2,
+            mode,
+        )
     }
 
     /// Validate the card before admission.
@@ -144,15 +241,35 @@ impl BowedStringCard {
                 ),
             });
         }
-        if !(self.length_m > 0.0
+        if !(self.length_m.is_finite()
+            && self.length_m > 0.0
+            && self.tension_n.is_finite()
             && self.tension_n > 0.0
+            && self.linear_density_kg_m.is_finite()
             && self.linear_density_kg_m > 0.0
+            && self.bending_stiffness_n_m2.is_finite()
+            && self.bending_stiffness_n_m2 >= 0.0
+            && self.viscous_bending_n_m2_s.is_finite()
+            && self.viscous_bending_n_m2_s >= 0.0
             && self.sample_rate_hz > 0
             && self.mode_count > 0)
         {
             return Err(BowedRunError::InvalidCard {
-                what: "card scalars must be positive".to_string(),
+                what: "card scalars must be positive and finite; bending stiffness must be finite and nonnegative".to_string(),
             });
+        }
+        if self.viscous_bending_n_m2_s > 0.0 {
+            for (k, &zeta) in self.zetas.iter().enumerate() {
+                let kappa = (k + 1) as f64 * core::f64::consts::PI / self.length_m;
+                let minimum = 0.5 * self.viscous_bending_n_m2_s * kappa.powi(4)
+                    / self.linear_density_kg_m
+                    / self.mode_omega_rad_s(k + 1);
+                if !minimum.is_finite() || !zeta.is_finite() || zeta < minimum {
+                    return Err(BowedRunError::InvalidCard {
+                        what: "modal damping must include the declared viscous bending law".into(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -166,10 +283,21 @@ impl BowedStringCard {
 ///
 /// `ViscousOnly` is the FALSIFIER law: purely viscous opposition has no
 /// stiction window and no Stribeck drop, so stick-slip gates must fail.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum FrictionIsland {
     /// The regularized Stribeck rung used across the music stack.
     Stribeck(StribeckFriction),
+    /// Ordered dry-interface law with a fixed temperature and nominal area.
+    /// The card retains caller authority, not measured-data admission. This
+    /// embedding uses the complete Stribeck law, including velocity strengthening.
+    InterfaceStribeck {
+        /// Ordered surface/history identity, law and applicability domain.
+        card: Box<fs_tribo::DryInterfaceSystemCard>,
+        /// Fixed contact temperature [K]; no thermal evolution is implied.
+        temperature_kelvin: f64,
+        /// Declared nominal contact area [m²], used to compute N/area.
+        nominal_contact_area_m2: f64,
+    },
     /// Pure viscous opposition `c * v_rel`; falsifier only.
     ViscousOnly {
         /// Viscous coefficient [N s/m].
@@ -178,11 +306,71 @@ pub enum FrictionIsland {
 }
 
 impl FrictionIsland {
-    fn capture_tol_m_s(self) -> f64 {
+    fn stribeck(&self) -> Result<Option<StribeckFriction>, BowedRunError> {
         match self {
-            Self::Stribeck(law) => law.stiction_m_s.max(0.02),
-            Self::ViscousOnly { .. } => 0.0,
+            Self::Stribeck(law) => Ok(Some(*law)),
+            Self::InterfaceStribeck { card, .. } => match *card.friction_law() {
+                fs_tribo::FrictionLaw::Stribeck {
+                    static_mu,
+                    kinetic_mu,
+                    characteristic_speed,
+                    ..
+                } => StribeckFriction::try_new(static_mu, kinetic_mu, characteristic_speed)
+                    .map(Some)
+                    .map_err(BowedRunError::Friction),
+                _ => Err(BowedRunError::Friction(
+                    "bow interface requires a Stribeck law",
+                )),
+            },
+            Self::ViscousOnly { .. } => Ok(None),
         }
+    }
+
+    fn sliding_traction(
+        &self,
+        law: StribeckFriction,
+        relative_velocity: f64,
+        normal_n: f64,
+    ) -> Result<f64, BowedRunError> {
+        if let Self::InterfaceStribeck { card, .. } = self {
+            // Do not reconstruct the kinetic law from the static/capture
+            // parameters: that would discard its velocity-strengthening term.
+            card.friction_law()
+                .regularized_traction_1d(-relative_velocity, normal_n, law.stiction_m_s)
+                .map_err(BowedRunError::Interface)
+        } else {
+            law.traction(relative_velocity, normal_n)
+                .map_err(BowedRunError::Friction)
+        }
+    }
+
+    fn check_state(&self, relative_velocity: f64, normal_n: f64) -> Result<(), BowedRunError> {
+        if let Self::InterfaceStribeck {
+            card,
+            temperature_kelvin,
+            nominal_contact_area_m2,
+        } = self
+        {
+            if !(nominal_contact_area_m2.is_finite() && *nominal_contact_area_m2 > 0.0) {
+                return Err(BowedRunError::Friction(
+                    "positive finite nominal contact area required",
+                ));
+            }
+            let query = || -> Result<(), fs_tribo::TriboError> {
+                let state = fs_tribo::DryFrictionState::new(
+                    *temperature_kelvin,
+                    normal_n / nominal_contact_area_m2,
+                    relative_velocity.abs(),
+                )?;
+                let frame = fs_tribo::ContactFrame::new([0.0, 0.0, 1.0])?;
+                // The owner takes body-minus-driver tangential velocity.
+                let slip = fs_tribo::TangentialSlip::new(&frame, [-relative_velocity, 0.0, 0.0])?;
+                card.query(state, normal_n, slip)?;
+                Ok(())
+            };
+            query().map_err(BowedRunError::Interface)?;
+        }
+        Ok(())
     }
 }
 
@@ -224,6 +412,7 @@ pub struct BowedRunConfig {
 /// One completed bowed run: per-sample histories at the bow point and the
 /// bridge, ready for gate analysis. Everything is plain `f64` in fixed
 /// order, so equal configurations replay bitwise on one host.
+/// String channels at index `i` describe the endpoint `(i + 1) / sample_rate_hz`.
 #[derive(Clone, Debug)]
 pub struct BowedRunLog {
     /// String transverse velocity at the bow station [m/s] per sample.
@@ -232,8 +421,8 @@ pub struct BowedRunLog {
     pub relative_velocity_m_s: Vec<f64>,
     /// Transmitted bridge force [N] per sample.
     pub bridge_force_n: Vec<f64>,
-    /// Body velocity [m/s] per sample; empty for [`Termination::Rigid`].
-    pub body_velocity_m_s: Vec<f64>,
+    /// Signed body volume velocity [m³/s] per sample; empty for [`Termination::Rigid`].
+    pub body_volume_velocity_m3_s: Vec<f64>,
     /// Radiated pressure at the listener [Pa]; empty for rigid.
     pub radiated_pressure_pa: Vec<f64>,
     /// Final total modal energy [J].
@@ -249,6 +438,8 @@ pub enum BowedRunError {
     Gesture(BowGestureError),
     /// The friction law refused a non-finite runtime input.
     Friction(&'static str),
+    /// The ordered interface refuses the actual contact state.
+    Interface(fs_tribo::TriboError),
     /// The card is inconsistent (zeta count, non-physical values).
     InvalidCard {
         /// Human-readable cause.
@@ -259,12 +450,17 @@ pub enum BowedRunError {
         /// Rejected density [kg/m^3].
         density_kg_m3: f64,
     },
+    /// The compact radiation observer requires a positive finite distance.
+    InvalidListenerDistance {
+        /// Rejected distance [m].
+        distance_m: f64,
+    },
     /// The modal runtime refused admission or a step.
     Model(ModalAcousticTimeError),
     /// A state limit was exceeded mid-run; earlier samples remain valid.
     LimitExceeded(ModalAcousticTimeError),
-    /// The compact-body radiation filter refused a step; earlier samples
-    /// remain valid.
+    /// The compact-body step or radiation observation refused. No partial
+    /// history is returned; the caller must discard the failed run.
     Radiation(String),
 }
 
@@ -276,10 +472,17 @@ impl std::fmt::Display for BowedRunError {
             Self::InvalidAmbientDensity { density_kg_m3 } => {
                 write!(f, "ambient density refused: {density_kg_m3} kg/m^3")
             }
+            Self::InvalidListenerDistance { distance_m } => {
+                write!(
+                    f,
+                    "listener distance must be positive and finite: {distance_m} m"
+                )
+            }
             Self::Model(e) => write!(f, "model refused: {e:?}"),
             Self::LimitExceeded(e) => write!(f, "state limit exceeded: {e:?}"),
             Self::Radiation(what) => write!(f, "radiation refused: {what}"),
             Self::Friction(what) => write!(f, "friction law refused: {what}"),
+            Self::Interface(error) => write!(f, "interface state refused: {error}"),
         }
     }
 }
@@ -294,7 +497,9 @@ fn unit_shape(k: usize, x_fraction: f64, length_m: f64, mu: f64) -> f64 {
 fn unit_shape_slope_at_bridge(k: usize, length_m: f64, mu: f64) -> f64 {
     let norm = (mu * length_m * 0.5).sqrt();
     let kk = (k + 1) as f64;
-    let slope = kk * core::f64::consts::PI / length_m * (kk * core::f64::consts::PI).cos();
+    // The station coordinate starts at the bridge (x = 0). The string
+    // pulls this support with T*y'(0)-EI*y'''(0); cos(k*pi) samples x=L.
+    let slope = kk * core::f64::consts::PI / length_m;
     slope / norm
 }
 
@@ -319,20 +524,49 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         config.gesture.station_fraction,
     )
     .map_err(BowedRunError::Gesture)?;
-    if let Termination::PlateOnePort { ambient, .. } = &config.termination
-        && !(ambient.density.is_finite() && ambient.density > 0.0)
-    {
-        return Err(BowedRunError::InvalidAmbientDensity {
-            density_kg_m3: ambient.density,
-        });
+    // Admit friction even when sticking never evaluates sliding traction.
+    let stribeck = config.island.stribeck()?;
+    config
+        .island
+        .check_state(config.gesture.v_bow_m_s, config.gesture.normal_force_n)?;
+    match &config.island {
+        FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
+            let law = stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
+            config
+                .island
+                .sliding_traction(law, 0.0, config.gesture.normal_force_n)?;
+            if !(law.mu_static * config.gesture.normal_force_n).is_finite() {
+                return Err(BowedRunError::Friction(
+                    "static friction capacity must be finite",
+                ));
+            }
+        }
+        FrictionIsland::ViscousOnly { viscous_n_s_per_m } => {
+            if !(viscous_n_s_per_m.is_finite() && *viscous_n_s_per_m >= 0.0) {
+                return Err(BowedRunError::Friction(
+                    "viscous friction must be finite and nonnegative",
+                ));
+            }
+        }
+    }
+    if let Termination::PlateOnePort { ambient, .. } = &config.termination {
+        if !(ambient.density.is_finite() && ambient.density > 0.0) {
+            return Err(BowedRunError::InvalidAmbientDensity {
+                density_kg_m3: ambient.density,
+            });
+        }
+        if !(config.listener_m.is_finite() && config.listener_m > 0.0) {
+            return Err(BowedRunError::InvalidListenerDistance {
+                distance_m: config.listener_m,
+            });
+        }
     }
     let card = &config.card;
     let mu = card.linear_density_kg_m;
-    let c = card.wave_speed_m_s();
 
     let modes: Vec<ModalAcousticMode> = (0..card.mode_count)
         .map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: (k + 1) as f64 * core::f64::consts::PI * c / card.length_m,
+            angular_frequency_rad_s: card.mode_omega_rad_s(k + 1),
             damping_ratio: card.zetas[k],
             pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
         })
@@ -348,15 +582,29 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     let shapes_at_bow: Vec<f64> = (0..card.mode_count)
         .map(|k| unit_shape(k, x_bow, card.length_m, mu))
         .collect();
-    let slopes_at_bridge: Vec<f64> = (0..card.mode_count)
-        .map(|k| unit_shape_slope_at_bridge(k, card.length_m, mu))
+    let w_point: f64 = shapes_at_bow.iter().map(|phi| phi * phi).sum();
+    let bridge_force_factors: Vec<f64> = (0..card.mode_count)
+        .map(|k| {
+            let kappa = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
+            // Support shear T*y' - EI*y''' for a pinned sine mode.
+            (card.tension_n + card.bending_stiffness_n_m2 * kappa.powi(2))
+                * unit_shape_slope_at_bridge(k, card.length_m, mu)
+        })
+        .collect();
+    let bridge_viscous_factors: Vec<f64> = (0..card.mode_count)
+        .map(|k| {
+            let kappa = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
+            card.viscous_bending_n_m2_s
+                * kappa.powi(2)
+                * unit_shape_slope_at_bridge(k, card.length_m, mu)
+        })
         .collect();
 
     let mut log = BowedRunLog {
         bow_point_velocity_m_s: Vec::with_capacity(config.steps),
         relative_velocity_m_s: Vec::with_capacity(config.steps),
         bridge_force_n: Vec::with_capacity(config.steps),
-        body_velocity_m_s: Vec::new(),
+        body_volume_velocity_m3_s: Vec::new(),
         radiated_pressure_pa: Vec::new(),
         final_total_energy_j: 0.0,
         peak_total_energy_j: f64::MIN,
@@ -368,7 +616,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         Termination::Rigid => None,
     };
     if plate.is_some() {
-        log.body_velocity_m_s.reserve(config.steps);
+        log.body_volume_velocity_m3_s.reserve(config.steps);
         log.radiated_pressure_pa.reserve(config.steps);
     }
     // Start from rest; the bow spins the string up from silence so every
@@ -377,7 +625,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     let dt = model.sample_period_s();
     let subsamples = config.subsamples.max(1);
     let sub_dt = dt / subsamples as f64;
-    let capture_tol = config.island.capture_tol_m_s();
+    let capture_tol = stribeck.map_or(0.0, |law| law.stiction_m_s.max(0.02));
     // Capture basin: both sides of a sign flip must be slower than this,
     // or the crossing is a chatter spike rather than a capturable corner.
     const CAPTURE_BASIN_M_S: f64 = 0.15;
@@ -386,55 +634,78 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     let mut peak_energy_j = f64::MIN;
 
     for _ in 0..config.steps {
-        let mut v_str = 0.0_f64;
-        let mut v_rel = 0.0_f64;
         for _ in 0..subsamples {
-            v_str = model
+            let v_str: f64 = model
                 .states()
                 .iter()
                 .zip(&shapes_at_bow)
                 .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
                 .sum();
-            v_rel = config.gesture.v_bow_m_s - v_str;
+            let v_rel = config.gesture.v_bow_m_s - v_str;
+            config
+                .island
+                .check_state(v_rel, config.gesture.normal_force_n)?;
             let flip_speed = prev_v_rel.abs().max(v_rel.abs());
             let flipped = prev_v_rel.is_finite()
                 && !stuck
                 && prev_v_rel.signum() != v_rel.signum()
                 && flip_speed <= CAPTURE_BASIN_M_S;
             prev_v_rel = v_rel;
-            let traction = match config.island {
-                FrictionIsland::Stribeck(law) => {
+            let traction = match &config.island {
+                FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
+                    let law = stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
                     let hold_cap = law.mu_static * config.gesture.normal_force_n;
-                    let pin = || {
-                        model
-                            .held_force_for_port_velocity(
-                                &shapes_at_bow,
-                                config.gesture.v_bow_m_s,
-                                sub_dt,
-                            )
-                            .map_err(BowedRunError::Model)
+                    // Approximate pinning: cancel initial contact acceleration
+                    // and correct velocity with a forward-Euler increment.
+                    // The subsequent exact-ZOH transition need not hit the
+                    // requested endpoint velocity exactly.
+                    let pin = || -> f64 {
+                        let accel_hold: f64 = model
+                            .modes()
+                            .iter()
+                            .zip(model.states())
+                            .zip(&shapes_at_bow)
+                            .map(|((m, s), phi)| {
+                                phi * (2.0
+                                    * m.damping_ratio
+                                    * m.angular_frequency_rad_s
+                                    * s.velocity_m_sqrt_kg_per_s
+                                    + m.angular_frequency_rad_s
+                                        * m.angular_frequency_rad_s
+                                        * s.displacement_m_sqrt_kg)
+                            })
+                            .sum::<f64>()
+                            / w_point;
+                        accel_hold + v_rel / (w_point * sub_dt)
                     };
                     if stuck {
-                        let p = pin()?;
+                        let p = pin();
                         if p.abs() <= hold_cap {
                             p
                         } else {
                             stuck = false;
-                            law.traction(v_rel, config.gesture.normal_force_n)
-                                .map_err(BowedRunError::Friction)?
+                            config.island.sliding_traction(
+                                law,
+                                v_rel,
+                                config.gesture.normal_force_n,
+                            )?
                         }
                     } else if flipped || v_rel.abs() <= capture_tol {
-                        let p = pin()?;
+                        let p = pin();
                         if p.abs() <= hold_cap {
                             stuck = true;
                             p
                         } else {
-                            law.traction(v_rel, config.gesture.normal_force_n)
-                                .map_err(BowedRunError::Friction)?
+                            config.island.sliding_traction(
+                                law,
+                                v_rel,
+                                config.gesture.normal_force_n,
+                            )?
                         }
                     } else {
-                        law.traction(v_rel, config.gesture.normal_force_n)
-                            .map_err(BowedRunError::Friction)?
+                        config
+                            .island
+                            .sliding_traction(law, v_rel, config.gesture.normal_force_n)?
                     }
                 }
                 FrictionIsland::ViscousOnly {
@@ -447,30 +718,56 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
             let stepped = model
                 .step_duration(&forces, sub_dt)
                 .map_err(BowedRunError::LimitExceeded)?;
+            if matches!(&config.island, FrictionIsland::InterfaceStribeck { .. }) {
+                let endpoint: f64 = model
+                    .states()
+                    .iter()
+                    .zip(&shapes_at_bow)
+                    .map(|(state, phi)| phi * state.velocity_m_sqrt_kg_per_s)
+                    .sum();
+                config.island.check_state(
+                    config.gesture.v_bow_m_s - endpoint,
+                    config.gesture.normal_force_n,
+                )?;
+            }
             peak_energy_j = peak_energy_j.max(stepped.total_modal_energy_j);
         }
 
         let bridge_force: f64 = model
             .states()
             .iter()
-            .zip(&slopes_at_bridge)
-            .map(|(s, slope)| card.tension_n * slope * s.displacement_m_sqrt_kg)
+            .zip(&bridge_force_factors)
+            .zip(&bridge_viscous_factors)
+            .map(|((s, factor), viscous)| {
+                factor * s.displacement_m_sqrt_kg + viscous * s.velocity_m_sqrt_kg_per_s
+            })
             .sum();
 
-        log.bow_point_velocity_m_s.push(v_str);
-        log.relative_velocity_m_s.push(v_rel);
+        // Observe the completed modal state, as the bridge force does.
+        let endpoint_velocity: f64 = model
+            .states()
+            .iter()
+            .zip(&shapes_at_bow)
+            .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
+            .sum();
+        log.bow_point_velocity_m_s.push(endpoint_velocity);
+        log.relative_velocity_m_s
+            .push(config.gesture.v_bow_m_s - endpoint_velocity);
         log.bridge_force_n.push(bridge_force);
 
         if let Some((body, ambient_density_kg_m3)) = plate.as_mut() {
             let acc = body
                 .drive(bridge_force * body.drive_participation, dt)
                 .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
-            log.body_velocity_m_s.push(body.volume_velocity());
-            log.radiated_pressure_pa.push(body.radiate(
-                acc,
-                *ambient_density_kg_m3,
-                config.listener_m,
-            ));
+            let volume_velocity = body.volume_velocity();
+            let pressure = body.radiate(acc, *ambient_density_kg_m3, config.listener_m);
+            if !(volume_velocity.is_finite() && pressure.is_finite()) {
+                return Err(BowedRunError::Radiation(
+                    "compact observer produced non-finite volume velocity or pressure".to_string(),
+                ));
+            }
+            log.body_volume_velocity_m3_s.push(volume_velocity);
+            log.radiated_pressure_pa.push(pressure);
         }
     }
     log.final_total_energy_j = frame_total_energy(&model);
@@ -501,7 +798,7 @@ pub fn run_log_hash(log: &BowedRunLog) -> fs_blake3::ContentHash {
         (log.bow_point_velocity_m_s.len()
             + log.relative_velocity_m_s.len()
             + log.bridge_force_n.len()
-            + log.body_velocity_m_s.len()
+            + log.body_volume_velocity_m3_s.len()
             + log.radiated_pressure_pa.len())
             * 8
             + 16,
@@ -510,7 +807,7 @@ pub fn run_log_hash(log: &BowedRunLog) -> fs_blake3::ContentHash {
         &log.bow_point_velocity_m_s,
         &log.relative_velocity_m_s,
         &log.bridge_force_n,
-        &log.body_velocity_m_s,
+        &log.body_volume_velocity_m3_s,
         &log.radiated_pressure_pa,
     ] {
         for value in series {
