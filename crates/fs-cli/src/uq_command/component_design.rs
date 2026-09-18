@@ -1,14 +1,16 @@
 //! Independent component/interval allocation through the existing cooling CLI.
 //! The orchestration shares UQ's bounded same-executable runner, not its
-//! probability model. Every feasibility decision uses a complete trajectory.
+//! probability model. Every feasibility decision uses complete trajectories.
 use super::*;
 use std::time::{Duration, Instant};
 mod input;
 mod search;
+mod thermal_constraints;
+mod constraint_execution;
 use input::Plan;
 
 const DESIGN_SCHEMA: &str = "frankensim.cooling-component-design.result.v1";
-const DESIGN_HELP: &str = "Usage: frankensim [--json] cooling-component-design <base-request.json> <allocation.json>\n\nAllocate absolute component watts in declared priority order. Each control names\none base interval and affects every occurrence in its fixed repeated schedule.\nEvery candidate runs the real cooling-network command from the original initial\nfield. A requested sampled-peak component adjoint may guide safeguarded trials;\nwithout one, bisection performs no hidden reverse solves. Bounds, thermal slack\nand watt-bracket tolerances are explicit. This is a priority allocation policy,\nnot a global optimum, monotonicity proof or continuous-time temperature bound.\nEvaluation, cumulative trajectory-step and wall budgets cover ALL priorities.\nBudget exhaustion after a passing baseline returns that accepted allocation with\nstatus=budget-exhausted and exit 6, never a completed search. Model failures refuse.\nThe result retains cooling_result and resolved_request for ordinary exact replay.\nSee examples/cooling-network/COMPONENT_POWER_ALLOCATION.md.\n";
+const DESIGN_HELP: &str = "Usage: frankensim [--json] cooling-component-design <base-request.json> <allocation.json>\n\nAllocate absolute component watts in declared priority order. Each control names\none base interval and affects every occurrence in its fixed repeated schedule.\nEvery candidate runs the real cooling-network command from the original initial\nfield. A requested sampled-peak component adjoint may guide safeguarded trials;\nwithout one, bisection performs no hidden reverse solves. Bounds, thermal slack\nand watt-bracket tolerances are explicit. Optional thermal_constraints add named\ncomponent-footprint or existing temperature objectives, each with its OWN limit.\nEvery limit must pass. The worst signed temperature excess guides the bracket,\nnot the largest absolute temperature. Each objective reruns the same full model\nand its own requested adjoint; every run consumes the cumulative step budget.\nEvaluation, cumulative trajectory-step and wall budgets cover ALL priorities.\nBudget exhaustion after a passing baseline returns that accepted allocation with\nstatus=budget-exhausted and exit 6, never a completed search. Model failures refuse.\nThe result retains cooling_result and resolved_request for ordinary exact replay.\nThis is not a global optimum or continuous-time temperature certificate.\nSee examples/cooling-network/COMPONENT_POWER_ALLOCATION.md and MULTI_LIMIT_ALLOCATION.md.\n";
 
 pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -21,17 +23,19 @@ pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     let result = (|| -> Result<(u8,String)> {
         let base = J::parse(&read(&args[0], MAX_BASE_BYTES)?).map_err(|e| bad(e.to_string()))?;
         let spec = J::parse(&read(&args[1], MAX_UQ_BYTES)?).map_err(|e| bad(e.to_string()))?;
-        let plan = Plan::parse(&base, &spec)?;
+        let (plan, constraints) = parse_plan(&base, &spec)?;
         let deadline = Instant::now().checked_add(Duration::from_secs_f64(plan.wall_seconds))
             .ok_or_else(|| bad("allocation wall deadline is not representable"))?;
-        let mut result = search::allocate(&plan, deadline, |values| evaluate(&plan, values, deadline))?;
+        let criteria = constraints.len() + 1;
+        let mut result = search::allocate_with_work(&plan, deadline, criteria, |values, work|
+            constraint_execution::evaluate(&plan, &constraints, values, deadline, work))?;
         let resolved = plan.request(&result.values)?;
         let selected = plan.axes.iter().zip(&result.values).map(|(axis,&value)| Ok(J::Object(vec![
             ("component".into(),J::Str(axis.component.clone())), ("interval".into(),usize_value(axis.interval)),
             ("min_power_w".into(),number_value(axis.minimum)?), ("max_power_w".into(),number_value(axis.maximum)?),
             ("selected_power_w".into(),number_value(value)?),
         ]))).collect::<Result<Vec<_>>>()?;
-        // Finalization cannot turn an expired invocation into search success.
+        let thermal_constraints = result.passing.constraint_report()?;
         if result.reason.is_none() && Instant::now() >= deadline {
             result.reason = Some("allocation deadline exhausted during finalization".into());
         }
@@ -45,17 +49,21 @@ pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
             ("temperature_tolerance_k".into(),number_value(plan.temperature_tolerance)?),
             ("baseline_sampled_peak_k".into(),number_value(result.baseline_peak)?),
             ("selected_sampled_peak_k".into(),number_value(result.passing.peak)?),
+            ("thermal_constraints".into(),thermal_constraints),
+            ("trajectories_per_candidate".into(),usize_value(criteria)),
             ("completed_priorities".into(),usize_value(result.completed)),
             ("selected".into(),J::Array(selected)), ("priority_decisions".into(),J::Array(result.decisions)),
             ("evaluations_attempted".into(),usize_value(result.attempted)),
             ("evaluations_completed".into(),usize_value(result.history.len())),
+            ("trajectory_evaluations_attempted".into(),usize_value(result.work.attempted)),
+            ("trajectory_evaluations_completed".into(),usize_value(result.work.completed)),
             ("total_completed_trajectory_steps".into(),usize_value(result.steps)),
             ("total_completed_trajectory_solid_solves".into(),usize_value(result.solves)),
             ("newton_trials".into(),usize_value(result.newton_trials)),
             ("search_method".into(),J::Str(if plan.adjoint { "priority-component-adjoint-brackets" } else { "priority-component-bisection" }.into())),
             ("history".into(),J::Array(result.history)), ("resolved_request".into(),resolved),
             ("cooling_result".into(),result.passing.document),
-            ("scope".into(),J::Str("declared-order local coordinate allocation; every selected vector actually passes the all-cycle sampled peak on the fixed numerical model; later loads can change earlier conditional brackets; no global or lexicographic optimality, monotonicity, continuous-time peak, mesh/time error or physical validation certificate; unfinished child work is not included in completed-trajectory counters; budget output retains only the last completed passing allocation; resolved_request is replayable but not a durable optimizer checkpoint".into())),
+            ("scope".into(),J::Str("declared-order local coordinate allocation; every selected vector actually passes every declared initial/accepted-endpoint temperature limit on the fixed numerical model; selected_sampled_peak_k and cooling_result retain the primary objective, not an artificial combined temperature; each extra criterion reruns the same physical experiment and consumes its own requested adjoint; completed work includes finished criteria of an interrupted candidate set, but that incomplete set never replaces a passing allocation; later loads can change earlier conditional brackets; no global or lexicographic optimality, monotonicity, continuous-time peak, mesh/time error or physical-validation certificate; no work count is invented for a killed child; resolved_request is replayable but not a durable optimizer checkpoint".into())),
         ]);
         publish(document, complete, deadline)
     })();
@@ -65,8 +73,15 @@ pub(in crate) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     }
 }
 
-// Formatting a retained field can outlast the last numerical poll. Keep the
-// already accepted allocation, but never turn an expired budget into success.
+fn parse_plan(base: &J, spec: &J) -> Result<(Plan, Vec<thermal_constraints::Constraint>)> {
+    let constraints = thermal_constraints::parse(base, spec.get("thermal_constraints"))?;
+    let mut core = spec.clone();
+    let J::Object(fields) = &mut core else { return Err(bad("component design must be an object")); };
+    fields.retain(|(key, _)| key != "thermal_constraints");
+    // Reuse the existing source/control/fixed-horizon admission unchanged.
+    Ok((Plan::parse(base, &core)?, constraints))
+}
+
 fn publish(mut document: J, complete: bool, deadline: Instant) -> Result<(u8,String)> {
     let mut stdout = serialize(&document)?;
     if complete && Instant::now() >= deadline {
@@ -91,16 +106,20 @@ pub(super) struct Evaluation {
     steps: usize,
     solves: usize,
     slopes: Vec<Option<f64>>,
+    constraints: Option<thermal_constraints::Envelope>,
 }
-fn evaluate(plan: &Plan, values: &[f64], deadline: Instant) -> Result<Evaluation> {
-    let request = serialize(&plan.request(values)?)?;
-    if request.len() as u64 > MAX_BASE_BYTES { return Err(bad("expanded allocation request exceeds the cooling input byte cap")); }
-    let document = child::evaluate_document(&request, deadline).map_err(|e| match e {
-        child::EvaluationError::Budget => budget("allocation deadline interrupted a candidate; no partial trajectory was used"),
-        child::EvaluationError::Child(message) => model_failure(message),
-    })?;
-    inspect(plan,values,document)
+impl Evaluation {
+    fn margin(&self, plan: &Plan) -> Result<f64> {
+        self.constraints.as_ref().map_or_else(|| checked(self.peak-plan.limit), |e| Ok(e.margin))
+    }
+    fn active_constraint(&self) -> &str {
+        self.constraints.as_ref().map_or("primary", |e| e.active_name())
+    }
+    fn constraint_report(&self) -> Result<J> {
+        self.constraints.as_ref().map(|e| e.report()).transpose().map(|e| e.unwrap_or(J::Null))
+    }
 }
+
 fn inspect(plan: &Plan, values: &[f64], document: J) -> Result<Evaluation> {
     if values.len() != plan.axes.len() { return Err(model_failure("component observation vector length mismatch")); }
     let peak = plan.qoi.extract(&document)?;
@@ -135,7 +154,7 @@ fn inspect(plan: &Plan, values: &[f64], document: J) -> Result<Evaluation> {
             slopes[index] = Some(number(field(matches[0],"dtemperature_dpower_w_k_per_w")?,"absolute component derivative")?);
         }
     }
-    Ok(Evaluation { document, peak, peak_time, steps, solves, slopes })
+    Ok(Evaluation { document, peak, peak_time, steps, solves, slopes, constraints: None })
 }
 
 fn checked(value: f64) -> Result<f64> {

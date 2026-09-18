@@ -10,7 +10,7 @@ fn plan() -> Plan { Plan::parse(&J::parse(BASE).unwrap(),&J::parse(SPEC).unwrap(
 fn deadline() -> Instant { Instant::now()+Duration::from_secs(60) }
 fn fake(plan: &Plan, values: &[f64]) -> Evaluation {
     Evaluation {document:J::Null,peak:300.0+2.0*values[0]+0.25*values[1],peak_time:20.0,
-        steps:plan.planned_steps,solves:7,slopes:vec![Some(2.0),Some(0.25)]}
+        steps:plan.planned_steps,solves:7,slopes:vec![Some(2.0),Some(0.25)],constraints:None}
 }
 fn interval<'a>(base: &'a J, index: usize) -> &'a J {
     &base.path(&["transient","intervals"]).unwrap().as_array().unwrap()[index]
@@ -141,3 +141,6 @@ fn expired_result_serialization_preserves_the_allocation_but_not_success_status(
     assert_eq!(doc.str_field("status"),Some("budget-exhausted"));
     assert_eq!(doc.get("selected").unwrap().as_array().unwrap().len(),2);
 }
+
+#[path = "multi_limit_tests.rs"]
+mod multi_limits;
