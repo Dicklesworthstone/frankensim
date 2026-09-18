@@ -3,8 +3,8 @@
 
 use fs_conduction::lumped::LumpedThermalEnvironment as ThermalStringEnvironment;
 use fs_couple::acoustic_realize::{
-    AcousticRealizeError, LinearMaterialStringRuntime, ThermalMaterialStringRuntime,
-    ThermalStringError, realize_assembly, string_mode_omega,
+    AcousticRealizeError, LinearMaterialStringRuntime, StringPointForce,
+    ThermalMaterialStringRuntime, ThermalStringError, realize_assembly, string_mode_omega,
 };
 use fs_couple::string_specimen::{
     BENDING_RELAXATION_TIME_PROPERTY, EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
@@ -468,6 +468,563 @@ fn incremental_ambient() -> AmbientGas {
         pressure_pa: 101_325.0,
         relative_humidity: 0.0,
     }
+}
+
+#[test]
+fn g1_settled_point_load_holds_then_releases_physical_string() {
+    with_string_cx(|cx, _| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 1),
+            None,
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        let load = StringPointForce {
+            station_frac: 0.5,
+            force_n: 1e-3,
+        };
+        assert_eq!(
+            runtime
+                .initialize_point_load_equilibrium(cx, &[load])
+                .unwrap(),
+            1
+        );
+        assert_eq!(runtime.accepted_samples(), 0);
+        let string = runtime.specimen().string();
+        let mass = string.lin_density_kg_m * string.length_m / 2.0;
+        let omega = runtime.modes()[0].angular_frequency_rad_s;
+        let decay = runtime.modes()[0].damping_ratio * omega;
+        let wd = (omega * omega - decay * decay).sqrt();
+        let static_u = load.force_n / (mass * omega * omega);
+        let motion = runtime.point_motion(cx, 0.5).unwrap();
+        close(motion.displacement_m, static_u);
+        assert_eq!(motion.velocity_m_s, 0.0);
+        let forces = runtime.project_point_forces(cx, &[load]).unwrap();
+        for _ in 0..3 {
+            let frame = runtime.step(cx, &forces).unwrap();
+            close(
+                runtime.point_motion(cx, 0.5).unwrap().displacement_m,
+                static_u,
+            );
+            close(
+                frame.acoustic.total_modal_energy_j,
+                0.5 * load.force_n * static_u,
+            );
+            assert!(frame.acoustic.observer_pressure_pa.abs() < 1e-12);
+        }
+        let frame = runtime.step(cx, &[0.0]).unwrap();
+        let motion = runtime.point_motion(cx, 0.5).unwrap();
+        let dt = 1.0 / 48_000.0;
+        close(
+            motion.displacement_m,
+            static_u * (-decay * dt).exp() * ((wd * dt).cos() + decay / wd * (wd * dt).sin()),
+        );
+        close(
+            motion.velocity_m_s,
+            -static_u * omega * omega / wd * (-decay * dt).exp() * (wd * dt).sin(),
+        );
+        assert_eq!(frame.acoustic.input_work_j, 0.0);
+        assert!(frame.acoustic.observer_pressure_pa.abs() > 1e-12);
+    });
+}
+
+#[test]
+fn g4_settled_point_load_refusals_preserve_initial_and_live_states() {
+    with_string_cx(|cx, gate| {
+        let pristine = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 2),
+            None,
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        let mut runtime = pristine.clone();
+        for force in [f64::NAN, f64::MAX, 1e100] {
+            assert!(
+                runtime
+                    .initialize_point_load_equilibrium(
+                        cx,
+                        &[StringPointForce {
+                            station_frac: 0.3,
+                            force_n: force,
+                        }]
+                    )
+                    .is_err()
+            );
+            assert_eq!(runtime.states(), pristine.states());
+            assert_eq!(runtime.epoch(), 0);
+        }
+        runtime
+            .initialize_point_load_equilibrium(
+                cx,
+                &[StringPointForce {
+                    station_frac: 0.3,
+                    force_n: 1e-3,
+                }],
+            )
+            .unwrap();
+        let mut control = runtime.clone();
+        assert!(runtime.initialize_point_load_equilibrium(cx, &[]).is_err());
+        assert_eq!(
+            runtime.step(cx, &[0.0; 2]).unwrap(),
+            control.step(cx, &[0.0; 2]).unwrap()
+        );
+        assert!(runtime.initialize_point_load_equilibrium(cx, &[]).is_err());
+        assert_eq!(
+            runtime.step(cx, &[0.0; 2]).unwrap(),
+            control.step(cx, &[0.0; 2]).unwrap()
+        );
+        let mut zero = pristine.clone();
+        zero.initialize_point_load_equilibrium(cx, &[]).unwrap();
+        assert!(zero.initialize_point_load_equilibrium(cx, &[]).is_err());
+        let mut cancelled = pristine.clone();
+        gate.request();
+        assert!(matches!(
+            cancelled.initialize_point_load_equilibrium(cx, &[]),
+            Err(AcousticRealizeError::Cancelled)
+        ));
+        assert_eq!(cancelled.states(), pristine.states());
+        assert_eq!(cancelled.epoch(), 0);
+    });
+}
+
+#[test]
+fn g1_point_load_matches_physical_oscillator_and_work() {
+    with_string_cx(|cx, _| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 1),
+            None,
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        let load = StringPointForce {
+            station_frac: 0.5,
+            force_n: 1e-3,
+        };
+        let forces = runtime.project_point_forces(cx, &[load]).unwrap();
+        let string = runtime.specimen().string();
+        let modal_mass = string.lin_density_kg_m * string.length_m / 2.0;
+        close(forces[0], load.force_n / modal_mass.sqrt());
+        let omega = runtime.modes()[0].angular_frequency_rad_s;
+        let decay = runtime.modes()[0].damping_ratio * omega;
+        let wd = (omega.powi(2) - decay.powi(2)).sqrt();
+        let dt: f64 = 1.0 / 48_000.0;
+        let expected_u = load.force_n / (modal_mass * omega.powi(2))
+            * (1.0 - (-decay * dt).exp() * ((wd * dt).cos() + decay / wd * (wd * dt).sin()));
+        let expected_v = load.force_n / modal_mass * (-decay * dt).exp() * (wd * dt).sin() / wd;
+        let frame = runtime.step(cx, &forces).unwrap();
+        let motion = runtime.point_motion(cx, 0.5).unwrap();
+        assert_eq!(motion.epoch, frame.epoch);
+        close(motion.displacement_m, expected_u);
+        close(motion.velocity_m_s, expected_v);
+        close(
+            frame.acoustic.input_work_j,
+            load.force_n * motion.displacement_m,
+        );
+        assert!(frame.acoustic.observer_pressure_pa.abs() > 0.0);
+    });
+}
+
+#[test]
+fn g3_point_load_ports_preserve_power_and_work_after_refinement_and_heating() {
+    with_string_cx(|cx, _| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        runtime.refine_modes(cx, 0, 2).unwrap();
+        let loads = [
+            StringPointForce {
+                station_frac: 0.3,
+                force_n: 1e-3,
+            },
+            StringPointForce {
+                station_frac: 0.7,
+                force_n: -2e-3,
+            },
+        ];
+        for _ in 0..3 {
+            let mechanical = runtime.mechanical();
+            let forces = mechanical.project_point_forces(cx, &loads).unwrap();
+            let before = loads.map(|load| mechanical.point_motion(cx, load.station_frac).unwrap());
+            let point_power: f64 = loads
+                .iter()
+                .zip(before)
+                .map(|(f, m)| f.force_n * m.velocity_m_s)
+                .sum();
+            let modal_power: f64 = forces
+                .iter()
+                .zip(mechanical.states())
+                .map(|(f, s)| f * s.velocity_m_sqrt_kg_per_s)
+                .sum();
+            assert!((point_power - modal_power).abs() < 1e-18 + 1e-12 * modal_power.abs());
+            let old_displacement_norm: f64 = mechanical
+                .states()
+                .iter()
+                .map(|s| s.displacement_m_sqrt_kg.abs())
+                .sum();
+            let string = mechanical.specimen().string();
+            let epoch = mechanical.epoch();
+            let frame = runtime.step(cx, epoch, &forces, 0.0).unwrap();
+            let physical_work: f64 = loads
+                .iter()
+                .zip(before)
+                .map(|(f, m)| {
+                    f.force_n
+                        * (runtime
+                            .mechanical()
+                            .point_motion(cx, f.station_frac)
+                            .unwrap()
+                            .displacement_m
+                            - m.displacement_m)
+                })
+                .sum();
+            // Physical work subtracts two reconstructed point displacements.
+            // Bound dot-product/subtraction roundoff by the *operands*, not
+            // the tiny net work; |sin(k*pi*x/L)| <= 1 bounds participation.
+            let displacement_norm = old_displacement_norm
+                + runtime
+                    .mechanical()
+                    .states()
+                    .iter()
+                    .map(|s| s.displacement_m_sqrt_kg.abs())
+                    .sum::<f64>();
+            let work_scale = loads.iter().map(|f| f.force_n.abs()).sum::<f64>() * displacement_norm
+                / (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
+            let allowance = 16.0 * f64::EPSILON * forces.len() as f64 * work_scale;
+            let residual = (frame.vibration.acoustic.input_work_j - physical_work).abs();
+            assert!(
+                residual <= allowance,
+                "point work residual {residual:e} > roundoff {allowance:e}"
+            );
+            assert_eq!(runtime.mechanical().states().len(), 2);
+        }
+        assert!(runtime.thermal().temperature_k() > 300.0);
+    });
+}
+
+#[test]
+fn g4_point_load_endpoints_and_refusals_preserve_runtime() {
+    with_string_cx(|cx, gate| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 3),
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        runtime.step(cx, &[0.0; 3]).unwrap();
+        let mut control = runtime.clone();
+        for station in [0.0, 1.0] {
+            let motion = runtime.point_motion(cx, station).unwrap();
+            assert_eq!(motion.displacement_m, 0.0);
+            assert_eq!(motion.velocity_m_s, 0.0);
+            assert_eq!(
+                runtime
+                    .project_point_forces(
+                        cx,
+                        &[StringPointForce {
+                            station_frac: station,
+                            force_n: f64::MAX,
+                        }]
+                    )
+                    .unwrap(),
+                vec![0.0; 3]
+            );
+        }
+        assert_eq!(runtime.project_point_forces(cx, &[]).unwrap(), vec![0.0; 3]);
+        for station in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            assert!(runtime.point_motion(cx, station).is_err());
+            assert!(
+                runtime
+                    .project_point_forces(
+                        cx,
+                        &[StringPointForce {
+                            station_frac: station,
+                            force_n: 0.0,
+                        }]
+                    )
+                    .is_err()
+            );
+        }
+        for force in [f64::NAN, f64::INFINITY, f64::MAX] {
+            assert!(
+                runtime
+                    .project_point_forces(
+                        cx,
+                        &[StringPointForce {
+                            station_frac: 0.5,
+                            force_n: force,
+                        }]
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            runtime.step(cx, &[0.0; 3]).unwrap(),
+            control.step(cx, &[0.0; 3]).unwrap()
+        );
+        gate.request();
+        assert!(matches!(
+            runtime.point_motion(cx, 0.5),
+            Err(AcousticRealizeError::Cancelled)
+        ));
+        assert!(matches!(
+            runtime.project_point_forces(cx, &[]),
+            Err(AcousticRealizeError::Cancelled)
+        ));
+        assert_eq!(runtime.states(), control.states());
+        assert_eq!(runtime.epoch(), control.epoch());
+    });
+}
+
+#[test]
+fn g1_mode_refinement_preserves_motion_and_drives_new_modes() {
+    with_string_cx(|cx, _| {
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            incremental_specimen(300.0, 2),
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        runtime.step(cx, &[0.0, 0.0]).unwrap();
+        let mut control = runtime.clone();
+        let identity = runtime.specimen().specimen_identity();
+        assert_eq!(runtime.refine_modes(cx, 3).unwrap(), 2);
+        assert_eq!(&runtime.states()[..2], control.states());
+        assert_eq!(&runtime.modes()[..2], control.modes());
+        assert_eq!(runtime.states()[2], Default::default());
+        assert_eq!(runtime.specimen().specimen_identity(), identity);
+        assert_eq!(runtime.accepted_samples(), 1);
+        for _ in 0..4 {
+            let actual = runtime.step(cx, &[0.0; 3]).unwrap();
+            let expected = control.step(cx, &[0.0; 2]).unwrap();
+            assert_eq!(&runtime.states()[..2], control.states());
+            assert_eq!(
+                actual.acoustic.observer_pressure_pa,
+                expected.acoustic.observer_pressure_pa
+            );
+            assert_eq!(
+                actual.acoustic.total_modal_energy_j,
+                expected.acoustic.total_modal_energy_j
+            );
+        }
+        // Independent held-force oscillator solution for the newly admitted mode.
+        let omega = runtime.modes()[2].angular_frequency_rad_s;
+        let decay = runtime.modes()[2].damping_ratio * omega;
+        let wd = (omega * omega - decay * decay).sqrt();
+        let dt: f64 = 1.0 / 48_000.0;
+        let force = 1e-4;
+        let q = force / omega.powi(2)
+            * (1.0 - (-decay * dt).exp() * ((wd * dt).cos() + decay / wd * (wd * dt).sin()));
+        let v = force * (-decay * dt).exp() * (wd * dt).sin() / wd;
+        runtime.step(cx, &[0.0, 0.0, force]).unwrap();
+        close(runtime.states()[2].displacement_m_sqrt_kg, q);
+        close(runtime.states()[2].velocity_m_sqrt_kg_per_s, v);
+    });
+}
+
+#[test]
+fn g4_mode_refinement_refuses_atomically_and_preserves_thermal_state() {
+    with_string_cx(|cx, gate| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let thermal = runtime.thermal();
+        let states = runtime.mechanical().states().to_vec();
+        assert_eq!(runtime.refine_modes(cx, 0, 2).unwrap(), 1);
+        assert_eq!(runtime.thermal(), thermal);
+        assert_eq!(&runtime.mechanical().states()[..1], states);
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        let mut retry = runtime.clone();
+        assert!(matches!(
+            runtime.refine_modes(cx, 0, 3),
+            Err(ThermalStringError::Epoch { .. })
+        ));
+        for count in [0, 1, 2, 4096, usize::MAX] {
+            assert!(runtime.refine_modes(cx, 1, count).is_err());
+            assert_eq!(runtime.mechanical().epoch(), 1);
+            assert_eq!(
+                runtime.mechanical().specimen(),
+                retry.mechanical().specimen()
+            );
+            assert_eq!(runtime.mechanical().states(), retry.mechanical().states());
+            assert_eq!(runtime.thermal(), thermal);
+        }
+        assert_eq!(
+            runtime.step(cx, 1, &[0.0; 2], 0.0).unwrap(),
+            retry.step(cx, 1, &[0.0; 2], 0.0).unwrap()
+        );
+        let before = runtime.mechanical().states().to_vec();
+        let thermal = runtime.thermal();
+        gate.request();
+        assert!(matches!(
+            runtime.refine_modes(cx, 2, 3),
+            Err(ThermalStringError::Acoustic(
+                AcousticRealizeError::Cancelled
+            ))
+        ));
+        assert_eq!(runtime.mechanical().epoch(), 2);
+        assert_eq!(runtime.mechanical().states(), before);
+        assert_eq!(runtime.thermal(), thermal);
+    });
+}
+
+#[test]
+fn g1_ambient_rebind_updates_drag_and_pressure_without_resetting_motion() {
+    with_string_cx(|cx, _| {
+        let source = incremental_specimen(300.0, 2);
+        let mut string = source.string();
+        // The legacy fixture uses a Rayleigh override, which deliberately
+        // replaces air drag. Select the actual air-loss path for this test.
+        string.rayleigh = None;
+        let specimen =
+            with_uniform_circular_material_state(string, source.radius_m(), source.material())
+                .unwrap();
+        let mut runtime = LinearMaterialStringRuntime::try_new(
+            cx,
+            specimen,
+            Some(Pluck {
+                station_frac: 0.4,
+                height_m: 1e-5,
+            }),
+            incremental_ambient(),
+            1.0,
+            48_000,
+        )
+        .unwrap();
+        runtime.step(cx, &[0.0, 0.0]).unwrap();
+        let before = runtime.clone();
+        let previous_acceleration: Vec<_> = before
+            .modes()
+            .iter()
+            .zip(before.states())
+            .map(|(m, s)| {
+                -m.angular_frequency_rad_s.powi(2) * s.displacement_m_sqrt_kg
+                    - 2.0 * m.damping_ratio * m.angular_frequency_rad_s * s.velocity_m_sqrt_kg_per_s
+            })
+            .collect();
+        let mut ambient = incremental_ambient();
+        ambient.pressure_pa *= 0.5;
+        ambient.temperature_k = 330.0;
+        let update = runtime.rebind_ambient(cx, ambient).unwrap();
+        assert_eq!(runtime.states(), before.states());
+        assert_eq!(runtime.specimen(), before.specimen());
+        assert_eq!(runtime.accepted_samples(), 1);
+        assert_eq!(runtime.epoch(), 2);
+        assert_eq!(update.parameter_work_j, 0.0);
+        assert_eq!(update.energy_before_j, update.energy_after_j);
+        let string = runtime.specimen().string();
+        let pi = core::f64::consts::PI;
+        for (old, new) in before.modes().iter().zip(runtime.modes()) {
+            assert_eq!(old.angular_frequency_rad_s, new.angular_frequency_rad_s);
+            let resistance = |gas: &fs_material::gas::GasState| {
+                2.0 * pi * gas.dynamic_viscosity
+                    + 2.0
+                        * pi
+                        * string.width_m
+                        * (gas.dynamic_viscosity * gas.density * new.angular_frequency_rad_s / 2.0)
+                            .sqrt()
+            };
+            let expected_change = (resistance(runtime.ambient()) - resistance(before.ambient()))
+                / (2.0 * string.lin_density_kg_m * new.angular_frequency_rad_s);
+            close(new.damping_ratio - old.damping_ratio, expected_change);
+            assert!(new.damping_ratio < old.damping_ratio);
+        }
+        let frame = runtime.step(cx, &[0.0, 0.0]).unwrap();
+        let acceleration: Vec<_> = runtime
+            .modes()
+            .iter()
+            .zip(runtime.states())
+            .map(|(m, s)| {
+                -m.angular_frequency_rad_s.powi(2) * s.displacement_m_sqrt_kg
+                    - 2.0 * m.damping_ratio * m.angular_frequency_rad_s * s.velocity_m_sqrt_kg_per_s
+            })
+            .collect();
+        let mass_scale = (string.lin_density_kg_m * string.length_m / 2.0).sqrt();
+        let factor = runtime.ambient().density * string.width_m / (4.0 * pi * mass_scale);
+        let area = factor * 2.0 * string.length_m / pi;
+        let moment = -factor * string.length_m.powi(2) / (2.0 * pi * runtime.ambient().sound_speed);
+        let expected_pressure = area * acceleration[0]
+            + moment * (acceleration[1] - previous_acceleration[1]) * 48_000.0;
+        close(frame.acoustic.observer_pressure_pa, expected_pressure);
+        // A same-state rebind must not reset the observer's jerk history.
+        let mut control = runtime.clone();
+        runtime.rebind_ambient(cx, ambient).unwrap();
+        let actual = runtime.step(cx, &[0.0, 0.0]).unwrap();
+        let expected = control.step(cx, &[0.0, 0.0]).unwrap();
+        assert_eq!(actual.acoustic, expected.acoustic);
+        assert_eq!(actual.dissipation, expected.dissipation);
+    });
+}
+
+#[test]
+fn g4_ambient_rebind_preserves_thermal_state_and_refuses_atomically() {
+    with_string_cx(|cx, gate| {
+        let (mechanical, card, curve) =
+            heated_string_parts(cx, 8000, false, InterpolationPolicy::LinearInside);
+        let mut runtime =
+            ThermalMaterialStringRuntime::try_new(cx, mechanical, card, curve, 0.0, 5.0).unwrap();
+        let initial_thermal = runtime.thermal();
+        let initial_specimen = runtime.mechanical().specimen().clone();
+        let mut ambient = incremental_ambient();
+        ambient.pressure_pa *= 0.5;
+        runtime.rebind_ambient(cx, 0, ambient).unwrap();
+        assert_eq!(runtime.thermal(), initial_thermal);
+        assert_eq!(runtime.mechanical().specimen(), &initial_specimen);
+        assert_eq!(runtime.mechanical().accepted_samples(), 0);
+        assert_eq!(runtime.mechanical().epoch(), 1);
+        let mut retry = runtime.clone();
+        assert!(matches!(
+            runtime.rebind_ambient(cx, 0, ambient),
+            Err(ThermalStringError::Epoch { .. })
+        ));
+        ambient.pressure_pa = -1.0;
+        assert!(runtime.rebind_ambient(cx, 1, ambient).is_err());
+        assert_eq!(runtime.thermal(), retry.thermal());
+        assert_eq!(runtime.mechanical().states(), retry.mechanical().states());
+        assert_eq!(
+            runtime.mechanical().ambient().density,
+            retry.mechanical().ambient().density
+        );
+        assert_eq!(
+            runtime.step(cx, 1, &[0.0], 0.0).unwrap(),
+            retry.step(cx, 1, &[0.0], 0.0).unwrap()
+        );
+        let epoch = runtime.mechanical().epoch();
+        let before = runtime.mechanical().states().to_vec();
+        let thermal = runtime.thermal();
+        gate.request();
+        assert!(matches!(
+            runtime.rebind_ambient(cx, epoch, incremental_ambient()),
+            Err(ThermalStringError::Acoustic(
+                AcousticRealizeError::Cancelled
+            ))
+        ));
+        assert_eq!(runtime.mechanical().states(), before);
+        assert_eq!(runtime.mechanical().epoch(), epoch);
+        assert_eq!(runtime.thermal(), thermal);
+    });
 }
 
 #[test]

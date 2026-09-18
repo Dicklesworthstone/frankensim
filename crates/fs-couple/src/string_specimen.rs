@@ -98,6 +98,13 @@ pub struct ResolvedStringSpecimen {
 }
 
 impl ResolvedStringSpecimen {
+    // Only solver resolution changes. The physical specimen identity explicitly
+    // excludes solver options; the consuming runtime admits every new frequency.
+    pub(crate) fn with_retained_modes(mut self, mode_count: usize) -> Self {
+        self.string.n_modes = mode_count;
+        self
+    }
+
     /// Ready for `AcousticAssembly::string` and the existing string realizer.
     #[must_use]
     pub fn string(&self) -> PrestressedString {

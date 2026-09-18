@@ -2055,6 +2055,26 @@ pub struct LinearMaterialStringRuntime {
     accepted_samples: u64,
 }
 
+/// Prescribed transverse force at a fixed material station for one sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringPointForce {
+    /// Fraction of loaded string length, in `[0, 1]`.
+    pub station_frac: f64,
+    /// Signed force in the string's transverse vibration direction [N].
+    pub force_n: f64,
+}
+
+/// Physical motion at a station, reconstructed from the accepted retained modes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StringPointMotion {
+    /// Accepted mechanical/material epoch of this observation.
+    pub epoch: u64,
+    /// Transverse displacement from the pre-stressed reference line [m].
+    pub displacement_m: f64,
+    /// Transverse velocity [m/s].
+    pub velocity_m_s: f64,
+}
+
 /// Energy change when replacing stiffness at fixed modal displacement/momentum.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringMaterialUpdate {
@@ -2206,6 +2226,219 @@ impl LinearMaterialStringRuntime {
     #[must_use]
     pub fn modes(&self) -> &[ModalAcousticMode] {
         self.member.model.modes()
+    }
+
+    /// Accepted surrounding gas used by air drag and the compact observer.
+    #[must_use]
+    pub const fn ambient(&self) -> &GasState {
+        &self.gas
+    }
+
+    /// Project physical point forces into this epoch's retained modal basis.
+    ///
+    /// With `phi_k = sin(k pi x/L)/sqrt(mu L/2)`, generalized force is
+    /// `sum(phi_k F)` and point velocity is `sum(phi_k qdot_k)`. Using the same
+    /// map in both directions preserves instantaneous power and held-load work.
+    /// Pass the returned `[N/sqrt(kg)]` vector to the existing mechanical or
+    /// thermal step before any rebind/refinement; do not cache it across epochs.
+    /// Loads are held at fixed stations during the step. End-support loads do
+    /// no work in this pinned model; support reaction dynamics are not modeled.
+    /// This projection supplies no contact law or opposite-body reaction.
+    pub fn project_point_forces(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        loads: &[StringPointForce],
+    ) -> Result<Vec<f64>, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let mut forces = vec![0.0; self.states().len()];
+        let string = self.specimen.string();
+        let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
+        for load in loads {
+            cx.checkpoint()
+                .map_err(|_| AcousticRealizeError::Cancelled)?;
+            validate_string_station(load.station_frac)?;
+            if !load.force_n.is_finite() {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "point force must be finite newtons",
+                });
+            }
+            for (index, force) in forces.iter_mut().enumerate() {
+                if index % 64 == 0 {
+                    cx.checkpoint()
+                        .map_err(|_| AcousticRealizeError::Cancelled)?;
+                }
+                *force +=
+                    string_point_participation(index, load.station_frac, mass_scale) * load.force_n;
+                if !force.is_finite() {
+                    return Err(AcousticRealizeError::InvalidDescription {
+                        what: "projected string point force is not finite",
+                    });
+                }
+            }
+        }
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        Ok(forces)
+    }
+
+    /// Initialize an unexcited string in equilibrium under settled point loads.
+    ///
+    /// The loading history is assumed to precede the simulation window: this
+    /// establishes stored elastic energy, not a measured actuator-work transfer.
+    /// Continue stepping the same loads to hold the shape, or release them to
+    /// excite vibration. Only a zero-state runtime with no accepted samples or
+    /// observer history can be initialized; existing motion is never reset.
+    /// Material state and sample count are unchanged. Publication advances the
+    /// epoch and records zero previous acceleration for the stationary history.
+    /// Cancellation or a force/state/energy refusal leaves the runtime untouched.
+    pub fn initialize_point_load_equilibrium(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        loads: &[StringPointForce],
+    ) -> Result<u64, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        if self.accepted_samples != 0
+            || self.member.observer.previous_acceleration.is_some()
+            || self.states().iter().any(|state| {
+                state.displacement_m_sqrt_kg != 0.0 || state.velocity_m_sqrt_kg_per_s != 0.0
+            })
+        {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "settled point-load initialization requires an unexcited string before stepping",
+            });
+        }
+        let epoch = next_string_epoch(self.epoch)?;
+        let forces = self.project_point_forces(cx, loads)?;
+        let mut candidate = self.member.clone();
+        candidate
+            .model
+            .initialize_static_equilibrium(&forces)
+            .map_err(AcousticRealizeError::Modal)?;
+        candidate.observer.previous_acceleration = Some(vec![0.0; forces.len()]);
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        self.member = candidate;
+        self.epoch = epoch;
+        Ok(epoch)
+    }
+
+    /// Observe physical displacement and conjugate velocity at a fixed station.
+    /// Reads accepted state only; it does not advance time or alter acoustics.
+    pub fn point_motion(
+        &self,
+        cx: &fs_exec::Cx<'_>,
+        station_frac: f64,
+    ) -> Result<StringPointMotion, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        validate_string_station(station_frac)?;
+        let string = self.specimen.string();
+        let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
+        let mut motion = StringPointMotion {
+            epoch: self.epoch,
+            displacement_m: 0.0,
+            velocity_m_s: 0.0,
+        };
+        for (index, state) in self.states().iter().enumerate() {
+            if index % 64 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| AcousticRealizeError::Cancelled)?;
+            }
+            let phi = string_point_participation(index, station_frac, mass_scale);
+            motion.displacement_m += phi * state.displacement_m_sqrt_kg;
+            motion.velocity_m_s += phi * state.velocity_m_sqrt_kg_per_s;
+        }
+        if !motion.displacement_m.is_finite() || !motion.velocity_m_s.is_finite() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "reconstructed string point motion is not finite",
+            });
+        }
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        Ok(motion)
+    }
+
+    /// Replace surrounding gas without restarting vibration or advancing time.
+    /// Air damping and acoustic observation rebuild through their shared owners;
+    /// material receipts, modal coordinates and previous acceleration survive.
+    /// The update advances the epoch, but consumes no sample or material heat.
+    /// This prescribed gas change does not model fluid-loading work, boundary
+    /// heat transfer or a propagating change of the surrounding atmosphere.
+    /// A refusal or cancellation preserves the complete accepted runtime.
+    pub fn rebind_ambient(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        ambient: AmbientGas,
+    ) -> Result<StringMaterialUpdate, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let gas = gas_state(ambient)?;
+        let mut candidate = self.clone();
+        candidate.gas = gas;
+        let update = candidate.rebind(cx, self.specimen.clone(), 0.0)?;
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        *self = candidate;
+        Ok(update)
+    }
+
+    /// Add higher sine modes at rest without advancing the physical clock.
+    /// Existing coordinates and accepted acceleration history are retained
+    /// exactly. New modes have zero prior acceleration (no prior forcing).
+    /// This is explicit fixed-basis refinement, not reconstruction of omitted
+    /// history, a tail-error estimate or transfer across changed geometry.
+    /// Returns the new epoch; smaller/equal counts or inadmissible frequencies
+    /// refuse without changing the accepted runtime.
+    pub fn refine_modes(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        mode_count: usize,
+    ) -> Result<u64, AcousticRealizeError> {
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        let epoch = next_string_epoch(self.epoch)?;
+        let old_count = self.states().len();
+        if mode_count <= old_count {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "mode refinement requires a strictly larger retained sine basis",
+            });
+        }
+        let specimen = self.specimen.clone().with_retained_modes(mode_count);
+        let string = specimen.string();
+        validate_incremental_string(&string)?;
+        let mut member = linear_string_member(
+            &string,
+            None,
+            None,
+            &self.gas,
+            self.listener_m,
+            self.sample_rate_hz,
+            1.0,
+        )?;
+        let mut states = member.model.states().to_vec();
+        states[..old_count].clone_from_slice(self.states());
+        member
+            .model
+            .restore_states(&states)
+            .map_err(AcousticRealizeError::Modal)?;
+        member.observer.previous_acceleration = self
+            .member
+            .observer
+            .previous_acceleration
+            .as_ref()
+            .map(|previous| {
+                let mut extended = previous.clone();
+                extended.resize(mode_count, 0.0);
+                extended
+            });
+        cx.checkpoint()
+            .map_err(|_| AcousticRealizeError::Cancelled)?;
+        self.specimen = specimen;
+        self.member = member;
+        self.epoch = epoch;
+        Ok(epoch)
     }
 
     /// Advance one sample under held modal forces [N/sqrt(kg)].
@@ -2625,10 +2858,51 @@ impl ThermalMaterialStringRuntime {
         &self.mechanical
     }
 
+    /// Update prescribed surrounding gas at the expected accepted epoch.
+    /// This changes drag/observation only; the material enthalpy is unchanged.
+    /// Use the thermal transport step for boundary heat exchange.
+    pub fn rebind_ambient(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        ambient: AmbientGas,
+    ) -> Result<StringMaterialUpdate, ThermalStringError> {
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        self.mechanical
+            .rebind_ambient(cx, ambient)
+            .map_err(ThermalStringError::Acoustic)
+    }
+
     /// Accepted uniform thermal state.
+    ///
+    /// Mode refinement and ambient rebinding do not alter this state.
     #[must_use]
     pub const fn thermal(&self) -> EquilibriumPhaseState {
         self.thermal
+    }
+
+    /// Refine the fixed sine basis while preserving material enthalpy.
+    /// New modes begin at rest; no omitted vibration history is reconstructed.
+    pub fn refine_modes(
+        &mut self,
+        cx: &fs_exec::Cx<'_>,
+        expected_epoch: u64,
+        mode_count: usize,
+    ) -> Result<u64, ThermalStringError> {
+        if expected_epoch != self.mechanical.epoch() {
+            return Err(ThermalStringError::Epoch {
+                expected: expected_epoch,
+                actual: self.mechanical.epoch(),
+            });
+        }
+        self.mechanical
+            .refine_modes(cx, mode_count)
+            .map_err(ThermalStringError::Acoustic)
     }
 
     fn conductor(&self) -> Result<fs_material::conductor::ResolvedConductor, ThermalStringError> {
@@ -3179,6 +3453,24 @@ impl ThermalMaterialStringRuntime {
             },
             transport: report,
         })
+    }
+}
+
+fn validate_string_station(station_frac: f64) -> Result<(), AcousticRealizeError> {
+    if !station_frac.is_finite() || !(0.0..=1.0).contains(&station_frac) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "string station must be a finite fraction in [0, 1]",
+        });
+    }
+    Ok(())
+}
+
+fn string_point_participation(index: usize, station_frac: f64, mass_scale: f64) -> f64 {
+    // Preserve exact pinned endpoints instead of taking a rounded sin(k*pi).
+    if station_frac == 0.0 || station_frac == 1.0 {
+        0.0
+    } else {
+        det::sin((index + 1) as f64 * core::f64::consts::PI * station_frac) / mass_scale
     }
 }
 

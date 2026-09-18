@@ -386,6 +386,38 @@ debit reservoirs or establish a closed thermal feedback/entropy model.
 Refused steps and rebindings preserve the complete accepted runtime. Cloning an
 accepted runtime retains the acceleration history needed for identical continuation.
 
+`project_point_forces` maps prescribed transverse loads in newtons at material
+stations to the current mass-normalized sine basis. `point_motion` uses the same
+participation to return accepted displacement [m] and velocity [m/s]. The transpose
+pair preserves power and held-load work; endpoint participation is exactly zero
+for pinned supports. The resulting forces feed the existing mechanical and thermal
+steps, including after refinement and material updates. Projections must be used
+before the next epoch change. This does not supply contact laws, opposite-body
+reactions, moving-load work or compliant-support dynamics. G1 checks an independent
+physical oscillator and work; G3 checks multipoint power/work through thermal
+updates; G4 checks endpoints, invalid inputs, overflow, cancellation and retry.
+
+`initialize_point_load_equilibrium` connects the same physical force projection
+to the modal owner's static solve `q_k = f_k / omega_k²`. It initializes only an
+unexcited runtime before its first sample, establishes zero prior acceleration,
+and advances the epoch without changing material state or the sample clock.
+Holding those forces retains equilibrium; releasing them excites the same live
+mechanics and pressure observer. Stored initial energy assumes a settled loading
+history before the simulation window; it is not a simulated actuator-work or
+contact receipt. Existing motion cannot be overwritten. G1 checks static compliance
+and release response; G4 checks repeat, invalid-force and cancellation refusals.
+
+`rebind_ambient` resolves a new prescribed gas through the existing gas owner
+and rebuilds air drag and compact observer weights atomically. Material receipts,
+modal coordinates, previous acceleration and accepted sample count are retained;
+the epoch advances with zero parameter work because this model has no gas-added
+mass or gas-dependent elastic storage. The thermal string exposes the same update
+with expected-epoch checking and unchanged material enthalpy. Boundary heat must
+still enter through thermal transport. This is a piecewise prescribed ambient
+change, not an atmosphere transient, fluid-loading work or propagation-delay solve.
+G1/G3 checks use cylinder drag and compact pressure formulas including retained
+jerk history; G4 checks invalid gas, stale epochs and cancellation preserve retry.
+
 Rebinding requires the exact same immutable card, length, linear density and
 sine-mode count. This makes the mass-normalized basis identical, with no sorted-mode
 matching, displacement reset or sound-level rescaling. Tension, EI, damping and
@@ -398,9 +430,18 @@ are not supplied here. Coefficients are externally scheduled and piecewise const
 The acoustic observer retains the preceding accepted acceleration across updates;
 abrupt coefficient changes can produce a transient, without a crossfade.
 
+Explicit `refine_modes` increases the retained sine basis at fixed geometry without
+advancing time. Existing coordinates and observer acceleration history are retained;
+added modes start at rest with zero previous acceleration. Shared admission enforces
+mode, Nyquist and material-frequency limits before publication. The thermal wrapper
+checks the expected epoch and preserves enthalpy. G1/G3 checks continuation energy,
+pressure and independent forced response; G4 checks atomic refusals and cancellation.
+This does not reconstruct omitted history or estimate truncation error, and does not
+support coarsening or transfer between different geometries or eigenbases.
+
 The rung omits transverse-motion-induced axial stretching, moving supports, extra
 polarizations, Prony memory, basis/geometry transfer, phase change and radiation
-backreaction. It uses fixed ambient gas and listener distance, with no atmospheric
+backreaction. It uses prescribed piecewise ambient gas and fixed listener distance, with no atmospheric
 path filter or common propagation delay. G1 uses a synthetic thermal-expansion card
 and an independent damped-oscillator/pressure calculation. G3 cycles a same-card
 density/temperature update at prescribed mass through changed cross-section, bending
