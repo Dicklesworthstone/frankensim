@@ -15,6 +15,8 @@
 //!   (expectation / CVaR / quantile over UQ configs) are FIRST-CLASS
 //!   nodes carrying adjoint/config metadata — the IR represents them,
 //!   FLUX/UQ execute them;
+//! - [`reverse`] compiles smooth algebra for native reverse-mode gradients
+//!   and reusable weighted pullbacks, without coordinate perturbations;
 //! - manifolds carry retraction metadata ([`Manifold::retract`]) that
 //!   a toy Riemannian descent consumes — orientations optimize as
 //!   orientations;
@@ -37,6 +39,7 @@ mod eval;
 pub mod game;
 mod guard;
 mod ir;
+pub mod reverse;
 mod serial;
 
 pub use admission::{
