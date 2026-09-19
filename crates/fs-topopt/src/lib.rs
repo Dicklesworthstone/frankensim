@@ -25,6 +25,7 @@ pub mod control;
 pub mod eigenfreq;
 pub mod elasticity;
 pub mod filter;
+pub mod gradient_check;
 #[cfg(feature = "cutfem-marquee")]
 pub mod marquee;
 pub mod multi_load;
@@ -35,7 +36,8 @@ pub mod stress;
 
 pub use continuation::{
     ContinuationStageReport, ContinuationTermination, MultiLoadContinuationReport,
-    controlled_multi_load_continuation, multi_load_continuation,
+    controlled_gradient_checked_multi_load_continuation, controlled_multi_load_continuation,
+    multi_load_continuation,
 };
 pub use control::{EvaluationStop, SolveBudget, SolveControl, SolveProgress, SolveWork};
 pub use eigenfreq::{
@@ -43,6 +45,10 @@ pub use eigenfreq::{
 };
 pub use elasticity::DensityElasticity;
 pub use filter::{DensityFilter, heaviside, heaviside_derivative};
+pub use gradient_check::{
+    GradientCheckOptions, GradientDirection, GradientProbe, MultiLoadGradientCheck,
+    controlled_multi_load_gradient_check,
+};
 pub use multi_load::{
     MultiLoadOcIteration, MultiLoadOcOptions, MultiLoadOcReport, MultiLoadOcTermination,
     controlled_multi_load_optimality_criteria, multi_load_optimality_criteria,

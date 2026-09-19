@@ -14,6 +14,9 @@ use std::ops::ControlFlow;
 
 use crate::control::{EvaluationStop, SolveBudget, SolveControl, SolveWork};
 use crate::elasticity::DensityElasticity;
+use crate::gradient_check::{
+    GradientCheckOptions, MultiLoadGradientCheck, controlled_multi_load_gradient_check,
+};
 use crate::multi_load::{
     MultiLoadOcIteration, MultiLoadOcOptions, MultiLoadOcReport, MultiLoadOcTermination,
     controlled_multi_load_optimality_criteria,
@@ -34,6 +37,8 @@ pub enum ContinuationTermination {
     /// Even the tested density-floor design exceeded the material cap.
     /// This is a failed restoration, not a global infeasibility certificate.
     FeasibilityRestorationFailed,
+    /// A complete stage-start numerical gradient audit exceeded its tolerance.
+    GradientCheckFailed,
 }
 
 /// History for one stage with at least one complete equilibrium evaluation.
@@ -48,6 +53,10 @@ pub struct ContinuationStageReport {
     /// Retained fraction of the incoming design's distance from the density
     /// floor. One means no restoration; zero means the floor design.
     pub restoration_scale: f64,
+    /// Optional numerical audit at this stage's restored starting design.
+    /// None means no runtime gradient gate was requested. It does not describe
+    /// later accepted iterates or certify individual gradient components.
+    pub gradient_check: Option<MultiLoadGradientCheck>,
     /// Aligned accepted-design history, including the new stage's baseline.
     pub history: Vec<MultiLoadOcIteration>,
     /// The fixed-stage driver's actual stopping reason.
@@ -72,6 +81,8 @@ pub struct MultiLoadContinuationReport {
     pub stopped_stage: Option<usize>,
     /// Detailed numerical/cancellation stop, when applicable.
     pub evaluation_stop: Option<EvaluationStop>,
+    /// Failed numerical audit of the rejected stage, never an accepted design.
+    pub rejected_gradient_check: Option<MultiLoadGradientCheck>,
     /// All consumed work, including failed transitions and rejected trials.
     pub work: SolveWork,
 }
@@ -196,6 +207,43 @@ pub fn controlled_multi_load_continuation(
     options: MultiLoadOcOptions,
     control: &mut SolveControl<'_>,
 ) -> MultiLoadContinuationReport {
+    run_continuation(pipeline, elasticity, loads, rho0, cell_vol, schedule, options, None, control)
+}
+
+/// Continuation with a real compliance AND physical-volume gradient gate at
+/// every stage's restored starting design. A failed finite-difference audit
+/// stops before the new stage can replace the previously accepted model.
+/// Numerical checks, restoration and optimization all consume the same budget.
+/// A successful directional audit is not a continuum or optimality certificate.
+#[allow(clippy::too_many_arguments)]
+pub fn controlled_gradient_checked_multi_load_continuation(
+    pipeline: &mut DesignPipeline,
+    elasticity: &mut DensityElasticity,
+    loads: &[LoadCase<'_>],
+    rho0: &[f64],
+    cell_vol: &[f64],
+    schedule: &[SimpParams],
+    options: MultiLoadOcOptions,
+    gradient_options: GradientCheckOptions,
+    control: &mut SolveControl<'_>,
+) -> MultiLoadContinuationReport {
+    gradient_options.assert_valid();
+    run_continuation(pipeline, elasticity, loads, rho0, cell_vol, schedule, options,
+        Some(gradient_options), control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_continuation(
+    pipeline: &mut DesignPipeline,
+    elasticity: &mut DensityElasticity,
+    loads: &[LoadCase<'_>],
+    rho0: &[f64],
+    cell_vol: &[f64],
+    schedule: &[SimpParams],
+    options: MultiLoadOcOptions,
+    gradient_options: Option<GradientCheckOptions>,
+    control: &mut SolveControl<'_>,
+) -> MultiLoadContinuationReport {
     assert!(!schedule.is_empty(), "continuation requires at least one stage");
     pipeline.params.assert_valid();
     for params in schedule {
@@ -224,6 +272,7 @@ pub fn controlled_multi_load_continuation(
         termination: ContinuationTermination::ScheduleComplete,
         stopped_stage: None,
         evaluation_stop: None,
+        rejected_gradient_check: None,
         work: control.work(),
     };
     for (stage, &params) in schedule.iter().enumerate() {
@@ -246,6 +295,25 @@ pub fn controlled_multi_load_continuation(
                 break;
             }
         };
+        let gradient_check = if let Some(check_options) = gradient_options {
+            match controlled_multi_load_gradient_check(
+                pipeline, elasticity, loads, &start.rho, cell_vol, check_options, control,
+            ) {
+                Ok(check) if check.passed() => Some(check),
+                Ok(check) => {
+                    report.termination = ContinuationTermination::GradientCheckFailed;
+                    report.stopped_stage = Some(stage);
+                    report.rejected_gradient_check = Some(check);
+                    break;
+                }
+                Err(stop) => {
+                    report.termination = ContinuationTermination::EvaluationStopped;
+                    report.stopped_stage = Some(stage);
+                    report.evaluation_stop = Some(stop);
+                    break;
+                }
+            }
+        } else { None };
         let run = controlled_multi_load_optimality_criteria(
             pipeline, elasticity, loads, &start.rho, cell_vol, options, control,
         );
@@ -266,6 +334,7 @@ pub fn controlled_multi_load_continuation(
                 params,
                 incoming_volume_fraction: start.incoming_volume,
                 restoration_scale: start.scale,
+                gradient_check,
                 history: run.history.clone(),
                 termination: run.termination,
             });
