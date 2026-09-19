@@ -1,11 +1,11 @@
 //! SQP for tightly-constrained SMALL-DIMENSION polish (bead ijil,
 //! §9.2): active-set sequential quadratic programming with a damped
 //! BFGS Lagrangian-Hessian approximation. Each iteration solves the
-//! equality-constrained QP on the current working set through a dense
-//! KKT factorization (fs-la LU — the "QP subproblems via fs-la dense
-//! factors" the bead names), takes a backtracking step on the ℓ1
-//! merit, and updates the working set from QP multiplier signs and
-//! constraint violations.
+//! complete inequality-constrained QP through a dual working-set method
+//! and dense KKT factorizations (fs-la LU), then globalizes the step
+//! with multiplier-adaptive exact ℓ1 merit and Armijo backtracking.
+//! Constraint addition and release happen inside the QP, before any
+//! nonlinear objective trial.
 //!
 //! Scope: n and the constraint counts are SMALL (the polish regime —
 //! warm starts near an optimum converge in a handful of iterations,
@@ -131,7 +131,7 @@ fn solve_qp(
         let mut correction: Vec<f64> = kkt.chunks_exact(dim)
             .zip(&original_rhs)
             .map(|(row, initial)| row.iter().zip(&rhs)
-                .fold(*initial, |r, (a, x)| (-a).mul_add(*x, r)))
+                .fold(*initial, |r, (a, x)| (-*a).mul_add(*x, r)))
             .collect();
         fact.solve(&mut correction);
         for (value, change) in rhs.iter_mut().zip(correction) {
@@ -152,66 +152,152 @@ fn violation(ce: &[f64], ci: &[f64]) -> f64 {
         + ci.iter().map(|c| c.max(0.0)).sum::<f64>()
 }
 
-fn active_constraints(problem: &ConstrainedProblem<'_>, x: &[f64], ni: usize) -> Vec<usize> {
-    let civ = checked_constraints("inequality", problem.ci, x, Some(ni));
-    (0..ni).filter(|&j| civ[j] > -1e-8).collect()
+struct QpSolution {
+    d: Vec<f64>,
+    lambda: Vec<f64>,
+    nu: Vec<f64>,
 }
 
-fn working_set_block(
-    problem: &ConstrainedProblem<'_>,
-    x: &[f64],
+fn constraint_block(
+    je: &[f64],
+    ce: &[f64],
+    ji: &[f64],
+    ci: &[f64],
     active: &[usize],
-    cev: &[f64],
-    civ: &[f64],
-    dims: (usize, usize, usize),
+    n: usize,
 ) -> (Vec<f64>, Vec<f64>) {
-    let (ne, ni, n) = dims;
-    let je = jacobian("equality", problem.ce_jt, x, ne, n);
-    let ji = jacobian("inequality", problem.ci_jt, x, ni, n);
-    let m = ne + active.len();
-    let mut a = vec![0.0f64; m * n];
-    let mut c = vec![0.0f64; m];
-    a[..ne * n].copy_from_slice(&je);
-    c[..ne].copy_from_slice(cev);
-    for (r, &j) in active.iter().enumerate() {
-        a[(ne + r) * n..(ne + r + 1) * n].copy_from_slice(&ji[j * n..(j + 1) * n]);
-        c[ne + r] = civ[j];
+    let mut a = je.to_vec();
+    let mut c = ce.to_vec();
+    for &j in active {
+        a.extend_from_slice(&ji[j * n..(j + 1) * n]);
+        c.push(ci[j]);
     }
     (a, c)
 }
 
-fn update_multipliers(
-    active: &mut Vec<usize>,
-    lambda: &mut [f64],
-    nu: &mut [f64],
-    mult: &[f64],
-    ne: usize,
-) -> bool {
-    assert_eq!(
-        mult.len(),
-        ne + active.len(),
-        "SQP multiplier dimension must match the working set"
-    );
-    assert_finite("SQP multiplier", mult);
-    lambda.copy_from_slice(&mult[..ne]);
-    nu.fill(0.0);
-    for (r, &j) in active.iter().enumerate() {
-        nu[j] = mult[ne + r].max(0.0);
+/// Residual and a scale-relative rounding allowance for one linear row.
+fn linear_residual(row: &[f64], d: &[f64], c: f64) -> Option<(f64, f64)> {
+    let mut value = c;
+    let mut scale = c.abs();
+    for (a, x) in row.iter().zip(d) {
+        value = a.mul_add(*x, value);
+        scale += (a * x).abs();
     }
-    let mut drop_idx = None;
-    let mut worst = -1e-10f64;
-    for r in 0..active.len() {
-        if mult[ne + r] < worst {
-            worst = mult[ne + r];
-            drop_idx = Some(r);
+    let allowance = 64.0 * f64::EPSILON * scale.max(f64::MIN_POSITIVE);
+    (value.is_finite() && scale.is_finite()).then_some((value, allowance))
+}
+
+/// Solve the complete convex QP, including currently inactive inequalities.
+///
+/// Start at the equality-constrained minimum (dual feasible with zero
+/// inequality multipliers). A violated row raises its multiplier along a
+/// projected search direction until it binds, or an old multiplier reaches
+/// zero and releases that row. Thus violated/redundant inequalities are not
+/// all imposed as simultaneous equalities. Dense KKT solves deliberately keep
+/// this a small-problem path. Singular equality blocks, incompatible linear
+/// constraints, arithmetic failure, or a bounded pivot limit return None;
+/// none of these is a nonlinear infeasibility certificate.
+fn solve_inequality_qp(
+    b: &[f64],
+    g: &[f64],
+    je: &[f64],
+    ce: &[f64],
+    ji: &[f64],
+    ci: &[f64],
+) -> Option<QpSolution> {
+    let (n, ne, ni) = (g.len(), ce.len(), ci.len());
+    let (mut d, mut mult) = solve_qp(b, g, je, ce, n, ne)?;
+    let mut active = Vec::<usize>::new();
+    let dimension = n.checked_add(ne)?.checked_add(ni)?.checked_add(1)?;
+    let mut pivots_left = dimension.checked_mul(dimension)?.checked_mul(8)?;
+    loop {
+        let mut selected = None;
+        let mut worst = 0.0f64;
+        for j in 0..ni {
+            if active.contains(&j) {
+                continue;
+            }
+            let (value, allowance) = linear_residual(&ji[j * n..(j + 1) * n], &d, ci[j])?;
+            if value > allowance && value > worst {
+                selected = Some(j);
+                worst = value;
+            }
         }
-    }
-    if let Some(r) = drop_idx {
-        let j = active.remove(r);
-        nu[j] = 0.0;
-        true
-    } else {
-        false
+        let Some(selected) = selected else {
+            let mut nu = vec![0.0; ni];
+            for (r, &j) in active.iter().enumerate() {
+                nu[j] = mult[ne + r];
+            }
+            return Some(QpSolution { d, lambda: mult[..ne].to_vec(), nu });
+        };
+        let row = &ji[selected * n..(selected + 1) * n];
+        let mut pending_multiplier = 0.0f64;
+        loop {
+            pivots_left = pivots_left.checked_sub(1)?;
+            let (a, _) = constraint_block(je, ce, ji, ci, &active, n);
+            let m = ne + active.len();
+            // B z + Aᵀ r = -a_new; A z = 0. Increasing the pending
+            // multiplier by t moves d by t*z and the old duals by t*r.
+            let (z, r) = solve_qp(b, row, &a, &vec![0.0; m], n, m)?;
+            let (value, _) = linear_residual(row, &d, ci[selected])?;
+            let rate = -row.iter().zip(&z).map(|(a, z)| a * z).sum::<f64>();
+            if !rate.is_finite() {
+                return None;
+            }
+            let full = if rate > 0.0 { value / rate } else { f64::INFINITY };
+            let mut partial = f64::INFINITY;
+            let mut blocking = None;
+            for j in 0..active.len() {
+                if r[ne + j] < 0.0 {
+                    let bound = mult[ne + j] / -r[ne + j];
+                    if bound < partial {
+                        partial = bound;
+                        blocking = Some(j);
+                    }
+                }
+            }
+            let t = full.min(partial);
+            if !t.is_finite() || t < 0.0 {
+                return None;
+            }
+            for (value, z) in d.iter_mut().zip(z) {
+                *value = t.mul_add(z, *value);
+            }
+            for (j, (value, r)) in mult.iter_mut().zip(r).enumerate() {
+                let updated = t.mul_add(r, *value);
+                if j >= ne {
+                    let roundoff = 64.0 * f64::EPSILON * (value.abs() + (t * r).abs());
+                    if !updated.is_finite() || !roundoff.is_finite() || updated < -roundoff {
+                        return None;
+                    }
+                    *value = updated.max(0.0);
+                } else {
+                    *value = updated;
+                }
+            }
+            pending_multiplier += t;
+            if !pending_multiplier.is_finite() || d.iter().chain(&mult).any(|x| !x.is_finite()) {
+                return None;
+            }
+            if full <= partial {
+                active.push(selected);
+                // Re-solve the final block instead of retaining cancellation
+                // in d + t*z when the equality-only minimizer was far away.
+                let (a, c) = constraint_block(je, ce, ji, ci, &active, n);
+                (d, mult) = solve_qp(b, g, &a, &c, n, ne + active.len())?;
+                let scale = mult.iter().map(|v| v.abs()).fold(1.0f64, f64::max);
+                for value in &mut mult[ne..] {
+                    if *value < -64.0 * f64::EPSILON * scale {
+                        return None;
+                    }
+                    *value = (*value).max(0.0);
+                }
+                break;
+            }
+            let j = blocking?;
+            active.remove(j);
+            mult.remove(ne + j);
+        }
     }
 }
 
@@ -287,15 +373,6 @@ fn accept_merit_step(
     None
 }
 
-fn activate_violated(active: &mut Vec<usize>, civ: &[f64]) {
-    for (j, &cj) in civ.iter().enumerate() {
-        if cj > -1e-10 && !active.contains(&j) {
-            active.push(j);
-        }
-    }
-    active.sort_unstable();
-}
-
 /// Run active-set SQP from `x0`.
 pub fn sqp(
     problem: &mut ConstrainedProblem<'_>,
@@ -314,8 +391,6 @@ pub fn sqp(
     let mut evals = 1usize; // validate_problem_at_start evaluates fg once.
     let mut penalty = 10.0f64;
     let mut iters = 0usize;
-    // Working set: active inequality indices (violated-or-near ones).
-    let mut active = active_constraints(problem, &x, ni);
     let mut lambda = vec![0.0f64; ne];
     let mut nu = vec![0.0f64; ni];
     for _ in 0..max_iters {
@@ -324,17 +399,19 @@ pub fn sqp(
         let cev = checked_constraints("equality", problem.ce, &x, Some(ne));
         let civ = checked_constraints("inequality", problem.ci, &x, Some(ni));
         evals += 1;
-        let m = ne + active.len();
-        let (a, c) = working_set_block(problem, &x, &active, &cev, &civ, (ne, ni, n));
-        let Some((d, mult)) = solve_qp(&b, &g, &a, &c, n, m) else {
-            break; // degenerate working set — report honestly below
+        let je = jacobian("equality", problem.ce_jt, &x, ne, n);
+        let ji = jacobian("inequality", problem.ci_jt, &x, ni, n);
+        let Some(qp) = solve_inequality_qp(&b, &g, &je, &cev, &ji, &civ) else {
+            break; // no admissible linearized step; report the actual KKT below
         };
-        let dropped = update_multipliers(&mut active, &mut lambda, &mut nu, &mult, ne);
+        let d = qp.d;
+        lambda = qp.lambda;
+        nu = qp.nu;
         // Convergence: small step + certificate.
         let dnorm = d.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         let kkt = kkt_residual(problem, &x, &lambda, &nu);
         evals += 1;
-        if !dropped && dnorm < tol && kkt.within_tolerance(tol) {
+        if dnorm < tol && kkt.within_tolerance(tol) {
             return SqpReport {
                 x,
                 f,
@@ -345,9 +422,6 @@ pub fn sqp(
                 evals,
                 converged: true,
             };
-        }
-        if dropped {
-            continue; // re-solve with the reduced set before stepping
         }
         let step = MeritStep {
             f,
@@ -364,9 +438,6 @@ pub fn sqp(
             break; // merit stall — certificate below tells the truth
         };
         x = accepted_x;
-        // Activate violated inequalities at the new point.
-        let civ_new = checked_constraints("inequality", problem.ci, &x, Some(ni));
-        activate_violated(&mut active, &civ_new);
     }
     let (f, _) = checked_fg(&mut *problem.fg, &x);
     let kkt = kkt_residual(problem, &x, &lambda, &nu);
@@ -381,5 +452,73 @@ pub fn sqp(
         iters,
         evals,
         converged,
+    }
+}
+
+#[cfg(test)]
+mod qp_tests {
+    use super::solve_inequality_qp;
+
+    #[test]
+    fn inactive_inequalities_enter_the_qp_before_a_trial_is_taken() {
+        let q = solve_inequality_qp(
+            &[1.0, 0.0, 0.0, 1.0], &[-3.0, -4.0], &[], &[],
+            &[1.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, -1.0, 1.0, 1.0],
+            &[-1.0, -2.0, 0.0, 0.0, -4.0],
+        ).expect("feasible box QP");
+        assert!((q.d[0] - 1.0).abs() < 1e-12);
+        assert!((q.d[1] - 2.0).abs() < 1e-12);
+        for (actual, expected) in q.nu.iter().zip([2.0, 2.0, 0.0, 0.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn tighter_redundant_bound_releases_the_looser_dual_constraint() {
+        for (rows, rhs, expected) in [
+            ([-100.0, -1.0], [100.0, 2.0], [0.0, 2.0]),
+            ([-1.0, -100.0], [2.0, 100.0], [2.0, 0.0]),
+        ] {
+            let q = solve_inequality_qp(&[1.0], &[0.0], &[], &[], &rows, &rhs)
+                .expect("compatible redundant bounds");
+            assert!((q.d[0] - 2.0).abs() < 1e-12);
+            for (actual, expected) in q.nu.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_active_bounds_do_not_make_the_equality_block_singular() {
+        let q = solve_inequality_qp(
+            &[1.0, 0.0, 0.0, 1.0], &[-1.6, -0.4], &[1.0, 1.0], &[0.0],
+            &[1.0, 0.0, 2.0, 0.0], &[0.0, 0.0],
+        ).expect("duplicate inequality rows need only one active representative");
+        assert!(q.d.iter().all(|v| v.abs() < 1e-12));
+        assert!((q.lambda[0] - 0.4).abs() < 1e-12);
+        assert!((q.nu[0] + 2.0 * q.nu[1] - 1.2).abs() < 1e-12);
+        assert!(q.nu.iter().all(|v| *v >= 0.0));
+    }
+
+    #[test]
+    fn equality_rows_are_preserved_while_an_inequality_is_added() {
+        let q = solve_inequality_qp(
+            &[1.0, 0.0, 0.0, 1.0], &[-3.0, -4.0], &[1.0, 1.0], &[-1.0],
+            &[1.0, 0.0], &[0.5],
+        ).expect("compatible equality and inequality");
+        assert!((q.d[0] + 0.5).abs() < 1e-12);
+        assert!((q.d[1] - 1.5).abs() < 1e-12);
+        assert!((q.lambda[0] - 2.5).abs() < 1e-12);
+        assert!((q.nu[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inconsistent_linear_constraints_are_refused_instead_of_clipped() {
+        assert!(solve_inequality_qp(
+            &[1.0], &[0.0], &[], &[], &[1.0, -1.0], &[0.0, 1.0],
+        ).is_none());
+        assert!(solve_inequality_qp(
+            &[1.0], &[0.0], &[], &[], &[0.0], &[1.0],
+        ).is_none());
     }
 }
