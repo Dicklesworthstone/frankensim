@@ -111,6 +111,49 @@ pub struct ScheduledRenderer {
 }
 
 impl ScheduledRenderer {
+    /// Bind a complete pressure performance to the actual hosted voice clocks.
+    ///
+    /// The context sample clock must still be zero; its supplied physical state
+    /// is retained. Every voice must match `audio_rate_hz`, and every binding
+    /// must target a pressure-capable voice, even for an empty horizon. All
+    /// admission and compilation happens before any input or state is changed.
+    /// `max_work` bounds compilation visits; `max_events` bounds emitted controls.
+    ///
+    /// # Errors
+    /// Returns source compilation errors or a typed render admission refusal
+    /// for invalid voice bindings, clocks, capacity, or event budgets.
+    pub fn from_pressure_gestures(
+        context: RenderContext,
+        schedule: &GestureSchedule,
+        bindings: &[PressureGestureBinding],
+        audio_rate_hz: u32,
+        samples: u64,
+        max_work: u64,
+        max_events: usize,
+    ) -> Result<Self, GestureCompileError> {
+        let renderer = Self::new(context, Vec::new(), 0).map_err(GestureCompileError::Render)?;
+        renderer
+            .validate_sample_rate(audio_rate_hz)
+            .map_err(GestureCompileError::Render)?;
+        if renderer.samples_rendered() != 0 {
+            return Err(GestureCompileError::Invalid {
+                what: "pressure performance requires a context at sample zero",
+            });
+        }
+        for binding in bindings {
+            renderer
+                .context
+                .validate_controls(&[ControlDelta::SetBlowingPressure {
+                    voice: binding.voice,
+                    pressure_pa: 0.0,
+                }])
+                .map_err(GestureCompileError::Render)?;
+        }
+        let events =
+            compile_pressure_gestures(schedule, bindings, audio_rate_hz, samples, max_work)?;
+        Self::new(renderer.into_context(), events, max_events).map_err(GestureCompileError::Render)
+    }
+
     /// Admit a complete schedule before any controls or physical state move.
     ///
     /// Input may be unsorted. Equal-time events keep their original order.
@@ -325,6 +368,8 @@ pub struct PressureGestureBinding {
 /// Admission failures while lowering typed gestures to audio-sample controls.
 #[derive(Debug)]
 pub enum GestureCompileError {
+    /// The destination renderer refused a voice, clock, capacity or control.
+    Render(RenderError),
     /// The source schedule refused a query.
     Gesture(fs_scenario::gesture::GestureError),
     /// A named track cannot be unambiguously rendered by this adapter.
@@ -351,6 +396,7 @@ pub enum GestureCompileError {
 impl core::fmt::Display for GestureCompileError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Render(error) => write!(f, "gesture renderer: {error}"),
             Self::Gesture(error) => write!(f, "gesture schedule: {error}"),
             Self::Track { track, what } => write!(f, "gesture track {track:?}: {what}"),
             Self::Invalid { what } => write!(f, "gesture compilation: {what}"),
@@ -375,8 +421,8 @@ impl core::error::Error for GestureCompileError {}
 /// This is an OFFLINE adapter, not a second gesture interpolator or physical
 /// solver. All tracks must be pressure tracks explicitly bound to distinct
 /// voices; unsupported/unbound tracks refuse rather than silently disappear.
-/// Overlapping ramps currently refuse because the source sampler does not yet
-/// define interruption correctly. Completed voice state is never involved in
+/// Interrupted ramps inherit the current value through the source sampler.
+/// Completed voice state is never involved in
 /// compilation; pass the result to [`ScheduledRenderer::new`] to validate voice
 /// indices and kinds before rendering. The audio rate must match the voices.
 ///
@@ -384,7 +430,7 @@ impl core::error::Error for GestureCompileError {}
 /// sampler, not just emitted changes (a long held track still costs work).
 ///
 /// # Errors
-/// Invalid clocks, bindings, unsupported tracks, overlapping ramps, non-finite
+/// Invalid clocks, bindings, unsupported tracks, non-finite
 /// samples, work-budget exhaustion, or inability to allocate compiled controls.
 pub fn compile_pressure_gestures(
     schedule: &fs_scenario::gesture::GestureSchedule,
@@ -419,19 +465,16 @@ pub fn compile_pressure_gestures(
             return Err(track_error(&binding.track, "track is bound more than once"));
         }
         if !voices.insert(binding.voice) {
-            return Err(track_error(&binding.track, "voice has more than one pressure track"));
+            return Err(track_error(
+                &binding.track,
+                "voice has more than one pressure track",
+            ));
         }
         if !matches!(track.target, GestureTarget::BlowingPressure) {
-            return Err(track_error(&binding.track, "target is not a blowing-pressure input"));
-        }
-        for pair in track.events.windows(2) {
-            // Subtraction avoids overflowing time + duration for finite inputs.
-            if pair[0].transition_s > pair[1].time_s - pair[0].time_s {
-                return Err(track_error(
-                    &binding.track,
-                    "overlapping ramps need source-sampler interruption support",
-                ));
-            }
+            return Err(track_error(
+                &binding.track,
+                "target is not a blowing-pressure input",
+            ));
         }
         // Each query may scan all track ids and all events on the selected track.
         work_per_tick += schedule.tracks().len() as u128 + track.events.len() as u128 + 1;
@@ -446,14 +489,17 @@ pub fn compile_pressure_gestures(
     }
     // ceil(k*a/c) < samples iff k*a <= (samples-1)*c. u128 keeps
     // u64 sample counts times u32 rates exact without a float clock.
-    let ticks = ((u128::from(samples) - 1) * u128::from(rate))
-        / u128::from(audio_rate_hz)
-        + 1;
-    let required = ticks.checked_mul(work_per_tick).ok_or(GestureCompileError::Invalid {
-        what: "gesture sampling work bound overflows",
-    })?;
+    let ticks = ((u128::from(samples) - 1) * u128::from(rate)) / u128::from(audio_rate_hz) + 1;
+    let required = ticks
+        .checked_mul(work_per_tick)
+        .ok_or(GestureCompileError::Invalid {
+            what: "gesture sampling work bound overflows",
+        })?;
     if required > u128::from(max_work) {
-        return Err(GestureCompileError::WorkBudget { required, allowed: max_work });
+        return Err(GestureCompileError::WorkBudget {
+            required,
+            allowed: max_work,
+        });
     }
     let ticks = u64::try_from(ticks).map_err(|_| GestureCompileError::Invalid {
         what: "control tick count exceeds u64",
@@ -461,8 +507,7 @@ pub fn compile_pressure_gestures(
     let mut previous = vec![None; bindings.len()];
     let mut controls = Vec::new();
     for tick in 0..ticks {
-        let sample = (u128::from(tick) * u128::from(audio_rate_hz))
-            .div_ceil(u128::from(rate));
+        let sample = (u128::from(tick) * u128::from(audio_rate_hz)).div_ceil(u128::from(rate));
         // By the tick bound this sample is strictly less than `samples` (u64).
         let sample = u64::try_from(sample).map_err(|_| GestureCompileError::Invalid {
             what: "compiled control sample exceeds u64",
@@ -472,13 +517,18 @@ pub fn compile_pressure_gestures(
                 .sample(&binding.track, tick)
                 .map_err(GestureCompileError::Gesture)?;
             if !pressure_pa.is_finite() || pressure_pa < 0.0 {
-                return Err(track_error(&binding.track, "sample is not finite nonnegative pressure"));
+                return Err(track_error(
+                    &binding.track,
+                    "sample is not finite nonnegative pressure",
+                ));
             }
             let bits = pressure_pa.to_bits();
             if previous[index] != Some(bits) {
-                controls.try_reserve(1).map_err(|_| GestureCompileError::Invalid {
-                    what: "cannot allocate compiled gesture controls",
-                })?;
+                controls
+                    .try_reserve(1)
+                    .map_err(|_| GestureCompileError::Invalid {
+                        what: "cannot allocate compiled gesture controls",
+                    })?;
                 controls.push(ScheduledControl {
                     sample,
                     delta: ControlDelta::SetBlowingPressure {
@@ -496,7 +546,9 @@ pub fn compile_pressure_gestures(
 #[cfg(test)]
 mod pressure_gesture_tests {
     use super::*;
-    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+    use fs_scenario::gesture::{
+        GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue,
+    };
 
     fn track(id: &str) -> GestureTrack {
         GestureTrack {
@@ -512,34 +564,82 @@ mod pressure_gesture_tests {
     }
 
     fn binding(id: &str, voice: usize) -> PressureGestureBinding {
-        PressureGestureBinding { track: id.to_string(), voice }
+        PressureGestureBinding {
+            track: id.to_string(),
+            voice,
+        }
     }
 
     #[test]
     fn ramps_use_the_source_clock_not_the_audio_buffer_partition() {
         let schedule = GestureSchedule::try_new(4, vec![track("blow")]).unwrap();
-        let controls = compile_pressure_gestures(&schedule, &[binding("blow", 2)], 10, 10, 100).unwrap();
-        assert_eq!(controls, vec![
-            ScheduledControl { sample: 0, delta: ControlDelta::SetBlowingPressure { voice: 2, pressure_pa: 0.0 } },
-            ScheduledControl { sample: 3, delta: ControlDelta::SetBlowingPressure { voice: 2, pressure_pa: 1.0 } },
-            ScheduledControl { sample: 5, delta: ControlDelta::SetBlowingPressure { voice: 2, pressure_pa: 2.0 } },
-            ScheduledControl { sample: 8, delta: ControlDelta::SetBlowingPressure { voice: 2, pressure_pa: 3.0 } },
-        ]);
+        let controls =
+            compile_pressure_gestures(&schedule, &[binding("blow", 2)], 10, 10, 100).unwrap();
+        assert_eq!(
+            controls,
+            vec![
+                ScheduledControl {
+                    sample: 0,
+                    delta: ControlDelta::SetBlowingPressure {
+                        voice: 2,
+                        pressure_pa: 0.0
+                    }
+                },
+                ScheduledControl {
+                    sample: 3,
+                    delta: ControlDelta::SetBlowingPressure {
+                        voice: 2,
+                        pressure_pa: 1.0
+                    }
+                },
+                ScheduledControl {
+                    sample: 5,
+                    delta: ControlDelta::SetBlowingPressure {
+                        voice: 2,
+                        pressure_pa: 2.0
+                    }
+                },
+                ScheduledControl {
+                    sample: 8,
+                    delta: ControlDelta::SetBlowingPressure {
+                        voice: 2,
+                        pressure_pa: 3.0
+                    }
+                },
+            ]
+        );
     }
 
     #[test]
     fn nondivisor_clock_and_half_open_end_never_apply_early() {
         let mut blow = track("blow");
         blow.events = vec![
-            GestureEvent { time_s: 1.0 / 7.0, transition_s: 0.0, value: GestureValue::PressurePa(100.0) },
-            GestureEvent { time_s: 2.0 / 7.0, transition_s: 0.0, value: GestureValue::PressurePa(0.0) },
+            GestureEvent {
+                time_s: 1.0 / 7.0,
+                transition_s: 0.0,
+                value: GestureValue::PressurePa(100.0),
+            },
+            GestureEvent {
+                time_s: 2.0 / 7.0,
+                transition_s: 0.0,
+                value: GestureValue::PressurePa(0.0),
+            },
         ];
         let schedule = GestureSchedule::try_new(7, vec![blow]).unwrap();
-        let compile = |samples| compile_pressure_gestures(&schedule, &[binding("blow", 0)], 48_000, samples, 100).unwrap();
+        let compile = |samples| {
+            compile_pressure_gestures(&schedule, &[binding("blow", 0)], 48_000, samples, 100)
+                .unwrap()
+        };
         let before = compile(13_715);
-        assert_eq!(before.iter().map(|e| e.sample).collect::<Vec<_>>(), vec![0, 6_858]);
+        assert_eq!(
+            before.iter().map(|e| e.sample).collect::<Vec<_>>(),
+            vec![0, 6_858]
+        );
         let after = compile(13_716);
-        assert_eq!(after.iter().map(|e| e.sample).collect::<Vec<_>>(), vec![0, 6_858, 13_715]);
+        assert_eq!(
+            after.iter().map(|e| e.sample).collect::<Vec<_>>(),
+            vec![0, 6_858, 13_715]
+        );
     }
 
     #[test]
@@ -550,10 +650,29 @@ mod pressure_gesture_tests {
         let mut b = a.clone();
         b.id = "b".to_string();
         let schedule = GestureSchedule::try_new(100, vec![a, b]).unwrap();
-        let controls = compile_pressure_gestures(&schedule, &[binding("b", 7), binding("a", 3)], 48_000, 48_000, 1000).unwrap();
+        let controls = compile_pressure_gestures(
+            &schedule,
+            &[binding("b", 7), binding("a", 3)],
+            48_000,
+            48_000,
+            1000,
+        )
+        .unwrap();
         assert_eq!(controls.len(), 2);
-        assert_eq!(controls[0].delta, ControlDelta::SetBlowingPressure { voice: 7, pressure_pa: 1500.0 });
-        assert_eq!(controls[1].delta, ControlDelta::SetBlowingPressure { voice: 3, pressure_pa: 1500.0 });
+        assert_eq!(
+            controls[0].delta,
+            ControlDelta::SetBlowingPressure {
+                voice: 7,
+                pressure_pa: 1500.0
+            }
+        );
+        assert_eq!(
+            controls[1].delta,
+            ControlDelta::SetBlowingPressure {
+                voice: 3,
+                pressure_pa: 1500.0
+            }
+        );
         assert!(controls.iter().all(|e| e.sample == 0));
     }
 
@@ -566,37 +685,75 @@ mod pressure_gesture_tests {
             vec![binding("a", 0), binding("a", 1)],
             vec![binding("a", 0), binding("b", 0)],
         ] {
-            assert!(matches!(compile_pressure_gestures(&schedule, &bindings, 10, 10, 1000), Err(GestureCompileError::Track { .. })));
+            assert!(matches!(
+                compile_pressure_gestures(&schedule, &bindings, 10, 10, 1000),
+                Err(GestureCompileError::Track { .. })
+            ));
         }
-        let unsupported = GestureSchedule::try_new(4, vec![GestureTrack {
-            id: "pedal".to_string(), target: GestureTarget::SustainPedal,
-            initial: GestureValue::Fraction(0.0), events: Vec::new(),
-        }]).unwrap();
-        assert!(matches!(compile_pressure_gestures(&unsupported, &[binding("pedal", 0)], 10, 10, 1000), Err(GestureCompileError::Track { .. })));
+        let unsupported = GestureSchedule::try_new(
+            4,
+            vec![GestureTrack {
+                id: "pedal".to_string(),
+                target: GestureTarget::SustainPedal,
+                initial: GestureValue::Fraction(0.0),
+                events: Vec::new(),
+            }],
+        )
+        .unwrap();
+        assert!(matches!(
+            compile_pressure_gestures(&unsupported, &[binding("pedal", 0)], 10, 10, 1000),
+            Err(GestureCompileError::Track { .. })
+        ));
     }
 
     #[test]
     fn work_budget_counts_sampling_not_only_emitted_changes() {
         let schedule = GestureSchedule::try_new(4, vec![track("blow")]).unwrap();
         // Four ticks * (one track lookup + one event + one initial value).
-        assert!(matches!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 10, 11),
-            Err(GestureCompileError::WorkBudget { required: 12, allowed: 11 })));
+        assert!(matches!(
+            compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 10, 11),
+            Err(GestureCompileError::WorkBudget {
+                required: 12,
+                allowed: 11
+            })
+        ));
         assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 10, 12).is_ok());
-        assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, u64::MAX, 12).is_err());
-        assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 0, 0).unwrap().is_empty());
+        assert!(
+            compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, u64::MAX, 12).is_err()
+        );
+        assert!(
+            compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn invalid_clocks_and_unsupported_ramp_interruptions_refuse() {
+    fn invalid_clocks_refuse_and_ramp_interruptions_compile() {
         let mut schedule = GestureSchedule::try_new(4, vec![track("blow")]).unwrap();
         assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 0, 10, 100).is_err());
         assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 3, 10, 100).is_err());
         schedule.control_rate_hz = 0;
         assert!(compile_pressure_gestures(&schedule, &[binding("blow", 0)], 10, 10, 100).is_err());
         let mut blow = track("blow");
-        blow.events.push(GestureEvent { time_s: 0.5, transition_s: 0.0, value: GestureValue::PressurePa(0.0) });
+        blow.events.push(GestureEvent {
+            time_s: 0.5,
+            transition_s: 0.0,
+            value: GestureValue::PressurePa(0.0),
+        });
         let overlap = GestureSchedule::try_new(4, vec![blow]).unwrap();
-        assert!(matches!(compile_pressure_gestures(&overlap, &[binding("blow", 0)], 10, 10, 100), Err(GestureCompileError::Track { .. })));
+        let controls =
+            compile_pressure_gestures(&overlap, &[binding("blow", 0)], 10, 10, 100).unwrap();
+        assert_eq!(
+            controls.last().unwrap(),
+            &ScheduledControl {
+                sample: 5,
+                delta: ControlDelta::SetBlowingPressure {
+                    voice: 0,
+                    pressure_pa: 0.0
+                },
+            }
+        );
     }
 }
 

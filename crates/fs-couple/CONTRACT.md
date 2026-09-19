@@ -269,7 +269,13 @@ rewound). The failed block's output is partial and must be discarded.
 Subsequent block or control calls return `RenderError::Poisoned` before
 touching output, voices, or control logs; reconstruction is required.
 Request sizing and control-admission refusals do not poison a healthy context.
-`ScheduledRenderer` admits immutable `ScheduledControl` schedules and
+`ScheduledRenderer` admits immutable `ScheduledControl` schedules.
+`ScheduledRenderer::from_pressure_gestures` connects complete pressure tracks
+directly to hosted voices, requiring their actual sample periods to match the
+declared audio rate. It validates destination bindings even for an empty horizon,
+requires context sample zero, and preserves supplied physical state. Compilation
+and all admission finish before controls or simulation state advance.
+The renderer
 splits caller blocks exactly before their integer sample indices. Equal-index
 events retain input order; end-boundary events wait for the next nonempty block.
 All controls are validated and log capacity reserved before stepping. The

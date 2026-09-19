@@ -4,6 +4,7 @@
 //! BITWISE identical — schedules are replayable data, not new physics.
 
 use fs_couple::render::ReedBoreVoice;
+use fs_couple::render::schedule::{PressureGestureBinding, compile_pressure_gestures};
 use fs_couple::render::schedule::{ScheduledRenderer, pressure_gesture_controls};
 use fs_couple::render::{ControlDelta, RenderContext, RenderVoice};
 use fs_duct::{Duct, Segment, Termination};
@@ -161,8 +162,8 @@ fn pressure_gesture_binding_matches_samplewise_controls_across_partitions() {
                     value: GestureValue::PressurePa(2400.0),
                 },
                 GestureEvent {
-                    time_s: 15.0 / f64::from(RATE),
-                    transition_s: 0.0,
+                    time_s: 5.0 / f64::from(RATE),
+                    transition_s: 4.0 / f64::from(RATE),
                     value: GestureValue::PressurePa(600.0),
                 },
             ],
@@ -172,6 +173,18 @@ fn pressure_gesture_binding_matches_samplewise_controls_across_partitions() {
     let events =
         pressure_gesture_controls(&schedule, "pressure", 0, 48_000, SAMPLES as u64, 30).unwrap();
     assert_eq!(events.first().unwrap().sample, 0);
+    let compiled = compile_pressure_gestures(
+        &schedule,
+        &[PressureGestureBinding {
+            track: "pressure".into(),
+            voice: 0,
+        }],
+        48_000,
+        SAMPLES as u64,
+        120,
+    )
+    .unwrap();
+    assert_eq!(compiled, events);
     assert!(events.iter().any(|event| event.sample == 275)); // ceil(4*48000/700)
     assert!(
         pressure_gesture_controls(&schedule, "pressure", 0, 48_000, SAMPLES as u64, 29).is_err()
@@ -193,7 +206,19 @@ fn pressure_gesture_binding_matches_samplewise_controls_across_partitions() {
     assert!(expected.iter().any(|value| value.abs() > 1.0));
     for block_len in [1, 37, 480, SAMPLES] {
         let context = RenderContext::new(vec![RenderVoice::ReedBore(voice())], block_len);
-        let mut renderer = ScheduledRenderer::new(context, events.clone(), 30).unwrap();
+        let mut renderer = ScheduledRenderer::from_pressure_gestures(
+            context,
+            &schedule,
+            &[PressureGestureBinding {
+                track: "pressure".into(),
+                voice: 0,
+            }],
+            48_000,
+            SAMPLES as u64,
+            120,
+            30,
+        )
+        .unwrap();
         let mut actual = vec![0.0; SAMPLES];
         for block in actual.chunks_mut(block_len) {
             renderer.block(block).unwrap();
@@ -241,4 +266,123 @@ fn pressure_gesture_binding_refuses_invalid_inputs_and_bounds_work() {
     )
     .unwrap();
     assert!(pressure_gesture_controls(&other, "blow", 0, 48_000, 1, 1).is_err());
+}
+
+#[test]
+fn pressure_performance_admits_the_actual_voice_clock_and_complete_bindings() {
+    use fs_couple::render::schedule::GestureCompileError;
+    let schedule = schedule(100);
+    let bindings = [PressureGestureBinding {
+        track: "blow".into(),
+        voice: 0,
+    }];
+    let context = || RenderContext::new(vec![RenderVoice::ReedBore(voice())], 37);
+    assert!(matches!(
+        ScheduledRenderer::from_pressure_gestures(
+            context(),
+            &schedule,
+            &bindings,
+            44_100,
+            480,
+            100,
+            10,
+        ),
+        Err(GestureCompileError::Render(_))
+    ));
+    // An empty horizon must not bypass bad destination indices.
+    assert!(matches!(
+        ScheduledRenderer::from_pressure_gestures(
+            context(),
+            &schedule,
+            &[PressureGestureBinding {
+                track: "blow".into(),
+                voice: 1
+            }],
+            48_000,
+            0,
+            0,
+            0,
+        ),
+        Err(GestureCompileError::Render(_))
+    ));
+    assert!(matches!(
+        ScheduledRenderer::from_pressure_gestures(
+            context(),
+            &schedule,
+            &bindings,
+            48_000,
+            480,
+            100,
+            0,
+        ),
+        Err(GestureCompileError::Render(_))
+    ));
+    let mut advanced = context();
+    advanced.block(&mut [0.0]).unwrap();
+    assert!(matches!(
+        ScheduledRenderer::from_pressure_gestures(advanced, &schedule, &bindings, 48_000, 0, 0, 0,),
+        Err(GestureCompileError::Invalid { .. })
+    ));
+    let admitted = ScheduledRenderer::from_pressure_gestures(
+        context(),
+        &schedule,
+        &bindings,
+        48_000,
+        480,
+        100,
+        10,
+    )
+    .unwrap();
+    assert_eq!(admitted.samples_rendered(), 0);
+    assert!(admitted.applied_controls().is_empty());
+    assert_eq!(admitted.pending_controls().len(), 1);
+}
+
+/// G0: exact analytical values across ramp-to-ramp and ramp-to-step interruption.
+#[test]
+fn interrupted_gesture_ramps_start_from_the_current_value() {
+    let schedule = GestureSchedule::try_new(
+        8,
+        vec![GestureTrack {
+            id: "pressure".into(),
+            target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(10.0),
+            events: vec![
+                GestureEvent {
+                    time_s: 0.0,
+                    transition_s: 1.0,
+                    value: GestureValue::PressurePa(50.0),
+                },
+                GestureEvent {
+                    time_s: 0.25,
+                    transition_s: 0.5,
+                    value: GestureValue::PressurePa(4.0),
+                },
+                GestureEvent {
+                    time_s: 0.5,
+                    transition_s: 0.0,
+                    value: GestureValue::PressurePa(30.0),
+                },
+                GestureEvent {
+                    time_s: 0.75,
+                    transition_s: 0.25,
+                    value: GestureValue::PressurePa(14.0),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let decoded = GestureSchedule::from_canonical_bytes(&schedule.to_canonical_bytes()).unwrap();
+    for source in [&schedule, &decoded] {
+        for (tick, expected) in [10.0, 15.0, 20.0, 16.0, 30.0, 30.0, 30.0, 22.0, 14.0]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                source.sample("pressure", tick as u64).unwrap(),
+                expected,
+                "tick {tick}"
+            );
+        }
+    }
 }

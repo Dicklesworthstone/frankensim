@@ -339,7 +339,9 @@ flagships.
   zero declares release, while signed tangential velocity permits either
   stroke direction. The decoder enforces the same domain. Sampling is a
   pure function of the integer control tick (fixed control clock, no
-  wall time); continuous targets ramp linearly, event targets belong
+  wall time); continuous targets ramp linearly. A command during a ramp
+  interrupts it at the current value: a replacement ramp starts there,
+  while a step applies immediately. Event targets belong
   to exactly one tick and take step events only. Canonical bytes +
   domain-separated content hash make a performance a receipt-able,
   replayable artifact; decode re-runs every admission law. An unknown

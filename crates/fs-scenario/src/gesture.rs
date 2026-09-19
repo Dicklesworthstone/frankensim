@@ -442,6 +442,8 @@ impl GestureSchedule {
     /// Sample a CONTINUOUS track at control tick `tick` (linear ramp
     /// over each event's transition; deterministic pure function of the
     /// integer tick).
+    /// A later event interrupts an unfinished ramp at its current value; a new
+    /// ramp starts from that value, while a step replaces it immediately.
     ///
     /// # Errors
     /// [`GestureError::UnknownControlId`]; `Invalid` for event tracks.
@@ -458,17 +460,24 @@ impl GestureSchedule {
         }
         let t = tick as f64 / f64::from(self.control_rate_hz);
         let mut value = track.initial.scalar().expect("continuous by admission");
-        for event in &track.events {
+        for (index, event) in track.events.iter().enumerate() {
             let target = event.value.scalar().expect("continuous by admission");
             if t < event.time_s {
                 break;
             }
-            if event.transition_s > 0.0 && t < event.time_s + event.transition_s {
-                let f = (t - event.time_s) / event.transition_s;
+            // Advance this ramp only as far as the next command, even when the
+            // requested tick lies beyond it. That value seeds the next ramp.
+            let until = track
+                .events
+                .get(index + 1)
+                .map_or(t, |next| t.min(next.time_s));
+            let elapsed = until - event.time_s;
+            if event.transition_s > 0.0 && elapsed < event.transition_s {
+                let f = elapsed / event.transition_s;
                 value += (target - value) * f;
-                break;
+            } else {
+                value = target;
             }
-            value = target;
         }
         Ok(value)
     }
