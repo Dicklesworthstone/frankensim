@@ -1,0 +1,29 @@
+name: Piano physics smoke
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  piano:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[piano-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize the repository's pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test the piano implementation
+        run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
+      - name: Render a physical-model smoke note
+        run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piano-smoke
+          path: piano-smoke.wav
+          retention-days: 7
