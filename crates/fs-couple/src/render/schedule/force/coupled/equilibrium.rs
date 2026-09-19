@@ -3,6 +3,8 @@ use super::*;
 
 mod preload;
 mod normal;
+mod free;
+use free::FreeResponse;
 
 impl CoupledModalSystem {
     /// Establish a settled equilibrium of the COMPLETE spring-connected network.
@@ -11,6 +13,9 @@ impl CoupledModalSystem {
     /// window; returned storage is not a measured work history. This offline
     /// initialization allocates, uses the same setup-size cap as construction,
     /// and publishes no states on a cancellation, residual or budget refusal.
+    /// Explicit free coordinates are legal only when the declared bilateral
+    /// springs constrain all of them. No artificial tether or pose is supplied.
+    /// The additional bounded support solve uses at most max_connections rows.
     pub fn initialize_static_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalCouplingError>
     {
@@ -37,6 +42,8 @@ impl CoupledModalSystem {
     /// accepted network unchanged. This method does not attach the contacts:
     /// pass these same descriptions to ContactModalSystem/MultiContactModalSystem
     /// to continue their dynamics, and retain the held forces until release.
+    /// Free coordinates require an independently supported bilateral network;
+    /// a mass supported ONLY by unilateral contacts remains outside this solve.
     pub fn initialize_contact_equilibrium(
         &mut self,
         external: &[f64],
@@ -111,22 +118,35 @@ struct StaticResponse {
     roots: Vec<f64>,
     matrix: Vec<f64>,
     factor: Cholesky,
+    free: Option<FreeResponse>,
 }
 impl StaticResponse {
     fn new(network: &CoupledModalSystem, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
+        let free_count = network.models.iter().flat_map(|m| m.modes())
+            .filter(|m| m.angular_frequency_rad_s == 0.0).count();
+        FreeResponse::admit(network, free_count)?;
+        let mut indices = Vec::with_capacity(free_count);
         let mut compliance = Vec::with_capacity(network.mode_count());
         for model in &network.models {
             poll(Some(gate))?;
             for mode in model.modes() {
-                let d = finite((mode.angular_frequency_rad_s * mode.angular_frequency_rad_s).recip())?;
-                if d <= 0.0 { return Err(invalid("positive static modal compliance is not representable")); }
-                compliance.push(d);
+                if mode.angular_frequency_rad_s == 0.0 {
+                    indices.push(compliance.len());
+                    compliance.push(0.0); // placeholder; free positions come from the support solve
+                } else {
+                    let d = finite((mode.angular_frequency_rad_s * mode.angular_frequency_rad_s).recip())?;
+                    if d <= 0.0 { return Err(invalid("positive static modal compliance is not representable")); }
+                    compliance.push(d);
+                }
             }
         }
         let roots: Vec<f64> = network.connections.iter().map(|c| c.stiffness_n_m.sqrt()).collect();
         let matrix = connection_matrix(&network.columns, &compliance, &roots, Some(gate))?;
         let factor = cholesky(&matrix, roots.len()).map_err(ModalCouplingError::Factor)?;
-        Ok(Self { compliance, roots, matrix, factor })
+        let free = if indices.is_empty() { None } else {
+            Some(FreeResponse::new(network, indices, &roots, &matrix, &factor, gate)?)
+        };
+        Ok(Self { compliance, roots, matrix, factor, free })
     }
 
     fn solve(&self, network: &CoupledModalSystem, external: &[f64], include_rest: bool,
@@ -141,6 +161,13 @@ impl StaticResponse {
         let mut solution = rhs.clone();
         self.factor.solve(&mut solution);
         check_solve(&self.matrix, &solution, &rhs, network.config.solve_relative_tolerance)?;
+        let free_q = if let Some(free) = &self.free {
+            let q = free.complete(external, &mut rhs, &solution, network.config.solve_relative_tolerance, gate)?;
+            solution.copy_from_slice(&rhs);
+            self.factor.solve(&mut solution);
+            check_solve(&self.matrix, &solution, &rhs, network.config.solve_relative_tolerance)?;
+            Some(q)
+        } else { None };
         let mut total = external.to_vec();
         for (j, column) in network.columns.iter().enumerate() {
             poll(Some(gate))?;
@@ -150,6 +177,10 @@ impl StaticResponse {
             }
             for (g,b) in total.iter_mut().zip(column) { *g = finite(*g + b*reaction)?; }
         }
-        self.compliance.iter().zip(total).map(|(d,g)| finite(d*g)).collect()
+        let mut q: Vec<f64> = self.compliance.iter().zip(total).map(|(d,g)| finite(d*g)).collect::<Result<_,_>>()?;
+        if let (Some(free), Some(free_q)) = (&self.free, &free_q) {
+            free.check_and_insert(external, &solution, free_q, &mut q, network.config.solve_relative_tolerance, gate)?;
+        }
+        Ok(q)
     }
 }
