@@ -188,3 +188,5 @@ fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
 
 /// Bounded geometry/material/force-file input for the existing plate reduction.
 pub mod file;
+/// Nonlinear shell/film impact with physical striker and hysteretic felt storage.
+pub mod impact;
