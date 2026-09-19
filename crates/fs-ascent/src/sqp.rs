@@ -35,7 +35,7 @@ pub struct SqpReport {
     pub nu: Vec<f64>,
     /// SQP iterations.
     pub iters: usize,
-    /// Objective/constraint evaluations.
+    /// Objective+gradient callback calls, including validation and KKT checks.
     pub evals: usize,
     /// Certificate below tolerance.
     pub converged: bool,
@@ -122,7 +122,22 @@ fn solve_qp(
     for r in 0..m {
         rhs[n + r] = -c[r];
     }
+    let original_rhs = rhs.clone();
     fact.solve(&mut rhs);
+    // Reuse the dense factor for two residual corrections. Large physical
+    // multipliers otherwise lose the much smaller feasibility step through
+    // cancellation, especially when constraint units rescale the KKT rows.
+    for _ in 0..2 {
+        let mut correction: Vec<f64> = kkt.chunks_exact(dim)
+            .zip(&original_rhs)
+            .map(|(row, initial)| row.iter().zip(&rhs)
+                .fold(*initial, |r, (a, x)| (-a).mul_add(*x, r)))
+            .collect();
+        fact.solve(&mut correction);
+        for (value, change) in rhs.iter_mut().zip(correction) {
+            *value += change;
+        }
+    }
     if rhs.iter().any(|value| !value.is_finite()) {
         return None;
     }
@@ -131,24 +146,10 @@ fn solve_qp(
     Some((d, mult))
 }
 
-/// ℓ1 merit: f + w·(‖c_e‖₁ + ‖max(0, c_i)‖₁).
-fn merit_of(
-    problem: &mut ConstrainedProblem<'_>,
-    xx: &[f64],
-    w: f64,
-    ev: &mut usize,
-    ne: usize,
-    ni: usize,
-) -> f64 {
-    let (fv, _) = checked_fg(&mut *problem.fg, xx);
-    *ev += 1;
-    let ce_v = checked_constraints("equality", problem.ce, xx, Some(ne));
-    let ci_v = checked_constraints("inequality", problem.ci, xx, Some(ni));
-    let viol: f64 =
-        ce_v.iter().map(|c| c.abs()).sum::<f64>() + ci_v.iter().map(|c| c.max(0.0)).sum::<f64>();
-    let merit = w.mul_add(viol, fv);
-    assert!(merit.is_finite(), "SQP merit value must remain finite");
-    merit
+/// Unweighted violation used by the exact ℓ1 merit.
+fn violation(ce: &[f64], ci: &[f64]) -> f64 {
+    ce.iter().map(|c| c.abs()).sum::<f64>()
+        + ci.iter().map(|c| c.max(0.0)).sum::<f64>()
 }
 
 fn active_constraints(problem: &ConstrainedProblem<'_>, x: &[f64], ni: usize) -> Vec<usize> {
@@ -215,6 +216,8 @@ fn update_multipliers(
 }
 
 struct MeritStep<'a> {
+    f: f64,
+    violation: f64,
     x: &'a [f64],
     d: &'a [f64],
     g: &'a [f64],
@@ -229,9 +232,23 @@ fn accept_merit_step(
     evals: &mut usize,
     ne: usize,
     ni: usize,
+    penalty: &mut f64,
 ) -> Option<Vec<f64>> {
     let n = step.x.len();
-    let m0 = merit_of(problem, step.x, 10.0, evals, ne, ni);
+    // Exact-penalty descent requires a weight above the QP multiplier norm.
+    // A fixed weight can forbid every feasibility-restoring step when the
+    // physical objective or the constraint units change. Never lower a weight
+    // already established by earlier iterations.
+    let multiplier_norm = step.lambda.iter().chain(step.nu)
+        .map(|v| v.abs()).fold(0.0f64, f64::max);
+    *penalty = (*penalty).max(1.1 * multiplier_norm);
+    let gd: f64 = step.g.iter().zip(step.d).map(|(g, d)| g * d).sum();
+    // The QP step satisfies the linearized constraints, so this is an upper
+    // bound on the one-sided directional derivative of the ℓ1 merit.
+    let slope = gd - *penalty * step.violation;
+    if !penalty.is_finite() || !slope.is_finite() || slope >= 0.0 {
+        return None;
+    }
     let mut alpha = 1.0f64;
     for _ in 0..40 {
         let xt: Vec<f64> = step
@@ -240,9 +257,18 @@ fn accept_merit_step(
             .zip(step.d)
             .map(|(xi, di)| alpha.mul_add(*di, *xi))
             .collect();
-        if merit_of(problem, &xt, 10.0, evals, ne, ni) < m0 - 1e-12 {
-            let (_, gt) = checked_fg(&mut *problem.fg, &xt);
-            *evals += 1;
+        if xt.as_slice() == step.x || xt.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let (ft, gt) = checked_fg(&mut *problem.fg, &xt);
+        *evals += 1;
+        let cet = checked_constraints("equality", problem.ce, &xt, Some(ne));
+        let cit = checked_constraints("inequality", problem.ci, &xt, Some(ni));
+        // Compare changes rather than subtracting two large penalized totals.
+        // Armijo scales with the proposed improvement: there is no absolute
+        // 1e-12 floor that strands small-amplitude physical objectives.
+        let change = (ft - step.f) + *penalty * (violation(&cet, &cit) - step.violation);
+        if change.is_finite() && change < 0.0 && change <= 1e-4 * alpha * slope {
             let pull_e = checked_jt("equality", problem.ce_jt, &xt, step.lambda);
             let pull_i = checked_jt("inequality", problem.ci_jt, &xt, step.nu);
             let pull_e0 = checked_jt("equality", problem.ce_jt, step.x, step.lambda);
@@ -285,7 +311,8 @@ pub fn sqp(
     for i in 0..n {
         b[i * n + i] = 1.0;
     }
-    let mut evals = 0usize;
+    let mut evals = 1usize; // validate_problem_at_start evaluates fg once.
+    let mut penalty = 10.0f64;
     let mut iters = 0usize;
     // Working set: active inequality indices (violated-or-near ones).
     let mut active = active_constraints(problem, &x, ni);
@@ -323,13 +350,17 @@ pub fn sqp(
             continue; // re-solve with the reduced set before stepping
         }
         let step = MeritStep {
+            f,
+            violation: violation(&cev, &civ),
             x: &x,
             d: &d,
             g: &g,
             lambda: &lambda,
             nu: &nu,
         };
-        let Some(accepted_x) = accept_merit_step(problem, &step, &mut b, &mut evals, ne, ni) else {
+        let Some(accepted_x) =
+            accept_merit_step(problem, &step, &mut b, &mut evals, ne, ni, &mut penalty)
+        else {
             break; // merit stall — certificate below tells the truth
         };
         x = accepted_x;
@@ -339,6 +370,7 @@ pub fn sqp(
     }
     let (f, _) = checked_fg(&mut *problem.fg, &x);
     let kkt = kkt_residual(problem, &x, &lambda, &nu);
+    evals += 2;
     let converged = kkt.within_tolerance(tol);
     SqpReport {
         x,
