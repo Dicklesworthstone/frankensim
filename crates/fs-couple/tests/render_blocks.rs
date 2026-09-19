@@ -322,6 +322,125 @@ fn controls_apply_between_blocks_and_are_logged() {
     ));
 }
 
+fn controlled_modal_model() -> ModalAcousticTimeModel {
+    ModalAcousticTimeModel::try_new(
+        RATE,
+        [220.0, 330.0]
+            .into_iter()
+            .map(|hz| ModalAcousticMode {
+                angular_frequency_rad_s: 2.0 * core::f64::consts::PI * hz,
+                damping_ratio: 0.01,
+                pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
+            })
+            .collect(),
+        ModalAcousticTimeBudget::audible_reference(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn modal_force_controls_preserve_vibration_across_release_and_reexcitation() {
+    let phases = [[0.5, -0.25], [0.0, 0.0], [-0.4, 0.3]];
+    let mut direct = controlled_modal_model();
+    let mut expected = Vec::new();
+    for forces in phases {
+        for _ in 0..256 {
+            expected.push(direct.step(&forces).unwrap().observer_pressure_pa);
+        }
+    }
+    assert!(
+        expected[256..512].iter().any(|p| p.abs() > 1e-6),
+        "releasing the input must retain actual ringdown"
+    );
+    for block_len in [1, 37, 256] {
+        let voice = ModalStringVoice::new(controlled_modal_model(), vec![0.0; 2]).unwrap();
+        let mut context = RenderContext::new(vec![RenderVoice::ModalString(voice)], 256);
+        let mut actual = vec![0.0; expected.len()];
+        for (phase, forces) in phases.into_iter().enumerate() {
+            let boundary = context.blocks_rendered();
+            let deltas = [0, 1].map(|mode| ControlDelta::SetModalForce {
+                voice: 0,
+                mode,
+                force_n_per_sqrt_kg: forces[mode],
+            });
+            context.apply_controls(&deltas).unwrap();
+            assert!(
+                context.control_log()[phase * 2..]
+                    .iter()
+                    .all(|entry| entry.block_index == boundary && entry.lift.is_empty())
+            );
+            for block in actual[phase * 256..(phase + 1) * 256].chunks_mut(block_len) {
+                context.block(block).unwrap();
+            }
+        }
+        assert!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "force scheduling must equal direct physics at block length {block_len}"
+        );
+    }
+}
+
+#[test]
+fn modal_force_batches_refuse_atomically() {
+    let make = || {
+        RenderContext::new(
+            vec![RenderVoice::ModalString(
+                ModalStringVoice::new(controlled_modal_model(), vec![0.0; 2]).unwrap(),
+            )],
+            32,
+        )
+    };
+    let valid = ControlDelta::SetModalForce {
+        voice: 0,
+        mode: 0,
+        force_n_per_sqrt_kg: 1.0,
+    };
+    for invalid in [
+        ControlDelta::SetModalForce {
+            voice: 0,
+            mode: 2,
+            force_n_per_sqrt_kg: 1.0,
+        },
+        ControlDelta::SetModalForce {
+            voice: 7,
+            mode: 0,
+            force_n_per_sqrt_kg: 1.0,
+        },
+        ControlDelta::SetModalForce {
+            voice: 0,
+            mode: 0,
+            force_n_per_sqrt_kg: f64::NAN,
+        },
+        ControlDelta::SetModalForce {
+            voice: 0,
+            mode: 0,
+            force_n_per_sqrt_kg: f64::INFINITY,
+        },
+        ControlDelta::SetBlowingPressure {
+            voice: 0,
+            pressure_pa: 1.0,
+        },
+    ] {
+        let mut context = make();
+        assert!(context.apply_controls(&[valid, invalid]).is_err());
+        assert!(context.control_log().is_empty());
+        let mut actual = [0.0; 32];
+        let mut expected = [0.0; 32];
+        context.block(&mut actual).unwrap();
+        make().block(&mut expected).unwrap();
+        assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+    }
+    let mut reed = RenderContext::new(vec![RenderVoice::ReedBore(reed_voice())], 32);
+    assert!(matches!(
+        reed.apply_controls(&[valid]),
+        Err(RenderError::Control { .. })
+    ));
+    assert!(reed.control_log().is_empty());
+}
+
 #[test]
 fn oversized_and_empty_blocks_refuse_before_state_moves() {
     let mut context = RenderContext::new(vec![RenderVoice::ReedBore(reed_voice())], 128);

@@ -427,7 +427,7 @@ pub struct BowedRunLog {
     pub radiated_pressure_pa: Vec<f64>,
     /// Final total modal energy [J].
     pub final_total_energy_j: f64,
-    /// Peak total modal energy observed during the run [J].
+    /// Peak total modal energy [J], including the initial resting state.
     pub peak_total_energy_j: f64,
 }
 
@@ -607,7 +607,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         body_volume_velocity_m3_s: Vec::new(),
         radiated_pressure_pa: Vec::new(),
         final_total_energy_j: 0.0,
-        peak_total_energy_j: f64::MIN,
+        peak_total_energy_j: 0.0,
     };
     let mut plate: Option<(CompactBody, f64)> = match &config.termination {
         Termination::PlateOnePort { body, ambient } => {
@@ -631,7 +631,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     const CAPTURE_BASIN_M_S: f64 = 0.15;
     let mut stuck = false;
     let mut prev_v_rel = f64::NAN;
-    let mut peak_energy_j = f64::MIN;
+    let mut peak_energy_j = frame_total_energy(&model);
 
     for _ in 0..config.steps {
         for _ in 0..subsamples {

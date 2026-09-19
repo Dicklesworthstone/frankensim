@@ -356,6 +356,16 @@ impl ModalStringVoice {
 /// their track beads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlDelta {
+    /// Replace one retained mode's held generalized force without changing state.
+    /// Zero releases this input; existing vibration continues to decay.
+    SetModalForce {
+        /// Voice index in the context.
+        voice: usize,
+        /// Zero-based index in the voice's admitted modal basis.
+        mode: usize,
+        /// Signed mass-normalized generalized force [N/sqrt(kg)].
+        force_n_per_sqrt_kg: f64,
+    },
     /// Replace a reed voice's held blowing pressure [Pa].
     SetBlowingPressure {
         /// Voice index in the context.
@@ -477,6 +487,32 @@ impl RenderContext {
         // Validate everything first: control application is transactional.
         for delta in deltas {
             match delta {
+                ControlDelta::SetModalForce {
+                    voice,
+                    mode,
+                    force_n_per_sqrt_kg,
+                } => {
+                    if !force_n_per_sqrt_kg.is_finite() {
+                        return Err(RenderError::Control {
+                            what: "modal force must be finite N/sqrt(kg)",
+                        });
+                    }
+                    match self.voices.get(*voice) {
+                        Some(RenderVoice::ModalString(string)) => {
+                            if *mode >= string.held_force.len() {
+                                return Err(RenderError::Control {
+                                    what: "modal force index is outside the admitted basis",
+                                });
+                            }
+                        }
+                        Some(RenderVoice::ReedBore(_)) => {
+                            return Err(RenderError::Control {
+                                what: "a reed voice has no retained modal-force input",
+                            });
+                        }
+                        None => return Err(RenderError::UnknownVoice { index: *voice }),
+                    }
+                }
                 ControlDelta::SetBlowingPressure { voice, pressure_pa } => {
                     if !pressure_pa.is_finite() || *pressure_pa < 0.0 {
                         return Err(RenderError::Control {
@@ -499,17 +535,26 @@ impl RenderContext {
         }
         for delta in deltas {
             match delta {
+                ControlDelta::SetModalForce {
+                    voice,
+                    mode,
+                    force_n_per_sqrt_kg,
+                } => {
+                    if let Some(RenderVoice::ModalString(string)) = self.voices.get_mut(*voice) {
+                        string.held_force[*mode] = *force_n_per_sqrt_kg;
+                    }
+                }
                 ControlDelta::SetBlowingPressure { voice, pressure_pa } => {
                     if let Some(RenderVoice::ReedBore(reed)) = self.voices.get_mut(*voice) {
                         reed.set_blowing_pressure(*pressure_pa);
                     }
-                    self.controls_applied.push(ControlRecord {
-                        block_index: self.blocks_rendered,
-                        delta: *delta,
-                        lift: "", // pure input-parameter move; no state lifted
-                    });
                 }
             }
+            self.controls_applied.push(ControlRecord {
+                block_index: self.blocks_rendered,
+                delta: *delta,
+                lift: "", // pure input-parameter move; no state lifted
+            });
         }
         Ok(())
     }

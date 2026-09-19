@@ -382,6 +382,23 @@ fn config(gesture: BowGesture, island: FrictionIsland, steps: usize) -> BowedRun
 }
 
 #[test]
+fn empty_bowed_run_reports_rest_energy_without_samples() {
+    let log = run_bowed(&config(
+        playable_gesture(),
+        FrictionIsland::Stribeck(rosin()),
+        0,
+    ))
+    .expect("an admitted empty run stays at rest");
+    assert!(log.bow_point_velocity_m_s.is_empty());
+    assert!(log.relative_velocity_m_s.is_empty());
+    assert!(log.bridge_force_n.is_empty());
+    assert!(log.body_volume_velocity_m3_s.is_empty());
+    assert!(log.radiated_pressure_pa.is_empty());
+    assert_eq!(log.final_total_energy_j.to_bits(), 0.0_f64.to_bits());
+    assert_eq!(log.peak_total_energy_j.to_bits(), 0.0_f64.to_bits());
+}
+
+#[test]
 fn gesture_admission_refuses_nonphysical_inputs() {
     assert_eq!(
         BowGesture::admit(0.2, -1.0, 0.11),

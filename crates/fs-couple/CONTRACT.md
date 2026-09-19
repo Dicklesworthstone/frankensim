@@ -243,7 +243,13 @@ advances them one block at a time into a pre-sized scratch buffer.
 INVARIANTS: a block boundary performs no arithmetic, so block size is a
 pure loop-partition choice — the one-shot path and every block partition
 are bitwise-identical (tested at 64/571/full); typed `ControlDelta`s
-apply only BETWEEN blocks, transactionally, and are logged as
+apply only BETWEEN blocks, transactionally.
+`SetModalForce` changes one mass-normalized held force [N/sqrt(kg)] in an
+admitted modal voice, preserving displacement, velocity and its physical clock.
+Zero force releases the input without silencing or resetting the resonator.
+All voice/mode indices and force values in a batch are checked before any
+input or control log changes. This exposes generalized excitation, not a
+spatial pluck/contact law or an automatic score scheduler. Controls are logged as
 `ControlRecord`s carrying their D17 lift description (empty = pure input
 move); cancellation (`render_under_gate` over `fs_exec::CancelGate`) is
 polled only at block boundaries with drain semantics — an in-flight
