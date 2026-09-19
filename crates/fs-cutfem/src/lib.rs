@@ -8,8 +8,8 @@
 //! quadtree IS the octree restricted to two axes, sharing the
 //! FrankenVDB dyadic-tile alignment (cells at level ℓ are 2⁻ℓ dyadic
 //! boxes; a leaf at the tile depth is one FrankenVDB leaf face). The
-//! 3D adaptive octree instantiation remains a recorded no-claim;
-//! the 3-D `elastic3` path uses a fixed Cartesian background.
+//! `octree3` module supplies bounded local refinement and Q1 constraints;
+//! the 3-D `elastic3` path currently uses a fixed Cartesian background.
 //!
 //! The pipeline, module by module:
 //! - [`sdf`]: the [`CutSdf`] trait — a level-set function plus a
@@ -55,6 +55,7 @@ pub mod elastic;
 pub mod elastic3;
 pub mod fem;
 pub mod grid;
+pub mod octree3;
 pub mod quad;
 pub mod quad3;
 pub mod sdf;
