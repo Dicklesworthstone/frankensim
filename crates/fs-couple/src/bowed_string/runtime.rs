@@ -12,6 +12,9 @@ use crate::stribeck_friction::StribeckFriction;
 use crate::thin_plate::CompactBody;
 use fs_exec::CancelGate;
 
+/// Sample-clock binding of physical bow gesture tracks to this retained state.
+pub mod schedule;
+
 /// One completed audio sample. All mechanical channels describe the endpoint.
 /// A rigid termination has no acoustic observer: its acoustic channels are None,
 /// never velocity mislabeled as pressure.
