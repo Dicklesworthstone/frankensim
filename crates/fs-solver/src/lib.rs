@@ -24,6 +24,8 @@ pub mod krylov;
 pub mod mixed;
 pub mod nonlinear;
 pub mod op;
+/// Bounded PSD nonnegative quadratic baseline; no adjoint/uniqueness claim.
+pub mod orthant;
 pub mod pmg;
 pub mod stokes;
 
@@ -53,7 +55,7 @@ pub use stokes::{StokesBlockDiag, StokesOp, StokesSystem};
 pub use fs_spectral as spectral_service;
 
 /// Deterministic inner product: elementwise products folded through
-/// the fixed-shape chunked combiner (shape = f(length) only).
+/// the fixed-shape chunked combiner (shape = f(length) only, never on threads).
 #[must_use]
 pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len(), "dot length mismatch");
