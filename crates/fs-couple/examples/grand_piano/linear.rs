@@ -30,6 +30,10 @@ use fs_material::visco::GeneralizedMaxwell;
 use fs_math::{c64::C64, det};
 use super::geometry::Course;
 
+/// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
+/// This is a memory/work ceiling, not a claim that every size is real-time.
+pub const MAX_BOARD_MODES: usize = 128;
+
 #[derive(Clone, Debug)]
 pub struct BoardMode {
     pub frequency_hz: f64,
@@ -123,6 +127,50 @@ fn inverse_spd(a: &[f64], n: usize) -> Result<Vec<f64>, String> {
     Ok(inverse)
 }
 
+/// Exact half-step velocity flow of the PHYSICAL bare-board damping after
+/// string mass loading: C_loaded = Phi^T diag(2*zeta_i*omega_i) Phi.
+/// The original per-mode loss is retained, including its off-diagonal terms.
+/// Eigenanalysis and exponentials are cold, using the existing fs-modal owner.
+/// Splitting this dissipative flow around the conservative bridge step is
+/// second-order, not the exact full damped coupled propagator.
+fn board_damping_flow(board: &[BoardMode], basis: &[f64], rate: u32)
+    -> Result<Vec<f64>, String> {
+    let r=board.len();
+    let mut c=vec![0.0;r*r];
+    for i in 0..r { for j in i..r {
+        let value: f64=board.iter().enumerate().map(|(a,b)|
+            2.0*b.damping_ratio*TAU*b.frequency_hz*basis[a*r+i]*basis[a*r+j]).sum();
+        c[i*r+j]=value;c[j*r+i]=value;
+    } }
+    let scale=c.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+    if !scale.is_finite() {return Err("loaded board damping overflow".into());}
+    if scale==0.0 {return Ok(identity(r));}
+    let eigen=fs_modal::eigh_gen_dense(&c,&identity(r),r).map_err(|e|e.to_string())?;
+    let tolerance=1e-10*scale*r as f64;
+    let mut flow=vec![0.0;r*r];
+    for pair in eigen {
+        if !pair.lambda.is_finite() || pair.lambda < -tolerance
+            || !pair.residual.is_finite() || pair.residual > tolerance {
+            return Err("physical board damping is not resolved positive semidefinite".into());
+        }
+        // A zero-loss direction can have a roundoff-negative eigenvalue.
+        // Only the scale-aware numerical nullspace is projected to zero.
+        let decay=det::exp(-0.5*pair.lambda.max(0.0)/f64::from(rate));
+        for i in 0..r { for j in 0..r {flow[i*r+j]+=decay*pair.phi[i]*pair.phi[j];} }
+    }
+    Ok(flow)
+}
+
+/// No allocation. Workless damping changes kinetic energy only. Reporting
+/// the actual norm difference closes the same floating-point energy ledger.
+fn damp_board(flow: &[f64], from: &[f64], to: &mut [f64]) -> f64 {
+    let r=from.len();
+    for (i,out) in to.iter_mut().enumerate() {
+        *out=flow[i*r..(i+1)*r].iter().zip(from).map(|(a,v)|a*v).sum();
+    }
+    0.5*from.iter().zip(to).map(|(a,b)|a*a-*b * *b).sum::<f64>()
+}
+
 pub struct Bank {
     pub strings: Vec<StringPort>,
     pub modes: Vec<StringMode>,
@@ -143,6 +191,9 @@ pub struct Bank {
     diagonal_omega2: Vec<f64>,
     pub last_modal_loss_j: f64,
     physical_board_k: Vec<f64>,
+    board_half_damping: Option<Vec<f64>>,
+    damped_board_v: Vec<f64>,
+    board_pre_loss: f64,
     board_volume: Vec<f64>,
     /// Columns map loaded coordinates to the supplied bare-board coordinates.
     board_basis: Vec<f64>,
@@ -161,7 +212,7 @@ impl Bank {
     pub fn new(courses: &[Course], board: &[BoardMode], rate: u32, band_hz: f64,
         max_modes: usize, damping: bool) -> Result<Self, String> {
         let r = board.len();
-        if courses.is_empty() || courses.len() > 88 || !(1..=32).contains(&r)
+        if courses.is_empty() || courses.len() > 88 || !(1..=MAX_BOARD_MODES).contains(&r)
             || !(1..=128).contains(&max_modes) || rate < 8_000
             || !band_hz.is_finite() || band_hz <= 0.0 || band_hz > 0.45*f64::from(rate) {
             return Err("invalid course, modal, frequency or sample-rate budget".into());
@@ -269,12 +320,14 @@ impl Bank {
             physical_board_k[j*r+i] = value;
         } }
         let board_volume: Vec<f64> = eig.iter().map(|e| board.iter().zip(&e.phi).map(|(b,p)| b.volume*p).sum()).collect();
+        let board_half_damping=if damping && board.iter().any(|b|b.damping_ratio>0.0) {
+            Some(board_damping_flow(board,&board_basis,rate)?)
+        } else {None};
         for e in &eig {
-            // Loaded-coordinate modal damping is an authored reduction. It
-            // is not an exact transform of the original nonproportional C.
-            let zeta = if damping { board.iter().map(|b| b.damping_ratio).sum::<f64>()/r as f64 } else { 0.0 };
+            // Board damping belongs to the physical matrix flow, not to an
+            // invented mean loss on the loaded diagonal oscillator basis.
             oscillator.push(ModalAcousticMode { angular_frequency_rad_s: det::sqrt(e.lambda),
-                damping_ratio: zeta, pressure_per_modal_velocity: C64::new(0.0,0.0) });
+                damping_ratio: 0.0, pressure_per_modal_velocity: C64::new(0.0,0.0) });
         }
         let transition = transitions(rate, &oscillator)?;
         let n = modes.len();
@@ -310,6 +363,7 @@ impl Bank {
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
             free_contact:vec![0.0;nc],rate,omitted_duplex_modes,transition,physical_board_k,
+            board_half_damping,damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
             board_volume,board_basis,schur_inverse,contact_board,free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
             r_string:vec![0.0;n],board_rhs:vec![0.0;r],board_end:vec![0.0;r] })
@@ -338,10 +392,14 @@ impl Bank {
     /// Prepare the unforced coupled end positions. No allocations.
     pub fn predict(&mut self) {
         let n = self.modes.len(); let r = self.board_count;
+        self.board_pre_loss=if let Some(flow)=&self.board_half_damping {
+            damp_board(flow,&self.v[n..],&mut self.damped_board_v)
+        } else {self.damped_board_v.copy_from_slice(&self.v[n..]);0.0};
         for k in 0..self.q.len() {
             let t=self.transition[k];
-            self.free_q[k]=t.qq*self.q[k]+t.qv*self.v[k];
-            self.free_v[k]=t.vq*self.q[k]+t.vv*self.v[k];
+            let v=if k<n {self.v[k]} else {self.damped_board_v[k-n]};
+            self.free_q[k]=t.qq*self.q[k]+t.qv*v;
+            self.free_v[k]=t.vq*self.q[k]+t.vv*v;
         }
         for j in 0..r { self.board_rhs[j]=self.free_q[n+j]/self.transition[n+j].bq; }
         for group in &self.groups {
@@ -380,7 +438,7 @@ impl Bank {
     /// arrays are not committed until the nonlinear island accepts the step.
     pub fn finish(&mut self, forces: &[f64]) {
         let n=self.modes.len();let r=self.board_count;
-        self.last_modal_loss_j=0.0;
+        self.last_modal_loss_j=self.board_pre_loss;
         // Build W^T F once. The former j,a,c nesting rebuilt this RHS r times.
         self.board_rhs.fill(0.0);
         for (c,&force) in forces.iter().enumerate() {
@@ -417,8 +475,12 @@ impl Bank {
             let k=n+j;let f=self.board_rhs[j];
             self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
             self.last_modal_loss_j+=f*(self.next_q[k]-self.q[k])-0.5*(
-                self.next_v[k].powi(2)-self.v[k].powi(2)
+                self.next_v[k].powi(2)-self.damped_board_v[j].powi(2)
                 +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
+        }
+        if let Some(flow)=&self.board_half_damping {
+            self.last_modal_loss_j+=damp_board(flow,&self.next_v[n..],&mut self.board_rhs);
+            self.next_v[n..].copy_from_slice(&self.board_rhs);
         }
     }
 
@@ -508,8 +570,10 @@ mod tests {
     /// Kept only as a small direct regression oracle, not another runtime image.
     fn unfactored(b:&Bank, forces:&[f64])->(Vec<f64>,Vec<f64>,Vec<f64>,f64) {
         let n=b.modes.len();let r=b.board_count;
-        let fq:Vec<f64>=(0..n+r).map(|k|b.transition[k].qq*b.q[k]+b.transition[k].qv*b.v[k]).collect();
-        let fv:Vec<f64>=(0..n+r).map(|k|b.transition[k].vq*b.q[k]+b.transition[k].vv*b.v[k]).collect();
+        let mut v0=b.v.clone();let mut loss=0.0;
+        if let Some(flow)=&b.board_half_damping {loss+=damp_board(flow,&b.v[n..],&mut v0[n..]);}
+        let fq:Vec<f64>=(0..n+r).map(|k|b.transition[k].qq*b.q[k]+b.transition[k].qv*v0[k]).collect();
+        let fv:Vec<f64>=(0..n+r).map(|k|b.transition[k].vq*b.q[k]+b.transition[k].vv*v0[k]).collect();
         let mut rhs:Vec<f64>=(0..r).map(|j|fq[n+j]/b.transition[n+j].bq).collect();
         let mut rs=vec![0.0;n];
         for (k,m) in b.modes.iter().enumerate() {
@@ -529,13 +593,12 @@ mod tests {
             let f=(0..forces.len()).map(|c|b.contact_board[c*r+a]*forces[c]).sum::<f64>();
             q[n+j]+=b.schur_inverse[j*r+a]*f;
         }}
-        let mut loss=0.0;
         for (k,m) in b.modes.iter().enumerate() {
             let s=&b.strings[m.string];
             let bbar=(0..r).map(|j|s.bridge[j]*0.5*(b.q[n+j]+q[n+j])).sum::<f64>();
             let f=m.a*bbar+s.contact.map_or(0.0,|c|forces[c]*m.hammer_shape);
             q[k]=fq[k]+b.transition[k].bq*f;v[k]=fv[k]+b.transition[k].bv*f;
-            loss+=f*(q[k]-b.q[k])-0.5*(v[k]*v[k]-b.v[k]*b.v[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
+            loss+=f*(q[k]-b.q[k])-0.5*(v[k]*v[k]-v0[k]*v0[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
         }
         rhs.fill(0.0);
         for (k,m) in b.modes.iter().enumerate() {for j in 0..r {
@@ -546,7 +609,10 @@ mod tests {
         }}
         for j in 0..r {
             let k=n+j;v[k]=fv[k]+b.transition[k].bv*rhs[j];
-            loss+=rhs[j]*(q[k]-b.q[k])-0.5*(v[k]*v[k]-b.v[k]*b.v[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
+            loss+=rhs[j]*(q[k]-b.q[k])-0.5*(v[k]*v[k]-v0[k]*v0[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
+        }
+        if let Some(flow)=&b.board_half_damping {
+            let original=v[n..].to_vec();loss+=damp_board(flow,&original,&mut v[n..]);
         }
         (free,q,v,loss)
     }
@@ -585,5 +651,45 @@ mod tests {
                 assert!((actual-b.contact_compliance[i*nc+c]).abs()<1e-14);
             }
         }
+    }
+
+    #[test]
+    fn physical_board_damping_preserves_heterogeneous_modal_losses_and_mass_loading() {
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let mut board=super::super::board::demonstration();
+        for (m,zeta) in board.iter_mut().zip([0.0,0.001,0.07,0.2]) {m.damping_ratio=zeta;}
+        let b=Bank::new(&[scale[48]],&board,192_000,21_600.0,24,true).unwrap();
+        let r=board.len();let v:Vec<f64>=(0..r).map(|i|0.03*(i+1) as f64).collect();
+        let expected_power: f64=board.iter().enumerate().map(|(i,m)| {
+            let speed: f64=(0..r).map(|j|b.board_basis[i*r+j]*v[j]).sum();
+            2.0*m.damping_ratio*TAU*m.frequency_hz*speed*speed
+        }).sum();
+        let mut out=vec![0.0;r];
+        let loss=damp_board(b.board_half_damping.as_ref().unwrap(),&v,&mut out);
+        assert!(loss>0.0);
+        // Compare the exact finite-time loss to its physical infinitesimal power.
+        let ratio=loss/(0.5/f64::from(b.rate)*expected_power);
+        assert!((0.99..=1.000001).contains(&ratio),"{ratio}");
+        assert!((loss+0.5*out.iter().map(|x|x*x).sum::<f64>()
+            -0.5*v.iter().map(|x|x*x).sum::<f64>()).abs()<1e-15);
+    }
+    #[test]
+    fn broader_board_retains_high_modes_and_closes_force_work() {
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let board:Vec<BoardMode>=(0..48).map(|i|BoardMode {
+            frequency_hz:70.0+25.0*i as f64,damping_ratio:0.002+0.0002*i as f64,
+            bridge:[0.01;88],volume:0.03,
+        }).collect();
+        let mut b=Bank::new(&[scale[48]],&board,192_000,21_600.0,24,true).unwrap();
+        assert_eq!(b.board_count,48);
+        let force=vec![1.0;b.contact_strings.len()];
+        for _ in 0..32 {
+            let before=b.energy();b.predict();b.finish(&force);
+            let work: f64=(0..force.len()).map(|c|force[c]*(b.contact_position(c,&b.next_q)
+                -b.contact_position(c,&b.q))).sum();
+            let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
+            assert!(defect.abs()<1e-10,"{defect:e}");b.commit();
+        }
+        assert!(b.v[b.modes.len()+32..].iter().any(|v|v.abs()>1e-12));
     }
 }
