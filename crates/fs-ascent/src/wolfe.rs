@@ -46,6 +46,32 @@ pub(crate) fn strong_wolfe_with_budget(
     c2: f64,
     max_evals: usize,
 ) -> WolfeOutcome {
+    let mut fallible = |alpha| Ok::<_, core::convert::Infallible>(phi(alpha));
+    match try_strong_wolfe_with_budget(
+        &mut fallible, f0, dphi0, alpha_init, c1, c2, max_evals,
+    ) {
+        Ok(outcome) => outcome,
+        Err(never) => match never {},
+    }
+}
+
+/// Fallible strong-Wolfe search with the same probe order and hard budget.
+///
+/// Callback errors propagate immediately, including during zoom. No step is
+/// accepted on error. Callers that need accounting on the error path should
+/// count attempts in their callback (a failed invocation still spends work).
+/// Successful callbacks obey the same finite/+infinity probe contract as
+/// `strong_wolfe`; invalid numerical arguments or observations still panic.
+#[allow(clippy::too_many_arguments)]
+pub fn try_strong_wolfe_with_budget<E>(
+    phi: &mut dyn FnMut(f64) -> Result<(f64, f64), E>,
+    f0: f64,
+    dphi0: f64,
+    alpha_init: f64,
+    c1: f64,
+    c2: f64,
+    max_evals: usize,
+) -> Result<WolfeOutcome, E> {
     assert!(
         dphi0.is_finite() && dphi0 < 0.0,
         "line search needs a descent direction (phi'(0) = {dphi0})"
@@ -66,9 +92,9 @@ pub(crate) fn strong_wolfe_with_budget(
     let max_expand = 20usize;
     for i in 0..max_expand {
         if evals == max_evals {
-            return failed(f0, evals);
+            return Ok(failed(f0, evals));
         }
-        let (f_a, d_a) = phi(alpha);
+        let (f_a, d_a) = phi(alpha)?;
         evals += 1;
         assert!(
             admissible_probe(f_a, d_a),
@@ -85,12 +111,12 @@ pub(crate) fn strong_wolfe_with_budget(
             );
         }
         if d_a.abs() <= c2 * dphi0.abs() {
-            return WolfeOutcome {
+            return Ok(WolfeOutcome {
                 alpha,
                 f_new: f_a,
                 evals,
                 success: true,
-            };
+            });
         }
         if d_a >= 0.0 {
             return zoom(
@@ -101,10 +127,10 @@ pub(crate) fn strong_wolfe_with_budget(
         f_prev = f_a;
         alpha *= 2.0;
         if !alpha.is_finite() {
-            return failed(f0, evals);
+            return Ok(failed(f0, evals));
         }
     }
-    failed(f0, evals)
+    Ok(failed(f0, evals))
 }
 
 /// Whether a probe `(φ(α), φ′(α))` is an admissible line-search observation.
@@ -137,8 +163,8 @@ fn failed(f0: f64, evals: usize) -> WolfeOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn zoom(
-    phi: &mut dyn FnMut(f64) -> (f64, f64),
+fn zoom<E>(
+    phi: &mut dyn FnMut(f64) -> Result<(f64, f64), E>,
     f0: f64,
     dphi0: f64,
     mut lo: f64,
@@ -148,13 +174,13 @@ fn zoom(
     c2: f64,
     mut evals: usize,
     max_evals: usize,
-) -> WolfeOutcome {
+) -> Result<WolfeOutcome, E> {
     for _ in 0..40 {
         if evals == max_evals {
-            return failed(f0, evals);
+            return Ok(failed(f0, evals));
         }
         let alpha = f64::midpoint(lo, hi);
-        let (f_a, d_a) = phi(alpha);
+        let (f_a, d_a) = phi(alpha)?;
         evals += 1;
         assert!(
             admissible_probe(f_a, d_a),
@@ -167,12 +193,12 @@ fn zoom(
             hi = alpha;
         } else {
             if d_a.abs() <= c2 * dphi0.abs() {
-                return WolfeOutcome {
+                return Ok(WolfeOutcome {
                     alpha,
                     f_new: f_a,
                     evals,
                     success: true,
-                };
+                });
             }
             if d_a * (hi - lo) >= 0.0 {
                 hi = lo;
@@ -184,7 +210,7 @@ fn zoom(
             break;
         }
     }
-    failed(f0, evals)
+    Ok(failed(f0, evals))
 }
 
 #[cfg(test)]

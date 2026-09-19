@@ -8,6 +8,9 @@ use crate::stop::{StopObservation, StopReason, StopRule};
 use crate::wolfe::strong_wolfe;
 use std::collections::VecDeque;
 
+mod fallible;
+pub use fallible::LbfgsError;
+
 /// Resumable L-BFGS state. Plain data: `clone()` is a checkpoint.
 #[derive(Debug, Clone)]
 pub struct LbfgsState {
