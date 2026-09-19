@@ -44,6 +44,9 @@
 //! attachment shapes retain their original 1/sqrt(kg) units; a unit physical
 //! translation uses 1/sqrt(m). Free motion has no direct pressure transfer.
 //! Existing `mode` rows still require strictly positive natural frequencies.
+//! `voice free-mass-preload 1 PORT_COUNT` uses the same mass row with zero X/V,
+//! then solves its declared supporting network before the window. Every other
+//! component must also request static preload. An unsupported mass still refuses.
 
 // Version 3 adds exactly one implicit compliant contact before the events.
 // Its initial states are retained; nonlinear static preload is not inferred.
@@ -222,11 +225,11 @@ impl ModalPerformance {
         for _ in 0..voice_count {
             let mut row = reader.row("voice")?;
             let kind = row.word()?;
-            let is_free_mass = kind == "free-mass";
+            let is_free_mass = matches!(kind, "free-mass" | "free-mass-preload");
             let initialization = match kind {
                 "free-mass" | "retain-state" => ForceInitialization::RetainState,
-                "static-preload" => ForceInitialization::StaticPreload,
-                _ => return Err(input(row.line, "expected retain-state, static-preload or free-mass")),
+                "static-preload" | "free-mass-preload" => ForceInitialization::StaticPreload,
+                _ => return Err(input(row.line, "expected retain-state, static-preload, free-mass or free-mass-preload")),
             };
             let modes = row.count(MAX_MODES - total_modes)?;
             let ports = row.count(MAX_PORT_WEIGHTS)?;
@@ -247,6 +250,10 @@ impl ModalPerformance {
                 let mass_kg = row.scalar()?;
                 let displacement_m = row.scalar()?;
                 let velocity_m_s = row.scalar()?;
+                if initialization == ForceInitialization::StaticPreload
+                    && (displacement_m != 0.0 || velocity_m_s != 0.0) {
+                    return Err(input(row.line, "free-mass preload cannot discard nonzero initial position/velocity"));
+                }
                 row.finish()?;
                 ModalAcousticTimeModel::try_free_mass(sample_rate_hz, mass_kg,
                     displacement_m, velocity_m_s, budget).map_err(RenderError::Modal)?
