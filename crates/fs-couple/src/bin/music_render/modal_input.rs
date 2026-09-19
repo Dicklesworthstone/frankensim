@@ -2,18 +2,24 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use fs_couple::pcm_wav::observation::DecimatedRenderer;
 use fs_couple::render::schedule::force::file::{
     MAX_MODAL_PERFORMANCE_BYTES, MODAL_PERFORMANCE_SCHEMA, MODAL_CONTACT_PERFORMANCE_SCHEMA,
     MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA, MODAL_FRICTION_PERFORMANCE_SCHEMA, ModalPerformance,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
 
-fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
     let mut paths = Vec::new();
     let mut block = None;
+    let mut decimate = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--decimate" => {
+                if decimate { return Err("--decimate may only be supplied once".into()); }
+                decimate = true;
+            }
             "--block" => {
                 if block.is_some() { return Err("--block may only be supplied once".into()); }
                 let value = iter.next().and_then(|v| v.parse::<usize>().ok())
@@ -28,13 +34,13 @@ fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
         }
     }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render modal INPUT.performance OUT.wav [--block N]".into());
+        return Err("usage: music_render modal INPUT.performance OUT.wav [--block N] [--decimate]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512)))
+    Ok((*input, *output, block.unwrap_or(512), decimate))
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), String> {
-    let (input, output, block) = options(args)?;
+    let (input, output, block, decimate) = options(args)?;
     let output = Path::new(output);
     let sidecar = output.with_extension("provenance.json");
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
@@ -46,12 +52,30 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("modal input read failed: {e}"))?;
     let performance = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
     let info = performance.info();
-    if info.sample_rate_hz != RATE {
-        return Err("music_render requires an explicitly declared 48000 Hz input; no implicit resampling".into());
+    if !decimate && info.sample_rate_hz != RATE {
+        return Err("non-48000-Hz mechanics require explicit --decimate; no implicit resampling".into());
     }
-    let samples = usize::try_from(info.samples).map_err(|_| "sample count exceeds this host".to_string())?;
-    let mut renderer = performance.into_renderer();
-    let compiled_controls = renderer.pending_controls().len();
+    if decimate && info.sample_rate_hz <= RATE {
+        return Err("--decimate requires mechanics above 48000 Hz; ordinary 48000-Hz input needs no conversion".into());
+    }
+    // The file owns the mechanical clock, duration, forces and numerical caps.
+    // The explicit flag changes ONLY the causal observer clock. A bypass calls
+    // the old scheduler directly, retaining the old waveform/statistic bits.
+    let mut renderer = DecimatedRenderer::new(performance.into_renderer(), info.sample_rate_hz, RATE, block)
+        .map_err(|e| e.to_string())?;
+    let samples = renderer.output_samples_for(info.samples).map_err(|e| e.to_string())?;
+    let samples = usize::try_from(samples).map_err(|_| "sample count exceeds this host".to_string())?;
+    let compiled_controls = renderer.source().pending_controls().len();
+    let observation = renderer.info();
+    let observation_provenance = if decimate {
+        format!(",\"observation\":{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\
+            \"output_sample_rate_hz\":{RATE},\"ratio\":{},\"filter\":\"{}\",\
+            \"delay_output_samples\":{},\"first_output_source_index\":{},\
+            \"initial_history\":\"zero\",\"delay_compensated\":false,\
+            \"tail\":\"no-flush-declared-window\"}}",
+            info.sample_rate_hz, info.samples, observation.ratio, observation.filter_profile,
+            observation.delay_output_samples, observation.first_output_source_index)
+    } else { String::new() };
     // Finish ALL input/model/clock admission before creating either artifact.
     // The existing output owner preserves stream scaling, short tails and hashes.
     let (mut audio, mut metadata) = create_outputs(output, &sidecar)?;
@@ -84,7 +108,7 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
          \"modal_input\":{{\"schema\":\"{input_schema}\",\"blake3\":\"{input_hash}\",\
-         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls}{coupling_provenance},\
+         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls}{coupling_provenance}{observation_provenance},\
          \"model_scope\":\"authored reduced model; no physical-validation claim\"}}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.voices, info.modes, info.force_events,
@@ -120,10 +144,18 @@ mod tests {
     }
 
     #[test]
-    fn callback_size_is_the_only_optional_override() {
+    fn legacy_callback_options_keep_decimation_disabled() {
         let input = args(&["in.performance", "out.wav"]);
-        assert_eq!(options(&input).unwrap(), ("in.performance", "out.wav", 512));
+        assert_eq!(options(&input).unwrap(), ("in.performance", "out.wav", 512, false));
         let input = args(&["--block", "37", "in.performance", "out.wav"]);
-        assert_eq!(options(&input).unwrap(), ("in.performance", "out.wav", 37));
+        assert_eq!(options(&input).unwrap(), ("in.performance", "out.wav", 37, false));
+    }
+
+    #[test]
+    fn decimation_is_explicit_and_duplicate_flags_refuse() {
+        let input = args(&["--decimate", "in.performance", "out.wav", "--block", "37"]);
+        assert_eq!(options(&input).unwrap(), ("in.performance", "out.wav", 37, true));
+        assert!(options(&args(&["in", "out", "--decimate", "--decimate"])).is_err());
+        assert!(options(&args(&["in", "out", "--decimate", "true"])).is_err());
     }
 }

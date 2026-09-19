@@ -1,0 +1,23 @@
+frankensim-modal-performance-v3
+sample_rate_hz 192000
+samples 19204
+full_scale_pa 1
+limits 0.9 1 1000 1000 1000
+compile_limits 16 64
+voices 2
+voice free-mass 1 1
+mass 0.04 0 1
+port 0 5
+voice retain-state 2 1
+mode 800 0.01 1 0 0 0
+mode 1800 0.02 0.4 0 0 0
+port 0 1 0.5
+coupling_limits 4 4096 0.9 1000 1000 1000000 1e-11 1e-10 1e-8
+connections 0
+contact_limits 96 1000000 0.1 1e-8 1e-9
+contact 3000000 1.5 0.12 0.0005 1 authored-free-striker
+contact_left 0 5
+contact_right 1 1 0.5
+events 2
+force 1201 0 0 1
+force 1360 0 0 0

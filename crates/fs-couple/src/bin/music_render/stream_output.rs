@@ -6,7 +6,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_couple::pcm_wav::stream::{MAX_PCM16_WAV_SAMPLES, Pcm16WavStream};
-use fs_couple::render::schedule::ScheduledRenderer;
+use fs_couple::pcm_wav::observation::PressureRenderer;
 
 use super::{RATE, WAV_HASH_DOMAIN};
 
@@ -18,14 +18,14 @@ pub(super) struct RenderedWaveform {
 }
 
 pub(super) fn render_waveform<W: Read + Write + Seek>(
-    renderer: &mut ScheduledRenderer,
+    renderer: &mut impl PressureRenderer,
     output: &mut W,
     samples: usize,
     block: usize,
     full_scale_pa: f64,
 ) -> Result<RenderedWaveform, String> {
     if samples == 0 || samples as u128 > u128::from(MAX_PCM16_WAV_SAMPLES)
-        || block == 0 || block > renderer.context().max_block_len()
+        || block == 0 || block > renderer.max_block_len()
     {
         return Err("render output needs a positive RIFF-sized history and an admitted block".into());
     }
@@ -33,6 +33,7 @@ pub(super) fn render_waveform<W: Read + Write + Seek>(
     if renderer.samples_rendered() != 0 {
         return Err("the command output starts at sample zero; use the stream API for continuation".into());
     }
+    renderer.validate_sample_count(samples as u64).map_err(|e| e.to_string())?;
     if output.stream_position().map_err(|e| e.to_string())? != 0 {
         return Err("the command WAV must start at byte zero".into());
     }
@@ -91,7 +92,7 @@ mod tests {
     use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
     use fs_couple::pcm_wav::encode_pcm16_wav;
     use fs_couple::render::{ControlDelta, ModalStringVoice, RenderContext, RenderVoice};
-    use fs_couple::render::schedule::ScheduledControl;
+    use fs_couple::render::schedule::{ScheduledControl, ScheduledRenderer};
 
     fn image(rate: u32) -> ModalAcousticTimeModel {
         ModalAcousticTimeModel::try_new(rate, vec![ModalAcousticMode {
