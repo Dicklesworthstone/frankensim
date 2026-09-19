@@ -11,6 +11,8 @@ pub(crate) mod moving;
 pub mod tube;
 /// Moving aperture coupled to nonuniform connected tube sections and branches.
 pub mod network;
+/// Geometry-derived reactive cavity loads for the coupled tube network.
+pub mod cavity;
 
 /// Quasistatic aperture: `y = H max(0, 1 − Δp/P_c)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
