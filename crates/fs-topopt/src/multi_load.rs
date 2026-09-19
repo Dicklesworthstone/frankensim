@@ -8,11 +8,12 @@
 //!
 //! This is a fixed-mesh density study, not free-boundary CutFEM topology,
 //! a KKT certificate, or a mesh-converged/experimentally validated design.
-//! Checkpoints occur between component evaluations and multiplier trials;
-//! the existing filter and elasticity solves are NOT interruptible internally.
+//! Filter, load and adjoint CG solves poll at most every 32 iterations. Work
+//! spent on failed or rejected trials counts against the shared linear budget.
 
 use std::ops::ControlFlow;
 
+use crate::control::{EvaluationStop, SolveBudget, SolveControl, SolveWork};
 use crate::elasticity::DensityElasticity;
 use crate::oc::assert_valid_oc_inputs;
 use crate::pipeline::{DesignPipeline, LoadCase, assert_valid_load_cases};
@@ -57,6 +58,10 @@ pub enum MultiLoadOcTermination {
     DesignChange,
     /// The caller stopped at a checkpoint; completed work is retained.
     Cancelled,
+    /// A per-solve or cumulative linear-work budget was consumed.
+    LinearBudget,
+    /// A trial evaluation failed numerically; the accepted prefix is retained.
+    NumericalFailure,
     /// No feasible, non-increasing-compliance trial was found within budget.
     NoAcceptableStep,
 }
@@ -87,24 +92,33 @@ pub struct MultiLoadOcReport {
     /// Last accepted displacement fields, in load-case order. Empty before
     /// the first equilibrium. Cancellation never substitutes a rejected trial.
     pub displacements: Vec<Vec<f64>>,
-    /// Includes the initial solve, unless cancelled before any solve.
+    /// Includes the initial solve, unless stopped before any complete solve.
     pub history: Vec<MultiLoadOcIteration>,
     /// Explicit terminal reason.
     pub termination: MultiLoadOcTermination,
+    /// Detailed interruption/failure; never a usable partial sensitivity.
+    pub evaluation_stop: Option<EvaluationStop>,
+    /// Work consumed by the shared control, including rejected/partial trials
+    /// and any setup evaluations performed with that same control.
+    pub work: SolveWork,
 }
 
-fn volume(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> f64 {
-    volume_projection(pipeline, rho, cell_vol).0
+fn volume(
+    pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64], control: &mut SolveControl<'_>,
+) -> Result<f64, EvaluationStop> {
+    Ok(volume_projection(pipeline, rho, cell_vol, control)?.0)
 }
 
-fn volume_projection(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> (f64, Vec<f64>) {
-    let (_, projected, _) = pipeline.forward(rho);
+fn volume_projection(
+    pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64], control: &mut SolveControl<'_>,
+) -> Result<(f64, Vec<f64>), EvaluationStop> {
+    let (_, projected, _) = pipeline.try_forward(rho, control)?;
     let total: f64 = cell_vol.iter().sum();
     // Normalize before multiplication so representable fractions do not
     // overflow solely because the caller uses a large volume unit.
     let value: f64 = projected.iter().zip(cell_vol).map(|(r, v)| r * (v / total)).sum();
-    assert!(value.is_finite(), "projected material volume must be finite");
-    (value, projected)
+    if !value.is_finite() { return Err(EvaluationStop::Breakdown { stage: "volume" }); }
+    Ok((value, projected))
 }
 
 /// Log-space OC update at a specified volume multiplier. Log space avoids a
@@ -126,17 +140,10 @@ fn trial_densities(rho: &[f64], log_ratio: &[f64], log_lambda: f64, step: f64) -
     }).collect()
 }
 
-/// Optimize one fixed-mesh design against independently applied load cases.
-///
-/// `checkpoint` returns `Break(())` to stop. A stopped result retains only
-/// evaluated, feasible designs; cancellation before the initial solve has an
-/// empty history and must not be presented as a solved result. Components
-/// retain their existing panic-on-invalid-model/failed-solve contract.
-///
-/// The starting projected design must be feasible, so comparisons are against
-/// a design under the SAME volume cap and loads, never full-material compliance.
-/// Continuation must be explicit: changing projection parameters changes the
-/// physical volume constraint and requires a newly admitted starting design.
+/// Optimize with the default component iteration caps and a cancellation hook.
+/// The hook is now also polled inside filter, elasticity and adjoint solves.
+/// A stopped result retains only fully evaluated accepted designs. Invalid
+/// modeling inputs still panic; numerical stops are returned in the report.
 #[allow(clippy::too_many_arguments)]
 pub fn multi_load_optimality_criteria(
     pipeline: &DesignPipeline,
@@ -146,6 +153,30 @@ pub fn multi_load_optimality_criteria(
     cell_vol: &[f64],
     options: MultiLoadOcOptions,
     mut checkpoint: impl FnMut() -> ControlFlow<()>,
+) -> MultiLoadOcReport {
+    let mut callback = |_| checkpoint();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    controlled_multi_load_optimality_criteria(pipeline, elasticity, loads, rho0, cell_vol,
+        options, &mut control)
+}
+
+/// Optimize under one shared cumulative linear-work and cancellation budget.
+/// The starting projected design must be feasible under the SAME volume cap
+/// and loads. Continuation parameters are fixed throughout this call.
+///
+/// All stops restore the last accepted operator and fields. An empty history
+/// means no complete baseline was solved. Linear-budget exhaustion is not
+/// convergence; no trial gradient, including a partially solved load family,
+/// is ever accepted. The current budget is observable through `control.work()`.
+#[allow(clippy::too_many_arguments)]
+pub fn controlled_multi_load_optimality_criteria(
+    pipeline: &DesignPipeline,
+    elasticity: &mut DensityElasticity,
+    loads: &[LoadCase<'_>],
+    rho0: &[f64],
+    cell_vol: &[f64],
+    options: MultiLoadOcOptions,
+    control: &mut SolveControl<'_>,
 ) -> MultiLoadOcReport {
     assert_valid_load_cases(elasticity, loads);
     assert_valid_oc_inputs(elasticity, loads[0].force, rho0, cell_vol,
@@ -160,133 +191,126 @@ pub fn multi_load_optimality_criteria(
     assert!(options.max_backtracks <= 64, "at most 64 OC backtracks are admitted");
     let mut report = MultiLoadOcReport {
         rho: rho0.to_vec(), projected_rho: Vec::new(), displacements: Vec::new(),
-        history: Vec::new(),
-        termination: MultiLoadOcTermination::IterationBudget,
+        history: Vec::new(), termination: MultiLoadOcTermination::IterationBudget,
+        evaluation_stop: None, work: control.work(),
     };
-    if checkpoint().is_break() {
-        report.termination = MultiLoadOcTermination::Cancelled;
-        return report;
-    }
-    let (initial_volume, initial_projection) = volume_projection(pipeline, rho0, cell_vol);
-    assert!(initial_volume <= options.volume_fraction + options.volume_tolerance,
-        "starting projected design exceeds the material budget");
-    if checkpoint().is_break() {
-        report.termination = MultiLoadOcTermination::Cancelled;
-        return report;
-    }
-    let mut current = pipeline.multi_load_compliance_and_gradient(elasticity, rho0, loads);
-    report.projected_rho = initial_projection;
-    report.displacements = std::mem::take(&mut current.displacements);
-    report.history.push(MultiLoadOcIteration {
-        iteration: 0, compliance: current.compliance,
-        case_compliances: current.case_compliances.clone(),
-        volume_fraction: initial_volume, max_change: 0.0,
-    });
-    for iteration in 0..options.max_iterations {
-        if checkpoint().is_break() {
-            report.termination = MultiLoadOcTermination::Cancelled;
-            break;
-        }
-        let (_, dv) = pipeline.volume_and_gradient(&report.rho, cell_vol);
-        // Classical multiplicative OC is not valid for a locally nonmonotone
-        // material constraint. Do not hide negative/zero slopes behind a floor.
-        assert!(dv.iter().all(|v| v.is_finite() && *v > 0.0),
-            "OC requires a strictly positive projected-volume gradient");
-        let log_ratio: Vec<f64> = current.gradient.iter().zip(&dv).map(|(&g, &v)| {
-            assert!(g.is_finite() && g <= 0.0,
-                "OC requires finite nonpositive compliance sensitivities");
-            if g < 0.0 { fs_math::det::ln(-g) - fs_math::det::ln(v) }
-            else { f64::NEG_INFINITY }
-        }).collect();
-        let lower: Vec<f64> = report.rho.iter().map(|r| (r - options.move_limit).max(1e-3)).collect();
-        let upper: Vec<f64> = report.rho.iter().zip(&log_ratio).map(|(&r, &ratio)| {
-            if ratio.is_finite() { (r + options.move_limit).min(1.0) }
-            else { (r - options.move_limit).max(1e-3) }
-        }).collect();
-        if checkpoint().is_break() {
-            report.termination = MultiLoadOcTermination::Cancelled;
-            break;
-        }
-        let mut candidate = upper;
-        if volume(pipeline, &candidate, cell_vol) > options.volume_fraction {
-            if volume(pipeline, &lower, cell_vol) > options.volume_fraction {
+    // This is also the rollback target for a stop before any equilibrium.
+    let mut accepted_moduli = elasticity.moduli.clone();
+    let outcome = (|| -> Result<(), EvaluationStop> {
+        control.checkpoint("optimizer")?;
+        let (initial_volume, initial_projection) = volume_projection(pipeline, rho0, cell_vol, control)?;
+        assert!(initial_volume <= options.volume_fraction + options.volume_tolerance,
+            "starting projected design exceeds the material budget");
+        let mut current = pipeline.try_multi_load_compliance_and_gradient(elasticity, rho0, loads, control)?;
+        accepted_moduli = elasticity.moduli.clone();
+        report.projected_rho = initial_projection;
+        report.displacements = std::mem::take(&mut current.displacements);
+        report.history.push(MultiLoadOcIteration {
+            iteration: 0, compliance: current.compliance,
+            case_compliances: current.case_compliances.clone(),
+            volume_fraction: initial_volume, max_change: 0.0,
+        });
+        for iteration in 0..options.max_iterations {
+            control.checkpoint("optimizer")?;
+            let (_, dv) = pipeline.try_volume_and_gradient(&report.rho, cell_vol, control)?;
+            // OC requires a locally monotone material constraint. Do not hide
+            // zero/negative slopes or non-finite sensitivities behind floors.
+            if !dv.iter().all(|v| v.is_finite() && *v > 0.0) {
+                return Err(EvaluationStop::Breakdown { stage: "volume-gradient" });
+            }
+            if !current.gradient.iter().all(|g| g.is_finite() && *g <= 0.0) {
+                return Err(EvaluationStop::Breakdown { stage: "compliance-gradient" });
+            }
+            let log_ratio: Vec<f64> = current.gradient.iter().zip(&dv).map(|(&g, &v)| {
+                if g < 0.0 { fs_math::det::ln(-g) - fs_math::det::ln(v) }
+                else { f64::NEG_INFINITY }
+            }).collect();
+            let lower: Vec<f64> = report.rho.iter().map(|r| (r - options.move_limit).max(1e-3)).collect();
+            let upper: Vec<f64> = report.rho.iter().zip(&log_ratio).map(|(&r, &ratio)| {
+                if ratio.is_finite() { (r + options.move_limit).min(1.0) }
+                else { (r - options.move_limit).max(1e-3) }
+            }).collect();
+            let mut candidate = upper;
+            if volume(pipeline, &candidate, cell_vol, control)? > options.volume_fraction {
+                if volume(pipeline, &lower, cell_vol, control)? > options.volume_fraction {
+                    report.termination = MultiLoadOcTermination::NoAcceptableStep;
+                    break;
+                }
+                let mut lo = f64::INFINITY;
+                let mut hi = f64::NEG_INFINITY;
+                for ((&r, &ratio), &floor) in report.rho.iter().zip(&log_ratio).zip(&lower) {
+                    if ratio.is_finite() {
+                        lo = lo.min(ratio - 2.0 * fs_math::det::ln((r + options.move_limit).min(1.0) / r));
+                        hi = hi.max(ratio - 2.0 * fs_math::det::ln(floor / r));
+                    }
+                }
+                if !lo.is_finite() || !hi.is_finite() {
+                    return Err(EvaluationStop::Breakdown { stage: "multiplier" });
+                }
+                candidate = lower;
+                for _ in 0..80 {
+                    control.checkpoint("multiplier")?;
+                    let mid = 0.5 * lo + 0.5 * hi;
+                    let trial = trial_densities(&report.rho, &log_ratio, mid, options.move_limit);
+                    if volume(pipeline, &trial, cell_vol, control)? > options.volume_fraction {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                        candidate = trial; // Retain the actually feasible side.
+                    }
+                }
+            }
+            let proposed = candidate;
+            let mut accepted = false;
+            let mut alpha = 1.0;
+            for _ in 0..=options.max_backtracks {
+                control.checkpoint("line-search")?;
+                let trial: Vec<f64> = report.rho.iter().zip(&proposed)
+                    .map(|(&r, &p)| r + alpha * (p - r)).collect();
+                let (v, projected) = volume_projection(pipeline, &trial, cell_vol, control)?;
+                if v <= options.volume_fraction + options.volume_tolerance {
+                    let mut next = pipeline.try_multi_load_compliance_and_gradient(elasticity, &trial, loads, control)?;
+                    if next.compliance <= current.compliance {
+                        let change = report.rho.iter().zip(&trial)
+                            .map(|(r, p)| (r - p).abs()).fold(0.0f64, f64::max);
+                        report.rho = trial;
+                        report.projected_rho = projected;
+                        report.displacements = std::mem::take(&mut next.displacements);
+                        report.history.push(MultiLoadOcIteration {
+                            iteration: iteration + 1, compliance: next.compliance,
+                            case_compliances: next.case_compliances.clone(),
+                            volume_fraction: v, max_change: change,
+                        });
+                        accepted_moduli = elasticity.moduli.clone();
+                        current = next;
+                        accepted = true;
+                        if change <= options.change_tolerance {
+                            report.termination = MultiLoadOcTermination::DesignChange;
+                        }
+                        break;
+                    }
+                }
+                alpha *= 0.5;
+            }
+            if !accepted {
                 report.termination = MultiLoadOcTermination::NoAcceptableStep;
                 break;
             }
-            // Endpoints correspond to every sensitive cell at its upper/lower
-            // move limit. They scale with the actual objective, not its units.
-            let mut lo = f64::INFINITY;
-            let mut hi = f64::NEG_INFINITY;
-            for ((&r, &ratio), &floor) in report.rho.iter().zip(&log_ratio).zip(&lower) {
-                if ratio.is_finite() {
-                    lo = lo.min(ratio - 2.0 * fs_math::det::ln((r + options.move_limit).min(1.0) / r));
-                    hi = hi.max(ratio - 2.0 * fs_math::det::ln(floor / r));
-                }
-            }
-            assert!(lo.is_finite() && hi.is_finite(), "OC multiplier bracket must be finite");
-            candidate = lower;
-            for _ in 0..80 {
-                if checkpoint().is_break() {
-                    report.termination = MultiLoadOcTermination::Cancelled;
-                    return report;
-                }
-                let mid = 0.5 * lo + 0.5 * hi;
-                let trial = trial_densities(&report.rho, &log_ratio, mid, options.move_limit);
-                if volume(pipeline, &trial, cell_vol) > options.volume_fraction {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                    candidate = trial; // Always retain the actually feasible side.
-                }
-            }
+            if report.termination == MultiLoadOcTermination::DesignChange { break; }
         }
-        let proposed = candidate;
-        let accepted_moduli = elasticity.moduli.clone();
-        let mut accepted = false;
-        let mut alpha = 1.0;
-        for _ in 0..=options.max_backtracks {
-            if checkpoint().is_break() {
-                elasticity.moduli = accepted_moduli;
-                report.termination = MultiLoadOcTermination::Cancelled;
-                return report;
-            }
-            let trial: Vec<f64> = report.rho.iter().zip(&proposed)
-                .map(|(&r, &p)| r + alpha * (p - r)).collect();
-            let (v, projected) = volume_projection(pipeline, &trial, cell_vol);
-            if v <= options.volume_fraction + options.volume_tolerance {
-                if checkpoint().is_break() {
-                    elasticity.moduli = accepted_moduli;
-                    report.termination = MultiLoadOcTermination::Cancelled;
-                    return report;
-                }
-                let mut next = pipeline.multi_load_compliance_and_gradient(elasticity, &trial, loads);
-                if next.compliance <= current.compliance {
-                    let change = report.rho.iter().zip(&trial)
-                        .map(|(r, p)| (r - p).abs()).fold(0.0f64, f64::max);
-                    report.rho = trial;
-                    report.projected_rho = projected;
-                    report.displacements = std::mem::take(&mut next.displacements);
-                    report.history.push(MultiLoadOcIteration {
-                        iteration: iteration + 1, compliance: next.compliance,
-                        case_compliances: next.case_compliances.clone(),
-                        volume_fraction: v, max_change: change,
-                    });
-                    current = next;
-                    accepted = true;
-                    if change <= options.change_tolerance {
-                        report.termination = MultiLoadOcTermination::DesignChange;
-                    }
-                    break;
-                }
-            }
-            alpha *= 0.5;
-        }
-        if !accepted {
-            elasticity.moduli = accepted_moduli;
-            report.termination = MultiLoadOcTermination::NoAcceptableStep;
-            break;
-        }
-        if report.termination == MultiLoadOcTermination::DesignChange { break; }
+        Ok(())
+    })();
+    // One exit path covers cancellation and failure at every nested stage,
+    // including an adjoint following already completed load solves.
+    elasticity.moduli = accepted_moduli;
+    report.work = control.work();
+    if let Err(stop) = outcome {
+        report.termination = match &stop {
+            EvaluationStop::Cancelled => MultiLoadOcTermination::Cancelled,
+            EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. } => MultiLoadOcTermination::LinearBudget,
+            EvaluationStop::Breakdown { .. } => MultiLoadOcTermination::NumericalFailure,
+        };
+        report.evaluation_stop = Some(stop);
     }
     report
 }

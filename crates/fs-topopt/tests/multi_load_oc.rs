@@ -2,10 +2,12 @@
 use std::ops::ControlFlow;
 
 use fs_topopt::multi_load::{
-    MultiLoadOcOptions, MultiLoadOcTermination, multi_load_optimality_criteria,
+    MultiLoadOcOptions, MultiLoadOcTermination, controlled_multi_load_optimality_criteria,
+    multi_load_optimality_criteria,
 };
 use fs_topopt::pipeline::LoadCase;
-use fs_topopt::{DensityElasticity, DensityFilter, DesignPipeline, SimpParams};
+use fs_topopt::{DensityElasticity, DensityFilter, DesignPipeline, EvaluationStop, SimpParams,
+    SolveBudget, SolveControl, SolveProgress};
 
 fn fixture() -> (DesignPipeline, DensityElasticity, Vec<f64>, Vec<f64>, Vec<f64>) {
     let (complex, positions) = fs_feec::kuhn_cube(2);
@@ -82,6 +84,7 @@ fn g5_repeated_studies_replay_bitwise() {
     assert_eq!(a.rho, b.rho);
     assert_eq!(a.projected_rho, b.projected_rho);
     assert_eq!(a.displacements, b.displacements);
+    assert_eq!(a.work, b.work);
     assert_eq!(a.history.len(), b.history.len());
     for (a, b) in a.history.iter().zip(&b.history) {
         assert_eq!(a.compliance.to_bits(), b.compliance.to_bits());
@@ -104,17 +107,19 @@ fn g4_cancel_before_analysis_does_not_fabricate_a_solved_design() {
     assert!(run.displacements.is_empty());
     assert_eq!(run.rho, rho);
     assert_eq!(elasticity.moduli, original_moduli);
+    assert_eq!(run.work.linear_iterations, 0);
 }
 
 #[test]
 fn g4_cancel_during_multiplier_search_retains_only_solved_state() {
     let (pipeline, mut elasticity, rho, force, volumes) = fixture();
-    let mut calls = 0;
-    let run = multi_load_optimality_criteria(&pipeline, &mut elasticity,
-        &[LoadCase { force: &force, weight: 1.0 }], &rho, &volumes, options(), || {
-            calls += 1;
-            if calls == 6 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
-        });
+    let mut callback = |progress: SolveProgress| {
+        if progress.stage == "multiplier" { ControlFlow::Break(()) }
+        else { ControlFlow::Continue(()) }
+    };
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let run = controlled_multi_load_optimality_criteria(&pipeline, &mut elasticity,
+        &[LoadCase { force: &force, weight: 1.0 }], &rho, &volumes, options(), &mut control);
     assert_eq!(run.termination, MultiLoadOcTermination::Cancelled);
     assert_eq!(run.history.len(), 1);
     assert_eq!(run.rho, rho);
@@ -145,4 +150,72 @@ fn g0_full_material_is_not_admitted_as_a_half_volume_baseline() {
     multi_load_optimality_criteria(&pipeline, &mut elasticity,
         &[LoadCase { force: &force, weight: 1.0 }], &rho, &volumes,
         options(), || ControlFlow::Continue(()));
+}
+
+#[test]
+fn g4_total_work_exhaustion_after_baseline_preserves_real_fields() {
+    let (pipeline, mut elasticity, rho, force, volumes) = fixture();
+    let loads = [LoadCase { force: &force, weight: 1.0 }];
+    let baseline = multi_load_optimality_criteria(&pipeline, &mut elasticity, &loads,
+        &rho, &volumes, MultiLoadOcOptions { max_iterations: 0, ..options() },
+        || ControlFlow::Continue(()));
+    let limit = baseline.work.linear_iterations + 1;
+    let mut callback = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget {
+        total_iterations: limit, ..SolveBudget::default()
+    }, &mut callback);
+    let stopped = controlled_multi_load_optimality_criteria(&pipeline, &mut elasticity,
+        &loads, &rho, &volumes, options(), &mut control);
+    assert_eq!(stopped.termination, MultiLoadOcTermination::LinearBudget);
+    assert!(matches!(stopped.evaluation_stop, Some(EvaluationStop::TotalBudget { .. })));
+    assert_eq!(stopped.work.linear_iterations, limit);
+    assert_eq!(stopped.history.len(), 1);
+    assert_eq!(stopped.rho, baseline.rho);
+    assert_eq!(stopped.projected_rho, baseline.projected_rho);
+    assert_eq!(stopped.displacements, baseline.displacements);
+    assert_eq!(elasticity.moduli, pipeline.forward(&rho).2);
+}
+
+#[test]
+fn g4_mid_trial_equilibrium_cancellation_restores_accepted_design() {
+    for stage in ["elasticity", "filter-transpose"] {
+        let (pipeline, mut elasticity, rho, force, volumes) = fixture();
+        let loads = [LoadCase { force: &force, weight: 1.0 }];
+        let baseline = multi_load_optimality_criteria(&pipeline, &mut elasticity, &loads,
+            &rho, &volumes, MultiLoadOcOptions { max_iterations: 0, ..options() },
+            || ControlFlow::Continue(()));
+        let mut evaluations = 0;
+        let mut callback = |progress: SolveProgress| {
+            if progress.stage == "evaluation" { evaluations += 1; }
+            if evaluations == 2 && progress.stage == stage && progress.solve_iterations > 0 {
+                ControlFlow::Break(())
+            } else { ControlFlow::Continue(()) }
+        };
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        let stopped = controlled_multi_load_optimality_criteria(&pipeline, &mut elasticity,
+            &loads, &rho, &volumes, options(), &mut control);
+        assert_eq!(stopped.termination, MultiLoadOcTermination::Cancelled, "{stage}");
+        assert_eq!(stopped.history.len(), 1);
+        assert_eq!(stopped.rho, baseline.rho);
+        assert_eq!(stopped.projected_rho, baseline.projected_rho);
+        assert_eq!(stopped.displacements, baseline.displacements);
+        assert_eq!(elasticity.moduli, pipeline.forward(&rho).2);
+        assert!(stopped.work.linear_iterations > baseline.work.linear_iterations);
+    }
+}
+
+#[test]
+fn g4_unfunded_baseline_reports_budget_not_success() {
+    let (pipeline, mut elasticity, rho, force, volumes) = fixture();
+    let previous = elasticity.moduli.clone();
+    let mut callback = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget {
+        per_solve_iterations: 0, ..SolveBudget::default()
+    }, &mut callback);
+    let run = controlled_multi_load_optimality_criteria(&pipeline, &mut elasticity,
+        &[LoadCase { force: &force, weight: 1.0 }], &rho, &volumes, options(), &mut control);
+    assert_eq!(run.termination, MultiLoadOcTermination::LinearBudget);
+    assert!(run.history.is_empty() && run.displacements.is_empty() && run.projected_rho.is_empty());
+    assert_eq!(elasticity.moduli, previous);
+    assert_eq!(run.work.linear_iterations, 0);
 }
