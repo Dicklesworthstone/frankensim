@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use fs_couple::render::schedule::force::file::{
     MAX_MODAL_PERFORMANCE_BYTES, MODAL_PERFORMANCE_SCHEMA, MODAL_CONTACT_PERFORMANCE_SCHEMA,
-    MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA, ModalPerformance,
+    MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA, MODAL_FRICTION_PERFORMANCE_SCHEMA, ModalPerformance,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
 
@@ -66,9 +66,15 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     };
     if input_schema == MODAL_CONTACT_PERFORMANCE_SCHEMA {
         coupling_provenance.push_str(",\"contacts\":1,\"contact\":\"implicit-nonadhesive-power-law\"");
-    } else if input_schema == MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA {
+    } else if input_schema == MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA
+        || input_schema == MODAL_FRICTION_PERFORMANCE_SCHEMA {
         coupling_provenance.push_str(&format!(
             ",\"contacts\":{},\"contact\":\"simultaneous-implicit-nonadhesive-power-law\"", info.contacts
+        ));
+    }
+    if input_schema == MODAL_FRICTION_PERFORMANCE_SCHEMA {
+        coupling_provenance.push_str(&format!(
+            ",\"friction_contacts\":{},\"friction\":\"simultaneous-1d-regularized-coulomb\"", info.friction_contacts
         ));
     }
     let provenance = format!(

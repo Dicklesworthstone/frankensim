@@ -43,6 +43,8 @@
 // Version 4 adds multi_contact_limits and contacts COUNT, then repeats the
 // unchanged version-3 contact records for a simultaneously solved contact set.
 mod contact;
+// Version 5 adds an explicit friction declaration for every normal contact.
+mod friction;
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
@@ -70,6 +72,10 @@ pub const MODAL_CONTACT_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-coupl
 pub const MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v4";
 /// Exact byte identity for the multi-contact input.
 pub const MODAL_MULTI_CONTACT_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-couple.modal-performance-input.v4";
+/// Version 5 adds explicitly authored 1-D regularized Coulomb friction.
+pub const MODAL_FRICTION_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v5";
+/// Exact byte identity including all friction coefficients, shapes and sources.
+pub const MODAL_FRICTION_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-couple.modal-performance-input.v5";
 /// Byte-read limit to apply BEFORE allocating or decoding an input file.
 pub const MAX_MODAL_PERFORMANCE_BYTES: usize = 4 * 1024 * 1024;
 /// A bounded offline performance; 600 seconds at 48 kHz.
@@ -90,8 +96,11 @@ pub struct ModalPerformanceInfo {
     pub schema: &'static str,
     /// Declared bilateral connections, separate from normal contacts.
     pub connections: usize,
-    /// Declared normal contacts: zero in v1/v2, one in v3, a bounded set in v4.
+    /// Declared normal contacts: zero in v1/v2, one in v3, a bounded set in v4/v5.
     pub contacts: usize,
+    /// Authored friction laws, including zero-coefficient controls; zero in v1-v4.
+    /// This is not the number of contacts currently touching or sliding.
+    pub friction_contacts: usize,
     /// Audio samples per second; not inferred from a note or output extension.
     pub sample_rate_hz: u32,
     /// Exact number of output samples, including a final short callback.
@@ -167,6 +176,7 @@ impl ModalPerformance {
             Some(MODAL_COUPLED_PERFORMANCE_SCHEMA) => MODAL_COUPLED_PERFORMANCE_SCHEMA,
             Some(MODAL_CONTACT_PERFORMANCE_SCHEMA) => MODAL_CONTACT_PERFORMANCE_SCHEMA,
             Some(MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA) => MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA,
+            Some(MODAL_FRICTION_PERFORMANCE_SCHEMA) => MODAL_FRICTION_PERFORMANCE_SCHEMA,
             _ => return Err(input(1, "unsupported modal performance schema")),
         };
         reader.row(schema)?.finish()?;
@@ -255,7 +265,7 @@ impl ModalPerformance {
             model.restore_states(&states).map_err(RenderError::Modal)?;
             voices.push(ModalForceVoice::new(model, columns, initial_forces, initialization)?);
         }
-        // V2/v3/v4 have connection records. V1 keeps its exact compiler and does
+        // V2/v3/v4/v5 have connection records. V1 keeps its exact compiler and does
         // not reinterpret any formerly accepted independent performance.
         let coupled = if schema != MODAL_PERFORMANCE_SCHEMA {
             let mut row = reader.row("coupling_limits")?;
@@ -290,12 +300,19 @@ impl ModalPerformance {
         let contact = if schema == MODAL_CONTACT_PERFORMANCE_SCHEMA {
             Some(contact::read(&mut reader, &voices, &mut total_weights)?)
         } else { None };
-        let multiple = if schema == MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA {
+        let multiple = if schema == MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA
+            || schema == MODAL_FRICTION_PERFORMANCE_SCHEMA {
             Some(contact::read_set(&mut reader, &voices, &mut total_weights)?)
         } else { None };
         let contact_count = if contact.is_some() { 1 } else {
             multiple.as_ref().map_or(0, |(contacts, _)| contacts.len())
         };
+        let frictions = if schema == MODAL_FRICTION_PERFORMANCE_SCHEMA {
+            let (contacts, _) = multiple.as_ref()
+                .ok_or_else(|| input(reader.line, "friction requires a complete normal-contact set"))?;
+            Some(friction::read(&mut reader, &voices, contacts, &mut total_weights)?)
+        } else { None };
+        let friction_count = frictions.as_ref().map_or(0, |items| items.iter().flatten().count());
         let event_count: usize = reader.one("events")?;
         if event_count > MAX_EVENTS {
             return Err(input(reader.line, "force event count exceeds 65536"));
@@ -322,9 +339,14 @@ impl ModalPerformance {
             Some((connections, coupling)) => {
                 let count = connections.len();
                 match multiple {
-                    Some((contacts, contact_set)) => (ScheduledRenderer::from_multi_contact_modal_forces(
-                        voices, events, force_config, connections, coupling, contacts, contact_set,
-                        &CancelGate::new())?, count, MODAL_MULTI_CONTACT_PERFORMANCE_HASH_DOMAIN),
+                    Some((contacts, contact_set)) => match frictions {
+                        Some(frictions) => (ScheduledRenderer::from_frictional_modal_forces(
+                            voices, events, force_config, connections, coupling, contacts, contact_set,
+                            frictions, &CancelGate::new())?, count, MODAL_FRICTION_PERFORMANCE_HASH_DOMAIN),
+                        None => (ScheduledRenderer::from_multi_contact_modal_forces(
+                            voices, events, force_config, connections, coupling, contacts, contact_set,
+                            &CancelGate::new())?, count, MODAL_MULTI_CONTACT_PERFORMANCE_HASH_DOMAIN),
+                    },
                     None => match contact {
                         Some((contact, contact_config)) => (ScheduledRenderer::from_contact_modal_forces(
                             voices, events, force_config, connections, coupling, contact, contact_config,
@@ -337,7 +359,7 @@ impl ModalPerformance {
             None => (ScheduledRenderer::from_modal_forces(voices, events, force_config)?, 0, MODAL_PERFORMANCE_HASH_DOMAIN),
         };
         Ok(Self {
-            info: ModalPerformanceInfo { schema, connections: connection_count, contacts: contact_count,
+            info: ModalPerformanceInfo { schema, connections: connection_count, contacts: contact_count, friction_contacts: friction_count,
                 sample_rate_hz, samples, full_scale_pa, input_hash: hash_domain(domain, bytes),
                 voices: voice_count, modes: total_modes, force_events: event_count },
             renderer,

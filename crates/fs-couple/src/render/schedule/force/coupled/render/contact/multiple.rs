@@ -1,6 +1,7 @@
-//! Existing scheduler and force compiler hosting simultaneous normal contacts.
+//! Existing scheduler and force compiler hosting simultaneous normal/tangential contacts.
 use super::*;
 use super::super::super::contact::multiple::{MultiContactConfig, MultiContactModalSystem};
+use super::super::super::contact::multiple::friction::ModalFriction;
 
 /// A contact set in one render slot. External controls never replace solved
 /// contact forces. The same network state survives all callback boundaries.
@@ -62,6 +63,32 @@ impl ScheduledRenderer {
         connections: Vec<ModalConnection>, coupling: ModalCouplingConfig,
         contacts: Vec<(ModalContact, ModalContactConfig)>, contact_set: MultiContactConfig, gate: &CancelGate,
     ) -> Result<Self, RenderError> {
+        Self::compile_contact_modal_forces(voices, events, force_config, connections, coupling,
+            contacts, contact_set, None, gate)
+    }
+
+    /// Host explicit 1-D regularized Coulomb friction in the same shared-body
+    /// contact solve, actuator compiler, sample clock and callback transaction.
+    /// Each normal contact requires Some(authored law) or explicit None.
+    /// No static sticking, rigid impact or friction-loaded preload is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_frictional_modal_forces(
+        voices: Vec<ModalForceVoice>, events: Vec<ModalForceEvent>, force_config: ForceRenderConfig,
+        connections: Vec<ModalConnection>, coupling: ModalCouplingConfig,
+        contacts: Vec<(ModalContact, ModalContactConfig)>, contact_set: MultiContactConfig,
+        friction: Vec<Option<ModalFriction>>, gate: &CancelGate,
+    ) -> Result<Self, RenderError> {
+        Self::compile_contact_modal_forces(voices, events, force_config, connections, coupling,
+            contacts, contact_set, Some(friction), gate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_contact_modal_forces(
+        voices: Vec<ModalForceVoice>, events: Vec<ModalForceEvent>, force_config: ForceRenderConfig,
+        connections: Vec<ModalConnection>, coupling: ModalCouplingConfig,
+        contacts: Vec<(ModalContact, ModalContactConfig)>, contact_set: MultiContactConfig,
+        friction: Option<Vec<Option<ModalFriction>>>, gate: &CancelGate,
+    ) -> Result<Self, RenderError> {
         super::super::super::poll(Some(gate)).map_err(RenderError::Coupled)?;
         if voices.iter().any(|v| v.initialization != ForceInitialization::RetainState) {
             return Err(invalid("multi-contact performances require retained initial states; nonlinear preload is not inferred"));
@@ -73,7 +100,8 @@ impl ScheduledRenderer {
         };
         if slots.next().is_some() { return Err(invalid("multi-contact host requires one complete network")); }
         let voice = *voice;
-        let system = MultiContactModalSystem::new(voice.system, contacts, contact_set, gate).map_err(RenderError::Coupled)?;
+        let mut system = MultiContactModalSystem::new(voice.system, contacts, contact_set, gate).map_err(RenderError::Coupled)?;
+        if let Some(friction) = friction { system = system.with_friction(friction, gate).map_err(RenderError::Coupled)?; }
         let hosted = MultiContactModalVoice::new(system, voice.held_force)?;
         let context = RenderContext::new(vec![RenderVoice::MultiContactModal(Box::new(hosted))], force_config.max_block);
         super::super::super::poll(Some(gate)).map_err(RenderError::Coupled)?;
