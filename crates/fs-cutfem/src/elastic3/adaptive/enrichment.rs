@@ -2,6 +2,8 @@
 //! These are numerical operators, not continuum-error certificates.
 use super::*;
 
+pub mod precondition;
+
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
     if checkpoint().is_break() { Err(ElasticityError3::Cancelled) } else { Ok(()) }
 }
