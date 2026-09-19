@@ -124,3 +124,6 @@ fn write_u32_le(out: &mut Vec<u8>, value: u32) {
 fn write_i16_le(out: &mut Vec<u8>, value: i16) {
     out.extend_from_slice(&value.to_le_bytes());
 }
+
+/// Incremental file export using the same PCM encoder and scheduled physics.
+pub mod stream;
