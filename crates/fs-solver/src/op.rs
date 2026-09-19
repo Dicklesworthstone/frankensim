@@ -4,6 +4,8 @@
 
 use fs_sparse::{Csr, ops};
 
+pub mod two_level;
+
 /// A linear operator with its transpose — the adjoint hook is part of
 /// the trait, not an afterthought, so every solver built on it is
 /// adjoint-equipped by construction.
