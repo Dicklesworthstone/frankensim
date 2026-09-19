@@ -89,7 +89,7 @@ impl CompactPlateVoice {
 
     /// Host already reduced bodies, including those returned by
     /// `thin_plate::certified_chart_radiators` for a regional-material mesh and
-    /// force footprint. Signed areas/participicipations and any existing vibration
+    /// force footprint. Signed areas/participations and any existing vibration
     /// survive unchanged. The clock counts samples since this wrapper was made.
     /// A body list is not proof of source validity or modal completeness.
     ///
@@ -185,3 +185,6 @@ impl CompactPlateVoice {
 }
 
 fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
+
+/// Bounded geometry/material/force-file input for the existing plate reduction.
+pub mod file;

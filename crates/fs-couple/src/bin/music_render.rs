@@ -12,6 +12,10 @@
 //! budgets; the command requires its explicit 48 kHz clock, without resampling.
 //! See `examples/MODAL_PERFORMANCES.md` for the format and scope.
 //!
+//! `music_render plate INPUT.performance OUT.wav [--block N]` derives modes
+//! from a supplied flat triangle mesh, per-triangle material/thickness sections,
+//! supports and force footprint. See `examples/PLATE_PERFORMANCES.md`.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. Unsupported targets and
@@ -49,6 +53,8 @@
 mod stream_output;
 #[path = "music_render/modal_input.rs"]
 mod modal_input;
+#[path = "music_render/plate_input.rs"]
+mod plate_input;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -249,6 +255,10 @@ fn string_context(block: usize) -> RenderContext {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "plate") {
+        plate_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "modal") {
         modal_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;
