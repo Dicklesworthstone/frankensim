@@ -17,7 +17,20 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize the repository's pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # The locked NumPy tree has an eol-converted legacy batch file.
+            # Restore its EXACT tracked blob, not a new dependency version or
+            # an admission bypass. The owner then rechecks every pinned tree.
+            python3 - <<'PY'
+          import pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          path = 'legacy_numpy_code/numpy/doc/make.bat'
+          blob = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + path])
+          (root / path).write_bytes(blob)
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
+          fi
       - name: Test the piano implementation
         run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
       - name: Render a physical-model smoke note
