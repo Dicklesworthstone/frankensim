@@ -27,6 +27,8 @@
 //!   rules, with symmetric vector Nitsche terms, cut-independent
 //!   penalty scaling, componentwise ghost stabilization, and an
 //!   optional fs-adjoint VJP registration.
+//! - [`controlled`]: bounded-batch interruption of canonical elasticity CG,
+//!   preserving the explicit true-residual gate and typed stop reasons.
 //! - [`agg`]: aggregated-element fallback — small-cut cells lend their
 //!   ill-supported DOFs to a well-cut anchor by polynomial extension
 //!   (belt + suspenders with ghost penalty; policy documented).
@@ -42,6 +44,7 @@
 
 pub mod agg;
 pub mod cond;
+pub mod controlled;
 pub mod elastic;
 pub mod fem;
 pub mod grid;
@@ -50,6 +53,7 @@ pub mod sdf;
 
 pub use agg::AggPolicy;
 pub use cond::{CondReport, condition_estimate};
+pub use controlled::ControlledElasticitySolution;
 pub use elastic::MAX_PLANE_STRAIN_STIFFNESS_RATIO;
 pub use elastic::{
     BoundaryTraction, CutElasticity, CutElasticityOperator, CutElasticitySolution,
