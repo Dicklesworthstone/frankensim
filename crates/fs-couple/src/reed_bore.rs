@@ -172,6 +172,12 @@ const NEWTON_BACKTRACK_MAX: u32 = 4;
 /// its endpoints are adjacent floating-point values.
 const NEWTON_STEP_TOL: f64 = 1.0e-9;
 
+// Arithmetic bisection near zero may cross the full binary64 exponent
+// range before reaching adjacent values, including subnormals. A fixed
+// 96-step cap is insufficient even for a 1e-20 Pa root in a kPa bracket.
+// Leave two extra steps beyond MAX_EXP - MIN_EXP + MANTISSA_DIGITS.
+const STRICT_MAX_BISECTIONS: usize = 2100;
+
 /// Analytic `d f / d p_plus` of [`reed_flow_mismatch`] at `p_plus`.
 ///
 /// With `dp = p_m − ((1+r0)·p_plus + p_minus_hist)`:
@@ -496,7 +502,7 @@ pub(crate) fn solve_reed_wave_strict(
     // No flow tolerance scaled by pressure: finish at an exact residual
     // zero or adjacent representable pressure endpoints. Multiple roots
     // remain possible; this is deterministic selection, not a uniqueness claim.
-    for _ in 0..96 {
+    for _ in 0..STRICT_MAX_BISECTIONS {
         let mid = f64::midpoint(lo, hi);
         if mid == lo || mid == hi || f_lo == 0.0 || f_hi == 0.0 {
             return Ok(if f_lo.abs() <= f_hi.abs() { lo } else { hi });
@@ -519,7 +525,7 @@ pub(crate) fn solve_reed_wave_strict(
         }
     }
     Err(AcousticRealizeError::Reed {
-        what: "reed pressure bracket did not converge within 96 bisections",
+        what: "reed pressure bracket did not converge within the binary64 refinement budget",
     })
 }
 
@@ -1204,6 +1210,19 @@ mod fast_mode_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn strict_reed_resolves_small_pressure_roots() {
+        // Within the declared Bernoulli dead zone, zero body flow and
+        // reflection leave the exact linear root p_plus = p_minus.
+        // Its floating-point resolution is unrelated to the closing pressure
+        // used to initialize the bracket.
+        for incoming in [-1e-100, -1e-20, 1e-20, 1e-100] {
+            let outgoing = solve_reed_wave_strict(reed(), 1.2, 1.0, 0.0, incoming, 0.0, 5.0, 0.0)
+                .expect("small nonzero root must resolve");
+            assert_eq!(outgoing.to_bits(), incoming.to_bits());
         }
     }
 
