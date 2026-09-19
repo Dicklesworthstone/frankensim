@@ -18,6 +18,9 @@ use crate::auglag::{
 };
 use fs_la::factor::lu;
 
+mod state;
+pub use state::{SqpError, SqpRunReport, SqpSample, SqpState, SqpStop};
+
 type JtAction<'a> = dyn Fn(&[f64], &[f64]) -> Vec<f64> + 'a;
 
 /// Outcome of an SQP solve.
