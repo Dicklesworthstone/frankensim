@@ -8,7 +8,8 @@
 //! quadtree IS the octree restricted to two axes, sharing the
 //! FrankenVDB dyadic-tile alignment (cells at level ℓ are 2⁻ℓ dyadic
 //! boxes; a leaf at the tile depth is one FrankenVDB leaf face). The
-//! 3D octree instantiation is a recorded no-claim (CONTRACT.md).
+//! 3D adaptive octree instantiation remains a recorded no-claim;
+//! the 3-D `elastic3` path uses a fixed Cartesian background.
 //!
 //! The pipeline, module by module:
 //! - [`sdf`]: the [`CutSdf`] trait — a level-set function plus a
@@ -29,6 +30,9 @@
 //!   rules, with symmetric vector Nitsche terms, cut-independent
 //!   penalty scaling, componentwise ghost stabilization, and an
 //!   optional fs-adjoint VJP registration.
+//! - [`elastic3`]: matrix-free 3-D Q1 elasticity on raw implicit cuts,
+//!   natural embedded boundaries, box clamps, ghost stabilization,
+//!   independent cell stiffness scales and their full energy pullbacks.
 //! - [`controlled`]: bounded-batch interruption of canonical elasticity CG,
 //!   preserving the explicit true-residual gate and typed stop reasons.
 //! - [`agg`]: aggregated-element fallback — small-cut cells lend their
@@ -48,6 +52,7 @@ pub mod agg;
 pub mod cond;
 pub mod controlled;
 pub mod elastic;
+pub mod elastic3;
 pub mod fem;
 pub mod grid;
 pub mod quad;
