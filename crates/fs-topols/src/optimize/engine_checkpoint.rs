@@ -1,6 +1,8 @@
 /// Reusable discretization and material. The background grid is built once,
 /// including when a guarded iteration backtracks over several geometries.
 use super::*;
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 
 struct ComplianceKernel {
     grid: Quadtree,
@@ -16,7 +18,7 @@ struct ComplianceKernel {
 
 struct EvaluatedDesign {
     phi: GridSdf,
-    solution: CutElasticitySolution,
+    solution: ControlledElasticitySolution,
     compliance: f64,
     volume: f64,
 }
@@ -85,7 +87,16 @@ impl ComplianceKernel {
         Ok(Self { grid, material, lambda, mu, support, fixture, settings, mass, stiffness })
     }
 
-    fn evaluate(&self, phi: GridSdf) -> Result<EvaluatedDesign, CutFemError> {
+    fn evaluate<B>(
+        &self,
+        phi: GridSdf,
+        poll_iters: usize,
+        stage: fn(usize) -> CheckpointStage,
+        control: &mut impl FnMut(CheckpointStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, EvaluatedDesign>, CutFemError> {
+        if let ControlFlow::Break(reason) = control(stage(0)) {
+            return Ok(ControlFlow::Break(reason));
+        }
         if phi.nodes().iter().any(|v| !v.is_finite()) {
             return Err(invalid_input("evolution produced a non-finite level set"));
         }
@@ -105,17 +116,24 @@ impl ComplianceKernel {
             solver_tol: SOLVER_TOL,
             solver_max_iters: SOLVER_MAX_ITERS,
         };
-        let solution = solver.solve_with_boundary_traction(
+        let operator = solver.assemble_with_boundary_traction(
             &|_, _| [0.0, 0.0],
             &|_, _| [0.0, 0.0],
             BoundaryTraction::EdgeBand { support: self.support, value: &traction },
         )?;
+        let solution = match operator.solve_controlled(
+            SOLVER_TOL, SOLVER_MAX_ITERS, poll_iters,
+            |iters| control(stage(iters)),
+        )? {
+            ControlFlow::Continue(solution) => solution,
+            ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+        };
         let compliance = solution.compliance();
         let volume = material_volume(&self.grid, &phi);
         if !(compliance.is_finite() && compliance >= 0.0 && volume.is_finite() && volume > 0.0) {
             return Err(invalid_input("cantilever solve produced invalid compliance or material area"));
         }
-        Ok(EvaluatedDesign { phi, solution, compliance, volume })
+        Ok(ControlFlow::Continue(EvaluatedDesign { phi, solution, compliance, volume }))
     }
 
     fn direction(&self, state: &EvaluatedDesign, iteration: usize) -> Result<ShapeDirection, CutFemError> {
@@ -299,40 +317,86 @@ pub(super) fn optimize_compliance_segment(
     start_iteration: usize,
     start_ell: f64,
 ) -> Result<OptimizeReport, CutFemError> {
+    match optimize_compliance_segment_controlled(
+        phi, fixture, settings, start_iteration, start_ell, usize::MAX,
+        &mut |_| ControlFlow::<Infallible>::Continue(()),
+    )? {
+        ControlFlow::Continue(report) => Ok(report),
+        ControlFlow::Break(never) => match never {},
+    }
+}
+
+/// Controlled sibling of the same numerical segment; no alternative evolution
+/// or line-search path. The checkpoint caller supplies a private trial geometry.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn optimize_compliance_segment_controlled<B>(
+    phi: &mut GridSdf,
+    fixture: Cantilever,
+    settings: OptimizeSettings,
+    start_iteration: usize,
+    start_ell: f64,
+    poll_iters: usize,
+    control: &mut impl FnMut(CheckpointStage) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, OptimizeReport>, CutFemError> {
     cantilever_support(fixture)?;
     validated_plane_strain_material(settings)?;
     validate_evolution(phi, settings)?;
     if !(start_ell.is_finite() && start_ell >= 0.0) {
         return Err(invalid_input("checkpoint multiplier must be finite and nonnegative"));
     }
+    if poll_iters == 0 {
+        return Err(invalid_input("checkpoint CG poll interval must be positive"));
+    }
     let mut report = OptimizeReport::default();
     if settings.iterations == 0 {
-        return Ok(report);
+        return Ok(ControlFlow::Continue(report));
     }
     start_iteration.checked_add(settings.iterations)
         .ok_or_else(|| invalid_input("optimizer global iteration ordinal overflow"))?;
+    if let ControlFlow::Break(reason) = control(CheckpointStage::Prepare) {
+        return Ok(ControlFlow::Break(reason));
+    }
     let kernel = ComplianceKernel::new(phi, fixture, settings)?;
-    let mut current = kernel.evaluate(phi.clone())?;
+    let mut current = match kernel.evaluate(
+        phi.clone(), poll_iters, CheckpointStage::InitialSolve, control,
+    )? {
+        ControlFlow::Continue(state) => state,
+        ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+    };
     let mut ell = start_ell;
     for local_iteration in 0..settings.iterations {
         let iteration = start_iteration + local_iteration;
+        if let ControlFlow::Break(reason) = control(CheckpointStage::Direction) {
+            return Ok(ControlFlow::Break(reason));
+        }
         let direction = kernel.direction(&current, iteration)?;
+        if let ControlFlow::Break(reason) = control(CheckpointStage::Evolution) {
+            return Ok(ControlFlow::Break(reason));
+        }
         let GeometryTrial { phi: trial_phi, audit, events, load_pad_nodes } =
             kernel.propose(&current, &direction, GeometryMove {
                 normal_multiplier: ell, hole_multiplier: ell, scale: 1.0, with_holes: true,
             })?;
-        let candidate = kernel.evaluate(trial_phi)?;
+        let candidate = match kernel.evaluate(
+            trial_phi, poll_iters, CheckpointStage::CandidateSolve, control,
+        )? {
+            ControlFlow::Continue(state) => state,
+            ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+        };
         let next_ell = ell + settings.mu_al * direction.mean_energy.abs().max(1e-30)
             * (candidate.volume - settings.volfrac) / settings.volfrac;
         if !next_ell.is_finite() {
             return Err(invalid_input("volume multiplier update overflowed"));
+        }
+        if let ControlFlow::Break(reason) = control(CheckpointStage::Publish) {
+            return Ok(ControlFlow::Break(reason));
         }
         ell = next_ell.max(0.0);
         append_iteration(&mut report, &candidate, iteration, ell, audit, events, load_pad_nodes);
         *phi = candidate.phi.clone();
         current = candidate;
     }
-    Ok(report)
+    Ok(ControlFlow::Continue(report))
 }
 
 /// Run the level-set compliance descent. Every returned row describes the
@@ -354,7 +418,7 @@ pub fn optimize_compliance(
 fn strain_at(
     grid: &Quadtree,
     phi: &GridSdf,
-    sol: &CutElasticitySolution,
+    sol: &ControlledElasticitySolution,
     p: [f64; 2],
 ) -> ([f64; 3], bool) {
     let level = grid.max_level();

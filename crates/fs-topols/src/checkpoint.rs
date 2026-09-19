@@ -12,7 +12,7 @@ use crate::topder::{NucleationEvent, nucleate, topological_derivative};
 use crate::veloext::extend_velocity;
 use crate::weno::{Velocity, advect, build_band};
 use fs_cutfem::{
-    BoundaryTraction, CutElasticity, CutElasticitySolution, CutFemError, DesignBoxEdge, EdgeBand,
+    BoundaryTraction, CutElasticity, ControlledElasticitySolution, CutFemError, DesignBoxEdge, EdgeBand,
     MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree,
 };
 use fs_material::IsotropicElastic;
@@ -150,3 +150,24 @@ mod engine;
 mod stateful;
 
 pub use stateful::OptimizeCheckpoint;
+
+/// Cooperative interruption boundaries within one unpublished optimizer update.
+///
+/// CG counts are cumulative within the named solve, including correction passes.
+/// Assembly and the other named stages are checked at their boundaries, not
+/// preempted internally. This does not promise a wall-clock latency bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointStage {
+    /// Before cloning the retained state or allocating discretization buffers.
+    Prepare,
+    /// Canonical solve of the retained design; zero also brackets assembly.
+    InitialSolve(usize),
+    /// Before sensitivity evaluation and Sobolev smoothing.
+    Direction,
+    /// Before advection, redistancing and optional hole nucleation.
+    Evolution,
+    /// Canonical solve of the proposed design; zero also brackets assembly.
+    CandidateSolve(usize),
+    /// Both solves succeeded, but the candidate has not replaced durable state.
+    Publish,
+}

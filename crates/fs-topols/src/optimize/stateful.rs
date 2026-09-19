@@ -8,7 +8,9 @@
 //! while preserving the global hole-nucleation schedule exactly.
 
 use super::*;
-use super::engine::optimize_compliance_segment;
+use super::engine::{optimize_compliance_segment, optimize_compliance_segment_controlled};
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 
 /// Durable optimizer state sufficient for exact deterministic continuation.
 #[derive(Debug, Clone)]
@@ -133,19 +135,57 @@ impl OptimizeCheckpoint {
     /// # Errors
     /// Propagates the canonical optimizer/CutFEM refusal for the attempted step.
     pub fn advance_one(&mut self) -> Result<Option<OptimizeReport>, CutFemError> {
+        match self.advance_one_controlled(usize::MAX, |_| ControlFlow::<Infallible>::Continue(()))? {
+            ControlFlow::Continue(report) => Ok(report),
+            ControlFlow::Break(never) => match never {},
+        }
+    }
+
+    /// Advance one update with interruption inside both canonical CG solves.
+    ///
+    /// `poll_iters` bounds additional CG iterations between callbacks. The
+    /// callback sees the named stage and may return its own stop reason. A
+    /// `Break` leaves geometry, multiplier and global ordinal BITWISE unchanged,
+    /// even after evolution or a completed candidate solve. Retrying performs
+    /// this update again, never replays earlier accepted geometry updates.
+    /// `Continue(None)` means the declared update count was already complete.
+    ///
+    /// Assembly, sensitivity smoothing, advection and individual sparse/vector
+    /// operations remain non-preemptible; checks bracket those stages. This is
+    /// cooperative interruption, not a hard wall-time or memory guarantee.
+    ///
+    /// # Errors
+    /// Refuses a zero polling interval or propagates a numerical refusal. An
+    /// interrupted solve is `Ok(Break(reason))`, not a failed/converged field.
+    pub fn advance_one_controlled<B>(
+        &mut self,
+        poll_iters: usize,
+        mut control: impl FnMut(CheckpointStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, Option<OptimizeReport>>, CutFemError> {
+        if poll_iters == 0 {
+            return Err(invalid_input("checkpoint CG poll interval must be positive"));
+        }
         if self.is_complete() {
-            return Ok(None);
+            return Ok(ControlFlow::Continue(None));
+        }
+        if let ControlFlow::Break(reason) = control(CheckpointStage::Prepare) {
+            return Ok(ControlFlow::Break(reason));
         }
         let mut candidate = self.geometry.clone();
         let mut step_settings = self.settings;
         step_settings.iterations = 1;
-        let report = optimize_compliance_segment(
+        let report = match optimize_compliance_segment_controlled(
             &mut candidate,
             self.fixture,
             step_settings,
             self.next_iteration,
             self.ell,
-        )?;
+            poll_iters,
+            &mut control,
+        )? {
+            ControlFlow::Continue(report) => report,
+            ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+        };
         if report.rows.len() != 1 || report.ell.len() != 1 {
             return Err(invalid_input(
                 "internal checkpoint step did not produce exactly one evaluated row",
@@ -157,10 +197,13 @@ impl OptimizeCheckpoint {
         if !(ell.is_finite() && ell >= 0.0) {
             return Err(invalid_input("checkpoint step produced invalid multiplier state"));
         }
+        if let ControlFlow::Break(reason) = control(CheckpointStage::Publish) {
+            return Ok(ControlFlow::Break(reason));
+        }
         self.geometry = candidate;
         self.next_iteration = next_iteration;
         self.ell = ell;
-        Ok(Some(report))
+        Ok(ControlFlow::Continue(Some(report)))
     }
 
     /// Advance at most `max_steps` updates and concatenate their evaluated
@@ -288,5 +331,83 @@ mod tests {
             f64::NAN,
         ).is_err());
         assert_eq!(geometry.nodes(), original.as_slice());
+    }
+
+    fn geometry_bits(state: &OptimizeCheckpoint) -> Vec<u64> {
+        state.geometry().nodes().iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[test]
+    fn interrupted_solves_and_late_publication_leave_the_accepted_checkpoint_exact() {
+        let settings = settings();
+        let fixture = Cantilever { load: 1.0, band: 0.125 };
+        let mut retained = OptimizeCheckpoint::new(beam(settings.level), fixture, settings)
+            .expect("checkpoint");
+        retained.advance_one().expect("retain one real accepted update");
+        let mut reference = retained.clone();
+        let expected = reference.advance_one().expect("reference update").expect("row");
+        for target in [
+            CheckpointStage::InitialSolve(2),
+            CheckpointStage::CandidateSolve(2),
+            CheckpointStage::Publish,
+        ] {
+            let mut state = retained.clone();
+            let stopped = state.advance_one_controlled(2, |stage| {
+                if stage == target { ControlFlow::Break(stage) }
+                else { ControlFlow::Continue(()) }
+            }).expect("interruption is not a numerical error");
+            assert!(matches!(stopped, ControlFlow::Break(stage) if stage == target));
+            assert_eq!(geometry_bits(&state), geometry_bits(&retained));
+            assert_eq!(state.next_iteration(), retained.next_iteration());
+            assert_eq!(state.ell().to_bits(), retained.ell().to_bits());
+            let ControlFlow::Continue(Some(retry)) = state.advance_one_controlled(
+                3, |_| ControlFlow::<()>::Continue(()),
+            ).expect("retry") else { panic!("retry did not complete") };
+            assert_eq!(retry.rows, expected.rows);
+            assert_eq!(retry.snapshots, expected.snapshots);
+            assert_eq!(geometry_bits(&state), geometry_bits(&reference));
+            assert_eq!(state.ell().to_bits(), reference.ell().to_bits());
+            assert_eq!(state.next_iteration(), reference.next_iteration());
+        }
+    }
+
+    #[test]
+    fn controlled_batches_keep_the_global_nucleation_schedule_and_trajectory() {
+        let settings = settings();
+        let fixture = Cantilever { load: 1.0, band: 0.125 };
+        let initial = beam(settings.level);
+        let mut full_geometry = initial.clone();
+        let full = optimize_compliance(&mut full_geometry, fixture, settings).expect("fixed run");
+        let mut state = OptimizeCheckpoint::new(initial, fixture, settings).expect("checkpoint");
+        let mut rows = Vec::new();
+        for batch in [1, 3, 7] {
+            let ControlFlow::Continue(Some(report)) = state.advance_one_controlled(
+                batch, |_| ControlFlow::<()>::Continue(()),
+            ).expect("controlled update") else { panic!("missing update") };
+            rows.extend(report.rows);
+        }
+        assert!(state.is_complete());
+        assert_eq!(rows, full.rows);
+        assert_eq!(geometry_bits(&state), full_geometry.nodes().iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn zero_poll_refuses_and_preflight_stop_allocates_no_trial() {
+        let settings = settings();
+        let mut state = OptimizeCheckpoint::new(
+            beam(settings.level), Cantilever { load: 1.0, band: 0.125 }, settings,
+        ).expect("checkpoint");
+        let before = geometry_bits(&state);
+        assert!(state.advance_one_controlled(0, |_| -> ControlFlow<()> {
+            panic!("invalid control must be refused before polling")
+        }).is_err());
+        let stopped = state.advance_one_controlled(32, |stage| {
+            assert_eq!(stage, CheckpointStage::Prepare);
+            ControlFlow::Break("cancelled")
+        }).expect("preflight stop");
+        assert!(matches!(stopped, ControlFlow::Break("cancelled")));
+        assert_eq!(geometry_bits(&state), before);
+        assert_eq!(state.next_iteration(), 0);
+        assert_eq!(state.ell().to_bits(), settings.ell0.to_bits());
     }
 }
