@@ -20,6 +20,8 @@
 //!   subdivision with certified classification at every level, exact
 //!   crossings by bisection, degree-2-exact polygon rules; error
 //!   control by subdivision depth.
+//! - [`quad3`]: bounded 3-D bulk height quadrature with positive numerical
+//!   weights and a separate conservative interval domain-volume enclosure.
 //! - [`fem`]: Q1 spaces on active cells, Nitsche weak embedded
 //!   Dirichlet conditions, GHOST-PENALTY stabilization (small-cut
 //!   conditioning), assembly to fs-sparse, fs-solver CG.
@@ -49,6 +51,7 @@ pub mod elastic;
 pub mod fem;
 pub mod grid;
 pub mod quad;
+pub mod quad3;
 pub mod sdf;
 
 pub use agg::AggPolicy;
