@@ -320,3 +320,156 @@ impl LinearOp for DensityElasticity {
         }
     }
 }
+
+impl DensityElasticity {
+    /// Apply the consistent mass on the free displacement space without a
+    /// global matrix. Fixed inputs are ignored and fixed outputs are ZERO:
+    /// adding the stiffness operator's identity here would introduce false
+    /// eigenmodes at constrained nodes. `densities` are physical mass weights,
+    /// not stiffness moduli and not a lumped-mass approximation.
+    ///
+    /// # Panics
+    /// On incompatible shapes or non-finite/negative mass weights.
+    pub fn apply_mass(&self, densities: &[f64], x: &[f64], y: &mut [f64]) {
+        self.assert_mass_weights(densities);
+        assert_eq!(x.len(), self.n, "mass input shape mismatch");
+        assert_eq!(y.len(), self.n, "mass output shape mismatch");
+        y.fill(0.0);
+        for ((mass, tet), &density) in self.me.iter().zip(&self.tets).zip(densities) {
+            let mut local = [0.0; 12];
+            for (a, &vertex) in tet.iter().enumerate() {
+                for component in 0..3 {
+                    let dof = 3 * vertex as usize + component;
+                    if self.free[dof] {
+                        local[3 * a + component] = x[dof];
+                    }
+                }
+            }
+            for (a, &vertex) in tet.iter().enumerate() {
+                for component in 0..3 {
+                    let dof = 3 * vertex as usize + component;
+                    if self.free[dof] {
+                        let row = 3 * a + component;
+                        let mut value = 0.0;
+                        for (column, &input) in local.iter().enumerate() {
+                            value = mass[12 * row + column].mul_add(input, value);
+                        }
+                        y[dof] = density.mul_add(value, y[dof]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Diagonal of the CURRENT stiffness operator, for matrix-free Jacobi
+    /// preconditioning. Fixed entries are one, matching `LinearOp::apply`.
+    #[must_use]
+    pub fn stiffness_diagonal(&self) -> Vec<f64> {
+        assert_eq!(self.moduli.len(), self.cells(), "stiffness weight shape mismatch");
+        assert!(self.moduli.iter().all(|e| e.is_finite() && *e > 0.0),
+            "stiffness weights must be finite and positive");
+        let mut diagonal = self.block_diagonal(&self.ke, &self.moduli);
+        for (value, &free) in diagonal.iter_mut().zip(&self.free) {
+            if !free {
+                *value = 1.0;
+            }
+        }
+        diagonal
+    }
+
+    /// Diagonal of the consistent mass. Fixed entries are zero. This is a
+    /// diagnostic/preconditioning quantity, NOT a replacement mass operator.
+    #[must_use]
+    pub fn mass_diagonal(&self, densities: &[f64]) -> Vec<f64> {
+        self.assert_mass_weights(densities);
+        self.block_diagonal(&self.me, densities)
+    }
+
+    fn assert_mass_weights(&self, densities: &[f64]) {
+        assert_eq!(densities.len(), self.cells(), "one mass weight per cell is required");
+        assert!(densities.iter().all(|r| r.is_finite() && *r >= 0.0),
+            "mass weights must be finite and nonnegative");
+    }
+
+    fn block_diagonal(&self, blocks: &[[f64; 144]], weights: &[f64]) -> Vec<f64> {
+        let mut diagonal = vec![0.0; self.n];
+        for ((block, tet), &weight) in blocks.iter().zip(&self.tets).zip(weights) {
+            for (a, &vertex) in tet.iter().enumerate() {
+                for component in 0..3 {
+                    let dof = 3 * vertex as usize + component;
+                    if self.free[dof] {
+                        let local = 3 * a + component;
+                        diagonal[dof] = weight.mul_add(block[13 * local], diagonal[dof]);
+                    }
+                }
+            }
+        }
+        diagonal
+    }
+}
+
+#[cfg(test)]
+mod matrix_free_mass_tests {
+    use super::*;
+
+    #[test]
+    fn consistent_mass_and_diagonals_match_dense_assembly() {
+        let (mesh, positions) = fs_feec::kuhn_cube(2);
+        let mut elasticity = DensityElasticity::new(&mesh, &positions, 1.0, 0.3,
+            &|p| p[0] == 0.0);
+        let weights: Vec<f64> = (0..elasticity.cells())
+            .map(|i| 0.2 + (i % 7) as f64 / 10.0).collect();
+        elasticity.moduli = weights.iter().map(|r| r * r * r).collect();
+        let (stiffness, mass, free) = elasticity.assemble_dense(&weights);
+        let n = free.len();
+        let input: Vec<f64> = (0..elasticity.n()).map(|i| (i % 11) as f64 - 5.0).collect();
+        let mut actual = vec![f64::NAN; elasticity.n()];
+        elasticity.apply_mass(&weights, &input, &mut actual);
+        let md = elasticity.mass_diagonal(&weights);
+        let kd = elasticity.stiffness_diagonal();
+        for (row, &dof) in free.iter().enumerate() {
+            let expected: f64 = free.iter().enumerate()
+                .map(|(column, &j)| mass[row * n + column] * input[j]).sum();
+            assert!((actual[dof] - expected).abs() < 1e-13);
+            assert!((md[dof] - mass[row * n + row]).abs() < 1e-13);
+            assert!((kd[dof] - stiffness[row * n + row]).abs() < 1e-13);
+        }
+        for (dof, &is_free) in elasticity.free().iter().enumerate() {
+            if !is_free {
+                assert_eq!(actual[dof], 0.0);
+                assert_eq!(md[dof], 0.0);
+                assert_eq!(kd[dof], 1.0);
+            }
+        }
+        let energy: f64 = input.iter().zip(&actual).map(|(x, y)| x * y).sum();
+        let cell_energy: f64 = elasticity.cell_kinetic(&input).iter().zip(&weights)
+            .map(|(kinetic, weight)| kinetic * weight).sum();
+        assert!((energy - cell_energy).abs() < 1e-12);
+        assert!(energy > 0.0);
+    }
+
+    #[test]
+    fn zero_mass_and_fixed_only_inputs_cannot_create_modes() {
+        let (mesh, positions) = fs_feec::kuhn_cube(1);
+        let elasticity = DensityElasticity::new(&mesh, &positions, 1.0, 0.3,
+            &|p| p[0] == 0.0);
+        let mut output = vec![17.0; elasticity.n()];
+        elasticity.apply_mass(&vec![0.0; elasticity.cells()],
+            &vec![1.0; elasticity.n()], &mut output);
+        assert!(output.iter().all(|y| *y == 0.0));
+        let fixed_only: Vec<f64> = elasticity.free().iter()
+            .map(|free| if *free { 0.0 } else { 3.0 }).collect();
+        elasticity.apply_mass(&vec![1.0; elasticity.cells()], &fixed_only, &mut output);
+        assert!(output.iter().all(|y| *y == 0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "mass weights must be finite and nonnegative")]
+    fn invalid_mass_is_rejected() {
+        let (mesh, positions) = fs_feec::kuhn_cube(1);
+        let elasticity = DensityElasticity::new(&mesh, &positions, 1.0, 0.3, &|_| false);
+        let mut weights = vec![1.0; elasticity.cells()];
+        weights[0] = f64::NAN;
+        let _ = elasticity.mass_diagonal(&weights);
+    }
+}
