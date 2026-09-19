@@ -31,6 +31,9 @@ mod halfedge;
 mod polygon;
 mod repair;
 pub mod shapes;
+/// Bounded diffuse enclosure geometry with opaque visibility and explicit
+/// sampling/projection diagnostics; estimates, not topology certificates.
+pub mod view_factors;
 mod winding;
 
 pub use chart::{Bvh, MeshChart, point_triangle_distance, ray_triangle_watertight};
