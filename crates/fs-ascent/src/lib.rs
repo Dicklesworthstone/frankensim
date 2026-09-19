@@ -20,6 +20,7 @@ pub mod interior;
 pub mod lbfgs;
 pub mod nsga;
 pub mod pareto;
+pub mod reverse_manifold;
 pub mod reverse_newton;
 pub mod reverse_sqp;
 pub mod reverse_study;
@@ -44,6 +45,7 @@ pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weig
 pub use auglag::{AugLagReport, KktResidual, augmented_lagrangian};
 pub use interior::{InteriorReport, interior_point};
 pub use lbfgs::{LbfgsError, LbfgsReport, LbfgsState};
+pub use reverse_manifold::{ReverseManifoldError, ReverseManifoldReport, ReverseManifoldStudy};
 pub use reverse_newton::{ReverseNewtonError, ReverseNewtonReport, ReverseNewtonStop, ReverseNewtonStudy};
 pub use reverse_sqp::{ReverseSqpError, ReverseSqpReport, ReverseSqpStudy};
 pub use reverse_study::{ReverseStudy, ReverseStudyError};
