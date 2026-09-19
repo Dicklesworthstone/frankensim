@@ -9,6 +9,8 @@ pub mod dynamic;
 pub(crate) mod moving;
 /// Moving aperture coupled to a geometry-bound passive uniform tube.
 pub mod tube;
+/// Moving aperture coupled to nonuniform connected tube sections and branches.
+pub mod network;
 
 /// Quasistatic aperture: `y = H max(0, 1 − Δp/P_c)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
