@@ -7,7 +7,10 @@ cargo run -p fs-couple --example percussion -- splash 4096 > splash.csv
 cargo run -p fs-couple --example percussion -- drum 4096 > drum.csv
 ```
 
-These are **mechanical reference experiments**, not a finished sampled instrument,
+The commands above are **mechanical reference experiments**. The additional
+`splash-wav` and `drum-wav` commands in [AUDIO.md](AUDIO.md) connect these mechanics
+to actual two-sided/closed-boundary BEM transfers and fixed-receiver pressure.
+Neither path is a finished sampled instrument,
 not measured digital twins and not a real-time-qualified plugin. The executable
 uses the original fs-phs nonlinear stepper, which allocates and builds a dense
 finite-difference Newton matrix. Native compilation and execution were not
@@ -88,9 +91,9 @@ tests, not by matching one attractive sound.
 The runtime gate is a bounded, workspace-based fast realization of the existing
 discrete-gradient law, benchmarked at actual sample rates, mode counts, contact
 counts and polyphony. It must reproduce this reference before being advertised
-as real time. The acoustic gate is a two-sided cymbal exterior/BEM transfer or
-other justified radiation model, reduced through the existing broadband
-radiation facility, including the relevant radiation loading, propagation and
-listener position. A room response is downstream, not a substitute for source
+as real time. A first one-way two-sided/closed-boundary BEM and fixed-receiver
+filter path now exists (AUDIO.md), but native execution, boundary refinement,
+full-band accuracy and radiation loading remain open. A moving receiver should
+use the existing broadband directional facility rather than this fixed bank. A room response is downstream, not a substitute for source
 physics. Finite-amplitude membrane/shell validity and aliasing must be checked
 separately. None of those missing gates is promoted by the tests here.

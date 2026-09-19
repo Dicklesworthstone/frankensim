@@ -1,5 +1,5 @@
-//! Sourced-dimension percussion MECHANICS reference, not a calibrated audio plugin.
-//! See README.md beside this file for measured anchors versus explicit estimates.
+//! Sourced-dimension percussion reference, not a calibrated or real-time audio plugin.
+//! See README.md for measured anchors/estimates and AUDIO.md for pressure export.
 //! cargo run -p fs-couple --example percussion -- splash 4096 > splash.csv
 //! cargo run -p fs-couple --example percussion -- drum 4096 > drum.csv
 use fs_couple::render::plate::impact::{BodyPotential,ImpactBody,ImpactSystem,ImpactConfig,VolumeSpring};
@@ -16,9 +16,11 @@ use fs_exec::CancelGate;
 use fs_dcontact::Obstacle;
 use std::io::Write;
 
+mod acoustics;
+
 type Error=Box<dyn std::error::Error>;
 fn mesh_budget()->ProfileBudget {ProfileBudget{max_nodes:10000,max_triangles:20000,max_feature_evaluations:100000}}
-fn config(steps:u64)->ImpactConfig {ImpactConfig{dt_s:2e-6,max_steps:steps,maximum_energy_j:20.0,
+fn config(steps:u64,dt_s:f64)->ImpactConfig {ImpactConfig{dt_s,max_steps:steps,maximum_energy_j:20.0,
     energy_absolute_tolerance_j:1e-9,energy_relative_tolerance:1e-6,maximum_generalized_force:1e6}}
 fn zero_body(potential:BodyPotential,omegas:&[f64])->ImpactBody {
     ImpactBody{potential,initial:vec![ModalAcousticState::default();omegas.len()],
@@ -46,8 +48,8 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     Ok(Obstacle::new(weights,1,n,vec![0.0],vec![1.0],stiffness,1.5,
         "estimated isotropic Hertz tip: E_eff=0.8GPa, R=3mm; not identified hickory-shell contact".into())?)
 }
-struct Experiment {system:ImpactSystem,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>}
-fn splash(steps:u64)->Result<Experiment,Error> {
+struct Experiment {system:ImpactSystem,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>}
+fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     // Published anchors: diameter 203.2mm; bell diameter78mm; hole diameter12.3mm;
     // edge thickness0.5mm; literature B20 E112.6GPa,nu.342,rho8607.
     // ALL interior heights and thicknesses below are explicit estimates.
@@ -73,6 +75,11 @@ fn splash(steps:u64)->Result<Experiment,Error> {
     if modes.len()>32 {return Err("splash retains too many modes for this declared reference; narrow the explicit window or increase the host budget".into());}
     let reduction=ShellReduction::new(&shell.mesh,&shell.sections,&model,&modes,
         ReductionBudget{max_modes:32,max_facet_modes:20000,relative_tolerance:1e-5})?;
+    let acoustics=if audio {
+        let surface=reduction.radiation_surface(&shell.nodal_thickness_m,
+            fs_plate::shell::reduction::radiation::RadiationSurfaceBudget{max_panels:2048,max_panel_modes:65536})?;
+        Some(acoustics::Boundary::shell(&surface,1)?)
+    }else{None};
     let nearest=|x:f64,y:f64|shell.mesh.tris.iter().enumerate().min_by(|(_,a),(_,b)| {
         let distance=|t:&&[usize;3]| {let cx=t.iter().map(|i|shell.mesh.nodes[*i][0]/3.0).sum::<f64>();
             let cy=t.iter().map(|i|shell.mesh.nodes[*i][1]/3.0).sum::<f64>();(cx-x).hypot(cy-y)};
@@ -96,11 +103,11 @@ fn splash(steps:u64)->Result<Experiment,Error> {
     eprintln!("estimated splash reconstruction: mass_kg={},modes={},facets={},max_edge_m={}",shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
-    let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps))?;
+    let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
     let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
-    Ok(Experiment{system,force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None})
+    Ok(Experiment{system,force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None,acoustics})
 }
-fn drum(steps:u64)->Result<Experiment,Error> {
+fn drum(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     // Pearl MM6 published 14x6.5in,7.5mm maple shell. Rigid cylindrical cavity
     // and clear-span radius below are geometric approximations of that shell;
     // maple elasticity, bearing-edge shape, hoops and snare wires are NOT solved.
@@ -114,6 +121,7 @@ fn drum(steps:u64)->Result<Experiment,Error> {
         if modes.is_empty() {return Err("head frequency window is empty".into());}
         mode_sets.push(modes);films.push(film);
     }
+    let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,0.1778)?)}else{None};
     let (stick,stick_weight)=stick()?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>();
     let mut contact=vec![0.0;n];contact[0]=stick_weight;let mut area=vec![0.0;n];let mut top=vec![0.0;n];let mut bottom=vec![0.0;n];let mut offset=1;
     for (head,(film,modes)) in films.iter().zip(&mode_sets).enumerate() {
@@ -121,6 +129,8 @@ fn drum(steps:u64)->Result<Experiment,Error> {
             (a.0-0.06).hypot(a.1).total_cmp(&(b.0-0.06).hypot(b.1))).unwrap().0;
         for (i,mode) in modes.iter().enumerate() {
             let shape=film.model.dof_map[3*point].map_or(0.0,|k|mode.phi[k]);
+            // Both head coordinates are positive downward: this signed area
+            // integrates COMPRESSION (negative exterior swept volume).
             area[offset+i]=(if head==0 {1.0}else{-1.0})*film.modal_area(&mode.phi)?;
             if head==0 {contact[offset+i]=-shape;top[offset+i]=shape;}else{bottom[offset+i]=shape;}
         }
@@ -129,22 +139,45 @@ fn drum(steps:u64)->Result<Experiment,Error> {
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}; PET constants and tension are estimates",film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     }
     let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:pi*radius*radius*depth,areas:area};
-    let system=ImpactSystem::new(bodies,vec![elastic_contact(contact)?],vec![],vec![volume.clone()],config(steps))?;
-    Ok(Experiment{system,force:vec![0.0;n],observer_a:top,observer_b:bottom,pressure:Some(volume)})
+    let system=ImpactSystem::new(bodies,vec![elastic_contact(contact)?],vec![],vec![volume.clone()],config(steps,dt_s))?;
+    Ok(Experiment{system,force:vec![0.0;n],observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics})
+}
+// The stored drum areas encode compression, so positive contraction means
+// positive internal pressure. The volume-spring Hamiltonian is unchanged.
+fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
+    (volume.bulk_modulus_pa/volume.volume_m3)*volume.areas.iter().enumerate()
+        .map(|(i,a)|a*state[2*i]).sum::<f64>()
 }
 fn run()->Result<(),Error> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.is_empty() || args.len()>2 {return Err("usage: percussion splash|drum [steps] (mechanics CSV; no microphone/audio claim)".into());}
-    let steps=if args.len()==2 {args[1].parse::<u64>()?}else{4096};
-    if steps==0 || steps>1_000_000 {return Err("steps must be 1..=1000000".into());}
-    let mut experiment=match args[0].as_str(){"splash"=>splash(steps)?,"drum"=>drum(steps)?,_=>return Err("unknown experiment".into())};
-    let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());let gate=CancelGate::new_clock_free();
+    if args.is_empty() || args.len()>3 {return Err("usage: percussion splash|drum [mechanics_steps]; or splash-wav|drum-wav [audio_frames] [full_scale_pa]; see AUDIO.md".into());}
+    let audio=matches!(args[0].as_str(),"splash-wav"|"drum-wav");
+    if !audio && args.len()>2 {return Err("mechanics CSV accepts only a step count".into());}
+    let count=if args.len()>=2 {args[1].parse::<u64>()?}else if audio {48000}else{4096};
+    let maximum=if audio {480000}else{1_000_000};
+    if count==0 || count>maximum {return Err(format!("requested count must be 1..={maximum}").into());}
+    let full_scale_pa=if args.len()==3 {args[2].parse::<f64>()?}else{1.0};
+    if !full_scale_pa.is_finite() || full_scale_pa<=0.0 {return Err("full_scale_pa must be positive and finite".into());}
+    let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
+    let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
+    let mut experiment=match args[0].as_str(){
+        "splash"|"splash-wav"=>splash(steps,dt_s,audio)?,
+        "drum"|"drum-wav"=>drum(steps,dt_s,audio)?,
+        _=>return Err("unknown experiment".into()),
+    };
+    let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
+    if audio {
+        // Render and admit the complete candidate before writing a WAV header.
+        let wav=acoustics::render(&mut experiment,usize::try_from(count)?,full_scale_pa)?;
+        out.write_all(&wav)?;out.flush()?;return Ok(());
+    }
+    let gate=CancelGate::new_clock_free();
     writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j")?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
         let displacement=|weights:&[f64]|weights.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
         let velocity=experiment.observer_a.iter().enumerate().map(|(i,b)|b*x[2*i+1]).sum::<f64>();
-        let pressure=experiment.pressure.as_ref().map_or(0.0,|v|-(v.bulk_modulus_pa/v.volume_m3)*displacement(&v.areas));
+        let pressure=experiment.pressure.as_ref().map_or(0.0,|v|cavity_pressure(v,x));
         writeln!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
             f.time_s,displacement(&experiment.observer_a),velocity,displacement(&experiment.observer_b),pressure,
             f.stored_energy_j,f.felt_crush_loss_j,f.dissipated_energy_j,f.balance_residual_j)?;
@@ -152,3 +185,15 @@ fn run()->Result<(),Error> {
     out.flush()?;Ok(())
 }
 fn main(){if let Err(e)=run(){eprintln!("percussion reference refused: {e}");std::process::exit(1);}}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn downward_batter_motion_compresses_air_and_bottom_motion_releases_it() {
+        let v=VolumeSpring{bulk_modulus_pa:100.0,volume_m3:2.0,areas:vec![0.0,3.0,-3.0]};
+        assert!((cavity_pressure(&v,&[0.,0.,0.2,0.,0.,0.])-30.0).abs()<1e-13);
+        assert!((cavity_pressure(&v,&[0.,0.,0.,0.,0.2,0.])+30.0).abs()<1e-13);
+        assert_eq!(cavity_pressure(&v,&[0.,0.,0.2,0.,0.2,0.]),0.0);
+    }
+}
