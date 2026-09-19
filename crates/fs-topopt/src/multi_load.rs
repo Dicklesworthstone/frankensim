@@ -81,6 +81,12 @@ pub struct MultiLoadOcIteration {
 pub struct MultiLoadOcReport {
     /// Raw SIMP densities. Projection is deliberately not a binary threshold.
     pub rho: Vec<f64>,
+    /// Projected physical densities of the last solved design. Empty when
+    /// stopped before the first equilibrium; retained for solver-free export.
+    pub projected_rho: Vec<f64>,
+    /// Last accepted displacement fields, in load-case order. Empty before
+    /// the first equilibrium. Cancellation never substitutes a rejected trial.
+    pub displacements: Vec<Vec<f64>>,
     /// Includes the initial solve, unless cancelled before any solve.
     pub history: Vec<MultiLoadOcIteration>,
     /// Explicit terminal reason.
@@ -88,13 +94,17 @@ pub struct MultiLoadOcReport {
 }
 
 fn volume(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> f64 {
+    volume_projection(pipeline, rho, cell_vol).0
+}
+
+fn volume_projection(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> (f64, Vec<f64>) {
     let (_, projected, _) = pipeline.forward(rho);
     let total: f64 = cell_vol.iter().sum();
     // Normalize before multiplication so representable fractions do not
     // overflow solely because the caller uses a large volume unit.
     let value: f64 = projected.iter().zip(cell_vol).map(|(r, v)| r * (v / total)).sum();
     assert!(value.is_finite(), "projected material volume must be finite");
-    value
+    (value, projected)
 }
 
 /// Log-space OC update at a specified volume multiplier. Log space avoids a
@@ -149,14 +159,15 @@ pub fn multi_load_optimality_criteria(
         "volume tolerance must be finite, nonnegative, and smaller than the cap");
     assert!(options.max_backtracks <= 64, "at most 64 OC backtracks are admitted");
     let mut report = MultiLoadOcReport {
-        rho: rho0.to_vec(), history: Vec::new(),
+        rho: rho0.to_vec(), projected_rho: Vec::new(), displacements: Vec::new(),
+        history: Vec::new(),
         termination: MultiLoadOcTermination::IterationBudget,
     };
     if checkpoint().is_break() {
         report.termination = MultiLoadOcTermination::Cancelled;
         return report;
     }
-    let initial_volume = volume(pipeline, rho0, cell_vol);
+    let (initial_volume, initial_projection) = volume_projection(pipeline, rho0, cell_vol);
     assert!(initial_volume <= options.volume_fraction + options.volume_tolerance,
         "starting projected design exceeds the material budget");
     if checkpoint().is_break() {
@@ -164,6 +175,8 @@ pub fn multi_load_optimality_criteria(
         return report;
     }
     let mut current = pipeline.multi_load_compliance_and_gradient(elasticity, rho0, loads);
+    report.projected_rho = initial_projection;
+    report.displacements = std::mem::take(&mut current.displacements);
     report.history.push(MultiLoadOcIteration {
         iteration: 0, compliance: current.compliance,
         case_compliances: current.case_compliances.clone(),
@@ -239,18 +252,20 @@ pub fn multi_load_optimality_criteria(
             }
             let trial: Vec<f64> = report.rho.iter().zip(&proposed)
                 .map(|(&r, &p)| r + alpha * (p - r)).collect();
-            let v = volume(pipeline, &trial, cell_vol);
+            let (v, projected) = volume_projection(pipeline, &trial, cell_vol);
             if v <= options.volume_fraction + options.volume_tolerance {
                 if checkpoint().is_break() {
                     elasticity.moduli = accepted_moduli;
                     report.termination = MultiLoadOcTermination::Cancelled;
                     return report;
                 }
-                let next = pipeline.multi_load_compliance_and_gradient(elasticity, &trial, loads);
+                let mut next = pipeline.multi_load_compliance_and_gradient(elasticity, &trial, loads);
                 if next.compliance <= current.compliance {
                     let change = report.rho.iter().zip(&trial)
                         .map(|(r, p)| (r - p).abs()).fold(0.0f64, f64::max);
                     report.rho = trial;
+                    report.projected_rho = projected;
+                    report.displacements = std::mem::take(&mut next.displacements);
                     report.history.push(MultiLoadOcIteration {
                         iteration: iteration + 1, compliance: next.compliance,
                         case_compliances: next.case_compliances.clone(),

@@ -58,9 +58,11 @@ fn g0_final_history_describes_returned_design_and_operator() {
     let loads = [LoadCase { force: &force, weight: 1.0 }];
     let run = multi_load_optimality_criteria(&pipeline, &mut elasticity, &loads,
         &rho, &volumes, options(), || ControlFlow::Continue(()));
-    let (_, _, expected_moduli) = pipeline.forward(&run.rho);
+    let (_, projected, expected_moduli) = pipeline.forward(&run.rho);
+    assert_eq!(run.projected_rho, projected);
     assert_eq!(elasticity.moduli, expected_moduli);
     let actual = pipeline.multi_load_compliance_and_gradient(&mut elasticity, &run.rho, &loads);
+    assert_eq!(run.displacements, actual.displacements);
     let (volume, _) = pipeline.volume_and_gradient(&run.rho, &volumes);
     let last = run.history.last().unwrap();
     assert_eq!(last.compliance.to_bits(), actual.compliance.to_bits());
@@ -78,6 +80,8 @@ fn g5_repeated_studies_replay_bitwise() {
         &rho, &volumes, options(), || ControlFlow::Continue(()));
     assert_eq!(a.termination, b.termination);
     assert_eq!(a.rho, b.rho);
+    assert_eq!(a.projected_rho, b.projected_rho);
+    assert_eq!(a.displacements, b.displacements);
     assert_eq!(a.history.len(), b.history.len());
     for (a, b) in a.history.iter().zip(&b.history) {
         assert_eq!(a.compliance.to_bits(), b.compliance.to_bits());
@@ -96,6 +100,8 @@ fn g4_cancel_before_analysis_does_not_fabricate_a_solved_design() {
         || ControlFlow::Break(()));
     assert_eq!(run.termination, MultiLoadOcTermination::Cancelled);
     assert!(run.history.is_empty());
+    assert!(run.projected_rho.is_empty());
+    assert!(run.displacements.is_empty());
     assert_eq!(run.rho, rho);
     assert_eq!(elasticity.moduli, original_moduli);
 }
@@ -113,6 +119,10 @@ fn g4_cancel_during_multiplier_search_retains_only_solved_state() {
     assert_eq!(run.history.len(), 1);
     assert_eq!(run.rho, rho);
     assert_eq!(elasticity.moduli, pipeline.forward(&rho).2);
+    let solved = pipeline.multi_load_compliance_and_gradient(&mut elasticity, &rho,
+        &[LoadCase { force: &force, weight: 1.0 }]);
+    assert_eq!(run.displacements, solved.displacements);
+    assert_eq!(run.projected_rho, pipeline.forward(&rho).1);
 }
 
 #[test]
