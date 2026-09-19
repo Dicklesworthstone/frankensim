@@ -4,10 +4,13 @@
 mod geometry;
 mod linear;
 mod board;
+mod board_geometry;
+mod performance;
 mod felt;
 mod engine;
 
-const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv] [--board board.csv]
+const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv] [--board board.csv | --board-geometry panel.fsb]
+    [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..256]
     [--dump-scale strings.csv] [--dump-board board.csv]
@@ -15,18 +18,26 @@ Imports are used by the renderer, not just inspected. Input CSV values are not
 independently certified as Steinway measurements. Omitted inputs are estimates.
 --note performs a single-key study; otherwise the demo also plays a chord of
 available keys. --velocity overrides the three demo hammer launch speeds.
-Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.";
+Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
+--board-geometry assembles a flat orthotropic plate before rendering. Its explicit
+frequency band admits at most 32 modes; it does not reconstruct missing geometry.
+--performance uses sample,event,key,value CSV instead of the demo and cannot be
+combined with --note or --velocity. Note-on values are hammer velocity in m/s.
+Observer gain is diagnostic, not a measured acoustic radiation transfer.";
 
 #[derive(Debug)]
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
+    board_geometry: Option<String>, performance: Option<String>,
+    board_band_hz: f64, observer_gain: f64,
     dump_scale: Option<String>, dump_board: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, help: bool,
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { render: None, scale: None, board: None, dump_scale: None,
+        Self { render: None, scale: None, board: None, board_geometry: None,
+            performance: None, board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             dump_board: None, note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, help: false }
     }
@@ -45,6 +56,10 @@ impl Options {
                 "--render" => options.render = Some(value.clone()),
                 "--scale" => options.scale = Some(value.clone()),
                 "--board" => options.board = Some(value.clone()),
+                "--board-geometry" => options.board_geometry = Some(value.clone()),
+                "--performance" => options.performance = Some(value.clone()),
+                "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
+                "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
                 "--dump-scale" => options.dump_scale = Some(value.clone()),
                 "--dump-board" => options.dump_board = Some(value.clone()),
                 "--note" => options.note = Some(value.parse().map_err(|_| invalid())?),
@@ -63,8 +78,24 @@ impl Options {
             || !(1..=16).contains(&options.substeps) || !(1..=256).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
         }
+        if options.board.is_some() && options.board_geometry.is_some() {
+            return Err("choose either a modal board or a geometric board, not both".into());
+        }
+        if seen.contains("--board-band-hz") && options.board_geometry.is_none() {
+            return Err("--board-band-hz requires --board-geometry".into());
+        }
+        if !options.board_band_hz.is_finite() || options.board_band_hz <= 0.0
+            || options.board_band_hz >= 0.45 * f64::from(options.sample_rate)
+            || !options.observer_gain.is_finite() || options.observer_gain <= 0.0 {
+            return Err("invalid board frequency band or diagnostic observer gain".into());
+        }
+        if options.performance.is_some()
+            && (options.render.is_none() || options.note.is_some() || options.velocity.is_some()) {
+            return Err("--performance requires --render and replaces --note/--velocity demo controls".into());
+        }
         // Do not overwrite the very measurements that a render was asked to use.
-        let inputs = [options.scale.as_ref(), options.board.as_ref()];
+        let inputs = [options.scale.as_ref(), options.board.as_ref(),
+            options.board_geometry.as_ref(), options.performance.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
             if let Some(path) = output {
@@ -87,6 +118,19 @@ fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<line
         None => Ok(board::demonstration()),
     }
 }
+/// Export only the admitted keys. An absent measurement must not become an
+/// apparently measured zero bridge coefficient when the table is re-imported.
+fn write_board_for_scale(modes: &[linear::BoardMode], scale: &[geometry::Course]) -> String {
+    let all = board::write(modes);
+    let mut out = String::new();
+    for row in all.lines() {
+        let admitted = row == board::HEADER || row.split(',').nth(4)
+            .and_then(|key| key.parse::<u8>().ok())
+            .is_some_and(|key| scale.iter().any(|c| c.midi == key));
+        if admitted { out.push_str(row); out.push('\n'); }
+    }
+    out
+}
 fn study_key(scale: &[geometry::Course], requested: Option<u8>) -> Result<u8, String> {
     if let Some(key) = requested {
         return scale.iter().any(|c| c.midi == key).then_some(key)
@@ -98,38 +142,29 @@ fn study_key(scale: &[geometry::Course], requested: Option<u8>) -> Result<u8, St
 
 fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options) -> Result<(), String> {
-    let key = study_key(&scale, options.note)?;
-    let chord: Vec<u8> = if options.note.is_some() { Vec::new() } else {
-        [48, 60, 64, 67].into_iter().filter(|key| scale.iter().any(|c| c.midi == *key)).collect()
-    };
-    let mut piano = engine::Instrument::new(scale, modes, options.sample_rate,
-        options.substeps, options.modes, true)?;
-    piano.set_sustain(1.0).map_err(|e| e.to_string())?;
-    let rate = piano.sample_rate();
+    study_key(&scale, options.note)?;
+    let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
+    let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
+    let mut score = match &options.performance {
+        Some(path) => performance::Performance::read(
+            &std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
+            &keys, u64::from(count))?,
+        None => performance::Performance::demonstration(&keys, rate, u64::from(count),
+            options.note, options.velocity)?,
+    };
+    let mut piano = engine::Instrument::new(scale, modes, rate,
+        options.substeps, options.modes, true)?;
+    debug_assert_eq!(piano.sample_rate(), rate);
     let mut pressure = Vec::with_capacity(count as usize);
     let start = std::time::Instant::now();
     let mut peak: f64 = 0.0;
     for sample in 0..count {
-        for (second, velocity) in [(0, 0.6), (1, 2.0), (2, 4.5)] {
-            if sample == rate * second {
-                piano.note_on(key, options.velocity.unwrap_or(velocity)).map_err(|e| e.to_string())?;
-            }
-        }
-        if [rate / 2, rate + rate / 2, rate * 2 + rate / 2].contains(&sample) {
-            piano.note_off(key).map_err(|e| e.to_string())?;
-        }
-        if sample == rate * 3 {
-            for &key in &chord { piano.note_on(key, options.velocity.unwrap_or(2.5)).map_err(|e| e.to_string())?; }
-        }
-        if sample == rate * 4 {
-            for &key in &chord { piano.note_off(key).map_err(|e| e.to_string())?; }
-        }
-        if sample == rate * 4 + rate / 2 { piano.set_sustain(0.5).map_err(|e| e.to_string())?; }
-        if sample == rate * 5 { piano.set_sustain(0.0).map_err(|e| e.to_string())?; }
+        score.dispatch(u64::from(sample), &mut piano)?;
         // Explicit diagnostic observer gain [Pa / (m^3/s)]. This is NOT a
         // measured radiation transfer or a claim of calibrated acoustic SPL.
-        let p = 10_000.0 * piano.step().map_err(|e| format!("sample {sample}: {e}"))?;
+        let p = options.observer_gain * piano.step().map_err(|e| format!("sample {sample}: {e}"))?;
+        if !p.is_finite() { return Err(format!("sample {sample}: diagnostic observer overflow")); }
         peak = peak.max(p.abs());
         pressure.push(p);
     }
@@ -137,7 +172,7 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let seconds = f64::from(count) / f64::from(rate);
     let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&pressure, rate, 2.0).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
-    println!("Diagnostic volume-velocity observer, gain 10000 Pa/(m^3/s); no peak normalization.");
+    println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
         piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
     println!("{seconds:.6} s audio rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);
@@ -154,18 +189,36 @@ fn run() -> Result<(), String> {
     let scale_text = options.scale.as_ref().map(read).transpose()?;
     let board_text = options.board.as_ref().map(read).transpose()?;
     let scale = load_scale(scale_text.as_deref())?;
-    let modes = load_board(board_text.as_deref(), &scale)?;
+    let (modes, board_source) = if let Some(path) = &options.board_geometry {
+        let start = std::time::Instant::now();
+        let geometry = board_geometry::BoardGeometry::read(&read(path)?)?;
+        let prepared = geometry.prepare(&scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
+            options.board_band_hz)?;
+        println!("Flat plate {:.6} m^2, {:.6} kg (panel+ribs), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
+            prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
+            options.board_band_hz, start.elapsed().as_secs_f64());
+        for (i, interval) in prepared.frequency_intervals_hz.iter().enumerate() {
+            println!("board mode {i}: [{:.9}, {:.9}] Hz", interval.0, interval.1);
+        }
+        (prepared.modes, format!("GEOMETRY-DERIVED FLAT PLATE; {}; crown/rim compliance and acoustic radiation not modeled", prepared.provenance))
+    } else {
+        (load_board(board_text.as_deref(), &scale)?, options.board.as_deref()
+            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned())
+    };
+    if modes.iter().any(|m| m.frequency_hz >= 0.45 * f64::from(options.sample_rate)) {
+        return Err("soundboard mode at/above output retention ceiling; use an explicitly reduced board".into());
+    }
     study_key(&scale, options.note)?;
     println!("String scale: {}.", options.scale.as_deref().unwrap_or("ESTIMATED demonstration"));
-    println!("Soundboard: {}.", options.board.as_deref().unwrap_or("AUTHORED illustrative modes"));
+    println!("Soundboard: {board_source}.");
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
     if let Some(path) = &options.dump_scale {
         let source = options.scale.as_deref().unwrap_or("ESTIMATED demonstration; not measured Steinway geometry");
         std::fs::write(path, format!("# Source: {source}\n{}", geometry::write_scale(&scale))).map_err(|e| e.to_string())?;
     }
     if let Some(path) = &options.dump_board {
-        let source = options.board.as_deref().unwrap_or("AUTHORED illustrative board; not measured Steinway geometry");
-        std::fs::write(path, format!("# Source: {source}\n{}", board::write(&modes))).map_err(|e| e.to_string())?;
+        std::fs::write(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)))
+            .map_err(|e| e.to_string())?;
     }
     if let Some(path) = &options.render { return render(path, scale, &modes, &options); }
     println!("Model D published envelope: {} x {} m; board {} -> {} m (center -> edge).",
@@ -221,5 +274,38 @@ mod render_tests {
             vec!["--note", "69", "--note", "70"], vec!["--substeps", "17"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn geometric_board_and_performance_options_compose_without_replacing_existing_controls() {
+        let o = options(&["--scale", "strings.csv", "--board-geometry", "panel.fsb",
+            "--board-band-hz", "300", "--performance", "score.csv", "--render", "piano.wav",
+            "--sample-rate", "44100", "--duration", "2", "--modes", "40"]).unwrap();
+        assert_eq!(o.board_geometry.as_deref(), Some("panel.fsb"));
+        assert_eq!(o.performance.as_deref(), Some("score.csv"));
+        assert_eq!(o.board_band_hz, 300.0);
+        assert_eq!((o.sample_rate, o.duration, o.modes), (44_100, 2.0, 40));
+        for args in [vec!["--board", "a.csv", "--board-geometry", "b.fsb"],
+            vec!["--board-band-hz", "300"], vec!["--performance", "score.csv"],
+            vec!["--render", "a.wav", "--performance", "score.csv", "--note", "69"],
+            vec!["--render", "a.wav", "--performance", "score.csv", "--velocity", "1"],
+            vec!["--render", "score.csv", "--performance", "score.csv"],
+            vec!["--observer-gain", "NaN"],
+            vec!["--board-geometry", "a.fsb", "--board-band-hz", "21600"]] {
+            assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
+    fn board_export_preserves_missing_measurements_and_reimports_the_admitted_subset() {
+        let scale = vec![geometry::demonstration_scale().unwrap()[48]];
+        let modes = board::demonstration();
+        let text = write_board_for_scale(&modes, &scale);
+        assert_eq!(text.lines().count(), modes.len() + 1);
+        let roundtrip = board::read(&text, &[69]).unwrap();
+        for (a, b) in roundtrip.iter().zip(&modes) {
+            assert_eq!(a.frequency_hz, b.frequency_hz);
+            assert_eq!(a.bridge[48], b.bridge[48]);
+            assert_eq!(a.volume, b.volume);
+        }
+        assert!(board::read(&text, &[60, 69]).is_err());
     }
 }
