@@ -20,6 +20,8 @@ use super::*;
 
 /// Tangential friction composed with these simultaneous normal contacts.
 pub mod friction;
+/// Two-direction set-valued Coulomb graph on the same compliant contact network.
+pub mod coulomb;
 
 /// Aggregate contact-set work limits, in addition to each contact's own limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +72,8 @@ pub struct MultiContactFrame {
     pub network_dissipation_j: f64,
     /// Sum of all normal contact losses [J].
     pub contact_dissipation_j: f64,
-    /// Actual tangential work removed by all optional friction contacts [J].
+    /// Tangential dissipation of the selected friction model [J].
+    /// Coulomb reports its signed actual-work defect separately.
     pub friction_dissipation_j: f64,
     /// Whole-system storage change plus losses minus external work [J].
     pub energy_residual_j: f64,
@@ -83,6 +86,8 @@ pub struct MultiContactFrame {
     /// Optional tangential diagnostics in normal-contact order. Empty unless
     /// friction was attached; None entries are explicitly frictionless.
     pub friction: Vec<Option<friction::TangentialContactFrame>>,
+    /// Two-direction Coulomb diagnostics. Empty for the original 1-D model.
+    pub coulomb_friction: Vec<Option<coulomb::CoulombContactFrame>>,
 }
 
 struct ContactPoint {
@@ -365,7 +370,7 @@ impl MultiContactModalSystem {
         self.frame.energy_tolerance_j = tolerance;
         self.frame.sweeps = sweeps;
         std::mem::swap(&mut self.frame.contacts, &mut self.staged_points);
-        if let Some(friction) = &mut self.friction { friction.publish(&mut self.frame.friction); }
+        if let Some(friction) = &mut self.friction { friction.publish(&mut self.frame.friction, &mut self.frame.coulomb_friction); }
         self.network.publish_staged();
         Ok(&self.frame)
     }

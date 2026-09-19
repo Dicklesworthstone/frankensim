@@ -72,19 +72,19 @@ impl MultiContactModalSystem {
         if self.samples_rendered() != 0 || self.friction.is_some() {
             return Err(invalid("friction requires a sample-zero network and may be attached only once"));
         }
-        let friction = TangentialSet::new(
+        let friction = RegularizedSet::new(
             &self.network, &self.points, specifications, self.config.max_setup_terms, gate,
         )?;
         poll(Some(gate))?;
         self.frame.friction = vec![None; self.points.len()];
-        self.friction = Some(friction);
+        self.friction = Some(TangentialSet::Regularized(friction));
         Ok(self)
     }
 
     /// Retained authored friction input; None means absent or an unknown index.
     #[must_use]
     pub fn friction_law(&self, index: usize) -> Option<&ModalFriction> {
-        self.friction.as_ref()?.points.get(index)?.as_ref().map(|p| &p.spec)
+        self.friction.as_ref()?.regularized_law(index)
     }
 }
 
@@ -94,7 +94,7 @@ struct TangentialPoint {
     column: Vec<f64>,
 }
 
-pub(super) struct TangentialSet {
+pub(super) struct RegularizedSet {
     points: Vec<Option<TangentialPoint>>,
     // Row-major normal-from-tangent, tangent-from-normal and tangent-from-tangent.
     // Both mixed directions are evaluated, not assumed numerically reciprocal.
@@ -107,7 +107,7 @@ pub(super) struct TangentialSet {
     staged: Vec<Option<TangentialContactFrame>>,
 }
 
-impl TangentialSet {
+impl RegularizedSet {
     fn new(
         network: &CoupledModalSystem,
         normals: &[ContactPoint],
@@ -329,4 +329,51 @@ fn solve_tangent(point: &TangentialPoint, normal: f64, free_delta: f64,
         if residual < 0.0 { lo = mid; } else { hi = mid; }
     }
     Err(ModalCouplingError::ContactSolve { residual_n: sign*residual, tolerance_n: tolerance, iterations: used })
+}
+
+// Both physical models share the existing normal-contact transaction. Dispatch
+// leaves the v5 regularized arithmetic untouched and never changes models at run time.
+pub(super) enum TangentialSet {
+    Regularized(RegularizedSet),
+    Coulomb(super::coulomb::CoulombSet),
+}
+impl TangentialSet {
+    pub(super) fn regularized_law(&self, i: usize) -> Option<&ModalFriction> {
+        match self { Self::Regularized(s) => s.points.get(i)?.as_ref().map(|p| &p.spec), Self::Coulomb(_) => None }
+    }
+    pub(super) fn coulomb_law(&self, i: usize) -> Option<&super::coulomb::ModalCoulombFriction> {
+        match self { Self::Coulomb(s) => s.law(i), Self::Regularized(_) => None }
+    }
+    pub(super) fn prepare(&mut self, old: &[f64], free: &[f64], gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
+        match self { Self::Regularized(s) => s.prepare(old, free, gate), Self::Coulomb(s) => s.prepare(old, free, gate) }
+    }
+    pub(super) fn normal_endpoint(&self, i: usize, x: f64) -> Result<f64, ModalCouplingError> {
+        match self { Self::Regularized(s) => s.normal_endpoint(i, x), Self::Coulomb(s) => s.normal_endpoint(i, x) }
+    }
+    pub(super) fn solve_coordinate(&mut self, i: usize, normals: &[f64], dt: f64, config: ModalContactConfig,
+        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+    {
+        match self { Self::Regularized(s) => s.solve_coordinate(i, normals, dt, config, gate),
+            Self::Coulomb(s) => s.solve_coordinate(i, normals, dt, config, gate) }
+    }
+    pub(super) fn residuals(&self, normals: &[f64], points: &[ContactPoint], dt: f64, worst: &mut (f64, f64),
+        gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
+    {
+        match self { Self::Regularized(s) => s.residuals(normals, points, dt, worst, gate),
+            Self::Coulomb(s) => s.residuals(normals, points, dt, worst, gate) }
+    }
+    pub(super) fn add_forces(&self, forces: &mut [f64], gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
+        match self { Self::Regularized(s) => s.add_forces(forces, gate), Self::Coulomb(s) => s.add_forces(forces, gate) }
+    }
+    pub(super) fn stage(&mut self, network: &CoupledModalSystem, normals: &[f64], points: &[ContactPoint], sweeps: usize,
+        gate: Option<&CancelGate>) -> Result<f64, ModalCouplingError>
+    {
+        match self { Self::Regularized(s) => s.stage(network, normals, points, sweeps, gate),
+            Self::Coulomb(s) => s.stage(network, normals, points, sweeps, gate) }
+    }
+    pub(super) fn publish(&mut self, regularized: &mut Vec<Option<TangentialContactFrame>>,
+        coulomb: &mut Vec<Option<super::coulomb::CoulombContactFrame>>)
+    {
+        match self { Self::Regularized(s) => s.publish(regularized), Self::Coulomb(s) => s.publish(coulomb) }
+    }
 }
