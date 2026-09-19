@@ -1,11 +1,13 @@
-//! PLY import/export: ASCII and binary_little_endian, vertex x/y/z
+//! PLY import/export: ASCII and both binary byte orders, vertex x/y/z
 //! (float/double) + face vertex-index lists. Other elements/properties
 //! are skipped with correct stride accounting (binary) or token counting
-//! (ASCII) — documented subset, structured rejection beyond it.
+//! (ASCII) — documented subset, structured rejection beyond it. Simple planar
+//! polygon faces are triangulated after all vertices are read, preserving
+//! concave boundaries and legal face-before-vertex element order.
 
 use crate::{IoError, MAX_ELEMENTS};
 use fs_geom::Point3;
-use fs_rep_mesh::Soup;
+use fs_rep_mesh::{PolygonError, Soup, triangulate_polygon};
 use std::fmt::Write as _;
 
 const MAX_PLY_HEADER_LINES: usize = 10_000;
@@ -27,6 +29,7 @@ pub const MAX_PLY_LIST_ITEMS: usize = 1024;
 enum Format {
     Ascii,
     BinaryLe,
+    BinaryBe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +68,18 @@ impl Ty {
         }
     }
 
-    fn read_f64(self, b: &[u8]) -> f64 {
+    fn read_f64(self, b: &[u8], format: Format) -> f64 {
+        // Normalize only the current scalar, not its enclosing record: mixed
+        // widths, skipped properties, and list-count strides stay intact.
+        let mut reordered = [0_u8; 8];
+        let b = if format == Format::BinaryBe {
+            let scalar = &mut reordered[..self.size()];
+            scalar.copy_from_slice(b);
+            scalar.reverse();
+            &*scalar
+        } else {
+            b
+        };
         match self {
             Ty::I8 => f64::from(b[0].cast_signed()),
             Ty::U8 => f64::from(b[0]),
@@ -219,9 +233,10 @@ fn header_line(
             *format = match it.next() {
                 Some("ascii") => Some(Format::Ascii),
                 Some("binary_little_endian") => Some(Format::BinaryLe),
+                Some("binary_big_endian") => Some(Format::BinaryBe),
                 Some(other) => {
                     return Err(IoError::Unsupported {
-                        what: format!("PLY format {other} (ascii/binary_little_endian only)"),
+                        what: format!("PLY format {other} (ascii/binary_little_endian/binary_big_endian only)"),
                     });
                 }
                 None => None,
@@ -291,12 +306,14 @@ fn take<'a>(bytes: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], IoEr
 pub fn read_ply(bytes: &[u8]) -> Result<Soup, IoError> {
     let header = parse_header(bytes)?;
     let mut positions: Vec<Point3> = Vec::new();
-    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut triangles = PendingFaces::default();
     match header.format {
         Format::Ascii => read_ascii_body(bytes, &header, &mut positions, &mut triangles)?,
-        Format::BinaryLe => read_binary_body(bytes, &header, &mut positions, &mut triangles)?,
+        Format::BinaryLe | Format::BinaryBe => {
+            read_binary_body(bytes, &header, &mut positions, &mut triangles)?;
+        }
     }
-    if positions.is_empty() || triangles.is_empty() {
+    if positions.is_empty() || triangles.triangles.is_empty() {
         return Err(IoError::Malformed {
             at: 0,
             what: "PLY has no vertex/face payload in the supported subset".to_string(),
@@ -309,7 +326,7 @@ pub fn read_ply(bytes: &[u8]) -> Result<Soup, IoError> {
     // once every element has been consumed; `at` is the exact ordinal
     // of the offending triangle.
     let n_vertices = positions.len();
-    for (ordinal, tri) in triangles.iter().enumerate() {
+    for (ordinal, tri) in triangles.triangles.iter().enumerate() {
         for &i in tri {
             let in_range = usize::try_from(i).is_ok_and(|v| v < n_vertices);
             if !in_range {
@@ -320,6 +337,7 @@ pub fn read_ply(bytes: &[u8]) -> Result<Soup, IoError> {
             }
         }
     }
+    let triangles = triangles.materialize(&positions)?;
     Ok(Soup {
         positions,
         triangles,
@@ -330,7 +348,7 @@ fn read_ascii_body(
     bytes: &[u8],
     header: &Header,
     positions: &mut Vec<Point3>,
-    triangles: &mut Vec<[u32; 3]>,
+    triangles: &mut PendingFaces,
 ) -> Result<(), IoError> {
     {
         {
@@ -395,7 +413,7 @@ fn read_binary_body(
     bytes: &[u8],
     header: &Header,
     positions: &mut Vec<Point3>,
-    triangles: &mut Vec<[u32; 3]>,
+    triangles: &mut PendingFaces,
 ) -> Result<(), IoError> {
     {
         {
@@ -407,7 +425,7 @@ fn read_binary_body(
                         match prop {
                             Prop::Scalar(ty, name) => {
                                 let b = take(bytes, &mut pos, ty.size())?;
-                                let v = ty.read_f64(b);
+                                let v = ty.read_f64(b, header.format);
                                 match name.as_str() {
                                     "x" => xyz[0] = v,
                                     "y" => xyz[1] = v,
@@ -417,7 +435,7 @@ fn read_binary_body(
                             }
                             Prop::List(count_ty, item_ty, name) => {
                                 let cb = take(bytes, &mut pos, count_ty.size())?;
-                                let n = parse_usize_value(count_ty.read_f64(cb), "list count")?;
+                                let n = parse_usize_value(count_ty.read_f64(cb, header.format), "list count")?;
                                 if n > MAX_PLY_LIST_ITEMS {
                                     return Err(IoError::ResourceBound {
                                         what: format!("list longer than {MAX_PLY_LIST_ITEMS}"),
@@ -430,7 +448,7 @@ fn read_binary_body(
                                     for _ in 0..n {
                                         let ib = take(bytes, &mut pos, item_ty.size())?;
                                         idx.push(parse_u32_value(
-                                            item_ty.read_f64(ib),
+                                            item_ty.read_f64(ib, header.format),
                                             "list item",
                                         )?);
                                     }
@@ -519,24 +537,56 @@ fn push_vertex(positions: &mut Vec<Point3>, xyz: [f64; 3]) -> Result<(), IoError
     Ok(())
 }
 
-/// Triangulate one face fan into pending triangles. Index RANGE checks
-/// are deferred to [`read_ply`]'s post-parse pass (legal PLY may put
-/// faces before vertices); structural checks and the resource cap stay
-/// here.
-fn push_face(triangles: &mut Vec<[u32; 3]>, idx: &[u32]) -> Result<(), IoError> {
-    if idx.len() < 3 {
-        return Err(IoError::Malformed {
-            at: triangles.len(),
-            what: "face with fewer than three indices".to_string(),
-        });
+// A fan is a compact, reversible ENCODING of the source loop, not admitted
+// geometry. Retain polygon spans so materialization waits for the final vertex
+// set. Triangle-only files keep the old storage cost and repair semantics.
+#[derive(Default)]
+struct PendingFaces {
+    triangles: Vec<[u32; 3]>,
+    polygons: Vec<core::ops::Range<usize>>,
+}
+
+impl PendingFaces {
+    fn materialize(mut self, positions: &[Point3]) -> Result<Vec<[u32; 3]>, IoError> {
+        for range in self.polygons {
+            let mut indices = Vec::new();
+            indices.try_reserve_exact(range.len() + 2).map_err(|_| IoError::ResourceBound {
+                what: "PLY polygon allocation failed".into(),
+            })?;
+            let first = self.triangles[range.start];
+            indices.extend([first[0], first[1]]);
+            indices.extend(self.triangles[range.clone()].iter().map(|t| t[2]));
+            let face = triangulate_polygon(positions, &indices).map_err(|error| match error {
+                PolygonError::Resource(what) => IoError::ResourceBound { what: what.into() },
+                error => IoError::Malformed { at: range.start, what: format!("PLY polygon: {error}") },
+            })?;
+            // A successful materialization has exactly n-2 triangles. Do not
+            // reorder other faces or lose the original diagnostic ordinals.
+            self.triangles[range].copy_from_slice(&face);
+        }
+        Ok(self.triangles)
+    }
+}
+
+fn push_face(pending: &mut PendingFaces, idx: &[u32]) -> Result<(), IoError> {
+    let start = pending.triangles.len();
+    let count = idx.len().checked_sub(2).filter(|&n| n > 0).ok_or_else(|| IoError::Malformed {
+        at: start,
+        what: "face with fewer than three indices".into(),
+    })?;
+    let end = start.checked_add(count).filter(|&n| n <= MAX_ELEMENTS)
+        .ok_or_else(|| IoError::ResourceBound { what: "triangle cap".into() })?;
+    pending.triangles.try_reserve(count).map_err(|_| IoError::ResourceBound {
+        what: "PLY face allocation failed".into(),
+    })?;
+    if idx.len() > 3 {
+        pending.polygons.try_reserve(1).map_err(|_| IoError::ResourceBound {
+            what: "PLY polygon-span allocation failed".into(),
+        })?;
+        pending.polygons.push(start..end);
     }
     for k in 1..idx.len() - 1 {
-        triangles.push([idx[0], idx[k], idx[k + 1]]);
-        if triangles.len() > MAX_ELEMENTS {
-            return Err(IoError::ResourceBound {
-                what: "triangle cap".to_string(),
-            });
-        }
+        pending.triangles.push([idx[0], idx[k], idx[k + 1]]);
     }
     Ok(())
 }
@@ -586,5 +636,78 @@ mod tests {
                 what: "PLY aggregate dispatch work overflow".to_string(),
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod polygon_tests {
+    use super::*;
+
+    const NOTCH: [[f64; 2]; 8] = [
+        [0., 0.], [3., 0.], [3., 3.], [2., 3.],
+        [2., 1.], [1., 1.], [1., 3.], [0., 3.],
+    ];
+
+    fn ascii() -> Vec<u8> {
+        let mut text = String::from("ply\nformat ascii 1.0\nelement face 1\nproperty list ushort int vertex_indices\nproperty list ushort short unused\nelement vertex 8\nproperty uchar red\nproperty float z\nproperty double y\nproperty short label\nproperty double x\nend_header\n8 0 1 2 3 4 5 6 7 2 -4 300\n");
+        for [x, y] in NOTCH { let _ = writeln!(text, "255 0 {y} -7 {x}"); }
+        text.into_bytes()
+    }
+
+    fn put<const N: usize>(out: &mut Vec<u8>, mut bytes: [u8; N], big: bool) {
+        if big { bytes.reverse(); }
+        out.extend_from_slice(&bytes);
+    }
+
+    fn binary(big: bool) -> Vec<u8> {
+        let format = if big { "binary_big_endian" } else { "binary_little_endian" };
+        let mut out = format!("ply\nformat {format} 1.0\nelement face 1\nproperty list ushort int vertex_indices\nproperty list ushort short unused\nelement vertex 8\nproperty uchar red\nproperty float z\nproperty double y\nproperty short label\nproperty double x\nend_header\n").into_bytes();
+        put(&mut out, 8_u16.to_le_bytes(), big);
+        for i in 0_i32..8 { put(&mut out, i.to_le_bytes(), big); }
+        put(&mut out, 2_u16.to_le_bytes(), big);
+        put(&mut out, (-4_i16).to_le_bytes(), big);
+        put(&mut out, 300_i16.to_le_bytes(), big);
+        for [x, y] in NOTCH {
+            out.push(255);
+            put(&mut out, 0_f32.to_le_bytes(), big);
+            put(&mut out, y.to_le_bytes(), big);
+            put(&mut out, (-7_i16).to_le_bytes(), big);
+            put(&mut out, x.to_le_bytes(), big);
+        }
+        out
+    }
+
+    #[test]
+    fn ascii_concavity_and_reordered_properties_preserve_boundary() {
+        let soup = read_ply(&ascii()).unwrap();
+        assert_eq!(soup.positions, NOTCH.map(|[x, y]| Point3::new(x, y, 0.0)).to_vec());
+        let expected = triangulate_polygon(&soup.positions, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        assert_eq!(soup.triangles, expected);
+        assert_eq!(soup.triangles.len(), 6);
+        let round_trip = read_ply(write_ply(&soup).as_bytes()).unwrap();
+        assert_eq!(round_trip.positions, soup.positions);
+        assert_eq!(round_trip.triangles, soup.triangles);
+    }
+
+    #[test]
+    fn both_binary_orders_match_ascii_with_mixed_widths_and_skipped_lists() {
+        let expected = read_ply(&ascii()).unwrap();
+        for big in [false, true] {
+            let bytes = binary(big);
+            let soup = read_ply(&bytes).unwrap();
+            assert_eq!(soup.positions, expected.positions);
+            assert_eq!(soup.triangles, expected.triangles);
+            assert!(read_ply(&bytes[..bytes.len() - 1]).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_polygon_and_deferred_out_of_range_index_refuse() {
+        let header = "ply\nformat ascii 1.0\nelement face 1\nproperty list uchar uint vertex_indices\nelement vertex 4\nproperty double x\nproperty double y\nproperty double z\nend_header\n";
+        let crossing = format!("{header}4 0 1 2 3\n0 0 0\n1 1 0\n0 1 0\n1 0 0\n");
+        assert!(matches!(read_ply(crossing.as_bytes()), Err(IoError::Malformed { .. })));
+        let bad_index = format!("{header}4 0 1 2 9\n0 0 0\n1 0 0\n1 1 0\n0 1 0\n");
+        let error = read_ply(bad_index.as_bytes()).unwrap_err();
+        assert!(matches!(error, IoError::Malformed { at: 1, .. }));
     }
 }
