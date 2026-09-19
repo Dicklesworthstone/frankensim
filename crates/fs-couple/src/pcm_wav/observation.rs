@@ -65,7 +65,9 @@ pub struct DecimationInfo {
     pub filter_profile: &'static str,
 }
 
-/// Existing scheduled mechanics observed through the shared causal decimator.
+/// An admitted pressure producer observed through the shared causal decimator.
+/// ScheduledRenderer remains the default type for existing callers; nonlinear
+/// impact or other physical producers use the SAME filter and streaming path.
 ///
 /// Starts at source sample zero with zero filter history. Constructing a new
 /// filter over an already-running source is refused rather than discarding its
@@ -75,8 +77,8 @@ pub struct DecimationInfo {
 /// size. Output errors poison the wrapper because the mechanical group or an
 /// earlier output prefix may already have advanced. No rollback of a failed
 /// callback, hard-real-time guarantee, or allocation-free voice is inferred.
-pub struct DecimatedRenderer {
-    source: ScheduledRenderer,
+pub struct DecimatedRenderer<S = ScheduledRenderer> {
+    source: S,
     filter: Decimator,
     input: Vec<f64>,
     info: DecimationInfo,
@@ -84,12 +86,12 @@ pub struct DecimatedRenderer {
     completed: u64,
     poisoned: bool,
 }
-impl DecimatedRenderer {
+impl<S: PressureRenderer> DecimatedRenderer<S> {
     /// Bind an integer output clock to existing mechanics WITHOUT rebuilding it.
     /// Source controls retain their exact source-sample indices, including
     /// assignments between output boundaries. Noninteger ratios and upsampling
     /// refuse. Ratio one delegates the original callback without extra arithmetic.
-    pub fn new(source: ScheduledRenderer, mechanics_sample_rate_hz: u32,
+    pub fn new(source: S, mechanics_sample_rate_hz: u32,
         output_sample_rate_hz: u32, max_block: usize) -> Result<Self, RenderError>
     {
         source.validate_sample_rate(mechanics_sample_rate_hz)?;
@@ -97,13 +99,13 @@ impl DecimatedRenderer {
             return Err(sizing("observation requires a positive integer mechanics/output rate ratio"));
         }
         let ratio = (mechanics_sample_rate_hz / output_sample_rate_hz) as usize;
-        if !(1..=16).contains(&ratio) || max_block == 0 {
-            return Err(sizing("observation requires a ratio in 1..=16 and positive output capacity"));
+        if !(1..=16).contains(&ratio) || max_block == 0 || source.max_block_len() == 0 {
+            return Err(sizing("observation requires a ratio in 1..=16 and positive callback capacities"));
         }
         if source.samples_rendered() != 0 {
             return Err(sizing("decimation must start at source sample zero with complete filter history"));
         }
-        if ratio == 1 && max_block > source.context().max_block_len() {
+        if ratio == 1 && max_block > source.max_block_len() {
             return Err(sizing("bypass output capacity must fit the source callback"));
         }
         let filter = Decimator::new(ratio, 1).map_err(|what| RenderError::Control { what })?;
@@ -119,9 +121,9 @@ impl DecimatedRenderer {
     /// Complete observation policy, including uncompensated causal delay.
     #[must_use]
     pub const fn info(&self) -> DecimationInfo { self.info }
-    /// Read source clocks and applied/pending controls without bypassing the filter.
+    /// Read source state without bypassing the retained observation history.
     #[must_use]
-    pub const fn source(&self) -> &ScheduledRenderer { &self.source }
+    pub const fn source(&self) -> &S { &self.source }
     /// Number of complete OUTPUT samples. Discard output from a failed callback.
     #[must_use]
     pub const fn samples_rendered(&self) -> u64 { self.completed }
@@ -171,7 +173,7 @@ impl DecimatedRenderer {
                 return Err(error);
             }
         } else {
-            let source_capacity = self.source.context().max_block_len();
+            let source_capacity = self.source.max_block_len();
             for value in output {
                 // A source admitted with --block 1 is still legal. These splits
                 // change neither source event times nor mechanical arithmetic.
@@ -195,7 +197,7 @@ impl DecimatedRenderer {
         Ok(())
     }
 }
-impl PressureRenderer for DecimatedRenderer {
+impl<S: PressureRenderer> PressureRenderer for DecimatedRenderer<S> {
     fn samples_rendered(&self) -> u64 { Self::samples_rendered(self) }
     fn max_block_len(&self) -> usize { Self::max_block_len(self) }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> { Self::validate_sample_rate(self, rate) }

@@ -24,7 +24,8 @@ fn samples() -> SampledRadiationData {
                 coefficients_by_input:vec![vec![transfer(hz).scale(root)]],diagnostics:diag}}).collect(),
         held_out:(0..23).map(|i| {let hz=70.0+f64::from(i)*80.0;
             DirectFarFieldHeldOutSample{omega_rad_s:core::f64::consts::TAU*hz,
-                directions:vec![[0.0,0.0,1.0]],far_field_by_input:vec![vec![transfer(hz)]],diagnostics:diag}}).collect() }
+                directions:vec![[0.,0.,1.],[0.,0.,-1.],[1.,0.,0.],[-1.,0.,0.],
+                    [0.,1.,0.],[0.,-1.,0.],[1.,1.,1.],[-1.,-1.,-1.]],far_field_by_input:vec![vec![transfer(hz);8]],diagnostics:diag}}).collect() }
 }
 fn controls() -> BroadbandRadiationControls {
     BroadbandRadiationControls { sample_rate_hz:f64::from(RATE),minimum_captured_fraction:0.99,
@@ -122,4 +123,57 @@ fn failed_observation_poisons_the_host_instead_of_replaying_a_partial_callback()
     r.pressure_limit=1e-15;r.set_forces(&[100.0]).unwrap();
     assert!(r.block(&mut [0.0;4]).is_err());assert!(matches!(r.block(&mut [0.0]),Err(RenderError::Poisoned)));
     assert!(r.set_forces(&[0.0]).is_err());
+}
+
+#[test]
+fn real_pressure_stream_decimates_pauses_and_resumes_without_losing_wave_history() {
+    use crate::pcm_wav::observation::DecimatedRenderer;
+    use crate::pcm_wav::stream::{Pcm16WavStream,render_pressure_pcm16,ScheduledWavProgress};
+    use std::io::Cursor;
+    let a=artifact();let make=|| {
+        let mut source=renderer(&a,1.0,1028);source.set_forces(&[40.0]).unwrap();
+        DecimatedRenderer::new(source,RATE,RATE/4,43).unwrap()
+    };
+    let mut baseline=make();let mut expected=vec![0.0;257];
+    for chunk in expected.chunks_mut(17) {baseline.block(chunk).unwrap();}
+    let mut actual=make();let mut stream=Pcm16WavStream::new(Cursor::new(Vec::<u8>::new()),RATE/4,20.0,43).unwrap();
+    let mut scratch=[0.0;43];let gate=CancelGate::new_clock_free();
+    assert!(actual.output_samples_for(1027).is_err());
+    assert_eq!(render_pressure_pcm16(&mut actual,&mut stream,&gate,&mut scratch,31).unwrap(),
+        ScheduledWavProgress::Completed{samples:31});
+    let frozen=actual.source().mechanics().state().to_vec();let stopped=CancelGate::new_clock_free();stopped.request();
+    assert_eq!(render_pressure_pcm16(&mut actual,&mut stream,&stopped,&mut scratch,226).unwrap(),
+        ScheduledWavProgress::Cancelled{samples:0});
+    assert_eq!(actual.source().mechanics().state(),frozen.as_slice());
+    assert_eq!(actual.samples_rendered(),31);assert_eq!(stream.samples_written(),31);
+    render_pressure_pcm16(&mut actual,&mut stream,&gate,&mut scratch,226).unwrap();
+    let (bytes,summary)=stream.finish().unwrap();
+    let (expected_bytes,clips)=crate::pcm_wav::encode_pcm16_wav(&expected,RATE/4,20.0).unwrap();
+    assert_eq!(bytes.into_inner(),expected_bytes);assert_eq!(summary.samples,257);
+    assert_eq!(summary.clipped_samples,clips as u64);assert_eq!(actual.source().mechanics().samples(),1028);
+}
+
+#[test]
+fn only_contact_excites_the_initially_silent_radiating_receiver() {
+    use super::super::BodyPotential;
+    use crate::modal_acoustic_time::ModalAcousticState;
+    use fs_dcontact::Obstacle;
+    let a=artifact();let build=|enabled:bool| {
+        let (striker,weight)=ImpactBody::free_mass(0.04,-0.0001,0.2).unwrap();
+        let receiver=ImpactBody{potential:BodyPotential::Linear(vec![core::f64::consts::TAU*300.0]),
+            initial:vec![ModalAcousticState::default()],damping_per_s:vec![3.0]};
+        let contact=Obstacle::new(vec![weight,-1.0],1,2,vec![0.0],vec![1.0],1e7,1.5,"synthetic test contact".into()).unwrap();
+        let s=ImpactSystem::new(vec![striker,receiver],if enabled {vec![contact]}else{vec![]},vec![],vec![],
+            ImpactConfig{dt_s:1.0/f64::from(RATE),max_steps:600,maximum_energy_j:10.0,
+                energy_absolute_tolerance_j:1e-10,energy_relative_tolerance:1e-7,maximum_generalized_force:1000.0}).unwrap();
+        ImpactPressureRenderer::new(s,&a,vec![VelocityProjection{input_id:"surface_velocity_m_s".into(),
+            weights:vec![0.0,1.0]}],vec![0.0;2],listener(1.0),RATE,32).unwrap()
+    };
+    let mut struck=build(true);let mut disconnected=build(false);let mut peak=0.0_f64;
+    for _ in 0..20 {
+        let(mut p,mut z)=([0.0;30],[0.0;30]);struck.block(&mut p).unwrap();disconnected.block(&mut z).unwrap();
+        peak=peak.max(p.iter().fold(0.0_f64,|a,b|a.max(b.abs())));
+        assert!(z.iter().all(|p|*p==0.0));
+    }
+    assert!(peak>1e-6);assert!(struck.mechanics().state()[1]<0.0);
 }
