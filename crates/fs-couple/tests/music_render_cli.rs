@@ -198,3 +198,149 @@ fn full_scale_is_physics_not_normalization() {
     );
     std::fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+fn pressure_performance() -> fs_scenario::gesture::GestureSchedule {
+    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+    GestureSchedule::try_new(137, vec![GestureTrack {
+        id: "blow\"quoted".to_string(),
+        target: GestureTarget::BlowingPressure,
+        initial: GestureValue::PressurePa(2800.0),
+        events: vec![
+            GestureEvent {
+                time_s: 0.02,
+                transition_s: 0.01,
+                value: GestureValue::PressurePa(0.0),
+            },
+            GestureEvent {
+                time_s: 0.06,
+                transition_s: 0.01,
+                value: GestureValue::PressurePa(3500.0),
+            },
+        ],
+    }]).expect("performance admits")
+}
+
+#[test]
+fn gesture_file_changes_real_physics_and_replays_across_audio_blocks() {
+    let dir = scratch("gesture-replay");
+    let schedule = pressure_performance();
+    let first_source = dir.join("first.gesture");
+    let moved_source = dir.join("relocated.gesture");
+    let source_bytes = schedule.to_canonical_bytes();
+    std::fs::write(&first_source, &source_bytes).unwrap();
+    std::fs::write(&moved_source, &source_bytes).unwrap();
+    let a = dir.join("a.wav");
+    let b = dir.join("b.wav");
+    let replay = dir.join("replay.wav");
+    for (output, source, block) in [
+        (&a, &first_source, "37"),
+        (&b, &first_source, "512"),
+        (&replay, &moved_source, "37"),
+    ] {
+        let (ok, stdout) = run(&[
+            "reed", output.to_str().unwrap(), "--seconds", "0.1",
+            "--full-scale-pa", "200000", "--block", block,
+            "--schedule", source.to_str().unwrap(),
+        ]);
+        assert!(ok, "scheduled render must succeed: {stdout}");
+        assert!(stdout.contains("\"verdict\":\"rendered\""));
+    }
+    let audio = std::fs::read(&a).unwrap();
+    assert_eq!(audio, std::fs::read(&b).unwrap(), "host block size changed the performed audio");
+    assert_eq!(audio, std::fs::read(&replay).unwrap(), "source relocation changed the performed audio");
+    let provenance = std::fs::read_to_string(a.with_extension("provenance.json")).unwrap();
+    assert_eq!(provenance, std::fs::read_to_string(replay.with_extension("provenance.json")).unwrap());
+    #[allow(clippy::format_collect)]
+    let source_hash: String = schedule.content_hash().0.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(provenance.contains(&format!("\"blake3\":\"{source_hash}\"")));
+    assert!(provenance.contains("\"control_rate_hz\":137"));
+    assert!(provenance.contains("\"track\":\"blow\\\"quoted\""));
+    assert!(provenance.contains("ceil-control-tick-to-audio-sample"));
+
+    // A vacuous file-loader test could produce the old fixed fixture unchanged.
+    // Require the same real voice WITHOUT the authored release/re-entry to differ.
+    let held = dir.join("held.wav");
+    let (ok, stdout) = run(&[
+        "reed", held.to_str().unwrap(), "--seconds", "0.1",
+        "--full-scale-pa", "200000", "--block", "37",
+    ]);
+    assert!(ok, "unscheduled reference failed: {stdout}");
+    assert_ne!(audio, std::fs::read(&held).unwrap(), "gesture input had no physical effect");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn malformed_or_unsupported_schedules_refuse_before_writing_artifacts() {
+    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+    let dir = scratch("gesture-refusals");
+    let valid = pressure_performance().to_canonical_bytes();
+    let mut trailing = valid.clone();
+    trailing.extend_from_slice(b"ignored\n");
+    let unsupported = GestureSchedule::try_new(137, vec![GestureTrack {
+        id: "pedal".to_string(),
+        target: GestureTarget::SustainPedal,
+        initial: GestureValue::Fraction(0.0),
+        events: Vec::new(),
+    }]).unwrap().to_canonical_bytes();
+    let mut overlapping_track = pressure_performance().tracks()[0].clone();
+    overlapping_track.events = vec![
+        GestureEvent { time_s: 0.0, transition_s: 0.1, value: GestureValue::PressurePa(3000.0) },
+        GestureEvent { time_s: 0.01, transition_s: 0.0, value: GestureValue::PressurePa(0.0) },
+    ];
+    let overlapping = GestureSchedule::try_new(137, vec![overlapping_track]).unwrap().to_canonical_bytes();
+    let excessive = b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t137\ntracks\t18446744073709551615\n".to_vec();
+    for (index, (bytes, needle)) in [
+        (trailing, "canonical"),
+        (unsupported, "not a blowing-pressure input"),
+        (overlapping, "overlapping ramps"),
+        (excessive, "count"),
+    ].into_iter().enumerate() {
+        let source = dir.join(format!("bad-{index}.gesture"));
+        let output = dir.join(format!("bad-{index}.wav"));
+        std::fs::write(&source, bytes).unwrap();
+        let (ok, stdout) = run(&[
+            "reed", output.to_str().unwrap(), "--schedule", source.to_str().unwrap(),
+        ]);
+        assert!(!ok, "invalid schedule rendered: {stdout}");
+        assert!(stdout.contains(needle), "wrong refusal: {stdout}");
+        assert_eq!(stdout.lines().count(), 1, "refusal must be one escaped JSON record");
+        assert!(!output.exists());
+        assert!(!output.with_extension("provenance.json").exists());
+    }
+    let source = dir.join("valid.gesture");
+    std::fs::write(&source, valid).unwrap();
+    let output = dir.join("string.wav");
+    let (ok, stdout) = run(&[
+        "string", output.to_str().unwrap(), "--schedule", source.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(stdout.contains("requires the reed fixture"));
+    assert!(!output.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn argument_and_sidecar_refusals_preserve_existing_evidence() {
+    let dir = scratch("gesture-output-refusals");
+    let out = dir.join("x.wav");
+    for args in [
+        vec!["string", out.to_str().unwrap(), "--full-scale-pa", "NaN"],
+        vec!["string", out.to_str().unwrap(), "--full-scale-pa", "inf"],
+        vec!["string", out.to_str().unwrap(), "--seconds", "1e-20"],
+        vec!["string", out.to_str().unwrap(), "--bad\"\noption"],
+    ] {
+        let (ok, stdout) = run(&args);
+        assert!(!ok, "invalid arguments must refuse");
+        assert_eq!(stdout.lines().count(), 1, "diagnostic contains a raw newline: {stdout}");
+        assert!(stdout.contains("\"verdict\":\"refused\""));
+        assert!(!out.exists());
+    }
+    let sidecar = out.with_extension("provenance.json");
+    std::fs::write(&sidecar, b"retained evidence").unwrap();
+    let (ok, stdout) = run(&["string", out.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(stdout.contains("refuses to overwrite evidence"));
+    assert_eq!(std::fs::read(&sidecar).unwrap(), b"retained evidence");
+    assert!(!out.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

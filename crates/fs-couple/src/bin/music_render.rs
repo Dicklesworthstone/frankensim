@@ -3,8 +3,15 @@
 //! puts music-lane audio ON DISK.
 //!
 //! ```text
-//! music_render <fixture> <out.wav> [--seconds S] [--block N] [--full-scale-pa P]
+//! music_render <fixture> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE]
 //! ```
+//!
+//! `--schedule performance.gesture` loads the existing canonical
+//! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
+//! typed blowing-pressure track, bound to voice zero. Unsupported targets and
+//! overlapping ramps refuse; no controls are silently discarded. The source
+//! clock is independent of `--block`, and the schedule digest is retained in
+//! the provenance sidecar. This is not an assembly loader or a MIDI renderer.
 //!
 //! Fixtures are PINNED compositions of gated machinery (`reed`: the
 //! massless-reed 2.2 mm characteristic-line voice; `string`: a plucked
@@ -34,19 +41,136 @@ use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use fs_couple::pcm_wav::encode_pcm16_wav;
+use fs_couple::render::schedule::{
+    PressureGestureBinding, ScheduledControl, ScheduledRenderer, compile_pressure_gestures,
+};
 use fs_couple::render::{ModalStringVoice, ReedBoreVoice, RenderContext, RenderVoice};
 use fs_couple::thin_plate::PlateBank;
 use fs_duct::{Duct, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::BeatingReed;
+use fs_scenario::gesture::GestureSchedule;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 const RATE: u32 = 48_000;
 const WAV_HASH_DOMAIN: &str = "org.frankensim.fs-couple.music-render-wav.v1";
 
+// Input and compilation budgets are separate: a small, densely scheduled file
+// must not turn into an unbounded control-clock scan or callback log.
+const MAX_SCHEDULE_BYTES: usize = 1 << 20;
+const MAX_SCHEDULE_ITEMS: usize = 16_384;
+const MAX_SCHEDULE_WORK: u64 = 1_000_000;
+
+fn json_string(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                write!(&mut out, "\\u{:04x}", u32::from(ch)).expect("writing to String");
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn fail(what: &str) -> ! {
-    // Structured refusal on stdout so agents parse one stream.
-    println!("{{\"suite\":\"music-render\",\"verdict\":\"refused\",\"what\":\"{what}\"}}");
+    // Paths, track ids and nested errors may contain quotes or newlines.
+    println!(
+        "{{\"suite\":\"music-render\",\"verdict\":\"refused\",\"what\":{}}}",
+        json_string(what)
+    );
     std::process::exit(1)
+}
+
+fn decode_schedule(bytes: &[u8]) -> Result<GestureSchedule, String> {
+    if bytes.len() > MAX_SCHEDULE_BYTES {
+        return Err("schedule exceeds the 1 MiB input budget".to_string());
+    }
+    let text = core::str::from_utf8(bytes).map_err(|_| "schedule is not UTF-8".to_string())?;
+    let lines = text.lines().count();
+    // The existing decoder reserves from the declared counts. Bound EVERY
+    // count before calling it, including counts in malformed/trailing records.
+    for line in text.lines() {
+        if let Some(count) = line.strip_prefix("tracks\t").or_else(|| line.strip_prefix("events\t")) {
+            let count = count.parse::<usize>().map_err(|_| "invalid schedule item count".to_string())?;
+            if count > MAX_SCHEDULE_ITEMS || count > lines {
+                return Err("schedule item count exceeds the input/16384-item budget".to_string());
+            }
+        }
+    }
+    let schedule = GestureSchedule::from_canonical_bytes(bytes).map_err(|e| e.to_string())?;
+    // Reject ignored suffixes, extra fields and lossy decoder aliases. The
+    // accepted file is exactly the artifact whose digest will be published.
+    if schedule.to_canonical_bytes() != bytes {
+        return Err("schedule must be canonical bytes without trailing or ignored fields".to_string());
+    }
+    Ok(schedule)
+}
+
+fn load_schedule(path: &Path) -> Result<GestureSchedule, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("schedule open failed: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_SCHEDULE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("schedule read failed: {e}"))?;
+    decode_schedule(&bytes)
+}
+
+fn scheduled_controls(
+    fixture: &str,
+    path: Option<&Path>,
+    samples: usize,
+) -> Result<(Vec<ScheduledControl>, String), String> {
+    let Some(path) = path else {
+        return Ok((Vec::new(), String::new()));
+    };
+    if fixture != "reed" {
+        return Err("--schedule currently requires the reed fixture and a blowing-pressure track".to_string());
+    }
+    let schedule = load_schedule(path)?;
+    let [track] = schedule.tracks() else {
+        return Err("the reed fixture requires exactly one gesture track bound to voice zero".to_string());
+    };
+    let bindings = [PressureGestureBinding { track: track.id.clone(), voice: 0 }];
+    let controls = compile_pressure_gestures(
+        &schedule, &bindings, RATE, samples as u64, MAX_SCHEDULE_WORK,
+    ).map_err(|e| e.to_string())?;
+    // Source paths are deliberately absent: relocation cannot change replay
+    // identity. v1 fixture-only sidecars remain byte-for-byte unchanged.
+    #[allow(clippy::format_collect)]
+    let schedule_hash: String = schedule.content_hash().0.iter().map(|b| format!("{b:02x}")).collect();
+    let provenance = format!(
+        ",\"gesture_schedule\":{{\"blake3\":\"{}\",\"control_rate_hz\":{},\
+         \"track\":{},\"voice\":0,\"compiled_controls\":{},\
+         \"clock_policy\":\"ceil-control-tick-to-audio-sample\"}}",
+        schedule_hash, schedule.control_rate_hz,
+        json_string(&track.id), controls.len()
+    );
+    Ok((controls, provenance))
+}
+
+// create_new closes the exists-check race without replacing evidence. An I/O
+// failure may leave incomplete NEW files; it always refuses and never claims
+// a rendered artifact. No existing file is truncated and no path is deleted.
+fn write_outputs(out: &Path, sidecar: &Path, wav: &[u8], provenance: &str) -> Result<(), String> {
+    let create = |path: &Path| {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    };
+    let mut audio_file = create(out).map_err(|e| format!("wav create refused: {e}"))?;
+    let mut sidecar_file = create(sidecar).map_err(|e| format!("sidecar create refused: {e}"))?;
+    audio_file.write_all(wav).map_err(|e| format!("wav write failed: {e}"))?;
+    writeln!(sidecar_file, "{provenance}").map_err(|e| format!("sidecar write failed: {e}"))?;
+    Ok(())
 }
 
 fn reed_context(samples: usize, block: usize) -> RenderContext {
@@ -118,6 +242,7 @@ fn main() {
     let mut seconds = 1.0f64;
     let mut block = 512usize;
     let mut full_scale_pa = 200.0f64;
+    let mut schedule_path: Option<PathBuf> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -139,12 +264,20 @@ fn main() {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or_else(|| fail("--full-scale-pa needs a positive number"));
             }
+            "--schedule" => {
+                if schedule_path.is_some() {
+                    fail("--schedule may only be specified once");
+                }
+                let path = iter.next().unwrap_or_else(|| fail("--schedule needs a file path"));
+                schedule_path = Some(PathBuf::from(path.as_str()));
+            }
+            other if other.starts_with('-') => fail(&format!("unknown option: {other}")),
             other => positional.push(other.to_string()),
         }
     }
     let [fixture, out_path] = positional.as_slice() else {
         fail(
-            "usage: music_render <reed|string> <out.wav> [--seconds S] [--block N] [--full-scale-pa P]",
+            "usage: music_render <reed|string> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE]",
         );
     };
     if !(seconds > 0.0 && seconds <= 600.0) {
@@ -153,28 +286,36 @@ fn main() {
     if block == 0 || block > 1 << 16 {
         fail("--block must be in 1..=65536");
     }
-    let out = std::path::Path::new(out_path);
+    if !full_scale_pa.is_finite() || full_scale_pa <= 0.0 {
+        fail("--full-scale-pa must be positive and finite");
+    }
+    let out = Path::new(out_path);
     let sidecar = out.with_extension("provenance.json");
+    if out == sidecar.as_path() {
+        fail("output and sidecar must have distinct file paths");
+    }
     if out.exists() || sidecar.exists() {
         fail("output or sidecar already exists; this lane refuses to overwrite evidence");
     }
 
     let samples = (seconds * f64::from(RATE)).round() as usize;
-    let mut context = match fixture.as_str() {
+    if samples == 0 {
+        fail("--seconds must round to at least one audio sample");
+    }
+    let (controls, schedule_provenance) = scheduled_controls(
+        fixture, schedule_path.as_deref(), samples,
+    ).unwrap_or_else(|e| fail(&e));
+    let context = match fixture.as_str() {
         "reed" => reed_context(samples, block),
         "string" => string_context(block),
         _ => fail("fixture must be `reed` or `string`"),
     };
 
-    // Render block by block through the same API the budget lane measures.
+    let mut renderer = ScheduledRenderer::new(context, controls, MAX_SCHEDULE_WORK as usize)
+        .unwrap_or_else(|e| fail(&format!("schedule admission refused: {e}")));
     let mut pressure = vec![0.0f64; samples];
-    let mut cursor = 0;
-    while cursor < samples {
-        let len = block.min(samples - cursor);
-        context
-            .block(&mut pressure[cursor..cursor + len])
-            .unwrap_or_else(|e| fail(&format!("render refused: {e}")));
-        cursor += len;
+    for chunk in pressure.chunks_mut(block) {
+        renderer.block(chunk).unwrap_or_else(|e| fail(&format!("render refused: {e}")));
     }
 
     let (wav, clipped) = encode_pcm16_wav(&pressure, RATE, full_scale_pa)
@@ -185,6 +326,10 @@ fn main() {
     let peak = pressure.iter().fold(0.0f64, |m, p| m.max(p.abs()));
     let rms = (pressure.iter().map(|p| p * p).sum::<f64>() / pressure.len() as f64).sqrt();
 
+    if !peak.is_finite() || !rms.is_finite() {
+        fail("pressure statistics exceeded the finite range; no artifact was written");
+    }
+
     // Deterministic provenance sidecar: everything a replayer needs. No
     // wall-clock, no commit stamp (the git history of committed artifacts
     // carries those); the WAV content hash is the replay check.
@@ -193,16 +338,72 @@ fn main() {
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{full_scale_pa:e},\"clipped_samples\":{clipped},\
          \"peak_pa\":{peak:e},\"rms_pa\":{rms:e},\"wav_blake3\":\"{hash_hex}\",\
-         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\"}}"
+         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\"{schedule_provenance}}}"
     );
-    std::fs::write(out, &wav).unwrap_or_else(|e| fail(&format!("wav write failed: {e}")));
-    std::fs::write(&sidecar, format!("{provenance}\n"))
-        .unwrap_or_else(|e| fail(&format!("sidecar write failed: {e}")));
+    write_outputs(out, &sidecar, &wav, &provenance).unwrap_or_else(|e| fail(&e));
 
     println!(
         "{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"{fixture}\",\
-         \"wav\":\"{}\",\"samples\":{samples},\"clipped\":{clipped},\"peak_pa\":{peak:.3},\
+         \"wav\":{},\"samples\":{samples},\"clipped\":{clipped},\"peak_pa\":{peak:.3},\
          \"rms_pa\":{rms:.3},\"wav_blake3\":\"{hash_hex}\"}}",
-        out.display()
+        json_string(&out.display().to_string())
     );
+}
+
+#[cfg(test)]
+mod schedule_input_tests {
+    use super::*;
+    use fs_scenario::gesture::{GestureTarget, GestureTrack, GestureValue};
+
+    fn canonical_schedule() -> Vec<u8> {
+        GestureSchedule::try_new(200, vec![GestureTrack {
+            id: "blow".to_string(),
+            target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(2800.0),
+            events: Vec::new(),
+        }]).unwrap().to_canonical_bytes()
+    }
+
+    #[test]
+    fn canonical_input_round_trips_but_ignored_suffixes_refuse() {
+        let bytes = canonical_schedule();
+        let schedule = decode_schedule(&bytes).unwrap();
+        assert_eq!(schedule.to_canonical_bytes(), bytes);
+        let mut trailing = bytes.clone();
+        trailing.extend_from_slice(b"ignored\n");
+        assert!(decode_schedule(&trailing).unwrap_err().contains("canonical"));
+        let extra = String::from_utf8(bytes).unwrap()
+            .replace("blowing-pressure\n", "blowing-pressure\textra\n");
+        assert!(decode_schedule(extra.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn untrusted_declared_sizes_are_rejected_before_decoder_reservation() {
+        for bytes in [
+            b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t200\ntracks\t18446744073709551615\n".as_slice(),
+            b"events\t9999999999999999999999999999999999999999\n".as_slice(),
+            b"tracks\t16385\n".as_slice(),
+            b"events\t100\n".as_slice(),
+        ] {
+            assert!(decode_schedule(bytes).unwrap_err().contains("count"));
+        }
+        assert!(decode_schedule(&vec![b'x'; MAX_SCHEDULE_BYTES + 1]).is_err());
+        assert!(decode_schedule(&[0xff]).is_err());
+    }
+
+    #[test]
+    fn structured_diagnostics_escape_untrusted_strings() {
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("\n\r\t"), "\"\\n\\r\\t\"");
+        assert_eq!(json_string("\0"), "\"\\u0000\"");
+        assert_eq!(json_string("é"), "\"é\"");
+    }
+
+    #[test]
+    fn no_schedule_does_not_add_provenance_or_controls() {
+        let (controls, provenance) = scheduled_controls("string", None, 480).unwrap();
+        assert!(controls.is_empty());
+        assert!(provenance.is_empty());
+    }
 }
