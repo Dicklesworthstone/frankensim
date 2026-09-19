@@ -6,6 +6,9 @@ use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{ElasticityError3, adaptive::AdaptiveElasticity3};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::octree3::Octant3;
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptiveJacobi3, AdaptivePreconditionError3};
+use fs_solver::op::two_level::{AdditiveTwoLevel, TwoLevelBudget, TwoLevelError};
+use fs_sparse::precond::Precond;
 use fs_dwr::elasticity3::{GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3, estimate_goal3};
 use crate::{EvaluationStop, SolveControl, SolveWork};
 use crate::sdf3::CutDensityStudy3;
@@ -19,6 +22,32 @@ pub struct GoalBodyLoad3<'a> {
     /// Nonnegative weight; weights are not automatically normalized.
     pub weight: f64,
 }
+/// Explicit enriched-solve policy. The default preserves the original solver;
+/// the runnable adaptive example opts into bounded two-level preparation.
+#[derive(Debug, Clone, Copy)]
+pub enum GoalPreconditioner3 {
+    /// Original identity action, without setup applications.
+    Identity,
+    /// Exact density/constraint-aware Jacobi, with bounded accumulation.
+    Jacobi { max_contributions: usize },
+    /// Fixed SPD Galerkin correction, prepared once for the entire load family.
+    TwoLevel { budget: TwoLevelBudget, max_diagonal_contributions: usize },
+}
+enum PreparedGoal3<'a> {
+    Identity,
+    Jacobi(AdaptiveJacobi3<'a>),
+    TwoLevel(AdditiveTwoLevel<'a, AdaptiveElasticity3>),
+}
+impl Precond for PreparedGoal3<'_> {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        match self {
+            Self::Identity => z.copy_from_slice(r),
+            Self::Jacobi(p) => p.apply(r, z),
+            Self::TwoLevel(p) => p.apply(r, z),
+        }
+    }
+}
+
 /// Limits beyond the existing shared linear-work control and geometry budget.
 #[derive(Debug, Clone, Copy)]
 pub struct GoalRefinementOptions3 {
@@ -28,10 +57,13 @@ pub struct GoalRefinementOptions3 {
     pub max_load_cases: usize,
     /// Actual-field and two-grid numerical identity gates.
     pub numerical: GoalOptions3,
+    /// Reused across all independent enriched loads; never silently downgraded.
+    pub preconditioner: GoalPreconditioner3,
 }
 impl Default for GoalRefinementOptions3 {
     fn default() -> Self {
-        Self { max_transfer_terms: 2_000_000, max_load_cases: 64, numerical: GoalOptions3::default() }
+        Self { max_transfer_terms: 2_000_000, max_load_cases: 64, numerical: GoalOptions3::default(),
+            preconditioner: GoalPreconditioner3::Identity }
     }
 }
 /// No partial family of estimates is usable on a returned error.
@@ -41,6 +73,8 @@ pub enum GoalRefinementError3 {
     Evaluation(EvaluationStop),
     /// Incompatible geometry/fields or a failed physical callback.
     Physics(ElasticityError3),
+    /// Refused setup size, diagonal, or coarse factorization.
+    Preconditioner(AdaptivePreconditionError3),
     /// Numerical estimator refused its assumptions or identity.
     Estimate(GoalError3),
     /// Invalid load family or explicit resource limits.
@@ -50,6 +84,15 @@ impl From<EvaluationStop> for GoalRefinementError3 { fn from(e: EvaluationStop) 
 impl From<ElasticityError3> for GoalRefinementError3 {
     fn from(e: ElasticityError3) -> Self {
         if matches!(e, ElasticityError3::Cancelled) { Self::Evaluation(EvaluationStop::Cancelled) } else { Self::Physics(e) }
+    }
+}
+impl From<AdaptivePreconditionError3> for GoalRefinementError3 {
+    fn from(e: AdaptivePreconditionError3) -> Self {
+        match e {
+            AdaptivePreconditionError3::Physics(e) => e.into(),
+            AdaptivePreconditionError3::Coarse(TwoLevelError::Cancelled) => Self::Evaluation(EvaluationStop::Cancelled),
+            other => Self::Preconditioner(other),
+        }
     }
 }
 impl From<GoalError3> for GoalRefinementError3 {
@@ -83,6 +126,9 @@ pub struct ComplianceRefinement3 {
     pub marking_mass: BTreeMap<Octant3, f64>,
     /// Cumulative solve work, including earlier optimization and this enrichment.
     pub work: SolveWork,
+    /// Actual explicitly selected solve policy. Setup applications are included
+    /// separately in `work.preconditioner_operator_applications`.
+    pub preconditioner: GoalPreconditioner3,
 }
 impl ComplianceRefinement3 {
     /// Choose actual coarse cells to refine under a caller-specified mark cap.
@@ -103,6 +149,11 @@ impl CutDensityStudy3<AdaptiveElasticity3> {
     ///
     /// All enriched Krylov work uses `control`, including failed solves. No
     /// partial estimate family or mark set escapes on cancellation/exhaustion.
+    /// All coarse fields are checked before preconditioner setup. Preparation
+    /// happens once per load family and is invalidated with the consumed fine
+    /// operator. Setup fine-applications remain visible in `control.work()` even
+    /// on an interrupted setup or a later failed solve; they do not consume the
+    /// outer-iteration allowance and have their own explicit setup budget.
     /// The returned differences are not certified continuum-error bounds.
     pub fn estimate_compliance_enrichment(&self, mut enriched: AdaptiveElasticity3,
         loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
@@ -116,17 +167,42 @@ impl CutDensityStudy3<AdaptiveElasticity3> {
         let scales = AdaptiveTransfer3::new(self.operator(), &enriched, options.max_transfer_terms, || poll(control))?.inherited_scales();
         enriched.set_scales(&scales)?;
         let transfer = AdaptiveTransfer3::new(self.operator(), &enriched, options.max_transfer_terms, || poll(control))?;
-        let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight).collect(),
-            coarse_value: 0.0, fine_value: 0.0, correction: 0.0, marking_mass: BTreeMap::new(), work: control.work() };
         for (load, coarse) in loads.iter().zip(coarse_displacements) {
-            // Reject a stale coarse field BEFORE spending an enriched solve.
+            // Reject the entire stale family BEFORE spending setup or a fine solve.
             let rhs_coarse = self.operator().body_load(load.density, || poll(control))?;
             let residual = self.operator().field_residual(coarse, &rhs_coarse, || poll(control))?;
             if residual > options.numerical.residual_tolerance {
                 return Err(GoalError3::FieldResidual { field: "coarse-primal", value: residual }.into());
             }
+        }
+        let prepared = match options.preconditioner {
+            GoalPreconditioner3::Identity => PreparedGoal3::Identity,
+            GoalPreconditioner3::Jacobi { max_contributions } => {
+                PreparedGoal3::Jacobi(enriched.prepare_jacobi(max_contributions, || poll(control))?)
+            }
+            GoalPreconditioner3::TwoLevel { budget, max_diagonal_contributions } => {
+                let mut recorded = 0usize;
+                let mut setup_stop = None;
+                let result = transfer.prepare_two_level(budget, max_diagonal_contributions, |work| {
+                    let Some(additional) = work.operator_applications.checked_sub(recorded) else {
+                        setup_stop = Some(EvaluationStop::Breakdown { stage: "preconditioner-accounting" });
+                        return ControlFlow::Break(());
+                    };
+                    recorded = work.operator_applications;
+                    match control.record_preconditioner_applications(additional) {
+                        Ok(()) => ControlFlow::Continue(()),
+                        Err(stop) => { setup_stop = Some(stop); ControlFlow::Break(()) }
+                    }
+                });
+                if let Some(stop) = setup_stop { return Err(stop.into()); }
+                PreparedGoal3::TwoLevel(result?)
+            }
+        };
+        let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight).collect(),
+            coarse_value: 0.0, fine_value: 0.0, correction: 0.0, marking_mass: BTreeMap::new(), work: control.work(), preconditioner: options.preconditioner };
+        for (load, coarse) in loads.iter().zip(coarse_displacements) {
             let rhs = enriched.body_load(load.density, || poll(control))?;
-            let fine = control.solve(&enriched, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
+            let fine = control.solve_preconditioned(&enriched, &prepared, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
             // The DWR owner rechecks true residuals before using this CG output.
             let estimate = estimate_goal3(&transfer, load.density, load.density,
                 GoalFields3::compliance(coarse, &fine), options.numerical, || poll(control))?;

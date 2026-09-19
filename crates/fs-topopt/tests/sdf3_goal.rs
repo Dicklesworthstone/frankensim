@@ -92,3 +92,70 @@ fn wrong_body_law_and_incomplete_load_family_refuse_before_fine_solver_work() {
         GoalRefinementOptions3::default(), &mut c), Err(GoalRefinementError3::Invalid(_))));
     assert_eq!(c.work().linear_solves, 0);
 }
+
+fn accelerated_options() -> GoalRefinementOptions3 {
+    use fs_topopt::sdf3_goal::GoalPreconditioner3;
+    GoalRefinementOptions3 { preconditioner: GoalPreconditioner3::TwoLevel {
+        budget: fs_solver::op::two_level::TwoLevelBudget::default(), max_diagonal_contributions: 20_000_000,
+    }, ..Default::default() }
+}
+#[test]
+fn two_level_setup_is_reused_and_estimates_match_the_original_solver() {
+    let (tree,study,accepted)=setup();let scales=study.operator().scales().to_vec();
+    let mut p=|_|ControlFlow::Continue(());let mut original=SolveControl::new(SolveBudget::default(),&mut p);
+    let reference=study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        GoalRefinementOptions3::default(),&mut original).unwrap();
+    let mut p=|_|ControlFlow::Continue(());let mut control=SolveControl::new(SolveBudget::default(),&mut p);
+    let result=study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        accelerated_options(),&mut control).unwrap();
+    let nc=3*study.operator().fixed().iter().filter(|&&f|!f).count();
+    assert_eq!(result.work.preconditioner_operator_applications,nc);assert_eq!(result.work.linear_solves,2);
+    assert!(result.work.linear_iterations<reference.work.linear_iterations);
+    assert!((result.fine_value-reference.fine_value).abs()<1e-8*reference.fine_value.abs());
+    assert!((result.correction-reference.correction).abs()<1e-8*reference.fine_value.abs());
+    for (cell,mass) in &reference.marking_mass {
+        assert!((result.marking_mass[cell]-mass).abs()<1e-8*reference.fine_value.abs());
+    }
+    let again=study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        accelerated_options(),&mut control).unwrap();
+    assert_eq!(again.work.preconditioner_operator_applications,2*nc);
+    assert_eq!(again.fine_value.to_bits(),result.fine_value.to_bits());
+    assert_eq!(again.marking_mass,result.marking_mass);assert_eq!(study.operator().scales(),scales);
+}
+#[test]
+fn setup_cancellation_retains_spent_work_without_starting_a_solve() {
+    let (tree,study,accepted)=setup();let scales=study.operator().scales().to_vec();
+    let mut p=|progress:SolveProgress|if progress.work.preconditioner_operator_applications>=2 {
+        ControlFlow::Break(())
+    }else{ControlFlow::Continue(())};
+    let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    assert!(matches!(study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        accelerated_options(),&mut c),Err(GoalRefinementError3::Evaluation(EvaluationStop::Cancelled))));
+    assert_eq!(c.work().preconditioner_operator_applications,2);assert_eq!(c.work().linear_solves,0);
+    assert_eq!(study.operator().scales(),scales);
+}
+#[test]
+fn preconditioned_exhaustion_keeps_outer_and_setup_work_distinct() {
+    let (tree,study,accepted)=setup();let mut p=|_|ControlFlow::Continue(());
+    let mut c=SolveControl::new(SolveBudget{total_iterations:1,..Default::default()},&mut p);
+    assert!(matches!(study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        accelerated_options(),&mut c),Err(GoalRefinementError3::Evaluation(EvaluationStop::TotalBudget{..}))));
+    assert_eq!(c.work().linear_iterations,1);
+    assert_eq!(c.work().preconditioner_operator_applications,3*study.operator().fixed().iter().filter(|&&f|!f).count());
+}
+#[test]
+fn coarse_setup_caps_and_stale_second_load_fail_before_preparation() {
+    use fs_topopt::sdf3_goal::GoalPreconditioner3;
+    let (tree,study,mut accepted)=setup();let mut p=|_|ControlFlow::Continue(());
+    let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let options=GoalRefinementOptions3{preconditioner:GoalPreconditioner3::TwoLevel {
+        budget:fs_solver::op::two_level::TwoLevelBudget{max_coarse_dofs:1,..Default::default()},
+        max_diagonal_contributions:20_000_000,
+    },..Default::default()};
+    assert!(matches!(study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        options,&mut c),Err(GoalRefinementError3::Preconditioner(_))));
+    for u in &mut accepted.displacements[1] {*u*=1.1;}
+    assert!(matches!(study.estimate_compliance_enrichment(enriched(&tree),&loads(),&accepted.displacements,
+        accelerated_options(),&mut c),Err(GoalRefinementError3::Estimate(_))));
+    assert_eq!(c.work().preconditioner_operator_applications,0);assert_eq!(c.work().linear_solves,0);
+}

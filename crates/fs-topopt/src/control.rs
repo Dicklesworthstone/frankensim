@@ -7,7 +7,7 @@
 use std::ops::ControlFlow;
 
 use fs_solver::{CgState, LinearOp};
-use fs_sparse::precond::IdentityPrecond;
+use fs_sparse::precond::{IdentityPrecond, Precond};
 
 /// Limits shared by every filter, load solve and pullback in one computation.
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +31,10 @@ pub struct SolveWork {
     pub linear_solves: usize,
     /// Completed Krylov iterations across all started solves.
     pub linear_iterations: usize,
+    /// Fine operator applications used to prepare preconditioners, including
+    /// failed/cancelled preparation. Governed by the separate setup budget;
+    /// not misreported as outer Krylov iterations.
+    pub preconditioner_operator_applications: usize,
 }
 
 /// Context provided to cancellation/wall-time callbacks.
@@ -99,9 +103,23 @@ impl<'a> SolveControl<'a> {
         }
     }
 
-    pub(crate) fn solve(
+    pub(crate) fn record_preconditioner_applications(&mut self, additional: usize) -> Result<(), EvaluationStop> {
+        self.work.preconditioner_operator_applications = self.work.preconditioner_operator_applications
+            .checked_add(additional).ok_or(EvaluationStop::TotalBudget { stage: "preconditioner-setup" })?;
+        self.checkpoint("preconditioner-setup")
+    }
+
+    pub(crate) fn solve(&mut self, op: &impl LinearOp, rhs: &[f64], tolerance: f64,
+        component_limit: usize, stage: &'static str) -> Result<Vec<f64>, EvaluationStop> {
+        self.solve_preconditioned(op, &IdentityPrecond, rhs, tolerance, component_limit, stage)
+    }
+
+    // The caller must keep this preconditioner fixed, linear and SPD throughout
+    // the solve. Recurrence and all budget/cancellation boundaries are shared.
+    pub(crate) fn solve_preconditioned(
         &mut self,
         op: &impl LinearOp,
+        preconditioner: &impl Precond,
         rhs: &[f64],
         tolerance: f64,
         component_limit: usize,
@@ -128,7 +146,7 @@ impl<'a> SolveControl<'a> {
                 stage, iterations: 0, residual_estimate: 1.0,
             });
         }
-        let mut state = CgState::new(op, &IdentityPrecond, rhs);
+        let mut state = CgState::new(op, preconditioner, rhs);
         loop {
             self.poll(stage, state.iters)?;
             let residual = state.rel_residual();
@@ -145,7 +163,7 @@ impl<'a> SolveControl<'a> {
             if remaining == 0 { return Err(EvaluationStop::TotalBudget { stage }); }
             let batch = 32.min(limit - state.iters).min(remaining);
             let before = state.iters;
-            let _ = state.run(op, &IdentityPrecond, tolerance, batch);
+            let _ = state.run(op, preconditioner, tolerance, batch);
             self.work.linear_iterations += state.iters - before;
             // CgState's recurrence does not depend on its diagnostic history.
             // Do not repeatedly clone an ever-growing history in each batch.
@@ -220,4 +238,29 @@ mod tests {
         assert!(control.work.linear_iterations > 0);
         assert!(control.work.linear_iterations <= 32);
     }
+    #[test]
+    fn preconditioned_solves_share_the_same_iteration_budget() {
+        struct Exact;
+        impl Precond for Exact {
+            fn apply(&self, r: &[f64], z: &mut [f64]) {
+                for (i, (r, z)) in r.iter().zip(z).enumerate() { *z = r / (1.0 + i as f64); }
+            }
+        }
+        let op = operator(); let mut callback = |_| ControlFlow::Continue(());
+        let mut control = SolveControl::new(SolveBudget { total_iterations: 1, ..Default::default() }, &mut callback);
+        control.solve_preconditioned(&op, &Exact, &[1.0;7], 1e-12, 100, "first").unwrap();
+        assert_eq!(control.work().linear_iterations, 1);
+        assert!(matches!(control.solve_preconditioned(&op, &Exact, &[1.0;7], 1e-12, 100, "second"),
+            Err(EvaluationStop::TotalBudget { .. })));
+    }
+
+    #[test]
+    fn cancelled_setup_work_remains_separate_and_observable() {
+        let mut callback = |_| ControlFlow::Break(());
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        assert_eq!(control.record_preconditioner_applications(3), Err(EvaluationStop::Cancelled));
+        assert_eq!(control.work().preconditioner_operator_applications, 3);
+        assert_eq!(control.work().linear_iterations, 0);
+    }
+
 }
