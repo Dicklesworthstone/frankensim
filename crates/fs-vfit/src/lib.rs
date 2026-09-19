@@ -33,6 +33,8 @@ pub mod loewner;
 pub mod model;
 pub mod passivity;
 pub mod vf;
+/// Passive integer-delay propagation with explicit wave storage.
+pub mod waveguide;
 
 pub use model::{PoleTerm, RationalModel, StateSpace};
 pub use vf::{FitOptions, FitOutcome, FitReport, VfError, WeightPreset, vector_fit};
