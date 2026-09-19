@@ -21,7 +21,10 @@
 //! `fs_couple::pcm_wav::encode_pcm16_wav`: mono PCM16, physically scaled
 //! by the declared full-scale, NEVER peak-normalized (normalization would
 //! hide a material or temperature change), clips COUNTED and reported,
-//! never rewritten.
+//! never rewritten. WAV output uses the incremental encoder with block-sized
+//! pressure/PCM staging, and hashes the finalized file through its open handle.
+//! The fixture's baked physics storage is unchanged; this is offline file I/O,
+//! not a device callback or a whole-program constant-memory claim.
 //!
 //! Seam decision (recorded here and on beads ib15w + h7xu5.7.8): the
 //! music lane's encoder owner is `fs_couple::pcm_wav`; the cinematic
@@ -36,11 +39,11 @@
 //! content hash is the replay check). Sample rate is pinned at 48 kHz to
 //! keep the ecosystem coherent (fs-psycho refuses other rates).
 
-use fs_blake3::hash_domain;
+#[path = "music_render/stream_output.rs"]
+mod stream_output;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
-use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::render::schedule::{
     PressureGestureBinding, ScheduledControl, ScheduledRenderer, compile_pressure_gestures,
 };
@@ -162,15 +165,15 @@ fn scheduled_controls(
 // create_new closes the exists-check race without replacing evidence. An I/O
 // failure may leave incomplete NEW files; it always refuses and never claims
 // a rendered artifact. No existing file is truncated and no path is deleted.
-fn write_outputs(out: &Path, sidecar: &Path, wav: &[u8], provenance: &str) -> Result<(), String> {
-    let create = |path: &Path| {
-        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
-    };
-    let mut audio_file = create(out).map_err(|e| format!("wav create refused: {e}"))?;
-    let mut sidecar_file = create(sidecar).map_err(|e| format!("sidecar create refused: {e}"))?;
-    audio_file.write_all(wav).map_err(|e| format!("wav write failed: {e}"))?;
-    writeln!(sidecar_file, "{provenance}").map_err(|e| format!("sidecar write failed: {e}"))?;
-    Ok(())
+fn create_outputs(out: &Path, sidecar: &Path)
+    -> Result<(std::fs::File, std::fs::File), String>
+{
+    // Read access is needed only for bounded hashing of the finalized WAV.
+    let audio_file = std::fs::OpenOptions::new().read(true).write(true)
+        .create_new(true).open(out).map_err(|e| format!("wav create refused: {e}"))?;
+    let sidecar_file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .open(sidecar).map_err(|e| format!("sidecar create refused: {e}"))?;
+    Ok((audio_file, sidecar_file))
 }
 
 fn reed_context(samples: usize, block: usize) -> RenderContext {
@@ -313,22 +316,18 @@ fn main() {
 
     let mut renderer = ScheduledRenderer::new(context, controls, MAX_SCHEDULE_WORK as usize)
         .unwrap_or_else(|e| fail(&format!("schedule admission refused: {e}")));
-    let mut pressure = vec![0.0f64; samples];
-    for chunk in pressure.chunks_mut(block) {
-        renderer.block(chunk).unwrap_or_else(|e| fail(&format!("render refused: {e}")));
-    }
-
-    let (wav, clipped) = encode_pcm16_wav(&pressure, RATE, full_scale_pa)
-        .unwrap_or_else(|e| fail(&format!("encode refused: {e}")));
-    let wav_hash = hash_domain(WAV_HASH_DOMAIN, &wav);
-    #[allow(clippy::format_collect)] // 16-byte hex dump; clarity over a fold
-    let hash_hex: String = wav_hash.0.iter().map(|b| format!("{b:02x}")).collect();
-    let peak = pressure.iter().fold(0.0f64, |m, p| m.max(p.abs()));
-    let rms = (pressure.iter().map(|p| p * p).sum::<f64>() / pressure.len() as f64).sqrt();
-
-    if !peak.is_finite() || !rms.is_finite() {
-        fail("pressure statistics exceeded the finite range; no artifact was written");
-    }
+    // Reserve both paths before advancing the physical performance. An error
+    // leaves only new incomplete files, never a success sidecar or overwritten
+    // evidence. Waveforms are streamed; no full pressure/PCM history is staged.
+    let (mut audio_file, mut sidecar_file) = create_outputs(out, &sidecar)
+        .unwrap_or_else(|e| fail(&e));
+    let rendered = stream_output::render_waveform(
+        &mut renderer, &mut audio_file, samples, block, full_scale_pa,
+    ).unwrap_or_else(|e| fail(&e));
+    let clipped = rendered.clipped;
+    let peak = rendered.peak_pa;
+    let rms = rendered.rms_pa;
+    let hash_hex = rendered.hash.to_hex();
 
     // Deterministic provenance sidecar: everything a replayer needs. No
     // wall-clock, no commit stamp (the git history of committed artifacts
@@ -340,7 +339,9 @@ fn main() {
          \"peak_pa\":{peak:e},\"rms_pa\":{rms:e},\"wav_blake3\":\"{hash_hex}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\"{schedule_provenance}}}"
     );
-    write_outputs(out, &sidecar, &wav, &provenance).unwrap_or_else(|e| fail(&e));
+    writeln!(sidecar_file, "{provenance}")
+        .and_then(|_| sidecar_file.flush())
+        .unwrap_or_else(|e| fail(&format!("sidecar write failed: {e}")));
 
     println!(
         "{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"{fixture}\",\
