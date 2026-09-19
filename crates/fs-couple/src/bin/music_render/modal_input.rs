@@ -59,14 +59,18 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     )?;
     let input_hash = info.input_hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
+    let input_schema = info.schema;
+    let coupling_provenance = if input_schema == MODAL_PERFORMANCE_SCHEMA { String::new() } else {
+        format!(",\"connections\":{},\"coupling\":\"implicit-bilateral-spring-damper\"", info.connections)
+    };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{:e},\"clipped_samples\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",\
-         \"modal_input\":{{\"schema\":\"{MODAL_PERFORMANCE_SCHEMA}\",\"blake3\":\"{input_hash}\",\
-         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls},\
+         \"modal_input\":{{\"schema\":\"{input_schema}\",\"blake3\":\"{input_hash}\",\
+         \"voices\":{},\"modes\":{},\"force_events\":{},\"compiled_controls\":{compiled_controls}{coupling_provenance},\
          \"model_scope\":\"authored reduced model; no physical-validation claim\"}}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.voices, info.modes, info.force_events,

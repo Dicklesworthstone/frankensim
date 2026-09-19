@@ -33,6 +33,7 @@ pub mod schedule;
 /// Geometry-derived compact plate voices with physical force controls.
 pub mod plate;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
+use schedule::force::coupled::{ModalCouplingError, render::CoupledModalVoice};
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
@@ -416,6 +417,8 @@ pub enum RenderError {
     Voice(AcousticRealizeError),
     /// The modal voice refused mid-block; the context is poisoned.
     Modal(ModalAcousticTimeError),
+    /// A two-way coupled modal network refused its complete sample transaction.
+    Coupled(ModalCouplingError),
     /// A control named a voice that does not exist or cannot accept it.
     Control {
         /// What was wrong.
@@ -447,6 +450,7 @@ impl core::fmt::Display for RenderError {
             ),
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
+            Self::Coupled(e) => write!(f, "coupled modal voice refusal: {e}"),
             Self::Control { what } => write!(f, "control refusal: {what}"),
             Self::UnknownVoice { index } => {
                 write!(f, "control names unknown voice slot {index}")
@@ -466,6 +470,8 @@ pub enum RenderVoice {
     ModalString(ModalStringVoice),
     /// Geometry/material-derived compact plate, using the existing body stepper.
     CompactPlate(CompactPlateVoice),
+    /// Modal components exchanging two-way physical connection forces.
+    CoupledModal(Box<CoupledModalVoice>),
 }
 
 /// The block render context: a set of voices summed into one observer
@@ -554,6 +560,7 @@ impl RenderContext {
                         });
                     }
                     match self.voices.get(*voice) {
+                        Some(RenderVoice::CoupledModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::ModalString(string)) => {
                             if *mode >= string.held_force.len() {
                                 return Err(RenderError::Control {
@@ -582,6 +589,9 @@ impl RenderContext {
                     }
                     match self.voices.get(*voice) {
                         Some(RenderVoice::ReedBore(_)) => {}
+                        Some(RenderVoice::CoupledModal(_)) => return Err(RenderError::Control {
+                            what: "a coupled modal network has no blowing pressure",
+                        }),
                         Some(RenderVoice::CompactPlate(_)) => {
                             return Err(RenderError::Control {
                                 what: "a compact plate voice has no blowing pressure",
@@ -621,8 +631,10 @@ impl RenderContext {
                     mode,
                     force_n_per_sqrt_kg,
                 } => {
-                    if let Some(RenderVoice::ModalString(string)) = self.voices.get_mut(*voice) {
-                        string.held_force[*mode] = *force_n_per_sqrt_kg;
+                    match self.voices.get_mut(*voice) {
+                        Some(RenderVoice::ModalString(string)) => string.held_force[*mode] = *force_n_per_sqrt_kg,
+                        Some(RenderVoice::CoupledModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
+                        _ => unreachable!("complete control batch was admitted"),
                     }
                 }
                 ControlDelta::SetBlowingPressure { voice, pressure_pa } => {
@@ -655,6 +667,7 @@ impl RenderContext {
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
+                RenderVoice::CoupledModal(network) => network.step_block(scratch),
                 RenderVoice::CompactPlate(plate) => plate.step_block(scratch),
                 RenderVoice::ReedBore(reed) => reed.step_block(scratch).map_err(RenderError::Voice),
                 RenderVoice::ModalString(string) => {

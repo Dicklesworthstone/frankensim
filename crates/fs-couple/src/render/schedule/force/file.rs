@@ -31,6 +31,12 @@
 //! Every event must occur inside [0, samples); no authored event is dropped.
 //! Input byte identity, rather than formatting-insensitive semantic identity,
 //! is retained so a sidecar can bind the exact supplied artifact.
+//!
+//! Version 2 keeps these records and inserts `coupling_limits`, `connections`,
+//! then `connection K C REST` / `left COMPONENT SHAPES...` /
+//! `right COMPONENT SHAPES...` before `events`. All limits are explicit; the
+//! example and complete units are in examples/COUPLED_MODAL_PERFORMANCES.md.
+//! Its preloads solve the complete network; mixed retain/preload modes refuse.
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
@@ -41,9 +47,15 @@ use crate::modal_acoustic_time::{
 use crate::render::RenderError;
 use super::{ForceInitialization, ForceRenderConfig, ModalForceEvent, ModalForceVoice};
 use super::super::ScheduledRenderer;
+use super::coupled::{ModalAttachment, ModalConnection, ModalCouplingConfig};
+use fs_exec::CancelGate;
 
 /// Schema token at the beginning of each file.
 pub const MODAL_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v1";
+/// Version 2 adds explicit bilateral spring/damper connections between components.
+pub const MODAL_COUPLED_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v2";
+/// Domain-separated exact byte identity for the coupled model schema.
+pub const MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-couple.modal-performance-input.v2";
 /// Byte-read limit to apply BEFORE allocating or decoding an input file.
 pub const MAX_MODAL_PERFORMANCE_BYTES: usize = 4 * 1024 * 1024;
 /// A bounded offline performance; 600 seconds at 48 kHz.
@@ -60,15 +72,19 @@ const MAX_PROJECTION_TERMS: usize = 16_777_216;
 /// Immutable description of the admitted input and its actual render clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModalPerformanceInfo {
+    /// Exact admitted schema, distinguishing independent and coupled mechanics.
+    pub schema: &'static str,
+    /// Declared mechanical connections (zero for schema v1).
+    pub connections: usize,
     /// Audio samples per second; not inferred from a note or output extension.
     pub sample_rate_hz: u32,
     /// Exact number of output samples, including a final short callback.
     pub samples: u64,
     /// Declared pascals mapped to positive full-scale PCM.
     pub full_scale_pa: f64,
-    /// Input bytes under [`MODAL_PERFORMANCE_HASH_DOMAIN`].
+    /// Input bytes under the matching version-specific hash domain.
     pub input_hash: ContentHash,
-    /// Independently simulated voices summed in file order.
+    /// Source components, independent in v1 or connected mechanically in v2.
     pub voices: usize,
     /// Total number of retained modes across all voices.
     pub modes: usize,
@@ -130,7 +146,12 @@ impl ModalPerformance {
         }
         let text = std::str::from_utf8(bytes).map_err(|_| input(1, "input must be UTF-8"))?;
         let mut reader = Reader { lines: text.lines(), line: 0 };
-        reader.row(MODAL_PERFORMANCE_SCHEMA)?.finish()?;
+        let schema = match text.lines().next().and_then(|line| line.split_ascii_whitespace().next()) {
+            Some(MODAL_PERFORMANCE_SCHEMA) => MODAL_PERFORMANCE_SCHEMA,
+            Some(MODAL_COUPLED_PERFORMANCE_SCHEMA) => MODAL_COUPLED_PERFORMANCE_SCHEMA,
+            _ => return Err(input(1, "unsupported modal performance schema")),
+        };
+        reader.row(schema)?.finish()?;
         let sample_rate_hz: u32 = reader.one("sample_rate_hz")?;
         if !(1..=192_000).contains(&sample_rate_hz) {
             return Err(input(reader.line, "sample_rate_hz must be in 1..=192000"));
@@ -216,6 +237,38 @@ impl ModalPerformance {
             model.restore_states(&states).map_err(RenderError::Modal)?;
             voices.push(ModalForceVoice::new(model, columns, initial_forces, initialization)?);
         }
+        // Only v2 has connection records. V1 keeps its exact compiler and does
+        // not reinterpret any formerly accepted independent performance.
+        let coupled = if schema == MODAL_COUPLED_PERFORMANCE_SCHEMA {
+            let mut row = reader.row("coupling_limits")?;
+            let max_connections = row.count(64)?;
+            let max_setup_terms = row.count(MAX_PROJECTION_TERMS)?;
+            let coupling = ModalCouplingConfig {
+                max_modes: MAX_MODES, max_connections, max_setup_terms,
+                nyquist_guard_fraction: row.scalar()?,
+                maximum_total_energy_j: row.scalar()?,
+                maximum_abs_pressure_pa: row.scalar()?,
+                maximum_abs_connection_force_n: row.scalar()?,
+                solve_relative_tolerance: row.scalar()?,
+                energy_absolute_tolerance_j: row.scalar()?,
+                energy_relative_tolerance: row.scalar()?,
+            };
+            row.finish()?;
+            let count: usize = reader.one("connections")?;
+            if count > max_connections { return Err(input(reader.line, "connection count exceeds coupling_limits")); }
+            let mut connections = Vec::with_capacity(count);
+            for _ in 0..count {
+                let mut row = reader.row("connection")?;
+                let stiffness_n_m = row.scalar()?;
+                let damping_n_s_m = row.scalar()?;
+                let rest_extension_m = row.scalar()?;
+                row.finish()?;
+                let left = read_attachment(&mut reader, "left", &voices, &mut total_weights)?;
+                let right = read_attachment(&mut reader, "right", &voices, &mut total_weights)?;
+                connections.push(ModalConnection { left, right, stiffness_n_m, damping_n_s_m, rest_extension_m });
+            }
+            Some((connections, coupling))
+        } else { None };
         let event_count: usize = reader.one("events")?;
         if event_count > MAX_EVENTS {
             return Err(input(reader.line, "force event count exceeds 65536"));
@@ -235,12 +288,20 @@ impl ModalPerformance {
         if reader.lines.next().is_some() {
             return Err(input(reader.line + 1, "unexpected trailing record"));
         }
-        let renderer = ScheduledRenderer::from_modal_forces(voices, events, ForceRenderConfig {
+        let force_config = ForceRenderConfig {
             sample_rate_hz, max_block, max_events: event_count, max_controls, max_projection_terms,
-        })?;
+        };
+        let (renderer, connection_count, domain) = match coupled {
+            Some((connections, coupling)) => {
+                let count = connections.len();
+                (ScheduledRenderer::from_coupled_modal_forces(voices, events, force_config,
+                    connections, coupling, &CancelGate::new())?, count, MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN)
+            }
+            None => (ScheduledRenderer::from_modal_forces(voices, events, force_config)?, 0, MODAL_PERFORMANCE_HASH_DOMAIN),
+        };
         Ok(Self {
-            info: ModalPerformanceInfo { sample_rate_hz, samples, full_scale_pa,
-                input_hash: hash_domain(MODAL_PERFORMANCE_HASH_DOMAIN, bytes),
+            info: ModalPerformanceInfo { schema, connections: connection_count, sample_rate_hz, samples, full_scale_pa,
+                input_hash: hash_domain(domain, bytes),
                 voices: voice_count, modes: total_modes, force_events: event_count },
             renderer,
         })
@@ -253,6 +314,23 @@ impl ModalPerformance {
     /// Move the admitted runtime to the existing scheduler/audio export APIs.
     #[must_use]
     pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }
+}
+
+fn read_attachment(reader: &mut Reader<'_>, key: &str, voices: &[ModalForceVoice], total_weights: &mut usize)
+    -> Result<ModalAttachment, ModalPerformanceError>
+{
+    let mut row = reader.row(key)?;
+    let component: usize = row.parse()?;
+    let model = voices.get(component).ok_or_else(|| input(row.line, "connection attachment names an unknown voice"))?;
+    let count = model.model.modes().len();
+    if count > MAX_PORT_WEIGHTS - *total_weights {
+        return Err(input(row.line, "combined actuator/connection shape budget exceeded"));
+    }
+    *total_weights += count;
+    let mut shapes = Vec::with_capacity(count);
+    for _ in 0..count { shapes.push(row.scalar()?); }
+    row.finish()?;
+    Ok(ModalAttachment { component, shapes })
 }
 
 struct Reader<'a> { lines: Lines<'a>, line: usize }

@@ -482,3 +482,7 @@ fn poll(gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
     if gate.is_some_and(CancelGate::is_requested) { Err(ModalCouplingError::Cancelled) } else { Ok(()) }
 }
 fn invalid(what: &'static str) -> ModalCouplingError { ModalCouplingError::Invalid { what } }
+
+mod equilibrium;
+/// Scheduled rendering of connected modal components.
+pub mod render;
