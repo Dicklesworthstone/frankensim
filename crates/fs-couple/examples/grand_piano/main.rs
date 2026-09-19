@@ -1,26 +1,32 @@
 //! Geometry-first grand-piano composition of existing FrankenSim owners.
-//! `cargo run --release -p fs-couple --example grand_piano -- --render piano.wav`
-//! Defaults are ESTIMATED, not a measured Steinway digital twin.
+//! `cargo run --release -p fs-couple --example grand_piano -- --preset steinway-d --render piano.wav`
+//! Source-derived geometry is approximate, not a measured specimen digital twin.
 mod geometry;
 mod linear;
 mod board;
 mod board_geometry;
+mod steinway_d;
 mod performance;
 mod felt;
 mod engine;
 
-const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv] [--board board.csv | --board-geometry panel.fsb]
+const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
+    [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
+    [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..256]
     [--dump-scale strings.csv] [--dump-board board.csv]
-Imports are used by the renderer, not just inspected. Input CSV values are not
-independently certified as Steinway measurements. Omitted inputs are estimates.
+--preset steinway-d reconstructs the published 17-rib Model D drawing, with
+spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
+--dump-geometry/--dump-obj export that same physical model; export alone skips
+eigenanalysis. Thickness taper, material constants and key assignment include
+explicit estimates. The string scale and hammer voicing remain replaceable estimates.
 --note performs a single-key study; otherwise the demo also plays a chord of
 available keys. --velocity overrides the three demo hammer launch speeds.
 Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
---board-geometry assembles a flat orthotropic plate before rendering. Its explicit
-frequency band admits at most 32 modes; it does not reconstruct missing geometry.
+Geometric boards assemble a flat orthotropic plate before rendering. The explicit
+frequency band admits at most 32 modes; mesh refinement is not a convergence claim.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
 combined with --note or --velocity. Note-on values are hammer velocity in m/s.
 Observer gain is diagnostic, not a measured acoustic radiation transfer.";
@@ -28,7 +34,8 @@ Observer gain is diagnostic, not a measured acoustic radiation transfer.";
 #[derive(Debug)]
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
-    board_geometry: Option<String>, performance: Option<String>,
+    board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
+    mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     dump_scale: Option<String>, dump_board: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
@@ -37,7 +44,8 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
+            performance: None, preset: None, mesh_divisions: 8, dump_geometry: None, dump_obj: None,
+            board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             dump_board: None, note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, help: false }
     }
@@ -57,6 +65,10 @@ impl Options {
                 "--scale" => options.scale = Some(value.clone()),
                 "--board" => options.board = Some(value.clone()),
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
+                "--preset" => options.preset = Some(value.clone()),
+                "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
+                "--dump-geometry" => options.dump_geometry = Some(value.clone()),
+                "--dump-obj" => options.dump_obj = Some(value.clone()),
                 "--performance" => options.performance = Some(value.clone()),
                 "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
                 "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
@@ -78,11 +90,20 @@ impl Options {
             || !(1..=16).contains(&options.substeps) || !(1..=256).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
         }
-        if options.board.is_some() && options.board_geometry.is_some() {
-            return Err("choose either a modal board or a geometric board, not both".into());
+        if usize::from(options.board.is_some()) + usize::from(options.board_geometry.is_some())
+            + usize::from(options.preset.is_some()) > 1 {
+            return Err("choose a preset, modal board or geometric board, not multiple board sources".into());
         }
-        if seen.contains("--board-band-hz") && options.board_geometry.is_none() {
-            return Err("--board-band-hz requires --board-geometry".into());
+        if options.preset.as_deref().is_some_and(|p| p != "steinway-d") {
+            return Err("unknown piano preset; available: steinway-d".into());
+        }
+        if !(4..=24).contains(&options.mesh_divisions)
+            || (options.preset.is_none() && (seen.contains("--mesh-divisions")
+                || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
+            return Err("mesh/export controls require --preset steinway-d; divisions must be 4..24".into());
+        }
+        if seen.contains("--board-band-hz") && options.board_geometry.is_none() && options.preset.is_none() {
+            return Err("--board-band-hz requires --board-geometry or --preset".into());
         }
         if !options.board_band_hz.is_finite() || options.board_band_hz <= 0.0
             || options.board_band_hz >= 0.45 * f64::from(options.sample_rate)
@@ -96,7 +117,8 @@ impl Options {
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref()];
-        let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref()];
+        let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
+            options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
             if let Some(path) = output {
                 if path.is_empty() || inputs.iter().flatten().any(|input| input == path)
@@ -189,12 +211,27 @@ fn run() -> Result<(), String> {
     let scale_text = options.scale.as_ref().map(read).transpose()?;
     let board_text = options.board.as_ref().map(read).transpose()?;
     let scale = load_scale(scale_text.as_deref())?;
-    let (modes, board_source) = if let Some(path) = &options.board_geometry {
+    let preset = options.preset.as_ref().map(|_| steinway_d::build(options.mesh_divisions)).transpose()?;
+    if let Some(preset) = &preset {
+        if let Some(path) = &options.dump_geometry { std::fs::write(path, &preset.geometry).map_err(|e| format!("{path}: {e}"))?; }
+        if let Some(path) = &options.dump_obj { std::fs::write(path, &preset.obj).map_err(|e| format!("{path}: {e}"))?; }
+        if options.render.is_none() && options.dump_board.is_none() && options.dump_scale.is_none()
+            && (options.dump_geometry.is_some() || options.dump_obj.is_some()) {
+            println!("Exported source-derived Model D: tapered panel, 17 ribs, maple bridges, cut-off bar and 88 bridge stations. No eigenanalysis was needed.");
+            return Ok(());
+        }
+    }
+    let geometry_text = match (&preset, &options.board_geometry) {
+        (Some(p), _) => Some(p.geometry.clone()),
+        (_, Some(path)) => Some(read(path)?),
+        _ => None,
+    };
+    let (modes, board_source) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
-        let geometry = board_geometry::BoardGeometry::read(&read(path)?)?;
+        let geometry = board_geometry::BoardGeometry::read(text)?;
         let prepared = geometry.prepare(&scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz)?;
-        println!("Flat plate {:.6} m^2, {:.6} kg (panel+ribs), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
+        println!("Flat plate {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
             options.board_band_hz, start.elapsed().as_secs_f64());
         for (i, interval) in prepared.frequency_intervals_hz.iter().enumerate() {
@@ -307,5 +344,16 @@ mod render_tests {
             assert_eq!(a.volume, b.volume);
         }
         assert!(board::read(&text, &[60, 69]).is_err());
+    }
+    #[test]
+    fn source_preset_renders_and_exports_without_conflicting_board_inputs() {
+        let o = options(&["--preset", "steinway-d", "--render", "d.wav", "--board-band-hz", "350",
+            "--dump-geometry", "d.fsb", "--dump-obj", "d.obj", "--mesh-divisions", "12"]).unwrap();
+        assert_eq!(o.preset.as_deref(), Some("steinway-d"));
+        assert_eq!(o.mesh_divisions, 12);
+        for args in [vec!["--preset", "unknown"],vec!["--preset", "steinway-d", "--board", "b.csv"],
+            vec!["--preset", "steinway-d", "--board-geometry", "b.fsb"],vec!["--dump-obj", "d.obj"],
+            vec!["--preset", "steinway-d", "--dump-obj", "d.obj", "--render", "d.obj"],
+            vec!["--preset", "steinway-d", "--mesh-divisions", "3"]] {assert!(options(&args).is_err());}
     }
 }
