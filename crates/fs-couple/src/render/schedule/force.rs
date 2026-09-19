@@ -237,3 +237,6 @@ fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 
 /// Bounded loading of authored modal images and physical force performances.
 pub mod file;
+
+/// Two-way spring/damper exchange over the existing modal stepper.
+pub mod coupled;
