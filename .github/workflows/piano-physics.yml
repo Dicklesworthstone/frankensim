@@ -19,13 +19,16 @@ jobs:
       - name: Materialize the repository's pinned dependencies
         run: |
           if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
-            # The locked NumPy tree has an eol-converted legacy batch file.
-            # Restore its EXACT tracked blob, not a new dependency version or
-            # an admission bypass. The owner then rechecks every pinned tree.
+            # Keep the exact tracked bytes AND disable Git's contradictory
+            # clean-side EOL conversion for this one legacy batch file.
+            # Dependency versions and bootstrap verification remain unchanged.
             python3 - <<'PY'
           import pathlib, subprocess
           root = pathlib.Path('../franken_numpy')
           path = 'legacy_numpy_code/numpy/doc/make.bat'
+          attributes = root / '.git/info/attributes'
+          with attributes.open('a') as f:
+              f.write('\n' + path + ' -text\n')
           blob = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + path])
           (root / path).write_bytes(blob)
           PY

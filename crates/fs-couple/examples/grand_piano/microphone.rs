@@ -20,6 +20,9 @@ use super::linear::{Bank, MAX_BOARD_MODES};
 use fs_bem::helmholtz::Medium;
 use fs_math::det;
 
+#[path = "antialias.rs"]
+mod antialias;
+
 const MAX_HISTORY: usize = 32_768;
 
 /// Time-major modal convolution. All allocations and geometry operations are
@@ -33,6 +36,7 @@ pub struct Microphone {
     history_frames: usize,
     previous_velocity: Vec<f64>,
     acceleration: Vec<f64>,
+    decimator: antialias::Decimator,
     head: usize,
     modes: usize,
     rate: f64,
@@ -50,6 +54,22 @@ impl Microphone {
         })).collect::<Result<Vec<_>,String>>()?;
         Self::from_loaded(&loaded, bank.board_count, rate, position_m, medium)
     }
+    /// Production path: use every mechanics substep, not just its final velocity.
+    pub fn new_multirate(surface: &[SurfaceSample], bank: &Bank, rate: u32,
+        position_m: [f64; 3], medium: Medium) -> Result<Self,String> {
+        if rate == 0 || bank.rate % rate != 0 {
+            return Err("microphone requires an integer mechanics/audio rate ratio".into());
+        }
+        let mut mic = Self::new(surface, bank, rate, position_m, medium)?;
+        mic.set_input_ratio((bank.rate / rate) as usize)?;
+        Ok(mic)
+    }
+    fn set_input_ratio(&mut self, ratio: usize) -> Result<(), String> {
+        self.decimator = antialias::Decimator::new(ratio, self.modes)?;
+        self.acceleration = vec![0.0; ratio * self.modes];
+        Ok(())
+    }
+    pub fn filter_delay_samples(&self) -> f64 { self.decimator.delay_output_frames() }
     fn from_loaded(surface: &[SurfaceSample], modes: usize, rate: u32,
         position_m: [f64; 3], medium: Medium) -> Result<Self,String> {
         if !(1..=MAX_BOARD_MODES).contains(&modes) || !(8_000..=192_000).contains(&rate)
@@ -85,22 +105,33 @@ impl Microphone {
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
         Ok(Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
+            decimator:antialias::Decimator::new(1,modes)?,
             position_m,delay_samples:(first,last) })
     }
-    pub fn multiply_adds_per_sample(&self)->usize {self.kernels.len()*self.modes}
+    pub fn multiply_adds_per_sample(&self)->usize {
+        self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
+    }
 
-    /// The model starts from rest. Supply the loaded board's END velocity after
-    /// each accepted audio sample. Differencing actual velocities includes the
-    /// contact/coupling forces and damping; using only -omega^2*q would not.
-    /// Input/output errors leave committed history and the cursor untouched.
-    /// Kernels have strictly positive delay, so the candidate slot is never
-    /// read by this output and is committed only after output validation.
+    /// Legacy one-rate input. Multirate callers must supply the complete trace.
     pub fn step(&mut self, velocity: &[f64])->Result<f64,String> {
-        if velocity.len()!=self.modes || velocity.iter().any(|v|!v.is_finite()) {
-            return Err("microphone needs one finite velocity per loaded board mode".into());
+        self.step_trace(velocity)
+    }
+
+    /// Interleaved END velocities from EVERY accepted mechanics substep.
+    /// Difference at mechanics rate, low-pass/decimate acceleration, then apply
+    /// spatial propagation at audio rate. The filter adds explicit causal delay.
+    /// All candidate values are checked before either delay line is committed.
+    pub fn step_trace(&mut self, velocity: &[f64])->Result<f64,String> {
+        if velocity.len()!=self.acceleration.len() || velocity.iter().any(|v|!v.is_finite()) {
+            return Err("microphone needs the complete finite substep velocity trace".into());
         }
-        for i in 0..self.modes {self.acceleration[i]=(velocity[i]-self.previous_velocity[i])*self.rate;}
-        if self.acceleration.iter().any(|v|!v.is_finite()) {return Err("surface acceleration overflow".into());}
+        let ratio=self.decimator.input_frames();
+        let mechanics_rate=self.rate*ratio as f64;
+        for s in 0..ratio { for i in 0..self.modes {
+            let previous=if s==0 {self.previous_velocity[i]} else {velocity[(s-1)*self.modes+i]};
+            self.acceleration[s*self.modes+i]=(velocity[s*self.modes+i]-previous)*mechanics_rate;
+        }}
+        let filtered=self.decimator.preview(&self.acceleration)?;
         let mut pressure=0.0;
         for (delay,weights) in &self.kernels {
             let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
@@ -111,8 +142,9 @@ impl Microphone {
         }
         if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
         let offset=self.head*self.modes;
-        self.history[offset..offset+self.modes].copy_from_slice(&self.acceleration);
-        self.previous_velocity.copy_from_slice(velocity);
+        self.history[offset..offset+self.modes].copy_from_slice(filtered);
+        self.previous_velocity.copy_from_slice(&velocity[(ratio-1)*self.modes..]);
+        self.decimator.commit();
         self.head+=1;if self.head==self.history_frames{self.head=0;}
         Ok(pressure)
     }
@@ -190,4 +222,34 @@ mod tests {
         assert!(mic.step(&[f64::MAX;64]).is_err());
         assert_eq!(mic.history,history);assert_eq!(mic.previous_velocity,previous);assert_eq!(mic.head,head);
     }
+    #[test]
+    fn an_intrasample_impact_is_not_erased_by_endpoint_downsampling() {
+        let mut mic=Microphone::from_loaded(&[patch(0.0,1.0)],1,32_000,[0.,0.,1.],medium()).unwrap();
+        mic.set_input_ratio(4).unwrap();
+        assert_eq!(mic.filter_delay_samples(),44.0);
+        let mut peak=0.0_f64;
+        for frame in 0..400 {
+            // The audio endpoint is zero, but a real within-sample motion occurred.
+            let trace=if frame==0 {[0.01,0.0,0.0,0.0]} else {[0.0;4]};
+            peak=peak.max(mic.step_trace(&trace).unwrap().abs());
+        }
+        assert!(peak>1e-5,"lost the substep impact");
+    }
+    #[test]
+    fn multirate_pressure_keeps_dc_units_and_rejected_input_does_not_change_time() {
+        for ratio in [1,3,4,8,16] {
+            let surface=[patch(0.0,1.0)];
+            let mut a=Microphone::from_loaded(&surface,1,32_000,[0.,0.,1.],medium()).unwrap();
+            let mut b=Microphone::from_loaded(&surface,1,32_000,[0.,0.,1.],medium()).unwrap();
+            a.set_input_ratio(ratio).unwrap();b.set_input_ratio(ratio).unwrap();
+            let gain=1.2*0.1/(2.0*std::f64::consts::PI);
+            for frame in 0..500 {
+                assert!(a.step_trace(&vec![f64::MAX;ratio]).is_err());
+                let trace:Vec<f64>=(0..ratio).map(|s|(frame*ratio+s+1) as f64/(32_000*ratio) as f64).collect();
+                let p=a.step_trace(&trace).unwrap();assert_eq!(p,b.step_trace(&trace).unwrap());
+                if frame>300 {assert!((p/gain-1.0).abs()<1e-10);}
+            }
+        }
+    }
+
 }
