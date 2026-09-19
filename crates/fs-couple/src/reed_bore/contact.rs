@@ -3,14 +3,15 @@
 //! Opening, velocity, pressure and contact work share one midpoint state.
 //! The contact potential remains fs-dcontact-owned. Incoming characteristic
 //! pressure and external body flow are held inputs, not an implicit whole-bore
-//! or plate solve. The existing Bernoulli dead zone is unchanged; second-order
-//! accuracy is claimed only on smooth branches, away from contact switches.
+//! or plate solve. Dynamic jets use a continuous, algebraically solved
+//! Bernoulli junction. Second-order accuracy is limited to smooth branches.
 
 use super::{
     AcousticRealizeError, BeatingReed, FastSolveStats, Obstacle, ReedSolverMode,
-    reed_pressure_face, reed_structural, reed_swept_flow, solve_moving_aperture_wave,
+    reed_pressure_face, reed_structural, reed_swept_flow,
 };
 use crate::unilateral_contact::SlitContactStep;
+use crate::bernoulli_aperture::moving::characteristic_pressure as solve_moving_aperture_wave;
 
 #[derive(Clone, Copy)]
 struct Trial {

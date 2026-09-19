@@ -6,6 +6,9 @@
 
 /// Stateful, explicitly parameterized moving-slit junction.
 pub mod dynamic;
+pub(crate) mod moving;
+/// Moving aperture coupled to a geometry-bound passive uniform tube.
+pub mod tube;
 
 /// Quasistatic aperture: `y = H max(0, 1 − Δp/P_c)`.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -231,6 +231,10 @@ impl DynamicAperture {
     #[must_use]
     pub fn contact_law(&self) -> &Obstacle { &self.lay }
 
+    /// Current mechanical and contact storage [J].
+    #[must_use]
+    pub fn stored_energy_j(&self) -> f64 { self.energy_at(self.state) }
+
     fn energy_at(&self, state: ApertureState) -> f64 {
         let displacement = state.opening_m - self.reed.rest_opening_m;
         0.5 * self.reed.mass_kg * state.opening_velocity_m_s * state.opening_velocity_m_s
@@ -258,6 +262,14 @@ impl DynamicAperture {
     /// Budget, invalid input, numerical solve or nonfinite observation. Every
     /// failure leaves the old state and accepted-step count unchanged.
     pub fn step(&mut self, drive: ApertureDrive) -> Result<ApertureFrame, AcousticRealizeError> {
+        let frame = self.preview_step(drive)?;
+        self.accept_frame(frame);
+        Ok(frame)
+    }
+
+    // Sibling coupled runtimes may validate the other participant before
+    // publication. Neither preview nor a failed outer observation changes state.
+    pub(super) fn preview_step(&self, drive: ApertureDrive) -> Result<ApertureFrame, AcousticRealizeError> {
         if self.accepted_steps >= self.spec.max_steps {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture step budget exhausted" });
         }
@@ -279,7 +291,7 @@ impl DynamicAperture {
         let vm = f64::midpoint(old.opening_velocity_m_s, velocity);
         let bore = outgoing + drive.incoming_pressure_pa;
         let dp = drive.upstream_pressure_pa - bore;
-        let jet = fs_phs::bernoulli_volume_flow(
+        let jet = super::moving::volume_flow(
             self.reed.width_m, midpoint_opening_m, dp, self.spec.density_kg_m3,
         );
         let swept = -reed_pressure_face(self.reed) * vm;
@@ -313,10 +325,13 @@ impl DynamicAperture {
         {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture observation left the finite set" });
         }
-        // No fallible work follows publication of the accepted physical step.
-        self.state = state;
-        self.accepted_steps = frame.step;
         Ok(frame)
+    }
+
+    // Only the parent module's coupled runtimes can publish a checked frame.
+    pub(super) fn accept_frame(&mut self, frame: ApertureFrame) {
+        self.state = frame.state;
+        self.accepted_steps = frame.step;
     }
 
     /// Step a caller-sized block with sample-boundary cancellation and resume.
