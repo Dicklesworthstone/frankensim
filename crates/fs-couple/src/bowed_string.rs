@@ -29,6 +29,10 @@
 //! [`StribeckFriction`]; that alone does not certify every other operand
 //! in this fixture across hosts.
 
+/// Stateful performance of the same bowed-string physics, with retained contact
+/// memory, physical bow release/re-entry and bounded cancellable callbacks.
+pub mod runtime;
+
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeError, ModalAcousticTimeModel,
 };
@@ -434,6 +438,13 @@ pub struct BowedRunLog {
 /// Typed refusal from run admission or an underlying model error.
 #[derive(Debug)]
 pub enum BowedRunError {
+    /// A previous physical refusal left a partial sample; reconstruct the voice.
+    Poisoned,
+    /// Invalid callback size, sample clock, or physical control request.
+    InvalidRequest {
+        /// The rejected condition.
+        what: &'static str,
+    },
     /// The gesture failed admission.
     Gesture(BowGestureError),
     /// The friction law refused a non-finite runtime input.
@@ -467,6 +478,8 @@ pub enum BowedRunError {
 impl std::fmt::Display for BowedRunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Poisoned => write!(f, "bowed voice has a partial sample after a physics refusal"),
+            Self::InvalidRequest { what } => write!(f, "bowed request refused: {what}"),
             Self::Gesture(e) => write!(f, "gesture refused: {e:?}"),
             Self::InvalidCard { what } => write!(f, "card refused: {what}"),
             Self::InvalidAmbientDensity { density_kg_m3 } => {
@@ -505,101 +518,14 @@ fn unit_shape_slope_at_bridge(k: usize, length_m: f64, mu: f64) -> f64 {
 
 /// Run the admitted configuration, returning per-sample histories.
 ///
-/// Coupling discipline: the island interaction refreshes on
-/// `config.subsamples` exact-ZOH sub-steps per audio sample
-/// (`step_duration`). Same host, same order, bitwise replayable; no
-/// wall-clock enters anywhere.
-///
-/// A state-limit refusal aborts the run and is returned as
-/// [`BowedRunError::LimitExceeded`]; callers treat blown limits as data
-/// (the raucous regime can genuinely blow a displacement ceiling).
+/// This is the batch collector over [`runtime::BowedStringState`], not a second
+/// integrator. Constant-input batch and block performances share the identical
+/// friction/substep loop. Interactive users retain the state instead of this log.
 ///
 /// # Errors
 /// See [`BowedRunError`].
 pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> {
-    config.card.validate()?;
-    BowGesture::admit(
-        config.gesture.v_bow_m_s,
-        config.gesture.normal_force_n,
-        config.gesture.station_fraction,
-    )
-    .map_err(BowedRunError::Gesture)?;
-    // Admit friction even when sticking never evaluates sliding traction.
-    let stribeck = config.island.stribeck()?;
-    config
-        .island
-        .check_state(config.gesture.v_bow_m_s, config.gesture.normal_force_n)?;
-    match &config.island {
-        FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
-            let law = stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
-            config
-                .island
-                .sliding_traction(law, 0.0, config.gesture.normal_force_n)?;
-            if !(law.mu_static * config.gesture.normal_force_n).is_finite() {
-                return Err(BowedRunError::Friction(
-                    "static friction capacity must be finite",
-                ));
-            }
-        }
-        FrictionIsland::ViscousOnly { viscous_n_s_per_m } => {
-            if !(viscous_n_s_per_m.is_finite() && *viscous_n_s_per_m >= 0.0) {
-                return Err(BowedRunError::Friction(
-                    "viscous friction must be finite and nonnegative",
-                ));
-            }
-        }
-    }
-    if let Termination::PlateOnePort { ambient, .. } = &config.termination {
-        if !(ambient.density.is_finite() && ambient.density > 0.0) {
-            return Err(BowedRunError::InvalidAmbientDensity {
-                density_kg_m3: ambient.density,
-            });
-        }
-        if !(config.listener_m.is_finite() && config.listener_m > 0.0) {
-            return Err(BowedRunError::InvalidListenerDistance {
-                distance_m: config.listener_m,
-            });
-        }
-    }
-    let card = &config.card;
-    let mu = card.linear_density_kg_m;
-
-    let modes: Vec<ModalAcousticMode> = (0..card.mode_count)
-        .map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: card.mode_omega_rad_s(k + 1),
-            damping_ratio: card.zetas[k],
-            pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
-        })
-        .collect();
-    let mut model = ModalAcousticTimeModel::try_new(
-        card.sample_rate_hz,
-        modes,
-        ModalAcousticTimeBudget::audible_reference(),
-    )
-    .map_err(BowedRunError::Model)?;
-
-    let x_bow = config.gesture.station_fraction;
-    let shapes_at_bow: Vec<f64> = (0..card.mode_count)
-        .map(|k| unit_shape(k, x_bow, card.length_m, mu))
-        .collect();
-    let w_point: f64 = shapes_at_bow.iter().map(|phi| phi * phi).sum();
-    let bridge_force_factors: Vec<f64> = (0..card.mode_count)
-        .map(|k| {
-            let kappa = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
-            // Support shear T*y' - EI*y''' for a pinned sine mode.
-            (card.tension_n + card.bending_stiffness_n_m2 * kappa.powi(2))
-                * unit_shape_slope_at_bridge(k, card.length_m, mu)
-        })
-        .collect();
-    let bridge_viscous_factors: Vec<f64> = (0..card.mode_count)
-        .map(|k| {
-            let kappa = (k + 1) as f64 * core::f64::consts::PI / card.length_m;
-            card.viscous_bending_n_m2_s
-                * kappa.powi(2)
-                * unit_shape_slope_at_bridge(k, card.length_m, mu)
-        })
-        .collect();
-
+    let mut state = runtime::BowedStringState::new(config, 1)?;
     let mut log = BowedRunLog {
         bow_point_velocity_m_s: Vec::with_capacity(config.steps),
         relative_velocity_m_s: Vec::with_capacity(config.steps),
@@ -609,169 +535,24 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         final_total_energy_j: 0.0,
         peak_total_energy_j: 0.0,
     };
-    let mut plate: Option<(CompactBody, f64)> = match &config.termination {
-        Termination::PlateOnePort { body, ambient } => {
-            Some((body.as_ref().clone(), ambient.density))
-        }
-        Termination::Rigid => None,
-    };
-    if plate.is_some() {
+    if state.has_radiation() {
         log.body_volume_velocity_m3_s.reserve(config.steps);
         log.radiated_pressure_pa.reserve(config.steps);
     }
-    // Start from rest; the bow spins the string up from silence so every
-    // periodicity in the logs is EMERGENT, never an initial-condition echo.
-    let mut forces = vec![0.0_f64; card.mode_count];
-    let dt = model.sample_period_s();
-    let subsamples = config.subsamples.max(1);
-    let sub_dt = dt / subsamples as f64;
-    let capture_tol = stribeck.map_or(0.0, |law| law.stiction_m_s.max(0.02));
-    // Capture basin: both sides of a sign flip must be slower than this,
-    // or the crossing is a chatter spike rather than a capturable corner.
-    const CAPTURE_BASIN_M_S: f64 = 0.15;
-    let mut stuck = false;
-    let mut prev_v_rel = f64::NAN;
-    let mut peak_energy_j = frame_total_energy(&model);
-
     for _ in 0..config.steps {
-        for _ in 0..subsamples {
-            let v_str: f64 = model
-                .states()
-                .iter()
-                .zip(&shapes_at_bow)
-                .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
-                .sum();
-            let v_rel = config.gesture.v_bow_m_s - v_str;
-            config
-                .island
-                .check_state(v_rel, config.gesture.normal_force_n)?;
-            let flip_speed = prev_v_rel.abs().max(v_rel.abs());
-            let flipped = prev_v_rel.is_finite()
-                && !stuck
-                && prev_v_rel.signum() != v_rel.signum()
-                && flip_speed <= CAPTURE_BASIN_M_S;
-            prev_v_rel = v_rel;
-            let traction = match &config.island {
-                FrictionIsland::Stribeck(_) | FrictionIsland::InterfaceStribeck { .. } => {
-                    let law = stribeck.ok_or(BowedRunError::Friction("missing Stribeck law"))?;
-                    let hold_cap = law.mu_static * config.gesture.normal_force_n;
-                    // Approximate pinning: cancel initial contact acceleration
-                    // and correct velocity with a forward-Euler increment.
-                    // The subsequent exact-ZOH transition need not hit the
-                    // requested endpoint velocity exactly.
-                    let pin = || -> f64 {
-                        let accel_hold: f64 = model
-                            .modes()
-                            .iter()
-                            .zip(model.states())
-                            .zip(&shapes_at_bow)
-                            .map(|((m, s), phi)| {
-                                phi * (2.0
-                                    * m.damping_ratio
-                                    * m.angular_frequency_rad_s
-                                    * s.velocity_m_sqrt_kg_per_s
-                                    + m.angular_frequency_rad_s
-                                        * m.angular_frequency_rad_s
-                                        * s.displacement_m_sqrt_kg)
-                            })
-                            .sum::<f64>()
-                            / w_point;
-                        accel_hold + v_rel / (w_point * sub_dt)
-                    };
-                    if stuck {
-                        let p = pin();
-                        if p.abs() <= hold_cap {
-                            p
-                        } else {
-                            stuck = false;
-                            config.island.sliding_traction(
-                                law,
-                                v_rel,
-                                config.gesture.normal_force_n,
-                            )?
-                        }
-                    } else if flipped || v_rel.abs() <= capture_tol {
-                        let p = pin();
-                        if p.abs() <= hold_cap {
-                            stuck = true;
-                            p
-                        } else {
-                            config.island.sliding_traction(
-                                law,
-                                v_rel,
-                                config.gesture.normal_force_n,
-                            )?
-                        }
-                    } else {
-                        config
-                            .island
-                            .sliding_traction(law, v_rel, config.gesture.normal_force_n)?
-                    }
-                }
-                FrictionIsland::ViscousOnly {
-                    viscous_n_s_per_m: cst,
-                } => cst * v_rel,
-            };
-            for (q, phi) in forces.iter_mut().zip(&shapes_at_bow) {
-                *q = traction * phi;
-            }
-            let stepped = model
-                .step_duration(&forces, sub_dt)
-                .map_err(BowedRunError::LimitExceeded)?;
-            if matches!(&config.island, FrictionIsland::InterfaceStribeck { .. }) {
-                let endpoint: f64 = model
-                    .states()
-                    .iter()
-                    .zip(&shapes_at_bow)
-                    .map(|(state, phi)| phi * state.velocity_m_sqrt_kg_per_s)
-                    .sum();
-                config.island.check_state(
-                    config.gesture.v_bow_m_s - endpoint,
-                    config.gesture.normal_force_n,
-                )?;
-            }
-            peak_energy_j = peak_energy_j.max(stepped.total_modal_energy_j);
+        let sample = state.step()?;
+        log.bow_point_velocity_m_s.push(sample.bow_point_velocity_m_s);
+        log.relative_velocity_m_s.push(sample.relative_velocity_m_s);
+        log.bridge_force_n.push(sample.bridge_force_n);
+        if let Some(value) = sample.body_volume_velocity_m3_s {
+            log.body_volume_velocity_m3_s.push(value);
         }
-
-        let bridge_force: f64 = model
-            .states()
-            .iter()
-            .zip(&bridge_force_factors)
-            .zip(&bridge_viscous_factors)
-            .map(|((s, factor), viscous)| {
-                factor * s.displacement_m_sqrt_kg + viscous * s.velocity_m_sqrt_kg_per_s
-            })
-            .sum();
-
-        // Observe the completed modal state, as the bridge force does.
-        let endpoint_velocity: f64 = model
-            .states()
-            .iter()
-            .zip(&shapes_at_bow)
-            .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
-            .sum();
-        log.bow_point_velocity_m_s.push(endpoint_velocity);
-        log.relative_velocity_m_s
-            .push(config.gesture.v_bow_m_s - endpoint_velocity);
-        log.bridge_force_n.push(bridge_force);
-
-        if let Some((body, ambient_density_kg_m3)) = plate.as_mut() {
-            let acc = body
-                .drive(bridge_force * body.drive_participation, dt)
-                .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
-            let volume_velocity = body.volume_velocity();
-            let pressure = body.radiate(acc, *ambient_density_kg_m3, config.listener_m);
-            if !(volume_velocity.is_finite() && pressure.is_finite()) {
-                return Err(BowedRunError::Radiation(
-                    "compact observer produced non-finite volume velocity or pressure".to_string(),
-                ));
-            }
-            log.body_volume_velocity_m3_s.push(volume_velocity);
-            log.radiated_pressure_pa.push(pressure);
+        if let Some(value) = sample.radiated_pressure_pa {
+            log.radiated_pressure_pa.push(value);
         }
     }
-    log.final_total_energy_j = frame_total_energy(&model);
-    log.peak_total_energy_j = peak_energy_j;
+    log.final_total_energy_j = state.total_modal_energy_j();
+    log.peak_total_energy_j = state.peak_modal_energy_j();
     Ok(log)
 }
 
