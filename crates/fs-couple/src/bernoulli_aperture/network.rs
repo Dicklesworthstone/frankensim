@@ -122,7 +122,7 @@ pub struct ApertureNetworkFrame {
     pub stored_energy_j: f64,
     /// Change in independently evaluated total storage [J].
     pub storage_change_j: f64,
-    /// Valve dissipation plus all memoryless terminal absorption [J].
+    /// Valve dissipation plus all terminal and interior load dissipation [J].
     pub dissipated_energy_j: f64,
     /// P_upstream (U_inlet - U_body) dt [J].
     pub upstream_work_j: f64,
@@ -250,7 +250,7 @@ impl ApertureNetwork {
             aperture, network,
             stored_energy_j: aperture.stored_energy_j + network.stored_energy_j,
             storage_change_j: aperture.storage_change_j + network.storage_change_j,
-            dissipated_energy_j: aperture.dissipated_energy_j + network.terminal_loss_j,
+            dissipated_energy_j: aperture.dissipated_energy_j + network.terminal_loss_j + network.interior_loss_j,
             upstream_work_j: drive.upstream_pressure_pa
                 * ((aperture.bore_flow_m3_s - drive.body_flow_m3_s) * dt),
             body_work_j: aperture.bore_pressure_pa * (drive.body_flow_m3_s * dt),

@@ -28,7 +28,7 @@ impl TerminalLoad {
     pub(super) fn new(node: NetworkNode, z: f64, dt: f64) -> Result<Option<Self>, WaveguideError> {
         Ok(match node {
             NetworkNode::Impedance { load } => Some(Self::Series(SeriesImpedance::new(load, z, dt)?)),
-            NetworkNode::Relaxation { load } => Some(Self::Relaxation(RelaxationImpedance::new(load, z, dt)?)),
+            NetworkNode::Relaxation { load } | NetworkNode::Shunt { load } | NetworkNode::Series { load } => Some(Self::Relaxation(RelaxationImpedance::new(load, z, dt)?)),
             _ => None,
         })
     }

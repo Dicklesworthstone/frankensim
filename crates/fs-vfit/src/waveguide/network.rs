@@ -9,15 +9,17 @@
 //!
 //! This is a fixed graph of lossless uniform sections and ideal zero-volume
 //! junctions, with one degree-one inlet and passive resistive, R-L-C or relaxation
-//! terminal loads. Reactive boundary storage participates in the total balance.
+//! terminal loads and explicit interior series/shunt loads. All load storage
+//! participates in the total balance; distributed laws must be supplied explicitly.
 //! No extra sample of junction delay, fitted-filter energy claim, branch end
-//! correction, distributed loss, fractional delay or radiation law is implied.
+//! correction, automatically inferred wall loss, fractional delay or radiation law is implied.
 
 use super::{PassiveWaveguide, WaveguideError, WaveguideSpec};
 use core::mem::size_of;
 use crate::impedance::{ImpedanceState, SeriesImpedanceSpec};
 use crate::relaxation::RelaxationImpedanceSpec;
 mod load;
+mod interior;
 use load::{TerminalFrame, TerminalLoad};
 
 /// Boundary or ideal connecting junction at a graph node.
@@ -35,6 +37,14 @@ pub enum NetworkNode {
     /// Degree-one frequency-dependent boundary loss. Each relaxation branch
     /// retains its own inertive history and participates in the energy balance.
     Relaxation { load: RelaxationImpedanceSpec },
+    /// Passive load from a common-pressure junction to a zero-pressure reference.
+    /// Requires at least two sections; section flows sum to the solved load flow.
+    /// No propagation delay is inserted. Use an empty relaxation list for R-L-C.
+    Shunt { load: RelaxationImpedanceSpec },
+    /// Passive inline load between exactly two sections. Positive load flow goes
+    /// from the first to second section in the caller's declared section order.
+    /// Port pressures may differ; their difference is the load pressure.
+    Series { load: RelaxationImpedanceSpec },
 }
 
 /// One lossless section. Endpoint order sets direction, not physical authority.
@@ -51,21 +61,31 @@ pub struct NetworkSegment {
 /// Observations at a node on the last ACCEPTED step (initially zero).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NodeFrame {
-    /// Common pressure [Pa].
+    /// Common pressure [Pa], or the first section's pressure at a series node.
     pub pressure_pa: f64,
     /// Sum of flows from adjacent sections INTO this node [m^3/s].
-    /// Approximately zero for a junction; negative of inlet flow at the inlet.
+    /// Approximately zero at ideal/series nodes, the load flow at a shunt,
+    /// and negative of inlet flow at the inlet.
     pub net_flow_into_node_m3_s: f64,
-    /// Irreversibly dissipated terminal energy [J]; zero elsewhere. Reactive
+    /// Irreversibly dissipated load energy [J]; zero at ideal nodes. Reactive
     /// port work may be negative, but is never confused with dissipation.
     pub absorbed_energy_j: f64,
-    /// End-of-step energy retained in this terminal's inertance/compliance [J].
+    /// End-of-step storage in this load, including relaxation branches [J].
     pub stored_energy_j: f64,
-    /// Change in terminal storage [J], independently evaluated from its state.
+    /// Change in load storage [J], independently evaluated from its state.
     pub storage_change_j: f64,
+    /// Second section's pressure at a series node [Pa]; None at other nodes.
+    /// Section order, not endpoint orientation, defines first and second.
+    pub series_other_pressure_pa: Option<f64>,
+    /// Pressure across an interior load [Pa]: the common pressure for a shunt,
+    /// or the pressure difference for a series element. Zero at legacy nodes.
+    pub load_pressure_pa: f64,
+    /// Volume flow into the shunt or through the series element [m^3/s].
+    /// Positive series direction follows declared section order. Zero at legacy nodes.
+    pub load_flow_m3_s: f64,
 }
 
-/// Same-step inlet work, all-terminal dissipation and wave PLUS reactive storage.
+/// Same-step inlet work, separate endpoint/interior losses and wave PLUS load storage.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NetworkFrame {
     /// Returning wave used by this step's inlet solve [Pa].
@@ -78,7 +98,7 @@ pub struct NetworkFrame {
     pub stored_energy_j: f64,
     /// Energy in bidirectional delay buffers alone [J].
     pub wave_stored_energy_j: f64,
-    /// Energy in all reactive terminal states alone [J].
+    /// Energy in every terminal and interior load state [J].
     pub load_stored_energy_j: f64,
     /// Difference in independently evaluated combined storage [J].
     pub storage_change_j: f64,
@@ -86,6 +106,9 @@ pub struct NetworkFrame {
     pub inlet_work_j: f64,
     /// Sum of resistive terminal dissipations [J], excluding reversible storage.
     pub terminal_loss_j: f64,
+    /// Irreversible loss at interior series/shunt elements [J], counted once
+    /// per element, not once per attached section. Excludes reversible storage.
+    pub interior_loss_j: f64,
     /// Incident minus departing energy at internal junctions [J]. Rounding
     /// diagnostic only: it is NOT treated as dissipation or used to repair storage.
     pub junction_residual_j: f64,
@@ -94,7 +117,7 @@ impl NetworkFrame {
     /// Total balance [J], without subtracting away any scattering defect.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.terminal_loss_j - self.inlet_work_j
+        self.storage_change_j + self.terminal_loss_j + self.interior_loss_j - self.inlet_work_j
     }
 }
 
@@ -207,6 +230,8 @@ impl WaveguideNetwork {
                 NetworkNode::Junction if degree >= 2 => {},
                 NetworkNode::Impedance { load } if degree == 1 => { load.validate()?; },
                 NetworkNode::Relaxation { .. } if degree == 1 => {},
+                NetworkNode::Shunt { .. } if degree >= 2 => {},
+                NetworkNode::Series { .. } if degree == 2 => {},
                 NetworkNode::Termination { reflection }
                     if degree == 1 && reflection.is_finite() && reflection.abs() <= 1.0 => {},
                 _ => return Err(WaveguideError("invalid node degree, repeated inlet or active/nonfinite termination")),
@@ -268,7 +293,8 @@ impl WaveguideNetwork {
         let inlet_port = ports[offsets[inlet_node]];
         let mut loads = buffer(nodes.len(), None)?;
         for (n, kind) in nodes.iter().enumerate() {
-            let z = segments[ports[offsets[n]] / 2].impedance_pa_s_m3;
+            let adjacent = &ports[offsets[n]..offsets[n + 1]];
+            let z = interior::load_impedance(*kind, adjacent, segments)?;
             loads[n] = TerminalLoad::new(*kind, z, time_step_s)?;
         }
         Ok(Self {
@@ -314,7 +340,8 @@ impl WaveguideNetwork {
         self.wave_stored_energy_j() + self.load_stored_energy_j()
     }
 
-    /// Accepted base R-L-C coordinates; None for a nonreactive or unknown node.
+    /// Accepted base R-L-C coordinates at a terminal OR interior load;
+    /// None for a nonreactive or unknown node. The legacy method name is retained.
     /// Relaxation histories are available separately through `terminal_relaxation_flows`.
     #[must_use]
     pub fn terminal_state(&self, node: usize) -> Option<ImpedanceState> {
@@ -364,12 +391,22 @@ impl WaveguideNetwork {
         let incoming = self.incoming_pressure_pa();
         let z = self.inlet_impedance_pa_s_m3();
         let mut terminal_loss = 0.0;
+        let mut interior_loss = 0.0;
         let mut junction_residual = 0.0;
         let mut load_stored = 0.0;
         for n in 0..self.nodes.len() {
+            if matches!(self.nodes[n], NetworkNode::Shunt { .. } | NetworkNode::Series { .. }) {
+                let residual = self.preview_interior(n)?;
+                let trial = self.load_candidate[n].port();
+                interior_loss += trial.dissipated_energy_j;
+                load_stored += trial.stored_energy_j;
+                junction_residual += residual;
+                continue;
+            }
             let range = self.offsets[n]..self.offsets[n + 1];
             let first = self.ports[range.start];
             let pressure = match self.nodes[n] {
+                NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
                 NetworkNode::Inlet => outgoing + self.arriving(first),
                 NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
@@ -396,6 +433,7 @@ impl WaveguideNetwork {
                 let port = self.ports[index];
                 let a = self.arriving(port);
                 let b = match self.nodes[n] {
+                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
                     NetworkNode::Inlet => outgoing,
                     NetworkNode::Termination { reflection } => reflection * a,
                     NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => self.load_candidate[n].port().reflected_pressure_pa,
@@ -408,6 +446,7 @@ impl WaveguideNetwork {
                 }
                 observation.net_flow_into_node_m3_s += flow;
                 match self.nodes[n] {
+                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
                     NetworkNode::Termination { reflection } => {
                         observation.absorbed_energy_j = line.wave_energy(a)
                             * (1.0 - reflection) * (1.0 + reflection);
@@ -445,10 +484,10 @@ impl WaveguideNetwork {
             stored_energy_j: stored, storage_change_j: stored - self.stored_energy_j(),
             wave_stored_energy_j: wave_stored, load_stored_energy_j: load_stored,
             inlet_work_j: (outgoing + incoming) * (((outgoing - incoming) / z) * self.time_step_s),
-            terminal_loss_j: terminal_loss, junction_residual_j: junction_residual,
+            terminal_loss_j: terminal_loss, interior_loss_j: interior_loss, junction_residual_j: junction_residual,
         };
         if ![frame.inlet_pressure_pa, frame.inlet_flow_m3_s, stored, frame.storage_change_j,
-            frame.inlet_work_j, terminal_loss, junction_residual, frame.balance_residual_j()]
+            frame.inlet_work_j, terminal_loss, interior_loss, junction_residual, frame.balance_residual_j()]
             .iter().all(|x| x.is_finite())
         {
             return Err(WaveguideError("network storage or work left the finite set"));
