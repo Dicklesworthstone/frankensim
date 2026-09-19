@@ -134,6 +134,10 @@ impl RelaxationImpedance {
     #[must_use]
     pub const fn spec(&self) -> &RelaxationImpedanceSpec { &self.spec }
 
+    /// Accepted coordinates of the base R-L-C contribution, excluding branch flows.
+    #[must_use]
+    pub const fn base_state(&self) -> crate::impedance::ImpedanceState { self.base.state() }
+
     /// Accepted branch histories, not a fitted response or accumulated energy.
     #[must_use]
     pub fn branch_flows_m3_s(&self) -> &[f64] { &self.flows[..self.spec.count] }

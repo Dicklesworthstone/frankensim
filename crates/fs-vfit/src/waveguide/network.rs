@@ -8,14 +8,17 @@
 //! reads the SAME old wave state before any segment shifts, including cycles.
 //!
 //! This is a fixed graph of lossless uniform sections and ideal zero-volume
-//! junctions, with one degree-one inlet and passive resistive or series R-L-C
+//! junctions, with one degree-one inlet and passive resistive, R-L-C or relaxation
 //! terminal loads. Reactive boundary storage participates in the total balance.
 //! No extra sample of junction delay, fitted-filter energy claim, branch end
 //! correction, distributed loss, fractional delay or radiation law is implied.
 
 use super::{PassiveWaveguide, WaveguideError, WaveguideSpec};
 use core::mem::size_of;
-use crate::impedance::{ImpedanceFrame, ImpedanceState, SeriesImpedance, SeriesImpedanceSpec};
+use crate::impedance::{ImpedanceState, SeriesImpedanceSpec};
+use crate::relaxation::RelaxationImpedanceSpec;
+mod load;
+use load::{TerminalFrame, TerminalLoad};
 
 /// Boundary or ideal connecting junction at a graph node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,6 +32,9 @@ pub enum NetworkNode {
     /// Degree-one passive reactive load, initially at zero energy. Its physical
     /// state is retained; memoryless reflection controls cannot erase it.
     Impedance { load: SeriesImpedanceSpec },
+    /// Degree-one frequency-dependent boundary loss. Each relaxation branch
+    /// retains its own inertive history and participates in the energy balance.
+    Relaxation { load: RelaxationImpedanceSpec },
 }
 
 /// One lossless section. Endpoint order sets direction, not physical authority.
@@ -104,8 +110,8 @@ pub struct WaveguideNetwork {
     departing: Vec<f64>,
     observed: Vec<NodeFrame>,
     candidate: Vec<NodeFrame>,
-    loads: Vec<Option<SeriesImpedance>>,
-    load_candidate: Vec<ImpedanceFrame>,
+    loads: Vec<Option<TerminalLoad>>,
+    load_candidate: Vec<TerminalFrame>,
     inlet_port: usize,
     time_step_s: f64,
 }
@@ -142,8 +148,8 @@ impl WaveguideNetwork {
         let mut bytes = size_of::<usize>(); // offsets has node_count + 1 entries
         for (count, width) in [
             (node_count, size_of::<NetworkNode>() + 2 * size_of::<usize>()
-                + 2 * size_of::<NodeFrame>() + size_of::<Option<SeriesImpedance>>()
-                + size_of::<ImpedanceFrame>()),
+                + 2 * size_of::<NodeFrame>() + size_of::<Option<TerminalLoad>>()
+                + size_of::<TerminalFrame>()),
             (segments.len(), size_of::<PassiveWaveguide>() + 2 * size_of::<usize>()
                 + 4 * size_of::<f64>()),
         ] {
@@ -200,6 +206,7 @@ impl WaveguideNetwork {
                 NetworkNode::Inlet if degree == 1 && inlet_node.is_none() => inlet_node = Some(n),
                 NetworkNode::Junction if degree >= 2 => {},
                 NetworkNode::Impedance { load } if degree == 1 => { load.validate()?; },
+                NetworkNode::Relaxation { .. } if degree == 1 => {},
                 NetworkNode::Termination { reflection }
                     if degree == 1 && reflection.is_finite() && reflection.abs() <= 1.0 => {},
                 _ => return Err(WaveguideError("invalid node degree, repeated inlet or active/nonfinite termination")),
@@ -261,16 +268,14 @@ impl WaveguideNetwork {
         let inlet_port = ports[offsets[inlet_node]];
         let mut loads = buffer(nodes.len(), None)?;
         for (n, kind) in nodes.iter().enumerate() {
-            if let NetworkNode::Impedance { load } = *kind {
-                let z = segments[ports[offsets[n]] / 2].impedance_pa_s_m3;
-                loads[n] = Some(SeriesImpedance::new(load, z, time_step_s)?);
-            }
+            let z = segments[ports[offsets[n]] / 2].impedance_pa_s_m3;
+            loads[n] = TerminalLoad::new(*kind, z, time_step_s)?;
         }
         Ok(Self {
             nodes: retained_nodes, offsets, ports, weights, lines,
             departing: buffer(port_count, 0.0)?, observed: buffer(nodes.len(), NodeFrame::default())?,
             candidate: buffer(nodes.len(), NodeFrame::default())?, inlet_port, time_step_s,
-            loads, load_candidate: buffer(nodes.len(), ImpedanceFrame::default())?,
+            loads, load_candidate: buffer(nodes.len(), TerminalFrame::default())?,
         })
     }
 
@@ -299,7 +304,7 @@ impl WaveguideNetwork {
     #[must_use]
     pub fn load_stored_energy_j(&self) -> f64 {
         self.loads.iter().fold(0.0, |sum, load| {
-            sum + load.as_ref().map_or(0.0, SeriesImpedance::stored_energy_j)
+            sum + load.as_ref().map_or(0.0, TerminalLoad::stored_energy_j)
         })
     }
 
@@ -309,10 +314,18 @@ impl WaveguideNetwork {
         self.wave_stored_energy_j() + self.load_stored_energy_j()
     }
 
-    /// Accepted load coordinates; None for a nonreactive or unknown node.
+    /// Accepted base R-L-C coordinates; None for a nonreactive or unknown node.
+    /// Relaxation histories are available separately through `terminal_relaxation_flows`.
     #[must_use]
     pub fn terminal_state(&self, node: usize) -> Option<ImpedanceState> {
-        self.loads.get(node).and_then(Option::as_ref).map(SeriesImpedance::state)
+        self.loads.get(node).and_then(Option::as_ref).map(TerminalLoad::state)
+    }
+
+    /// Accepted internal relaxation flows [m^3/s]; None for other node kinds.
+    /// Preview, failed samples and refused reflection controls preserve these.
+    #[must_use]
+    pub fn terminal_relaxation_flows(&self, node: usize) -> Option<&[f64]> {
+        self.loads.get(node).and_then(Option::as_ref).and_then(TerminalLoad::relaxation_flows)
     }
 
     /// Last accepted node observation; a preview never replaces this value.
@@ -358,12 +371,12 @@ impl WaveguideNetwork {
             let first = self.ports[range.start];
             let pressure = match self.nodes[n] {
                 NetworkNode::Inlet => outgoing + self.arriving(first),
-                NetworkNode::Impedance { .. } => {
+                NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
                     let trial = self.loads[n].as_ref().expect("admitted reactive terminal").preview_step(a)?;
                     self.load_candidate[n] = trial;
-                    load_stored += trial.stored_energy_j;
-                    trial.pressure_pa
+                    load_stored += trial.port().stored_energy_j;
+                    trial.port().pressure_pa
                 },
                 NetworkNode::Termination { reflection } => {
                     let a = self.arriving(first);
@@ -385,7 +398,7 @@ impl WaveguideNetwork {
                 let b = match self.nodes[n] {
                     NetworkNode::Inlet => outgoing,
                     NetworkNode::Termination { reflection } => reflection * a,
-                    NetworkNode::Impedance { .. } => self.load_candidate[n].reflected_pressure_pa,
+                    NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => self.load_candidate[n].port().reflected_pressure_pa,
                     NetworkNode::Junction => pressure - a,
                 };
                 let line = &self.lines[port / 2];
@@ -400,8 +413,8 @@ impl WaveguideNetwork {
                             * (1.0 - reflection) * (1.0 + reflection);
                         terminal_loss += observation.absorbed_energy_j;
                     },
-                    NetworkNode::Impedance { .. } => {
-                        let trial = self.load_candidate[n];
+                    NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
+                        let trial = self.load_candidate[n].port();
                         observation.absorbed_energy_j = trial.dissipated_energy_j;
                         observation.stored_energy_j = trial.stored_energy_j;
                         observation.storage_change_j = trial.storage_change_j;
