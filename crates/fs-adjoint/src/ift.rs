@@ -7,6 +7,9 @@
 //! parameterized-operator fixture: K(ρ) = Σ_t ρ_t·K_t with exact
 //! per-cell derivative contributions.
 
+/// Checked mesh-based scalar goals with bounded primal and adjoint solves.
+pub mod goal;
+
 use fs_feec::ElementGeometry;
 use fs_rep_mesh::TetComplex;
 use fs_solver::{GmresState, LinearOp};
