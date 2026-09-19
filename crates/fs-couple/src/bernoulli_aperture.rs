@@ -4,6 +4,9 @@
 //! [`fs_phs::quasistatic_aperture_opening`]. This type is only the
 //! geometry + closing-pressure data a coupling step carries.
 
+/// Stateful, explicitly parameterized moving-slit junction.
+pub mod dynamic;
+
 /// Quasistatic aperture: `y = H max(0, 1 − Δp/P_c)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BernoulliAperture {
