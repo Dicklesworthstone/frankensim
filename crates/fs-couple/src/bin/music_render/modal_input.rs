@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_couple::render::schedule::force::file::{
-    MAX_MODAL_PERFORMANCE_BYTES, MODAL_PERFORMANCE_SCHEMA, ModalPerformance,
+    MAX_MODAL_PERFORMANCE_BYTES, MODAL_PERFORMANCE_SCHEMA, MODAL_CONTACT_PERFORMANCE_SCHEMA, ModalPerformance,
 };
 use super::{RATE, create_outputs, json_string, stream_output};
 
@@ -60,9 +60,12 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     let input_hash = info.input_hash.to_hex();
     let wav_hash = rendered.hash.to_hex();
     let input_schema = info.schema;
-    let coupling_provenance = if input_schema == MODAL_PERFORMANCE_SCHEMA { String::new() } else {
+    let mut coupling_provenance = if input_schema == MODAL_PERFORMANCE_SCHEMA { String::new() } else {
         format!(",\"connections\":{},\"coupling\":\"implicit-bilateral-spring-damper\"", info.connections)
     };
+    if input_schema == MODAL_CONTACT_PERFORMANCE_SCHEMA {
+        coupling_provenance.push_str(",\"contacts\":1,\"contact\":\"implicit-nonadhesive-power-law\"");
+    }
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"modal-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\

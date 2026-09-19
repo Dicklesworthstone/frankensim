@@ -124,3 +124,5 @@ impl ScheduledRenderer {
     }
 }
 fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
+/// Scheduled normal contact on top of the existing coupled network.
+pub mod contact;

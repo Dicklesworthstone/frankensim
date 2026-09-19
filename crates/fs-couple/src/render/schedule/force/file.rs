@@ -38,6 +38,10 @@
 //! example and complete units are in examples/COUPLED_MODAL_PERFORMANCES.md.
 //! Its preloads solve the complete network; mixed retain/preload modes refuse.
 
+// Version 3 adds exactly one implicit compliant contact before the events.
+// Its initial states are retained; nonlinear static preload is not inferred.
+mod contact;
+
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
 use fs_math::c64::C64;
@@ -56,6 +60,10 @@ pub const MODAL_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v1";
 pub const MODAL_COUPLED_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v2";
 /// Domain-separated exact byte identity for the coupled model schema.
 pub const MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-couple.modal-performance-input.v2";
+/// Version 3 adds one unilateral contact to the bilateral network.
+pub const MODAL_CONTACT_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v3";
+/// Exact byte identity for the contact-enabled input.
+pub const MODAL_CONTACT_PERFORMANCE_HASH_DOMAIN: &str = "org.frankensim.fs-couple.modal-performance-input.v3";
 /// Byte-read limit to apply BEFORE allocating or decoding an input file.
 pub const MAX_MODAL_PERFORMANCE_BYTES: usize = 4 * 1024 * 1024;
 /// A bounded offline performance; 600 seconds at 48 kHz.
@@ -74,7 +82,7 @@ const MAX_PROJECTION_TERMS: usize = 16_777_216;
 pub struct ModalPerformanceInfo {
     /// Exact admitted schema, distinguishing independent and coupled mechanics.
     pub schema: &'static str,
-    /// Declared mechanical connections (zero for schema v1).
+    /// Declared bilateral connections (v3 additionally carries one contact).
     pub connections: usize,
     /// Audio samples per second; not inferred from a note or output extension.
     pub sample_rate_hz: u32,
@@ -84,7 +92,7 @@ pub struct ModalPerformanceInfo {
     pub full_scale_pa: f64,
     /// Input bytes under the matching version-specific hash domain.
     pub input_hash: ContentHash,
-    /// Source components, independent in v1 or connected mechanically in v2.
+    /// Source components, independent in v1 or connected mechanically in v2/v3.
     pub voices: usize,
     /// Total number of retained modes across all voices.
     pub modes: usize,
@@ -149,6 +157,7 @@ impl ModalPerformance {
         let schema = match text.lines().next().and_then(|line| line.split_ascii_whitespace().next()) {
             Some(MODAL_PERFORMANCE_SCHEMA) => MODAL_PERFORMANCE_SCHEMA,
             Some(MODAL_COUPLED_PERFORMANCE_SCHEMA) => MODAL_COUPLED_PERFORMANCE_SCHEMA,
+            Some(MODAL_CONTACT_PERFORMANCE_SCHEMA) => MODAL_CONTACT_PERFORMANCE_SCHEMA,
             _ => return Err(input(1, "unsupported modal performance schema")),
         };
         reader.row(schema)?.finish()?;
@@ -237,9 +246,9 @@ impl ModalPerformance {
             model.restore_states(&states).map_err(RenderError::Modal)?;
             voices.push(ModalForceVoice::new(model, columns, initial_forces, initialization)?);
         }
-        // Only v2 has connection records. V1 keeps its exact compiler and does
+        // V2/v3 have connection records. V1 keeps its exact compiler and does
         // not reinterpret any formerly accepted independent performance.
-        let coupled = if schema == MODAL_COUPLED_PERFORMANCE_SCHEMA {
+        let coupled = if schema != MODAL_PERFORMANCE_SCHEMA {
             let mut row = reader.row("coupling_limits")?;
             let max_connections = row.count(64)?;
             let max_setup_terms = row.count(MAX_PROJECTION_TERMS)?;
@@ -269,6 +278,9 @@ impl ModalPerformance {
             }
             Some((connections, coupling))
         } else { None };
+        let contact = if schema == MODAL_CONTACT_PERFORMANCE_SCHEMA {
+            Some(contact::read(&mut reader, &voices, &mut total_weights)?)
+        } else { None };
         let event_count: usize = reader.one("events")?;
         if event_count > MAX_EVENTS {
             return Err(input(reader.line, "force event count exceeds 65536"));
@@ -294,8 +306,13 @@ impl ModalPerformance {
         let (renderer, connection_count, domain) = match coupled {
             Some((connections, coupling)) => {
                 let count = connections.len();
-                (ScheduledRenderer::from_coupled_modal_forces(voices, events, force_config,
-                    connections, coupling, &CancelGate::new())?, count, MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN)
+                match contact {
+                    Some((contact, contact_config)) => (ScheduledRenderer::from_contact_modal_forces(
+                        voices, events, force_config, connections, coupling, contact, contact_config,
+                        &CancelGate::new())?, count, MODAL_CONTACT_PERFORMANCE_HASH_DOMAIN),
+                    None => (ScheduledRenderer::from_coupled_modal_forces(voices, events, force_config,
+                        connections, coupling, &CancelGate::new())?, count, MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN),
+                }
             }
             None => (ScheduledRenderer::from_modal_forces(voices, events, force_config)?, 0, MODAL_PERFORMANCE_HASH_DOMAIN),
         };
