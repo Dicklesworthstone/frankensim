@@ -16,19 +16,23 @@
 //! structural bandwidth and output sampling still limit acoustic accuracy.
 //! This is not the previous arbitrary volume-velocity gain in Pa/(m^3/s).
 use super::board_geometry::SurfaceSample;
-use super::linear::Bank;
+use super::linear::{Bank, MAX_BOARD_MODES};
 use fs_bem::helmholtz::Medium;
 use fs_math::det;
 
-const MAX_MODES: usize = 32;
 const MAX_HISTORY: usize = 32_768;
 
 /// Time-major modal convolution. All allocations and geometry operations are
 /// cold; one output step has a bounded multiply-add count and no allocation.
 pub struct Microphone {
-    kernels: Vec<(usize, [f64; MAX_MODES])>,
-    history: Vec<[f64; MAX_MODES]>,
-    previous_velocity: [f64; MAX_MODES],
+    kernels: Vec<(usize, Vec<f64>)>,
+    /// Interleaved frames with exactly `modes` entries, not MAX_BOARD_MODES
+    /// padding. Increasing the admitted bandwidth does not multiply memory
+    /// for an existing one-mode or four-mode soundboard.
+    history: Vec<f64>,
+    history_frames: usize,
+    previous_velocity: Vec<f64>,
+    acceleration: Vec<f64>,
     head: usize,
     modes: usize,
     rate: f64,
@@ -48,14 +52,14 @@ impl Microphone {
     }
     fn from_loaded(surface: &[SurfaceSample], modes: usize, rate: u32,
         position_m: [f64; 3], medium: Medium) -> Result<Self,String> {
-        if !(1..=MAX_MODES).contains(&modes) || !(8_000..=192_000).contains(&rate)
+        if !(1..=MAX_BOARD_MODES).contains(&modes) || !(8_000..=192_000).contains(&rate)
             || surface.is_empty() || surface.len()>120_000
             || position_m.iter().any(|v|!v.is_finite()) || position_m[2]<0.05
             || !medium.density.is_finite() || medium.density<=0.0
             || !medium.sound_speed.is_finite() || medium.sound_speed<=0.0 {
             return Err("invalid surface/microphone/medium budget; microphone must be >=5 cm above z=0".into());
         }
-        let mut bins=std::collections::BTreeMap::<usize,[f64;MAX_MODES]>::new();
+        let mut bins=std::collections::BTreeMap::<usize,Vec<f64>>::new();
         for p in surface {
             if !p.area_m2.is_finite() || p.area_m2<=0.0
                 || p.position_m.iter().any(|v|!v.is_finite()) || p.position_m[2]!=0.0
@@ -70,15 +74,17 @@ impl Microphone {
             let first=delay.floor() as usize; let fraction=delay-first as f64;
             let gain=medium.density*p.area_m2/(2.0*std::f64::consts::PI*radius);
             for (d,weight) in [(first,1.0-fraction),(first+1,fraction)] {
-                let row=bins.entry(d).or_insert([0.0;MAX_MODES]);
+                let row=bins.entry(d).or_insert_with(||vec![0.0;modes]);
                 for (i,value) in p.mode_shape.iter().enumerate() {row[i]+=gain*weight*value;}
             }
         }
         if bins.values().flatten().any(|v|!v.is_finite()) {return Err("radiation kernel overflow".into());}
         let first=*bins.first_key_value().ok_or("empty radiation kernel")?.0;
         let last=*bins.last_key_value().ok_or("empty radiation kernel")?.0;
-        Ok(Self { kernels: bins.into_iter().collect(), history: vec![[0.0;MAX_MODES];last+1],
-            previous_velocity:[0.0;MAX_MODES],head:0,modes,rate:f64::from(rate),
+        let history_frames=last+1;
+        let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
+        Ok(Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
+            previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             position_m,delay_samples:(first,last) })
     }
     pub fn multiply_adds_per_sample(&self)->usize {self.kernels.len()*self.modes}
@@ -86,25 +92,28 @@ impl Microphone {
     /// The model starts from rest. Supply the loaded board's END velocity after
     /// each accepted audio sample. Differencing actual velocities includes the
     /// contact/coupling forces and damping; using only -omega^2*q would not.
-    /// Input errors do not mutate history, and failed output rolls back its slot.
+    /// Input/output errors leave committed history and the cursor untouched.
+    /// Kernels have strictly positive delay, so the candidate slot is never
+    /// read by this output and is committed only after output validation.
     pub fn step(&mut self, velocity: &[f64])->Result<f64,String> {
         if velocity.len()!=self.modes || velocity.iter().any(|v|!v.is_finite()) {
             return Err("microphone needs one finite velocity per loaded board mode".into());
         }
-        let mut acceleration=[0.0;MAX_MODES];
-        for i in 0..self.modes {acceleration[i]=(velocity[i]-self.previous_velocity[i])*self.rate;}
-        if acceleration.iter().any(|v|!v.is_finite()) {return Err("surface acceleration overflow".into());}
-        let old=self.history[self.head];self.history[self.head]=acceleration;
+        for i in 0..self.modes {self.acceleration[i]=(velocity[i]-self.previous_velocity[i])*self.rate;}
+        if self.acceleration.iter().any(|v|!v.is_finite()) {return Err("surface acceleration overflow".into());}
         let mut pressure=0.0;
         for (delay,weights) in &self.kernels {
-            let index=if self.head>=*delay {self.head-*delay}else{self.head+self.history.len()-*delay};
-            for (i,weight) in weights[..self.modes].iter().enumerate() {
-                pressure+=weight*self.history[index][i];
+            let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
+            let offset=frame*self.modes;
+            for (i,weight) in weights.iter().enumerate() {
+                pressure+=weight*self.history[offset+i];
             }
         }
-        if !pressure.is_finite() {self.history[self.head]=old;return Err("radiated pressure overflow".into());}
-        self.previous_velocity[..self.modes].copy_from_slice(velocity);
-        self.head+=1;if self.head==self.history.len(){self.head=0;}
+        if !pressure.is_finite() {return Err("radiated pressure overflow".into());}
+        let offset=self.head*self.modes;
+        self.history[offset..offset+self.modes].copy_from_slice(&self.acceleration);
+        self.previous_velocity.copy_from_slice(velocity);
+        self.head+=1;if self.head==self.history_frames{self.head=0;}
         Ok(pressure)
     }
 }
@@ -149,5 +158,36 @@ mod tests {
             assert_eq!(a.step(&[v]).unwrap()*2.0,b.step(&[2.0*v]).unwrap());
         }
         assert!(Microphone::from_loaded(&surface,1,48_000,[0.,0.,0.],medium()).is_err());
+    }
+
+    #[test]
+    fn highest_retained_mode_reaches_pressure_without_a_32_mode_truncation() {
+        for modes in [1,33,64,MAX_BOARD_MODES] {
+            let mut shape=vec![0.0;modes];shape[modes-1]=1.0;
+            let sample=SurfaceSample{position_m:[0.,0.,0.],area_m2:0.1,mode_shape:shape};
+            let mut mic=Microphone::from_loaded(&[sample],modes,32_000,[0.,0.,1.],medium()).unwrap();
+            assert_eq!(mic.history.len(),mic.history_frames*modes);
+            assert!(mic.kernels.iter().all(|(_,row)|row.len()==modes));
+            let pointers=(mic.history.as_ptr(),mic.acceleration.as_ptr(),mic.previous_velocity.as_ptr());
+            let mut velocity=vec![0.0;modes];
+            let gain=1.2*0.1/(2.0*std::f64::consts::PI);
+            for n in 0..600 {
+                velocity[modes-1]=(n+1) as f64/32_000.0;
+                let p=mic.step(&velocity).unwrap();
+                if n<100 {assert_eq!(p,0.0);}else{assert!((p/gain-1.0).abs()<1e-11);}
+            }
+            assert_eq!(pointers,(mic.history.as_ptr(),mic.acceleration.as_ptr(),mic.previous_velocity.as_ptr()));
+        }
+        let too_many=SurfaceSample{position_m:[0.,0.,0.],area_m2:0.1,mode_shape:vec![1.;MAX_BOARD_MODES+1]};
+        assert!(Microphone::from_loaded(&[too_many],MAX_BOARD_MODES+1,32_000,[0.,0.,1.],medium()).is_err());
+    }
+    #[test]
+    fn rejected_acceleration_does_not_advance_any_mode_or_delay() {
+        let sample=SurfaceSample{position_m:[0.,0.,0.],area_m2:0.1,mode_shape:vec![1.;64]};
+        let mut mic=Microphone::from_loaded(&[sample],64,48_000,[0.,0.,1.],medium()).unwrap();
+        for _ in 0..50 {mic.step(&[0.1;64]).unwrap();}
+        let history=mic.history.clone();let previous=mic.previous_velocity.clone();let head=mic.head;
+        assert!(mic.step(&[f64::MAX;64]).is_err());
+        assert_eq!(mic.history,history);assert_eq!(mic.previous_velocity,previous);assert_eq!(mic.head,head);
     }
 }
