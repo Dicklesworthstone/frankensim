@@ -111,5 +111,31 @@ pub(super) fn attach(output: String, request: &Request, march: &TransportMarch) 
     Ok(format!("{prefix},\"recirculation\":{report}}}\n"))
 }
 
+/// Actual outer sensible-heat gain, excluding air circulating internally.
+pub(super) fn external_heat_gain(march: &TransportMarch) -> f64 {
+    march.recirculation.as_ref().map_or(march.external_heat_gain_w, |r| r.external_heat_gain_w)
+}
+
+/// A bounded endpoint observation; do not repeat topology/provenance per step.
+pub(super) fn history_field(request: &Request, march: &TransportMarch) -> Result<String> {
+    let Some(policy) = &request.recirculation else {
+        if march.recirculation.is_some() { return Err(producer("unrequested transient return model")); }
+        return Ok(String::new());
+    };
+    let Some(report) = &march.recirculation else {
+        if policy.links.iter().any(|link| link.fraction > 0.0) {
+            return Err(producer("return-air feedback missing from an accepted endpoint"));
+        }
+        return Ok(",\"recirculation\":{\"status\":\"once-through-zero-returns\"}".into());
+    };
+    let supplies = report.supplies.iter().map(|s| Ok(format!(
+        "{{\"node\":{},\"mixed_temperature_k\":{}}}", s.node, num(s.mixed_temperature_k)?)))
+        .collect::<Result<Vec<_>>>()?.join(",");
+    Ok(format!(",\"recirculation\":{{\"mixed_supplies\":[{supplies}],\"external_heat_gain_w\":{},\"heat_imbalance_w\":{},\"max_mixing_residual_k\":{}}}",
+        num(report.external_heat_gain_w)?, num(report.heat_imbalance_w)?, num(report.max_mixing_residual_k)?))
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transient_tests;

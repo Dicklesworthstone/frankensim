@@ -337,6 +337,7 @@ fn simulate_cycle_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
     let mut stored=0.0;
     let mut input=0.0;
     let mut exhaust=0.0;
+    let mut fresh_exhaust=0.0;
     let mut radiative=0.0;
     let mut work=0_usize;
     let mut completed=0_usize;
@@ -406,10 +407,12 @@ fn simulate_cycle_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
                 stored=finite(stored+solid.stored_energy_change_j)?;
                 input=finite(input+dt*solid.source_w)?;
                 exhaust=finite(exhaust+dt*coupled.transport.external_heat_gain_w)?;
+                fresh_exhaust=finite(fresh_exhaust+dt*recirculation::external_heat_gain(&coupled.transport))?;
                 radiative=finite(radiative+dt*radiative_w)?;
                 completed+=1;
                 let radiation_field=if heat.is_some(){format!(",\"radiative_heat_w\":{}",num(radiative_w)?)}else{String::new()};
-                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{}{radiation_field}}}",
+                let recirculation_field=recirculation::history_field(request,&coupled.transport)?;
+                history.push(format!("{{\"time_s\":{},\"dt_s\":{},\"interval\":{},{},\"fan_speed_ratio\":{},\"objective_temperature_k\":{},\"active_vertex\":{},\"source_w\":{},\"air_heat_gain_w\":{},\"stored_energy_change_j\":{},\"solid_energy_residual_j\":{},\"coupled_energy_residual_j\":{},\"coupling_iterations\":{},\"estimated_local_error_ratio\":{}{radiation_field}{recirculation_field}}}",
                     num(endpoint)?,num(dt)?,ordinal,workload_json,optional(speed)?,num(state.value)?,
                     state.vertex.map_or_else(||"null".into(),|v|v.to_string()),num(solid.source_w)?,
                     num(coupled.transport.external_heat_gain_w)?,num(solid.stored_energy_change_j)?,num(solid.energy_residual_j)?,
@@ -451,6 +454,10 @@ fn simulate_cycle_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
     }
     let residual=finite(stored-input+exhaust+radiative)?;
     if residual.abs()>finite(request.limits.heat*time)? {return Err(producer("whole-window transient energy gate failed"));}
+    let fresh_residual=finite(stored-input+fresh_exhaust+radiative)?;
+    if request.recirculation.is_some() && fresh_residual.abs()>finite(request.limits.heat*time)? {
+        return Err(producer("fresh/undrawn-exhaust whole-window transient energy gate failed"));
+    }
     let (adjoint,reverse_work,design_gradient)=match tape {
         Some(tape)=>tape.reverse(request,cx,schedule,&engine)?, None=>("null".into(),0,None),
     };
@@ -458,7 +465,10 @@ fn simulate_cycle_observed(request:&Request,cx:&Cx<'_>,schedule:&Schedule,speed_
     let result=final_result.ok_or_else(||bad("transient run has no completed final step"))?;
     let prefix=result.strip_suffix("}\n").ok_or_else(||bad("internal transient result framing"))?;
     let radiation_field=if request.radiation.is_some(){format!(",\"radiative_energy_loss_j\":{}",num(radiative)?)}else{String::new()};
-    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"nonlinear\":{},\"adjoint\":{}{radiation_field},\"scope\":\"initial state and accepted endpoints only; fixed-grid discrete adjoints are separately disclosed when requested; no inter-step peak/crossing certificate, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
+    let recirculation_window=if request.recirculation.is_some(){format!(
+        ",\"fresh_exhaust_energy_gain_j\":{},\"fresh_exhaust_energy_residual_j\":{}",
+        num(fresh_exhaust)?,num(fresh_residual)?)}else{String::new()};
+    let output=format!("{prefix},\"transient\":{{\"scheme\":\"backward-euler\",\"air_model\":\"quasi-steady endpoint mixing; no fluid storage or travel delay\",\"time_s\":{},\"steps\":{},\"total_solid_solves\":{},\"forward_solid_solves\":{},\"sampled_peak_objective_k\":{},\"sampled_peak_time_s\":{},\"temperature_limit_k\":{},\"first_sampled_violation_s\":{},\"stored_energy_change_j\":{},\"input_energy_j\":{},\"air_energy_gain_j\":{},\"energy_residual_j\":{},\"history\":[{}],\"adaptive\":{},\"nonlinear\":{},\"adjoint\":{}{radiation_field}{recirculation_window},\"scope\":\"initial state and accepted endpoints only; fixed-grid discrete adjoints are separately disclosed when requested; no inter-step peak/crossing certificate, air inertia, ramp model, or time-discretization error bound; solid_inputs are base declarations; each interval selects a global power scale or absolute named component watts\"}}}}\n",
         num(time)?,completed,total_work,work,num(peak)?,num(peak_time)?,optional(schedule.limit)?,optional(first_violation)?,
         num(stored)?,num(input)?,num(exhaust)?,num(residual)?,history.join(","),adaptive_stats.render(schedule.adaptive)?,
         nonlinear_stats.render(schedule.nonlinear)?,adjoint);
