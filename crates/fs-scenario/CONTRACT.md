@@ -334,7 +334,10 @@ flagships.
   and breath controls (pressure, pre-stress, rest aperture, jet
   speed/angle). UNIT DISCIPLINE is type-level: each target names the
   ONE `GestureValue` variant it accepts, so a pressure literally cannot
-  enter a length control (`UnitMismatch` at admission). Sampling is a
+  enter a length control (`UnitMismatch` at admission). Bow normal load
+  must be finite and nonnegative in both initial values and events;
+  zero declares release, while signed tangential velocity permits either
+  stroke direction. The decoder enforces the same domain. Sampling is a
   pure function of the integer control tick (fixed control clock, no
   wall time); continuous targets ramp linearly, event targets belong
   to exactly one tick and take step events only. Canonical bytes +

@@ -183,7 +183,7 @@ pub enum GestureValue {
     Bow {
         /// Bow velocity [m/s].
         velocity_m_per_s: f64,
-        /// Normal force [N].
+        /// Compressive normal force [N], nonnegative; zero declares release.
         normal_force_n: f64,
         /// Bowing station as a fraction of speaking length in (0, 1).
         station: f64,
@@ -235,7 +235,11 @@ impl GestureValue {
             GestureValue::LengthM(v) | GestureValue::TensionN(v) | GestureValue::PressurePa(v) => {
                 *v >= 0.0
             }
-            GestureValue::Bow { station, .. } => *station > 0.0 && *station < 1.0,
+            GestureValue::Bow {
+                station,
+                normal_force_n,
+                ..
+            } => *station > 0.0 && *station < 1.0 && *normal_force_n >= 0.0,
             GestureValue::TerminationSwap { fade_s, digest_hex } => {
                 *fade_s >= 0.0 && !digest_hex.is_empty()
             }
@@ -925,6 +929,65 @@ mod gesture_tests {
                 s.content_hash().to_hex()
             ),
         );
+    }
+
+    // G0: physical-domain admission and serialized-input parity.
+    #[test]
+    fn bow_normal_load_is_nonnegative_in_initial_events_and_decode() {
+        let bow = |force, velocity| GestureValue::Bow {
+            normal_force_n: force,
+            velocity_m_per_s: velocity,
+            station: 0.25,
+        };
+        for force in [
+            -1.0,
+            -f64::MIN_POSITIVE,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for invalid_initial in [true, false] {
+                let tracks = vec![GestureTrack {
+                    id: "bow".to_string(),
+                    target: GestureTarget::BowStroke { string: 0 },
+                    initial: bow(if invalid_initial { force } else { 0.0 }, -0.2),
+                    events: vec![GestureEvent {
+                        time_s: 0.1,
+                        transition_s: 0.0,
+                        value: bow(if invalid_initial { 0.0 } else { force }, 0.2),
+                    }],
+                }];
+                // Encode an intentionally unadmitted value to exercise the
+                // public decoder's physical-domain check independently.
+                let bytes = GestureSchedule {
+                    control_rate_hz: 100,
+                    tracks: tracks.clone(),
+                }
+                .to_canonical_bytes();
+                assert!(matches!(
+                    GestureSchedule::try_new(100, tracks),
+                    Err(GestureError::OutOfRange { .. })
+                ));
+                assert!(GestureSchedule::from_canonical_bytes(&bytes).is_err());
+            }
+        }
+        let valid = GestureSchedule::try_new(
+            100,
+            vec![GestureTrack {
+                id: "bow".to_string(),
+                target: GestureTarget::BowStroke { string: 0 },
+                initial: bow(1.0, -0.2),
+                events: vec![GestureEvent {
+                    time_s: 0.1,
+                    transition_s: 0.0,
+                    value: bow(0.0, 0.2),
+                }],
+            }],
+        )
+        .unwrap();
+        let decoded = GestureSchedule::from_canonical_bytes(&valid.to_canonical_bytes()).unwrap();
+        assert_eq!(decoded.tracks(), valid.tracks());
+        assert_eq!(decoded.content_hash(), valid.content_hash());
     }
 
     #[test]
