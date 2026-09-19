@@ -39,10 +39,12 @@ mod eval;
 pub mod game;
 mod guard;
 mod ir;
+mod product_ops;
 pub mod reverse;
 mod reverse_problem;
 mod serial;
 
+pub use product_ops::ProductDifferentialError;
 pub use reverse_problem::{ProblemEvaluation, ReverseProblem, ReverseProblemError};
 pub use admission::{
     ADMISSION_SCHEMA_VERSION, AdmissionCaps, AdmissionReport, AdmissionViolation, ProblemAdmission,
