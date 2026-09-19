@@ -381,3 +381,6 @@ impl ReverseEvaluation<'_, '_> {
         Ok(result)
     }
 }
+
+mod second_order;
+pub use second_order::HessianError;

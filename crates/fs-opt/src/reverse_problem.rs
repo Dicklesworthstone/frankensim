@@ -1,6 +1,6 @@
 //! Weighted objective and constraint-Jacobian products over one shared tape.
 
-use crate::reverse::{ReverseError, ReverseEvaluation, ReverseLimits, ReverseProgram};
+use crate::reverse::{HessianError, ReverseError, ReverseEvaluation, ReverseLimits, ReverseProgram};
 use crate::{OptError, Problem, Sense};
 use fs_exec::Cx;
 
@@ -9,6 +9,8 @@ use fs_exec::Cx;
 pub enum ReverseProblemError {
     /// Preserve the reverse evaluator's complete refusal.
     Reverse(ReverseError),
+    /// Original second-order directional derivative refusal.
+    Hessian(HessianError),
     /// A scalarized optimization objective must exist.
     NoObjectives,
     /// The adapter does not execute chance, multi-fidelity or bilevel metadata.
@@ -38,6 +40,10 @@ pub enum ReverseProblemError {
     SizeOverflow,
 }
 
+impl From<HessianError> for ReverseProblemError {
+    fn from(error: HessianError) -> Self { Self::Hessian(error) }
+}
+
 impl From<ReverseError> for ReverseProblemError {
     fn from(error: ReverseError) -> Self {
         Self::Reverse(error)
@@ -54,6 +60,7 @@ impl core::fmt::Display for ReverseProblemError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Reverse(error) => write!(f, "{error}"),
+            Self::Hessian(error) => write!(f, "{error}"),
             Self::NoObjectives => write!(f, "reverse problem requires at least one objective"),
             Self::UnsupportedProblemTags => write!(
                 f, "reverse problem cannot execute chance, multi-fidelity or bilevel tags"
@@ -76,6 +83,7 @@ impl std::error::Error for ReverseProblemError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Reverse(error) => Some(error),
+            Self::Hessian(error) => Some(error),
             _ => None,
         }
     }
@@ -387,5 +395,28 @@ impl ProblemEvaluation<'_, '_> {
         }
         poll(cx, 0)?;
         Ok(seeds)
+    }
+}
+
+impl ProblemEvaluation<'_, '_> {
+    /// Hessian of the signed weighted objective applied to an ambient direction.
+    /// Reuses the accepted primal tape; no new objective evaluation, coordinate
+    /// perturbations, or dense Hessian. `None` explicitly disables cancellation.
+    /// Direction blocks use point storage, not manifold parameters. This is NOT
+    /// a Riemannian Hessian and has no interval/error-certificate interpretation.
+    pub fn objective_hessian_vector_product(
+        &self, direction: &[Vec<f64>], cx: Option<&Cx<'_>>,
+    ) -> Result<Vec<Vec<f64>>, ReverseProblemError> {
+        Ok(self.tape.hessian_vector_product(&self.owner.objective_weights, direction, cx)?)
+    }
+
+    /// Hessian action of objective + sum(multiplier * constraint), holding all
+    /// multipliers fixed. Constraints keep declaration order and raw residuals.
+    /// Primal values are shared with the objective and constraint derivatives.
+    pub fn lagrangian_hessian_vector_product(
+        &self, multipliers: &[f64], direction: &[Vec<f64>], cx: Option<&Cx<'_>>,
+    ) -> Result<Vec<Vec<f64>>, ReverseProblemError> {
+        let seeds = self.seeds(multipliers, true, cx)?;
+        Ok(self.tape.hessian_vector_product(&seeds, direction, cx)?)
     }
 }
