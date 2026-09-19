@@ -19,6 +19,8 @@ use crate::modal_acoustic_time::ModalAcousticState;
 
 /// Solver-derived causal listener pressure and streamed audio.
 pub mod audio;
+/// Prepared modal/contact image for explicitly linear bodies.
+pub mod linear;
 pub mod felt;
 pub mod striker;
 use felt::FeltPad;
