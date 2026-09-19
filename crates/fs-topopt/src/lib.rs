@@ -17,8 +17,9 @@
 //! name now carries the L2 topology-CERTIFICATE machinery
 //! (persistence, cubical homology), so the optimization stack lives
 //! here as fs-topopt. The feature-gated `sdf3` path connects 3-D raw
-//! implicit cuts to density optimization on a fixed Cartesian background.
-//! Adaptive octrees and composed marquee certification remain follow-ups.
+//! implicit cuts to density optimization on Cartesian and adaptive backgrounds.
+//! `sdf3_goal` drives refinement with enriched goal-weighted residuals.
+//! Composed continuum certification remains a separate obligation.
 
 pub mod continuation;
 pub mod control;
@@ -34,6 +35,8 @@ pub mod pipeline;
 pub mod robust;
 #[cfg(feature = "cutfem-marquee")]
 pub mod sdf3;
+#[cfg(feature = "cutfem-marquee")]
+pub mod sdf3_goal;
 pub mod stress;
 
 pub use continuation::{

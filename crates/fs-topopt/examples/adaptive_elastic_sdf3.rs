@@ -2,10 +2,11 @@
 //!      --example adaptive_elastic_sdf3 -- 2 3 250000
 //! Arguments: refinement rounds (1..=4), updates/round, total Krylov iterations.
 //! Dimensionless slab z<0.73, two independent body loads, projected volume cap 0.5.
-//! Marks the two highest discrete-energy-density cells between rounds. This is
-//! an energy heuristic, NOT DWR. Histories have fresh baselines: neither cross-
-//! mesh compliance descent nor mesh-converged accuracy is asserted. Only raw
-//! densities transfer; every refined mesh re-integrates and re-solves physics.
+//! Between rounds, solve a one-level enriched physical design and Dörfler-mark
+//! its goal-weighted residual, capped at two cells. Report consistency terms
+//! and achieved marking fraction; no cross-mesh descent or continuum bound.
+//! Only raw densities transfer into the NEXT optimization model, which restores
+//! its own volume and re-solves. The ESTIMATOR inherits physical stiffness.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::octree3::{Octree3,Octant3};
@@ -16,6 +17,7 @@ use fs_material::IsotropicElastic;
 use fs_topopt::{SimpParams,SolveControl,SolveBudget,MultiLoadOcOptions,MultiLoadOcTermination};
 use fs_topopt::pipeline::LoadCase;
 use fs_topopt::sdf3::{CutDensityStudy3,controlled_sdf3_optimality_criteria,inherit_raw_densities3};
+use fs_topopt::sdf3_goal::{GoalBodyLoad3,GoalRefinementOptions3};
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64 {p[2]-0.73}
@@ -39,11 +41,13 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     let mut solve_poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget{total_iterations:budget,..Default::default()},&mut solve_poll);
     let mut previous:Option<(Vec<Octant3>,Vec<f64>)>=None;
+    let body_y=|_:[f64;3]|[0.0,-1.0,0.0];
+    let body_z=|_:[f64;3]|[0.0,0.0,-1.0];
     println!("round,background_cells,active_cells,master_nodes,iteration,compliance,volume_fraction");
     for round in 0..rounds {
         let op=AdaptiveElasticity3::build(domain,&tree,&Slab,&material,&|p|p[0]==0.0,ElasticityOptions3::default(),&mut geometry)?;
-        let y=op.body_load(&|_|[0.0,-1.0,0.0],||ControlFlow::Continue(()))?;
-        let z=op.body_load(&|_|[0.0,0.0,-1.0],||ControlFlow::Continue(()))?;
+        let y=op.body_load(&body_y,||ControlFlow::Continue(()))?;
+        let z=op.body_load(&body_z,||ControlFlow::Continue(()))?;
         let mut study=CutDensityStudy3::new(op,0.15,SimpParams::default());
         let raw=match &previous {
             Some((leaves,rho))=>inherit_raw_densities3(leaves,rho,study.operator().leaves(),&mut control)?,
@@ -55,23 +59,24 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             MultiLoadOcOptions{max_iterations:updates,..Default::default()},&mut control);
         for row in &report.history {println!("{round},{},{},{},{},{:.17e},{:.17e}",
             tree.leaves().len(),study.cells(),study.operator().nodes().len(),row.iteration,row.compliance,row.volume_fraction);}
-        eprintln!("round={round} termination={:?} cumulative_krylov={} DWR=false continuum_certified=false",report.termination,report.work.linear_iterations);
+        eprintln!("round={round} termination={:?} cumulative_krylov={} continuum_certified=false",report.termination,report.work.linear_iterations);
         if matches!(report.termination,MultiLoadOcTermination::Cancelled|MultiLoadOcTermination::LinearBudget|MultiLoadOcTermination::NumericalFailure) {
             return Err(format!("stopped with accepted prefix: {:?}",report.evaluation_stop).into());
         }
         if round+1==rounds {break;}
-        let volumes=study.operator().volumes();let mut indicators=vec![0.0;study.cells()];
-        for (load,u) in loads.iter().zip(&report.displacements) {
-            let energies=study.operator().scale_quadratic_forms(u)?;
-            for i in 0..indicators.len(){indicators[i]+=load.weight*study.operator().scales()[i]*energies[i]/volumes[i];}
-        }
-        if !indicators.iter().all(|v|v.is_finite()){return Err("nonfinite refinement indicator".into());}
-        let mut candidates:Vec<_>=study.operator().leaves().iter().copied().zip(indicators).filter(|(c,_)|c.level()<5).collect();
-        candidates.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let marks:Vec<_>=candidates.iter().take(2).map(|(c,_)|*c).collect();
-        if marks.is_empty(){return Err("refinement level budget exhausted".into());}
+        let probe_tree=tree.refined(&tree.leaves().iter().copied().collect::<Vec<_>>(),||ControlFlow::Continue(()))?;
+        let probe=AdaptiveElasticity3::build(domain,&probe_tree,&Slab,&material,&|p|p[0]==0.0,ElasticityOptions3::default(),&mut geometry)?;
+        let goal=study.estimate_compliance_enrichment(probe,
+            &[GoalBodyLoad3{density:&body_y,weight:0.3},GoalBodyLoad3{density:&body_z,weight:0.7}],
+            &report.displacements,GoalRefinementOptions3::default(),&mut control)?;
+        let marked=goal.mark(0.5,2,||ControlFlow::Continue(()))?;
+        let dwr:f64=goal.cases.iter().zip(&goal.weights).map(|(g,w)|w*g.dwr).sum();
+        let consistency:f64=goal.cases.iter().zip(&goal.weights).map(|(g,w)|w*g.coarse_space).sum();
+        eprintln!("round={round} hierarchical_dwr={dwr:.9e} coarse_space={consistency:.9e} two_grid_change={:.9e} marking_fraction={:.6} target_met={} cumulative_krylov={}",
+            goal.correction,marked.achieved_fraction,marked.target_met,goal.work.linear_iterations);
+        if marked.marked.is_empty(){eprintln!("no numerical refinement signal; this is not an accuracy certificate");break;}
         previous=Some((study.operator().leaves().to_vec(),report.rho));
-        tree=tree.refined(&marks,||ControlFlow::Continue(()))?;
+        tree=tree.refined(&marked.marked,||ControlFlow::Continue(()))?;
     }
     Ok(())
 }
