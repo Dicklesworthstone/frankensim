@@ -12,9 +12,14 @@
 //! are legal when their compliant laws can be resolved within the given budget.
 //! Contact laws, scalar roots and time integration retain their existing owners.
 //! The contact owner allocates during evaluation. This is not a hard-real-time,
-//! friction, rigid-impact, contact-discovery or alias-free sound implementation.
+//! rigid-impact, contact-discovery or alias-free sound implementation.
+//! Optional 1-D regularized Coulomb friction is attached with `with_friction`;
+//! its full mixed compliance and work join the SAME sample transaction.
 
 use super::*;
+
+/// Tangential friction composed with these simultaneous normal contacts.
+pub mod friction;
 
 /// Aggregate contact-set work limits, in addition to each contact's own limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +70,8 @@ pub struct MultiContactFrame {
     pub network_dissipation_j: f64,
     /// Sum of all normal contact losses [J].
     pub contact_dissipation_j: f64,
+    /// Actual tangential work removed by all optional friction contacts [J].
+    pub friction_dissipation_j: f64,
     /// Whole-system storage change plus losses minus external work [J].
     pub energy_residual_j: f64,
     /// Original network's absolute-plus-relative energy allowance [J].
@@ -73,6 +80,9 @@ pub struct MultiContactFrame {
     pub sweeps: usize,
     /// Diagnostics in contact construction order; none describe partial trials.
     pub contacts: Vec<ContactPointFrame>,
+    /// Optional tangential diagnostics in normal-contact order. Empty unless
+    /// friction was attached; None entries are explicitly frictionless.
+    pub friction: Vec<Option<friction::TangentialContactFrame>>,
 }
 
 struct ContactPoint {
@@ -109,6 +119,7 @@ pub struct MultiContactModalSystem {
     reactions: Vec<f64>,
     staged_points: Vec<ContactPointFrame>,
     frame: MultiContactFrame,
+    friction: Option<friction::TangentialSet>,
 }
 impl MultiContactModalSystem {
     /// Condense the network's displacement response at every contact pair.
@@ -163,7 +174,7 @@ impl MultiContactModalSystem {
         let system = Self {
             network, points, config, compliance, forces: vec![0.0; n], free_q: vec![0.0; n],
             old_x: vec![0.0; p], free_x: vec![0.0; p], reactions: vec![0.0; p],
-            staged_points: vec![ContactPointFrame::default(); p],
+            staged_points: vec![ContactPointFrame::default(); p], friction: None,
             frame: MultiContactFrame { contacts: vec![ContactPointFrame::default(); p], ..MultiContactFrame::default() },
         };
         limit("total initial energy including contacts", system.total_energy_j()?, system.network.config.maximum_total_energy_j)?;
@@ -236,6 +247,9 @@ impl MultiContactModalSystem {
         // Scratch guesses restart deterministically after every failed/cancelled
         // attempt. No speculative contact memory leaks into the accepted state.
         self.reactions.fill(0.0);
+        if let Some(friction) = &mut self.friction {
+            friction.prepare(&self.network.old_q, &self.free_q, gate)?;
+        }
         let mut converged = false;
         let mut sweeps = 0;
         let mut worst = (0.0_f64, 1.0_f64);
@@ -247,6 +261,7 @@ impl MultiContactModalSystem {
                 for j in 0..p {
                     if i != j { free = finite(free - self.compliance[i*p+j]*self.reactions[j])?; }
                 }
+                if let Some(friction) = &self.friction { free = friction.normal_endpoint(i, free)?; }
                 let mut local = self.points[i].config;
                 // Seek a tighter coordinate root to leave room for later
                 // coordinates. Acceptance still uses the user's ORIGINAL caps.
@@ -261,16 +276,23 @@ impl MultiContactModalSystem {
                     Err(ModalCouplingError::Budget { what: "contact normal force", .. }) => local.maximum_force_n,
                     Err(error) => return Err(error),
                 };
+                if let Some(friction) = &mut self.friction {
+                    friction.solve_coordinate(i, &self.reactions, self.network.dt, local, gate)?;
+                }
             }
             worst = (0.0, 1.0);
             for i in 0..p {
                 poll(gate)?;
                 let mut x = self.free_x[i];
                 for j in 0..p { x = finite(x - self.compliance[i*p+j]*self.reactions[j])?; }
+                if let Some(friction) = &self.friction { x = friction.normal_endpoint(i, x)?; }
                 let (expected, _) = law_force(&laws[i], self.old_x[i], x, self.network.dt)?;
                 let residual = finite(self.reactions[i] - expected)?;
                 let tolerance = force_tolerance(self.reactions[i], expected, self.points[i].config)?;
                 if residual.abs()/tolerance > worst.0.abs()/worst.1 { worst = (residual, tolerance); }
+            }
+            if let Some(friction) = &self.friction {
+                friction.residuals(&self.reactions, &self.points, self.network.dt, &mut worst, gate)?;
             }
             if worst.0.abs() <= worst.1 { converged = true; break; }
         }
@@ -287,6 +309,7 @@ impl MultiContactModalSystem {
                 }
             }
         }
+        if let Some(friction) = &self.friction { friction.add_forces(&mut self.forces, gate)?; }
         self.network.stage_inner(&self.forces, gate)?;
         let mut contact_energy = 0.0;
         let mut contact_loss = 0.0;
@@ -312,14 +335,18 @@ impl MultiContactModalSystem {
                 penetration_after_m: penetration, stored_energy_j: energy, dissipation_j: loss,
             };
         }
+        let friction_loss = if let Some(friction) = &mut self.friction {
+            friction.stage(&self.network, &self.reactions, &self.points, sweeps, gate)?
+        } else { 0.0 };
         let frame = &self.network.staged_frame;
         let network_energy = finite(frame.modal_energy_j + frame.connection_energy_j)?;
         let network_loss = finite(frame.component_dissipation_j + frame.connection_dissipation_j)?;
         let external_work = dot(external, &self.network.free_delta)?;
         let after = finite(network_energy + contact_energy)?;
         limit("total energy including contacts", after, self.network.config.maximum_total_energy_j)?;
-        let residual = finite((after-before) + network_loss + contact_loss - external_work)?;
-        let scale = before.max(after).max(external_work.abs()).max(network_loss.abs()).max(contact_loss);
+        let balance = finite((after-before) + network_loss + contact_loss - external_work)?;
+        let residual = if self.friction.is_some() { finite(balance + friction_loss)? } else { balance };
+        let scale = before.max(after).max(external_work.abs()).max(network_loss.abs()).max(contact_loss).max(friction_loss);
         let tolerance = finite(self.network.config.energy_absolute_tolerance_j
             + self.network.config.energy_relative_tolerance*scale)?;
         if residual.abs() > tolerance {
@@ -333,10 +360,12 @@ impl MultiContactModalSystem {
         self.frame.external_work_j = external_work;
         self.frame.network_dissipation_j = network_loss;
         self.frame.contact_dissipation_j = contact_loss;
+        self.frame.friction_dissipation_j = friction_loss;
         self.frame.energy_residual_j = residual;
         self.frame.energy_tolerance_j = tolerance;
         self.frame.sweeps = sweeps;
         std::mem::swap(&mut self.frame.contacts, &mut self.staged_points);
+        if let Some(friction) = &mut self.friction { friction.publish(&mut self.frame.friction); }
         self.network.publish_staged();
         Ok(&self.frame)
     }
