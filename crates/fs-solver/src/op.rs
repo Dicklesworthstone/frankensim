@@ -4,6 +4,7 @@
 
 use fs_sparse::{Csr, ops};
 
+pub mod multilevel;
 pub mod two_level;
 
 /// A linear operator with its transpose — the adjoint hook is part of
