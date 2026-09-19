@@ -17,6 +17,8 @@ use fs_material::gas::GasState;
 use fs_math::det;
 use fs_scenario::BeatingReed;
 
+mod contact;
+
 /// Realize mouthpiece pressure from a beating reed on a TMM bore.
 ///
 /// Since the block render API landed (music bead 3ez8g.2.1) this is a
@@ -315,11 +317,18 @@ pub(crate) fn step_massive_reed(
     mode: ReedSolverMode,
     stats: &mut FastSolveStats,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    if let Some(obstacle) = lay {
+        let result = contact::step(reed, rho, zc, p_minus, p_m, y, v, dt, u_body, obstacle)?;
+        if mode == ReedSolverMode::FastNewton {
+            stats.fallback_samples += 1;
+        }
+        return Ok(result);
+    }
     let face = reed_pressure_face(reed);
     let (k, r_damp) = reed_structural(reed);
-    // Hold aperture geometry and elastic lay force over this interval. Linear
-    // mechanics and pressure use the SAME midpoint velocity. Eliminating
-    // mechanics leaves the existing monotone fixed-aperture junction:
+    // The contact-free linear mechanics and pressure use the SAME midpoint
+    // velocity. The implicit contact path above reuses this exact free step
+    // when its opening segment has no contact. Eliminating mechanics gives:
     //   vbar = v_free - beta * dp
     //   dp + Z (Ujet - A vbar + Ubody) = Pmouth - 2 Pminus.
     // Positive A*beta adds load; it cannot introduce a negative impedance.
@@ -355,11 +364,6 @@ pub(crate) fn step_massive_reed(
         Ok((p_plus, y1, v1))
     };
     let mut result = solve(elastic, contact_damping)?;
-    // The held-penetration Hunt-Crossley law has two linear branches:
-    // F = max(elastic - contact_damping * v_mid, 0). If the active
-    // solve would attract, solve its zero-reaction unloading branch.
-    // Monotonicity of the pressure/mechanical residual makes this branch
-    // selection unique. Loss work uses the SAME velocity as mechanics.
     if elastic - contact_damping * (0.5 * (v + result.2)) < 0.0 {
         result = solve(0.0, 0.0)?;
     }
@@ -872,11 +876,12 @@ mod fast_mode_tests {
                 &mut FastSolveStats::default(),
             )
             .unwrap();
-            // Power-law elastic force plus Hunt-Crossley loss, including
-            // the nonadhesive unloading clamp. Penetration is held from y;
-            // loss uses the accepted midpoint velocity, not the old one.
+            // The accepted step uses the finite-step contact potential, not
+            // the force frozen at y. Loss remains evaluated at midpoint velocity.
             let vm = 0.5 * (v + v1);
-            let expected = 1e8 * y * y * (1.0 - 5.0 * vm).max(0.0);
+            let (elastic, contact_damping) =
+                crate::unilateral_contact::slit_contact_discrete_coefficients(&lay, y, y1).unwrap();
+            let expected = (elastic - contact_damping * vm).max(0.0);
             let reconstructed = reed.mass_kg * (v1 - v) / dt
                 + reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m)
                 + damping * 0.5 * (v + v1)
@@ -917,13 +922,14 @@ mod fast_mode_tests {
             .unwrap();
             let vm = 0.5 * (v + v1);
             assert!(vm > 0.0, "fixture must reverse direction within the step");
-            let loss = lay.dissipative_modal_forces(1, &[y, v], &[vm])[0];
+            let (elastic, contact_damping) =
+                crate::unilateral_contact::slit_contact_discrete_coefficients(&lay, y, y1).unwrap();
+            let loss = (elastic - contact_damping * vm).max(0.0) - elastic;
             assert!(
                 old_loss * vm > 0.0,
                 "old-velocity loss is an energy source here"
             );
             assert!(loss * vm < 0.0, "midpoint loss must remove energy");
-            let elastic = 1e8 * y * y;
             assert!(elastic + loss >= 0.0, "contact must not attract");
             let (_, damping) = reed_structural(reed);
             let force = reed.mass_kg * (v1 - v) / dt
