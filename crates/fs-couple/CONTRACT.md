@@ -269,6 +269,15 @@ rewound). The failed block's output is partial and must be discarded.
 Subsequent block or control calls return `RenderError::Poisoned` before
 touching output, voices, or control logs; reconstruction is required.
 Request sizing and control-admission refusals do not poison a healthy context.
+`ScheduledRenderer` admits immutable `ScheduledControl` schedules and
+splits caller blocks exactly before their integer sample indices. Equal-index
+events retain input order; end-boundary events wait for the next nonempty block.
+All controls are validated and log capacity reserved before stepping. The
+constructor refuses invalid schedules or budgets; no resampling or
+score-to-excitation compilation is claimed. Its cancellation gate polls before each
+caller block and consumes no events on cancellation. G3 tests compare scheduled
+force changes, release and re-excitation against direct modal stepping across
+multiple block partitions, with cancellation/resume at callback boundaries.
 Boundary facts a consumer must
 know, both discovered by this bead's battery: the characteristic-line
 realization refuses `UnflangedOpen`/`FlangedOpen` terminations whose
