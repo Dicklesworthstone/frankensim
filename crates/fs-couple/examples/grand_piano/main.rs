@@ -11,6 +11,7 @@ mod performance;
 mod felt;
 mod engine;
 mod microphone;
+mod audio;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
@@ -55,6 +56,9 @@ the backcheck remain estimates; jack timing is resolved at the mechanical rate.
 Geometric boards default to a spatial Rayleigh half-space pressure microphone
 at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
 This assumes an infinite baffle, with no lid/room scattering or air backreaction.
+Pressure uses every mechanics substep and causal anti-alias filtering before
+output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
+latency, in addition to acoustic travel time. Histories persist across blocks.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
 applies only to that diagnostic, not to physical microphone pressure.";
 
@@ -250,49 +254,39 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
-    let mut score = match &options.performance {
+    let score = match &options.performance {
         Some(path) => performance::Performance::read(
             &std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
             &keys, u64::from(count))?,
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
     };
-    let mut piano = prepare_instrument(scale, modes, options)?;
+    let piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
-    let mut microphone = match surface {
-        Some(surface) if !options.diagnostic_volume => Some(microphone::Microphone::new(surface,
-            &piano.bank, rate, options.microphone.unwrap_or([0.675, 1.0, 1.0]),
-            fs_bem::helmholtz::Medium::air())?),
-        _ => None,
-    };
-    if let Some(mic) = &microphone {
-        println!("Rayleigh pressure microphone at {:?} m; propagation {:?} samples; {} modal multiply-adds/output sample.",
-            mic.position_m, mic.delay_samples, mic.multiply_adds_per_sample());
+    let surface = if options.diagnostic_volume { None } else { surface };
+    let mut stream = audio::AudioStream::new(piano, score, surface,
+        options.microphone.unwrap_or([0.675, 1.0, 1.0]),
+        fs_bem::helmholtz::Medium::air(), options.observer_gain)?;
+    if let Some(mic) = stream.microphone() {
+        println!("Rayleigh pressure microphone at {:?} m; propagation {:?} samples plus {} anti-alias delay samples; {} modal multiplies/output sample.",
+            mic.position_m, mic.delay_samples, mic.filter_delay_samples(), mic.multiply_adds_per_sample());
     }
-    let mut pressure = Vec::with_capacity(count as usize);
+    let mut pressure = vec![0.0; count as usize];
     let start = std::time::Instant::now();
-    let mut peak: f64 = 0.0;
-    for sample in 0..count {
-        score.dispatch(u64::from(sample), &mut piano)?;
-        let volume = piano.step().map_err(|e| format!("sample {sample}: {e}"))?;
-        let p = match &mut microphone {
-            Some(mic) => mic.step(&piano.bank.v[piano.bank.modes.len()..])
-                .map_err(|e| format!("sample {sample}: {e}"))?,
-            None => options.observer_gain * volume,
-        };
-        if !p.is_finite() { return Err(format!("sample {sample}: observer overflow")); }
-        peak = peak.max(p.abs());
-        pressure.push(p);
+    for block in pressure.chunks_mut(256) {
+        stream.render_block(block).map_err(|e| e.to_string())?;
     }
     let elapsed = start.elapsed().as_secs_f64();
+    let peak = pressure.iter().fold(0.0_f64, |a, p| a.max(p.abs()));
     let seconds = f64::from(count) / f64::from(rate);
     let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&pressure, rate, 2.0).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
-    if microphone.is_some() {
+    if stream.microphone().is_some() {
         println!("Computed half-space pressure in Pa; PCM full scale 2 Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.");
     } else {
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     }
+    let piano = stream.instrument();
     println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
         piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
     println!("{seconds:.6} s audio rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);

@@ -26,7 +26,9 @@ jobs:
           import pathlib, subprocess
           root = pathlib.Path('../franken_numpy')
           path = 'legacy_numpy_code/numpy/doc/make.bat'
-          attributes = root / '.git/info/attributes'
+          git_dir = subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--absolute-git-dir'], text=True).strip()
+          attributes = pathlib.Path(git_dir) / 'info/attributes'
+          attributes.parent.mkdir(parents=True, exist_ok=True)
           with attributes.open('a') as f:
               f.write('\n' + path + ' -text\n')
           blob = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + path])

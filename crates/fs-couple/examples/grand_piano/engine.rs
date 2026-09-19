@@ -382,20 +382,35 @@ impl Instrument {
     /// Transactional audio sample, including jack timing and bending state.
     /// Prepared modal scratch is always restored from authoritative motion on
     /// each trial. No allocation is required to predict, accept or roll back.
-    pub fn step(&mut self)->Result<f64,Error>{
+    pub fn step(&mut self)->Result<f64,Error>{self.step_observed(None)}
+
+    pub fn board_trace_len(&self)->usize {self.substeps*self.bank.board_count}
+
+    /// Capture every substep's loaded-board end velocity, interleaved by mode.
+    /// Only consume the trace on Ok: a refused step may overwrite this caller's
+    /// scratch buffer, but restores all authoritative mechanical/material state.
+    pub fn step_with_board_trace(&mut self,trace:&mut[f64])->Result<f64,Error>{
+        if trace.len()!=self.board_trace_len(){return Err(Error::InvalidControl);}
+        self.step_observed(Some(trace))
+    }
+    fn step_observed(&mut self,mut trace:Option<&mut[f64]>)->Result<f64,Error>{
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
         let saved=self.accounting;let modal=self.bank.last_modal_loss_j;
         let mut average=0.0;
-        for _ in 0..self.substeps {
+        for substep in 0..self.substeps {
             if let Err(error)=self.mechanics_step(){
                 self.bank.q.copy_from_slice(&self.saved_q);self.bank.v.copy_from_slice(&self.saved_v);
                 self.hammers.copy_from_slice(&self.saved_hammers);self.contacts.clone_from_slice(&self.saved_contacts);
                 self.accounting=saved;self.bank.last_modal_loss_j=modal;return Err(error);
             }
+            if let Some(buffer)=trace.as_deref_mut(){
+                let r=self.bank.board_count;
+                buffer[substep*r..(substep+1)*r].copy_from_slice(&self.bank.v[self.bank.modes.len()..]);
+            }
             average+=self.bank.volume_velocity();
         }
-        // Diagnostic box decimation, not a certified audio antialias filter.
+        // Diagnostic box decimation; physical pressure consumes the full trace.
         Ok(average/self.substeps as f64)
     }
 }
@@ -493,5 +508,31 @@ mod tests {
             assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
         }
         assert!(instrument().jack_on(69,70.0,0.007).is_err());
+    }
+    #[test]
+    fn observed_step_preserves_dynamics_and_every_substep_velocity() {
+        let mut a=instrument();let mut b=instrument();
+        a.note_on(69,2.0).unwrap();b.note_on(69,2.0).unwrap();
+        let r=a.bank.board_count;let mut trace=vec![0.0;a.board_trace_len()];
+        for _ in 0..1000 {
+            let volume=a.step_with_board_trace(&mut trace).unwrap();let mut average=0.0;
+            for substep in 0..b.substeps {
+                b.mechanics_step().unwrap();average+=b.bank.volume_velocity();
+                assert_eq!(&trace[substep*r..(substep+1)*r],&b.bank.v[b.bank.modes.len()..]);
+            }
+            assert_eq!(volume,average/b.substeps as f64);
+            assert_eq!(a.bank.q,b.bank.q);assert_eq!(a.bank.v,b.bank.v);
+            assert_eq!(a.accounting.felt_loss_j,b.accounting.felt_loss_j);
+        }
+    }
+    #[test]
+    fn observed_step_rejects_bad_shape_and_keeps_mechanical_rollback() {
+        let mut p=instrument();p.note_on(69,2.0).unwrap();
+        let q=p.bank.q.clone();let v=p.bank.v.clone();let energy=p.energy_j();
+        assert!(p.step_with_board_trace(&mut[]).is_err());
+        assert_eq!(p.bank.q,q);assert_eq!(p.bank.v,v);assert_eq!(p.energy_j(),energy);
+        let mut trace=vec![0.0;p.board_trace_len()];p.damper_drag_ns_m=f64::NAN;
+        assert!(p.step_with_board_trace(&mut trace).is_err());
+        assert_eq!(p.bank.q,q);assert_eq!(p.bank.v,v);assert_eq!(p.energy_j(),energy);
     }
 }
