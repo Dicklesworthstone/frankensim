@@ -150,25 +150,31 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 }
 fn run()->Result<(),Error> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.is_empty() || args.len()>3 {return Err("usage: percussion splash|drum [mechanics_steps]; or splash-wav|drum-wav [audio_frames] [full_scale_pa]; see AUDIO.md".into());}
-    let audio=matches!(args[0].as_str(),"splash-wav"|"drum-wav");
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; see AUDIO.md".into());}
+    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic");
+    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav");
+    if args.len()>3 && (!microphone || args.len()!=6) {return Err("microphone position needs exactly x_m y_m z_m after frames and full-scale".into());}
     if !audio && args.len()>2 {return Err("mechanics CSV accepts only a step count".into());}
     let count=if args.len()>=2 {args[1].parse::<u64>()?}else if audio {48000}else{4096};
     let maximum=if audio {480000}else{1_000_000};
     if count==0 || count>maximum {return Err(format!("requested count must be 1..={maximum}").into());}
-    let full_scale_pa=if args.len()==3 {args[2].parse::<f64>()?}else{1.0};
+    let full_scale_pa=if args.len()>=3 {args[2].parse::<f64>()?}else{1.0};
     if !full_scale_pa.is_finite() || full_scale_pa<=0.0 {return Err("full_scale_pa must be positive and finite".into());}
+    let receiver=if microphone {
+        let position=if args.len()==6 {[args[3].parse::<f64>()?,args[4].parse::<f64>()?,args[5].parse::<f64>()?]}else{[0.08,0.05,0.35]};
+        acoustics::Receiver::FinitePoint(position)
+    }else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let mut experiment=match args[0].as_str(){
-        "splash"|"splash-wav"=>splash(steps,dt_s,audio)?,
-        "drum"|"drum-wav"=>drum(steps,dt_s,audio)?,
+        "splash"|"splash-wav"|"splash-mic"=>splash(steps,dt_s,audio)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum(steps,dt_s,audio)?,
         _=>return Err("unknown experiment".into()),
     };
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
         // Render and admit the complete candidate before writing a WAV header.
-        let wav=acoustics::render(&mut experiment,usize::try_from(count)?,full_scale_pa)?;
+        let wav=acoustics::render(&mut experiment,usize::try_from(count)?,full_scale_pa,receiver)?;
         out.write_all(&wav)?;out.flush()?;return Ok(());
     }
     let gate=CancelGate::new_clock_free();

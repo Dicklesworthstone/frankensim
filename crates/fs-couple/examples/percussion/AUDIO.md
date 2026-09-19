@@ -16,6 +16,10 @@ From the workspace root, on the repository's supported Rust toolchain:
 cargo run --release -p fs-couple --example percussion -- splash-wav 48000 1.0 > splash.wav
 cargo run --release -p fs-couple --example percussion -- drum-wav 48000 1.0 > drum.wav
 
+# Finite-distance microphone: actual point pressure, not a far-field shortcut.
+cargo run --release -p fs-couple --example percussion -- splash-mic 48000 1.0 > splash-mic.wav
+cargo run --release -p fs-couple --example percussion -- drum-mic 48000 1.0 0.08 0.05 0.35 > drum-mic.wav
+
 # The original mechanical CSV paths remain available at their original 2 us step.
 cargo run -p fs-couple --example percussion -- splash 4096 > splash.csv
 cargo run -p fs-couple --example percussion -- drum 4096 > drum.csv
@@ -59,7 +63,7 @@ under BEM's `exp(-i omega t)` convention. Materially negative radiated power
 beyond the solver's roundoff interval is refused, as are BEM work/resolution
 limits. The default splash and drum each have 1024 exterior panels.
 
-A fixed observer at `[1.5, 0.7, 1.5]` metres is an explicit **far-field** receiver,
+The `*-wav` observer at `[1.5, 0.7, 1.5]` metres is an explicit **far-field** receiver,
 not a close drum microphone. Its direction is projected before vector fitting,
 so it needs one proper filter per retained generalized acceleration rather than
 a full spherical-harmonic bank. `fs-vfit` owns fitting, stability and Tustin
@@ -74,6 +78,24 @@ phase remains that of the original field propagated by `range/c`. The delay
 line uses its existing two-tap fractional interpolation, not an exact all-band
 delay. The ten-source-radius admission is a screening rule, not a near-field
 error certificate.
+
+The separate `*-mic` commands use `fs-bem::helmholtz::exterior_pressure_at_points`
+at an actual finite position. Its Green representation retains near-field
+terms as well as outgoing waves; the sound is not approximated by taking a
+far-field direction and dividing by distance. The default microphone is
+`[0.08, 0.05, 0.35]` metres in the geometry frame, with x/y in the head plane
+and z upward. An optional complete x/y/z triple follows frame count and
+full-scale. For the drum, the heads are at z = +/- depth/2.
+
+This owner already returns physical pressure INCLUDING spreading and travel.
+Only a lower-bound travel delay `(range-enclosing_radius)/c` is peeled before
+fitting and restored once by the existing propagation line. **No additional
+1/r gain** is applied. A conservative rule requires the microphone to be
+outside the source's enclosing sphere with at least two samples of remaining
+propagation. Some physically exterior positions closer to a face are therefore
+not admitted. This is a point-pressure reference, not a microphone capsule,
+proximity-effect/electronics model or moving microphone. The same fit and mesh
+accuracy limits still apply.
 
 Mechanical steps are `1/768000 s`; the new renderer observes interval-average
 modal acceleration without adding a force pulse. The existing causal integer
@@ -103,8 +125,8 @@ convergence and aliasing remain major accuracy gates. A 48 kHz WAV header does
 not turn this basis into a full-band cymbal crash.
 
 Exterior radiation is one-way and linear about the undeformed boundary. No
-radiation mass/damping back-coupling, deformation-updated normals, proximity
-microphone pressure, air absorption, room, snare wires, vent flow, flexible maple
+radiation mass/damping back-coupling, deformation-updated normals, microphone
+capsule/electronics, air absorption, room, snare wires, vent flow, flexible maple
 shell, full stand rocking, hand/grip model or flexible/anisotropic hickory stick
 is inferred. The original cavity uses its declared approximate bulk modulus;
 exterior dry air comes from `Medium::air()`. A complete timpani needs bowl/head/
@@ -132,3 +154,11 @@ meshes. An independent real rational least-squares oracle reproduces a known
 two-state transfer on the withheld warped grid to 1.30e-15; it is **not execution
 of fs-vfit**. These checks do not establish compilation, native acoustic quality
 or real-time performance.
+
+Three additional Rust regressions cover finite-point admission versus far field,
+no double distance gain, and the existing Green evaluator plus delay peeling.
+An independent 64-by-128 spherical surface quadrature of a known translating
+(dipole) field matches its analytic finite-distance pressure to below 1e-13
+relative error at four microphone ranges. At k*r=0.2 its pressure magnitude is
+5.099 times the far-field approximation, so the distinction is load-bearing.
+That independent calculation is not execution of the Rust BEM or its new tests.

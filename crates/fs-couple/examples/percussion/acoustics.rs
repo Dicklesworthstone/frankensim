@@ -1,17 +1,18 @@
 //! Cold geometry -> BEM -> fixed-receiver filters, then observed acceleration -> Pa.
 //!
 //! This example is composition, not another BEM, constitutive law or integrator.
-//! The fixed direction is projected BEFORE vector fitting: one proper filter per
+//! The fixed receiver is evaluated BEFORE vector fitting: one proper filter per
 //! generalized acceleration, not an entire SH bank for a stationary microphone.
 //! A moving receiver needs the existing broadband directional source instead.
 //!
 //! Exterior acoustics is linear, one-way and evaluated on undeformed geometry.
-//! The far-field approximation is explicit; a nearby drum microphone, radiation
+//! A finite-distance receiver uses the existing exterior Green representation;
+//! the far-field approximation remains a separate explicit option. Radiation
 //! loading, air absorption, room reflections and stand/stick radiation are NOT
 //! modeled. Fit error is checked only in the declared 40..1640 Hz band. Neither
 //! that check nor successful WAV export certifies a full-band physical instrument.
 use super::{Error, Experiment};
-use fs_bem::helmholtz::{Formulation, Medium, far_field, solve_radiation_batch};
+use fs_bem::helmholtz::{Formulation, Medium, RadiationSolution, exterior_pressure_at_points, far_field, solve_radiation_batch};
 use fs_bem::panel3d::SpherePanels;
 use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
 use fs_exec::CancelGate;
@@ -29,6 +30,34 @@ const MAX_PANELS: usize = 2048;
 const MAX_INPUTS: usize = 63;
 const MAX_RELATIVE_ERROR: f64 = 0.15;
 const MAX_RMS_ERROR: f64 = 0.05;
+
+/// A stationary point in the boundary's geometry frame, measured in metres.
+#[derive(Debug, Clone, Copy)]
+pub enum Receiver {
+    /// Directional asymptotic pressure, with an explicit 1/r factor.
+    FarField([f64;3]),
+    /// Actual exterior pressure at the point; no extra distance gain is applied.
+    FinitePoint([f64;3]),
+}
+impl Receiver {
+    fn position(self)->[f64;3] {
+        match self {Self::FarField(p)|Self::FinitePoint(p)=>p}
+    }
+    fn propagation(self,radius:f64,medium:Medium,dt:f64)->Result<(f64,f64),Error> {
+        let range=self.position().iter().map(|x|x*x).sum::<f64>().sqrt();
+        let delay=(range-radius)/medium.sound_speed;
+        // A conservative enclosing-sphere rule excludes the body and leaves
+        // an actual propagation interval for the existing >=2-sample delay.
+        // It does not admit every geometrically exterior close microphone.
+        if !dt.is_finite() || dt<=0.0 || !medium.sound_speed.is_finite() || medium.sound_speed<=0.0
+            || !range.is_finite() || !radius.is_finite() || radius<=0.0
+            || !delay.is_finite() || delay<2.0*dt
+            || matches!(self,Self::FarField(_)) && range<10.0*radius {
+            return Err("receiver must lie outside the enclosing sphere with at least two propagation samples; far field additionally needs ten source radii".into());
+        }
+        Ok((delay,match self {Self::FarField(_)=>1.0/range,Self::FinitePoint(_)=>1.0}))
+    }
+}
 
 /// Arbitrary closed exterior triangles, prescribed modal normal velocities and
 /// explicit addresses in ImpactSystem's interleaved q/v state. No instrument
@@ -182,7 +211,8 @@ struct Bake {
     filters:Vec<DiscreteStateSpace>,
     range_m:f64,
     medium:Medium,
-    source_delay_s:f64,
+    propagation_delay_s:f64,
+    pressure_gain:f64,
 }
 // In negative-time phasors this factor DELAYS the transfer by radius/c.
 // F alone is referenced to the origin and can contain advance from the near
@@ -192,19 +222,30 @@ fn shift_to_enclosing_sphere(amplitude:C64,omega:f64,source_delay_s:f64)->C64 {
     let phase=omega*source_delay_s;
     amplitude*C64::new(det::cos(phase),det::sin(phase))
 }
-fn bake(boundary:&Boundary,observer:[f64;3])->Result<Bake,Error> {
+// The finite-point owner returns Pa INCLUDING propagation and spreading.
+// Peel only a lower bound on travel time, not its 1/r magnitude or reactive
+// near-field terms. The proper causal fit realizes the remaining response.
+fn receiver_response(surface:&SpherePanels,solution:&RadiationSolution,medium:Medium,
+    receiver:Receiver,radius:f64,propagation_delay_s:f64)->Result<C64,Error> {
+    let omega=solution.k*medium.sound_speed;
+    Ok(match receiver {
+        Receiver::FarField(position)=>shift_to_enclosing_sphere(
+            far_field(surface,solution,medium,&[position])[0],omega,radius/medium.sound_speed),
+        Receiver::FinitePoint(position)=>shift_to_enclosing_sphere(
+            exterior_pressure_at_points(surface,solution,medium,&[position])?[0],omega,-propagation_delay_s),
+    })
+}
+fn bake(boundary:&Boundary,receiver:Receiver)->Result<Bake,Error> {
     let count=boundary.weights.len(); let panels=boundary.triangles.len();
     if count==0 || count>MAX_INPUTS || count!=boundary.state_modes.len() || panels==0 || panels>MAX_PANELS
         || boundary.weights.iter().any(|b|b.len()!=panels || b.iter().any(|v|!v.is_finite())) {
         return Err("exterior radiation exceeds its shape/work contract".into());
     }
-    let range_m=observer.iter().map(|x|x*x).sum::<f64>().sqrt();
+    let position=receiver.position();
+    let range_m=position.iter().map(|x|x*x).sum::<f64>().sqrt();
     let radius=boundary.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt()).fold(0.0_f64,f64::max);
-    if !range_m.is_finite() || !radius.is_finite() || radius<=0.0 || range_m<10.0*radius {
-        return Err("fixed far-field observer must be finite and at least ten source radii away (a screening rule, not a near-field certificate)".into());
-    }
     let medium=Medium::air();
-    let source_delay_s=radius/medium.sound_speed;
+    let (propagation_delay_s,pressure_gain)=receiver.propagation(radius,medium,1.0/f64::from(OUTPUT_RATE))?;
     let surface=SpherePanels::from_triangles(boundary.triangles.clone())?;
     let omega:Vec<_>=(0..41).map(|i|2.0*std::f64::consts::PI*(40.0+40.0*i as f64)).collect();
     let mut values=vec![Vec::with_capacity(omega.len());count];
@@ -221,7 +262,7 @@ fn bake(boundary:&Boundary,observer:[f64;3])->Result<Bake,Error> {
                 return Err("BEM reports negative radiation power beyond roundoff; refine the acoustic solve".into());
             }
             ppw=ppw.min(solution.panels_per_wavelength); condition=condition.max(solution.condition_lower_bound);
-            row.push(shift_to_enclosing_sphere(far_field(&surface,solution,medium,&[observer])[0],w,source_delay_s));
+            row.push(receiver_response(&surface,solution,medium,receiver,radius,propagation_delay_s)?);
         }
     }
     let mut filters=Vec::with_capacity(count); let mut maximum=0.0_f64; let mut rms=0.0_f64;
@@ -230,19 +271,19 @@ fn bake(boundary:&Boundary,observer:[f64;3])->Result<Bake,Error> {
         maximum=maximum.max(m); rms=rms.max(r); filters.push(filter);
     }
     eprintln!("fixed receiver BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, held_out=20, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
-    eprintln!("observer_m={observer:?}; one causal filter per modal acceleration; linear undeformed one-way FAR FIELD, not a close microphone or radiation loading");
-    Ok(Bake{filters,range_m,medium,source_delay_s})
+    eprintln!("receiver={receiver:?}; one causal filter per modal acceleration; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={propagation_delay_s}, pressure_gain={pressure_gain}");
+    Ok(Bake{filters,range_m,medium,propagation_delay_s,pressure_gain})
 }
 
-struct Observer<'a> { filters:Vec<DiscreteStateSpaceRuntime<'a>>, delay:DelayedFilter, inverse_range:f64 }
+struct Observer<'a> { filters:Vec<DiscreteStateSpaceRuntime<'a>>, delay:DelayedFilter, pressure_gain:f64 }
 impl Bake {
     fn runtime(&self)->Result<Observer<'_>,Error> {
         let dt=self.filters.first().ok_or("empty observer bank")?.t_s;
-        let delay=DelayedFilter::new((self.range_m/self.medium.sound_speed-self.source_delay_s)/dt,DigitalFilter {
+        let delay=DelayedFilter::new(self.propagation_delay_s/dt,DigitalFilter {
             sections:vec![],direct:1.0,t_s:dt,prewarp:0.0,
         })?;
         Ok(Observer {filters:self.filters.iter().map(DiscreteStateSpace::try_runtime).collect::<Result<_,_>>()?,
-            delay,inverse_range:1.0/self.range_m})
+            delay,pressure_gain:self.pressure_gain})
     }
 }
 impl Observer<'_> {
@@ -255,20 +296,20 @@ impl Observer<'_> {
         let mut amplitude=0.0;
         for (filter,&a) in self.filters.iter_mut().zip(accelerations) {amplitude+=filter.step(a)?;}
         if !amplitude.is_finite() {return Err("observer modal sum overflow".into());}
-        Ok(self.delay.push(amplitude*self.inverse_range)?)
+        Ok(self.delay.push(amplitude*self.pressure_gain)?)
     }
 }
 
 /// Offline reference export; all expensive geometry/BEM/fitting precedes the
 /// observed samples. Mechanics still uses the allocating implicit fs-phs owner.
 /// No native wall-clock or callback allocation bound is asserted.
-pub fn render(experiment:&mut Experiment,frames:usize,full_scale_pa:f64)->Result<Vec<u8>,Error> {
+pub fn render(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,receiver:Receiver)->Result<Vec<u8>,Error> {
     let boundary=experiment.acoustics.as_ref().ok_or("missing acoustic boundary")?;
     if frames==0 || frames>480000 || !full_scale_pa.is_finite() || full_scale_pa<=0.0
         || boundary.state_modes.iter().any(|&k|k>=experiment.force.len()) {
         return Err("pressure export requires bounded frames, finite positive full-scale and valid state addresses".into());
     }
-    let baked=bake(boundary,[1.5,0.7,1.5])?;
+    let baked=bake(boundary,receiver)?;
     let mut observer=baked.runtime()?;
     let count=boundary.state_modes.len();
     let mut decimator=Decimator::new(SUBSTEPS,count)?;
@@ -363,11 +404,57 @@ mod tests {
     #[test]
     fn pressure_delay_and_range_are_applied_exactly_once() {
         let mut filter=zero_filter(0.001); filter.d=2.0;
-        let baked=Bake{filters:vec![filter],range_m:2.0,medium:Medium{density:1.2,sound_speed:100.0},source_delay_s:0.0};
+        let baked=Bake{filters:vec![filter],range_m:2.0,medium:Medium{density:1.2,sound_speed:100.0},propagation_delay_s:0.02,pressure_gain:0.5};
         let mut r=baked.runtime().unwrap();
         for i in 0..30 {
             let y=r.step(&[if i==0 {1.0}else{0.0}]).unwrap();
             assert_eq!(y,if i==20 {1.0}else{0.0});
         }
+    }
+
+    #[test]
+    fn finite_point_delay_does_not_apply_a_second_distance_gain() {
+        let mut filter=zero_filter(0.001); filter.d=4.0;
+        let baked=Bake{filters:vec![filter],range_m:2.0,medium:Medium{density:1.2,sound_speed:100.0},
+            propagation_delay_s:0.02,pressure_gain:1.0};
+        let mut r=baked.runtime().unwrap();
+        for i in 0..30 {
+            assert_eq!(r.step(&[if i==0 {1.0}else{0.0}]).unwrap(),if i==20 {4.0}else{0.0});
+        }
+    }
+    #[test]
+    fn finite_receiver_admission_is_distinct_from_far_field() {
+        let medium=Medium{density:1.2,sound_speed:343.0}; let dt=1.0/48000.0;
+        let position=[0.08,0.05,0.35];
+        let (delay,gain)=Receiver::FinitePoint(position).propagation(0.2,medium,dt).unwrap();
+        assert!(delay>2.0*dt); assert_eq!(gain,1.0);
+        assert!(Receiver::FarField(position).propagation(0.2,medium,dt).is_err());
+        for p in [[0.0;3],[f64::NAN,0.0,0.0],[0.201,0.0,0.0]] {
+            assert!(Receiver::FinitePoint(p).propagation(0.2,medium,dt).is_err());
+        }
+    }
+    #[test]
+    fn finite_point_uses_the_existing_green_representation_and_peels_only_delay() {
+        let nodes=[[0.01,0.01,0.01],[0.01,-0.01,-0.01],[-0.01,0.01,-0.01],[-0.01,-0.01,0.01]];
+        let mut triangles=Vec::new();
+        for t in [[0,1,2],[0,3,1],[0,2,3],[1,3,2]] {
+            let mut p=t.map(|i|nodes[i]);
+            let a=[p[1][0]-p[0][0],p[1][1]-p[0][1],p[1][2]-p[0][2]];
+            let b=[p[2][0]-p[0][0],p[2][1]-p[0][1],p[2][2]-p[0][2]];
+            let n=[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+            if n.iter().zip(p[0]).map(|(n,p)|n*p).sum::<f64>()<0.0 {p.swap(1,2);}
+            triangles.push(p);
+        }
+        let surface=SpherePanels::from_triangles(triangles).unwrap();
+        let medium=Medium{density:1.2,sound_speed:343.0};
+        let velocity:Vec<_>=surface.normals().iter().map(|n|C64::from_re(n[2])).collect();
+        let solution=fs_bem::helmholtz::solve_radiation(&surface,5.0,medium,&velocity,Formulation::PlainCbie).unwrap();
+        let receiver=Receiver::FinitePoint([0.0,0.0,0.04]); let radius=0.02;
+        let (delay,gain)=receiver.propagation(radius,medium,1.0/48000.0).unwrap();
+        let raw=exterior_pressure_at_points(&surface,&solution,medium,&[receiver.position()]).unwrap()[0];
+        let residual=receiver_response(&surface,&solution,medium,receiver,radius,delay).unwrap();
+        let reconstructed=shift_to_enclosing_sphere(residual,solution.k*medium.sound_speed,delay).scale(gain);
+        assert!((reconstructed-raw).abs()<1e-13*raw.abs().max(1.0));
+        assert!(raw.abs()>1e-8,"translating boundary must emit a nonzero pressure field");
     }
 }
