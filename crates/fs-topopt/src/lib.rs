@@ -20,6 +20,7 @@
 //! ZERO remeshing) is the marquee follow-up lane recorded on the
 //! bead.
 
+pub mod continuation;
 pub mod control;
 pub mod eigenfreq;
 pub mod elasticity;
@@ -32,6 +33,10 @@ pub mod pipeline;
 pub mod robust;
 pub mod stress;
 
+pub use continuation::{
+    ContinuationStageReport, ContinuationTermination, MultiLoadContinuationReport,
+    controlled_multi_load_continuation, multi_load_continuation,
+};
 pub use control::{EvaluationStop, SolveBudget, SolveControl, SolveProgress, SolveWork};
 pub use eigenfreq::{
     eigenfrequency_objective, eigenvalue_gradient, lowest_eigenpairs, mass_interp, smooth_min,
