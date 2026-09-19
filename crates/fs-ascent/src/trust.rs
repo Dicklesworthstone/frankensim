@@ -62,6 +62,7 @@ pub struct TrustRegionState {
     hv_evals: usize,
     negative_curvature_hits: usize,
     history: Vec<f64>,
+    stalled: bool,
 }
 
 fn inf_norm(values: &[f64]) -> f64 {
@@ -107,10 +108,21 @@ impl TrustRegionState {
         assert!(x0.iter().all(|v| v.is_finite()), "non-finite trust-region start");
         let (f, g) = fg(x0);
         assert_eq!(g.len(), x0.len(), "trust-region gradient dimension mismatch");
-        assert!(f.is_finite() && g.iter().all(|v| v.is_finite()), "non-finite trust-region initial evaluation");
+        assert!(
+            f.is_finite() && g.iter().all(|v| v.is_finite()),
+            "non-finite trust-region initial evaluation"
+        );
         Self {
-            x: x0.to_vec(), f, g, delta: 1.0, iters: 0, evals: 1,
-            hv_evals: 0, negative_curvature_hits: 0, history: vec![f],
+            x: x0.to_vec(),
+            f,
+            g,
+            delta: 1.0,
+            iters: 0,
+            evals: 1,
+            hv_evals: 0,
+            negative_curvature_hits: 0,
+            history: vec![f],
+            stalled: false,
         }
     }
 
@@ -137,8 +149,12 @@ impl TrustRegionState {
     #[must_use]
     pub fn report(&self) -> TrustRegionReport {
         TrustRegionReport {
-            x: self.x.clone(), f: self.f, grad_norm: inf_norm(&self.g),
-            iters: self.iters, evals: self.evals, hv_evals: self.hv_evals,
+            x: self.x.clone(),
+            f: self.f,
+            grad_norm: inf_norm(&self.g),
+            iters: self.iters,
+            evals: self.evals,
+            hv_evals: self.hv_evals,
             negative_curvature_hits: self.negative_curvature_hits,
         }
     }
@@ -169,7 +185,9 @@ impl TrustRegionState {
         max_iters: usize,
         cx: &Cx,
     ) -> TrustRegionRunReport {
-        self.run_with_pause(fg, hv_at, rule, max_iters, &mut || cx.checkpoint().is_err())
+        self.run_with_pause(fg, hv_at, rule, max_iters, &mut || {
+            cx.checkpoint().is_err()
+        })
     }
 
     fn run_with_pause(
@@ -190,29 +208,44 @@ impl TrustRegionState {
                 break TrustRegionProgress::Stopped(StopReason::Budget);
             }
             let obs = StopObservation {
-                grad_norm: inf_norm(&self.g), objective: self.f,
-                evals: self.evals, history: &self.history,
+                grad_norm: inf_norm(&self.g),
+                objective: self.f,
+                evals: self.evals,
+                history: &self.history,
             };
             if let Some(reason) = rule.check(&obs) {
                 break TrustRegionProgress::Stopped(reason);
             }
-            if self.delta < 1e-14 {
+            if self.stalled || self.delta < 1e-14 {
                 break TrustRegionProgress::Stopped(StopReason::Stall);
             }
             if completed == max_iters {
                 break TrustRegionProgress::Stopped(StopReason::IterationCap);
             }
-            self.iterate(fg, hv_at);
+            self.stalled = !self.iterate(fg, hv_at);
+            self.iters += 1;
+            self.history.push(self.f);
             completed += 1;
         };
-        TrustRegionRunReport { progress, solution: self.report() }
+        TrustRegionRunReport {
+            progress,
+            solution: self.report(),
+        }
     }
 
-    fn iterate(&mut self, fg: crate::FnGrad<'_>, hv_at: crate::FnHv<'_>) {
-        let (p, _hit, neg, hv_count) = {
+    // false means an unusable model/precision stall; no candidate is accepted.
+    fn iterate(&mut self, fg: crate::FnGrad<'_>, hv_at: crate::FnHv<'_>) -> bool {
+        let step = {
             let xc = self.x.clone();
             let mut hv = |v: &[f64]| hv_at(&xc, v);
             steihaug(&self.g, &mut hv, self.delta, 1e-8)
+        };
+        let (p, _hit, neg, hv_count) = match step {
+            Ok(step) => step,
+            Err(hv_count) => {
+                self.hv_evals += hv_count;
+                return false;
+            }
         };
         self.hv_evals += hv_count;
         if neg {
@@ -221,14 +254,44 @@ impl TrustRegionState {
         // Keep the established floating-point operation order on valid runs.
         let hp = hv_at(&self.x, &p);
         self.hv_evals += 1;
+        assert_eq!(hp.len(), self.x.len(), "trust-region Hessian dimension mismatch");
+        if hp.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
         let gp: f64 = self.g.iter().zip(&p).map(|(a, b)| a * b).sum();
         let php: f64 = p.iter().zip(&hp).map(|(a, b)| a * b).sum();
         let model_decrease = -gp - 0.5 * php;
+        if !model_decrease.is_finite() || model_decrease <= 0.0 {
+            return false;
+        }
         let x_new: Vec<f64> = self.x.iter().zip(&p).map(|(a, b)| a + b).collect();
+        if x_new == self.x {
+            return false;
+        }
+        if x_new.iter().any(|v| !v.is_finite()) {
+            self.delta *= 0.25;
+            return true;
+        }
         let (f_new, g_new) = fg(&x_new);
         self.evals += 1;
+        assert_eq!(g_new.len(), self.x.len(), "trust-region gradient dimension mismatch");
+        // A trial outside the objective's domain is a rejected step, not a
+        // new incumbent. In particular, -infinity must not look like an
+        // infinite improvement, nor may NaN freeze the radius through rho.
+        if !f_new.is_finite() || g_new.iter().any(|v| !v.is_finite()) {
+            self.delta *= 0.25;
+            return true;
+        }
         let actual = self.f - f_new;
-        let rho = if model_decrease.abs() < 1e-300 { 0.0 } else { actual / model_decrease };
+        let rho = if model_decrease.abs() < 1e-300 {
+            0.0
+        } else {
+            actual / model_decrease
+        };
+        if !actual.is_finite() || !rho.is_finite() {
+            self.delta *= 0.25;
+            return true;
+        }
         let p_norm: f64 = p.iter().map(|v| v * v).sum::<f64>().sqrt();
         if rho < 0.25 {
             self.delta *= 0.25;
@@ -240,19 +303,19 @@ impl TrustRegionState {
             self.f = f_new;
             self.g = g_new;
         }
-        self.iters += 1;
-        self.history.push(self.f);
+        true
     }
 }
 
 /// Steihaug-CG: approximately minimize m(p) = gᵀp + ½pᵀHp within
-/// ‖p‖ ≤ Δ. Returns (step, hit_boundary, negative_curvature, hv_count).
+/// ‖p‖ ≤ Δ. Returns (step, hit_boundary, negative_curvature, hv_count),
+/// or the spent Hessian count if the model/arithmetic is unusable.
 fn steihaug(
     g: &[f64],
     hv: &mut dyn FnMut(&[f64]) -> Vec<f64>,
     delta: f64,
     tol: f64,
-) -> (Vec<f64>, bool, bool, usize) {
+) -> Result<(Vec<f64>, bool, bool, usize), usize> {
     let n = g.len();
     let mut p = vec![0.0f64; n];
     let mut r: Vec<f64> = g.iter().map(|v| -v).collect();
@@ -260,22 +323,42 @@ fn steihaug(
     let mut rr: f64 = r.iter().map(|v| v * v).sum();
     let g_norm = rr.sqrt();
     let mut hv_count = 0usize;
-    for _ in 0..2 * n {
+    if !rr.is_finite() {
+        return Err(hv_count);
+    }
+    for _ in 0..n.saturating_mul(2) {
         if rr.sqrt() < tol * g_norm.max(1e-30) {
-            return (p, false, false, hv_count);
+            return Ok((p, false, false, hv_count));
+        }
+        if d.iter().any(|v| !v.is_finite()) {
+            return Err(hv_count);
         }
         let hd = hv(&d);
         hv_count += 1;
+        assert_eq!(hd.len(), n, "trust-region Hessian dimension mismatch");
+        if hd.iter().any(|v| !v.is_finite()) {
+            return Err(hv_count);
+        }
         let dhd: f64 = d.iter().zip(&hd).map(|(a, b)| a * b).sum();
+        if !dhd.is_finite() {
+            return Err(hv_count);
+        }
         if dhd <= 0.0 {
             // Negative curvature: follow d to the boundary.
             let tau = boundary_tau(&p, &d, delta);
             for i in 0..n {
                 p[i] = tau.mul_add(d[i], p[i]);
             }
-            return (p, true, true, hv_count);
+            return if p.iter().all(|v| v.is_finite()) {
+                Ok((p, true, true, hv_count))
+            } else {
+                Err(hv_count)
+            };
         }
         let alpha = rr / dhd;
+        if !alpha.is_finite() {
+            return Err(hv_count);
+        }
         let mut p_next = p.clone();
         for i in 0..n {
             p_next[i] = alpha.mul_add(d[i], p_next[i]);
@@ -286,20 +369,34 @@ fn steihaug(
             for i in 0..n {
                 p[i] = tau.mul_add(d[i], p[i]);
             }
-            return (p, true, false, hv_count);
+            return if p.iter().all(|v| v.is_finite()) {
+                Ok((p, true, false, hv_count))
+            } else {
+                Err(hv_count)
+            };
         }
         p = p_next;
         for i in 0..n {
             r[i] = alpha.mul_add(-hd[i], r[i]);
         }
         let rr_new: f64 = r.iter().map(|v| v * v).sum();
+        if !rr_new.is_finite() {
+            return Err(hv_count);
+        }
         let beta = rr_new / rr;
+        if !beta.is_finite() {
+            return Err(hv_count);
+        }
         rr = rr_new;
         for i in 0..n {
             d[i] = beta.mul_add(d[i], r[i]);
         }
     }
-    (p, false, false, hv_count)
+    if p.iter().all(|v| v.is_finite()) {
+        Ok((p, false, false, hv_count))
+    } else {
+        Err(hv_count)
+    }
 }
 
 /// Positive τ with ‖p + τ·d‖ = Δ.
@@ -323,8 +420,9 @@ pub fn trust_region_newton(
     max_iters: usize,
 ) -> TrustRegionReport {
     let rule = StopRule::GradNorm(grad_tol);
-    admit_rule(&rule, 0);
-    TrustRegionState::new(x0, fg).run(fg, hv_at, &rule, max_iters).solution
+    let _ = admit_rule(&rule, 0);
+    let mut state = TrustRegionState::new(x0, fg);
+    state.run(fg, hv_at, &rule, max_iters).solution
 }
 
 /// Finite-difference-of-gradients Hessian-vector product: the interim
@@ -384,6 +482,7 @@ mod tests {
         assert_eq!(a.evals, b.evals);
         assert_eq!(a.hv_evals, b.hv_evals);
         assert_eq!(a.negative_curvature_hits, b.negative_curvature_hits);
+        assert_eq!(a.stalled, b.stalled);
     }
 
     #[test]
@@ -500,5 +599,136 @@ mod tests {
             &mut |_, _| panic!("unexpected Hessian evaluation"),
             &StopRule::Budget(0), 1,
         );
+    }
+
+    #[test]
+    fn trust_region_rejects_nonfinite_objectives_without_poisoning_state() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut fg = |x: &[f64]| {
+                let f = if x[0] == 1.0 { invalid } else { (x[0] - 2.0).powi(2) };
+                (f, vec![2.0 * (x[0] - 2.0)])
+            };
+            let mut hv = |_: &[f64], v: &[f64]| vec![2.0 * v[0]];
+            let mut state = TrustRegionState::new(&[0.0], &mut fg);
+            let run = state.run(&mut fg, &mut hv, &StopRule::GradNorm(1e-10), 1);
+            assert_eq!(run.solution.x, vec![0.0]);
+            assert_eq!(run.solution.f, 4.0);
+            assert_eq!(state.gradient(), &[-4.0]);
+            assert_eq!(state.radius(), 0.25);
+            assert_eq!(state.history(), &[4.0, 4.0]);
+            assert_eq!(run.solution.evals, 2);
+            let recovered = state.run(&mut fg, &mut hv, &StopRule::GradNorm(1e-10), 100);
+            assert_eq!(recovered.progress, TrustRegionProgress::Stopped(StopReason::GradNorm));
+            assert!((recovered.solution.x[0] - 2.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn trust_region_finite_objective_with_nan_gradient_is_not_accepted() {
+        let mut fg = |x: &[f64]| {
+            let g = if x[0] == 1.0 { f64::NAN } else { 2.0 * (x[0] - 2.0) };
+            ((x[0] - 2.0).powi(2), vec![g])
+        };
+        let mut state = TrustRegionState::new(&[0.0], &mut fg);
+        let run = state.run(
+            &mut fg, &mut |_, v| vec![2.0 * v[0]], &StopRule::GradNorm(1e-10), 1,
+        );
+        assert_eq!(run.solution.x, vec![0.0]);
+        assert_eq!(run.solution.grad_norm, 4.0);
+        assert_eq!(state.radius(), 0.25);
+    }
+
+    #[test]
+    fn trust_region_nonfinite_hessian_stalls_without_objective_trials() {
+        let mut fg = |x: &[f64]| (x[0] * x[0], vec![2.0 * x[0]]);
+        let mut state = TrustRegionState::new(&[1.0], &mut fg);
+        let outcome = state.run(
+            &mut |_| panic!("invalid Hessian must not reach the objective"),
+            &mut |_, _| vec![f64::NAN], &StopRule::GradNorm(1e-8), 100,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Stall));
+        assert_eq!(outcome.solution.x, vec![1.0]);
+        assert_eq!(outcome.solution.grad_norm, 2.0);
+        assert_eq!(outcome.solution.evals, 1);
+        assert_eq!(outcome.solution.hv_evals, 1);
+        let checkpoint = state.clone();
+        state.run(
+            &mut |_| panic!("stalled state evaluated the objective"),
+            &mut |_, _| panic!("stalled state evaluated the Hessian"),
+            &StopRule::GradNorm(1e-8), 100,
+        );
+        assert_same_state(&checkpoint, &state);
+    }
+
+    #[test]
+    fn trust_region_nonpositive_model_cannot_accept_an_uphill_step() {
+        let mut fg = |x: &[f64]| (x[0] * x[0], vec![2.0 * x[0]]);
+        let mut state = TrustRegionState::new(&[1.0], &mut fg);
+        let mut calls = 0;
+        let mut inconsistent_hv = |_: &[f64], v: &[f64]| {
+            calls += 1;
+            let scale = if calls == 1 { 2.0 } else { 10.0 };
+            vec![scale * v[0]]
+        };
+        let outcome = state.run(
+            &mut |_| panic!("nonpositive model must not reach the objective"),
+            &mut inconsistent_hv, &StopRule::GradNorm(1e-8), 100,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Stall));
+        assert_eq!(outcome.solution.x, vec![1.0]);
+        assert_eq!(outcome.solution.evals, 1);
+        assert_eq!(outcome.solution.hv_evals, 2);
+    }
+
+    #[test]
+    fn trust_region_precision_noop_stops_instead_of_reevaluating() {
+        let mut state = TrustRegionState::new(&[1e100], &mut |_| (0.0, vec![-1.0]));
+        let outcome = state.run(
+            &mut |_| panic!("unchanged point must not be reevaluated"),
+            &mut |_, _| vec![0.0], &StopRule::GradNorm(1e-8), 100,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Stall));
+        assert_eq!(outcome.solution.evals, 1);
+        assert_eq!(outcome.solution.x, vec![1e100]);
+    }
+
+    #[test]
+    fn trust_region_internal_overflow_is_not_convergence() {
+        let mut state = TrustRegionState::new(&[0.0], &mut |_| (1.0, vec![1e308]));
+        let outcome = state.run(
+            &mut |_| panic!("overflowed model reached objective"),
+            &mut |_, _| panic!("overflowed residual reached Hessian"),
+            &StopRule::GradNorm(1e-8), 10,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Stall));
+        assert_eq!(outcome.solution.evals, 1);
+        assert_eq!(outcome.solution.hv_evals, 0);
+        assert_eq!(outcome.solution.grad_norm, 1e308);
+    }
+
+    #[test]
+    #[should_panic(expected = "Hessian dimension mismatch")]
+    fn trust_region_refuses_malformed_hessian_products() {
+        let mut state = TrustRegionState::new(&[1.0], &mut |_| (1.0, vec![2.0]));
+        state.run(
+            &mut |_| panic!("bad Hessian reached objective"),
+            &mut |_, _| vec![], &StopRule::GradNorm(1e-8), 1,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "gradient dimension mismatch")]
+    fn trust_region_refuses_malformed_trial_gradients() {
+        let mut state = TrustRegionState::new(&[1.0], &mut |_| (1.0, vec![2.0]));
+        state.run(
+            &mut |_| (0.0, vec![]), &mut |_, v| vec![2.0 * v[0]],
+            &StopRule::GradNorm(1e-8), 1,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "initial evaluation")]
+    fn trust_region_refuses_nan_initial_gradients() {
+        let _ = TrustRegionState::new(&[1.0], &mut |_| (1.0, vec![f64::NAN]));
     }
 }
