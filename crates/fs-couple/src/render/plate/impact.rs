@@ -17,6 +17,8 @@ use fs_phs::{PortHamiltonian,Storage};
 use fs_plate::shell::reduction::ShellReduction;
 use crate::modal_acoustic_time::ModalAcousticState;
 
+/// Solver-derived causal listener pressure and streamed audio.
+pub mod audio;
 pub mod felt;
 pub mod striker;
 use felt::FeltPad;
