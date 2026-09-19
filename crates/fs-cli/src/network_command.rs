@@ -289,7 +289,7 @@ impl Request {
         let mesh_convergence = root.get("mesh_convergence")
             .map(|value|mesh_convergence::Study::parse(value,&root)).transpose()?;
         let recirculation = root.get("recirculation")
-            .map(|value| recirculation::Policy::parse(value, &inlets)).transpose()?;
+            .map(|value| recirculation::Policy::parse_request(value, &inlets, &root)).transpose()?;
         Ok(Self { seed, graph, boundaries, inlets, region_paths, air, mesh, surfaces,
             conductivity, source, adiabatic, solid_data, contacts, fan, fan_speed_design, transient,
             mesh_convergence, radiation, recirculation, objective, gradient, limits, design })
@@ -472,7 +472,7 @@ fn render(request: &Request, flow: &GraphSolution, evaluated: &Evaluation) -> Re
                 acceleration::render(request.limits.relaxation, evaluated.gradient.is_some())?,
                 evaluated.gradient.as_ref().map(fan_gradient::CoolingGradient::speed_json).transpose()?.unwrap_or_else(|| "null".into())))
         })
-        .and_then(|result| recirculation::attach(result, request, &evaluated.coupled.transport))
+        .and_then(|result| recirculation::attach(result, request, evaluated))
 }
 
 fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
@@ -481,6 +481,9 @@ fn execute(request: &Request, gate: &CancelGate) -> Result<String> {
         let cx = Cx::new(gate, arena, StreamKey { seed: request.seed, kernel_id: 717, tile: 0, iteration: 0 },
             Budget::INFINITE, ExecMode::Deterministic);
         poll(&cx)?;
+        if let Some(result) = request.recirculation.as_ref().and_then(|policy| policy.run_design(&cx)) {
+            return result;
+        }
         if let Some(policy) = &request.radiation {
             return policy.solve(request, &cx);
         }

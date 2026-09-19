@@ -6,6 +6,9 @@ use fs_airflow::graph::thermal::transport::{TransportMarch, recirculation::{
     MAX_RECIRCULATION_LINKS, MAX_RECIRCULATION_SUPPLIES, RecirculationLink,
 }};
 
+mod sensitivity;
+mod design;
+
 const MODEL: &str = "prescribed-adiabatic-return";
 const SCOPE: &str = "imposed receiving-supply fractions; positive fresh makeup; instantaneous adiabatic return with externally imposed pressure reset; no return-duct hydraulics, fan heat, humidity or residence time; not an experimentally validated or uncertainty-certified model";
 
@@ -14,9 +17,23 @@ pub(super) struct Policy {
     links: Vec<RecirculationLink>,
     tolerance_k: f64,
     source: String,
+    design: Option<design::Design>,
 }
 
 impl Policy {
+    pub(super) fn parse_request(value: &J, inlets: &[TransportInlet], root: &J) -> Result<Self> {
+        let Some(spec) = value.get("design") else { return Self::parse(value, inlets); };
+        let fields = value.as_object().ok_or_else(|| bad("recirculation must be an object"))?;
+        let plain = J::Object(fields.iter().filter(|(key, _)| key != "design").cloned().collect());
+        let mut policy = Self::parse(&plain, inlets)?;
+        policy.design = Some(design::Design::parse(spec, root, &policy)?);
+        Ok(policy)
+    }
+
+    pub(super) fn run_design(&self, cx: &Cx<'_>) -> Option<Result<String>> {
+        self.design.as_ref().map(|design| design.solve(cx))
+    }
+
     pub(super) fn parse(value: &J, inlets: &[TransportInlet]) -> Result<Self> {
         object(value, &["model", "source", "temperature_tolerance_k", "links"], "recirculation")?;
         if get(value, "model")?.as_str() != Some(MODEL) {
@@ -56,12 +73,15 @@ impl Policy {
         if fractions.len() > MAX_RECIRCULATION_SUPPLIES {
             return Err(bad("recirculation supply cap exceeded"));
         }
-        Ok(Self { links, tolerance_k, source })
+        Ok(Self { links, tolerance_k, source, design: None })
     }
 
     pub(super) fn bind<'flow>(&self, cx: &Cx<'_>, network: TransportNetwork<'flow>)
         -> Result<TransportNetwork<'flow>> {
         poll(cx)?;
+        if self.design.is_some() {
+            return Err(bad("return-fraction designs must construct a resolved candidate before transport"));
+        }
         // Recheck ACTUAL supply/exhaust signs and capacities on every candidate.
         network.with_recirculation(cx, self.links.clone(), self.tolerance_k).map_err(producer)
     }
@@ -101,14 +121,15 @@ impl Policy {
     }
 }
 
-pub(super) fn attach(output: String, request: &Request, march: &TransportMarch) -> Result<String> {
-    let report = match &request.recirculation {
-        Some(policy) => policy.report(march)?,
+pub(super) fn attach(output: String, request: &Request, evaluated: &Evaluation) -> Result<String> {
+    let march = &evaluated.coupled.transport;
+    let (report, sensitivities) = match &request.recirculation {
+        Some(policy) => (policy.report(march)?, policy.sensitivity_json(request, evaluated)?),
         None if march.recirculation.is_none() => return Ok(output),
         None => return Err(producer("unrequested return-air model in cooling result")),
     };
     let prefix = output.strip_suffix("}\n").ok_or_else(|| bad("invalid cooling JSON framing"))?;
-    Ok(format!("{prefix},\"recirculation\":{report}}}\n"))
+    Ok(format!("{prefix},\"recirculation\":{report},\"recirculation_sensitivity\":{sensitivities}}}\n"))
 }
 
 /// Actual outer sensible-heat gain, excluding air circulating internally.
