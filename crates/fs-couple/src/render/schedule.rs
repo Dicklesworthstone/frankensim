@@ -13,6 +13,83 @@
 
 use super::{ControlDelta, GatedRenderOutcome, RenderContext, RenderError};
 use fs_exec::CancelGate;
+use fs_scenario::gesture::{GestureSchedule, GestureTarget};
+
+/// Lower one pressure track onto an audio sample clock before rendering.
+///
+/// Each control tick is sampled using the gesture's existing ramp semantics and
+/// held until the next tick. Tick `k` applies at `ceil(k * sample_rate / control_rate)`,
+/// never before its physical time. `samples` is a half-open horizon from sample
+/// zero. The caller must use the same sample rate for the destination voice.
+/// Unchanged values are coalesced; the initial value is always emitted for a
+/// nonempty horizon. This does not reset vibration or infer pressure from notes.
+///
+/// `max_ticks` bounds evaluation work and storage, including unchanged ticks.
+/// Admission may allocate; rendering the resulting schedule does not.
+///
+/// # Errors
+/// Refuses absent/non-pressure tracks, zero rates, control rates above the audio
+/// rate, horizons exceeding the tick budget, and allocation failure.
+pub fn pressure_gesture_controls(
+    schedule: &GestureSchedule,
+    track_id: &str,
+    voice: usize,
+    sample_rate_hz: u32,
+    samples: u64,
+    max_ticks: usize,
+) -> Result<Vec<ScheduledControl>, RenderError> {
+    let control_rate = schedule.control_rate_hz;
+    if sample_rate_hz == 0 || control_rate == 0 || control_rate > sample_rate_hz {
+        return Err(RenderError::Control {
+            what: "pressure gesture requires 0 < control rate <= audio sample rate",
+        });
+    }
+    if !schedule
+        .tracks()
+        .iter()
+        .any(|track| track.id == track_id && track.target == GestureTarget::BlowingPressure)
+    {
+        return Err(RenderError::Control {
+            what: "pressure gesture binding requires an existing blowing-pressure track",
+        });
+    }
+    // Wide integer arithmetic keeps long horizons and nonintegral rate ratios
+    // independent of floating-point clock rounding.
+    let rate = u128::from(sample_rate_hz);
+    let control = u128::from(control_rate);
+    let ticks = if samples == 0 {
+        0
+    } else {
+        (u128::from(samples - 1) * control) / rate + 1
+    };
+    if ticks > max_ticks as u128 {
+        return Err(RenderError::Sizing {
+            what: "pressure gesture horizon exceeds the control-tick budget",
+        });
+    }
+    let mut events = Vec::new();
+    events
+        .try_reserve(ticks as usize)
+        .map_err(|_| RenderError::Sizing {
+            what: "cannot reserve pressure gesture controls",
+        })?;
+    let mut previous = None;
+    for tick in 0..ticks as u64 {
+        let pressure_pa = schedule
+            .sample(track_id, tick)
+            .map_err(|_| RenderError::Control {
+                what: "pressure gesture could not be sampled",
+            })?;
+        if previous != Some(pressure_pa) {
+            events.push(ScheduledControl {
+                sample: (u128::from(tick) * rate).div_ceil(control) as u64,
+                delta: ControlDelta::SetBlowingPressure { voice, pressure_pa },
+            });
+            previous = Some(pressure_pa);
+        }
+    }
+    Ok(events)
+}
 
 /// One input assignment on the context-relative, absolute sample clock.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -133,7 +210,10 @@ impl ScheduledRenderer {
                     .apply_controls(core::slice::from_ref(&event.delta))?;
                 self.next_event += 1;
             }
-            let until = self.events.get(self.next_event).map_or(end, |e| e.sample.min(end));
+            let until = self
+                .events
+                .get(self.next_event)
+                .map_or(end, |e| e.sample.min(end));
             // The difference is bounded by this already-admitted output slice.
             let len = (until - now) as usize;
             self.context.block(&mut out[offset..offset + len])?;
@@ -164,9 +244,12 @@ impl ScheduledRenderer {
         let samples = u64::try_from(required).map_err(|_| RenderError::Sizing {
             what: "scheduled render length exceeds the sample clock",
         })?;
-        let end = self.samples_rendered().checked_add(samples).ok_or(RenderError::Sizing {
-            what: "scheduled render would overflow the sample clock",
-        })?;
+        let end = self
+            .samples_rendered()
+            .checked_add(samples)
+            .ok_or(RenderError::Sizing {
+                what: "scheduled render would overflow the sample clock",
+            })?;
         if out.len() < required {
             return Err(RenderError::Sizing {
                 what: "output slice must hold all requested scheduled callbacks",
@@ -174,7 +257,12 @@ impl ScheduledRenderer {
         }
         // At most one internal segment per sample. This up-front conservative
         // clock check excludes overflow after partially rendering a request.
-        if self.context.blocks_rendered().checked_add(samples).is_none() {
+        if self
+            .context
+            .blocks_rendered()
+            .checked_add(samples)
+            .is_none()
+        {
             return Err(RenderError::Sizing {
                 what: "scheduled render could overflow the internal block clock",
             });
@@ -182,12 +270,16 @@ impl ScheduledRenderer {
         self.validate_segment_budget(end)?;
         for index in 0..blocks {
             if gate.is_requested() {
-                return Ok(GatedRenderOutcome::Cancelled { blocks: index as u64 });
+                return Ok(GatedRenderOutcome::Cancelled {
+                    blocks: index as u64,
+                });
             }
             let start = index * block_len;
             self.block(&mut out[start..start + block_len])?;
         }
-        Ok(GatedRenderOutcome::Completed { blocks: blocks as u64 })
+        Ok(GatedRenderOutcome::Completed {
+            blocks: blocks as u64,
+        })
     }
 
     fn validate_segment_budget(&self, end: u64) -> Result<(), RenderError> {
@@ -204,7 +296,12 @@ impl ScheduledRenderer {
                 previous = event.sample;
             }
         }
-        if self.context.blocks_rendered().checked_add(segments).is_none() {
+        if self
+            .context
+            .blocks_rendered()
+            .checked_add(segments)
+            .is_none()
+        {
             return Err(RenderError::Sizing {
                 what: "scheduled callback would overflow the internal block clock",
             });

@@ -4,6 +4,7 @@
 //! BITWISE identical — schedules are replayable data, not new physics.
 
 use fs_couple::render::ReedBoreVoice;
+use fs_couple::render::schedule::{ScheduledRenderer, pressure_gesture_controls};
 use fs_couple::render::{ControlDelta, RenderContext, RenderVoice};
 use fs_duct::{Duct, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
@@ -139,4 +140,105 @@ fn schedule_driven_render_is_bitwise_identical_to_inline() {
          \"blocks\":{blocks},\"rms_pa\":{rms:.1},\"schedule_hash\":\"{}\"}}",
         s.content_hash().to_hex()
     );
+}
+
+/// G3: a physical pressure ramp on a nonintegral control/audio clock ratio
+/// drives the same retained reed state regardless of the host callback size.
+#[test]
+fn pressure_gesture_binding_matches_samplewise_controls_across_partitions() {
+    const SAMPLES: usize = 2048;
+    const RATE: u32 = 700;
+    let schedule = GestureSchedule::try_new(
+        RATE,
+        vec![GestureTrack {
+            id: "pressure".into(),
+            target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(1500.0),
+            events: vec![
+                GestureEvent {
+                    time_s: 3.0 / f64::from(RATE),
+                    transition_s: 5.0 / f64::from(RATE),
+                    value: GestureValue::PressurePa(2400.0),
+                },
+                GestureEvent {
+                    time_s: 15.0 / f64::from(RATE),
+                    transition_s: 0.0,
+                    value: GestureValue::PressurePa(600.0),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let events =
+        pressure_gesture_controls(&schedule, "pressure", 0, 48_000, SAMPLES as u64, 30).unwrap();
+    assert_eq!(events.first().unwrap().sample, 0);
+    assert!(events.iter().any(|event| event.sample == 275)); // ceil(4*48000/700)
+    assert!(
+        pressure_gesture_controls(&schedule, "pressure", 0, 48_000, SAMPLES as u64, 29).is_err()
+    );
+    let mut direct = RenderContext::new(vec![RenderVoice::ReedBore(voice())], 1);
+    let mut expected = vec![0.0; SAMPLES];
+    for (sample, output) in expected.iter_mut().enumerate() {
+        // Independent inverse clock mapping, rather than reusing the compiler's
+        // event timestamps: the latest tick whose physical time has arrived.
+        let tick = sample as u64 * u64::from(RATE) / 48_000;
+        direct
+            .apply_controls(&[ControlDelta::SetBlowingPressure {
+                voice: 0,
+                pressure_pa: schedule.sample("pressure", tick).unwrap(),
+            }])
+            .unwrap();
+        direct.block(core::slice::from_mut(output)).unwrap();
+    }
+    assert!(expected.iter().any(|value| value.abs() > 1.0));
+    for block_len in [1, 37, 480, SAMPLES] {
+        let context = RenderContext::new(vec![RenderVoice::ReedBore(voice())], block_len);
+        let mut renderer = ScheduledRenderer::new(context, events.clone(), 30).unwrap();
+        let mut actual = vec![0.0; SAMPLES];
+        for block in actual.chunks_mut(block_len) {
+            renderer.block(block).unwrap();
+        }
+        assert!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "partition {block_len}"
+        );
+        assert_eq!(renderer.applied_controls(), events);
+    }
+}
+
+#[test]
+fn pressure_gesture_binding_refuses_invalid_inputs_and_bounds_work() {
+    let mut schedule = schedule(100);
+    assert!(pressure_gesture_controls(&schedule, "missing", 0, 48_000, 1, 1).is_err());
+    assert!(pressure_gesture_controls(&schedule, "blow", 0, 0, 1, 1).is_err());
+    assert!(pressure_gesture_controls(&schedule, "blow", 0, 99, 1, 1).is_err());
+    assert!(pressure_gesture_controls(&schedule, "blow", 0, 48_000, u64::MAX, 1).is_err());
+    assert!(
+        pressure_gesture_controls(&schedule, "blow", 0, 48_000, 0, 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        pressure_gesture_controls(&schedule, "blow", 0, 48_000, 1, 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    // The clock field is public: callers can invalidate it after admission.
+    schedule.control_rate_hz = 0;
+    assert!(pressure_gesture_controls(&schedule, "blow", 0, 48_000, 1, 1).is_err());
+    let other = GestureSchedule::try_new(
+        100,
+        vec![GestureTrack {
+            id: "blow".into(),
+            target: GestureTarget::RestAperture,
+            initial: GestureValue::LengthM(0.001),
+            events: vec![],
+        }],
+    )
+    .unwrap();
+    assert!(pressure_gesture_controls(&other, "blow", 0, 48_000, 1, 1).is_err());
 }

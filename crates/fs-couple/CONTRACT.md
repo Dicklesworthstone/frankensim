@@ -278,6 +278,14 @@ score-to-excitation compilation is claimed. Its cancellation gate polls before e
 caller block and consumes no events on cancellation. G3 tests compare scheduled
 force changes, release and re-excitation against direct modal stepping across
 multiple block partitions, with cancellation/resume at callback boundaries.
+`pressure_gesture_controls` binds a selected blowing-pressure gesture track to
+that scheduler. It samples existing gesture ramps at the declared control rate,
+holds each value, and places ticks at the first audio sample at or after their
+time using integer clock conversion. Admission bounds evaluated ticks and storage;
+the caller supplies the destination voice's audio rate and a half-open horizon.
+G3 checks a nonintegral clock ratio and pressure ramp against per-sample control
+application across callback partitions. Other gesture targets and continuous-time
+interpolation between control ticks are not implemented by this binding.
 Boundary facts a consumer must
 know, both discovered by this bead's battery: the characteristic-line
 realization refuses `UnflangedOpen`/`FlangedOpen` terminations whose
