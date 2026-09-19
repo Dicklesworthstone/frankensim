@@ -264,8 +264,12 @@ Determinism: one-host bitwise, inherited from the hosted kernels.
 No-claims: no device/OS audio host (Franken-only policy; live output
 would be a quarantined adapter decision); no image hopping yet (D17
 lifts beyond input parameters land with the articulation/track beads);
-refusal mid-block poisons the context (mid-sample state is not rewound)
-and is documented rather than hidden. Boundary facts a consumer must
+refusal mid-block permanently poisons the context (mid-sample state is not
+rewound). The failed block's output is partial and must be discarded.
+Subsequent block or control calls return `RenderError::Poisoned` before
+touching output, voices, or control logs; reconstruction is required.
+Request sizing and control-admission refusals do not poison a healthy context.
+Boundary facts a consumer must
 know, both discovered by this bead's battery: the characteristic-line
 realization refuses `UnflangedOpen`/`FlangedOpen` terminations whose
 Nyquist `ka` exceeds 1 (at 48 kHz that is every bore wider than

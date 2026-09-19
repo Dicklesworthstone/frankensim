@@ -6,8 +6,9 @@
 //! charts move without clicks); no allocation inside a block on the
 //! admitted no-alloc voices; cancellation is polled at block boundaries
 //! (request -> complete the current block -> stop; blocks are
-//! transactional, so a cancelled render is always a whole number of
-//! blocks and resumes bitwise-identically).
+//! complete on success, so a cancelled render is always a whole number of
+//! blocks and resumes bitwise-identically). A physics refusal may leave
+//! partial state and permanently poisons the context; it cannot be resumed.
 //!
 //! This module HOSTS the existing steppers — the exact-FIR characteristic
 //! line, the scalar reed islands, the exact-ZOH modal runtime — it never
@@ -391,6 +392,8 @@ pub struct ControlRecord {
 /// Typed refusal from the render context.
 #[derive(Debug)]
 pub enum RenderError {
+    /// A previous voice refusal left partial state; construct a new context.
+    Poisoned,
     /// A voice refused mid-block; the context is poisoned.
     Voice(AcousticRealizeError),
     /// The modal voice refused mid-block; the context is poisoned.
@@ -420,6 +423,10 @@ pub enum RenderError {
 impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Poisoned => write!(
+                f,
+                "render context has partial state after a voice refusal; construct a new context"
+            ),
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
             Self::Control { what } => write!(f, "control refusal: {what}"),
@@ -451,6 +458,7 @@ pub struct RenderContext {
     scratch: Vec<f64>,
     blocks_rendered: u64,
     controls_applied: Vec<ControlRecord>,
+    poisoned: bool,
 }
 
 impl RenderContext {
@@ -463,6 +471,7 @@ impl RenderContext {
             scratch: vec![0.0; max_block],
             blocks_rendered: 0,
             controls_applied: Vec::new(),
+            poisoned: false,
         }
     }
 
@@ -482,8 +491,12 @@ impl RenderContext {
     /// `block` call). Refusals leave every voice untouched.
     ///
     /// # Errors
-    /// Unknown voice index or a delta the voice kind cannot accept.
+    /// A poisoned context, unknown voice index, or a delta the voice kind
+    /// cannot accept.
     pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        if self.poisoned {
+            return Err(RenderError::Poisoned);
+        }
         // Validate everything first: control application is transactional.
         for delta in deltas {
             match delta {
@@ -565,9 +578,13 @@ impl RenderContext {
     ///
     /// # Errors
     /// Voice refusals poison the context (mid-sample state is not
-    /// rewound); an oversized or empty block refuses before any state
-    /// moves.
+    /// rewound); discard that block's partial output. Later calls refuse
+    /// without touching output or state. An oversized or empty block
+    /// refuses before any state moves and does not poison a healthy context.
     pub fn block(&mut self, out: &mut [f64]) -> Result<(), RenderError> {
+        if self.poisoned {
+            return Err(RenderError::Poisoned);
+        }
         if out.is_empty() {
             return Err(RenderError::EmptyBlock);
         }
@@ -579,13 +596,15 @@ impl RenderContext {
         out.fill(0.0);
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
-            match voice {
-                RenderVoice::ReedBore(reed) => {
-                    reed.step_block(scratch).map_err(RenderError::Voice)?;
-                }
+            let result = match voice {
+                RenderVoice::ReedBore(reed) => reed.step_block(scratch).map_err(RenderError::Voice),
                 RenderVoice::ModalString(string) => {
-                    string.step_block(scratch).map_err(RenderError::Modal)?;
+                    string.step_block(scratch).map_err(RenderError::Modal)
                 }
+            };
+            if let Err(error) = result {
+                self.poisoned = true;
+                return Err(error);
             }
             for (accumulator, sample) in out.iter_mut().zip(scratch.iter()) {
                 *accumulator += *sample;

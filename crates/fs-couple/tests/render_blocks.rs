@@ -442,6 +442,58 @@ fn modal_force_batches_refuse_atomically() {
 }
 
 #[test]
+fn partial_voice_failure_permanently_refuses_render_and_control_updates() {
+    let healthy = ModalStringVoice::new(controlled_modal_model(), vec![1.0; 2]).unwrap();
+    let constrained = ModalAcousticTimeModel::try_new(
+        RATE,
+        controlled_modal_model().modes().to_vec(),
+        ModalAcousticTimeBudget {
+            maximum_total_energy_j: 1e-30,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    )
+    .unwrap();
+    let failing = ModalStringVoice::new(constrained, vec![1.0; 2]).unwrap();
+    let mut context = RenderContext::new(
+        vec![
+            RenderVoice::ModalString(healthy),
+            RenderVoice::ModalString(failing),
+        ],
+        32,
+    );
+    let mut partial = [0.0; 32];
+    assert!(matches!(
+        context.block(&mut partial),
+        Err(RenderError::Modal(
+            fs_couple::modal_acoustic_time::ModalAcousticTimeError::BudgetExceeded { .. }
+        ))
+    ));
+    assert!(partial.iter().any(|p| p.abs() > 1e-6));
+    assert_eq!(context.blocks_rendered(), 0);
+
+    // The first voice has advanced while the second refused. Even removing
+    // the offending input cannot make their clocks coherent again.
+    assert!(matches!(
+        context.apply_controls(&[ControlDelta::SetModalForce {
+            voice: 1,
+            mode: 0,
+            force_n_per_sqrt_kg: 0.0,
+        }]),
+        Err(RenderError::Poisoned)
+    ));
+    assert!(context.control_log().is_empty());
+    for _ in 0..2 {
+        let mut untouched = [123.0; 32];
+        assert!(matches!(
+            context.block(&mut untouched),
+            Err(RenderError::Poisoned)
+        ));
+        assert_eq!(untouched.map(f64::to_bits), [123.0_f64.to_bits(); 32]);
+        assert_eq!(context.blocks_rendered(), 0);
+    }
+}
+
+#[test]
 fn oversized_and_empty_blocks_refuse_before_state_moves() {
     let mut context = RenderContext::new(vec![RenderVoice::ReedBore(reed_voice())], 128);
     let mut too_big = vec![0.0; 256];
