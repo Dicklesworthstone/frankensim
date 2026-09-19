@@ -6,6 +6,7 @@ mod linear;
 mod board;
 mod board_geometry;
 mod steinway_d;
+mod steinway_scale;
 mod performance;
 mod felt;
 mod engine;
@@ -13,6 +14,7 @@ mod microphone;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
+    [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--microphone x_m,y_m,z_m] [--diagnostic-volume]
@@ -21,9 +23,18 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
---dump-geometry/--dump-obj export that same physical model; export alone skips
-eigenanalysis. Thickness taper, material constants and key assignment include
-explicit estimates. The string scale and hammer voicing remain replaceable estimates.
+It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
+estimated extensions), and separate per-key hammer force and relaxation cards.
+Lengths, effective winding mass and EI remain fixed. Preset tensions are tuned
+to A4=440 Hz by default to compensate rounded source values; --raw-tensions
+preserves the published table. --concert-pitch tunes first partials by changing
+physical tension, not oscillator frequencies. This is not a stretch-tuning fit.
+An explicit --scale always supplies the geometry/masses; absent --concert-pitch,
+its tensions are preserved even with a preset. Preset hammer voicing still applies.
+--dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
+Thickness taper, material constants and key assignment include explicit estimates.
+Per-key WoolFelt loading envelopes are source-derived; crush/unloading parameters,
+felt patch geometry and Prony time constants are still estimates, not coupon fits.
 --note performs a single-key study; otherwise the demo also plays a chord of
 available keys. --velocity overrides the three demo hammer launch speeds.
 Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
@@ -41,6 +52,7 @@ applies only to that diagnostic, not to physical microphone pressure.";
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
+    concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     microphone: Option<[f64; 3]>, diagnostic_volume: bool,
@@ -51,7 +63,8 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, mesh_divisions: 8, dump_geometry: None, dump_obj: None,
+            performance: None, preset: None, concert_pitch: None, raw_tensions: false,
+            mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, diagnostic_volume: false,
             dump_board: None, note: None, velocity: None, duration: 6.0,
@@ -67,6 +80,7 @@ impl Options {
             if flag == "--help" || flag == "-h" { options.help = true; continue; }
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
             if flag == "--diagnostic-volume" { options.diagnostic_volume = true; continue; }
+            if flag == "--raw-tensions" { options.raw_tensions = true; continue; }
             let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
             match flag.as_str() {
@@ -75,6 +89,7 @@ impl Options {
                 "--board" => options.board = Some(value.clone()),
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
                 "--preset" => options.preset = Some(value.clone()),
+                "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
                 "--dump-obj" => options.dump_obj = Some(value.clone()),
@@ -104,6 +119,10 @@ impl Options {
             || !(8_000..=192_000).contains(&options.sample_rate)
             || !(1..=16).contains(&options.substeps) || !(1..=128).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
+        }
+        if options.concert_pitch.is_some_and(|f| !f.is_finite() || !(430.0..=450.0).contains(&f))
+            || (options.raw_tensions && (options.preset.is_none() || options.concert_pitch.is_some())) {
+            return Err("concert pitch must be 430..450 Hz; --raw-tensions requires a preset and excludes --concert-pitch".into());
         }
         if usize::from(options.board.is_some()) + usize::from(options.board_geometry.is_some())
             + usize::from(options.preset.is_some()) > 1 {
@@ -153,10 +172,39 @@ impl Options {
         }
         Ok(options)
     }
+    fn tuning_hz(&self) -> Option<f64> {
+        self.concert_pitch.or_else(||
+            (self.preset.is_some() && self.scale.is_none() && !self.raw_tensions).then_some(440.0))
+    }
 }
 
 fn load_scale(text: Option<&str>) -> Result<Vec<geometry::Course>, String> {
     match text { Some(text) => geometry::read_scale(text), None => geometry::demonstration_scale() }
+}
+fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry::Course>, String> {
+    let mut scale = if text.is_none() && options.preset.is_some() {
+        steinway_scale::courses()?
+    } else { load_scale(text)? };
+    if let Some(reference) = options.tuning_hz() {
+        for c in &mut scale {
+            let target = reference * fs_math::det::pow(2.0, (f64::from(c.midi) - 69.0) / 12.0);
+            let cents = 1200.0 * fs_math::det::ln(target / c.partial_hz(1, c.tension_n))
+                / std::f64::consts::LN_2;
+            c.tension_n = c.tension_at_cents(cents)
+                .map_err(|e| format!("key {} tension retuning: {e}", c.midi))?;
+        }
+    }
+    Ok(scale)
+}
+fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    options: &Options) -> Result<engine::Instrument, String> {
+    if options.preset.is_some() {
+        let materials = scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
+        engine::Instrument::new_with_course_felts(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials)
+    } else {
+        engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
+    }
 }
 fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<linear::BoardMode>, String> {
     match text {
@@ -199,8 +247,7 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
     };
-    let mut piano = engine::Instrument::new(scale, modes, rate,
-        options.substeps, options.modes, true)?;
+    let mut piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
     let mut microphone = match surface {
         Some(surface) if !options.diagnostic_volume => Some(microphone::Microphone::new(surface,
@@ -253,7 +300,12 @@ fn run() -> Result<(), String> {
     let read = |path: &String| std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"));
     let scale_text = options.scale.as_ref().map(read).transpose()?;
     let board_text = options.board.as_ref().map(read).transpose()?;
-    let scale = load_scale(scale_text.as_deref())?;
+    let scale = selected_scale(scale_text.as_deref(), &options)?;
+    let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
+        "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
+    } else { "ESTIMATED demonstration" });
+    let tuning_source = options.tuning_hz().map_or_else(|| "input tensions preserved".to_owned(),
+        |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"));
     let preset = options.preset.as_ref().map(|_| steinway_d::build(options.mesh_divisions)).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { std::fs::write(path, &preset.geometry).map_err(|e| format!("{path}: {e}"))?; }
@@ -290,12 +342,14 @@ fn run() -> Result<(), String> {
         return Err("soundboard mode at/above output retention ceiling; use an explicitly reduced board".into());
     }
     study_key(&scale, options.note)?;
-    println!("String scale: {}.", options.scale.as_deref().unwrap_or("ESTIMATED demonstration"));
+    println!("String scale: {scale_source}; {tuning_source}.");
     println!("Soundboard: {board_source}.");
+    if options.preset.is_some() {
+        println!("Per-key source-derived hammer loading envelopes; estimated unloading/crush and tangent-scaled Prony relaxation.");
+    }
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
     if let Some(path) = &options.dump_scale {
-        let source = options.scale.as_deref().unwrap_or("ESTIMATED demonstration; not measured Steinway geometry");
-        std::fs::write(path, format!("# Source: {source}\n{}", geometry::write_scale(&scale))).map_err(|e| e.to_string())?;
+        std::fs::write(path, format!("# Source: {scale_source}; {tuning_source}\n{}", geometry::write_scale(&scale))).map_err(|e| e.to_string())?;
     }
     if let Some(path) = &options.dump_board {
         std::fs::write(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)))
@@ -415,5 +469,34 @@ mod render_tests {
             assert!(options(&args).is_err());
         }
     }
-
+    #[test]
+    fn preset_tunes_tension_not_geometry_and_raw_source_is_available() {
+        let o=options(&["--preset","steinway-d"]).unwrap();
+        let tuned=selected_scale(None,&o).unwrap();let source=steinway_scale::courses().unwrap();
+        for (a,b) in tuned.iter().zip(&source) {
+            assert_eq!(a.length_m,b.length_m);assert_eq!(a.linear_density_kg_m,b.linear_density_kg_m);
+            assert_eq!(a.flexural_rigidity_nm2,b.flexural_rigidity_nm2);
+            let target=440.0*2.0f64.powf((f64::from(a.midi)-69.0)/12.0);
+            assert!((a.partial_hz(1,a.tension_n)/target-1.0).abs()<1e-10);
+        }
+        let raw=options(&["--preset","steinway-d","--raw-tensions"]).unwrap();
+        assert_eq!(selected_scale(None,&raw).unwrap(),source);
+        let imported=options(&["--preset","steinway-d","--scale","measured.csv"]).unwrap();
+        assert_eq!(selected_scale(Some(&geometry::write_scale(&source)),&imported).unwrap(),source);
+        for args in [vec!["--concert-pitch","NaN"],vec!["--concert-pitch","400"],
+            vec!["--raw-tensions"],vec!["--preset","steinway-d","--raw-tensions","--concert-pitch","442"]] {
+            assert!(options(&args).is_err());
+        }
+    }
+    #[test]
+    fn source_hammer_cards_are_used_by_the_render_preparation_path() {
+        let mut o=options(&["--preset","steinway-d"]).unwrap();o.modes=12;
+        let scale=selected_scale(None,&o).unwrap();
+        let mut piano=prepare_instrument(vec![scale[48]],&board::demonstration(),&o).unwrap();
+        piano.note_on(69,2.0).unwrap();
+        for _ in 0..1500 {assert!(piano.step().unwrap().is_finite());}
+        assert!(piano.accounting.felt_loss_j>0.0);
+        assert!(piano.accounting.felt_relaxation_loss_j>0.0);
+        assert!((piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j()).abs()<1e-7);
+    }
 }
