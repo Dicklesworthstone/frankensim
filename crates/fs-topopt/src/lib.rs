@@ -25,6 +25,7 @@ pub mod elasticity;
 pub mod filter;
 #[cfg(feature = "cutfem-marquee")]
 pub mod marquee;
+pub mod multi_load;
 pub mod oc;
 pub mod pipeline;
 pub mod robust;
@@ -35,6 +36,10 @@ pub use eigenfreq::{
 };
 pub use elasticity::DensityElasticity;
 pub use filter::{DensityFilter, heaviside, heaviside_derivative};
+pub use multi_load::{
+    MultiLoadOcIteration, MultiLoadOcOptions, MultiLoadOcReport, MultiLoadOcTermination,
+    multi_load_optimality_criteria,
+};
 pub use oc::{OcReport, optimality_criteria};
 pub use pipeline::{DesignPipeline, SimpParams};
 pub use robust::{RobustPipeline, RobustReport, ThreeField, robust_optimality_criteria};
