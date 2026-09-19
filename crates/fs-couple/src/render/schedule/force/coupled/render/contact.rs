@@ -83,3 +83,6 @@ impl ScheduledRenderer {
     }
 }
 fn invalid(what:&'static str)->RenderError {RenderError::Control {what}}
+
+/// Scheduled rendering of a simultaneously solved normal-contact set.
+pub mod multiple;

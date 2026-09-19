@@ -34,6 +34,7 @@ pub mod schedule;
 pub mod plate;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
+use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
@@ -474,6 +475,8 @@ pub enum RenderVoice {
     CoupledModal(Box<CoupledModalVoice>),
     /// Modal network with an implicit two-body unilateral contact.
     ContactModal(Box<ContactModalVoice>),
+    /// Modal network with a jointly solved set of compliant normal contacts.
+    MultiContactModal(Box<MultiContactModalVoice>),
 }
 
 /// The block render context: a set of voices summed into one observer
@@ -562,6 +565,7 @@ impl RenderContext {
                         });
                     }
                     match self.voices.get(*voice) {
+                        Some(RenderVoice::MultiContactModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::ContactModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::CoupledModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::ModalString(string)) => {
@@ -592,7 +596,7 @@ impl RenderContext {
                     }
                     match self.voices.get(*voice) {
                         Some(RenderVoice::ReedBore(_)) => {}
-                        Some(RenderVoice::CoupledModal(_) | RenderVoice::ContactModal(_)) => return Err(RenderError::Control {
+                        Some(RenderVoice::CoupledModal(_) | RenderVoice::ContactModal(_) | RenderVoice::MultiContactModal(_)) => return Err(RenderError::Control {
                             what: "a coupled modal network has no blowing pressure",
                         }),
                         Some(RenderVoice::CompactPlate(_)) => {
@@ -636,6 +640,7 @@ impl RenderContext {
                 } => {
                     match self.voices.get_mut(*voice) {
                         Some(RenderVoice::ModalString(string)) => string.held_force[*mode] = *force_n_per_sqrt_kg,
+                        Some(RenderVoice::MultiContactModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
                         Some(RenderVoice::ContactModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
                         Some(RenderVoice::CoupledModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
                         _ => unreachable!("complete control batch was admitted"),
@@ -671,6 +676,7 @@ impl RenderContext {
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
+                RenderVoice::MultiContactModal(network) => network.step_block(scratch),
                 RenderVoice::ContactModal(network) => network.step_block(scratch),
                 RenderVoice::CoupledModal(network) => network.step_block(scratch),
                 RenderVoice::CompactPlate(plate) => plate.step_block(scratch),
