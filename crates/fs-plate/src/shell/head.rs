@@ -7,6 +7,9 @@
 use super::profile::{ProfileBudget,ProfileStation,revolve};
 use crate::{AssemblyOptions,EdgeSupport,PlateError,PlateMesh,PlateModel,PlateSection,assemble};
 
+/// Geometric stretching with cold, statically condensed in-plane relaxation.
+pub mod nonlinear;
+
 /// Explicit circular film and numerical sampling.
 #[derive(Clone,Copy,Debug)]
 pub struct TensionedDiskSpec {
