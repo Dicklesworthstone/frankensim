@@ -233,3 +233,6 @@ fn charge(remaining: &mut usize, columns: &[Vec<f64>]) -> Result<(), RenderError
 
 fn control(what: &'static str) -> RenderError { RenderError::Control { what } }
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
+
+/// Bounded loading of authored modal images and physical force performances.
+pub mod file;
