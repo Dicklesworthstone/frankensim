@@ -2,7 +2,9 @@
 //!      --example adaptive_elastic_sdf3 -- 2 3 250000
 //! Arguments: rounds (1..=4), updates/round, total Krylov iterations, then
 //! optional enrichment preconditioner: two-level (default), jacobi, or identity.
-//! Setup applications are counted separately; optimization solves are unchanged.
+//! A fifth argument selects optimization preparation: jacobi (default) or
+//! two-level. Geometry transfer is built once per grid, numeric factors once per
+//! evaluated design, and shared by its loads. Setup applications remain separate.
 //! Dimensionless slab z<0.73, two independent body loads, projected volume cap 0.5.
 //! Between rounds, solve a one-level enriched physical design and Dörfler-mark
 //! its goal-weighted residual, capped at two cells. Report consistency terms
@@ -14,6 +16,7 @@ use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::octree3::{Octree3,Octant3};
 use fs_cutfem::elastic3::{ElasticityOptions3,adaptive::AdaptiveElasticity3};
 use fs_cutfem::quad3::{QuadratureControl3,QuadratureOptions3};
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptiveSolveOptions3,AdaptiveSolveSpace3};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use fs_topopt::{SimpParams,SolveControl,SolveBudget,MultiLoadOcOptions,MultiLoadOcTermination};
@@ -31,7 +34,7 @@ impl CutSdf3 for Slab {
 }
 fn main()->Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()>4{return Err("usage: adaptive_elastic_sdf3 [ROUNDS [UPDATES [TOTAL_KRYLOV_ITERATIONS [two-level|jacobi|identity]]]]".into());}
+    if args.len()>5{return Err("usage: adaptive_elastic_sdf3 [ROUNDS [UPDATES [TOTAL_KRYLOV_ITERATIONS [ENRICHMENT_MODE [OPTIMIZATION_MODE]]]]]".into());}
     let rounds=args.first().map_or(Ok(2),|s|s.parse::<usize>())?;
     let updates=args.get(1).map_or(Ok(3),|s|s.parse::<usize>())?;
     let budget=args.get(2).map_or(Ok(250000),|s|s.parse::<usize>())?;
@@ -43,11 +46,19 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         "two-level"=>GoalPreconditioner3::TwoLevel{budget:TwoLevelBudget::default(),max_diagonal_contributions:100_000_000},
         _=>return Err("preconditioner must be two-level, jacobi, or identity".into()),
     };
+    let optimization=args.get(4).map(String::as_str).unwrap_or("jacobi");
+    if !matches!(optimization,"jacobi"|"two-level") {return Err("optimization mode must be jacobi or two-level".into());}
     let mut tree=Octree3::uniform(1,5,2048)?;
     let domain=HexCell::try_new([0.0;3],[1.0;3])?;
     let material=IsotropicElastic::new(1.0,0.3,1.0)?;
     let mut geometry_poll=|_|ControlFlow::Continue(());
     let mut geometry=QuadratureControl3::new(QuadratureOptions3::default(),&mut geometry_poll)?;
+    // This coarse slab is only a correction space, never a physics substitute.
+    // Reuse its geometry across rounds; P is rebound to each new fine grid.
+    let correction=if optimization=="two-level" {
+        Some(AdaptiveElasticity3::build(domain,&Octree3::uniform(0,5,2048)?,&Slab,&material,
+            &|p|p[0]==0.0,ElasticityOptions3::default(),&mut geometry)?)
+    } else {None};
     let mut solve_poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget{total_iterations:budget,..Default::default()},&mut solve_poll);
     let mut previous:Option<(Vec<Octant3>,Vec<f64>)>=None;
@@ -58,9 +69,13 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         let op=AdaptiveElasticity3::build(domain,&tree,&Slab,&material,&|p|p[0]==0.0,ElasticityOptions3::default(),&mut geometry)?;
         let y=op.body_load(&body_y,||ControlFlow::Continue(()))?;
         let z=op.body_load(&body_z,||ControlFlow::Continue(()))?;
+        let op=match &correction {
+            Some(coarse)=>AdaptiveSolveSpace3::two_level(op,coarse,AdaptiveSolveOptions3::default(),||ControlFlow::Continue(()))?,
+            None=>AdaptiveSolveSpace3::jacobi(op,100_000_000),
+        };
         let mut study=CutDensityStudy3::new(op,0.15,SimpParams::default());
         let raw=match &previous {
-            Some((leaves,rho))=>inherit_raw_densities3(leaves,rho,study.operator().leaves(),&mut control)?,
+            Some((leaves,rho))=>inherit_raw_densities3(leaves,rho,study.operator().elasticity().leaves(),&mut control)?,
             None=>vec![0.5;study.cells()],
         };
         let rho=study.feasible_start(&raw,0.5,1e-8,&mut control)?;
@@ -68,8 +83,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         let report=controlled_sdf3_optimality_criteria(&mut study,&loads,&rho,
             MultiLoadOcOptions{max_iterations:updates,..Default::default()},&mut control);
         for row in &report.history {println!("{round},{},{},{},{},{:.17e},{:.17e}",
-            tree.leaves().len(),study.cells(),study.operator().nodes().len(),row.iteration,row.compliance,row.volume_fraction);}
-        eprintln!("round={round} termination={:?} cumulative_krylov={} continuum_certified=false",report.termination,report.work.linear_iterations);
+            tree.leaves().len(),study.cells(),study.operator().elasticity().nodes().len(),row.iteration,row.compliance,row.volume_fraction);}
+        eprintln!("round={round} termination={:?} optimization_preconditioner={optimization} cumulative_krylov={} cumulative_setup_applications={} continuum_certified=false",report.termination,report.work.linear_iterations,report.work.preconditioner_operator_applications);
         if matches!(report.termination,MultiLoadOcTermination::Cancelled|MultiLoadOcTermination::LinearBudget|MultiLoadOcTermination::NumericalFailure) {
             return Err(format!("stopped with accepted prefix: {:?}",report.evaluation_stop).into());
         }
@@ -85,7 +100,7 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
         eprintln!("round={round} hierarchical_dwr={dwr:.9e} coarse_space={consistency:.9e} two_grid_change={:.9e} marking_fraction={:.6} target_met={} cumulative_krylov={} preconditioner={solver} cumulative_setup_applications={}",
             goal.correction,marked.achieved_fraction,marked.target_met,goal.work.linear_iterations,goal.work.preconditioner_operator_applications);
         if marked.marked.is_empty(){eprintln!("no numerical refinement signal; this is not an accuracy certificate");break;}
-        previous=Some((study.operator().leaves().to_vec(),report.rho));
+        previous=Some((study.operator().elasticity().leaves().to_vec(),report.rho));
         tree=tree.refined(&marked.marked,||ControlFlow::Continue(()))?;
     }
     Ok(())

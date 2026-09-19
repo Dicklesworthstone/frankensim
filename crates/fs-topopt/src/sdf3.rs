@@ -12,10 +12,11 @@
 
 mod operator;
 mod refine;
-pub use operator::Sdf3Elasticity;
+pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
 use fs_cutfem::elastic3::CutElasticity3;
 use fs_solver::op::{CsrOp, LinearOp};
+use fs_sparse::precond::{IdentityPrecond, Precond};
 use crate::control::{EvaluationStop, SolveControl};
 use crate::filter::{heaviside, heaviside_derivative};
 use crate::multi_load::{MultiLoadOcIteration, MultiLoadOcOptions, MultiLoadOcReport, MultiLoadOcTermination};
@@ -131,6 +132,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// chain. All filter, load and pullback solves share the existing SolveControl.
     /// Invalid inputs panic before mutation. Any returned stop restores scales;
     /// no partial load family or gradient is usable as an evaluation.
+    /// An explicitly preconditioned backend prepares once per evaluated design,
+    /// not once per load. Its setup work is retained even on a rejected trial.
+    /// Bare backends preserve the original identity-preconditioned arithmetic.
     pub fn evaluate(&mut self,rho:&[f64],loads:&[LoadCase<'_>],control:&mut SolveControl<'_>)
         -> Result<CutDensityEvaluation3,EvaluationStop> {
         control.checkpoint("sdf3-evaluation")?;
@@ -144,6 +148,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales).map_err(|_|failure("sdf3-scales"))?;
         let result = (|| {
+            // Prepared once at this exact density, then shared by all loads.
+            // Its immutable borrow ends before any rollback or next trial.
+            let prepared = self.operator.prepare_elasticity(control)?;
             let mut compliance = 0.0;
             let mut local = vec![0.0;self.cells()];
             let mut displacements = Vec::with_capacity(loads.len());
@@ -151,7 +158,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             for load in loads {
                 control.checkpoint("sdf3-elasticity")?;
                 let rhs: Vec<f64> = load.force.iter().enumerate().map(|(i,&f)|if self.operator.fixed()[i/3] {0.0}else{f}).collect();
-                let u = checked_solve(&self.operator,&rhs,1e-11,"sdf3-elasticity",control)?;
+                let u = checked_solve_preconditioned(&self.operator,&prepared,&rhs,1e-11,"sdf3-elasticity",control)?;
                 let c: f64 = rhs.iter().zip(&u).map(|(f,u)|f*u).sum();
                 compliance += load.weight*c;
                 let energies = self.operator.scale_quadratic_forms(&u).map_err(|_|failure("sdf3-energy"))?;
@@ -183,7 +190,11 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
 // solve, this adapter refuses a failed residual gate instead of restarting.
 fn checked_solve(op:&impl LinearOp,rhs:&[f64],tol:f64,stage:&'static str,control:&mut SolveControl<'_>)
     -> Result<Vec<f64>,EvaluationStop> {
-    let x = control.solve(op,rhs,0.1*tol,50_000,stage)?;
+    checked_solve_preconditioned(op,&IdentityPrecond,rhs,tol,stage,control)
+}
+fn checked_solve_preconditioned(op:&impl LinearOp,preconditioner:&impl Precond,rhs:&[f64],tol:f64,
+    stage:&'static str,control:&mut SolveControl<'_>) -> Result<Vec<f64>,EvaluationStop> {
+    let x = control.solve_preconditioned(op,preconditioner,rhs,0.1*tol,50_000,stage)?;
     control.checkpoint("sdf3-true-residual")?;
     let mut applied = vec![0.0;rhs.len()]; op.apply(&x,&mut applied);
     let scale = rhs.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);

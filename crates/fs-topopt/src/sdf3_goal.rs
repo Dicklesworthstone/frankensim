@@ -11,7 +11,7 @@ use fs_solver::op::two_level::{AdditiveTwoLevel, TwoLevelBudget, TwoLevelError};
 use fs_sparse::precond::Precond;
 use fs_dwr::elasticity3::{GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3, estimate_goal3};
 use crate::{EvaluationStop, SolveControl, SolveWork};
-use crate::sdf3::CutDensityStudy3;
+use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3};
 
 /// One independent dead body-force density with its objective weight.
 /// The callback must be pure and identical to the accepted coarse solve's law.
@@ -136,7 +136,7 @@ impl ComplianceRefinement3 {
         dorfler3(&self.marking_mass, theta, max_marks, checkpoint)
     }
 }
-impl CutDensityStudy3<AdaptiveElasticity3> {
+impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// Estimate the current accepted design using one enriched solve per case.
     ///
     /// `coarse_displacements` must be the complete accepted fields, in body-load
@@ -164,13 +164,14 @@ impl CutDensityStudy3<AdaptiveElasticity3> {
             || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0) {
             return Err(GoalRefinementError3::Invalid("invalid load family or numerical/resource policy"));
         }
-        let scales = AdaptiveTransfer3::new(self.operator(), &enriched, options.max_transfer_terms, || poll(control))?.inherited_scales();
+        let coarse_operator = self.operator().adaptive();
+        let scales = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?.inherited_scales();
         enriched.set_scales(&scales)?;
-        let transfer = AdaptiveTransfer3::new(self.operator(), &enriched, options.max_transfer_terms, || poll(control))?;
+        let transfer = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?;
         for (load, coarse) in loads.iter().zip(coarse_displacements) {
             // Reject the entire stale family BEFORE spending setup or a fine solve.
-            let rhs_coarse = self.operator().body_load(load.density, || poll(control))?;
-            let residual = self.operator().field_residual(coarse, &rhs_coarse, || poll(control))?;
+            let rhs_coarse = coarse_operator.body_load(load.density, || poll(control))?;
+            let residual = coarse_operator.field_residual(coarse, &rhs_coarse, || poll(control))?;
             if residual > options.numerical.residual_tolerance {
                 return Err(GoalError3::FieldResidual { field: "coarse-primal", value: residual }.into());
             }

@@ -59,3 +59,7 @@ required-features = ["cutfem-marquee"]
 [[test]]
 name = "sdf3_goal"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "preconditioned_sdf3"
+required-features = ["cutfem-marquee"]
