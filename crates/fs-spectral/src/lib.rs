@@ -41,6 +41,7 @@ use fs_evidence::{Color, ColorRank};
 pub mod adapter;
 pub mod admission;
 pub mod bridge;
+pub mod generalized;
 pub mod service;
 pub mod truth;
 
