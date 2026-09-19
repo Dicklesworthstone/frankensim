@@ -15,6 +15,13 @@
 //! closes their work exactly. Linear component damping is dissipative. The
 //! coupling is second-order consistent, NOT the exact full coupled propagator.
 //! No new oscillator, eigensolver or matrix factorization is implemented here.
+//!
+//! All unison members and duplex segments of a course share its bridge shape.
+//! Reduce partial forces BEFORE projecting to the board, and project board
+//! displacement ONCE per course. This exact reassociation changes roundoff,
+//! not the retained model: O(partials + courses*board_modes + board_modes^2)
+//! stepping replaces repeated O(partials*board_modes) projections. Silent
+//! strings still participate; no voice stealing or sympathetic-tail cutoff.
 
 use std::f64::consts::{PI, TAU};
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
@@ -130,6 +137,8 @@ pub struct Bank {
     pub free_contact: Vec<f64>,
     pub rate: u32,
     pub omitted_duplex_modes: usize,
+    /// Contiguous strings sharing one physical course bridge; prepared cold.
+    groups: Vec<std::ops::Range<usize>>,
     transition: Vec<Transition>,
     diagonal_omega2: Vec<f64>,
     pub last_modal_loss_j: f64,
@@ -165,6 +174,7 @@ impl Bank {
             }
         }
         let mut strings = Vec::new();
+        let mut groups = Vec::with_capacity(courses.len());
         let mut modes = Vec::new();
         let mut contact_strings = Vec::new();
         let mut oscillator = Vec::new();
@@ -180,6 +190,7 @@ impl Bank {
         let mut omitted_duplex_modes = 0;
         for (ci, c) in courses.iter().enumerate() {
             c.validate()?;
+            let group_start = strings.len();
             for member in 0..c.unison {
                 let cents = (member as f64 - 0.5*(c.unison-1) as f64)*c.detune_cents;
                 let tension = c.tension_at_cents(cents)?;
@@ -189,6 +200,7 @@ impl Bank {
                     let start = modes.len();
                     let si = strings.len();
                     let mut beta2 = 0.0;
+                    let mut modal_endpoint_k = 0.0;
                     let mut hammer_lift = c.strike_fraction;
                     let mut damper_lift = 0.35; // authored station, replace for measured dampers
                     let bridge: Vec<f64> = board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect();
@@ -208,11 +220,9 @@ impl Bank {
                         modes.push(StringMode { omega, beta, a: omega*omega*beta,
                             hammer_shape, damper_shape, string: si });
                         beta2 += beta*beta;
+                        modal_endpoint_k += omega*omega*beta*beta;
                         hammer_lift -= hammer_shape*beta;
                         damper_lift -= damper_shape*beta;
-                        for i in 0..r { for j in 0..r {
-                            loaded_add[i*r+j] += omega*omega*beta*beta*bridge[i]*bridge[j];
-                        } }
                     }
                     if modes.len() == start {
                         if !duplex { return Err(format!("key {} fundamental exceeds the output band",c.midi)); }
@@ -223,6 +233,7 @@ impl Bank {
                     for i in 0..r { for j in 0..r {
                         mass[i*r+j] += residual_mass*bridge[i]*bridge[j];
                         endpoint_k[i*r+j] += tension/card.length_m*bridge[i]*bridge[j];
+                        loaded_add[i*r+j] += modal_endpoint_k*bridge[i]*bridge[j];
                     } }
                     let contact = if duplex { None } else {
                         let index = contact_strings.len(); contact_strings.push(si); Some(index)
@@ -231,6 +242,7 @@ impl Bank {
                         hammer_lift, damper_lift, contact });
                 }
             }
+            groups.push(group_start..strings.len());
         }
         let loaded: Vec<f64> = endpoint_k.iter().zip(&loaded_add).map(|(x,y)| x+y).collect();
         let eig = fs_modal::eigh_gen_dense(&loaded, &mass, r).map_err(|e| e.to_string())?;
@@ -245,10 +257,17 @@ impl Bank {
         for s in &mut strings {
             s.bridge = eig.iter().map(|e| s.bridge.iter().zip(&e.phi).map(|(g,p)| g*p).sum()).collect();
         }
+        // Phi^T K Phi as two products, not one O(r^4) scalar expansion.
+        let mut k_phi = vec![0.0; r*r];
+        for a in 0..r { for j in 0..r {
+            k_phi[a*r+j] = (0..r).map(|b| endpoint_k[a*r+b]*board_basis[b*r+j]).sum();
+        } }
         let mut physical_board_k = vec![0.0; r*r];
-        for i in 0..r { for j in 0..r { for a in 0..r { for b in 0..r {
-            physical_board_k[i*r+j] += eig[i].phi[a]*endpoint_k[a*r+b]*eig[j].phi[b];
-        } } } }
+        for i in 0..r { for j in i..r {
+            let value = (0..r).map(|a| board_basis[a*r+i]*k_phi[a*r+j]).sum();
+            physical_board_k[i*r+j] = value;
+            physical_board_k[j*r+i] = value;
+        } }
         let board_volume: Vec<f64> = eig.iter().map(|e| board.iter().zip(&e.phi).map(|(b,p)| b.volume*p).sum()).collect();
         for e in &eig {
             // Loaded-coordinate modal damping is an authored reduction. It
@@ -262,9 +281,9 @@ impl Bank {
         let nc = contact_strings.len();
         let mut schur = vec![0.0; r*r];
         for i in 0..r { schur[i*r+i] = 1.0/transition[n+i].bq; }
-        for (m,t) in modes.iter().zip(&transition) {
-            let g = &strings[m.string].bridge;
-            for i in 0..r { for j in 0..r { schur[i*r+j] -= 0.25*m.a*m.a*t.bq*g[i]*g[j]; } }
+        for s in &strings {
+            let weight: f64 = s.modes.clone().map(|k| 0.25*modes[k].a*modes[k].a*transition[k].bq).sum();
+            for i in 0..r { for j in 0..r { schur[i*r+j] -= weight*s.bridge[i]*s.bridge[j]; } }
         }
         let schur_inverse = inverse_spd(&schur,r)?;
         let mut contact_board = vec![0.0; nc*r];
@@ -278,10 +297,17 @@ impl Bank {
             }
             for j in 0..r { contact_board[c*r+j] = lift*s.bridge[j]; }
         }
-        for i in 0..nc { for j in 0..nc { for a in 0..r { for b in 0..r {
-            contact_compliance[i*nc+j] += contact_board[i*r+a]*schur_inverse[a*r+b]*contact_board[j*r+b];
-        } } } }
-        Ok(Self { strings,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
+        // W S^-1 W^T in O(nc*r^2 + nc^2*r), not O(nc^2*r^2).
+        let mut response = vec![0.0; nc*r];
+        for c in 0..nc { for a in 0..r {
+            response[c*r+a] = (0..r).map(|b| schur_inverse[a*r+b]*contact_board[c*r+b]).sum();
+        } }
+        for i in 0..nc { for j in i..nc {
+            let value: f64 = (0..r).map(|a| contact_board[i*r+a]*response[j*r+a]).sum();
+            contact_compliance[i*nc+j] += value;
+            if i != j { contact_compliance[j*nc+i] = contact_compliance[i*nc+j]; }
+        } }
+        Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
             free_contact:vec![0.0;nc],rate,omitted_duplex_modes,transition,physical_board_k,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
@@ -318,23 +344,36 @@ impl Bank {
             self.free_v[k]=t.vq*self.q[k]+t.vv*self.v[k];
         }
         for j in 0..r { self.board_rhs[j]=self.free_q[n+j]/self.transition[n+j].bq; }
-        for (k,m) in self.modes.iter().enumerate() {
-            let g=&self.strings[m.string].bridge;
+        for group in &self.groups {
+            let g=&self.strings[group.start].bridge;
             let b0=g.iter().zip(&self.q[n..]).map(|(g,q)| g*q).sum::<f64>();
-            let rs=self.free_q[k]+0.5*self.transition[k].bq*m.a*b0;
-            self.r_string[k]=rs;
-            for j in 0..r { self.board_rhs[j]+=0.5*m.a*g[j]*(self.q[k]+rs); }
+            let mut reaction=0.0;
+            for si in group.clone() { for k in self.strings[si].modes.clone() {
+                let m=self.modes[k];
+                let rs=self.free_q[k]+0.5*self.transition[k].bq*m.a*b0;
+                self.r_string[k]=rs;
+                reaction+=0.5*m.a*(self.q[k]+rs);
+            } }
+            for (rhs,g) in self.board_rhs.iter_mut().zip(g) { *rhs+=g*reaction; }
         }
         for j in 0..r {
             self.board_end[j]=(0..r).map(|k| self.schur_inverse[j*r+k]*self.board_rhs[k]).sum();
             self.next_q[n+j]=self.board_end[j];
         }
-        for (k,m) in self.modes.iter().enumerate() {
-            let g=&self.strings[m.string].bridge;
-            self.next_q[k]=self.r_string[k]+0.5*self.transition[k].bq*m.a
-                *g.iter().zip(&self.board_end).map(|(g,q)| g*q).sum::<f64>();
+        for group in &self.groups {
+            let g=&self.strings[group.start].bridge;
+            let b1=g.iter().zip(&self.board_end).map(|(g,q)| g*q).sum::<f64>();
+            for si in group.clone() {
+                let s=&self.strings[si];
+                let mut position=s.hammer_lift*b1;
+                for k in s.modes.clone() {
+                    let m=self.modes[k];
+                    self.next_q[k]=self.r_string[k]+0.5*self.transition[k].bq*m.a*b1;
+                    position+=m.hammer_shape*self.next_q[k];
+                }
+                if let Some(c)=s.contact { self.free_contact[c]=position; }
+            }
         }
-        for c in 0..self.contact_strings.len() { self.free_contact[c]=self.contact_position(c,&self.next_q); }
     }
 
     /// Finish the SAME prediction with held contact forces [N]. Candidate
@@ -342,33 +381,37 @@ impl Bank {
     pub fn finish(&mut self, forces: &[f64]) {
         let n=self.modes.len();let r=self.board_count;
         self.last_modal_loss_j=0.0;
+        // Build W^T F once. The former j,a,c nesting rebuilt this RHS r times.
+        self.board_rhs.fill(0.0);
+        for (c,&force) in forces.iter().enumerate() {
+            if force==0.0 { continue; }
+            for a in 0..r { self.board_rhs[a]+=self.contact_board[c*r+a]*force; }
+        }
         for j in 0..r {
-            let mut response=0.0;
-            for a in 0..r {
-                let rhs=(0..forces.len()).map(|c|self.contact_board[c*r+a]*forces[c]).sum::<f64>();
-                response+=self.schur_inverse[j*r+a]*rhs;
-            }
+            let response: f64=(0..r).map(|a| self.schur_inverse[j*r+a]*self.board_rhs[a]).sum();
             self.next_q[n+j]=self.board_end[j]+response;
         }
-        for (k,m) in self.modes.iter().enumerate() {
-            let s=&self.strings[m.string];
-            let bbar=s.bridge.iter().enumerate().map(|(j,g)|g*0.5*(self.q[n+j]+self.next_q[n+j])).sum::<f64>();
-            let contact=s.contact.map_or(0.0,|c|forces[c]*m.hammer_shape);
-            let f=m.a*bbar+contact;
-            self.next_q[k]=self.free_q[k]+self.transition[k].bq*f;
-            self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
-            self.last_modal_loss_j+=f*(self.next_q[k]-self.q[k])-0.5*(
-                self.next_v[k].powi(2)-self.v[k].powi(2)
-                +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
-        }
         self.board_rhs.fill(0.0);
-        for (k,m) in self.modes.iter().enumerate() {
-            let g=&self.strings[m.string].bridge;
-            for j in 0..r { self.board_rhs[j]+=m.a*g[j]*0.5*(self.q[k]+self.next_q[k]); }
-        }
-        for (c,&si) in self.contact_strings.iter().enumerate() {
-            let s=&self.strings[si];
-            for j in 0..r { self.board_rhs[j]+=s.hammer_lift*s.bridge[j]*forces[c]; }
+        for group in &self.groups {
+            let g=&self.strings[group.start].bridge;
+            let bbar=g.iter().enumerate().map(|(j,g)|g*0.5*(self.q[n+j]+self.next_q[n+j])).sum::<f64>();
+            let mut reaction=0.0;
+            for si in group.clone() {
+                let s=&self.strings[si];
+                let contact=s.contact.map_or(0.0,|c|forces[c]);
+                reaction+=s.hammer_lift*contact;
+                for k in s.modes.clone() {
+                    let m=self.modes[k];
+                    let f=m.a*bbar+contact*m.hammer_shape;
+                    self.next_q[k]=self.free_q[k]+self.transition[k].bq*f;
+                    self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
+                    reaction+=m.a*0.5*(self.q[k]+self.next_q[k]);
+                    self.last_modal_loss_j+=f*(self.next_q[k]-self.q[k])-0.5*(
+                        self.next_v[k].powi(2)-self.v[k].powi(2)
+                        +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
+                }
+            }
+            for (rhs,g) in self.board_rhs.iter_mut().zip(g) { *rhs+=g*reaction; }
         }
         for j in 0..r {
             let k=n+j;let f=self.board_rhs[j];
@@ -385,9 +428,12 @@ impl Bank {
     pub fn energy_at(&self,q:&[f64],v:&[f64])->f64 {
         let n=self.modes.len();let r=self.board_count;
         let mut energy=0.5*v.iter().map(|x|x*x).sum::<f64>();
-        for (k,m) in self.modes.iter().enumerate() {
-            let b=self.strings[m.string].bridge.iter().zip(&q[n..]).map(|(g,q)|g*q).sum::<f64>();
-            energy+=0.5*m.omega.powi(2)*(q[k]-m.beta*b).powi(2);
+        for group in &self.groups {
+            let b=self.strings[group.start].bridge.iter().zip(&q[n..]).map(|(g,q)|g*q).sum::<f64>();
+            for si in group.clone() { for k in self.strings[si].modes.clone() {
+                let m=self.modes[k];
+                energy+=0.5*m.omega.powi(2)*(q[k]-m.beta*b).powi(2);
+            } }
         }
         for i in 0..r { for j in 0..r {energy+=0.5*q[n+i]*self.physical_board_k[i*r+j]*q[n+j];} }
         energy
@@ -456,5 +502,88 @@ mod tests {
         let observed=projected.iter().zip(&b.v[b.modes.len()..]).map(|(g,v)|g*v).sum::<f64>();
         assert_eq!(observed,b.volume_velocity());
         assert!(b.project_board_shape(&[]).is_err());
+    }
+
+    /// The former scalar expansion, independent of the course grouping.
+    /// Kept only as a small direct regression oracle, not another runtime image.
+    fn unfactored(b:&Bank, forces:&[f64])->(Vec<f64>,Vec<f64>,Vec<f64>,f64) {
+        let n=b.modes.len();let r=b.board_count;
+        let fq:Vec<f64>=(0..n+r).map(|k|b.transition[k].qq*b.q[k]+b.transition[k].qv*b.v[k]).collect();
+        let fv:Vec<f64>=(0..n+r).map(|k|b.transition[k].vq*b.q[k]+b.transition[k].vv*b.v[k]).collect();
+        let mut rhs:Vec<f64>=(0..r).map(|j|fq[n+j]/b.transition[n+j].bq).collect();
+        let mut rs=vec![0.0;n];
+        for (k,m) in b.modes.iter().enumerate() {
+            let g=&b.strings[m.string].bridge;
+            let b0=g.iter().zip(&b.q[n..]).map(|(g,q)|g*q).sum::<f64>();
+            rs[k]=fq[k]+0.5*b.transition[k].bq*m.a*b0;
+            for j in 0..r {rhs[j]+=0.5*m.a*g[j]*(b.q[k]+rs[k]);}
+        }
+        let end:Vec<f64>=(0..r).map(|j|(0..r).map(|a|b.schur_inverse[j*r+a]*rhs[a]).sum()).collect();
+        let mut q=vec![0.0;n+r];let mut v=vec![0.0;n+r];q[n..].copy_from_slice(&end);
+        for (k,m) in b.modes.iter().enumerate() {
+            let b1=b.strings[m.string].bridge.iter().zip(&end).map(|(g,q)|g*q).sum::<f64>();
+            q[k]=rs[k]+0.5*b.transition[k].bq*m.a*b1;
+        }
+        let free=(0..forces.len()).map(|c|b.contact_position(c,&q)).collect();
+        for j in 0..r {for a in 0..r {
+            let f=(0..forces.len()).map(|c|b.contact_board[c*r+a]*forces[c]).sum::<f64>();
+            q[n+j]+=b.schur_inverse[j*r+a]*f;
+        }}
+        let mut loss=0.0;
+        for (k,m) in b.modes.iter().enumerate() {
+            let s=&b.strings[m.string];
+            let bbar=(0..r).map(|j|s.bridge[j]*0.5*(b.q[n+j]+q[n+j])).sum::<f64>();
+            let f=m.a*bbar+s.contact.map_or(0.0,|c|forces[c]*m.hammer_shape);
+            q[k]=fq[k]+b.transition[k].bq*f;v[k]=fv[k]+b.transition[k].bv*f;
+            loss+=f*(q[k]-b.q[k])-0.5*(v[k]*v[k]-b.v[k]*b.v[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
+        }
+        rhs.fill(0.0);
+        for (k,m) in b.modes.iter().enumerate() {for j in 0..r {
+            rhs[j]+=m.a*b.strings[m.string].bridge[j]*0.5*(b.q[k]+q[k]);
+        }}
+        for (c,&si) in b.contact_strings.iter().enumerate() {for j in 0..r {
+            rhs[j]+=b.strings[si].hammer_lift*b.strings[si].bridge[j]*forces[c];
+        }}
+        for j in 0..r {
+            let k=n+j;v[k]=fv[k]+b.transition[k].bv*rhs[j];
+            loss+=rhs[j]*(q[k]-b.q[k])-0.5*(v[k]*v[k]-b.v[k]*b.v[k]+b.diagonal_omega2[k]*(q[k]*q[k]-b.q[k]*b.q[k]));
+        }
+        (free,q,v,loss)
+    }
+    fn close(a:&[f64],b:&[f64]) {
+        assert_eq!(a.len(),b.len());
+        for (x,y) in a.iter().zip(b) {assert!((x-y).abs()<2e-12*(1.0+x.abs().max(y.abs())),"{x:e} != {y:e}");}
+    }
+    #[test]
+    fn grouped_bridge_matches_unfactored_dynamics_with_unisons_and_duplexes() {
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let courses=[scale[0],scale[39],scale[48]];
+        for damped in [false,true] {
+            let mut b=Bank::new(&courses,&super::super::board::demonstration(),192_000,21_600.0,24,damped).unwrap();
+            assert_eq!(b.groups.len(),courses.len());
+            for group in &b.groups {for si in group.clone() {
+                assert_eq!(b.strings[si].bridge,b.strings[group.start].bridge);
+            }}
+            for k in 0..b.q.len(){b.q[k]=1e-9*det::sin(k as f64);b.v[k]=1e-4*det::cos(k as f64);}
+            for sample in 0..64 {
+                let force:Vec<f64>=(0..b.contact_strings.len()).map(|c|0.5*det::sin((c+sample) as f64)).collect();
+                let (free,q,v,loss)=unfactored(&b,&force);
+                b.predict();close(&free,&b.free_contact);b.finish(&force);
+                close(&q,&b.next_q);close(&v,&b.next_v);
+                assert!((loss-b.last_modal_loss_j).abs()<1e-12);
+                b.commit();
+            }
+        }
+    }
+    #[test]
+    fn factored_contact_operator_reproduces_each_unit_force_column() {
+        let mut b=bank(false);let nc=b.contact_strings.len();let mut forces=vec![0.0;nc];
+        for c in 0..nc {
+            forces.fill(0.0);forces[c]=1.0;b.predict();b.finish(&forces);
+            for i in 0..nc {
+                let actual=b.contact_position(i,&b.next_q)-b.free_contact[i];
+                assert!((actual-b.contact_compliance[i*nc+c]).abs()<1e-14);
+            }
+        }
     }
 }
