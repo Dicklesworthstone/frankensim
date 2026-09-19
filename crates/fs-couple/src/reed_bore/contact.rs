@@ -1,8 +1,10 @@
-//! Implicit, nonadhesive lay contact in the characteristic reed step.
+//! Implicit moving-aperture and nonadhesive lay contact in the reed step.
 //!
-//! Contact uses the existing PHS discrete gradient of fs-dcontact storage.
-//! Aperture geometry is still held over a step: this closes contact work,
-//! not the whole-bore energy or material-validation obligations of MR68.
+//! Opening, velocity, pressure and contact work share one midpoint state.
+//! The contact potential remains fs-dcontact-owned. Incoming characteristic
+//! pressure and external body flow are held inputs, not an implicit whole-bore
+//! or plate solve. The existing Bernoulli dead zone is unchanged; second-order
+//! accuracy is claimed only on smooth branches, away from contact switches.
 
 use super::{
     AcousticRealizeError, BeatingReed, FastSolveStats, Obstacle, ReedSolverMode,
@@ -17,10 +19,13 @@ struct Trial {
     state: (f64, f64, f64),
 }
 
+fn resolved(trial: Trial) -> bool {
+    trial.residual.abs() <= 1e-13 * trial.scale.max(f64::MIN_POSITIVE)
+}
+
 fn finish(trial: Trial) -> Result<(f64, f64, f64), AcousticRealizeError> {
-    // A narrow bracket is not permission to accept a discontinuity or an
-    // unresolved equation. This is an impulse residual, not a pressure-scaled
-    // flow tolerance. The scale is the sum of the actual equation terms.
+    // Adjacent floating-point endpoints alone cannot establish convergence.
+    // The equation and its scale are impulses, not pressure-scaled flows.
     if trial.residual.abs() > 2e-11 * trial.scale.max(f64::MIN_POSITIVE) {
         return Err(AcousticRealizeError::Reed {
             what: "implicit reed contact did not resolve the momentum balance",
@@ -29,9 +34,7 @@ fn finish(trial: Trial) -> Result<(f64, f64, f64), AcousticRealizeError> {
     Ok(trial.state)
 }
 
-// Ordered binary64 keys give a bounded refinement even at subnormal roots.
-// For finite lo < hi, their midpoint key is finite and inside the bracket.
-// Keep -0 and +0 adjacent; neither mapping relies on unsafe code.
+// Ordered binary64 keys bound refinement even for subnormal velocities.
 fn velocity_key(value: f64) -> u64 {
     let bits = value.to_bits();
     if bits >> 63 == 0 {
@@ -96,8 +99,8 @@ pub(super) fn step(
     }
     let contact = SlitContactStep::new(lay, y)
         .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-    // Preserve the established no-contact trajectory bit for bit when its
-    // entire linear-in-time opening segment has zero contact potential.
+    // The held-aperture solve is a predictor only. Even free flight must solve
+    // again: changing opening changes jet flow and hence the pressure load.
     let free = super::step_massive_reed(
         reed,
         rho,
@@ -112,14 +115,6 @@ pub(super) fn step(
         ReedSolverMode::Strict,
         &mut FastSolveStats::default(),
     )?;
-    if contact
-        .coefficients(free.1)
-        .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?
-        .0
-        == 0.0
-    {
-        return Ok(free);
-    }
     let face = reed_pressure_face(reed);
     let (stiffness, damping) = reed_structural(reed);
     let half_dt = 0.5 * dt;
@@ -135,13 +130,13 @@ pub(super) fn step(
         let (elastic, contact_loss) = contact
             .coefficients(next_y)
             .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-        // For a convex obstacle potential, elastic decreases with velocity.
-        // This nonadhesive force and the passive bore load therefore leave
-        // a monotone scalar momentum equation, including contact crossings.
         let force = (elastic - contact_loss * velocity).max(0.0);
+        // Clamp the MIDPOINT opening, not each endpoint separately. This is
+        // the same configuration used by the midpoint spring and velocity.
+        let opening = f64::midpoint(y, next_y).max(0.0);
         let outgoing = solve_moving_aperture_wave(
             reed.width_m,
-            y.max(0.0),
+            opening,
             rho,
             zc,
             p_minus,
@@ -168,6 +163,11 @@ pub(super) fn step(
             state: (outgoing, next_y, next_v),
         })
     };
+    let mut velocity = f64::midpoint(v, free.2);
+    let mut current = evaluate(velocity)?;
+    if resolved(current) {
+        return finish(current);
+    }
     let mut span = v.abs().max((rhs / mass_mid).abs()).max(1.0);
     let (mut lo, mut hi) = (-span, span);
     let (mut left, mut right) = (evaluate(lo)?, evaluate(hi)?);
@@ -190,9 +190,49 @@ pub(super) fn step(
             what: "implicit reed contact could not bracket the momentum balance",
         });
     }
+    // Bounded, safeguarded Newton avoids exhaustive nested bisection on each
+    // smooth audio sample. The aperture feedback need not be globally monotone:
+    // every accepted trial still solves the original equation, and a failed
+    // acceleration falls back to the retained sign-changing bracket.
+    for _ in 0..8 {
+        if velocity <= lo || velocity >= hi {
+            break;
+        }
+        if resolved(current) {
+            return finish(current);
+        }
+        if current.residual < 0.0 {
+            lo = velocity;
+            left = current;
+        } else {
+            hi = velocity;
+            right = current;
+        }
+        let increment = 1e-6 * (1.0 + velocity.abs());
+        let lower = (velocity - increment).max(lo);
+        let upper = (velocity + increment).min(hi);
+        if upper <= lower {
+            break;
+        }
+        let slope = (evaluate(upper)?.residual - evaluate(lower)?.residual) / (upper - lower);
+        if !slope.is_finite() || slope <= 0.0 {
+            break;
+        }
+        let candidate = velocity - current.residual / slope;
+        if !candidate.is_finite() || candidate <= lo || candidate >= hi {
+            break;
+        }
+        let next = evaluate(candidate)?;
+        if next.residual.abs() >= current.residual.abs() {
+            break;
+        }
+        velocity = candidate;
+        current = next;
+    }
+    // No uniqueness or branch-independent result is inferred from bisection.
     for _ in 0..=64 {
         let (low_key, high_key) = (velocity_key(lo), velocity_key(hi));
-        if left.residual == 0.0 || right.residual == 0.0 || high_key - low_key <= 1 {
+        if resolved(left) || resolved(right) || high_key - low_key <= 1 {
             return finish(if left.residual.abs() <= right.residual.abs() {
                 left
             } else {
@@ -201,7 +241,7 @@ pub(super) fn step(
         }
         let mid = from_velocity_key(low_key + (high_key - low_key) / 2);
         let trial = evaluate(mid)?;
-        if trial.residual == 0.0 {
+        if resolved(trial) {
             return finish(trial);
         }
         if trial.residual < 0.0 {
@@ -247,8 +287,7 @@ mod tests {
                     .unwrap()
                     .with_internal_loss(internal_loss)
                     .unwrap();
-                // Independent analytical power-law energy, not the adapter's
-                // gradient or the solver's own acceptance residual.
+                // Independent analytical potential, not the solver's gradient.
                 let potential = |opening: f64| {
                     1e8 * (-opening).max(0.0).powf(alpha + 1.0) / (alpha + 1.0)
                 };
@@ -262,42 +301,34 @@ mod tests {
                         for dt in [1e-6, 1e-5, 1e-4, 5e-4] {
                             for mouth in [-500.0, 0.0, 500.0, 10000.0] {
                                 let (pressure, y1, v1) = super::super::step_massive_reed(
-                                    reed,
-                                    rho,
-                                    zc,
-                                    incoming,
-                                    mouth,
-                                    y,
-                                    v,
-                                    dt,
-                                    body,
-                                    Some(&lay),
-                                    ReedSolverMode::Strict,
+                                    reed, rho, zc, incoming, mouth, y, v, dt, body,
+                                    Some(&lay), ReedSolverMode::Strict,
                                     &mut FastSolveStats::default(),
-                                )
-                                .unwrap();
+                                ).unwrap();
                                 let vm = 0.5 * (v + v1);
                                 let dp = mouth - (pressure + incoming);
-                                let jet = reed.width_m
-                                    * y.max(0.0)
-                                    * dp.signum()
+                                let opening = (0.5 * (y + y1)).max(0.0);
+                                let jet = reed.width_m * opening * dp.signum()
                                     * (2.0 * dp.abs() / rho).sqrt();
+                                let wave = (pressure - incoming) / zc;
+                                let swept = -reed_pressure_face(reed) * vm;
+                                let flow_scale = jet.abs() + body.abs() + swept.abs() + wave.abs();
+                                let roundoff = 64.0 * f64::EPSILON
+                                    * (pressure.abs() + incoming.abs()) / zc;
+                                assert!((jet + body + swept - wave).abs()
+                                    <= 2e-10 * flow_scale + roundoff);
                                 let before = energy(y, v);
                                 let after = energy(y1, v1);
-                                let supplied = dt * dp * ((pressure - incoming) / zc - body);
-                                // Reconstruct the actual contact force independently.
+                                let supplied = dt * dp * (wave - body);
                                 let inertia = reed.mass_kg * (v1 - v) / dt;
                                 let spring = reed.stiffness_n_m
                                     * (0.5 * (y + y1) - reed.rest_opening_m);
                                 let viscous = damping * vm;
                                 let pressure_force = reed_pressure_face(reed) * dp;
                                 let force = inertia + spring + viscous + pressure_force;
-                                let force_scale = inertia.abs()
-                                    + spring.abs()
-                                    + viscous.abs()
-                                    + pressure_force.abs();
-                                let force_tolerance =
-                                    2e-11 * force_scale.max(f64::MIN_POSITIVE);
+                                let force_scale = inertia.abs() + spring.abs()
+                                    + viscous.abs() + pressure_force.abs();
+                                let force_tolerance = 2e-11 * force_scale.max(f64::MIN_POSITIVE);
                                 let contact_loss = potential(y) - potential(y1) - dt * force * vm;
                                 let loss = dt * (damping * vm * vm + dp * jet) + contact_loss;
                                 let scale = before.abs() + after.abs() + supplied.abs() + loss.abs();
@@ -308,8 +339,6 @@ mod tests {
                                 if internal_loss == 0.0 {
                                     assert!(contact_loss.abs() <= tolerance, "elastic contact lost energy");
                                 }
-                                // Independent potential secant checks the force law,
-                                // rather than merely rearranging the energy balance.
                                 if (y1 - y).abs() > 1e-10 * y.abs().max(y1.abs()) {
                                     let elastic = (potential(y) - potential(y1)) / (y1 - y);
                                     let expected = (elastic * (1.0 - internal_loss * vm)).max(0.0);
@@ -322,39 +351,111 @@ mod tests {
                 }
             }
         }
-        assert!(
-            transitions.iter().all(|seen| *seen),
-            "must exercise entry, exit and both persistent regimes"
-        );
+        assert!(transitions.iter().all(|seen| *seen));
     }
 
     #[test]
-    fn g0_free_flight_with_a_lay_preserves_the_existing_step_bits() {
+    fn g1_midpoint_aperture_matches_an_independently_manufactured_step() {
         let reed = reed();
         let lay = slit_lay(1e8, 2.0).unwrap();
-        let run = |obstacle| {
-            super::super::step_massive_reed(
-                reed,
-                1.2,
-                2.7e7,
-                0.0,
-                0.0,
-                reed.rest_opening_m,
-                0.01,
-                1e-6,
-                0.0,
-                obstacle,
-                ReedSolverMode::Strict,
-                &mut FastSolveStats::default(),
-            )
-            .unwrap()
-        };
-        let free = run(None);
-        let contact = run(Some(&lay));
-        assert_eq!(
-            (free.0.to_bits(), free.1.to_bits(), free.2.to_bits()),
-            (contact.0.to_bits(), contact.1.to_bits(), contact.2.to_bits())
-        );
+        let (rho, zc, incoming, body) = (1.2, 1e6, 75.0, 2e-7);
+        let (y, y1, v, dt) = (4e-4, 3e-4, 0.2, 1e-4);
+        let vm = (y1 - y) / dt;
+        let v1 = 2.0 * vm - v;
+        let face = reed.stiffness_n_m * reed.rest_opening_m / reed.closing_pressure_pa;
+        let damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
+        let dp = -(reed.mass_kg * (v1 - v) / dt
+            + reed.stiffness_n_m * (0.5 * (y + y1) - reed.rest_opening_m)
+            + damping * vm) / face;
+        let jet = reed.width_m * (0.5 * (y + y1)) * dp.signum()
+            * (2.0 * dp.abs() / rho).sqrt();
+        let expected_pressure = incoming + zc * (jet + body - face * vm);
+        let mouth = dp + expected_pressure + incoming;
+        let actual = step(reed, rho, zc, incoming, mouth, y, v, dt, body, &lay).unwrap();
+        assert!((actual.0 - expected_pressure).abs() < 1e-8);
+        assert!((actual.1 - y1).abs() < 1e-13);
+        assert!((actual.2 - v1).abs() < 1e-9);
+        let old = super::super::step_massive_reed(
+            reed, rho, zc, incoming, mouth, y, v, dt, body, None,
+            ReedSolverMode::Strict, &mut FastSolveStats::default(),
+        ).unwrap();
+        assert!((old.1 - y1).abs() > 1e-7, "held-opening negative control must fail");
+    }
+
+    // An independent continuous ODE oracle: invert the Bernoulli quadratic
+    // algebraically, not through the characteristic solver used in production.
+    fn derivative(state: [f64; 2]) -> [f64; 2] {
+        let reed = reed();
+        let (rho, zc, incoming, body, mouth) = (1.2, 1e6, 75.0, 2e-7, 1000.0);
+        let face = reed.stiffness_n_m * reed.rest_opening_m / reed.closing_pressure_pa;
+        let damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
+        let [y, v] = state;
+        assert!(y > 0.0, "smooth oracle must remain outside contact");
+        let drive = mouth - 2.0 * incoming - zc * (body - face * v);
+        let b = zc * reed.width_m * y * (2.0_f64 / rho).sqrt();
+        let root = 2.0 * drive.abs() / (b.hypot(2.0 * drive.abs().sqrt()) + b);
+        let dp = drive.signum() * root * root;
+        [v, (-reed.stiffness_n_m * (y - reed.rest_opening_m) - damping * v - face * dp)
+            / reed.mass_kg]
+    }
+
+    fn rk4_reference(mut state: [f64; 2], duration: f64) -> [f64; 2] {
+        let h = duration / 4096.0;
+        for _ in 0..4096 {
+            let a = derivative(state);
+            let b = derivative([state[0] + 0.5 * h * a[0], state[1] + 0.5 * h * a[1]]);
+            let c = derivative([state[0] + 0.5 * h * b[0], state[1] + 0.5 * h * b[1]]);
+            let d = derivative([state[0] + h * c[0], state[1] + h * c[1]]);
+            for i in 0..2 {
+                state[i] += h * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn g1_moving_aperture_refines_at_second_order_against_independent_ode() {
+        let reed = reed();
+        let lay = slit_lay(1e8, 2.0).unwrap();
+        let initial = [1.1 * reed.rest_opening_m, 0.25];
+        let duration = 2e-4;
+        let reference = rk4_reference(initial, duration);
+        let mut errors = Vec::new();
+        let mut frozen_errors = Vec::new();
+        for count in [64, 128, 256] {
+            let dt = duration / f64::from(count);
+            for (obstacle, output) in [
+                (Some(&lay), &mut errors),
+                (None, &mut frozen_errors),
+            ] {
+                let [mut y, mut v] = initial;
+                for _ in 0..count {
+                    let (_, next_y, next_v) = super::super::step_massive_reed(
+                        reed, 1.2, 1e6, 75.0, 1000.0, y, v, dt, 2e-7, obstacle,
+                        ReedSolverMode::Strict, &mut FastSolveStats::default(),
+                    ).unwrap();
+                    (y, v) = (next_y, next_v);
+                }
+                let omega = (reed.stiffness_n_m / reed.mass_kg).sqrt();
+                output.push(((y - reference[0]) / reed.rest_opening_m)
+                    .hypot((v - reference[1]) / (reed.rest_opening_m * omega)));
+            }
+        }
+        for pair in errors.windows(2) {
+            assert!(pair[0] / pair[1] > 3.8 && pair[0] / pair[1] < 4.2, "{errors:?}");
+        }
+        let frozen_ratio = frozen_errors[1] / frozen_errors[2];
+        assert!(frozen_ratio > 1.8 && frozen_ratio < 2.3, "{frozen_errors:?}");
+        assert!(errors[2] < 0.2 * frozen_errors[2]);
+    }
+
+    #[test]
+    fn g0_stationary_zero_load_has_no_spurious_aperture_motion() {
+        let reed = reed();
+        let lay = slit_lay(1e8, 2.0).unwrap();
+        let result = step(reed, 1.2, 1e6, 0.0, 0.0, reed.rest_opening_m,
+            0.0, 1e-5, 0.0, &lay).unwrap();
+        assert_eq!(result, (0.0, reed.rest_opening_m, 0.0));
     }
 
     #[test]
