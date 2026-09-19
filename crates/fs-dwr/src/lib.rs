@@ -50,6 +50,7 @@
 pub mod adapt;
 pub mod aniso;
 pub mod elasticity;
+pub mod elasticity3;
 pub mod estimate;
 pub mod hvsp;
 pub mod mark;

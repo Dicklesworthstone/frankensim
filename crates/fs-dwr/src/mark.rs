@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 
-pub(crate) fn indicator_order(
-    indicators: &BTreeMap<(u32, u32, u32), f64>,
-) -> Vec<((u32, u32, u32), f64)> {
+pub(crate) fn indicator_order<K: Copy + Ord>(
+    indicators: &BTreeMap<K, f64>,
+) -> Vec<(K, f64)> {
     let mut order: Vec<_> = indicators
         .iter()
         .map(|(&cell, &indicator)| (cell, indicator.abs()))
