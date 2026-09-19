@@ -89,7 +89,8 @@ impl RobustPipeline {
 
     /// ERODED compliance and its exact design gradient (the robust
     /// objective): same self-adjoint structure as the nominal path,
-    /// chained through the eroded projection's slope.
+    /// chained through the eroded projection's slope. Loads on homogeneous
+    /// Dirichlet dofs contribute only to reactions, never displacement work.
     pub fn eroded_compliance_and_gradient(
         &self,
         elasticity: &mut DensityElasticity,
@@ -227,8 +228,82 @@ pub fn robust_optimality_criteria(
 }
 
 fn solve(op: &DensityElasticity, b: &[f64]) -> Vec<f64> {
-    let mut st = fs_solver::CgState::new(op, &fs_sparse::precond::IdentityPrecond, b);
+    // Identity rows preserve SPD, but impose u_fixed = 0, NOT u_fixed = f.
+    // A support-applied load changes reactions, not the free equilibrium.
+    let rhs: Vec<f64> = b.iter().zip(op.free())
+        .map(|(&f, &free)| if free { f } else { 0.0 }).collect();
+    if rhs.iter().all(|value| value.abs() <= 0.0) {
+        return vec![0.0; op.n()];
+    }
+    let mut st = fs_solver::CgState::new(op, &fs_sparse::precond::IdentityPrecond, &rhs);
     let rep = st.run(op, &fs_sparse::precond::IdentityPrecond, 1e-11, 50_000);
     assert!(rep.converged, "elasticity solve failed: {rep:?}");
     st.x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (RobustPipeline, DensityElasticity, Vec<f64>, Vec<f64>) {
+        let (complex, positions) = fs_feec::kuhn_cube(2);
+        let elasticity = DensityElasticity::new(&complex, &positions, 1.0, 0.3,
+            &|p| p[0] < 1e-12);
+        let mut force = vec![0.0; elasticity.n()];
+        for (v, p) in positions.iter().enumerate() {
+            if p[0] > 1.0 - 1e-12 { force[3 * v + 2] = -1.0; }
+        }
+        let rho = vec![0.55; elasticity.cells()];
+        let pipeline = RobustPipeline {
+            filter: DensityFilter::new(&complex, &positions, 0.15),
+            params: SimpParams::default(), eta_offset: 0.1,
+        };
+        (pipeline, elasticity, rho, force)
+    }
+
+    #[test]
+    fn g3_support_loads_do_not_change_eroded_compliance_or_gradient() {
+        let (pipeline, mut elasticity, rho, force) = fixture();
+        let expected = pipeline.eroded_compliance_and_gradient(&mut elasticity, &rho, &force);
+        let mut loaded = force;
+        for (i, (f, &free)) in loaded.iter_mut().zip(elasticity.free()).enumerate() {
+            if !free { *f = 100.0 + (i % 7) as f64; }
+        }
+        let actual = pipeline.eroded_compliance_and_gradient(&mut elasticity, &rho, &loaded);
+        assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+        assert_eq!(actual.1, expected.1);
+        let u = solve(&elasticity, &loaded);
+        for (&value, &free) in u.iter().zip(elasticity.free()) {
+            if !free { assert!(value.abs() <= 0.0); }
+        }
+    }
+
+    #[test]
+    fn g0_support_only_loads_produce_exact_zero_motion_and_objective() {
+        let (pipeline, mut elasticity, rho, mut force) = fixture();
+        for (f, &free) in force.iter_mut().zip(elasticity.free()) {
+            *f = if free { 0.0 } else { 42.0 };
+        }
+        let (c, gradient) = pipeline.eroded_compliance_and_gradient(&mut elasticity, &rho, &force);
+        assert!(c.abs() <= 0.0);
+        assert!(gradient.iter().all(|g| g.abs() <= 0.0));
+        assert!(solve(&elasticity, &force).iter().all(|u| u.abs() <= 0.0));
+    }
+
+    #[test]
+    fn g3_free_load_scaling_is_quadratic_even_with_fixed_support_loads() {
+        let (pipeline, mut elasticity, rho, mut force) = fixture();
+        for (f, &free) in force.iter_mut().zip(elasticity.free()) {
+            if !free { *f = 100.0; }
+        }
+        let (c, gradient) = pipeline.eroded_compliance_and_gradient(&mut elasticity, &rho, &force);
+        for (f, &free) in force.iter_mut().zip(elasticity.free()) {
+            if free { *f *= 2.0; }
+        }
+        let (scaled_c, scaled_gradient) = pipeline.eroded_compliance_and_gradient(&mut elasticity, &rho, &force);
+        assert!((scaled_c - 4.0 * c).abs() < 1e-9 * c.max(1.0));
+        for (a, b) in scaled_gradient.iter().zip(&gradient) {
+            assert!((a - 4.0 * b).abs() < 1e-8 * b.abs().max(1.0));
+        }
+    }
 }
