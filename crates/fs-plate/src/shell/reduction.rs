@@ -16,6 +16,9 @@
 use super::{ShellMesh, ShellModel, local_bending_stiffness};
 use crate::{ModePair, PlateError, PlateSection};
 
+/// Two-sided finite-thickness acoustic boundary and reciprocal modal projection.
+pub mod radiation;
+
 /// Explicit cold reduction ceilings. These are not acoustic error estimates.
 #[derive(Debug, Clone, Copy)]
 pub struct ReductionBudget {
@@ -38,8 +41,11 @@ pub struct ShellReduction {
     omegas:Vec<f64>,
     remainder:Vec<f64>,
     facets:Vec<Facet>,
-    // Mode-major translations; rotations were already projected into bending.
+    // Mode-major physical translations and axial rotations in the same basis.
     translations:Vec<[f64;3]>,
+    rotations:Vec<[f64;3]>,
+    reference_positions:Vec<[f64;3]>,
+    section_thicknesses:Vec<f64>,
     nodes:usize,
     triangles:Vec<[usize;3]>,
     area_normals:Vec<[f64;3]>,
@@ -105,8 +111,10 @@ impl ShellReduction {
             }
         }}
         let mut translations=Vec::with_capacity(n*mesh.nodes.len());
+        let mut rotations=Vec::with_capacity(n*mesh.nodes.len());
         for mode in modes {for node in 0..mesh.nodes.len() {
             translations.push(core::array::from_fn(|c|model.dof_map[6*node+c].map_or(0.0,|i|mode.phi[i])));
+            rotations.push(core::array::from_fn(|c|model.dof_map[6*node+3+c].map_or(0.0,|i|mode.phi[i])));
         }}
         let mut remainder=vec![0.0;nn];let mut membrane_linear=vec![0.0;nn];
         let mut facets=Vec::with_capacity(mesh.tris.len());let mut area_normals=Vec::with_capacity(mesh.tris.len());
@@ -149,7 +157,8 @@ impl ShellReduction {
             }
         }}
         Ok(Self{omegas:modes.iter().map(|m|m.lambda.sqrt()).collect(),remainder,facets,translations,
-            nodes:mesh.nodes.len(),triangles:mesh.tris.clone(),area_normals})
+            nodes:mesh.nodes.len(),triangles:mesh.tris.clone(),area_normals,rotations,
+            reference_positions:mesh.nodes.clone(),section_thicknesses:sections.iter().map(|s|s.thickness).collect()})
     }
     /// Linear frequencies of the supplied numerical basis [rad/s]; zero denotes
     /// an explicitly supplied rigid coordinate, not an invented soft spring.
