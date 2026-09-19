@@ -58,7 +58,7 @@ impl Accounting {
 
 pub struct Instrument {
     pub bank:Bank,
-    courses:Vec<Course>,law:WoolFelt,hammers:Vec<Hammer>,contacts:Vec<Contact>,
+    courses:Vec<Course>,laws:Vec<WoolFelt>,hammers:Vec<Hammer>,contacts:Vec<Contact>,
     creep:Vec<relaxation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Explicitly authored upper damper break; not a verified Steinway D value.
@@ -77,30 +77,50 @@ impl Instrument {
             felt::demonstration_law()?,&relaxation::demonstration_prony())
     }
 
-    /// Cold material front door. The supplied Prony card contributes its creep
-    /// spectrum; its instantaneous spring is replaced by the supplied WoolFelt.
-    /// Match its instantaneous modulus to the desired reference felt tangent
-    /// when fitting a coupon. An empty Prony spectrum retains the older purely
-    /// rate-independent image, without changing the unilateral contact solver.
+    /// Uniform-material front door retained for coupons and the earlier image.
+    /// The supplied Prony card contributes its creep spectrum; its instantaneous
+    /// spring is replaced by WoolFelt. All preparation is outside the audio loop.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_felt(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,law:WoolFelt,prony:&GeneralizedMaxwell)->Result<Self,String> {
+        let materials=(0..courses.len()).map(|_|(law.clone(),GeneralizedMaxwell {
+            e_inf:prony.e_inf,terms:prony.terms.clone(),
+        })).collect();
+        Self::new_with_course_felts(courses,board,rate,substeps,modes_per_string,damping,materials)
+    }
+
+    /// One (WoolFelt, Prony) card per COURSE in the supplied course order.
+    /// Unison members share a material, not history: every physical contact keeps
+    /// its own permanent crush and recoverable relaxation memory. Match Prony's
+    /// instantaneous modulus to that course's reference tangent when fitting.
+    /// An empty spectrum preserves the purely rate-independent image.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_course_felts(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>)->Result<Self,String> {
         if !(8_000..=192_000).contains(&rate)||!(1..=16).contains(&substeps){return Err("invalid rate/substep budget".into());}
-        if [law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify].iter().any(|x|!x.is_finite()) {
-            return Err("nonfinite felt material card".into());
+        if materials.len()!=courses.len() {return Err("one felt/Prony card is required for every course".into());}
+        let mut laws=Vec::with_capacity(materials.len());
+        let mut spectra=Vec::with_capacity(materials.len());
+        for (law,prony) in materials {
+            if [law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify].iter().any(|x|!x.is_finite()) {
+                return Err("nonfinite felt material card".into());
+            }
+            WoolFelt::new(law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify).map_err(|e|e.to_string())?;
+            spectra.push(relaxation::Spectrum::from_prony(&prony)?);
+            laws.push(law);
         }
-        WoolFelt::new(law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify).map_err(|e|e.to_string())?;
         let mechanics_rate=rate.checked_mul(substeps as u32).ok_or("mechanics rate overflow")?;
         let bank=Bank::new(&courses,board,mechanics_rate,0.45*f64::from(rate),modes_per_string,damping)?;
-        let spectrum=relaxation::Spectrum::from_prony(prony)?;
         let nc=bank.contact_strings.len();let dt=1.0/f64::from(mechanics_rate);
         let creep=bank.contact_strings.iter().map(|&si| {
-            let c=&courses[bank.strings[si].course];
-            spectrum.prepare(c.felt_area_m2/c.unison as f64,c.felt_thickness_m,dt)
+            let ci=bank.strings[si].course;let c=&courses[ci];
+            spectra[ci].prepare(c.felt_area_m2/c.unison as f64,c.felt_thickness_m,dt)
         }).collect::<Result<Vec<_>,_>>()?;
         let hammers=vec![Hammer::default();courses.len()];
-        let contacts=vec![Contact{state:law.initial_state(),memory:relaxation::Memory::default(),
-            overlap:-CATCH_DISTANCE,force:0.0,enabled:true};nc];
+        let contacts:Vec<_>=bank.contact_strings.iter().map(|&si| Contact {
+            state:laws[bank.strings[si].course].initial_state(),memory:relaxation::Memory::default(),
+            overlap:-CATCH_DISTANCE,force:0.0,enabled:true,
+        }).collect();
         let mut contact_h=bank.contact_compliance.clone();
         for i in 0..nc {for j in 0..nc {
             let ci=bank.strings[bank.contact_strings[i]].course;
@@ -109,7 +129,7 @@ impl Instrument {
         }}
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
-            bank,courses,law,hammers,contacts,creep,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,creep,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -146,7 +166,7 @@ impl Instrument {
             self.contacts[c].enabled=member<count;member+=1;
             if self.contacts[c].enabled {
                 let x=self.bank.contact_position(c,&self.bank.q);
-                let free=self.law.eps_residual(&self.contacts[c].state)*self.courses[ci].felt_thickness_m
+                let free=self.laws[ci].eps_residual(&self.contacts[c].state)*self.courses[ci].felt_thickness_m
                     +self.creep[c].deformation(&self.contacts[c].memory);
                 launch=launch.min(x+free-0.002);
             }
@@ -170,10 +190,10 @@ impl Instrument {
             // energy. Even disabled/airborne felt patches keep relaxing.
             e+=self.creep[i].stored(&p.memory);
             if p.enabled {
-                let c=&self.courses[self.bank.strings[self.bank.contact_strings[i]].course];
+                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=&self.courses[ci];
                 let elastic=p.overlap-self.creep[i].deformation(&p.memory);
                 e+=c.felt_area_m2/c.unison as f64*c.felt_thickness_m
-                    *felt::stored(&self.law,elastic/c.felt_thickness_m,&p.state);
+                    *felt::stored(&self.laws[ci],elastic/c.felt_thickness_m,&p.state);
             }
         }
         e
@@ -217,18 +237,18 @@ impl Instrument {
                 let material=&self.creep[i];let old=&self.contacts[i];
                 let start=old.overlap-material.deformation(&old.memory);
                 let free=self.gap[i]+diagonal*self.force[i]-material.free_deformation(&old.memory);
-                let next=felt::solve(&self.law,&old.state,start,free,
+                let next=felt::solve(&self.laws[ci],&old.state,start,free,
                     diagonal+material.compliance(),c.felt_thickness_m,c.felt_area_m2/c.unison as f64).map_err(Error::Contact)?;
                 let change=next-self.force[i];self.force[i]=next;
                 for &j in &self.active{self.gap[j]-=self.contact_h[j*nc+i]*change;}
             }
             converged=true;
             for &i in &self.active {
-                let c=self.courses[self.bank.strings[self.bank.contact_strings[i]].course];
+                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
                 let material=&self.creep[i];let old=&self.contacts[i];
                 let start=old.overlap-material.deformation(&old.memory);
                 let end=self.gap[i]-material.free_deformation(&old.memory)-material.compliance()*self.force[i];
-                let expected=felt::average(&self.law,&old.state,start,end,
+                let expected=felt::average(&self.laws[ci],&old.state,start,end,
                     c.felt_thickness_m,c.felt_area_m2/c.unison as f64).0;
                 if !expected.is_finite()||(self.force[i]-expected).abs()>1e-5+1e-8*expected.abs(){converged=false;}
             }
@@ -253,13 +273,13 @@ impl Instrument {
             if old.enabled {
                 let start_elastic=old.overlap-material.deformation(&old.memory);
                 let end_elastic=end-material.deformation(&memory);
-                if end/c.felt_thickness_m>self.law.eps_densify+1e-10 {
+                if end/c.felt_thickness_m>self.laws[ci].eps_densify+1e-10 {
                     return Err(Error::Contact("total felt densification bound exceeded"));
                 }
-                let state=self.law.update_state(end_elastic/c.felt_thickness_m,&old.state);
+                let state=self.laws[ci].update_state(end_elastic/c.felt_thickness_m,&old.state);
                 let volume=c.felt_area_m2/c.unison as f64*c.felt_thickness_m;
-                let delta=volume*(felt::stored(&self.law,end_elastic/c.felt_thickness_m,&state)
-                    -felt::stored(&self.law,start_elastic/c.felt_thickness_m,&old.state));
+                let delta=volume*(felt::stored(&self.laws[ci],end_elastic/c.felt_thickness_m,&state)
+                    -felt::stored(&self.laws[ci],start_elastic/c.felt_thickness_m,&old.state));
                 felt_loss+=self.force[i]*(end_elastic-start_elastic)-delta;
                 self.contacts[i].state=state;
             }
@@ -374,5 +394,25 @@ mod tests {
             48_000,4,12,true,felt::demonstration_law().unwrap(),&card).unwrap();
         p.note_on(69,2.0).unwrap();for _ in 0..1000 {p.step().unwrap();}
         assert!(p.accounting.felt_loss_j>0.0);assert_eq!(p.accounting.felt_relaxation_loss_j,0.0);
+    }
+    #[test]
+    fn independent_course_materials_keep_contact_history_and_close_energy(){
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let courses=vec![scale[27],scale[48]];
+        let first=felt::demonstration_law().unwrap();let mut second=first.clone();
+        second.f_ref*=2.0;
+        let mut p=Instrument::new_with_course_felts(courses.clone(),&super::super::board::demonstration(),
+            48_000,4,12,true,vec![(first,relaxation::demonstration_prony()),
+                (second,relaxation::demonstration_prony())]).unwrap();
+        assert_eq!(p.laws[1].f_ref,2.0*p.laws[0].f_ref);
+        p.note_on(courses[0].midi,2.0).unwrap();p.note_on(courses[1].midi,2.0).unwrap();
+        for _ in 0..2400 {p.step().unwrap();}
+        for course in 0..2 {
+            assert!(p.bank.contact_strings.iter().enumerate().any(|(i,&s)|
+                p.bank.strings[s].course==course&&p.contacts[i].state.eps_max>0.0));
+        }
+        assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
+        assert!(Instrument::new_with_course_felts(courses,&super::super::board::demonstration(),
+            48_000,4,12,true,vec![]).is_err());
     }
 }
