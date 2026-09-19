@@ -1,11 +1,14 @@
 //! Allocation-free prepared composition: moving-boundary modal strings,
-//! one shared board, separate felt contact patches, free-flight hammers and
-//! pedal-controlled dissipative ports. No samples, envelopes or reverb presets.
+//! one shared board, separate hysteretic/viscoelastic felt patches, free-flight
+//! hammers and pedal-controlled dissipative ports. No samples or reverb presets.
 //!
 //! note_on supplies a POST-ESCAPEMENT hammer velocity. The catch is idealized;
 //! this is not a claim to reconstruct the complete Steinway grand action.
 use fs_material::{Uniaxial, WoolFelt};
+use fs_material::visco::GeneralizedMaxwell;
 use super::{felt,geometry::Course,linear::{Bank,BoardMode}};
+#[path = "felt_relaxation.rs"]
+mod relaxation;
 
 const GRAVITY: f64 = 9.80665;
 const CATCH_DISTANCE: f64 = 0.020; // authored ideal backcheck, not a factory dimension
@@ -35,12 +38,15 @@ impl Default for Hammer {
     fn default()->Self {Self{y:-CATCH_DISTANCE,v:0.0,active:false,held:false,latched:false}}
 }
 #[derive(Clone,Debug)]
-struct Contact { state:felt::State,overlap:f64,force:f64,enabled:bool }
+struct Contact { state:felt::State,memory:relaxation::Memory,overlap:f64,force:f64,enabled:bool }
 
 #[derive(Clone,Copy,Debug,Default)]
 pub struct Accounting {
     pub input_work_j:f64,
+    /// Total felt dissipation: permanent crush plus reversible-branch viscosity.
     pub felt_loss_j:f64,
+    /// The viscous subset of felt_loss_j; NOT added a second time to the total.
+    pub felt_relaxation_loss_j:f64,
     pub modal_loss_j:f64,
     pub damper_loss_j:f64,
     pub catch_loss_j:f64,
@@ -53,6 +59,7 @@ impl Accounting {
 pub struct Instrument {
     pub bank:Bank,
     courses:Vec<Course>,law:WoolFelt,hammers:Vec<Hammer>,contacts:Vec<Contact>,
+    creep:Vec<relaxation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Explicitly authored upper damper break; not a verified Steinway D value.
     pub last_damped_midi:u8,
@@ -66,13 +73,34 @@ pub struct Instrument {
 impl Instrument {
     pub fn new(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool)->Result<Self,String> {
+        Self::new_with_felt(courses,board,rate,substeps,modes_per_string,damping,
+            felt::demonstration_law()?,&relaxation::demonstration_prony())
+    }
+
+    /// Cold material front door. The supplied Prony card contributes its creep
+    /// spectrum; its instantaneous spring is replaced by the supplied WoolFelt.
+    /// Match its instantaneous modulus to the desired reference felt tangent
+    /// when fitting a coupon. An empty Prony spectrum retains the older purely
+    /// rate-independent image, without changing the unilateral contact solver.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_felt(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,law:WoolFelt,prony:&GeneralizedMaxwell)->Result<Self,String> {
         if !(8_000..=192_000).contains(&rate)||!(1..=16).contains(&substeps){return Err("invalid rate/substep budget".into());}
+        if [law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify].iter().any(|x|!x.is_finite()) {
+            return Err("nonfinite felt material card".into());
+        }
+        WoolFelt::new(law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify).map_err(|e|e.to_string())?;
         let mechanics_rate=rate.checked_mul(substeps as u32).ok_or("mechanics rate overflow")?;
         let bank=Bank::new(&courses,board,mechanics_rate,0.45*f64::from(rate),modes_per_string,damping)?;
-        let law=felt::demonstration_law()?;
+        let spectrum=relaxation::Spectrum::from_prony(prony)?;
         let nc=bank.contact_strings.len();let dt=1.0/f64::from(mechanics_rate);
+        let creep=bank.contact_strings.iter().map(|&si| {
+            let c=&courses[bank.strings[si].course];
+            spectrum.prepare(c.felt_area_m2/c.unison as f64,c.felt_thickness_m,dt)
+        }).collect::<Result<Vec<_>,_>>()?;
         let hammers=vec![Hammer::default();courses.len()];
-        let contacts=vec![Contact{state:law.initial_state(),overlap:-CATCH_DISTANCE,force:0.0,enabled:true};nc];
+        let contacts=vec![Contact{state:law.initial_state(),memory:relaxation::Memory::default(),
+            overlap:-CATCH_DISTANCE,force:0.0,enabled:true};nc];
         let mut contact_h=bank.contact_compliance.clone();
         for i in 0..nc {for j in 0..nc {
             let ci=bank.strings[bank.contact_strings[i]].course;
@@ -81,7 +109,7 @@ impl Instrument {
         }}
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
-            bank,courses,law,hammers,contacts,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,law,hammers,contacts,creep,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -118,7 +146,8 @@ impl Instrument {
             self.contacts[c].enabled=member<count;member+=1;
             if self.contacts[c].enabled {
                 let x=self.bank.contact_position(c,&self.bank.q);
-                let free=self.law.eps_residual(&self.contacts[c].state)*self.courses[ci].felt_thickness_m;
+                let free=self.law.eps_residual(&self.contacts[c].state)*self.courses[ci].felt_thickness_m
+                    +self.creep[c].deformation(&self.contacts[c].memory);
                 launch=launch.min(x+free-0.002);
             }
         }
@@ -136,11 +165,17 @@ impl Instrument {
         for (h,c) in self.hammers.iter().zip(&self.courses){
             e+=0.5*c.hammer_mass_kg*h.v*h.v+c.hammer_mass_kg*GRAVITY*(h.y+CATCH_DISTANCE);
         }
-        for (i,p) in self.contacts.iter().enumerate(){if p.enabled {
-            let c=&self.courses[self.bank.strings[self.bank.contact_strings[i]].course];
-            e+=c.felt_area_m2/c.unison as f64*c.felt_thickness_m
-                *felt::stored(&self.law,p.overlap/c.felt_thickness_m,&p.state);
-        }}
+        for (i,p) in self.contacts.iter().enumerate(){
+            // Shifting the hammer away from a string must not erase internal
+            // energy. Even disabled/airborne felt patches keep relaxing.
+            e+=self.creep[i].stored(&p.memory);
+            if p.enabled {
+                let c=&self.courses[self.bank.strings[self.bank.contact_strings[i]].course];
+                let elastic=p.overlap-self.creep[i].deformation(&p.memory);
+                e+=c.felt_area_m2/c.unison as f64*c.felt_thickness_m
+                    *felt::stored(&self.law,elastic/c.felt_thickness_m,&p.state);
+            }
+        }
         e
     }
 
@@ -179,17 +214,22 @@ impl Instrument {
             for index in 0..self.active.len(){
                 let i=self.active[index];let ci=self.bank.strings[self.bank.contact_strings[i]].course;
                 let c=self.courses[ci];let diagonal=self.contact_h[i*nc+i];
-                let free=self.gap[i]+diagonal*self.force[i];
-                let next=felt::solve(&self.law,&self.contacts[i].state,self.contacts[i].overlap,
-                    free,diagonal,c.felt_thickness_m,c.felt_area_m2/c.unison as f64).map_err(Error::Contact)?;
+                let material=&self.creep[i];let old=&self.contacts[i];
+                let start=old.overlap-material.deformation(&old.memory);
+                let free=self.gap[i]+diagonal*self.force[i]-material.free_deformation(&old.memory);
+                let next=felt::solve(&self.law,&old.state,start,free,
+                    diagonal+material.compliance(),c.felt_thickness_m,c.felt_area_m2/c.unison as f64).map_err(Error::Contact)?;
                 let change=next-self.force[i];self.force[i]=next;
                 for &j in &self.active{self.gap[j]-=self.contact_h[j*nc+i]*change;}
             }
             converged=true;
             for &i in &self.active {
                 let c=self.courses[self.bank.strings[self.bank.contact_strings[i]].course];
-                let expected=felt::average(&self.law,&self.contacts[i].state,self.contacts[i].overlap,
-                    self.gap[i],c.felt_thickness_m,c.felt_area_m2/c.unison as f64).0;
+                let material=&self.creep[i];let old=&self.contacts[i];
+                let start=old.overlap-material.deformation(&old.memory);
+                let end=self.gap[i]-material.free_deformation(&old.memory)-material.compliance()*self.force[i];
+                let expected=felt::average(&self.law,&old.state,start,end,
+                    c.felt_thickness_m,c.felt_area_m2/c.unison as f64).0;
                 if !expected.is_finite()||(self.force[i]-expected).abs()>1e-5+1e-8*expected.abs(){converged=false;}
             }
         }
@@ -203,19 +243,27 @@ impl Instrument {
             h.y=self.hammers[i].y+dt*self.hammers[i].v-0.5*dt*dt*accel;
             h.v=self.hammers[i].v-dt*accel;
         }}
-        let mut felt_loss=0.0;
+        let mut felt_loss=0.0;let mut relaxation_loss=0.0;
         for i in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
             let end=self.hammer_next[ci].y-self.bank.contact_position(i,&self.bank.next_q);
-            if self.contacts[i].enabled {
-                if end/c.felt_thickness_m>self.law.eps_densify+1e-10{return Err(Error::Contact("felt densification bound exceeded"));}
-                let old=&self.contacts[i];let state=self.law.update_state(end/c.felt_thickness_m,&old.state);
+            let material=&self.creep[i];let old=&self.contacts[i];
+            let (memory,viscous)=material.advance(&old.memory,self.force[i]);
+            relaxation_loss+=viscous;felt_loss+=viscous;
+            if old.enabled {
+                let start_elastic=old.overlap-material.deformation(&old.memory);
+                let end_elastic=end-material.deformation(&memory);
+                if end/c.felt_thickness_m>self.law.eps_densify+1e-10 {
+                    return Err(Error::Contact("total felt densification bound exceeded"));
+                }
+                let state=self.law.update_state(end_elastic/c.felt_thickness_m,&old.state);
                 let volume=c.felt_area_m2/c.unison as f64*c.felt_thickness_m;
-                let delta=volume*(felt::stored(&self.law,end/c.felt_thickness_m,&state)
-                    -felt::stored(&self.law,old.overlap/c.felt_thickness_m,&old.state));
-                felt_loss+=self.force[i]*(end-old.overlap)-delta;
+                let delta=volume*(felt::stored(&self.law,end_elastic/c.felt_thickness_m,&state)
+                    -felt::stored(&self.law,start_elastic/c.felt_thickness_m,&old.state));
+                felt_loss+=self.force[i]*(end_elastic-start_elastic)-delta;
                 self.contacts[i].state=state;
             }
+            self.contacts[i].memory=memory;
             self.contacts[i].overlap=end;self.contacts[i].force=self.force[i];
         }
         self.hammers.copy_from_slice(&self.hammer_next);self.bank.commit();
@@ -243,7 +291,8 @@ impl Instrument {
         if balance.abs()>tolerance||felt_loss< -tolerance||modal_loss< -tolerance||catch_loss< -tolerance {
             return Err(Error::Energy{defect_j:balance});
         }
-        self.accounting.felt_loss_j+=felt_loss;self.accounting.modal_loss_j+=modal_loss;
+        self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
+        self.accounting.modal_loss_j+=modal_loss;
         self.accounting.damper_loss_j+=damper_loss;self.accounting.catch_loss_j+=catch_loss;
         self.accounting.max_balance_error_j=self.accounting.max_balance_error_j.max(balance.abs());
         Ok(())
@@ -251,7 +300,7 @@ impl Instrument {
 
     /// Transactional audio sample. Every scratch/history buffer is allocated
     /// at construction; a refused substep restores the ENTIRE sample, including
-    /// prior substeps, felt maxima, hammers and all component loss accounts.
+    /// prior substeps, felt maxima/relaxation memory, hammers and loss accounts.
     /// Returns a surface volume-velocity diagnostic, NOT calibrated pressure.
     pub fn step(&mut self)->Result<f64,Error>{
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
@@ -286,14 +335,19 @@ mod tests {
         let mut peak:f64=0.0;
         for _ in 0..4800{let x=a.step().unwrap();let y=b.step().unwrap();assert_eq!(x.to_bits(),y.to_bits());peak=peak.max(x.abs());}
         assert!(peak>1e-10);assert!(a.accounting.felt_loss_j>0.0);
+        assert!(a.accounting.felt_relaxation_loss_j>0.0);
+        assert!(a.accounting.felt_loss_j>=a.accounting.felt_relaxation_loss_j);
         let balance=a.accounting.input_work_j-a.accounting.dissipated_j()-a.energy_j();
         assert!(balance.abs()<1e-7,"{balance:e}");
     }
     #[test]
     fn invalid_controls_and_failed_samples_preserve_state(){
         let mut p=instrument();assert!(p.note_on(69,f64::NAN).is_err());assert!(p.set_sustain(1.1).is_err());
-        p.note_on(69,2.0).unwrap();let before=p.energy_j();let q=p.bank.q.clone();
-        p.damper_drag_ns_m=f64::NAN;assert!(p.step().is_err());assert_eq!(p.energy_j(),before);assert_eq!(p.bank.q,q);
+        p.note_on(69,2.0).unwrap();
+        for _ in 0..200 {p.step().unwrap();}
+        let before=p.energy_j();let q=p.bank.q.clone();let memory=p.contacts[0].memory;
+        p.damper_drag_ns_m=f64::NAN;assert!(p.step().is_err());assert_eq!(p.energy_j(),before);
+        assert_eq!(p.bank.q,q);assert_eq!(p.contacts[0].memory,memory);
     }
     #[test]
     fn sostenuto_captures_only_keys_held_on_its_rising_edge(){
@@ -301,5 +355,24 @@ mod tests {
         assert!(!p.hammers[0].latched);p.set_sostenuto(false);p.set_sostenuto(true);
         assert!(p.hammers[0].latched);p.note_off(69).unwrap();assert!(p.hammers[0].latched);
         p.set_sostenuto(false);assert!(!p.hammers[0].latched);
+    }
+    #[test]
+    fn airborne_felt_recovers_without_erasing_permanent_crush(){
+        let mut p=instrument();p.note_on(69,3.0).unwrap();let mut peak:f64=0.0;
+        for _ in 0..4800 {
+            p.step().unwrap();peak=peak.max(p.creep[0].deformation(&p.contacts[0].memory));
+        }
+        assert!(peak>1e-7);
+        assert!(p.creep[0].deformation(&p.contacts[0].memory)<peak*1e-4);
+        assert!(p.contacts[0].state.eps_max>0.0);
+    }
+    #[test]
+    fn empty_prony_keeps_the_rate_independent_image_available(){
+        let scale=super::super::geometry::demonstration_scale().unwrap();
+        let card=GeneralizedMaxwell::new(5e6,vec![]).unwrap();
+        let mut p=Instrument::new_with_felt(vec![scale[48]],&super::super::board::demonstration(),
+            48_000,4,12,true,felt::demonstration_law().unwrap(),&card).unwrap();
+        p.note_on(69,2.0).unwrap();for _ in 0..1000 {p.step().unwrap();}
+        assert!(p.accounting.felt_loss_j>0.0);assert_eq!(p.accounting.felt_relaxation_loss_j,0.0);
     }
 }
