@@ -205,6 +205,13 @@ impl ApertureNetwork {
     #[must_use]
     pub fn node_frame(&self, node: usize) -> Option<&NodeFrame> { self.network.node_frame(node) }
 
+    /// Accepted physical R-L-C coordinates at an endpoint or interior load.
+    /// No mutable access is exposed: waves and load clocks remain synchronized.
+    #[must_use]
+    pub fn load_state(&self, node: usize) -> Option<fs_vfit::impedance::ImpedanceState> {
+        self.network.terminal_state(node)
+    }
+
     /// Actual mechanical/contact/wave storage [J].
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {

@@ -15,6 +15,8 @@ pub mod network;
 pub mod cavity;
 /// Sample-checked passive frequency-dependent boundary loss.
 pub mod loss;
+/// Geometry-bound, locally reacting compliant walls with retained physical motion.
+pub mod wall;
 
 /// Quasistatic aperture: `y = H max(0, 1 − Δp/P_c)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
