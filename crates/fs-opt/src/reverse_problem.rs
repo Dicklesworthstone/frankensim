@@ -3,6 +3,7 @@
 use crate::reverse::{HessianError, ReverseError, ReverseEvaluation, ReverseLimits, ReverseProgram};
 use crate::{OptError, Problem, Sense};
 use fs_exec::Cx;
+use crate::reverse::physics::PhysicsBinding;
 
 /// Refusal from the solver-facing problem derivative adapter.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +143,7 @@ pub struct ReverseProblem<'p> {
 impl<'p> ReverseProblem<'p> {
     /// Compile all objectives and constraints into one shared reverse program.
     pub fn new(problem: &'p Problem, limits: ReverseLimits) -> Result<Self, ReverseProblemError> {
-        Self::compile(problem, limits, None)
+        Self::compile(problem, limits, &[], None)
     }
 
     /// Observe cancellation before/after compilation. The underlying reverse
@@ -152,12 +153,25 @@ impl<'p> ReverseProblem<'p> {
         limits: ReverseLimits,
         cx: &Cx<'_>,
     ) -> Result<Self, ReverseProblemError> {
-        Self::compile(problem, limits, Some(cx))
+        Self::compile(problem, limits, &[], Some(cx))
+    }
+
+    /// Compile with explicit first-order physics executors for PDE nodes.
+    /// The bindings and immutable problem share the oracle's lifetime. This
+    /// runtime association is not encoded by the canonical IR wire identity.
+    pub fn new_with_physics(
+        problem: &'p Problem,
+        limits: ReverseLimits,
+        bindings: &[PhysicsBinding<'p>],
+        cx: Option<&Cx<'_>>,
+    ) -> Result<Self, ReverseProblemError> {
+        Self::compile(problem, limits, bindings, cx)
     }
 
     fn compile(
         problem: &'p Problem,
         limits: ReverseLimits,
+        bindings: &[PhysicsBinding<'p>],
         cx: Option<&Cx<'_>>,
     ) -> Result<Self, ReverseProblemError> {
         poll(cx, 0)?;
@@ -191,7 +205,7 @@ impl<'p> ReverseProblem<'p> {
             poll(cx, i)?;
             roots.push(constraint.node);
         }
-        let program = ReverseProgram::new(problem, &roots, limits)?;
+        let program = ReverseProgram::new_with_physics(problem, &roots, limits, bindings)?;
         poll(cx, 0)?;
         Ok(Self {
             problem,

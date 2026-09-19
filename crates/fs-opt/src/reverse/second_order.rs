@@ -188,6 +188,12 @@ impl ReverseEvaluation<'_, '_> {
         for &node in program.order.iter().rev() {
             poll(cx)?;
             if active[node.0 as usize] {
+                if matches!(program.problem.expr(node)?, Expr::PdeResidual { .. }) {
+                    return Err(OptError::Unevaluable {
+                        node: node.0,
+                        kind: "bound physics supplies first-order derivatives, not a Hessian action",
+                    }.into());
+                }
                 for child in children(program.problem.expr(node)?) { active[child.0 as usize] = true; }
             }
         }

@@ -7,13 +7,16 @@
 //! Gradients are chain-rule derivatives of the mathematical operators, not
 //! derivatives of their floating-point implementations or error certificates.
 //!
-//! Only smooth algebra is executable here. Kinks and external physics/UQ nodes
-//! are refused, even when a caller later supplies a zero seed. An unrelated
-//! unreachable node cannot poison a requested subgraph. No PDE adjoint is
-//! fabricated. Existing `eval` and finite-difference descent are unchanged.
+//! Smooth algebra is executable by default. Explicit [`physics`] bindings may
+//! supply solved scalar PDE residuals and their total first-order derivatives.
+//! Unbound physics, UQ and kinks still refuse; no PDE adjoint is fabricated.
+//! Existing `eval` and finite-difference descent are unchanged.
 
 use crate::{BindingFrame, Expr, NodeId, OptError, Problem, Shape, VarId, children};
 use fs_exec::Cx;
+
+pub mod physics;
+use physics::{CompiledPhysics, PhysicsBinding, PhysicsError};
 
 /// Explicit storage/work envelope for a compiled reverse program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +34,12 @@ pub struct ReverseLimits {
 pub enum ReverseError {
     /// Existing graph, binding, domain, resource, or cancellation refusal.
     Evaluation(OptError),
+    /// A supplied physics binding disagrees with its node or declaration.
+    PhysicsBinding { node: NodeId, what: &'static str },
+    /// Preserve a model's original typed refusal and the responsible node.
+    Physics { node: NodeId, source: PhysicsError },
+    /// A provider omitted or invented derivative components.
+    PhysicsGradientLength { node: NodeId, expected: usize, actual: usize },
     /// No smooth derivative is claimed for this reachable operation.
     Nonsmooth {
         /// Offending live-IR node.
@@ -62,6 +71,9 @@ impl core::fmt::Display for ReverseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Evaluation(error) => write!(f, "{error}"),
+            Self::PhysicsBinding { node, what } => write!(f, "physics node {}: {what}", node.0),
+            Self::Physics { node, source } => write!(f, "physics node {}: {source}", node.0),
+            Self::PhysicsGradientLength { node, expected, actual } => write!(f, "physics node {} needs {expected} gradient components, received {actual}", node.0),
             Self::Nonsmooth { node } => write!(f, "node {} has no smooth reverse rule", node.0),
             Self::SeedCount { expected, actual } => write!(f, "reverse program needs {expected} seeds, received {actual}"),
             Self::NonFiniteAdjoint { node, component, bits } => write!(f, "node {} produced a non-finite adjoint at component {component}: {bits:#018x}", node.0),
@@ -71,7 +83,11 @@ impl core::fmt::Display for ReverseError {
 
 impl std::error::Error for ReverseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self { Self::Evaluation(error) => Some(error), _ => None }
+        match self {
+            Self::Evaluation(error) => Some(error),
+            Self::Physics { source, .. } => Some(source),
+            _ => None,
+        }
     }
 }
 
@@ -88,6 +104,7 @@ pub struct ReverseProgram<'problem> {
     variables: Vec<Slot>,
     order: Vec<NodeId>,
     scalar_slots: usize,
+    physics: Vec<CompiledPhysics<'problem>>,
 }
 
 fn cap(what: &'static str, count: usize, limit: usize) -> Result<(), OptError> {
@@ -127,9 +144,24 @@ impl<'problem> ReverseProgram<'problem> {
     /// Compilation performs no objective evaluations and consumes no problem
     /// evaluation budget; the calling optimizer owns that accounting.
     pub fn new(problem: &'problem Problem, roots: &[NodeId], limits: ReverseLimits) -> Result<Self, ReverseError> {
+        Self::new_with_physics(problem, roots, limits, &[])
+    }
+
+    /// Bind explicitly declared scalar physics studies to their live executors.
+    /// Every supplied signature is checked, including unreachable bindings.
+    /// Retained physics gradients are charged to `max_scalar_slots`. Provider
+    /// scratch space, solves and their work budgets remain provider-owned.
+    pub fn new_with_physics(
+        problem: &'problem Problem,
+        roots: &[NodeId],
+        limits: ReverseLimits,
+        bindings: &[PhysicsBinding<'problem>],
+    ) -> Result<Self, ReverseError> {
         cap("reverse graph nodes", problem.exprs().len(), limits.max_nodes)?;
         cap("reverse roots", roots.len(), limits.max_nodes)?;
         cap("reverse variables", problem.vars().len(), limits.max_nodes)?;
+        cap("reverse physics bindings", bindings.len(), limits.max_nodes)?;
+        let bindings = physics::admitted_bindings(problem, bindings)?;
         let mut needed = capacity(problem.exprs().len())?;
         needed.resize(problem.exprs().len(), false);
         let mut retained_roots = capacity(roots.len())?;
@@ -143,6 +175,7 @@ impl<'problem> ReverseProgram<'problem> {
             if needed[i] {
                 match &problem.exprs()[i] {
                     Expr::Min(..) | Expr::Max(..) | Expr::Abs(..) => return Err(ReverseError::Nonsmooth { node: NodeId(i as u32) }),
+                    Expr::PdeResidual { .. } if bindings.binary_search_by_key(&NodeId(i as u32), |binding| binding.node).is_ok() => {},
                     Expr::PdeResidual { .. } | Expr::Expectation { .. } | Expr::Cvar { .. } | Expr::Quantile { .. } => return Err(OptError::Unevaluable {
                         node: i as u32, kind: "reverse program requires a live algebraic derivative; physics/UQ needs its own executor",
                     }.into()),
@@ -180,7 +213,18 @@ impl<'problem> ReverseProgram<'problem> {
             };
             order.push(node);
         }
-        Ok(Self { problem, roots: retained_roots, slots, variables, order, scalar_slots })
+        let mut physics = capacity(bindings.len())?;
+        for binding in bindings {
+            if !needed[binding.node.0 as usize] { continue; }
+            let Expr::PdeResidual { over, .. } = problem.expr(binding.node)? else {
+                unreachable!("binding admission requires a PDE residual");
+            };
+            physics.push(CompiledPhysics {
+                node: binding.node, model: binding.model, variable: *over,
+                gradient: allocate(variables[over.0 as usize].len)?,
+            });
+        }
+        Ok(Self { problem, roots: retained_roots, slots, variables, order, scalar_slots, physics })
     }
 
     /// Number of reachable IR nodes; independent of the number of variables.
@@ -210,6 +254,38 @@ impl<'problem> ReverseProgram<'problem> {
         for &node in &self.order {
             poll(cx)?;
             let out = self.slots[node.0 as usize];
+            if let Ok(index) = self.physics.binary_search_by_key(&node, |binding| binding.node) {
+                let binding = &self.physics[index];
+                let input = self.variables[binding.variable.0 as usize];
+                let sample = binding.model.value_gradient(
+                    &values[input.start..input.start + input.len], cx,
+                ).map_err(|source| match source {
+                    PhysicsError::Cancelled => ReverseError::Evaluation(OptError::Cancelled),
+                    source => ReverseError::Physics { node, source },
+                })?;
+                poll(cx)?;
+                if sample.gradient.len() != input.len {
+                    return Err(ReverseError::PhysicsGradientLength {
+                        node, expected: input.len, actual: sample.gradient.len(),
+                    });
+                }
+                if !sample.value.is_finite() {
+                    return Err(OptError::EvalNonFinite {
+                        node: node.0, component: None, bits: sample.value.to_bits(),
+                    }.into());
+                }
+                values[out.start] = sample.value;
+                for (i, &derivative) in sample.gradient.iter().enumerate() {
+                    tick(i, cx)?;
+                    if !derivative.is_finite() {
+                        return Err(ReverseError::NonFiniteAdjoint {
+                            node, component: i, bits: derivative.to_bits(),
+                        });
+                    }
+                    values[binding.gradient.start + i] = derivative;
+                }
+                continue;
+            }
             let at = |id: NodeId| self.slots[id.0 as usize];
             for j in 0..out.len {
                 tick(j, cx)?;
@@ -304,6 +380,16 @@ impl ReverseEvaluation<'_, '_> {
                 if g == 0.0 { continue; }
                 match self.program.problem.expr(node)? {
                     Expr::Var(_) | Expr::Const { .. } => {},
+                    Expr::PdeResidual { over, .. } => {
+                        let index = self.program.physics.binary_search_by_key(&node, |binding| binding.node)
+                            .expect("compiled PDE node has a bound provider");
+                        let binding = &self.program.physics[index];
+                        let input = self.program.variables[over.0 as usize];
+                        for k in 0..input.len {
+                            tick(k, cx)?;
+                            accumulate(&mut adjoint, input, k, g * values[binding.gradient.start + k], node)?;
+                        }
+                    }
                     Expr::Component { of, index } => accumulate(&mut adjoint, at(*of), *index as usize, g, node)?,
                     Expr::Add(a, b) | Expr::Sub(a, b) => {
                         accumulate(&mut adjoint, at(*a), j, g, node)?;
