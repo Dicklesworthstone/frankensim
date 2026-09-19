@@ -3,7 +3,10 @@
 //! integrated coarse stiffness (cut quadrature and ghost penalties differ).
 use super::*;
 use fs_solver::op::two_level::{AdditiveTwoLevel, TwoLevelBudget, TwoLevelError, TwoLevelWork};
-use fs_sparse::{Coo, precond::Precond};
+use fs_sparse::{Coo, Csr, precond::Precond};
+
+mod reusable;
+pub use reusable::{AdaptivePrepared3, AdaptiveSolveOptions3, AdaptiveSolveSpace3};
 
 /// Exact inverse diagonal of T^T K T, prepared for one immutable density state.
 /// Includes off-diagonal physical-node terms mapping to the same master and
@@ -112,23 +115,13 @@ impl std::fmt::Display for AdaptivePreconditionError3 {
 impl std::error::Error for AdaptivePreconditionError3 {}
 
 impl<'a> AdaptiveTransfer3<'a> {
-    /// Prepare the fixed-SPD two-level action against the FINE density state.
-    /// Remove fixed coarse coordinates instead of adding artificial coarse
-    /// pivots. Reuse the exact Q1 transfer, its transpose, fs-solver's Galerkin
-    /// builder and fs-la's direct factorization. The coarse geometry supplies
-    /// a correction space; its separately integrated stiffness is NOT used.
-    ///
-    /// A setup-budget failure does not silently fall back or change the model.
-    /// Callers can explicitly request diagonal-only preparation instead. Coarse
-    /// setup applications are reported separately from subsequent Krylov work.
-    pub fn prepare_two_level(&self, budget: TwoLevelBudget, max_diagonal_contributions: usize,
-        mut checkpoint: impl FnMut(TwoLevelWork) -> ControlFlow<()>)
-        -> Result<AdditiveTwoLevel<'a, AdaptiveElasticity3>, AdaptivePreconditionError3> {
+    // One vectorization/admission path for transient enrichment and retained
+    // optimization spaces. No stiffness or numerical factor is retained here.
+    fn vector_prolongation(&self, budget: TwoLevelBudget,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Csr, AdaptivePreconditionError3> {
         let coarse_error = AdaptivePreconditionError3::Coarse;
         let mut poll_setup = || {
-            if checkpoint(TwoLevelWork::default()).is_break() {
-                Err(coarse_error(TwoLevelError::Cancelled))
-            } else { Ok(()) }
+            if checkpoint().is_break() { Err(coarse_error(TwoLevelError::Cancelled)) } else { Ok(()) }
         };
         poll_setup()?;
         let nc = 3 * self.coarse.fixed.iter().filter(|&&fixed| !fixed).count();
@@ -156,9 +149,24 @@ impl<'a> AdaptiveTransfer3<'a> {
         }
         let p = coo.assemble();
         poll_setup()?;
+        Ok(p)
+    }
+
+    /// Prepare the fixed-SPD two-level action against the FINE density state.
+    /// Remove fixed coarse coordinates instead of adding artificial coarse
+    /// pivots. Reuse the exact Q1 transfer, its transpose, fs-solver's Galerkin
+    /// builder and fs-la's direct factorization. The coarse geometry supplies
+    /// a correction space; its separately integrated stiffness is NOT used.
+    ///
+    /// A setup-budget failure does not silently fall back or change the model.
+    /// Callers can explicitly request diagonal-only preparation instead. Coarse
+    /// setup applications are reported separately from subsequent Krylov work.
+    pub fn prepare_two_level(&self, budget: TwoLevelBudget, max_diagonal_contributions: usize,
+        mut checkpoint: impl FnMut(TwoLevelWork) -> ControlFlow<()>)
+        -> Result<AdditiveTwoLevel<'a, AdaptiveElasticity3>, AdaptivePreconditionError3> {
+        let p = self.vector_prolongation(budget, || checkpoint(TwoLevelWork::default()))?;
         let jacobi = self.fine.prepare_jacobi(max_diagonal_contributions,
-            || if poll_setup().is_ok() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) })
-            .map_err(AdaptivePreconditionError3::Physics)?;
+            || checkpoint(TwoLevelWork::default())).map_err(AdaptivePreconditionError3::Physics)?;
         AdditiveTwoLevel::new(self.fine, jacobi.inverse_diagonal(), p, budget, checkpoint)
             .map_err(AdaptivePreconditionError3::Coarse)
     }
