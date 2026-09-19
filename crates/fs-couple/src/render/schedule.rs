@@ -502,3 +502,6 @@ mod pressure_gesture_tests {
         assert!(matches!(compile_pressure_gestures(&overlap, &[binding("blow", 0)], 10, 10, 100), Err(GestureCompileError::Track { .. })));
     }
 }
+
+/// Physical actuator histories projected through mass-normalized modal ports.
+pub mod force;
