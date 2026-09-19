@@ -306,6 +306,9 @@ impl LinearImpactSystem {
     /// Last accepted diagnostic, or initial energy at sample zero.
     #[must_use]
     pub const fn frame(&self) -> &LinearImpactFrame { &self.frame }
+    /// Absolute per-coordinate external force ceiling [N/sqrt(kg)].
+    #[must_use]
+    pub const fn maximum_generalized_force(&self) -> f64 { self.config.maximum_generalized_force }
     /// Remaining lifetime mechanical step allowance.
     #[must_use]
     pub fn remaining_steps(&self) -> u64 { self.config.max_steps-self.frame.sample }

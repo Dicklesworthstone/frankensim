@@ -17,6 +17,8 @@ use fs_dcontact::Obstacle;
 use std::io::Write;
 
 mod acoustics;
+mod mechanics;
+use mechanics::Mechanics;
 
 type Error=Box<dyn std::error::Error>;
 fn mesh_budget()->ProfileBudget {ProfileBudget{max_nodes:10000,max_triangles:20000,max_feature_evaluations:100000}}
@@ -48,7 +50,7 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     Ok(Obstacle::new(weights,1,n,vec![0.0],vec![1.0],stiffness,1.5,
         "estimated isotropic Hertz tip: E_eff=0.8GPa, R=3mm; not identified hickory-shell contact".into())?)
 }
-struct Experiment {system:ImpactSystem,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>}
+struct Experiment {system:Mechanics,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     // Published anchors: diameter 203.2mm; bell diameter78mm; hole diameter12.3mm;
     // edge thickness0.5mm; literature B20 E112.6GPa,nu.342,rho8607.
@@ -105,9 +107,9 @@ fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
     let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
     let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
-    Ok(Experiment{system,force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None,acoustics})
+    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None,acoustics})
 }
-fn drum(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
+fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     // Pearl MM6 published 14x6.5in,7.5mm maple shell. Rigid cylindrical cavity
     // and clear-span radius below are geometric approximations of that shell;
     // maple elasticity, bearing-edge shape, hoops and snare wires are NOT solved.
@@ -139,7 +141,15 @@ fn drum(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}; PET constants and tension are estimates",film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     }
     let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:pi*radius*radius*depth,areas:area};
-    let system=ImpactSystem::new(bodies,vec![elastic_contact(contact)?],vec![],vec![volume.clone()],config(steps,dt_s))?;
+    // Both images consume the identical geometric reduction, strike port,
+    // constitutive contact, loss coefficients and air volume. Only the discrete
+    // realization changes. Neither path modifies the microphone/BEM boundary.
+    let contact=elastic_contact(contact)?;
+    let system=if prepared {
+        Mechanics::prepared(bodies,vec![contact],volume.clone(),pi*radius*radius,steps,dt_s)?
+    }else{
+        Mechanics::Reference(ImpactSystem::new(bodies,vec![contact],vec![],vec![volume.clone()],config(steps,dt_s))?)
+    };
     Ok(Experiment{system,force:vec![0.0;n],observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics})
 }
 // The stored drum areas encode compression, so positive contraction means
@@ -150,9 +160,9 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 }
 fn run()->Result<(),Error> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; see AUDIO.md".into());}
-    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic");
-    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav");
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md and PREPARED.md".into());}
+    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic");
+    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav");
     if args.len()>3 && (!microphone || args.len()!=6) {return Err("microphone position needs exactly x_m y_m z_m after frames and full-scale".into());}
     if !audio && args.len()>2 {return Err("mechanics CSV accepts only a step count".into());}
     let count=if args.len()>=2 {args[1].parse::<u64>()?}else if audio {48000}else{4096};
@@ -168,7 +178,8 @@ fn run()->Result<(),Error> {
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let mut experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash(steps,dt_s,audio)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum(steps,dt_s,audio)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum(steps,dt_s,audio,false)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum(steps,dt_s,audio,true)?,
         _=>return Err("unknown experiment".into()),
     };
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());

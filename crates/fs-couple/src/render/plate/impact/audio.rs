@@ -18,9 +18,10 @@
 //! inspectable and converge with sample rate. Neither is time compensated.
 //! This is stationary-reference, ONE-WAY far-field observation: no acoustic
 //! reaction, near field, room, air absorption or moving-surface claim. Original
-//! mechanics remain unchanged and are still an allocating reference solver.
+//! each mechanical image retains its own numerical and allocation contract.
 
-use super::{ImpactFrame, ImpactSystem};
+use super::{ImpactError, ImpactFrame, ImpactSystem};
+use super::linear::{LinearImpactFrame, LinearImpactSystem};
 use crate::broadband_radiation::{
     BroadbandRadiationArtifact, BroadbandRadiationControls, BroadbandRadiationError,
     BroadbandRadiationRuntime, SampledRadiationData, build_broadband_radiation_artifact,
@@ -123,14 +124,63 @@ pub struct ImpactObservationTiming {
     pub velocity_difference_delay_s: f64,
 }
 
-/// Nonlinear mechanics -> causal radiation -> geometric travel -> pressure [Pa].
+/// Mechanical source contract for the existing pressure observer.
+/// Accepted state starts with interleaved mass-normalized q/v coordinates;
+/// constitutive memory, when present, follows that prefix. Refused advances must
+/// preserve accepted state/time. No source may change the basis or timestep while
+/// attached, because the acoustic projections and filter histories bind both.
+/// This is an interface to existing images, not a new integrator.
+pub trait ImpactSource {
+    /// The image's own accepted diagnostics; residual units are not re-labelled.
+    type Frame;
+    /// Accepted state, with at least two entries per mechanical mode.
+    fn state(&self) -> &[f64];
+    /// Mechanical modes only, excluding material history coordinates.
+    fn mode_count(&self) -> usize;
+    /// Complete accepted mechanical steps.
+    fn samples_rendered(&self) -> u64;
+    /// Fixed positive mechanical period [s].
+    fn sample_period_s(&self) -> f64;
+    /// Number of further steps admitted by the current lifetime budget.
+    fn remaining_steps(&self) -> u64;
+    /// Absolute per-coordinate external force ceiling [N/sqrt(kg)].
+    fn maximum_generalized_force(&self) -> f64;
+    /// Advance one physical sample or retain the old accepted state.
+    fn advance(&mut self, forces: &[f64], gate: &CancelGate) -> Result<Self::Frame, ImpactError>;
+}
+impl ImpactSource for ImpactSystem {
+    type Frame = ImpactFrame;
+    fn state(&self) -> &[f64] { ImpactSystem::state(self) }
+    fn mode_count(&self) -> usize { self.modes }
+    fn samples_rendered(&self) -> u64 { self.sample }
+    fn sample_period_s(&self) -> f64 { self.config.dt_s }
+    fn remaining_steps(&self) -> u64 { self.config.max_steps - self.sample }
+    fn maximum_generalized_force(&self) -> f64 { self.config.maximum_generalized_force }
+    fn advance(&mut self, f: &[f64], gate: &CancelGate) -> Result<Self::Frame, ImpactError> {
+        self.step(f, gate)
+    }
+}
+impl ImpactSource for LinearImpactSystem {
+    type Frame = LinearImpactFrame;
+    fn state(&self) -> &[f64] { LinearImpactSystem::state(self) }
+    fn mode_count(&self) -> usize { LinearImpactSystem::mode_count(self) }
+    fn samples_rendered(&self) -> u64 { LinearImpactSystem::samples_rendered(self) }
+    fn sample_period_s(&self) -> f64 { LinearImpactSystem::sample_period_s(self) }
+    fn remaining_steps(&self) -> u64 { LinearImpactSystem::remaining_steps(self) }
+    fn maximum_generalized_force(&self) -> f64 { LinearImpactSystem::maximum_generalized_force(self) }
+    fn advance(&mut self, f: &[f64], gate: &CancelGate) -> Result<Self::Frame, ImpactError> {
+        self.step(f, gate)
+    }
+}
+
+/// Retained mechanics -> causal radiation -> geometric travel -> pressure [Pa].
 /// Implements the existing stream surface; no second WAV encoder or scheduler.
 /// Attach at sample zero with explicitly quiescent prior acoustics. Retaining
 /// this object retains mechanical, felt, radiation and propagation histories.
 /// A failed callback poisons this host because a physical prefix may have run.
 /// Callers must discard the failed callback's output, as PressureRenderer requires.
-pub struct ImpactPressureRenderer<'a> {
-    mechanics: ImpactSystem,
+pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
+    mechanics: M,
     radiation: BroadbandRadiationRuntime<'a>,
     projections: Vec<VelocityProjection>,
     forces: Vec<f64>,
@@ -147,32 +197,35 @@ pub struct ImpactPressureRenderer<'a> {
     completed: u64,
     poisoned: bool,
     gate: CancelGate,
-    last_frame: Option<ImpactFrame>,
+    last_frame: Option<M::Frame>,
 }
 fn input(what: &'static str) -> RenderError { RenderError::Control { what } }
 fn owner(error: impl core::fmt::Display) -> RenderError {
     RenderError::Voice(crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string()))
 }
-impl<'a> ImpactPressureRenderer<'a> {
+impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
     /// Bind the exact mechanical and radiation clocks, coordinate IDs and fixed
     /// listener. Forces are held until explicitly replaced between callbacks.
     /// Startup radiating velocity must be zero: otherwise its acoustic history
     /// is missing. A moving nonradiating striker remains fully legal.
     pub fn new(
-        mechanics: ImpactSystem, radiation: &'a ImpactRadiation,
+        mechanics: M, radiation: &'a ImpactRadiation,
         projections: Vec<VelocityProjection>, forces: Vec<f64>,
         listener: ImpactListener, sample_rate_hz: u32, max_block: usize,
     ) -> Result<Self, RenderError> {
         let dt = 1.0 / f64::from(sample_rate_hz);
-        if sample_rate_hz == 0 || max_block == 0 || mechanics.sample != 0
-            || dt.to_bits() != mechanics.config.dt_s.to_bits()
+        if sample_rate_hz == 0 || max_block == 0 || mechanics.samples_rendered() != 0
+            || dt.to_bits() != mechanics.sample_period_s().to_bits()
             || dt.to_bits() != radiation.bank.sample_interval_s.to_bits()
         { return Err(input("impact/radiation clock mismatch, nonzero start or invalid block capacity")); }
-        if projections.len() != radiation.bank.inputs.len()
+        if mechanics.mode_count() == 0
+            || mechanics.mode_count().checked_mul(2).is_none_or(|n| n > mechanics.state().len())
+            || !mechanics.maximum_generalized_force().is_finite() || mechanics.maximum_generalized_force() <= 0.0
+            || projections.len() != radiation.bank.inputs.len()
             || projections.iter().zip(&radiation.bank.inputs).any(|(p, a)|
-                p.input_id != a.id || p.weights.len() != mechanics.modes || p.weights.iter().any(|v| !v.is_finite()))
-            || forces.len() != mechanics.modes
-            || forces.iter().any(|f| !f.is_finite() || f.abs() > mechanics.config.maximum_generalized_force)
+                p.input_id != a.id || p.weights.len() != mechanics.mode_count() || p.weights.iter().any(|v| !v.is_finite()))
+            || forces.len() != mechanics.mode_count()
+            || forces.iter().any(|f| !f.is_finite() || f.abs() > mechanics.maximum_generalized_force())
         { return Err(input("impact radiation input identities, projections or forces disagree")); }
         let range = det::hypot(det::hypot(listener.position_m[0], listener.position_m[1]), listener.position_m[2]);
         if !range.is_finite() || range <= radiation.source_radius_m
@@ -191,7 +244,7 @@ impl<'a> ImpactPressureRenderer<'a> {
         }
         let mut previous_velocity = Vec::with_capacity(projections.len());
         for p in &projections {
-            let v: f64 = p.weights.iter().enumerate().map(|(i,b)| b * mechanics.x[2*i+1]).sum();
+            let v: f64 = p.weights.iter().enumerate().map(|(i,b)| b * mechanics.state()[2*i+1]).sum();
             if !v.is_finite() || v != 0.0 { return Err(input("nonzero initial radiating velocity needs an acoustic-state initialization")); }
             previous_velocity.push(v);
         }
@@ -221,26 +274,26 @@ impl<'a> ImpactPressureRenderer<'a> {
     }
     /// Accepted physical mechanics. No mutation bypasses acoustic histories.
     #[must_use]
-    pub const fn mechanics(&self) -> &ImpactSystem { &self.mechanics }
+    pub const fn mechanics(&self) -> &M { &self.mechanics }
     /// The exact travel and observation approximation actually used.
     #[must_use]
     pub const fn timing(&self) -> ImpactObservationTiming { self.timing }
     /// Last accepted mechanical sample; not a fluid-energy or radiation audit.
     #[must_use]
-    pub const fn last_mechanical_frame(&self) -> Option<&ImpactFrame> { self.last_frame.as_ref() }
+    pub const fn last_mechanical_frame(&self) -> Option<&M::Frame> { self.last_frame.as_ref() }
     /// Atomically replace held physical forces without erasing vibration/history.
     pub fn set_forces(&mut self, forces: &[f64]) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
         if forces.len() != self.forces.len() || forces.iter().any(|f|
-            !f.is_finite() || f.abs() > self.mechanics.config.maximum_generalized_force)
+            !f.is_finite() || f.abs() > self.mechanics.maximum_generalized_force())
         { return Err(input("held impact force shape or physical limit failed")); }
         self.forces.copy_from_slice(forces); Ok(())
     }
     fn sample(&mut self) -> Result<f64, RenderError> {
-        let frame = self.mechanics.step(&self.forces, &self.gate).map_err(owner)?;
+        let frame = self.mechanics.advance(&self.forces, &self.gate).map_err(owner)?;
         for (k, p) in self.projections.iter().enumerate() {
-            self.velocity[k] = p.weights.iter().enumerate().map(|(i,b)| b * self.mechanics.x[2*i+1]).sum();
-            self.acceleration[k] = (self.velocity[k] - self.previous_velocity[k]) / self.mechanics.config.dt_s;
+            self.velocity[k] = p.weights.iter().enumerate().map(|(i,b)| b * self.mechanics.state()[2*i+1]).sum();
+            self.acceleration[k] = (self.velocity[k] - self.previous_velocity[k]) / self.mechanics.sample_period_s();
             if !self.acceleration[k].is_finite() { return Err(input("radiating acceleration left finite set")); }
         }
         let coefficients = self.radiation.step(&self.acceleration).map_err(owner)?;
@@ -256,7 +309,7 @@ impl<'a> ImpactPressureRenderer<'a> {
         self.last_frame = Some(frame); self.completed += 1; Ok(pressure)
     }
 }
-impl PressureRenderer for ImpactPressureRenderer<'_> {
+impl<M: ImpactSource> PressureRenderer for ImpactPressureRenderer<'_, M> {
     fn samples_rendered(&self) -> u64 { self.completed }
     fn max_block_len(&self) -> usize { self.max_block }
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
@@ -265,7 +318,7 @@ impl PressureRenderer for ImpactPressureRenderer<'_> {
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
         if self.poisoned { return Err(RenderError::Poisoned); }
-        if self.completed.checked_add(samples).is_none_or(|n| n > self.mechanics.config.max_steps) {
+        if self.completed.checked_add(samples).is_none() || samples > self.mechanics.remaining_steps() {
             return Err(input("pressure request exceeds remaining mechanical horizon"));
         } Ok(())
     }
