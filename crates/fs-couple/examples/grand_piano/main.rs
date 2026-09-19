@@ -24,7 +24,10 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
-estimated extensions), and separate per-key hammer force and relaxation cards.
+estimated extensions), separate per-key hammer force and relaxation cards, and
+published shank geometry reduced to rigid rotation plus one bending coordinate.
+The shank is not a fitted oscillator: mass, compliance and jack projection come
+from its dimensions/material. This is a linearized reduction, not the full action.
 Lengths, effective winding mass and EI remain fixed. Preset tensions are tuned
 to A4=440 Hz by default to compensate rounded source values; --raw-tensions
 preserves the published table. --concert-pitch tunes first partials by changing
@@ -41,7 +44,13 @@ Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
 Geometric boards assemble a flat orthotropic plate before rendering. The explicit
 frequency band admits at most 32 modes; mesh refinement is not a convergence claim.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
-combined with --note or --velocity. Note-on values are hammer velocity in m/s.
+combined with --note or --velocity. note_on values are hammer velocity in m/s.
+With the preset, jack_staccato and jack_legato instead take peak force in N at
+the physical jack station, with 7/100 ms pulses and 1.5 mm let-off. For example:
+0,jack_staccato,27,70
+48000,jack_legato,69,30
+Use note_off events to release keys before repeating them. Shank damping and
+the backcheck remain estimates; jack timing is resolved at the mechanical rate.
 Geometric boards default to a spatial Rayleigh half-space pressure microphone
 at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
 This assumes an infinite baffle, with no lid/room scattering or air backreaction.
@@ -200,8 +209,8 @@ fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options) -> Result<engine::Instrument, String> {
     if options.preset.is_some() {
         let materials = scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
-        engine::Instrument::new_with_course_felts(scale, modes, options.sample_rate,
-            options.substeps, options.modes, true, materials)
+        engine::Instrument::new_with_course_shanks(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials, engine::ShankGeometry::published())
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }
@@ -289,8 +298,8 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     println!("Input {:.9} J; stored {:.9} J; component losses {:.9} J; closure {:.3e} J; worst substep defect {:.3e} J.",
         piano.accounting.input_work_j, piano.energy_j(), piano.accounting.dissipated_j(),
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
-    println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation.",
-        piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j);
+    println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation; shank damping {:.9} J.",
+        piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j, piano.accounting.shank_loss_j);
     Ok(())
 }
 
@@ -346,6 +355,7 @@ fn run() -> Result<(), String> {
     println!("Soundboard: {board_source}.");
     if options.preset.is_some() {
         println!("Per-key source-derived hammer loading envelopes; estimated unloading/crush and tangent-scaled Prony relaxation.");
+        println!("Published shank geometry -> rigid rotation + bending; reciprocal jack port and 1.5 mm let-off. Linearized action fragment; damping/backcheck estimated.");
     }
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
     if let Some(path) = &options.dump_scale {
@@ -497,6 +507,16 @@ mod render_tests {
         for _ in 0..1500 {assert!(piano.step().unwrap().is_finite());}
         assert!(piano.accounting.felt_loss_j>0.0);
         assert!(piano.accounting.felt_relaxation_loss_j>0.0);
+        assert!((piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j()).abs()<1e-7);
+    }
+    #[test]
+    fn jack_performance_reaches_preset_mechanics_without_velocity_substitution() {
+        let mut o=options(&["--preset","steinway-d"]).unwrap();o.modes=12;
+        let c=selected_scale(None,&o).unwrap()[48];
+        let mut piano=prepare_instrument(vec![c],&board::demonstration(),&o).unwrap();
+        let mut score=performance::Performance::read("sample,event,key,value\n0,jack_legato,69,30\n",&[69],2400).unwrap();
+        for sample in 0..2400 {score.dispatch(sample,&mut piano).unwrap();piano.step().unwrap();}
+        assert!(piano.accounting.shank_loss_j>0.0);assert!(piano.accounting.felt_loss_j>0.0);
         assert!((piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j()).abs()<1e-7);
     }
 }
