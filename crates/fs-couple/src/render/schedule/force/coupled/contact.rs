@@ -132,35 +132,7 @@ impl ContactModalSystem {
         if network.samples_rendered() != 0 {
             return Err(invalid("contact admission requires a sample-zero network; no mid-run energy insertion"));
         }
-        if !(1..=128).contains(&config.max_iterations)
-            || [config.maximum_force_n, config.maximum_penetration_m,
-                config.force_absolute_tolerance_n, config.force_relative_tolerance]
-                .iter().any(|x| !x.is_finite() || *x <= 0.0)
-            || config.force_relative_tolerance >= 1.0 {
-            return Err(invalid("contact requires explicit positive finite force, penetration, iteration and residual budgets"));
-        }
-        let law = &contact.law;
-        if law.n_points() != 1 || law.collocation() != [-1.0]
-            || law.gaps().len() != 1 || law.weights().len() != 1
-            || !law.gaps()[0].is_finite() || !law.weights()[0].is_finite() || law.weights()[0] < 0.0
-            || !law.stiffness().is_finite() || law.stiffness() < 0.0
-            || !law.alpha().is_finite() || law.alpha() < 1.0
-            || !law.internal_loss().is_finite() || law.internal_loss() < 0.0
-            || law.provenance().trim().is_empty() {
-            return Err(invalid("contact requires a finite provenance-labelled one-point unit-opening obstacle"));
-        }
-        let mut column = vec![0.0; network.mode_count()];
-        for (attachment, sign) in [(&contact.left, 1.0), (&contact.right, -1.0)] {
-            let model = network.models.get(attachment.component)
-                .ok_or_else(|| invalid("contact attachment names an unknown component"))?;
-            if attachment.shapes.len() != model.modes().len() || attachment.shapes.iter().any(|x| !x.is_finite()) {
-                return Err(invalid("contact shapes must match the finite mass-normalized component basis"));
-            }
-            for (k, b) in attachment.shapes.iter().enumerate() {
-                let index = network.offsets[attachment.component] + k;
-                column[index] = finite(column[index] + sign*b)?;
-            }
-        }
+        let column = contact_column(&network, &contact, config)?;
         let compliance_m_per_n = effective_compliance(&network, &column, gate)?;
         let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
             .map_err(ModalCouplingError::ContactLaw)?;
@@ -288,10 +260,57 @@ impl ContactModalSystem {
     }
 }
 
+// Shared single/multiple-contact admission: obstacle, limits and signed basis.
+fn contact_column(network: &CoupledModalSystem, contact: &ModalContact, config: ModalContactConfig)
+    -> Result<Vec<f64>, ModalCouplingError>
+{
+    if !(1..=128).contains(&config.max_iterations)
+        || [config.maximum_force_n, config.maximum_penetration_m,
+            config.force_absolute_tolerance_n, config.force_relative_tolerance]
+            .iter().any(|x| !x.is_finite() || *x <= 0.0)
+        || config.force_relative_tolerance >= 1.0 {
+        return Err(invalid("contact requires explicit positive finite force, penetration, iteration and residual budgets"));
+    }
+    let law = &contact.law;
+    if law.n_points() != 1 || law.collocation() != [-1.0]
+        || law.gaps().len() != 1 || law.weights().len() != 1
+        || !law.gaps()[0].is_finite() || !law.weights()[0].is_finite() || law.weights()[0] < 0.0
+        || !law.stiffness().is_finite() || law.stiffness() < 0.0
+        || !law.alpha().is_finite() || law.alpha() < 1.0
+        || !law.internal_loss().is_finite() || law.internal_loss() < 0.0
+        || law.provenance().trim().is_empty() {
+        return Err(invalid("contact requires a finite provenance-labelled one-point unit-opening obstacle"));
+    }
+    let mut column = vec![0.0; network.mode_count()];
+    for (attachment, sign) in [(&contact.left, 1.0), (&contact.right, -1.0)] {
+        let model = network.models.get(attachment.component)
+            .ok_or_else(|| invalid("contact attachment names an unknown component"))?;
+        if attachment.shapes.len() != model.modes().len() || attachment.shapes.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("contact shapes must match the finite mass-normalized component basis"));
+        }
+        for (k, b) in attachment.shapes.iter().enumerate() {
+            let index = network.offsets[attachment.component] + k;
+            column[index] = finite(column[index] + sign*b)?;
+        }
+    }
+    Ok(column)
+}
+
 // Condense the ALREADY ADMITTED bilateral network, not a different integrator.
 // S = b^T[D - D B sqrt(h) A^-1 sqrt(h) B^T D]b.
 fn effective_compliance(network: &CoupledModalSystem, column: &[f64], gate: &CancelGate)
     -> Result<f64, ModalCouplingError>
+{
+    let response = network_response(network, column, gate)?;
+    let s = dot(column, &response)?;
+    if s <= 0.0 { return Err(invalid("contact attachment needs positive representable network compliance")); }
+    Ok(s)
+}
+
+// Full displacement response of the existing bilateral network to a unit
+// attachment load. Cross-contact compliance is b_i^T response(b_j).
+fn network_response(network: &CoupledModalSystem, column: &[f64], gate: &CancelGate)
+    -> Result<Vec<f64>, ModalCouplingError>
 {
     let mut d = Vec::with_capacity(column.len());
     for model in &network.models {
@@ -313,9 +332,7 @@ fn effective_compliance(network: &CoupledModalSystem, column: &[f64], gate: &Can
             response[k] = finite(response[k] - d[k]*b[k]*network.roots[j]*solution[j])?;
         }
     }
-    let s = dot(column, &response)?;
-    if s <= 0.0 { return Err(invalid("contact attachment needs positive representable network compliance")); }
-    Ok(s)
+    Ok(response)
 }
 
 fn law_force(law: &SlitContactStep, x0: f64, x1: f64, dt: f64)
@@ -366,3 +383,6 @@ fn solve_contact(law: &SlitContactStep, x0: f64, free: f64, compliance: f64, dt:
     }
     Err(ModalCouplingError::ContactSolve { residual_n: residual, tolerance_n: tolerance, iterations: used })
 }
+
+/// Simultaneous normal contacts sharing the same mechanical network.
+pub mod multiple;
