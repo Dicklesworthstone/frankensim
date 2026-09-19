@@ -28,7 +28,8 @@ use super::{
     extension, finite, invalid, limit, poll,
 };
 use crate::modal_acoustic_time::{ModalAcousticState, ModalAcousticTimeModel, advance_exact_zoh};
-use crate::unilateral_contact::SlitContactStep;
+// Same one-coordinate potential secant, with stable near-equilibrium arithmetic.
+use fs_dcontact::OpeningContactStep as SlitContactStep;
 
 /// One physical attachment pair and an explicitly sourced/authored contact law.
 #[derive(Clone, Debug)]

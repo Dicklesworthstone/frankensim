@@ -567,3 +567,7 @@ pub fn string_collocation(
     }
     Ok(m)
 }
+
+mod opening;
+/// Stable scalar discrete gradient of the admitted contact potential.
+pub use opening::OpeningContactStep;

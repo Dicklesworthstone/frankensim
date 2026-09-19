@@ -55,8 +55,8 @@ impl ScheduledRenderer {
     /// Compile physical actuators with the existing coupled-force compiler, then
     /// attach a jointly solved set of normal contacts to the complete network.
     /// No event timing, modal projection, constitutive law or encoder is copied.
-    /// Nonlinear contact-loaded static preload is not inferred; retain-state is
-    /// required for every component, just as for single-contact performances.
+    /// Explicit all-component static preload settles the complete contact set
+    /// under the authored contact_set setup/sweep caps and per-contact root caps.
     #[allow(clippy::too_many_arguments)]
     pub fn from_multi_contact_modal_forces(
         voices: Vec<ModalForceVoice>, events: Vec<ModalForceEvent>, force_config: ForceRenderConfig,
@@ -84,22 +84,27 @@ impl ScheduledRenderer {
 
     #[allow(clippy::too_many_arguments)]
     fn compile_contact_modal_forces(
-        voices: Vec<ModalForceVoice>, events: Vec<ModalForceEvent>, force_config: ForceRenderConfig,
+        mut voices: Vec<ModalForceVoice>, events: Vec<ModalForceEvent>, force_config: ForceRenderConfig,
         connections: Vec<ModalConnection>, coupling: ModalCouplingConfig,
         contacts: Vec<(ModalContact, ModalContactConfig)>, contact_set: MultiContactConfig,
         friction: Option<Vec<Option<ModalFriction>>>, gate: &CancelGate,
     ) -> Result<Self, RenderError> {
         super::super::super::poll(Some(gate)).map_err(RenderError::Coupled)?;
-        if voices.iter().any(|v| v.initialization != ForceInitialization::RetainState) {
-            return Err(invalid("multi-contact performances require retained initial states; nonlinear preload is not inferred"));
+        if friction.is_some() && voices.iter().any(|v| v.initialization != ForceInitialization::RetainState) {
+            return Err(invalid("frictional performances require retained states; tangential preload is not inferred"));
         }
+        let preload = prepare_preload(&mut voices)?;
         let prepared = Self::from_coupled_modal_forces(voices, events, force_config, connections, coupling, gate)?;
         let mut slots = prepared.context.voices.into_iter();
         let Some(RenderVoice::CoupledModal(voice)) = slots.next() else {
             return Err(invalid("coupled compiler returned an incompatible multi-contact host"));
         };
         if slots.next().is_some() { return Err(invalid("multi-contact host requires one complete network")); }
-        let voice = *voice;
+        let mut voice = *voice;
+        if preload {
+            voice.system.initialize_contact_equilibrium(&voice.held_force, &contacts, contact_set, gate)
+                .map_err(RenderError::Coupled)?;
+        }
         let mut system = MultiContactModalSystem::new(voice.system, contacts, contact_set, gate).map_err(RenderError::Coupled)?;
         if let Some(friction) = friction { system = system.with_friction(friction, gate).map_err(RenderError::Coupled)?; }
         let hosted = MultiContactModalVoice::new(system, voice.held_force)?;
