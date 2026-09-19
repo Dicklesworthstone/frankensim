@@ -105,6 +105,7 @@ impl ScheduledRenderer {
         let expected = f64::from(sample_rate_hz).recip().to_bits();
         for voice in &self.context.voices {
             let period = match voice {
+                RenderVoice::CompactPlate(plate) => plate.sample_period_s(),
                 RenderVoice::ReedBore(reed) => reed.dt,
                 RenderVoice::ModalString(string) => string.model.sample_period_s(),
             };

@@ -30,6 +30,9 @@
 
 /// Sample-accurate, bounded control schedules over the existing voice steppers.
 pub mod schedule;
+/// Geometry-derived compact plate voices with physical force controls.
+pub mod plate;
+pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
@@ -365,6 +368,13 @@ impl ModalStringVoice {
 /// their track beads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlDelta {
+    /// Total signed force [N] on a plate reduction's declared footprint.
+    SetPlateForce {
+        /// Plate voice slot.
+        voice: usize,
+        /// Zero releases the load while preserving vibration.
+        force_n: f64,
+    },
     /// Replace one retained mode's held generalized force without changing state.
     /// Zero releases this input; existing vibration continues to decay.
     SetModalForce {
@@ -454,6 +464,8 @@ pub enum RenderVoice {
     ReedBore(ReedBoreVoice),
     /// Exact-ZOH modal string (string filling).
     ModalString(ModalStringVoice),
+    /// Geometry/material-derived compact plate, using the existing body stepper.
+    CompactPlate(CompactPlateVoice),
 }
 
 /// The block render context: a set of voices summed into one observer
@@ -522,6 +534,15 @@ impl RenderContext {
         // Validate everything first: control application is transactional.
         for delta in deltas {
             match delta {
+                ControlDelta::SetPlateForce { voice, force_n } => {
+                    match self.voices.get(*voice) {
+                        Some(RenderVoice::CompactPlate(plate)) => plate.validate_force(*force_n)?,
+                        Some(_) => return Err(RenderError::Control {
+                            what: "a plate footprint force requires a compact plate voice",
+                        }),
+                        None => return Err(RenderError::UnknownVoice { index: *voice }),
+                    }
+                }
                 ControlDelta::SetModalForce {
                     voice,
                     mode,
@@ -540,6 +561,11 @@ impl RenderContext {
                                 });
                             }
                         }
+                        Some(RenderVoice::CompactPlate(_)) => {
+                            return Err(RenderError::Control {
+                                what: "use a physical footprint force for a compact plate voice",
+                            });
+                        }
                         Some(RenderVoice::ReedBore(_)) => {
                             return Err(RenderError::Control {
                                 what: "a reed voice has no retained modal-force input",
@@ -556,6 +582,11 @@ impl RenderContext {
                     }
                     match self.voices.get(*voice) {
                         Some(RenderVoice::ReedBore(_)) => {}
+                        Some(RenderVoice::CompactPlate(_)) => {
+                            return Err(RenderError::Control {
+                                what: "a compact plate voice has no blowing pressure",
+                            });
+                        }
                         Some(RenderVoice::ModalString(_)) => {
                             return Err(RenderError::Control {
                                 what: "a modal string voice has no blowing pressure",
@@ -580,6 +611,11 @@ impl RenderContext {
         self.validate_controls(deltas)?;
         for delta in deltas {
             match delta {
+                ControlDelta::SetPlateForce { voice, force_n } => {
+                    if let Some(RenderVoice::CompactPlate(plate)) = self.voices.get_mut(*voice) {
+                        plate.set_force_admitted(*force_n);
+                    }
+                }
                 ControlDelta::SetModalForce {
                     voice,
                     mode,
@@ -619,6 +655,7 @@ impl RenderContext {
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
+                RenderVoice::CompactPlate(plate) => plate.step_block(scratch),
                 RenderVoice::ReedBore(reed) => reed.step_block(scratch).map_err(RenderError::Voice),
                 RenderVoice::ModalString(string) => {
                     string.step_block(scratch).map_err(RenderError::Modal)
