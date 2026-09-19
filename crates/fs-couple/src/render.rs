@@ -33,7 +33,9 @@ pub mod schedule;
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
-use crate::modal_acoustic_time::{ModalAcousticTimeError, ModalAcousticTimeModel};
+use crate::modal_acoustic_time::{
+    ModalAcousticTimeError, ModalAcousticTimeModel, ModalAcousticWorkspace,
+};
 use crate::reed_bore::{
     FastSolveStats, ReedSolverMode, blowing_envelope, reed_structural, solve_reed_wave,
     solve_reed_wave_fast,
@@ -302,11 +304,12 @@ impl ReedBoreVoice {
 
 /// A modal string voice hosting the exact-ZOH runtime: per-sample free
 /// decay (or a held generalized force) with the model's own observer
-/// pressure. DISCLOSED allocating: `ModalAcousticTimeModel::step` builds a
-/// per-sample energy frame `Vec`, so this voice is not in the no-alloc
-/// set until a frame-free stepping seam lands (fusion bead 3ez8g.15).
+/// pressure. Candidate states and energy/loss diagnostics reuse a workspace
+/// allocated at construction; the callback does not construct per-sample
+/// vectors. All exact-ZOH budget and passivity gates remain active.
 pub struct ModalStringVoice {
     model: ModalAcousticTimeModel,
+    workspace: ModalAcousticWorkspace,
     held_force: Vec<f64>,
     sample_index: u64,
 }
@@ -327,8 +330,10 @@ impl ModalStringVoice {
                 found: held_force.len(),
             });
         }
+        let workspace = ModalAcousticWorkspace::new(&model);
         Ok(Self {
             model,
+            workspace,
             held_force,
             sample_index: 0,
         })
@@ -346,7 +351,7 @@ impl ModalStringVoice {
     /// Model refusals (budget ceilings, non-finite states).
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), ModalAcousticTimeError> {
         for slot in out.iter_mut() {
-            let frame = self.model.step(&self.held_force)?;
+            let frame = self.model.step_into(&self.held_force, &mut self.workspace)?;
             *slot = frame.observer_pressure_pa;
             self.sample_index += 1;
         }

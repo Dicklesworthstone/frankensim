@@ -108,6 +108,50 @@ pub struct ModalViscousLoss {
     pub roundoff_tolerance_j: f64,
 }
 
+/// Reusable sample-transition storage, allocated outside the audio callback.
+///
+/// One workspace serves any model with the same mode count; it stores no
+/// constitutive coefficients or history. Successful `step_into` calls return
+/// its borrowed diagnostics. A refusal may overwrite scratch entries but never
+/// publishes a frame or changes the model's accepted state.
+#[derive(Debug)]
+pub struct ModalAcousticWorkspace {
+    candidate: Vec<ModalAcousticState>,
+    frame: ModalAcousticFrame,
+}
+
+impl ModalAcousticWorkspace {
+    /// Allocate all candidate-state and diagnostic buffers for an admitted model.
+    #[must_use]
+    pub fn new(model: &ModalAcousticTimeModel) -> Self {
+        let count = model.modes.len();
+        Self {
+            candidate: vec![ModalAcousticState::default(); count],
+            frame: ModalAcousticFrame {
+                observer_pressure_pa: 0.0,
+                modal_energy_j: vec![0.0; count],
+                total_modal_energy_j: 0.0,
+                input_work_j: 0.0,
+                viscous_dissipation_j: 0.0,
+                modal_viscous_losses: vec![
+                    ModalViscousLoss {
+                        energy_j: 0.0,
+                        roundoff_tolerance_j: 0.0,
+                    };
+                    count
+                ],
+                dissipation_roundoff_tolerance_j: 0.0,
+            },
+        }
+    }
+
+    /// Number of modes this workspace can stage without resizing.
+    #[must_use]
+    pub fn mode_count(&self) -> usize {
+        self.candidate.len()
+    }
+}
+
 /// Typed refusal from model admission or a transactional sample step.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModalAcousticTimeError {
@@ -601,12 +645,53 @@ impl ModalAcousticTimeModel {
     /// # Errors
     /// Refuses nonpositive/nonfinite duration and every condition documented
     /// by [`Self::step`]. A refusal leaves every modal state unchanged.
-    #[allow(clippy::too_many_lines)] // one coherent block loop
     pub fn step_duration(
         &mut self,
         generalized_force_n_per_sqrt_kg: &[f64],
         duration_s: f64,
     ) -> Result<ModalAcousticFrame, ModalAcousticTimeError> {
+        let mut workspace = ModalAcousticWorkspace::new(self);
+        self.step_duration_into(generalized_force_n_per_sqrt_kg, duration_s, &mut workspace)?;
+        Ok(workspace.frame)
+    }
+
+    /// Advance one nominal sample using caller-owned, preallocated storage.
+    ///
+    /// This is the same transition and all the same gates as [`Self::step`],
+    /// with no buffer construction, resize, clone or allocation during the step.
+    /// The borrowed frame remains valid until the workspace is reused; callers
+    /// needing an owned history may explicitly clone it outside the callback.
+    ///
+    /// # Errors
+    /// Every refusal from [`Self::step`], plus an incompatible workspace size.
+    /// On refusal the model remains unchanged; scratch diagnostics are not published.
+    pub fn step_into<'w>(
+        &mut self,
+        generalized_force_n_per_sqrt_kg: &[f64],
+        workspace: &'w mut ModalAcousticWorkspace,
+    ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
+        self.step_duration_into(
+            generalized_force_n_per_sqrt_kg,
+            self.sample_period_s,
+            workspace,
+        )
+    }
+
+    /// Allocation-free exact-ZOH advance for a positive caller-specified duration.
+    /// Full/half samples reuse the existing cached transition coefficients;
+    /// other durations retain the existing exact fallback. No new integrator or
+    /// relaxed budget/passivity test is introduced.
+    ///
+    /// # Errors
+    /// Invalid duration, force, workspace size, or any state/passivity refusal
+    /// from [`Self::step`]. No accepted model state changes on failure.
+    #[allow(clippy::too_many_lines)] // one shared, transactional physics loop
+    pub fn step_duration_into<'w>(
+        &mut self,
+        generalized_force_n_per_sqrt_kg: &[f64],
+        duration_s: f64,
+        workspace: &'w mut ModalAcousticWorkspace,
+    ) -> Result<&'w ModalAcousticFrame, ModalAcousticTimeError> {
         if !(duration_s > 0.0 && duration_s.is_finite()) {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "step duration must be positive and finite",
@@ -627,9 +712,11 @@ impl ModalAcousticTimeModel {
             });
         }
 
-        let mut candidate = Vec::with_capacity(self.states.len());
-        let mut modal_energy_j = Vec::with_capacity(self.states.len());
-        let mut modal_viscous_losses = Vec::with_capacity(self.states.len());
+        if workspace.mode_count() != self.modes.len() {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "modal workspace must match the admitted mode count",
+            });
+        }
         let mut pressure_pa = 0.0;
         let mut input_work_j = 0.0;
         let mut energy_before_j = 0.0;
@@ -678,16 +765,16 @@ impl ModalAcousticTimeModel {
                     tolerance_j: allowance,
                 });
             }
-            modal_viscous_losses.push(ModalViscousLoss {
+            workspace.frame.modal_viscous_losses[mode_index] = ModalViscousLoss {
                 energy_j: loss,
                 roundoff_tolerance_j: allowance,
-            });
+            };
             pressure_pa += mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s
                 + mode.pressure_per_modal_velocity.im
                     * mode.angular_frequency_rad_s
                     * next.displacement_m_sqrt_kg;
-            modal_energy_j.push(after);
-            candidate.push(next);
+            workspace.frame.modal_energy_j[mode_index] = after;
+            workspace.candidate[mode_index] = next;
         }
         check_limit(
             "total modal energy",
@@ -721,16 +808,13 @@ impl ModalAcousticTimeModel {
                 tolerance_j: dissipation_roundoff_tolerance_j,
             });
         }
-        self.states = candidate;
-        Ok(ModalAcousticFrame {
-            observer_pressure_pa: pressure_pa,
-            modal_energy_j,
-            total_modal_energy_j: energy_after_j,
-            input_work_j,
-            viscous_dissipation_j,
-            modal_viscous_losses,
-            dissipation_roundoff_tolerance_j,
-        })
+        self.states.copy_from_slice(&workspace.candidate);
+        workspace.frame.observer_pressure_pa = pressure_pa;
+        workspace.frame.total_modal_energy_j = energy_after_j;
+        workspace.frame.input_work_j = input_work_j;
+        workspace.frame.viscous_dissipation_j = viscous_dissipation_j;
+        workspace.frame.dissipation_roundoff_tolerance_j = dissipation_roundoff_tolerance_j;
+        Ok(&workspace.frame)
     }
 
     /// Solve the exact-ZOH held generalized force that drives one physical
