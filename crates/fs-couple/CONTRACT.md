@@ -280,7 +280,10 @@ reflected incoming waves, and reopening.
 The reed aperture junction has two solver modes on
 `ReedBoreVoice::set_solver_mode`. `Strict` (default) is the
 deterministic path: a local sign-changing bracket, up to 32 symmetric
-bracket expansions if needed, then up to 96 bisections. It stops at an
+bracket expansions if needed, then up to 2100 bisections (covering the
+binary64 exponent range, including subnormals). The former 96-step bound
+could refuse near-zero roots solely because their pressure scale was far
+below the initial bracket width. It stops at an
 exact residual zero or adjacent floating-point pressure endpoints,
 returning the endpoint with smaller flow residual. Nonfinite residuals,
 failure to bracket, or exhausted refinement return errors; a grid guess
