@@ -9,8 +9,13 @@ use super::*;
 use crate::octree3::{Octant3,Octree3,OctreeNode3,OctreeError3};
 type Row=Vec<(OctreeNode3,f64)>;
 
+pub mod enrichment;
+
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {
+    domain: HexCell,
+    reference: [f64; 3],
+    master_lattice: Vec<OctreeNode3>,
     raw: CutElasticity3,
     rows: Vec<Vec<(usize,f64)>>,
     nodes: Vec<[f64;3]>,
@@ -134,7 +139,9 @@ impl AdaptiveElasticity3 {
         let raw_nodes:Vec<_>=keys.iter().map(|&n|tree.position(n,domain)).collect();
         let raw=CutElasticity3 {fixed:vec![false;raw_nodes.len()],nodes:raw_nodes,scales:vec![1.0;cells.len()],cells,ghosts,
             volume_bounds:Interval::new(volume_bounds.lo().max(0.0),volume_bounds.hi())};
-        control.poll()?;Ok(Self {raw,rows,nodes,fixed,leaves,edges})
+        let master_lattice = masters.iter().map(|n| n.map(|v| v * ((1u32 << 20) / tree.extent()))).collect();
+        let reference = [material.youngs, material.poisson, options.ghost_gamma];
+        control.poll()?;Ok(Self {domain,reference,master_lattice,raw,rows,nodes,fixed,leaves,edges})
     }
     /// Independent master positions; reduced displacement coefficients use this order.
     #[must_use] pub fn nodes(&self)->&[[f64;3]] {&self.nodes}
