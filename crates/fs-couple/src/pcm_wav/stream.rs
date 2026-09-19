@@ -11,6 +11,7 @@ use fs_exec::CancelGate;
 use crate::render::RenderError;
 use crate::render::schedule::ScheduledRenderer;
 use super::{WavError, encode_pcm16_wav};
+use super::observation::PressureRenderer;
 
 /// Largest mono PCM16 history fitting this RIFF/WAVE format (not RF64).
 pub const MAX_PCM16_WAV_SAMPLES: u64 = (u32::MAX as u64 - 36) / 2;
@@ -182,20 +183,36 @@ pub fn render_scheduled_pcm16<W: Write + Seek>(
     scratch: &mut [f64],
     samples: u64,
 ) -> Result<ScheduledWavProgress, WavStreamError> {
+    render_pressure_pcm16(renderer, stream, gate, scratch, samples)
+}
+
+/// Stream any admitted pressure producer on its output clock. In particular,
+/// a DecimatedRenderer drains all high-rate mechanics and filter stages before
+/// a callback is written. Continuation retains BOTH the producer and the sink;
+/// no lost filter history, synthetic tail, or partial output interval is inferred.
+/// The PCM writer, prefix/error rules and cancellation loop are shared with
+/// render_scheduled_pcm16, not an alternative encoder.
+pub fn render_pressure_pcm16<W: Write + Seek>(
+    renderer: &mut impl PressureRenderer,
+    stream: &mut Pcm16WavStream<W>,
+    gate: &CancelGate,
+    scratch: &mut [f64],
+    samples: u64,
+) -> Result<ScheduledWavProgress, WavStreamError> {
     renderer.validate_sample_rate(stream.sample_rate_hz).map_err(WavStreamError::Render)?;
     stream.validate_append(samples)?;
     if renderer.samples_rendered() != stream.samples_written() {
         return Err(invalid("renderer and WAV stream must have the same completed sample clock"));
     }
-    if scratch.is_empty() || scratch.len() > renderer.context().max_block_len()
+    if scratch.is_empty() || scratch.len() > renderer.max_block_len()
         || scratch.len() > stream.max_block {
         return Err(invalid("pressure scratch must fit both callback capacities and be nonempty"));
     }
     let block = u64::try_from(scratch.len()).map_err(|_| invalid("scratch length exceeds u64"))?;
-    if renderer.samples_rendered().checked_add(samples).is_none()
-        || renderer.context().blocks_rendered().checked_add(samples).is_none() {
-        return Err(invalid("requested render could overflow a renderer clock"));
-    }
+    renderer.validate_sample_count(samples).map_err(|error| match error {
+        RenderError::Sizing { what } => invalid(what),
+        other => WavStreamError::Render(other),
+    })?;
     let mut written = 0;
     while written < samples {
         if gate.is_requested() { return Ok(ScheduledWavProgress::Cancelled { samples: written }); }

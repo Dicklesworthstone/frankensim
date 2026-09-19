@@ -127,3 +127,8 @@ fn write_i16_le(out: &mut Vec<u8>, value: i16) {
 
 /// Incremental file export using the same PCM encoder and scheduled physics.
 pub mod stream;
+
+/// Shared causal integer-rate pressure filter (also used by the piano example).
+pub mod decimate;
+/// Output-clock adapters over the existing scheduled mechanics.
+pub mod observation;
