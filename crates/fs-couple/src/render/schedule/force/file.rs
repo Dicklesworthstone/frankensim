@@ -37,6 +37,13 @@
 //! `right COMPONENT SHAPES...` before `events`. All limits are explicit; the
 //! example and complete units are in examples/COUPLED_MODAL_PERFORMANCES.md.
 //! Its preloads solve the complete network; mixed retain/preload modes refuse.
+//!
+//! An additive voice form declares one untethered translation explicitly:
+//! `voice free-mass 1 PORT_COUNT`, followed by `mass KG X_M V_M_S`, then
+//! the usual port records. Its one coordinate is q=sqrt(m)*x. Port and
+//! attachment shapes retain their original 1/sqrt(kg) units; a unit physical
+//! translation uses 1/sqrt(m). Free motion has no direct pressure transfer.
+//! Existing `mode` rows still require strictly positive natural frequencies.
 
 // Version 3 adds exactly one implicit compliant contact before the events.
 // Its initial states are retained; nonlinear static preload is not inferred.
@@ -151,7 +158,7 @@ impl From<RenderError> for ModalPerformanceError {
 }
 
 impl ModalPerformance {
-    /// Decode, bind and compile the whole performance before returning a runtime.
+    /// Decode, bind and compile thewhole performance before returning a runtime.
     ///
     /// Host admission caps are 64 voices, 4096 TOTAL modes, 65536 TOTAL port
     /// coefficients/events, 262144 expanded controls and 16777216 projection
@@ -214,15 +221,20 @@ impl ModalPerformance {
         let mut total_weights = 0;
         for _ in 0..voice_count {
             let mut row = reader.row("voice")?;
-            let initialization = match row.word()? {
-                "retain-state" => ForceInitialization::RetainState,
+            let kind = row.word()?;
+            let is_free_mass = kind == "free-mass";
+            let initialization = match kind {
+                "free-mass" | "retain-state" => ForceInitialization::RetainState,
                 "static-preload" => ForceInitialization::StaticPreload,
-                _ => return Err(input(row.line, "expected retain-state or static-preload")),
+                _ => return Err(input(row.line, "expected retain-state, static-preload or free-mass")),
             };
             let modes = row.count(MAX_MODES - total_modes)?;
             let ports = row.count(MAX_PORT_WEIGHTS)?;
             if modes == 0 || ports == 0 {
                 return Err(input(row.line, "each voice needs modes and force ports"));
+            }
+            if is_free_mass && modes != 1 {
+                return Err(input(row.line, "free-mass requires exactly one translational coordinate"));
             }
             let weights = modes.checked_mul(ports)
                 .filter(|n| *n <= MAX_PORT_WEIGHTS - total_weights)
@@ -230,26 +242,40 @@ impl ModalPerformance {
             row.finish()?;
             total_modes += modes;
             total_weights += weights;
-            let mut model_modes = Vec::with_capacity(modes);
-            let mut states = Vec::with_capacity(modes);
-            for _ in 0..modes {
-                let mut row = reader.row("mode")?;
-                model_modes.push(ModalAcousticMode {
-                    angular_frequency_rad_s: row.scalar()?,
-                    damping_ratio: row.scalar()?,
-                    pressure_per_modal_velocity: C64::new(row.scalar()?, row.scalar()?),
-                });
-                let state = ModalAcousticState {
-                    displacement_m_sqrt_kg: row.scalar()?,
-                    velocity_m_sqrt_kg_per_s: row.scalar()?,
-                };
-                if initialization == ForceInitialization::StaticPreload
-                    && (state.displacement_m_sqrt_kg != 0.0 || state.velocity_m_sqrt_kg_per_s != 0.0) {
-                    return Err(input(row.line, "static preload cannot discard nonzero initial Q/V"));
-                }
-                states.push(state);
+            let model = if is_free_mass {
+                let mut row = reader.row("mass")?;
+                let mass_kg = row.scalar()?;
+                let displacement_m = row.scalar()?;
+                let velocity_m_s = row.scalar()?;
                 row.finish()?;
-            }
+                ModalAcousticTimeModel::try_free_mass(sample_rate_hz, mass_kg,
+                    displacement_m, velocity_m_s, budget).map_err(RenderError::Modal)?
+            } else {
+                let mut model_modes = Vec::with_capacity(modes);
+                let mut states = Vec::with_capacity(modes);
+                for _ in 0..modes {
+                    let mut row = reader.row("mode")?;
+                    model_modes.push(ModalAcousticMode {
+                        angular_frequency_rad_s: row.scalar()?,
+                        damping_ratio: row.scalar()?,
+                        pressure_per_modal_velocity: C64::new(row.scalar()?, row.scalar()?),
+                    });
+                    let state = ModalAcousticState {
+                        displacement_m_sqrt_kg: row.scalar()?,
+                        velocity_m_sqrt_kg_per_s: row.scalar()?,
+                    };
+                    if initialization == ForceInitialization::StaticPreload
+                        && (state.displacement_m_sqrt_kg != 0.0 || state.velocity_m_sqrt_kg_per_s != 0.0) {
+                        return Err(input(row.line, "static preload cannot discard nonzero initial Q/V"));
+                    }
+                    states.push(state);
+                    row.finish()?;
+                }
+                let mut model = ModalAcousticTimeModel::try_new(sample_rate_hz, model_modes, budget)
+                    .map_err(RenderError::Modal)?;
+                model.restore_states(&states).map_err(RenderError::Modal)?;
+                model
+            };
             let mut columns = Vec::with_capacity(ports);
             let mut initial_forces = Vec::with_capacity(ports);
             for _ in 0..ports {
@@ -260,9 +286,6 @@ impl ModalPerformance {
                 row.finish()?;
                 columns.push(column);
             }
-            let mut model = ModalAcousticTimeModel::try_new(sample_rate_hz, model_modes, budget)
-                .map_err(RenderError::Modal)?;
-            model.restore_states(&states).map_err(RenderError::Modal)?;
             voices.push(ModalForceVoice::new(model, columns, initial_forces, initialization)?);
         }
         // V2/v3/v4/v5 have connection records. V1 keeps its exact compiler and does
