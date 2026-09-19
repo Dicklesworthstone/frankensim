@@ -11,6 +11,10 @@ use fs_sparse::{Coo, Csr};
 
 /// Radially sampled shells, thickness fields and explicit surface indentations.
 pub mod profile;
+/// Nonlinear membrane energy projected from the same shell geometry.
+pub mod reduction;
+/// Circular prestressed films through the existing DKT/membrane assembly.
+pub mod head;
 
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
@@ -199,6 +203,16 @@ fn local_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize) -> Result<[
     for i in 0..18 { for j in 0..18 { for p in 0..3 { for q in 0..3 {
         k[i*18+j]+=g.area_m2*b[p][i]*a[3*p+q]*b[q][j];
     }}}}
+    let bending = local_bending_stiffness(g, s, element)?;
+    for (value, extra) in k.iter_mut().zip(bending) { *value += extra; }
+    Ok(k)
+}
+// Project this positive remainder separately from membrane energy. Subtracting
+// two nearly equal dense stiffnesses would destroy positive small eigenvalues.
+pub(super) fn local_bending_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize)
+    -> Result<[f64;324],PlateError> {
+    let mut k=[0.0;324];
+    let a=s.d.map(|d| (12.0/(s.thickness*s.thickness))*d);
     let (kb,_) = dkt_stiffness(&g.x,&g.y,&s.d,element)?;
     let slots=[2,4,3,8,10,9,14,16,15];
     let signs=[1.0,-1.0,1.0,1.0,-1.0,1.0,1.0,-1.0,1.0];
@@ -240,7 +254,7 @@ pub fn generate_cylinder_shell(r:f64,h:f64,n_theta:usize,n_z:usize)->ShellMesh {
     }}
     ShellMesh {nodes,tris}
 }
-/// Existing revolved bell helper, retaining its historical point ordering.
+/// Revolve the existing crown-to-lip bell profile, without admission changes.
 #[must_use]
 pub fn generate_bell_shell(profile:&[(f64,f64)],n_theta:usize)->ShellMesh {
     let mut nodes=Vec::with_capacity(profile.len()*n_theta);
