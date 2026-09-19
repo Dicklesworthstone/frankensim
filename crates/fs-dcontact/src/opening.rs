@@ -122,3 +122,7 @@ mod tests {
         assert!(step.coefficients(f64::INFINITY).is_err());assert_eq!(step.coefficients(-0.01).unwrap(),expected);
     }
 }
+
+
+/// Stationary normal-law partials for implicit equilibrium derivatives.
+pub mod static_response;
