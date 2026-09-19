@@ -6,6 +6,12 @@
 //! music_render <fixture> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE]
 //! ```
 //!
+//! `music_render modal INPUT.performance OUT.wav [--block N]` renders supplied
+//! mass-normalized structural images and physical actuator histories instead of
+//! either fixture. The file owns sample count, physical scale and numerical
+//! budgets; the command requires its explicit 48 kHz clock, without resampling.
+//! See `examples/MODAL_PERFORMANCES.md` for the format and scope.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. Unsupported targets and
@@ -41,6 +47,8 @@
 
 #[path = "music_render/stream_output.rs"]
 mod stream_output;
+#[path = "music_render/modal_input.rs"]
+mod modal_input;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -241,6 +249,10 @@ fn string_context(block: usize) -> RenderContext {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "modal") {
+        modal_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
     let mut positional = Vec::new();
     let mut seconds = 1.0f64;
     let mut block = 512usize;
