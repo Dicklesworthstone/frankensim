@@ -16,9 +16,9 @@
 //! NAMING: the plan's atlas used "fs-topo" for this stack; that crate
 //! name now carries the L2 topology-CERTIFICATE machinery
 //! (persistence, cubical homology), so the optimization stack lives
-//! here as fs-topopt. CutFEM-octree execution (topology evolving with
-//! ZERO remeshing) is the marquee follow-up lane recorded on the
-//! bead.
+//! here as fs-topopt. The feature-gated `sdf3` path connects 3-D raw
+//! implicit cuts to density optimization on a fixed Cartesian background.
+//! Adaptive octrees and composed marquee certification remain follow-ups.
 
 pub mod continuation;
 pub mod control;
@@ -32,6 +32,8 @@ pub mod multi_load;
 pub mod oc;
 pub mod pipeline;
 pub mod robust;
+#[cfg(feature = "cutfem-marquee")]
+pub mod sdf3;
 pub mod stress;
 
 pub use continuation::{

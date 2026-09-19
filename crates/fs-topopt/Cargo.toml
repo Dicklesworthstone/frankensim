@@ -39,3 +39,11 @@ workspace = true
 [[test]]
 name = "marquee"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "elastic_sdf3"
+required-features = ["cutfem-marquee"]
