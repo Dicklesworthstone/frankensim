@@ -247,6 +247,42 @@ impl GestureValue {
         }
     }
 
+    /// Interpolate only matching continuous payloads. Bow coordinates share one
+    /// ramp clock; no coordinate can silently fall back to a scalar payload.
+    fn ramp_towards(&self, target: &Self, fraction: f64) -> Option<Self> {
+        // Retain the existing scalar arithmetic for ordinary values. Opposite
+        // extreme finite velocities can overflow their difference, even though
+        // the convex combination is representable.
+        let lerp = |from: f64, to: f64| {
+            let difference = to - from;
+            if difference.is_finite() {
+                from + difference * fraction
+            } else {
+                from * (1.0 - fraction) + to * fraction
+            }
+        };
+        Some(match (self, target) {
+            (Self::LengthM(a), Self::LengthM(b)) => Self::LengthM(lerp(*a, *b)),
+            (Self::Fraction(a), Self::Fraction(b)) => Self::Fraction(lerp(*a, *b)),
+            (Self::Multiplier(a), Self::Multiplier(b)) => Self::Multiplier(lerp(*a, *b)),
+            (Self::TensionN(a), Self::TensionN(b)) => Self::TensionN(lerp(*a, *b)),
+            (Self::PressurePa(a), Self::PressurePa(b)) => Self::PressurePa(lerp(*a, *b)),
+            (Self::VelocityMPerS(a), Self::VelocityMPerS(b)) => {
+                Self::VelocityMPerS(lerp(*a, *b))
+            }
+            (Self::AngleRad(a), Self::AngleRad(b)) => Self::AngleRad(lerp(*a, *b)),
+            (
+                Self::Bow { velocity_m_per_s: av, normal_force_n: af, station: ax },
+                Self::Bow { velocity_m_per_s: bv, normal_force_n: bf, station: bx },
+            ) => Self::Bow {
+                velocity_m_per_s: lerp(*av, *bv),
+                normal_force_n: lerp(*af, *bf),
+                station: lerp(*ax, *bx),
+            },
+            _ => return None,
+        })
+    }
+
     /// Scalar payload for continuous interpolation (events return None).
     fn scalar(&self) -> Option<f64> {
         match self {
@@ -439,15 +475,36 @@ impl GestureSchedule {
         &self.tracks
     }
 
-    /// Sample a CONTINUOUS track at control tick `tick` (linear ramp
+    /// Sample a scalar CONTINUOUS track at control tick `tick` (linear ramp
     /// over each event's transition; deterministic pure function of the
     /// integer tick).
     /// A later event interrupts an unfinished ramp at its current value; a new
     /// ramp starts from that value, while a step replaces it immediately.
     ///
     /// # Errors
-    /// [`GestureError::UnknownControlId`]; `Invalid` for event tracks.
+    /// [`GestureError::UnknownControlId`]; `Invalid` for event or compound tracks.
+    /// Bow consumers use [`Self::sample_value`] to retain all three coordinates.
     pub fn sample(&self, id: &str, tick: u64) -> Result<f64, GestureError> {
+        self.sample_value(id, tick)?.scalar().ok_or(GestureError::Invalid {
+            what: "compound continuous tracks are read with sample_value, not sample",
+        })
+    }
+
+    /// Sample a continuous track without discarding its physical value type.
+    ///
+    /// Scalar values and all three bow coordinates use the same interrupted-ramp
+    /// semantics. A released bow retains its signed velocity and station; only
+    /// its normal force becomes zero. This changes no schema or canonical bytes.
+    ///
+    /// # Errors
+    /// Unknown track, an event-only track, a zero control clock, or a sampled
+    /// value that cannot be represented within the track's physical domain.
+    pub fn sample_value(&self, id: &str, tick: u64) -> Result<GestureValue, GestureError> {
+        if self.control_rate_hz == 0 {
+            return Err(GestureError::Invalid {
+                what: "control rate must be positive",
+            });
+        }
         let track = self.tracks.iter().find(|t| t.id == id).ok_or_else(|| {
             GestureError::UnknownControlId {
                 requested: id.to_string(),
@@ -459,9 +516,9 @@ impl GestureSchedule {
             });
         }
         let t = tick as f64 / f64::from(self.control_rate_hz);
-        let mut value = track.initial.scalar().expect("continuous by admission");
+        let mut value = track.initial.clone();
         for (index, event) in track.events.iter().enumerate() {
-            let target = event.value.scalar().expect("continuous by admission");
+            let target = &event.value;
             if t < event.time_s {
                 break;
             }
@@ -474,10 +531,15 @@ impl GestureSchedule {
             let elapsed = until - event.time_s;
             if event.transition_s > 0.0 && elapsed < event.transition_s {
                 let f = elapsed / event.transition_s;
-                value += (target - value) * f;
+                value = value.ramp_towards(target, f).ok_or_else(|| {
+                    GestureError::UnitMismatch { track: track.id.clone() }
+                })?;
             } else {
-                value = target;
+                value = target.clone();
             }
+        }
+        if !value.finite() || !value.in_range() {
+            return Err(GestureError::OutOfRange { track: track.id.clone() });
         }
         Ok(value)
     }
@@ -1133,5 +1195,89 @@ mod gesture_tests {
                 string.length_m
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod compound_sampling_tests {
+    use super::*;
+
+    fn bow(velocity: f64, force: f64, station: f64) -> GestureValue {
+        GestureValue::Bow {
+            velocity_m_per_s: velocity,
+            normal_force_n: force,
+            station,
+        }
+    }
+
+    #[test]
+    fn bow_ramps_reverse_move_and_release_without_scalar_panics() {
+        let schedule = GestureSchedule::try_new(8, vec![GestureTrack {
+            id: "bow".into(),
+            target: GestureTarget::BowStroke { string: 2 },
+            initial: bow(0.0, 0.0, 0.25),
+            events: vec![
+                GestureEvent { time_s: 0.0, transition_s: 1.0, value: bow(1.0, 4.0, 0.75) },
+                // Interrupt at (0.5 m/s, 2 N, 0.5), not the first target.
+                GestureEvent { time_s: 0.5, transition_s: 0.5, value: bow(-0.5, 0.0, 0.25) },
+                GestureEvent { time_s: 0.875, transition_s: 0.0, value: bow(-0.25, 0.0, 0.5) },
+            ],
+        }]).unwrap();
+        let decoded = GestureSchedule::from_canonical_bytes(&schedule.to_canonical_bytes()).unwrap();
+        for source in [&schedule, &decoded] {
+            assert_eq!(source.sample_value("bow", 0).unwrap(), bow(0.0, 0.0, 0.25));
+            assert_eq!(source.sample_value("bow", 2).unwrap(), bow(0.25, 1.0, 0.375));
+            assert_eq!(source.sample_value("bow", 4).unwrap(), bow(0.5, 2.0, 0.5));
+            assert_eq!(source.sample_value("bow", 6).unwrap(), bow(0.0, 1.0, 0.375));
+            assert_eq!(source.sample_value("bow", 7).unwrap(), bow(-0.25, 0.0, 0.5));
+            assert_eq!(source.sample_value("bow", 800).unwrap(), bow(-0.25, 0.0, 0.5));
+            assert!(matches!(source.sample("bow", 0), Err(GestureError::Invalid { .. })));
+            assert!(matches!(source.events_at("bow", 0), Err(GestureError::Invalid { .. })));
+        }
+        assert_eq!(schedule.content_hash(), decoded.content_hash());
+    }
+
+    #[test]
+    fn typed_scalar_sampling_preserves_existing_interrupted_pressure_arithmetic() {
+        let schedule = GestureSchedule::try_new(8, vec![GestureTrack {
+            id: "pressure".into(),
+            target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(0.0),
+            events: vec![
+                GestureEvent { time_s: 0.0, transition_s: 1.0, value: GestureValue::PressurePa(4.0) },
+                GestureEvent { time_s: 0.5, transition_s: 0.5, value: GestureValue::PressurePa(0.0) },
+            ],
+        }]).unwrap();
+        for (tick, expected) in [0.0_f64, 0.5, 1.0, 1.5, 2.0, 1.5, 1.0, 0.5, 0.0].into_iter().enumerate() {
+            assert_eq!(schedule.sample("pressure", tick as u64).unwrap().to_bits(), expected.to_bits());
+            assert_eq!(schedule.sample_value("pressure", tick as u64).unwrap(), GestureValue::PressurePa(expected));
+        }
+    }
+
+    #[test]
+    fn finite_opposite_velocities_do_not_overflow_the_ramp_difference() {
+        let mut schedule = GestureSchedule::try_new(2, vec![GestureTrack {
+            id: "bow".into(),
+            target: GestureTarget::BowStroke { string: 0 },
+            initial: bow(-f64::MAX, 1.0, 0.25),
+            events: vec![GestureEvent {
+                time_s: 0.0, transition_s: 1.0, value: bow(f64::MAX, 0.0, 0.75),
+            }],
+        }]).unwrap();
+        assert_eq!(schedule.sample_value("bow", 1).unwrap(), bow(0.0, 0.5, 0.5));
+        assert!(matches!(schedule.sample_value("absent", 0), Err(GestureError::UnknownControlId { .. })));
+        schedule.control_rate_hz = 0;
+        assert!(matches!(schedule.sample_value("bow", 0), Err(GestureError::Invalid { .. })));
+    }
+
+    #[test]
+    fn typed_sampling_does_not_convert_strikes_into_continuous_controls() {
+        let schedule = GestureSchedule::try_new(100, vec![GestureTrack {
+            id: "hammer".into(),
+            target: GestureTarget::HammerStrike { string: 0 },
+            initial: GestureValue::StrikeVelocity { velocity_m_per_s: 0.0 },
+            events: Vec::new(),
+        }]).unwrap();
+        assert!(matches!(schedule.sample_value("hammer", 0), Err(GestureError::Invalid { .. })));
     }
 }
