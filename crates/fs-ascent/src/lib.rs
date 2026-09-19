@@ -48,7 +48,10 @@ pub use runner::{
 };
 pub use sqp::{SqpReport, sqp};
 pub use stop::{StopReason, StopRule};
-pub use trust::{TrustRegionReport, trust_region_newton};
+pub use trust::{
+    TrustRegionProgress, TrustRegionReport, TrustRegionRunReport, TrustRegionState,
+    trust_region_newton,
+};
 pub use wolfe::{WolfeOutcome, strong_wolfe};
 
 /// The objective callback shape every engine consumes:
