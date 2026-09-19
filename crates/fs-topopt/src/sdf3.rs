@@ -1,20 +1,19 @@
-//! Filtered SIMP optimization on the real 3-D raw-implicit CutFEM operator.
+//! Filtered SIMP optimization on real 3-D raw-implicit CutFEM operators.
 //!
-//! The SDF defines a fixed admissible design domain. Densities change its
-//! stiffness, not its quadrature or background connectivity; no body-fitted
-//! mesh or geometric reintegration occurs during optimization. A conservative
-//! cell-graph Helmholtz filter, Heaviside projection and SIMP interpolation
-//! compose with the bulk AND ghost-energy pullback. Independent dead loads
-//! remain independent equilibrium solves, never a summed force cancellation.
+//! Uniform Cartesian and Q1-conforming octree backgrounds share the SAME
+//! filter/projection/SIMP chain, independent-load evaluator and OC driver.
+//! Geometry and quadrature stay fixed inside each optimization call. Refined
+//! studies reassemble geometry between calls, inherit only raw densities, and
+//! must restore volume feasibility and re-solve their new baseline.
 //!
-//! Volume is measured using retained numerical cut weights, not certified by
-//! their Gauss sum. This is a fixed-background density method, not an evolving
-//! zero-level-set boundary, adaptive octree, DWR certificate, manufacturing
-//! guarantee or optimality proof. The filter is the documented graph
-//! discretization, not the existing tetrahedral FEEC filter.
+//! Numerical cut volumes, discrete sensitivities and energy-based marking are
+//! not DWR estimates, continuum certificates or proofs of optimality. The graph
+//! Helmholtz filter is not the tetrahedral FEEC filter.
 
-use std::collections::BTreeMap;
-
+mod operator;
+mod refine;
+pub use operator::Sdf3Elasticity;
+pub use refine::inherit_raw_densities3;
 use fs_cutfem::elastic3::CutElasticity3;
 use fs_solver::op::{CsrOp, LinearOp};
 use crate::control::{EvaluationStop, SolveControl};
@@ -24,10 +23,10 @@ use crate::pipeline::{LoadCase, MultiLoadCompliance, SimpParams};
 
 fn failure(stage: &'static str) -> EvaluationStop { EvaluationStop::Breakdown { stage } }
 
-/// Geometry-bound density pipeline; owns its operator to prevent accidentally
-/// applying a filter/mass map from a different cut domain of the same size.
-pub struct CutDensityStudy3 {
-    operator: CutElasticity3,
+/// Geometry-bound density pipeline. The default backend preserves existing
+/// Cartesian callers; an adaptive backend uses independent master-node DOFs.
+pub struct CutDensityStudy3<O: Sdf3Elasticity = CutElasticity3> {
+    operator: O,
     filter: CsrOp,
     mass: Vec<f64>,
     params: SimpParams,
@@ -48,14 +47,15 @@ pub struct CutDensityEvaluation3 {
     pub volume_gradient: Vec<f64>,
 }
 
-impl CutDensityStudy3 {
+impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Bind the cut operator and build `A=M+r^2 L` on face-adjacent active cells.
     /// `M` contains normalized positive cut volumes. Each symmetric graph edge
-    /// has weight harmonic_mean(M_i,M_j)/distance(center_i,center_j)^2.
+    /// has weight harmonic_mean(M_i,M_j)/normal_center_separation^2. Each
+    /// coarse/fine face patch contributes one edge, with no diagonal neighbors.
     /// Thus F=A^-1 M preserves constants and M-weighted volume in exact
     /// arithmetic, and its pullback is M A^-1, NOT A^-1 M.
     /// `radius` has the same length unit as the supplied operator coordinates.
-    pub fn new(operator: CutElasticity3, radius: f64, params: SimpParams) -> Self {
+    pub fn new(operator: O, radius: f64, params: SimpParams) -> Self {
         params.assert_valid();
         assert!(radius.is_finite() && radius >= 0.0 && (radius*radius).is_finite(), "invalid filter radius");
         let volumes = operator.volumes();
@@ -63,31 +63,22 @@ impl CutDensityStudy3 {
         assert!(total.is_finite() && total > 0.0, "invalid cut-domain volume");
         let mass: Vec<f64> = volumes.iter().map(|v| v/total).collect();
         assert!(mass.iter().all(|v| v.is_finite() && *v > 0.0), "unrepresentable normalized cut volumes");
-        let keys = operator.cell_keys();
-        let ids: BTreeMap<_,_> = keys.iter().enumerate().map(|(i,&k)|(k,i)).collect();
-        let centers: Vec<[f64;3]> = operator.cell_nodes().iter().map(|nodes| {
-            std::array::from_fn(|a| f64::midpoint(operator.nodes()[nodes[0]][a], operator.nodes()[nodes[7]][a]))
-        }).collect();
         let mut coo = fs_sparse::Coo::new(mass.len(), mass.len());
         for (i,&m) in mass.iter().enumerate() { coo.push(i,i,m); }
-        for (i,&key) in keys.iter().enumerate() { for axis in 0..3 {
-            let mut next = key; next[axis] += 1;
-            if let Some(&j) = ids.get(&next) {
-                let distance = centers[j][axis]-centers[i][axis];
-                let ratio = radius/distance;
-                let low = mass[i].min(mass[j]); let high = mass[i].max(mass[j]);
-                let weight = (2.0*low/(1.0+low/high))*ratio*ratio;
-                assert!(distance.is_finite() && distance > 0.0 && weight.is_finite(), "unrepresentable graph filter edge");
-                coo.push(i,i,weight); coo.push(j,j,weight);
-                coo.push(i,j,-weight); coo.push(j,i,-weight);
-            }
-        } }
+        for (i,j,distance) in operator.filter_edges() {
+            let ratio = radius/distance;
+            let low = mass[i].min(mass[j]); let high = mass[i].max(mass[j]);
+            let weight = (2.0*low/(1.0+low/high))*ratio*ratio;
+            assert!(distance.is_finite() && distance > 0.0 && weight.is_finite(), "unrepresentable graph filter edge");
+            coo.push(i,i,weight); coo.push(j,j,weight);
+            coo.push(i,j,-weight); coo.push(j,i,-weight);
+        }
         Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params }
     }
 
     /// Read-only access to the geometry, accepted scales, and field ordering.
     #[must_use]
-    pub const fn operator(&self) -> &CutElasticity3 { &self.operator }
+    pub const fn operator(&self) -> &O { &self.operator }
     /// Fixed material/projection model for this study.
     #[must_use]
     pub const fn params(&self) -> SimpParams { self.params }
@@ -222,7 +213,7 @@ fn trial(rho:&[f64],ratios:&[f64],lambda:f64,step:f64)->Vec<f64> {
 /// independently solved accepted designs replace the current operator and fields.
 /// Bisection and rejected solves count against the shared control. No reintegration
 /// or remeshing is performed. Parameters are fixed throughout this call.
-pub fn controlled_sdf3_optimality_criteria(study:&mut CutDensityStudy3,loads:&[LoadCase<'_>],rho0:&[f64],
+pub fn controlled_sdf3_optimality_criteria<O:Sdf3Elasticity>(study:&mut CutDensityStudy3<O>,loads:&[LoadCase<'_>],rho0:&[f64],
     options:MultiLoadOcOptions,control:&mut SolveControl<'_>)->MultiLoadOcReport {
     assert_eq!(rho0.len(),study.cells(),"initial density shape mismatch");
     assert!(rho0.iter().all(|r|r.is_finite()&&(1e-3..=1.0).contains(r)),"OC densities must lie in [0.001,1]");

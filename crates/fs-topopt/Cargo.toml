@@ -47,3 +47,11 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "elastic_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "adaptive_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "adaptive_elastic_sdf3"
+required-features = ["cutfem-marquee"]
