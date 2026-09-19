@@ -1,484 +1,265 @@
-//! Flat-facet shell assembly for curved shells and musical bells (bead `frankensim-music-v8-root-3ez8g.12.2`).
-//!
-//! Combines:
-//! - Constant Strain Triangle (CST) in-plane membrane stiffness
-//! - Discrete Kirchhoff Triangle (DKT) plate bending stiffness
-//! - Regularized drilling DOF ($\theta_z$) handling with disclosed parameter $\alpha_{\text{drill}}$
-//! - Full 3D local-to-global frame transformations ($18 \times 18$)
-//! - Lumped mass matrix (translational + rotary)
-//! - Axisymmetric bell profile mesh generator and harmonic partial ratio analysis
-//! - Oracle ladder generators (cylinder, hemisphere, church bell)
+//! Flat-facet CST/DKT shells. Nodal coordinates are three displacements and
+//! three PHYSICAL axial rotations, not plate slopes. In a local tangent frame
+//! the DKT slopes are (w_x,w_y)=(-theta_y,theta_x). Drilling stabilization
+//! penalizes rotation relative to membrane spin, preserving rigid motions.
+//! Lumped translational/rotary mass and the existing fs-modal solver are used.
+//! Moderate rotations, facet-local material axes; no plastic forming model.
 
 use crate::{PlateError, PlateSection, dkt_stiffness};
 use fs_modal::{SliceOptions, SliceReport, slice_window};
 use fs_sparse::{Coo, Csr};
 
-/// Drilling DOF regularization coefficient (disclosed in CONTRACT.md).
+/// Radially sampled shells, thickness fields and explicit surface indentations.
+pub mod profile;
+
+/// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
 
-/// 3D shell mesh with triangular facets.
+/// Triangular midsurface, in metres. Each node has (u,v,w,theta_x,theta_y,theta_z).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellMesh {
-    /// 3D node coordinates `(x, y, z)` [m].
+    /// Cartesian midsurface positions.
     pub nodes: Vec<[f64; 3]>,
-    /// Triangle node indices `[n0, n1, n2]`.
+    /// Oriented triangle indices.
     pub tris: Vec<[usize; 3]>,
 }
-
 impl ShellMesh {
-    /// Construct a new shell mesh from nodes and triangles.
-    ///
+    /// Admit finite coordinates and nondegenerate, in-range triangles.
     /// # Errors
-    /// Returns [`PlateError::DegenerateElement`] if any triangle references out-of-range nodes.
+    /// Empty, nonfinite, invalid-index or degenerate mesh.
     pub fn new(nodes: Vec<[f64; 3]>, tris: Vec<[usize; 3]>) -> Result<Self, PlateError> {
-        let nn = nodes.len();
-        for tri in &tris {
-            for &n in tri {
-                if n >= nn {
-                    return Err(PlateError::BadBoundary {
-                        node: n,
-                        node_count: nn,
-                    });
-                }
-            }
+        let mesh = Self { nodes, tris };
+        mesh.validate()?;
+        Ok(mesh)
+    }
+    /// Number of positions.
+    #[must_use]
+    pub fn node_count(&self) -> usize { self.nodes.len() }
+    /// Number of facets.
+    #[must_use]
+    pub fn element_count(&self) -> usize { self.tris.len() }
+    fn validate(&self) -> Result<(), PlateError> {
+        if self.nodes.len() < 3 || self.tris.is_empty()
+            || self.nodes.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(PlateError::BadSection { what: "shell requires finite nonempty geometry" });
         }
-        Ok(Self { nodes, tris })
+        for e in 0..self.tris.len() { self.facet(e)?; }
+        Ok(())
     }
-
-    /// Number of nodes in the shell mesh.
-    #[must_use]
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Number of triangular elements.
-    #[must_use]
-    pub fn element_count(&self) -> usize {
-        self.tris.len()
+    /// Local orthonormal frame and constant P1 derivatives for one facet.
+    /// This same geometry is usable by modal nonlinear membrane reductions.
+    /// # Errors
+    /// Out-of-range element/node, nonfinite or degenerate geometry.
+    pub fn facet(&self, element: usize) -> Result<FacetGeometry, PlateError> {
+        let fail = || PlateError::DegenerateElement { element, twice_area: 0.0 };
+        let tri = self.tris.get(element).ok_or_else(fail)?;
+        for &n in tri {
+            if n >= self.nodes.len() { return Err(PlateError::BadBoundary { node: n, node_count: self.nodes.len() }); }
+        }
+        let a = sub(self.nodes[tri[1]], self.nodes[tri[0]]);
+        let b = sub(self.nodes[tri[2]], self.nodes[tri[0]]);
+        let length = norm(a);
+        let normal = cross(a, b);
+        let twice_area = norm(normal);
+        if !length.is_finite() || length < 1e-12 || !twice_area.is_finite() || twice_area < 2e-14 { return Err(fail()); }
+        let ex = a.map(|v| v / length);
+        let ez = normal.map(|v| v / twice_area);
+        let ey = cross(ez, ex);
+        let x = [0.0, length, dot(b, ex)];
+        let y = [0.0, 0.0, dot(b, ey)];
+        let gradient = [
+            [(y[1]-y[2])/twice_area, (x[2]-x[1])/twice_area],
+            [(y[2]-y[0])/twice_area, (x[0]-x[2])/twice_area],
+            [(y[0]-y[1])/twice_area, (x[1]-x[0])/twice_area],
+        ];
+        Ok(FacetGeometry { frame: [ex, ey, ez], x, y, area_m2: 0.5*twice_area, gradient })
     }
 }
+fn sub(a: [f64;3], b: [f64;3]) -> [f64;3] { [a[0]-b[0],a[1]-b[1],a[2]-b[2]] }
+fn dot(a: [f64;3], b: [f64;3]) -> f64 { a[0]*b[0]+a[1]*b[1]+a[2]*b[2] }
+fn cross(a: [f64;3], b: [f64;3]) -> [f64;3] { [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]] }
+fn norm(a: [f64;3]) -> f64 { dot(a,a).sqrt() }
 
-/// Boundary support condition for shell nodes.
+/// Element geometry shared by stiffness and physical modal strain projections.
+#[derive(Debug, Clone, Copy)]
+pub struct FacetGeometry {
+    /// Rows ex, ey, ez mapping Cartesian vectors to local tangent coordinates.
+    pub frame: [[f64;3];3],
+    /// Local nodal x coordinates [m].
+    pub x: [f64;3],
+    /// Local nodal y coordinates [m].
+    pub y: [f64;3],
+    /// Midsurface facet area [m^2].
+    pub area_m2: f64,
+    /// P1 shape derivatives, [node][x/y], in [1/m].
+    pub gradient: [[f64;2];3],
+}
+
+/// Strong essential boundary conditions. Compliant supports belong at ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellSupport {
-    /// All 6 DOFs free.
+    /// No constrained degrees of freedom (six rigid modes remain).
     Free,
-    /// Clamped: all 6 DOFs constrained to zero (u=v=w=θx=θy=θz=0).
+    /// All translations and physical rotations constrained.
     Clamped,
-    /// Pinned: translation constrained (u=v=w=0), rotations free.
+    /// Translations constrained, physical rotations free.
     Pinned,
 }
-
-/// Assembled reduced shell model pencil `(K, M)`.
+/// Reduced stiffness/mass pencil, with explicit full-to-free coordinate map.
 #[derive(Debug, Clone)]
 pub struct ShellModel {
-    /// Reduced stiffness matrix (membrane + bending + drilling).
+    /// Membrane, bending and relative-spin stabilization stiffness.
     pub k: Csr,
-    /// Reduced lumped mass matrix (translational + rotary).
+    /// Positive lumped translational and rotary inertia.
     pub m: Csr,
-    /// Map from full DOF index (`6 * node + component`) to reduced free DOF index.
+    /// Full DOF (6*node+component) to free coordinate.
     pub dof_map: Vec<Option<usize>>,
-    /// Number of free DOFs.
+    /// Free coordinate count.
     pub free: usize,
 }
 
-/// Assemble the reduced (K, M) pencil for a 3D flat-facet shell mesh.
-///
+/// Assemble a homogeneous shell using the same element path as thickness fields.
 /// # Errors
-/// Returns [`PlateError`] on invalid geometry or section.
-pub fn assemble_shell(
-    mesh: &ShellMesh,
-    section: &PlateSection,
-    boundary_nodes: &[usize],
-    support: ShellSupport,
-) -> Result<ShellModel, PlateError> {
-    let nn = mesh.node_count();
-    let ndof = 6 * nn;
-
-    // 1. Build DOF elimination map
+/// Invalid geometry, section, boundary, mass or unrepresentable assembly.
+pub fn assemble_shell(mesh: &ShellMesh, section: &PlateSection,
+    boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+    assemble(mesh, core::slice::from_ref(section), true, boundary_nodes, support)
+}
+/// Assemble one explicit material/thickness section per facet. D is expressed
+/// in that facet's ex/ey axes; rotate anisotropic data into those axes beforehand.
+/// There is no thickness averaging across facets and no inferred density.
+/// # Errors
+/// Section count, physical admission, mesh, boundary or finite-set refusal.
+pub fn assemble_shell_sections(mesh: &ShellMesh, sections: &[PlateSection],
+    boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+    if sections.len() != mesh.tris.len() {
+        return Err(PlateError::SectionCount { expected: mesh.tris.len(), actual: sections.len() });
+    }
+    assemble(mesh, sections, false, boundary_nodes, support)
+}
+fn assemble(mesh: &ShellMesh, sections: &[PlateSection], uniform: bool,
+    boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
+    mesh.validate()?;
+    for section in sections { section.validate()?; }
+    let ndof = mesh.nodes.len().checked_mul(6).ok_or(PlateError::BadSection { what: "shell DOF overflow" })?;
     let mut constrained = vec![false; ndof];
-    if support != ShellSupport::Free {
-        for &b in boundary_nodes {
-            if b >= nn {
-                return Err(PlateError::BadBoundary {
-                    node: b,
-                    node_count: nn,
-                });
-            }
-            match support {
-                ShellSupport::Clamped => {
-                    for comp in 0..6 {
-                        constrained[6 * b + comp] = true;
-                    }
-                }
-                ShellSupport::Pinned => {
-                    for comp in 0..3 {
-                        constrained[6 * b + comp] = true;
-                    }
-                }
-                ShellSupport::Free => {}
-            }
-        }
+    for &node in boundary_nodes {
+        if node >= mesh.nodes.len() { return Err(PlateError::BadBoundary { node, node_count: mesh.nodes.len() }); }
+        let count = match support { ShellSupport::Free => 0, ShellSupport::Pinned => 3, ShellSupport::Clamped => 6 };
+        for c in 0..count { constrained[6*node+c] = true; }
     }
-
-    let mut dof_map = vec![None; ndof];
-    let mut free_count = 0;
-    for i in 0..ndof {
-        if !constrained[i] {
-            dof_map[i] = Some(free_count);
-            free_count += 1;
-        }
-    }
-
-    let mut k_coo = Coo::new(free_count, free_count);
-    let mut m_diag = vec![0.0f64; free_count];
-
-    let h = section.thickness;
-    let rho = section.density;
-
-    // Plane stress constitutive matrix for membrane: C = 12 / h^2 * D
-    let c_scale = 12.0 / (h * h);
-    let c_mat = [
-        c_scale * section.d[0],
-        c_scale * section.d[1],
-        0.0,
-        c_scale * section.d[3],
-        c_scale * section.d[4],
-        0.0,
-        0.0,
-        0.0,
-        c_scale * section.d[8],
-    ];
-
-    // 2. Loop over triangular facets
-    for (elem_idx, tri) in mesh.tris.iter().enumerate() {
-        let p0 = mesh.nodes[tri[0]];
-        let p1 = mesh.nodes[tri[1]];
-        let p2 = mesh.nodes[tri[2]];
-
-        // Vector p0 -> p1
-        let v01 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-        let l01 = (v01[0] * v01[0] + v01[1] * v01[1] + v01[2] * v01[2]).sqrt();
-        if l01 < 1e-12 {
-            return Err(PlateError::DegenerateElement {
-                element: elem_idx,
-                twice_area: 0.0,
-            });
-        }
-        let ex = [v01[0] / l01, v01[1] / l01, v01[2] / l01];
-
-        // Vector p0 -> p2
-        let v02 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-
-        // Normal ez = ex x v02
-        let n_cross = [
-            ex[1] * v02[2] - ex[2] * v02[1],
-            ex[2] * v02[0] - ex[0] * v02[2],
-            ex[0] * v02[1] - ex[1] * v02[0],
-        ];
-        let n_len =
-            (n_cross[0] * n_cross[0] + n_cross[1] * n_cross[1] + n_cross[2] * n_cross[2]).sqrt();
-        if n_len < 1e-12 {
-            return Err(PlateError::DegenerateElement {
-                element: elem_idx,
-                twice_area: 0.0,
-            });
-        }
-        let ez = [n_cross[0] / n_len, n_cross[1] / n_len, n_cross[2] / n_len];
-
-        // ey = ez x ex
-        let ey = [
-            ez[1] * ex[2] - ez[2] * ex[1],
-            ez[2] * ex[0] - ez[0] * ex[2],
-            ez[0] * ex[1] - ez[1] * ex[0],
-        ];
-
-        // Local 2D coordinates in facet plane (z' = 0 by construction)
-        let lx0 = 0.0;
-        let ly0 = 0.0;
-        let lx1 = l01;
-        let ly1 = 0.0;
-        let lx2 = v02[0] * ex[0] + v02[1] * ex[1] + v02[2] * ex[2];
-        let ly2 = v02[0] * ey[0] + v02[1] * ey[1] + v02[2] * ey[2];
-
-        let lx = [lx0, lx1, lx2];
-        let ly = [ly0, ly1, ly2];
-
-        let twice_area = ((lx1 - lx0) * (ly2 - ly0) - (lx2 - lx0) * (ly1 - ly0)).abs();
-        let area = 0.5 * twice_area;
-        if area < 1e-14 {
-            return Err(PlateError::DegenerateElement {
-                element: elem_idx,
-                twice_area,
-            });
-        }
-
-        // Local 18x18 stiffness matrix
-        let mut k_local = [0.0f64; 18 * 18];
-
-        // (a) Membrane stiffness (CST in-plane): local DOFs u1, v1, u2, v2, u3, v3 -> slots 0,1, 6,7, 12,13
-        // B_m matrix: epsilon = B_m * u
-        let b1 = ly1 - ly2; // y1 - y2
-        let b2 = ly2 - ly0; // y2 - y0
-        let b3 = ly0 - ly1; // y0 - y1
-        let c1 = lx2 - lx1; // x2 - x1
-        let c2 = lx0 - lx2; // x0 - x2
-        let c3 = lx1 - lx0; // x1 - x0
-
-        let bm = [
-            [
-                b1 / twice_area,
-                0.0,
-                b2 / twice_area,
-                0.0,
-                b3 / twice_area,
-                0.0,
-            ],
-            [
-                0.0,
-                c1 / twice_area,
-                0.0,
-                c2 / twice_area,
-                0.0,
-                c3 / twice_area,
-            ],
-            [
-                c1 / twice_area,
-                b1 / twice_area,
-                c2 / twice_area,
-                b2 / twice_area,
-                c3 / twice_area,
-                b3 / twice_area,
-            ],
-        ];
-
-        let mut km_6x6 = [0.0f64; 36];
-        for r in 0..6 {
-            for c in 0..6 {
-                let mut sum = 0.0;
-                for i in 0..3 {
-                    for j in 0..3 {
-                        sum += bm[i][r] * c_mat[i * 3 + j] * bm[j][c];
-                    }
-                }
-                km_6x6[r * 6 + c] = sum * area;
-            }
-        }
-
-        // Place km_6x6 into k_local (u, v components: slots 0,1; 6,7; 12,13)
-        let m_dofs = [0, 1, 6, 7, 12, 13];
-        for (i, &di) in m_dofs.iter().enumerate() {
-            for (j, &dj) in m_dofs.iter().enumerate() {
-                k_local[di * 18 + dj] += km_6x6[i * 6 + j];
-            }
-        }
-
-        // (b) DKT Bending stiffness (9x9): local DOFs w1, tx1, ty1, w2, tx2, ty2, w3, tx3, ty3 -> slots 2,3,4; 8,9,10; 14,15,16
-        let (kb_9x9, _) = dkt_stiffness(&lx, &ly, &section.d, elem_idx)?;
-        let b_dofs = [2, 3, 4, 8, 9, 10, 14, 15, 16];
-        for (i, &di) in b_dofs.iter().enumerate() {
-            for (j, &dj) in b_dofs.iter().enumerate() {
-                k_local[di * 18 + dj] += kb_9x9[i * 9 + j];
-            }
-        }
-
-        // (c) Regularized drilling stiffness on theta_z: slots 5, 11, 17
-        let k_drill = DRILLING_ALPHA * c_mat[0] * area;
-        k_local[5 * 18 + 5] += k_drill;
-        k_local[11 * 18 + 11] += k_drill;
-        k_local[17 * 18 + 17] += k_drill;
-
-        // (d) Transformation matrix R (3x3): rows are ex, ey, ez
-        // For each node, T_node = diag(R, R) (6x6)
-        // Transform k_local (18x18) to k_global: K_glob = T^T * K_loc * T
-        let r_mat = [
-            ex[0], ex[1], ex[2], ey[0], ey[1], ey[2], ez[0], ez[1], ez[2],
-        ];
-
-        let mut k_global = [0.0f64; 18 * 18];
-        for node_i in 0..3 {
-            for node_j in 0..3 {
-                for comp_ti in 0..2 {
-                    // 0 = translational, 1 = rotational
-                    for comp_tj in 0..2 {
-                        // Transform 3x3 sub-block
-                        let r_offset_i = node_i * 6 + comp_ti * 3;
-                        let r_offset_j = node_j * 6 + comp_tj * 3;
-
-                        for a in 0..3 {
-                            for b in 0..3 {
-                                let mut val = 0.0;
-                                for p in 0..3 {
-                                    for q in 0..3 {
-                                        let k_loc_val =
-                                            k_local[(r_offset_i + p) * 18 + (r_offset_j + q)];
-                                        val += r_mat[p * 3 + a] * k_loc_val * r_mat[q * 3 + b];
-                                    }
-                                }
-                                k_global[(r_offset_i + a) * 18 + (r_offset_j + b)] += val;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // (e) Accumulate into global Coo
-        let global_dof_indices = [
-            6 * tri[0],
-            6 * tri[0] + 1,
-            6 * tri[0] + 2,
-            6 * tri[0] + 3,
-            6 * tri[0] + 4,
-            6 * tri[0] + 5,
-            6 * tri[1],
-            6 * tri[1] + 1,
-            6 * tri[1] + 2,
-            6 * tri[1] + 3,
-            6 * tri[1] + 4,
-            6 * tri[1] + 5,
-            6 * tri[2],
-            6 * tri[2] + 1,
-            6 * tri[2] + 2,
-            6 * tri[2] + 3,
-            6 * tri[2] + 4,
-            6 * tri[2] + 5,
-        ];
-
+    let mut free = 0;
+    let dof_map: Vec<_> = constrained.iter().map(|fixed| if *fixed { None } else { let i=free; free+=1; Some(i) }).collect();
+    if free == 0 { return Err(PlateError::BadSection { what: "shell has no free coordinates" }); }
+    let mut k = Coo::new(free,free);
+    let mut mass = vec![0.0;free];
+    for (e,tri) in mesh.tris.iter().enumerate() {
+        let section = &sections[if uniform { 0 } else { e }];
+        let g = mesh.facet(e)?;
+        let local = local_stiffness(&g,section,e)?;
+        // Transform translations and physical axial rotations with the same R.
         for i in 0..18 {
-            if let Some(ri) = dof_map[global_dof_indices[i]] {
-                for j in 0..18 {
-                    if let Some(cj) = dof_map[global_dof_indices[j]] {
-                        k_coo.push(ri, cj, k_global[i * 18 + j]);
-                    }
-                }
+            let Some(ri) = dof_map[6*tri[i/6]+i%6] else { continue; };
+            for j in 0..18 {
+                let Some(cj) = dof_map[6*tri[j/6]+j%6] else { continue; };
+                let bi=6*(i/6)+3*((i%6)/3);
+                let bj=6*(j/6)+3*((j%6)/3);
+                let mut value=0.0;
+                for p in 0..3 { for q in 0..3 {
+                    value += g.frame[p][i%3]*local[(bi+p)*18+bj+q]*g.frame[q][j%3];
+                }}
+                if !value.is_finite() { return Err(PlateError::BadSection { what: "shell stiffness overflow" }); }
+                k.push(ri,cj,value);
             }
         }
-
-        // (f) Lumped mass contributions per node
-        let node_mass = rho * h * area / 3.0;
-        let node_rot_inertia = rho * h * h * h * area / 36.0;
-
-        for &n in tri {
-            for comp in 0..3 {
-                if let Some(r) = dof_map[6 * n + comp] {
-                    m_diag[r] += node_mass;
-                }
-            }
-            for comp in 3..6 {
-                if let Some(r) = dof_map[6 * n + comp] {
-                    m_diag[r] += node_rot_inertia;
-                }
-            }
-        }
+        let m=section.density*section.thickness*g.area_m2/3.0;
+        let jr=m*section.thickness*section.thickness/12.0;
+        for &node in tri { for c in 0..6 {
+            if let Some(i)=dof_map[6*node+c] { mass[i]+=if c<3 {m} else {jr}; }
+        }}
     }
-
-    let k_csr = k_coo.assemble();
-    let mut m_coo = Coo::new(free_count, free_count);
-    for (i, &val) in m_diag.iter().enumerate() {
-        m_coo.push(i, i, val.max(1e-15));
+    let mut m = Coo::new(free,free);
+    for (i,&value) in mass.iter().enumerate() {
+        // An isolated coordinate is a mesh error, not permission to invent mass.
+        if !value.is_finite() || value<=0.0 { return Err(PlateError::BadSection { what: "shell contains unrepresented mass or isolated free nodes" }); }
+        m.push(i,i,value);
     }
-    let m_csr = m_coo.assemble();
-
-    Ok(ShellModel {
-        k: k_csr,
-        m: m_csr,
-        dof_map,
-        free: free_count,
-    })
+    Ok(ShellModel { k:k.assemble(),m:m.assemble(),dof_map,free })
+}
+fn local_stiffness(g:&FacetGeometry, s:&PlateSection, element:usize) -> Result<[f64;324],PlateError> {
+    let mut k=[0.0;324];
+    // Membrane resultant modulus A = 12 D / h^2, including D16/D26.
+    let a=s.d.map(|d| (12.0/(s.thickness*s.thickness))*d);
+    let mut b=[[0.0;18];3];
+    for i in 0..3 {
+        let [dx,dy]=g.gradient[i];
+        b[0][6*i]=dx; b[1][6*i+1]=dy;
+        b[2][6*i]=dy; b[2][6*i+1]=dx;
+    }
+    for i in 0..18 { for j in 0..18 { for p in 0..3 { for q in 0..3 {
+        k[i*18+j]+=g.area_m2*b[p][i]*a[3*p+q]*b[q][j];
+    }}}}
+    let (kb,_) = dkt_stiffness(&g.x,&g.y,&s.d,element)?;
+    let slots=[2,4,3,8,10,9,14,16,15];
+    let signs=[1.0,-1.0,1.0,1.0,-1.0,1.0,1.0,-1.0,1.0];
+    for i in 0..9 { for j in 0..9 { k[slots[i]*18+slots[j]]+=signs[i]*kb[9*i+j]*signs[j]; }}
+    // Positive penalty on theta_z - (v_x-u_y)/2. Its lumped three-point
+    // integration also controls nonconstant drilling modes without grounding
+    // the mean rigid rotation. The old diagonal theta_z spring did not.
+    for node in 0..3 {
+        let mut spin=[0.0;18];
+        spin[6*node+5]=1.0;
+        for i in 0..3 { spin[6*i]=0.5*g.gradient[i][1]; spin[6*i+1]=-0.5*g.gradient[i][0]; }
+        let scale=DRILLING_ALPHA*a[8]*g.area_m2/3.0;
+        for i in 0..18 { for j in 0..18 { k[18*i+j]+=scale*spin[i]*spin[j]; }}
+    }
+    Ok(k)
 }
 
-/// Compute certified modes of a shell model in the frequency-squared window `(low, high]`.
-///
+/// Certified generalized modes in the angular-frequency-squared window.
 /// # Errors
-/// Returns [`PlateError::Modal`] on solver refusal.
-pub fn modes_shell(
-    model: &ShellModel,
-    window: (f64, f64),
-    opts: &SliceOptions,
-) -> Result<SliceReport, PlateError> {
-    Ok(slice_window(&model.k, &model.m, window, opts)?)
+/// The existing fs-modal eigensolver's refusals.
+pub fn modes_shell(model:&ShellModel,window:(f64,f64),opts:&SliceOptions)->Result<SliceReport,PlateError> {
+    Ok(slice_window(&model.k,&model.m,window,opts)?)
 }
 
-/// Generate a cylindrical shell mesh of radius `r` and height `h`.
+/// Existing cylindrical geometry helper. For checked production profile input,
+/// use [`profile::revolve`] instead.
 #[must_use]
-pub fn generate_cylinder_shell(r: f64, h: f64, n_theta: usize, n_z: usize) -> ShellMesh {
-    let mut nodes = Vec::with_capacity((n_theta + 1) * (n_z + 1));
-    for j in 0..=n_z {
-        let z = (j as f64 / n_z as f64) * h;
-        for i in 0..n_theta {
-            let theta = (i as f64 / n_theta as f64) * 2.0 * std::f64::consts::PI;
-            let x = r * theta.cos();
-            let y = r * theta.sin();
-            nodes.push([x, y, z]);
-        }
-    }
-
-    let mut tris = Vec::with_capacity(2 * n_theta * n_z);
-    for j in 0..n_z {
-        for i in 0..n_theta {
-            let next_i = (i + 1) % n_theta;
-            let n00 = j * n_theta + i;
-            let n10 = j * n_theta + next_i;
-            let n01 = (j + 1) * n_theta + i;
-            let n11 = (j + 1) * n_theta + next_i;
-
-            tris.push([n00, n10, n11]);
-            tris.push([n00, n11, n01]);
-        }
-    }
-
-    ShellMesh { nodes, tris }
+pub fn generate_cylinder_shell(r:f64,h:f64,n_theta:usize,n_z:usize)->ShellMesh {
+    let mut nodes=Vec::with_capacity((n_theta+1)*(n_z+1));
+    for j in 0..=n_z { let z=j as f64/n_z as f64*h; for i in 0..n_theta {
+        let theta=i as f64/n_theta as f64*2.0*core::f64::consts::PI;
+        nodes.push([r*theta.cos(),r*theta.sin(),z]);
+    }}
+    let mut tris=Vec::with_capacity(2*n_theta*n_z);
+    for j in 0..n_z { for i in 0..n_theta {
+        let ni=(i+1)%n_theta;
+        let (a,b,c,d)=(j*n_theta+i,j*n_theta+ni,(j+1)*n_theta+i,(j+1)*n_theta+ni);
+        tris.push([a,b,d]);tris.push([a,d,c]);
+    }}
+    ShellMesh {nodes,tris}
 }
-
-/// Revolve an axisymmetric bell profile into a 3D shell mesh.
-/// `profile` contains `(r, z)` points from crown ($z=H$) to lip ($z=0$).
+/// Existing revolved bell helper, retaining its historical point ordering.
 #[must_use]
-pub fn generate_bell_shell(profile: &[(f64, f64)], n_theta: usize) -> ShellMesh {
-    let n_points = profile.len();
-    let mut nodes = Vec::with_capacity(n_points * n_theta);
-
-    for &(r, z) in profile {
-        for i in 0..n_theta {
-            let theta = (i as f64 / n_theta as f64) * 2.0 * std::f64::consts::PI;
-            let x = r * theta.cos();
-            let y = r * theta.sin();
-            nodes.push([x, y, z]);
-        }
-    }
-
-    let mut tris = Vec::with_capacity(2 * (n_points - 1) * n_theta);
-    for j in 0..n_points - 1 {
-        for i in 0..n_theta {
-            let next_i = (i + 1) % n_theta;
-            let n00 = j * n_theta + i;
-            let n10 = j * n_theta + next_i;
-            let n01 = (j + 1) * n_theta + i;
-            let n11 = (j + 1) * n_theta + next_i;
-
-            tris.push([n00, n10, n11]);
-            tris.push([n00, n11, n01]);
-        }
-    }
-
-    ShellMesh { nodes, tris }
+pub fn generate_bell_shell(profile:&[(f64,f64)],n_theta:usize)->ShellMesh {
+    let mut nodes=Vec::with_capacity(profile.len()*n_theta);
+    for &(r,z) in profile { for i in 0..n_theta {
+        let theta=i as f64/n_theta as f64*2.0*core::f64::consts::PI;
+        nodes.push([r*theta.cos(),r*theta.sin(),z]);
+    }}
+    let mut tris=Vec::with_capacity(2*(profile.len()-1)*n_theta);
+    for j in 0..profile.len()-1 { for i in 0..n_theta {
+        let ni=(i+1)%n_theta;
+        let(a,b,c,d)=(j*n_theta+i,j*n_theta+ni,(j+1)*n_theta+i,(j+1)*n_theta+ni);
+        tris.push([a,b,d]);tris.push([a,d,c]);
+    }}
+    ShellMesh {nodes,tris}
 }
-
-/// Standard canonical English church bell profile (normalized coordinates).
+/// Existing normalized church-bell research profile; not a measured specimen.
 #[must_use]
-pub fn canonical_church_bell_profile(scale_m: f64) -> Vec<(f64, f64)> {
-    // 10 radial slices from crown to soundring/lip
-    let raw = [
-        (0.10, 1.00), // Crown
-        (0.18, 0.88), // Shoulder
-        (0.24, 0.72), // Waist top
-        (0.30, 0.55), // Waist mid
-        (0.38, 0.38), // Soundbow upper
-        (0.50, 0.20), // Soundbow
-        (0.65, 0.08), // Soundring
-        (0.75, 0.00), // Lip / mouth
-    ];
-    raw.iter()
-        .map(|&(r, z)| (r * scale_m, z * scale_m))
-        .collect()
+pub fn canonical_church_bell_profile(scale_m:f64)->Vec<(f64,f64)> {
+    [(0.10,1.00),(0.18,0.88),(0.24,0.72),(0.30,0.55),(0.38,0.38),
+        (0.50,0.20),(0.65,0.08),(0.75,0.00)].iter()
+        .map(|&(r,z)|(r*scale_m,z*scale_m)).collect()
 }
