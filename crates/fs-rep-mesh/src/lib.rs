@@ -28,6 +28,7 @@ mod complex;
 mod contour;
 mod convert;
 mod halfedge;
+mod polygon;
 mod repair;
 pub mod shapes;
 mod winding;
@@ -46,6 +47,7 @@ pub use contour::{
 };
 pub use convert::{IncrementalMeshSdf, MeshQuality, MeshSdfError, assess_quality, mesh_to_sdf};
 pub use halfedge::{HalfEdge, HalfEdgeMesh, MeshBuildError, NO_FACE};
+pub use polygon::{MAX_POLYGON_VERTICES, MAX_POLYGON_WORK, PolygonError, triangulate_polygon};
 pub use repair::{RepairOutcome, RepairReceipt, repair};
 pub use winding::{Soup, WindingOctree, triangle_winding, winding_exact};
 
