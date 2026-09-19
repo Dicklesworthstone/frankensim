@@ -28,6 +28,9 @@
 //! candidates for bead 3ez8g.15), not silently admitted to the no-alloc
 //! set.
 
+/// Sample-accurate, bounded control schedules over the existing voice steppers.
+pub mod schedule;
+
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
 use crate::modal_acoustic_time::{ModalAcousticTimeError, ModalAcousticTimeModel};
@@ -457,6 +460,7 @@ pub struct RenderContext {
     /// after construction.
     scratch: Vec<f64>,
     blocks_rendered: u64,
+    samples_rendered: u64,
     controls_applied: Vec<ControlRecord>,
     poisoned: bool,
 }
@@ -470,6 +474,7 @@ impl RenderContext {
             voices,
             scratch: vec![0.0; max_block],
             blocks_rendered: 0,
+            samples_rendered: 0,
             controls_applied: Vec::new(),
             poisoned: false,
         }
@@ -481,19 +486,31 @@ impl RenderContext {
         self.blocks_rendered
     }
 
+    /// Samples completed since this context was constructed. Unlike the block
+    /// counter, this clock is independent of the callback partition.
+    #[must_use]
+    pub const fn samples_rendered(&self) -> u64 {
+        self.samples_rendered
+    }
+
+    /// Construction-time scratch capacity in samples.
+    #[must_use]
+    pub fn max_block_len(&self) -> usize {
+        self.scratch.len()
+    }
+
     /// The applied-control log (the inspectable D17 record).
     #[must_use]
     pub fn control_log(&self) -> &[ControlRecord] {
         &self.controls_applied
     }
 
-    /// Apply control deltas at the CURRENT block boundary (before the next
-    /// `block` call). Refusals leave every voice untouched.
+    /// Check an entire control batch without changing inputs, state or logs.
     ///
     /// # Errors
     /// A poisoned context, unknown voice index, or a delta the voice kind
     /// cannot accept.
-    pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+    pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
         if self.poisoned {
             return Err(RenderError::Poisoned);
         }
@@ -546,6 +563,16 @@ impl RenderContext {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Apply control deltas at the CURRENT block boundary (before the next
+    /// `block` call). Refusals leave every voice untouched.
+    ///
+    /// # Errors
+    /// A poisoned context, unknown voice index, or incompatible/invalid input.
+    pub fn apply_controls(&mut self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
+        self.validate_controls(deltas)?;
         for delta in deltas {
             match delta {
                 ControlDelta::SetModalForce {
@@ -582,17 +609,7 @@ impl RenderContext {
     /// without touching output or state. An oversized or empty block
     /// refuses before any state moves and does not poison a healthy context.
     pub fn block(&mut self, out: &mut [f64]) -> Result<(), RenderError> {
-        if self.poisoned {
-            return Err(RenderError::Poisoned);
-        }
-        if out.is_empty() {
-            return Err(RenderError::EmptyBlock);
-        }
-        if out.len() > self.scratch.len() {
-            return Err(RenderError::Sizing {
-                what: "block exceeds the pre-sized maximum; grow max_block at construction",
-            });
-        }
+        self.validate_block_len(out.len())?;
         out.fill(0.0);
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
@@ -611,6 +628,33 @@ impl RenderContext {
             }
         }
         self.blocks_rendered += 1;
+        // The conversion and both additions were admitted before stepping.
+        self.samples_rendered += out.len() as u64;
+        Ok(())
+    }
+
+    fn validate_block_len(&self, len: usize) -> Result<(), RenderError> {
+        if self.poisoned {
+            return Err(RenderError::Poisoned);
+        }
+        if len == 0 {
+            return Err(RenderError::EmptyBlock);
+        }
+        if len > self.scratch.len() {
+            return Err(RenderError::Sizing {
+                what: "block exceeds the pre-sized maximum; grow max_block at construction",
+            });
+        }
+        let samples = u64::try_from(len).map_err(|_| RenderError::Sizing {
+            what: "block length cannot be represented by the sample clock",
+        })?;
+        if self.samples_rendered.checked_add(samples).is_none()
+            || self.blocks_rendered.checked_add(1).is_none()
+        {
+            return Err(RenderError::Sizing {
+                what: "render sample or block clock would overflow",
+            });
+        }
         Ok(())
     }
 }
