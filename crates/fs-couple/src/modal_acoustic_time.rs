@@ -15,6 +15,12 @@
 //! `exp(-i omega t)` convention. It is therefore a narrow-band modal
 //! radiation realization, not a broadband replacement for vector fitting an
 //! acoustic frequency response.
+//!
+//! Explicit free coordinates use the exact zero-stiffness held-force limit,
+//! not a small artificial natural frequency. They carry kinetic energy and
+//! exchange physical forces through the same modal ports, but have no direct
+//! narrow-band pressure transfer. This is translation in a supplied fixed
+//! coordinate, not a rotating six-degree-of-freedom rigid-body model.
 
 use std::sync::Arc;
 
@@ -304,6 +310,9 @@ impl ExactZohKernel {
 
 #[derive(Clone, Copy, Debug)]
 enum ExactZohCoefficients {
+    Free {
+        duration_s: f64,
+    },
     Undamped {
         sine: f64,
         one_minus_cosine: f64,
@@ -335,6 +344,68 @@ impl ModalAcousticTimeModel {
         modes: Vec<ModalAcousticMode>,
         budget: ModalAcousticTimeBudget,
     ) -> Result<Self, ModalAcousticTimeError> {
+        Self::try_new_impl(sample_rate_hz, modes, budget, false)
+    }
+
+    /// Explicitly admit zero-stiffness, mass-normalized coordinates alongside
+    /// ordinary modes. A zero frequency requires zero damping ratio and zero
+    /// pressure transfer: neither a drag law nor free-body radiation is inferred.
+    /// Positive-frequency admission and transition arithmetic are unchanged.
+    /// Initial coordinates are zero; use `restore_states` for supplied motion.
+    /// Static-compliance initialization refuses models containing free coordinates.
+    ///
+    /// # Errors
+    /// All `try_new` limits, or a free coordinate with damping/acoustic transfer.
+    pub fn try_new_with_free_coordinates(
+        sample_rate_hz: u32,
+        modes: Vec<ModalAcousticMode>,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        Self::try_new_impl(sample_rate_hz, modes, budget, true)
+    }
+
+    /// Construct one freely translating mass from kilograms, metres and m/s.
+    /// Its coordinate is q=sqrt(m)*x, velocity=sqrt(m)*dx/dt, so a force F [N]
+    /// enters as F/sqrt(m), and the conjugate displacement/force-port shape is
+    /// 1/sqrt(m). The same transformation must be used in attachment maps.
+    /// There is no tether, drag, imposed restitution or direct acoustic output.
+    /// The existing budgets retain their mass-normalized units and joules.
+    ///
+    /// # Errors
+    /// Nonpositive/nonfinite mass, nonfinite motion, or clock/state/budget limits.
+    pub fn try_free_mass(
+        sample_rate_hz: u32,
+        mass_kg: f64,
+        displacement_m: f64,
+        velocity_m_s: f64,
+        budget: ModalAcousticTimeBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        if !mass_kg.is_finite() || mass_kg <= 0.0
+            || !displacement_m.is_finite() || !velocity_m_s.is_finite()
+        {
+            return Err(ModalAcousticTimeError::InvalidInput {
+                what: "free mass requires positive finite kilograms and finite physical motion",
+            });
+        }
+        let root_mass = det::sqrt(mass_kg);
+        let mut model = Self::try_new_with_free_coordinates(sample_rate_hz, vec![ModalAcousticMode {
+            angular_frequency_rad_s: 0.0,
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: C64::ZERO,
+        }], budget)?;
+        model.restore_states(&[ModalAcousticState {
+            displacement_m_sqrt_kg: root_mass * displacement_m,
+            velocity_m_sqrt_kg_per_s: root_mass * velocity_m_s,
+        }])?;
+        Ok(model)
+    }
+
+    fn try_new_impl(
+        sample_rate_hz: u32,
+        modes: Vec<ModalAcousticMode>,
+        budget: ModalAcousticTimeBudget,
+        allow_free_coordinates: bool,
+    ) -> Result<Self, ModalAcousticTimeError> {
         if sample_rate_hz == 0 {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "sample rate must be positive",
@@ -348,7 +419,13 @@ impl ModalAcousticTimeModel {
         validate_budget(budget)?;
         let maximum_hz = 0.5 * f64::from(sample_rate_hz) * budget.nyquist_guard_fraction;
         for (mode_index, mode) in modes.iter().enumerate() {
-            if !(mode.angular_frequency_rad_s > 0.0
+            if allow_free_coordinates && mode.angular_frequency_rad_s == 0.0 {
+                if mode.damping_ratio != 0.0 || mode.pressure_per_modal_velocity != C64::ZERO {
+                    return Err(ModalAcousticTimeError::InvalidInput {
+                        what: "free coordinates require zero damping ratio and zero pressure transfer",
+                    });
+                }
+            } else if !(mode.angular_frequency_rad_s > 0.0
                 && mode.angular_frequency_rad_s.is_finite()
                 && mode.damping_ratio >= 0.0
                 && mode.damping_ratio.is_finite()
@@ -480,6 +557,11 @@ impl ModalAcousticTimeModel {
                 });
             }
             let omega = mode.angular_frequency_rad_s;
+            if omega == 0.0 {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "a free coordinate has no unique isolated static equilibrium; supply its motion",
+                });
+            }
             let state = ModalAcousticState {
                 displacement_m_sqrt_kg: force / (omega * omega),
                 velocity_m_sqrt_kg_per_s: 0.0,
@@ -537,6 +619,11 @@ impl ModalAcousticTimeModel {
             if !(transfer.re.is_finite() && transfer.im.is_finite()) {
                 return Err(ModalAcousticTimeError::InvalidInput {
                     what: "observer pressure transfers must be finite",
+                });
+            }
+            if mode.angular_frequency_rad_s == 0.0 && *transfer != C64::ZERO {
+                return Err(ModalAcousticTimeError::InvalidInput {
+                    what: "free coordinates have no narrow-band pressure transfer",
                 });
             }
             pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
@@ -604,6 +691,15 @@ impl ModalAcousticTimeModel {
                 });
             }
             let omega = mode.angular_frequency_rad_s;
+            if omega == 0.0 {
+                if *transfer != C64::ZERO {
+                    return Err(ModalAcousticTimeError::InvalidInput {
+                        what: "free coordinates have no narrow-band pressure transfer",
+                    });
+                }
+                // No acoustic contribution, and no fictitious F/omega^2 baseline.
+                continue;
+            }
             let dynamic_displacement = state.displacement_m_sqrt_kg - force / (omega * omega);
             pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
                 + transfer.im * omega * dynamic_displacement;
@@ -749,7 +845,16 @@ impl ModalAcousticTimeModel {
             let after = modal_energy(*mode, next);
             energy_before_j += before;
             energy_after_j += after;
-            let work = force * (next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
+            // A free coordinate stores no positional energy. Subtracting its
+            // absolute positions can spuriously fail passivity near velocity
+            // reversal, especially after translating the coordinate origin.
+            // Integrate the held force over the exact polynomial increment.
+            let displacement_increment = if mode.angular_frequency_rad_s == 0.0 {
+                free_displacement_increment(state.velocity_m_sqrt_kg_per_s, *force, duration_s)
+            } else {
+                next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg
+            };
+            let work = force * displacement_increment;
             input_work_j += work;
             let loss = work - (after - before);
             let allowance =
@@ -957,6 +1062,9 @@ fn modal_energy(mode: ModalAcousticMode, state: ModalAcousticState) -> f64 {
 
 fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficients {
     let omega = mode.angular_frequency_rad_s;
+    if omega == 0.0 {
+        return ExactZohCoefficients::Free { duration_s: dt };
+    }
     let zeta = mode.damping_ratio;
     if zeta == 0.0 {
         let angle = omega * dt;
@@ -1006,6 +1114,12 @@ fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficie
     }
 }
 
+// The exact integral of velocity for a held force on a free coordinate.
+// Shared by state evolution and work evaluation; no absolute-position subtraction.
+fn free_displacement_increment(velocity: f64, force: f64, duration_s: f64) -> f64 {
+    duration_s * (velocity + 0.5 * (duration_s * force))
+}
+
 fn advance_exact_zoh_cached(
     mode: ModalAcousticMode,
     state: ModalAcousticState,
@@ -1013,10 +1127,22 @@ fn advance_exact_zoh_cached(
     coefficients: ExactZohCoefficients,
 ) -> ModalAcousticState {
     let omega = mode.angular_frequency_rad_s;
-    let equilibrium = force / (omega * omega);
+    // Equilibrium is only used by the oscillator arms below. Never divide by
+    // zero for the explicitly admitted free-coordinate transition.
+    let equilibrium = if omega == 0.0 { 0.0 } else { force / (omega * omega) };
     let q0 = state.displacement_m_sqrt_kg - equilibrium;
     let v0 = state.velocity_m_sqrt_kg_per_s;
     let (q, v) = match coefficients {
+        ExactZohCoefficients::Free { duration_s } => {
+            // Exact polynomial solution of q''=force under a held force.
+            // Full, half and arbitrary durations use this same arithmetic.
+            let delta_v = duration_s * force;
+            return ModalAcousticState {
+                displacement_m_sqrt_kg: state.displacement_m_sqrt_kg
+                    + free_displacement_increment(v0, force, duration_s),
+                velocity_m_sqrt_kg_per_s: v0 + delta_v,
+            };
+        }
         ExactZohCoefficients::Undamped {
             sine,
             one_minus_cosine,
