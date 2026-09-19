@@ -8,6 +8,7 @@
 
 use fs_rep_mesh::TetComplex;
 use fs_sparse::Csr;
+use crate::control::{EvaluationStop, SolveBudget, SolveControl};
 
 /// Helmholtz density filter on a tet complex: cell densities are
 /// volume-scattered to vertices, smoothed by (M + r²K)⁻¹M, and
@@ -113,17 +114,28 @@ impl DensityFilter {
     }
 
     /// Solve (M + r²K)·x = rhs on the FULL vertex space (natural BCs).
-    fn helmholtz_solve(&self, rhs: &[f64]) -> Vec<f64> {
+    fn helmholtz_solve(
+        &self, rhs: &[f64], control: &mut SolveControl<'_>, stage: &'static str,
+    ) -> Result<Vec<f64>, EvaluationStop> {
+        control.checkpoint(stage)?;
         let a = fs_solver::CsrOp::symmetric(self.helmholtz.clone());
-        let mut st = fs_solver::CgState::new(&a, &fs_sparse::precond::IdentityPrecond, rhs);
-        let rep = st.run(&a, &fs_sparse::precond::IdentityPrecond, 1e-12, 20_000);
-        assert!(rep.converged, "Helmholtz filter solve failed: {rep:?}");
-        st.x
+        control.solve(&a, rhs, 1e-12, 20_000, stage)
     }
 
     /// FORWARD filter: cell densities → filtered cell densities.
     #[must_use]
     pub fn apply(&self, rho: &[f64]) -> Vec<f64> {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_apply(rho, &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("Helmholtz filter solve failed")
+    }
+
+    /// Forward filter under a shared cancellation and linear-work budget.
+    /// A stopped solve returns no partially filtered design.
+    pub fn try_apply(
+        &self, rho: &[f64], control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, EvaluationStop> {
+        control.checkpoint("filter")?;
         assert_eq!(
             rho.len(),
             self.cells.len(),
@@ -136,6 +148,7 @@ impl DensityFilter {
         // Scatter: vertex value = Σ_c∋v (|V_c|/4)·ρ_c / vertex_vol.
         let mut vtx = vec![0.0f64; self.nv];
         for (c, tet) in self.cells.iter().enumerate() {
+            if c % 256 == 0 { control.checkpoint("filter-scatter")?; }
             for &v in tet {
                 vtx[v as usize] += self.vol[c] / 4.0 * rho[c];
             }
@@ -145,12 +158,17 @@ impl DensityFilter {
         }
         let mut rhs = vec![0.0f64; self.nv];
         self.mass.spmv(&vtx, &mut rhs);
-        let smooth = self.helmholtz_solve(&rhs);
+        let smooth = self.helmholtz_solve(&rhs, control, "filter")?;
         // Gather: cell value = vertex average.
-        self.cells
+        let result: Vec<f64> = self.cells
             .iter()
             .map(|tet| tet.iter().map(|&v| smooth[v as usize]).sum::<f64>() / 4.0)
-            .collect()
+            .collect();
+        control.checkpoint("filter-publish")?;
+        if !result.iter().all(|value| value.is_finite()) {
+            return Err(EvaluationStop::Breakdown { stage: "filter-publish" });
+        }
+        Ok(result)
     }
 
     /// TRANSPOSED filter (the chain-rule pullback of `apply`): maps a
@@ -161,6 +179,17 @@ impl DensityFilter {
     /// scatterᵀ(M·solve(gatherᵀ(g)))).
     #[must_use]
     pub fn apply_transpose(&self, g_filtered: &[f64]) -> Vec<f64> {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_apply_transpose(g_filtered,
+            &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("transposed Helmholtz filter solve failed")
+    }
+
+    /// Exact-transpose pullback with interruptible Helmholtz solves.
+    pub fn try_apply_transpose(
+        &self, g_filtered: &[f64], control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, EvaluationStop> {
+        control.checkpoint("filter-transpose")?;
         assert_eq!(
             g_filtered.len(),
             self.cells.len(),
@@ -173,17 +202,18 @@ impl DensityFilter {
         // gatherᵀ: vertex accumulation of cell sensitivities /4.
         let mut vtx = vec![0.0f64; self.nv];
         for (c, tet) in self.cells.iter().enumerate() {
+            if c % 256 == 0 { control.checkpoint("filter-transpose-scatter")?; }
             for &v in tet {
                 vtx[v as usize] += g_filtered[c] / 4.0;
             }
         }
         // Transpose of x ↦ (M + r²K)⁻¹·M·x is M·(M + r²K)⁻¹ (both
         // factors symmetric): solve first, THEN mass-multiply.
-        let sol = self.helmholtz_solve(&vtx);
+        let sol = self.helmholtz_solve(&vtx, control, "filter-transpose")?;
         let mut mx = vec![0.0f64; self.nv];
         self.mass.spmv(&sol, &mut mx);
         // scatterᵀ: back to cells with the forward scatter weights.
-        self.cells
+        let result: Vec<f64> = self.cells
             .iter()
             .enumerate()
             .map(|(c, tet)| {
@@ -191,7 +221,12 @@ impl DensityFilter {
                     .map(|&v| self.vol[c] / 4.0 / self.vertex_vol[v as usize] * mx[v as usize])
                     .sum::<f64>()
             })
-            .collect()
+            .collect();
+        control.checkpoint("filter-transpose-publish")?;
+        if !result.iter().all(|value| value.is_finite()) {
+            return Err(EvaluationStop::Breakdown { stage: "filter-transpose-publish" });
+        }
+        Ok(result)
     }
 }
 

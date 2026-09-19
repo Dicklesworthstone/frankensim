@@ -6,6 +6,7 @@
 
 use crate::elasticity::DensityElasticity;
 use crate::filter::{DensityFilter, heaviside, heaviside_derivative};
+use crate::control::{EvaluationStop, SolveBudget, SolveControl};
 
 /// SIMP + continuation parameters.
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +112,16 @@ impl DesignPipeline {
     /// Forward: raw design ρ → (ρ̃ filtered, ρ̄ projected, E moduli).
     #[must_use]
     pub fn forward(&self, rho: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_forward(rho, &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("design forward evaluation failed")
+    }
+
+    /// Forward design map with bounded, interruptible filter work.
+    pub fn try_forward(
+        &self, rho: &[f64], control: &mut SolveControl<'_>,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), EvaluationStop> {
+        control.checkpoint("projection")?;
         let p = &self.params;
         p.assert_valid();
         assert!(
@@ -118,7 +129,7 @@ impl DesignPipeline {
                 .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
             "raw design densities must be finite and lie in [0, 1]"
         );
-        let rho_tilde = self.filter.apply(rho);
+        let rho_tilde = self.filter.try_apply(rho, control)?;
         let rho_bar: Vec<f64> = rho_tilde
             .iter()
             .map(|&r| heaviside(r, p.beta, p.eta))
@@ -130,7 +141,11 @@ impl DesignPipeline {
                 p.e_min + (1.0 - p.e_min) * fs_math::det::pow(rc.max(1e-12), p.penal)
             })
             .collect();
-        (rho_tilde, rho_bar, moduli)
+        if !rho_bar.iter().chain(&moduli).all(|value| value.is_finite()) {
+            return Err(EvaluationStop::Breakdown { stage: "projection" });
+        }
+        control.checkpoint("projection-publish")?;
+        Ok((rho_tilde, rho_bar, moduli))
     }
 
     /// Reverse chain: given dc/dE per cell (the physics-level
@@ -138,6 +153,17 @@ impl DesignPipeline {
     /// and the transposed filter.
     #[must_use]
     pub fn pullback(&self, rho_tilde: &[f64], dc_de: &[f64]) -> Vec<f64> {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_pullback(rho_tilde, dc_de,
+            &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("design pullback failed")
+    }
+
+    /// Pull back a complete physics sensitivity under the same work budget.
+    pub fn try_pullback(
+        &self, rho_tilde: &[f64], dc_de: &[f64], control: &mut SolveControl<'_>,
+    ) -> Result<Vec<f64>, EvaluationStop> {
+        control.checkpoint("sensitivity")?;
         let p = &self.params;
         p.assert_valid();
         assert_eq!(
@@ -160,7 +186,10 @@ impl DesignPipeline {
                 de * dsimp * dproj
             })
             .collect();
-        self.filter.apply_transpose(&chained)
+        if !chained.iter().all(|value| value.is_finite()) {
+            return Err(EvaluationStop::Breakdown { stage: "sensitivity" });
+        }
+        self.filter.try_apply_transpose(&chained, control)
     }
 
     /// Projected physical volume fraction and its raw-design gradient.
@@ -168,6 +197,17 @@ impl DesignPipeline {
     /// vector and NOT the SIMP stiffness pullback.
     #[must_use]
     pub fn volume_and_gradient(&self, rho: &[f64], cell_vol: &[f64]) -> (f64, Vec<f64>) {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_volume_and_gradient(rho, cell_vol,
+            &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("volume evaluation failed")
+    }
+
+    /// Projected volume and its full derivative with interruptible filtering.
+    pub fn try_volume_and_gradient(
+        &self, rho: &[f64], cell_vol: &[f64], control: &mut SolveControl<'_>,
+    ) -> Result<(f64, Vec<f64>), EvaluationStop> {
+        control.checkpoint("volume")?;
         assert_eq!(rho.len(), cell_vol.len(), "one volume per design cell is required");
         assert!(
             !cell_vol.is_empty()
@@ -176,7 +216,7 @@ impl DesignPipeline {
         );
         let total: f64 = cell_vol.iter().sum();
         assert!(total.is_finite(), "total cell volume must be finite");
-        let (filtered, projected, _) = self.forward(rho);
+        let (filtered, projected, _) = self.try_forward(rho, control)?;
         let weights: Vec<f64> = cell_vol.iter().map(|volume| volume / total).collect();
         let volume = projected.iter().zip(&weights).map(|(r, w)| r * w).sum();
         let local: Vec<f64> = filtered
@@ -184,7 +224,7 @@ impl DesignPipeline {
             .zip(&weights)
             .map(|(&r, &w)| w * heaviside_derivative(r, self.params.beta, self.params.eta))
             .collect();
-        (volume, self.filter.apply_transpose(&local))
+        Ok((volume, self.filter.try_apply_transpose(&local, control)?))
     }
 
     /// Compliance objective and its EXACT design gradient for the
@@ -231,28 +271,58 @@ impl DesignPipeline {
         rho: &[f64],
         loads: &[LoadCase<'_>],
     ) -> MultiLoadCompliance {
+        let mut callback = |_| std::ops::ControlFlow::Continue(());
+        self.try_multi_load_compliance_and_gradient(elasticity, rho, loads,
+            &mut SolveControl::new(SolveBudget::default(), &mut callback))
+            .expect("multi-load elasticity evaluation failed")
+    }
+
+    /// All load solves and the exact pullback share one work/cancellation budget.
+    /// On any returned stop, restore the operator's previous moduli and return
+    /// no partial objective or gradient. Invalid model inputs still panic.
+    pub fn try_multi_load_compliance_and_gradient(
+        &self,
+        elasticity: &mut DensityElasticity,
+        rho: &[f64],
+        loads: &[LoadCase<'_>],
+        control: &mut SolveControl<'_>,
+    ) -> Result<MultiLoadCompliance, EvaluationStop> {
+        control.checkpoint("evaluation")?;
         assert_valid_load_cases(elasticity, loads);
         assert_eq!(elasticity.cells(), rho.len(), "one density per cell is required");
-        let (filtered, _, moduli) = self.forward(rho);
-        elasticity.moduli = moduli;
+        let (filtered, _, moduli) = self.try_forward(rho, control)?;
+        let previous_moduli = std::mem::replace(&mut elasticity.moduli, moduli);
+        let result = (|| {
         let mut compliance = 0.0;
         let mut dc_de = vec![0.0; rho.len()];
         let mut case_compliances = Vec::with_capacity(loads.len());
         let mut displacements = Vec::with_capacity(loads.len());
         for load in loads {
-            let u = solve(elasticity, load.force);
+            control.checkpoint("elasticity")?;
+            let rhs: Vec<f64> = load.force.iter().zip(elasticity.free())
+                .map(|(&force, &free)| if free { force } else { 0.0 }).collect();
+            let u = control.solve(elasticity, &rhs, 1e-11, 50_000, "elasticity")?;
             let c: f64 = load.force.iter().zip(&u).map(|(f, value)| f * value).sum();
-            assert!(c.is_finite(), "load compliance must remain finite");
+            if !c.is_finite() {
+                return Err(EvaluationStop::Breakdown { stage: "compliance" });
+            }
             compliance += load.weight * c;
+            control.checkpoint("element-sensitivity")?;
             for (sensitivity, energy) in dc_de.iter_mut().zip(elasticity.cell_energies(&u)) {
                 *sensitivity -= load.weight * energy;
             }
             case_compliances.push(c);
             displacements.push(u);
         }
-        assert!(compliance.is_finite(), "weighted compliance must remain finite");
-        let gradient = self.pullback(&filtered, &dc_de);
-        MultiLoadCompliance { compliance, case_compliances, displacements, gradient }
+        if !compliance.is_finite() || !dc_de.iter().all(|value| value.is_finite()) {
+            return Err(EvaluationStop::Breakdown { stage: "compliance" });
+        }
+        let gradient = self.try_pullback(&filtered, &dc_de, control)?;
+        control.checkpoint("evaluation-publish")?;
+        Ok(MultiLoadCompliance { compliance, case_compliances, displacements, gradient })
+        })();
+        if result.is_err() { elasticity.moduli = previous_moduli; }
+        result
     }
 }
 
