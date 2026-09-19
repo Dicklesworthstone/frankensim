@@ -261,7 +261,7 @@ impl ContactModalSystem {
 }
 
 // Shared single/multiple-contact admission: obstacle, limits and signed basis.
-fn contact_column(network: &CoupledModalSystem, contact: &ModalContact, config: ModalContactConfig)
+pub(super) fn contact_column(network: &CoupledModalSystem, contact: &ModalContact, config: ModalContactConfig)
     -> Result<Vec<f64>, ModalCouplingError>
 {
     if !(1..=128).contains(&config.max_iterations)
@@ -345,7 +345,7 @@ fn law_force(law: &SlitContactStep, x0: f64, x1: f64, dt: f64)
     let force = finite(elastic + damping*velocity)?.max(0.0);
     Ok((force,elastic))
 }
-fn force_tolerance(applied: f64, expected: f64, c: ModalContactConfig) -> Result<f64,ModalCouplingError> {
+pub(super) fn force_tolerance(applied: f64, expected: f64, c: ModalContactConfig) -> Result<f64,ModalCouplingError> {
     finite(c.force_absolute_tolerance_n + c.force_relative_tolerance*applied.abs().max(expected.abs()))
 }
 fn solve_contact(law: &SlitContactStep, x0: f64, free: f64, compliance: f64, dt: f64,
@@ -357,6 +357,14 @@ fn solve_contact(law: &SlitContactStep, x0: f64, free: f64, compliance: f64, dt:
         let (expected,_) = law_force(law,x0,x,dt)?;
         Ok((finite(reaction-expected)?,force_tolerance(reaction,expected,config)?))
     };
+    solve_reaction(evaluate, config)
+}
+
+// One bracket owner for dynamic discrete forces and stationary potentials.
+pub(super) fn solve_reaction(
+    evaluate: impl Fn(f64) -> Result<(f64, f64), ModalCouplingError>,
+    config: ModalContactConfig,
+) -> Result<(f64, usize), ModalCouplingError> {
     let (at_zero,_) = evaluate(0.0)?;
     if at_zero == 0.0 { return Ok((0.0,0)); }
     let mut lo = 0.0;
