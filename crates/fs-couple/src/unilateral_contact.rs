@@ -109,6 +109,74 @@ pub(crate) fn slit_contact_coefficients(
     Ok((elastic, damping))
 }
 
+/// Finite-step slit reaction from the existing contact potential.
+///
+/// The conservative coefficient is the negative discrete gradient of the
+/// `fs-dcontact` storage, so its work accounts for the change in contact
+/// potential, including entry into and exit from contact. The second
+/// coefficient is the same reaction times the obstacle's Hunt–Crossley loss.
+/// At midpoint velocity `v`, use `max(elastic - damping * v, 0)`; the
+/// unloading clamp discards released contact energy rather than attracting
+/// the opening. This is a numerical contact adapter, not a new material law.
+///
+/// # Errors
+/// Nonfinite openings, incompatible obstacle coordinates, or nonfinite or
+/// negative reaction coefficients. No invalid trial is published as a force.
+pub fn slit_contact_discrete_coefficients(
+    obstacle: &Obstacle,
+    opening_before_m: f64,
+    opening_after_m: f64,
+) -> Result<(f64, f64), DContactError> {
+    SlitContactStep::new(obstacle, opening_before_m)?.coefficients(opening_after_m)
+}
+
+/// Retain one contact storage across all trials of an implicit step.
+pub(crate) struct SlitContactStep {
+    storage: ContactStorage,
+    opening_before_m: f64,
+    internal_loss: f64,
+}
+
+impl SlitContactStep {
+    pub(crate) fn new(obstacle: &Obstacle, opening_before_m: f64) -> Result<Self, DContactError> {
+        if !opening_before_m.is_finite() {
+            return Err(DContactError::Parameter {
+                what: "discrete slit contact requires finite openings",
+            });
+        }
+        slit_contact_coefficients(obstacle, opening_before_m)?;
+        Ok(Self {
+            storage: ContactStorage::new(Box::new(ZeroStorage), 1, vec![obstacle.clone()])?,
+            opening_before_m,
+            internal_loss: obstacle.internal_loss(),
+        })
+    }
+
+    pub(crate) fn coefficients(&self, opening_after_m: f64) -> Result<(f64, f64), DContactError> {
+        if !opening_after_m.is_finite() {
+            return Err(DContactError::Parameter {
+                what: "discrete slit contact requires finite openings",
+            });
+        }
+        // Hold the dummy momentum at zero. The one-coordinate Gonzalez
+        // gradient is the potential secant (or the derivative at coincidence).
+        // Reuse the PHS owner's pinned discretization, not a private power law.
+        let gradient = fs_phs::discrete_gradient(
+            &self.storage,
+            &[self.opening_before_m, 0.0],
+            &[opening_after_m, 0.0],
+        );
+        let elastic = -gradient[0];
+        let damping = elastic * self.internal_loss;
+        if !elastic.is_finite() || elastic < 0.0 || !damping.is_finite() || damping < 0.0 {
+            return Err(DContactError::Parameter {
+                what: "discrete slit response coefficients must be finite and nonnegative",
+            });
+        }
+        Ok((elastic, damping))
+    }
+}
+
 /// Modal contact forces `f_k = −∂V/∂q_k` for an interleaved `[q, p]` state.
 ///
 /// # Errors
@@ -378,5 +446,63 @@ mod tests {
         let into = slit_contact_force(&lay, -1.0e-4).expect("force");
         assert!(closed.abs() < 1.0e-12);
         assert!(into > 0.0);
+    }
+
+    #[test]
+    fn g1_discrete_slit_reaction_accounts_for_contact_entry_and_release() {
+        for alpha in [1.0, 1.5, 2.0, 2.3] {
+            let lay = slit_lay(1e8, alpha).unwrap();
+            for before in [-1e-4, 0.0, 2e-5] {
+                let step = SlitContactStep::new(&lay, before).unwrap();
+                for after in [-2e-4, -5e-5, 0.0, 1e-4, before] {
+                    let (force, damping) = step.coefficients(after).unwrap();
+                    let initial = step.storage.hamiltonian(&[before, 0.0]);
+                    let final_energy = step.storage.hamiltonian(&[after, 0.0]);
+                    let work = force * (after - before);
+                    let scale = (initial.abs() + final_energy.abs() + work.abs())
+                        .max(f64::MIN_POSITIVE);
+                    assert!((work + final_energy - initial).abs() <= 1e-12 * scale);
+                    assert!(force >= 0.0);
+                    assert_eq!(damping, 0.0);
+                    if before == after {
+                        assert_eq!(force, slit_contact_force(&lay, before).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_discrete_slit_unloading_and_hunt_crossley_loss_are_passive() {
+        let lay = slit_lay(1e8, 2.0).unwrap().with_internal_loss(5.0).unwrap();
+        let before = -1e-4;
+        let step = SlitContactStep::new(&lay, before).unwrap();
+        for after in [-2e-4, -9e-5, 0.0, 1e-4] {
+            let velocity = (after - before) / 1e-4;
+            let (elastic, damping) = step.coefficients(after).unwrap();
+            assert_eq!(damping, 5.0 * elastic);
+            let force = (elastic - damping * velocity).max(0.0);
+            let released = step.storage.hamiltonian(&[before, 0.0])
+                - step.storage.hamiltonian(&[after, 0.0]);
+            let loss = released - force * (after - before);
+            assert!(loss >= -1e-12 * released.abs().max(f64::MIN_POSITIVE));
+            if velocity > 0.2 {
+                assert_eq!(force, 0.0, "unloading must not attract the opening");
+            }
+        }
+    }
+
+    #[test]
+    fn g0_discrete_slit_rejects_nonfinite_trials_and_nonunit_coordinates() {
+        let lay = slit_lay(1e8, 2.0).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(slit_contact_discrete_coefficients(&lay, invalid, 0.0).is_err());
+            assert!(slit_contact_discrete_coefficients(&lay, 0.0, invalid).is_err());
+        }
+        let other = Obstacle::new(
+            vec![-2.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0, "nonunit".into(),
+        )
+        .unwrap();
+        assert!(slit_contact_discrete_coefficients(&other, -1e-4, 0.0).is_err());
     }
 }
