@@ -49,8 +49,19 @@ pub struct BoardGeometry {
     damping_ratio: f64,
 }
 
+/// One degree-two triangle quadrature point for the P1 surface displacement.
+/// These are bare-board coordinates; the coupled bank owns their mass-loading
+/// transformation. Areas sum to the panel area, not to its bounding rectangle.
+#[derive(Clone, Debug)]
+pub struct SurfaceSample {
+    pub position_m: [f64; 3],
+    pub area_m2: f64,
+    pub mode_shape: Vec<f64>,
+}
+
 #[derive(Debug)]
 pub struct PreparedBoard {
+    pub surface: Vec<SurfaceSample>,
     pub modes: Vec<BoardMode>,
     pub provenance: String,
     pub area_m2: f64,
@@ -290,10 +301,26 @@ impl BoardGeometry {
             });
             intervals.push((det::sqrt(pair.interval.0) / TAU, det::sqrt(pair.interval.1) / TAU));
         }
+        let mut surface = Vec::with_capacity(3 * mesh.tris.len());
+        for tri in &mesh.tris {
+            let area = triangle_area(mesh, *tri) / 3.0;
+            for weights in [[2.0/3.0, 1.0/6.0, 1.0/6.0],
+                [1.0/6.0, 2.0/3.0, 1.0/6.0], [1.0/6.0, 1.0/6.0, 2.0/3.0]] {
+                let mut position = [0.0; 3];
+                for i in 0..3 {
+                    position[0] += weights[i] * mesh.nodes[tri[i]].0;
+                    position[1] += weights[i] * mesh.nodes[tri[i]].1;
+                }
+                let shape = report.modes.iter().map(|pair| (0..3)
+                    .map(|i| weights[i] * nodal_displacement(&model, &pair.phi, tri[i])).sum())
+                    .collect();
+                surface.push(SurfaceSample { position_m: position, area_m2: area, mode_shape: shape });
+            }
+        }
         let mass = self.mass_kg();
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
         Ok(PreparedBoard {
-            modes, provenance: self.provenance.clone(), area_m2: mesh.total_area(),
+            modes, surface, provenance: self.provenance.clone(), area_m2: mesh.total_area(),
             mass_kg: mass, frequency_intervals_hz: intervals, free_dofs: model.free,
         })
     }
@@ -424,4 +451,15 @@ mod tests {
         }
         assert!((a.mass_kg - b.mass_kg).abs() < 1e-12);
     }
+    #[test]
+    fn surface_quadrature_retains_area_and_signed_modal_volume() {
+        let p=BoardGeometry::read(&fixture()).unwrap().prepare(&[69],300.0).unwrap();
+        let area=p.surface.iter().map(|s|s.area_m2).sum::<f64>();
+        assert!((area-p.area_m2).abs()<1e-12);
+        for (i,m) in p.modes.iter().enumerate() {
+            let volume=p.surface.iter().map(|s|s.area_m2*s.mode_shape[i]).sum::<f64>();
+            assert!((volume-m.volume).abs()<1e-12);
+        }
+    }
+
 }

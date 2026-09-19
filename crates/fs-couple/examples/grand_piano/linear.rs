@@ -135,6 +135,8 @@ pub struct Bank {
     pub last_modal_loss_j: f64,
     physical_board_k: Vec<f64>,
     board_volume: Vec<f64>,
+    /// Columns map loaded coordinates to the supplied bare-board coordinates.
+    board_basis: Vec<f64>,
     schur_inverse: Vec<f64>,
     contact_board: Vec<f64>,
     free_q: Vec<f64>,
@@ -238,6 +240,8 @@ impl Bank {
                 return Err("loaded soundboard mode unresolved or above output band".into());
             }
         }
+        let mut board_basis = vec![0.0; r*r];
+        for i in 0..r { for j in 0..r { board_basis[i*r+j] = eig[j].phi[i]; } }
         for s in &mut strings {
             s.bridge = eig.iter().map(|e| s.bridge.iter().zip(&e.phi).map(|(g,p)| g*p).sum()).collect();
         }
@@ -281,8 +285,21 @@ impl Bank {
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
             free_contact:vec![0.0;nc],rate,omitted_duplex_modes,transition,physical_board_k,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
-            board_volume,schur_inverse,contact_board,free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
+            board_volume,board_basis,schur_inverse,contact_board,free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
             r_string:vec![0.0;n],board_rhs:vec![0.0;r],board_end:vec![0.0;r] })
+    }
+
+    /// Cold projection of a physical bare-board shape into the SAME loaded
+    /// coordinates used for bridge work. This preserves modal normalization for
+    /// spatial microphones; a unit-mass or frequency-only observer is not used.
+    pub fn project_board_shape(&self, shape: &[f64]) -> Result<Vec<f64>, String> {
+        let r=self.board_count;
+        if shape.len()!=r || shape.iter().any(|x| !x.is_finite()) {
+            return Err("surface projection must cover every finite bare-board mode".into());
+        }
+        let out:Vec<f64>=(0..r).map(|j|(0..r).map(|i|shape[i]*self.board_basis[i*r+j]).sum()).collect();
+        if out.iter().any(|x| !x.is_finite()) { return Err("surface projection overflow".into()); }
+        Ok(out)
     }
 
     pub fn contact_position(&self, contact: usize, q: &[f64]) -> f64 {
@@ -428,5 +445,16 @@ mod tests {
         let mut b=bank(false);b.v.fill(0.03);let before=b.energy();
         let loss=b.damp_string(0,0.4,1.0/192_000.0);
         assert!(loss>0.0);assert!((b.energy()+loss-before).abs()<1e-12);
+    }
+    #[test]
+    fn surface_projection_uses_the_same_loaded_basis_as_volume_velocity(){
+        let mut b=bank(false);
+        let shape:Vec<f64>=super::super::board::demonstration().iter().map(|m|m.volume).collect();
+        let projected=b.project_board_shape(&shape).unwrap();
+        assert_eq!(projected,b.board_volume);
+        b.v.fill(0.03);
+        let observed=projected.iter().zip(&b.v[b.modes.len()..]).map(|(g,v)|g*v).sum::<f64>();
+        assert_eq!(observed,b.volume_velocity());
+        assert!(b.project_board_shape(&[]).is_err());
     }
 }

@@ -9,13 +9,15 @@ mod steinway_d;
 mod performance;
 mod felt;
 mod engine;
+mod microphone;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
+    [--microphone x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
-    [--sample-rate Hz] [--substeps 1..16] [--modes 1..256]
+    [--sample-rate Hz] [--substeps 1..16] [--modes 1..128]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
@@ -29,7 +31,11 @@ Geometric boards assemble a flat orthotropic plate before rendering. The explici
 frequency band admits at most 32 modes; mesh refinement is not a convergence claim.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
 combined with --note or --velocity. Note-on values are hammer velocity in m/s.
-Observer gain is diagnostic, not a measured acoustic radiation transfer.";
+Geometric boards default to a spatial Rayleigh half-space pressure microphone
+at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
+This assumes an infinite baffle, with no lid/room scattering or air backreaction.
+--diagnostic-volume retains the old volume-velocity observer; --observer-gain
+applies only to that diagnostic, not to physical microphone pressure.";
 
 #[derive(Debug)]
 struct Options {
@@ -37,6 +43,7 @@ struct Options {
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
+    microphone: Option<[f64; 3]>, diagnostic_volume: bool,
     dump_scale: Option<String>, dump_board: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, help: bool,
@@ -46,6 +53,7 @@ impl Default for Options {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
+            microphone: None, diagnostic_volume: false,
             dump_board: None, note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, help: false }
     }
@@ -58,6 +66,7 @@ impl Options {
         while let Some(flag) = args.next() {
             if flag == "--help" || flag == "-h" { options.help = true; continue; }
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
+            if flag == "--diagnostic-volume" { options.diagnostic_volume = true; continue; }
             let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
             match flag.as_str() {
@@ -70,6 +79,12 @@ impl Options {
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
                 "--dump-obj" => options.dump_obj = Some(value.clone()),
                 "--performance" => options.performance = Some(value.clone()),
+                "--microphone" => {
+                    let values = value.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>,_>>()
+                        .map_err(|_| invalid())?;
+                    if values.len() != 3 { return Err(invalid()); }
+                    options.microphone = Some([values[0], values[1], values[2]]);
+                }
                 "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
                 "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
                 "--dump-scale" => options.dump_scale = Some(value.clone()),
@@ -87,7 +102,7 @@ impl Options {
             || options.velocity.is_some_and(|v| !v.is_finite() || v <= 0.0 || v > 8.0)
             || !options.duration.is_finite() || !(0.001..=120.0).contains(&options.duration)
             || !(8_000..=192_000).contains(&options.sample_rate)
-            || !(1..=16).contains(&options.substeps) || !(1..=256).contains(&options.modes) {
+            || !(1..=16).contains(&options.substeps) || !(1..=128).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
         }
         if usize::from(options.board.is_some()) + usize::from(options.board_geometry.is_some())
@@ -113,6 +128,15 @@ impl Options {
         if options.performance.is_some()
             && (options.render.is_none() || options.note.is_some() || options.velocity.is_some()) {
             return Err("--performance requires --render and replaces --note/--velocity demo controls".into());
+        }
+        let geometric = options.preset.is_some() || options.board_geometry.is_some();
+        if options.microphone.is_some_and(|p| p.iter().any(|x|!x.is_finite()) || p[2] < 0.05)
+            || (options.microphone.is_some() && (!geometric || options.render.is_none()
+                || options.diagnostic_volume)) {
+            return Err("--microphone needs a geometric render, finite x,y,z with z>=0.05, and no --diagnostic-volume".into());
+        }
+        if geometric && !options.diagnostic_volume && seen.contains("--observer-gain") {
+            return Err("--observer-gain requires --diagnostic-volume for a geometric board".into());
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
@@ -163,7 +187,7 @@ fn study_key(scale: &[geometry::Course], requested: Option<u8>) -> Result<u8, St
 }
 
 fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
-    options: &Options) -> Result<(), String> {
+    surface: Option<&[board_geometry::SurfaceSample]>, options: &Options) -> Result<(), String> {
     study_key(&scale, options.note)?;
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
@@ -178,15 +202,28 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let mut piano = engine::Instrument::new(scale, modes, rate,
         options.substeps, options.modes, true)?;
     debug_assert_eq!(piano.sample_rate(), rate);
+    let mut microphone = match surface {
+        Some(surface) if !options.diagnostic_volume => Some(microphone::Microphone::new(surface,
+            &piano.bank, rate, options.microphone.unwrap_or([0.675, 1.0, 1.0]),
+            fs_bem::helmholtz::Medium::air())?),
+        _ => None,
+    };
+    if let Some(mic) = &microphone {
+        println!("Rayleigh pressure microphone at {:?} m; propagation {:?} samples; {} modal multiply-adds/output sample.",
+            mic.position_m, mic.delay_samples, mic.multiply_adds_per_sample());
+    }
     let mut pressure = Vec::with_capacity(count as usize);
     let start = std::time::Instant::now();
     let mut peak: f64 = 0.0;
     for sample in 0..count {
         score.dispatch(u64::from(sample), &mut piano)?;
-        // Explicit diagnostic observer gain [Pa / (m^3/s)]. This is NOT a
-        // measured radiation transfer or a claim of calibrated acoustic SPL.
-        let p = options.observer_gain * piano.step().map_err(|e| format!("sample {sample}: {e}"))?;
-        if !p.is_finite() { return Err(format!("sample {sample}: diagnostic observer overflow")); }
+        let volume = piano.step().map_err(|e| format!("sample {sample}: {e}"))?;
+        let p = match &mut microphone {
+            Some(mic) => mic.step(&piano.bank.v[piano.bank.modes.len()..])
+                .map_err(|e| format!("sample {sample}: {e}"))?,
+            None => options.observer_gain * volume,
+        };
+        if !p.is_finite() { return Err(format!("sample {sample}: observer overflow")); }
         peak = peak.max(p.abs());
         pressure.push(p);
     }
@@ -194,13 +231,19 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let seconds = f64::from(count) / f64::from(rate);
     let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&pressure, rate, 2.0).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
-    println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
+    if microphone.is_some() {
+        println!("Computed half-space pressure in Pa; PCM full scale 2 Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.");
+    } else {
+        println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
+    }
     println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
         piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
     println!("{seconds:.6} s audio rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);
     println!("Input {:.9} J; stored {:.9} J; component losses {:.9} J; closure {:.3e} J; worst substep defect {:.3e} J.",
         piano.accounting.input_work_j, piano.energy_j(), piano.accounting.dissipated_j(),
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
+    println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation.",
+        piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j);
     Ok(())
 }
 
@@ -226,7 +269,7 @@ fn run() -> Result<(), String> {
         (_, Some(path)) => Some(read(path)?),
         _ => None,
     };
-    let (modes, board_source) = if let Some(text) = &geometry_text {
+    let (modes, board_source, surface) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
         let geometry = board_geometry::BoardGeometry::read(text)?;
         let prepared = geometry.prepare(&scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
@@ -237,10 +280,11 @@ fn run() -> Result<(), String> {
         for (i, interval) in prepared.frequency_intervals_hz.iter().enumerate() {
             println!("board mode {i}: [{:.9}, {:.9}] Hz", interval.0, interval.1);
         }
-        (prepared.modes, format!("GEOMETRY-DERIVED FLAT PLATE; {}; crown/rim compliance and acoustic radiation not modeled", prepared.provenance))
+        (prepared.modes, format!("GEOMETRY-DERIVED FLAT PLATE; {}; crown/rim compliance not modeled", prepared.provenance),
+            Some(prepared.surface))
     } else {
         (load_board(board_text.as_deref(), &scale)?, options.board.as_deref()
-            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned())
+            .unwrap_or("AUTHORED illustrative modes; not measured Steinway geometry").to_owned(), None)
     };
     if modes.iter().any(|m| m.frequency_hz >= 0.45 * f64::from(options.sample_rate)) {
         return Err("soundboard mode at/above output retention ceiling; use an explicitly reduced board".into());
@@ -257,7 +301,7 @@ fn run() -> Result<(), String> {
         std::fs::write(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)))
             .map_err(|e| e.to_string())?;
     }
-    if let Some(path) = &options.render { return render(path, scale, &modes, &options); }
+    if let Some(path) = &options.render { return render(path, scale, &modes, surface.as_deref(), &options); }
     println!("Model D published envelope: {} x {} m; board {} -> {} m (center -> edge).",
         geometry::D_LENGTH_M, geometry::D_WIDTH_M, geometry::D_BOARD_CENTER_M, geometry::D_BOARD_EDGE_M);
     println!("{} courses; {} speaking strings; {} board modes.", scale.len(), scale.iter().map(|c| c.unison).sum::<usize>(), modes.len());
@@ -356,4 +400,20 @@ mod render_tests {
             vec!["--preset", "steinway-d", "--dump-obj", "d.obj", "--render", "d.obj"],
             vec!["--preset", "steinway-d", "--mesh-divisions", "3"]] {assert!(options(&args).is_err());}
     }
+    #[test]
+    fn physical_microphone_and_diagnostic_observer_are_not_silently_mixed() {
+        let o=options(&["--preset","steinway-d","--render","d.wav","--microphone","0.5,1.2,0.8"]).unwrap();
+        assert_eq!(o.microphone,Some([0.5,1.2,0.8]));assert!(!o.diagnostic_volume);
+        let o=options(&["--preset","steinway-d","--render","d.wav","--diagnostic-volume","--observer-gain","500"]).unwrap();
+        assert!(o.diagnostic_volume);
+        for args in [vec!["--preset","steinway-d","--observer-gain","1000"],
+            vec!["--render","d.wav","--microphone","0,0,1"],
+            vec!["--preset","steinway-d","--render","d.wav","--microphone","0,0,NaN"],
+            vec!["--preset","steinway-d","--render","d.wav","--microphone","0,0,-1"],
+            vec!["--preset","steinway-d","--render","d.wav","--microphone","0,1"],
+            vec!["--preset","steinway-d","--render","d.wav","--microphone","0,0,1","--diagnostic-volume"]] {
+            assert!(options(&args).is_err());
+        }
+    }
+
 }
