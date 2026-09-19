@@ -29,6 +29,8 @@
 //! are conjugation-invariant.
 
 pub mod discretize;
+/// Reactive characteristic loads with physical storage and resistive loss.
+pub mod impedance;
 pub mod loewner;
 pub mod model;
 pub mod passivity;
