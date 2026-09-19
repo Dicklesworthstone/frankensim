@@ -34,6 +34,8 @@ pub mod impedance;
 pub mod loewner;
 pub mod model;
 pub mod passivity;
+/// Passive frequency-dependent boundary loss with retained relaxation histories.
+pub mod relaxation;
 pub mod vf;
 /// Passive integer-delay propagation with explicit wave storage.
 pub mod waveguide;
