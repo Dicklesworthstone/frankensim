@@ -1,17 +1,19 @@
-//! Allocation-free prepared composition: moving-boundary modal strings,
-//! one shared board, separate hysteretic/viscoelastic felt patches, free-flight
-//! hammers and pedal-controlled dissipative ports. No samples or reverb presets.
-//!
-//! note_on supplies a POST-ESCAPEMENT hammer velocity. The catch is idealized;
-//! this is not a claim to reconstruct the complete Steinway grand action.
+//! Prepared reciprocal strings/board, hysteretic/viscoelastic felt and hammers.
+//! Both the point-mass coupon image and geometry-derived flexible shanks remain
+//! available. note_on supplies a post-escapement velocity; jack_on instead drives
+//! the shank through its physical jack port and disengages at let-off.
+//! The backcheck/rest stop is idealized, not a full grand-action reconstruction.
 use fs_material::{Uniaxial, WoolFelt};
 use fs_material::visco::GeneralizedMaxwell;
 use super::{felt,geometry::Course,linear::{Bank,BoardMode}};
 #[path = "felt_relaxation.rs"]
 mod relaxation;
+#[path = "hammer_shank.rs"]
+mod shank;
+pub use shank::Geometry as ShankGeometry;
 
-const GRAVITY: f64 = 9.80665;
-const CATCH_DISTANCE: f64 = 0.020; // authored ideal backcheck, not a factory dimension
+const CATCH_DISTANCE: f64 = 0.020; // idealized backcheck/rest gap
+const LET_OFF_DISTANCE: f64 = 0.0015; // Chabassier/Durufle JSV 2014 Table 3
 
 #[derive(Debug,Clone,Copy)]
 pub enum Error {
@@ -32,11 +34,10 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+#[derive(Clone,Copy,Debug,Default)]
+struct Jack { peak_n:f64, duration_s:f64, elapsed_s:f64 }
 #[derive(Clone,Copy,Debug)]
-struct Hammer { y:f64,v:f64,active:bool,held:bool,latched:bool }
-impl Default for Hammer {
-    fn default()->Self {Self{y:-CATCH_DISTANCE,v:0.0,active:false,held:false,latched:false}}
-}
+struct Hammer { motion:shank::State, active:bool, held:bool, latched:bool, on_rest:bool, jack:Jack }
 #[derive(Clone,Debug)]
 struct Contact { state:felt::State,memory:relaxation::Memory,overlap:f64,force:f64,enabled:bool }
 
@@ -47,18 +48,20 @@ pub struct Accounting {
     pub felt_loss_j:f64,
     /// The viscous subset of felt_loss_j; NOT added a second time to the total.
     pub felt_relaxation_loss_j:f64,
+    pub shank_loss_j:f64,
     pub modal_loss_j:f64,
     pub damper_loss_j:f64,
     pub catch_loss_j:f64,
     pub max_balance_error_j:f64,
 }
 impl Accounting {
-    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.modal_loss_j+self.damper_loss_j+self.catch_loss_j}
+    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.damper_loss_j+self.catch_loss_j}
 }
 
 pub struct Instrument {
     pub bank:Bank,
     courses:Vec<Course>,laws:Vec<WoolFelt>,hammers:Vec<Hammer>,contacts:Vec<Contact>,
+    hammer_models:Vec<shank::Prepared>,
     creep:Vec<relaxation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Explicitly authored upper damper break; not a verified Steinway D value.
@@ -66,7 +69,7 @@ pub struct Instrument {
     pub damper_drag_ns_m:f64,
     pub accounting:Accounting,
     contact_h:Vec<f64>,force:Vec<f64>,gap:Vec<f64>,active:Vec<usize>,
-    hammer_free:Vec<f64>,hammer_next:Vec<Hammer>,
+    hammer_free:Vec<f64>,hammer_next:Vec<Hammer>,jack_force:Vec<f64>,rest_force:Vec<f64>,
     saved_q:Vec<f64>,saved_v:Vec<f64>,saved_hammers:Vec<Hammer>,saved_contacts:Vec<Contact>,
 }
 
@@ -77,9 +80,7 @@ impl Instrument {
             felt::demonstration_law()?,&relaxation::demonstration_prony())
     }
 
-    /// Uniform-material front door retained for coupons and the earlier image.
-    /// The supplied Prony card contributes its creep spectrum; its instantaneous
-    /// spring is replaced by WoolFelt. All preparation is outside the audio loop.
+    /// Uniform-material, point-mass front door retained for coupon comparisons.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_felt(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,law:WoolFelt,prony:&GeneralizedMaxwell)->Result<Self,String> {
@@ -89,14 +90,27 @@ impl Instrument {
         Self::new_with_course_felts(courses,board,rate,substeps,modes_per_string,damping,materials)
     }
 
-    /// One (WoolFelt, Prony) card per COURSE in the supplied course order.
-    /// Unison members share a material, not history: every physical contact keeps
-    /// its own permanent crush and recoverable relaxation memory. Match Prony's
-    /// instantaneous modulus to that course's reference tangent when fitting.
-    /// An empty spectrum preserves the purely rate-independent image.
+    /// One material card per course, with the original point-mass hammer image.
+    /// Unison members share a material, never their internal contact histories.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_course_felts(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>)->Result<Self,String> {
+        Self::build(courses,board,rate,substeps,modes_per_string,damping,materials,None)
+    }
+
+    /// Geometry-derived rigid rotation plus Timoshenko static bending reduction.
+    /// Head masses and felt cards are per-course; the shank geometry is supplied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_course_shanks(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
+        geometry:ShankGeometry)->Result<Self,String> {
+        Self::build(courses,board,rate,substeps,modes_per_string,damping,materials,Some(geometry))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
+        shank_geometry:Option<ShankGeometry>)->Result<Self,String> {
         if !(8_000..=192_000).contains(&rate)||!(1..=16).contains(&substeps){return Err("invalid rate/substep budget".into());}
         if materials.len()!=courses.len() {return Err("one felt/Prony card is required for every course".into());}
         let mut laws=Vec::with_capacity(materials.len());
@@ -106,8 +120,7 @@ impl Instrument {
                 return Err("nonfinite felt material card".into());
             }
             WoolFelt::new(law.f_ref,law.eps_ref,law.p,law.q,law.crush_fraction,law.eps_densify).map_err(|e|e.to_string())?;
-            spectra.push(relaxation::Spectrum::from_prony(&prony)?);
-            laws.push(law);
+            spectra.push(relaxation::Spectrum::from_prony(&prony)?);laws.push(law);
         }
         let mechanics_rate=rate.checked_mul(substeps as u32).ok_or("mechanics rate overflow")?;
         let bank=Bank::new(&courses,board,mechanics_rate,0.45*f64::from(rate),modes_per_string,damping)?;
@@ -116,7 +129,13 @@ impl Instrument {
             let ci=bank.strings[si].course;let c=&courses[ci];
             spectra[ci].prepare(c.felt_area_m2/c.unison as f64,c.felt_thickness_m,dt)
         }).collect::<Result<Vec<_>,_>>()?;
-        let hammers=vec![Hammer::default();courses.len()];
+        let hammer_models=courses.iter().map(|c| match shank_geometry {
+            Some(g)=>shank::Prepared::from_geometry(g,c.hammer_mass_kg,mechanics_rate),
+            None=>shank::Prepared::point_mass(c.hammer_mass_kg,mechanics_rate),
+        }).collect::<Result<Vec<_>,_>>()?;
+        let hammers:Vec<_>=hammer_models.iter().map(|p|Hammer {
+            motion:p.rest(CATCH_DISTANCE),active:false,held:false,latched:false,on_rest:true,jack:Jack::default(),
+        }).collect();
         let contacts:Vec<_>=bank.contact_strings.iter().map(|&si| Contact {
             state:laws[bank.strings[si].course].initial_state(),memory:relaxation::Memory::default(),
             overlap:-CATCH_DISTANCE,force:0.0,enabled:true,
@@ -125,11 +144,12 @@ impl Instrument {
         for i in 0..nc {for j in 0..nc {
             let ci=bank.strings[bank.contact_strings[i]].course;
             let cj=bank.strings[bank.contact_strings[j]].course;
-            if ci==cj {contact_h[i*nc+j]+=0.5*dt*dt/courses[ci].hammer_mass_kg;}
+            if ci==cj {contact_h[i*nc+j]+=hammer_models[ci].compliance();}
         }}
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
-            bank,courses,laws,hammers,contacts,creep,output_rate:rate,substeps,sustain:0.0,
+            jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
+            bank,courses,laws,hammers,contacts,hammer_models,creep,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -147,21 +167,10 @@ impl Instrument {
         self.sostenuto=on;
     }
     fn key_index(&self,midi:u8)->Result<usize,Error>{self.courses.iter().position(|c|c.midi==midi).ok_or(Error::UnknownKey)}
-
-    /// Velocity is SI m/s, not an arbitrary MIDI brightness parameter. All
-    /// force/spectral changes emerge from the contact law and coupled motion.
-    pub fn note_on(&mut self,midi:u8,hammer_velocity_m_s:f64)->Result<(),Error>{
-        if !hammer_velocity_m_s.is_finite()||!(0.0..=8.0).contains(&hammer_velocity_m_s)||hammer_velocity_m_s==0.0 {
-            return Err(Error::InvalidControl);
-        }
-        let ci=self.key_index(midi)?;
-        if self.hammers[ci].active||self.hammers[ci].held{return Err(Error::NotRearmed);}
-        let before=self.energy_j();let mut launch:f64=-0.002;let mut member=0;
+    fn arm(&mut self,ci:usize)->f64 {
+        let mut launch:f64=-0.002;let mut member=0;
         for c in 0..self.contacts.len(){
-            let s=&self.bank.strings[self.bank.contact_strings[c]];
-            if s.course!=ci {continue;}
-            // Same area per physical string; una corda does not duplicate the
-            // remaining patch's force or replace the instrument's material.
+            if self.bank.strings[self.bank.contact_strings[c]].course!=ci {continue;}
             let count=if self.una_corda{self.courses[ci].unison.saturating_sub(1).max(1)}else{self.courses[ci].unison};
             self.contacts[c].enabled=member<count;member+=1;
             if self.contacts[c].enabled {
@@ -171,23 +180,53 @@ impl Instrument {
                 launch=launch.min(x+free-0.002);
             }
         }
-        self.hammers[ci].y=launch;self.hammers[ci].v=hammer_velocity_m_s;
-        self.hammers[ci].held=true;self.hammers[ci].active=true;
+        launch
+    }
+    fn reset_overlaps(&mut self,ci:usize) {
+        let y=self.hammer_models[ci].position(&self.hammers[ci].motion);
         for c in 0..self.contacts.len(){if self.bank.strings[self.bank.contact_strings[c]].course==ci {
-            self.contacts[c].overlap=launch-self.bank.contact_position(c,&self.bank.q);self.contacts[c].force=0.0;
+            self.contacts[c].overlap=y-self.bank.contact_position(c,&self.bank.q);self.contacts[c].force=0.0;
         }}
+    }
+
+    /// Post-escapement SI crown velocity. No preset spectrum or gain envelope.
+    pub fn note_on(&mut self,midi:u8,hammer_velocity_m_s:f64)->Result<(),Error>{
+        if !hammer_velocity_m_s.is_finite()||hammer_velocity_m_s<=0.0||hammer_velocity_m_s>8.0 {
+            return Err(Error::InvalidControl);
+        }
+        let ci=self.key_index(midi)?;
+        if self.hammers[ci].active||self.hammers[ci].held{return Err(Error::NotRearmed);}
+        let before=self.energy_j();let launch=self.arm(ci);
+        self.hammers[ci].motion=self.hammer_models[ci].launch(launch,hammer_velocity_m_s);
+        self.hammers[ci].held=true;self.hammers[ci].active=true;self.hammers[ci].on_rest=false;
+        self.hammers[ci].jack=Jack::default();self.reset_overlaps(ci);
         self.accounting.input_work_j+=self.energy_j()-before;Ok(())
     }
-    pub fn note_off(&mut self,midi:u8)->Result<(),Error>{let i=self.key_index(midi)?;self.hammers[i].held=false;Ok(())}
+
+    /// Push the published jack station with F=A*sin(pi*t/duration)^2, starting
+    /// from rest. Table 3 examples: (70 N,7 ms) and (30 N,100 ms). Force ceases
+    /// at the earlier of pulse end or 1.5 mm let-off, resolved to one mechanical
+    /// substep. This is a force-driven action fragment, not a key-velocity alias.
+    pub fn jack_on(&mut self,midi:u8,peak_n:f64,duration_s:f64)->Result<(),Error> {
+        if !peak_n.is_finite()||!(0.0..=200.0).contains(&peak_n)||peak_n==0.0
+            || !duration_s.is_finite()||!(0.001..=0.2).contains(&duration_s) {return Err(Error::InvalidControl);}
+        let ci=self.key_index(midi)?;
+        if !self.hammer_models[ci].is_flexible() {return Err(Error::Contact("jack drive needs a geometry-derived shank"));}
+        if self.hammers[ci].active||self.hammers[ci].held {return Err(Error::NotRearmed);}
+        let before=self.energy_j();self.arm(ci);
+        self.hammers[ci].motion=self.hammer_models[ci].rest(CATCH_DISTANCE);
+        self.hammers[ci].held=true;self.hammers[ci].active=true;self.hammers[ci].on_rest=true;
+        self.hammers[ci].jack=Jack{peak_n,duration_s,elapsed_s:0.0};self.reset_overlaps(ci);
+        self.accounting.input_work_j+=self.energy_j()-before;Ok(())
+    }
+    pub fn note_off(&mut self,midi:u8)->Result<(),Error>{
+        let i=self.key_index(midi)?;self.hammers[i].held=false;self.hammers[i].jack.peak_n=0.0;Ok(())
+    }
 
     pub fn energy_j(&self)->f64 {
         let mut e=self.bank.energy();
-        for (h,c) in self.hammers.iter().zip(&self.courses){
-            e+=0.5*c.hammer_mass_kg*h.v*h.v+c.hammer_mass_kg*GRAVITY*(h.y+CATCH_DISTANCE);
-        }
+        for (h,p) in self.hammers.iter().zip(&self.hammer_models) {e+=p.energy(&h.motion,CATCH_DISTANCE);}
         for (i,p) in self.contacts.iter().enumerate(){
-            // Shifting the hammer away from a string must not erase internal
-            // energy. Even disabled/airborne felt patches keep relaxing.
             e+=self.creep[i].stored(&p.memory);
             if p.enabled {
                 let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=&self.courses[ci];
@@ -216,8 +255,27 @@ impl Instrument {
         let dt=1.0/f64::from(self.bank.rate);let nc=self.contacts.len();
         let before=self.energy_j();let mut damper_loss=self.damp(0.5*dt)?;
         self.bank.predict();self.active.clear();
-        for (i,h) in self.hammers.iter().enumerate(){
-            self.hammer_free[i]=if h.active{h.y+dt*h.v-0.5*dt*dt*GRAVITY}else{h.y};
+        self.jack_force.fill(0.0);self.rest_force.fill(0.0);
+        for i in 0..self.hammers.len() {
+            let h=&mut self.hammers[i];let p=&mut self.hammer_models[i];
+            let y=p.position(&h.motion);self.hammer_free[i]=y;
+            if !h.active {continue;}
+            if y>=-LET_OFF_DISTANCE||h.jack.elapsed_s>=h.jack.duration_s {h.jack.peak_n=0.0;}
+            if h.jack.peak_n>0.0 {
+                let phase=std::f64::consts::PI*(h.jack.elapsed_s+0.5*dt).min(h.jack.duration_s)/h.jack.duration_s;
+                self.jack_force[i]=h.jack.peak_n*fs_math::det::sin(phase).powi(2);
+                h.jack.elapsed_s+=dt;
+            }
+            let (free,_)=p.advance(&h.motion,0.0,self.jack_force[i]).map_err(Error::Contact)?;
+            self.hammer_free[i]=p.position(&free);
+            if h.on_rest {
+                if self.hammer_free[i]< -CATCH_DISTANCE {
+                    // Work-conjugate unilateral support: the crown stays on
+                    // the rest, so its reaction does zero work, not a clamp.
+                    self.rest_force[i]=(-CATCH_DISTANCE-self.hammer_free[i])/p.compliance();
+                    self.hammer_free[i]=-CATCH_DISTANCE;
+                } else {h.on_rest=false;}
+            }
         }
         self.force.fill(0.0);
         for c in 0..nc {
@@ -257,16 +315,19 @@ impl Instrument {
         self.bank.finish(&self.force);
         if self.bank.next_q.iter().chain(&self.bank.next_v).any(|x|!x.is_finite()||x.abs()>1e5){return Err(Error::NonFinite);}
         self.hammer_next.copy_from_slice(&self.hammers);
+        let mut shank_loss=0.0;let mut jack_work=0.0;
         for (i,h) in self.hammer_next.iter_mut().enumerate(){if h.active {
             let force=(0..nc).filter(|&c|self.bank.strings[self.bank.contact_strings[c]].course==i).map(|c|self.force[c]).sum::<f64>();
-            let accel=GRAVITY+force/self.courses[i].hammer_mass_kg;
-            h.y=self.hammers[i].y+dt*self.hammers[i].v-0.5*dt*dt*accel;
-            h.v=self.hammers[i].v-dt*accel;
+            let model=&mut self.hammer_models[i];
+            let (motion,loss)=model.advance(&self.hammers[i].motion,self.rest_force[i]-force,
+                self.jack_force[i]).map_err(Error::Contact)?;
+            jack_work+=self.jack_force[i]*(model.jack_position(&motion)-model.jack_position(&self.hammers[i].motion));
+            shank_loss+=loss;h.motion=motion;
         }}
         let mut felt_loss=0.0;let mut relaxation_loss=0.0;
         for i in 0..nc {
             let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
-            let end=self.hammer_next[ci].y-self.bank.contact_position(i,&self.bank.next_q);
+            let end=self.hammer_models[ci].position(&self.hammer_next[ci].motion)-self.bank.contact_position(i,&self.bank.next_q);
             let material=&self.creep[i];let old=&self.contacts[i];
             let (memory,viscous)=material.advance(&old.memory,self.force[i]);
             relaxation_loss+=viscous;felt_loss+=viscous;
@@ -289,28 +350,28 @@ impl Instrument {
         self.hammers.copy_from_slice(&self.hammer_next);self.bank.commit();
         let mut catch_loss=0.0;
         for i in 0..self.hammers.len(){
-            let h=self.hammers[i];
-            if h.active&&h.y< -CATCH_DISTANCE&&h.v<0.0 {
+            let h=self.hammers[i];let model=&self.hammer_models[i];
+            let landed=model.position(&h.motion)< -CATCH_DISTANCE-1e-10&&model.velocity(&h.motion)<0.0;
+            if h.active&&(landed||(h.on_rest&&h.jack.peak_n==0.0)) {
                 let clear=(0..nc).filter(|&c|self.bank.strings[self.bank.contact_strings[c]].course==i)
                     .all(|c|self.contacts[c].overlap<=0.0);
                 if clear {
-                    let m=self.courses[i].hammer_mass_kg;
-                    catch_loss+=0.5*m*h.v*h.v+m*GRAVITY*(h.y+CATCH_DISTANCE);
-                    self.hammers[i].y=-CATCH_DISTANCE;self.hammers[i].v=0.0;self.hammers[i].active=false;
-                    for c in 0..nc {if self.bank.strings[self.bank.contact_strings[c]].course==i {
-                        self.contacts[c].overlap=-CATCH_DISTANCE-self.bank.contact_position(c,&self.bank.q);self.contacts[c].force=0.0;
-                    }}
+                    let rest=model.rest(CATCH_DISTANCE);
+                    catch_loss+=model.energy(&h.motion,CATCH_DISTANCE)-model.energy(&rest,CATCH_DISTANCE);
+                    self.hammers[i].motion=rest;self.hammers[i].on_rest=true;
+                    self.hammers[i].active=h.jack.peak_n>0.0;self.reset_overlaps(i);
                 }
             }
         }
         damper_loss+=self.damp(0.5*dt)?;
         let modal_loss=self.bank.last_modal_loss_j;
-        let after=self.energy_j();let balance=after-before+felt_loss+modal_loss+damper_loss+catch_loss;
+        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+damper_loss+catch_loss-jack_work;
         let tolerance=1e-9+1e-8*before.abs().max(after.abs());
         if !after.is_finite()||after>100.0{return Err(Error::NonFinite);}
-        if balance.abs()>tolerance||felt_loss< -tolerance||modal_loss< -tolerance||catch_loss< -tolerance {
+        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||catch_loss< -tolerance {
             return Err(Error::Energy{defect_j:balance});
         }
+        self.accounting.input_work_j+=jack_work;self.accounting.shank_loss_j+=shank_loss;
         self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
         self.accounting.modal_loss_j+=modal_loss;
         self.accounting.damper_loss_j+=damper_loss;self.accounting.catch_loss_j+=catch_loss;
@@ -318,10 +379,9 @@ impl Instrument {
         Ok(())
     }
 
-    /// Transactional audio sample. Every scratch/history buffer is allocated
-    /// at construction; a refused substep restores the ENTIRE sample, including
-    /// prior substeps, felt maxima/relaxation memory, hammers and loss accounts.
-    /// Returns a surface volume-velocity diagnostic, NOT calibrated pressure.
+    /// Transactional audio sample, including jack timing and bending state.
+    /// Prepared modal scratch is always restored from authoritative motion on
+    /// each trial. No allocation is required to predict, accept or roll back.
     pub fn step(&mut self)->Result<f64,Error>{
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
@@ -335,8 +395,7 @@ impl Instrument {
             }
             average+=self.bank.volume_velocity();
         }
-        // Box averaging is a diagnostic decimator, not a certified audio
-        // antialias filter. The renderer must disclose this approximation.
+        // Diagnostic box decimation, not a certified audio antialias filter.
         Ok(average/self.substeps as f64)
     }
 }
@@ -399,8 +458,7 @@ mod tests {
     fn independent_course_materials_keep_contact_history_and_close_energy(){
         let scale=super::super::geometry::demonstration_scale().unwrap();
         let courses=vec![scale[27],scale[48]];
-        let first=felt::demonstration_law().unwrap();let mut second=first.clone();
-        second.f_ref*=2.0;
+        let first=felt::demonstration_law().unwrap();let mut second=first.clone();second.f_ref*=2.0;
         let mut p=Instrument::new_with_course_felts(courses.clone(),&super::super::board::demonstration(),
             48_000,4,12,true,vec![(first,relaxation::demonstration_prony()),
                 (second,relaxation::demonstration_prony())]).unwrap();
@@ -414,5 +472,26 @@ mod tests {
         assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
         assert!(Instrument::new_with_course_felts(courses,&super::super::board::demonstration(),
             48_000,4,12,true,vec![]).is_err());
+    }
+    #[test]
+    fn jack_touch_drives_contact_disengages_and_preserves_energy_and_rollback() {
+        let c=super::super::geometry::demonstration_scale().unwrap()[48];
+        for (peak,duration) in [(70.0,0.007),(30.0,0.1)] {
+            let mut p=Instrument::new_with_course_shanks(vec![c],&super::super::board::demonstration(),
+                48_000,4,12,true,vec![(felt::demonstration_law().unwrap(),relaxation::demonstration_prony())],
+                ShankGeometry::published()).unwrap();
+            p.jack_on(69,peak,duration).unwrap();
+            for _ in 0..120 {p.step().unwrap();}
+            let motion=p.hammers[0].motion;let elapsed=p.hammers[0].jack.elapsed_s;let input=p.accounting.input_work_j;
+            p.damper_drag_ns_m=f64::NAN;assert!(p.step().is_err());
+            assert_eq!(p.hammers[0].motion,motion);assert_eq!(p.hammers[0].jack.elapsed_s,elapsed);
+            assert_eq!(p.accounting.input_work_j,input);p.damper_drag_ns_m=0.4;
+            for _ in 0..7200 {p.step().unwrap();}
+            assert!(p.contacts.iter().any(|c|c.state.eps_max>0.0));
+            assert_eq!(p.hammers[0].jack.peak_n,0.0);
+            assert!(p.accounting.input_work_j>0.0);assert!(p.accounting.shank_loss_j>0.0);
+            assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
+        }
+        assert!(instrument().jack_on(69,70.0,0.007).is_err());
     }
 }
