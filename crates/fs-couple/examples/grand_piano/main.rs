@@ -19,7 +19,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--microphone x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
-    [--sample-rate Hz] [--substeps 1..16] [--modes 1..128]
+    [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
@@ -42,7 +42,8 @@ felt patch geometry and Prony time constants are still estimates, not coupon fit
 available keys. --velocity overrides the three demo hammer launch speeds.
 Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
 Geometric boards assemble a flat orthotropic plate before rendering. The explicit
-frequency band admits at most 32 modes; mesh refinement is not a convergence claim.
+frequency band admits at most 128 modes; --modes admits up to 512 string partials.
+Neither a larger budget nor mesh refinement alone is a convergence or real-time claim.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
 combined with --note or --velocity. note_on values are hammer velocity in m/s.
 With the preset, jack_staccato and jack_legato instead take peak force in N at
@@ -126,7 +127,7 @@ impl Options {
             || options.velocity.is_some_and(|v| !v.is_finite() || v <= 0.0 || v > 8.0)
             || !options.duration.is_finite() || !(0.001..=120.0).contains(&options.duration)
             || !(8_000..=192_000).contains(&options.sample_rate)
-            || !(1..=16).contains(&options.substeps) || !(1..=128).contains(&options.modes) {
+            || !(1..=16).contains(&options.substeps) || !(1..=linear::MAX_STRING_MODES).contains(&options.modes) {
             return Err("render control outside its finite admitted range".into());
         }
         if options.concert_pitch.is_some_and(|f| !f.is_finite() || !(430.0..=450.0).contains(&f))

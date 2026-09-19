@@ -33,6 +33,10 @@ use super::geometry::Course;
 /// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
 /// This is a memory/work ceiling, not a claim that every size is real-time.
 pub const MAX_BOARD_MODES: usize = 128;
+/// A bass string may need hundreds of physical partials before reaching the
+/// output band. The frequency ceiling still stops retention; this is a per-
+/// string ceiling, not an instruction to allocate inaudible oscillators.
+pub const MAX_STRING_MODES: usize = 512;
 
 #[derive(Clone, Debug)]
 pub struct BoardMode {
@@ -198,6 +202,9 @@ pub struct Bank {
     /// Columns map loaded coordinates to the supplied bare-board coordinates.
     board_basis: Vec<f64>,
     schur_inverse: Vec<f64>,
+    /// Row c is the prepared S^-1 W^T column for contact c.
+    contact_response: Vec<f64>,
+    #[cfg(test)]
     contact_board: Vec<f64>,
     free_q: Vec<f64>,
     free_v: Vec<f64>,
@@ -213,7 +220,7 @@ impl Bank {
         max_modes: usize, damping: bool) -> Result<Self, String> {
         let r = board.len();
         if courses.is_empty() || courses.len() > 88 || !(1..=MAX_BOARD_MODES).contains(&r)
-            || !(1..=128).contains(&max_modes) || rate < 8_000
+            || !(1..=MAX_STRING_MODES).contains(&max_modes) || rate < 8_000
             || !band_hz.is_finite() || band_hz <= 0.0 || band_hz > 0.45*f64::from(rate) {
             return Err("invalid course, modal, frequency or sample-rate budget".into());
         }
@@ -257,6 +264,7 @@ impl Bank {
                     let bridge: Vec<f64> = board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect();
                     for n in 1..=max_modes {
                         let f = card.partial_hz(n, tension);
+                        if !f.is_finite() { return Err("derived string frequency overflow".into()); }
                         if f > band_hz { break; }
                         let omega = TAU*f;
                         let sign = if n % 2 == 0 { -1.0 } else { 1.0 };
@@ -365,7 +373,10 @@ impl Bank {
             free_contact:vec![0.0;nc],rate,omitted_duplex_modes,transition,physical_board_k,
             board_half_damping,damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
-            board_volume,board_basis,schur_inverse,contact_board,free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
+            board_volume,board_basis,schur_inverse,contact_response:response,
+            #[cfg(test)]
+            contact_board,
+            free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
             r_string:vec![0.0;n],board_rhs:vec![0.0;r],board_end:vec![0.0;r] })
     }
 
@@ -439,15 +450,14 @@ impl Bank {
     pub fn finish(&mut self, forces: &[f64]) {
         let n=self.modes.len();let r=self.board_count;
         self.last_modal_loss_j=self.board_pre_loss;
-        // Build W^T F once. The former j,a,c nesting rebuilt this RHS r times.
-        self.board_rhs.fill(0.0);
+        assert_eq!(forces.len(),self.contact_strings.len(),"one force per contact");
+        // S^-1 W^T was already computed for the compliance matrix. Keep it
+        // rather than repeat the small dense solve for every accepted substep.
+        // Silent contacts skip only multiplication, not sympathetic dynamics.
+        self.next_q[n..].copy_from_slice(&self.board_end);
         for (c,&force) in forces.iter().enumerate() {
             if force==0.0 { continue; }
-            for a in 0..r { self.board_rhs[a]+=self.contact_board[c*r+a]*force; }
-        }
-        for j in 0..r {
-            let response: f64=(0..r).map(|a| self.schur_inverse[j*r+a]*self.board_rhs[a]).sum();
-            self.next_q[n+j]=self.board_end[j]+response;
+            for j in 0..r { self.next_q[n+j]+=self.contact_response[c*r+j]*force; }
         }
         self.board_rhs.fill(0.0);
         for group in &self.groups {
@@ -691,5 +701,61 @@ mod tests {
             assert!(defect.abs()<1e-10,"{defect:e}");b.commit();
         }
         assert!(b.v[b.modes.len()+32..].iter().any(|v|v.abs()>1e-12));
+    }
+    #[test]
+    fn higher_bandwidth_boards_preserve_reciprocal_work_above_the_old_limit() {
+        let c=super::super::geometry::demonstration_scale().unwrap()[48];
+        for count in [33,64,MAX_BOARD_MODES] {
+            let board:Vec<_>=(0..count).map(|i| {
+                let mut bridge=[0.0;88];bridge[48]=0.04*det::cos(i as f64*0.6)/(count as f64).sqrt();
+                BoardMode{frequency_hz:90.0+10.0*i as f64,damping_ratio:0.01,bridge,volume:0.02}
+            }).collect();
+            let mut b=Bank::new(&[c],&board,192_000,21_600.0,12,true).unwrap();
+            assert_eq!(b.board_count,count);
+            for k in 0..b.q.len() {b.q[k]=1e-8*det::sin(k as f64);b.v[k]=1e-4*det::cos(k as f64);}
+            let forces=vec![0.2;b.contact_strings.len()];
+            for _ in 0..20 {
+                let before=b.energy();b.predict();b.finish(&forces);
+                let work=(0..forces.len()).map(|c|forces[c]*(b.contact_position(c,&b.next_q)-b.contact_position(c,&b.q))).sum::<f64>();
+                let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
+                assert!(defect.abs()<1e-10,"{count} modes: {defect:e}");
+                b.commit();
+            }
+            let too_many=vec![board[0].clone();MAX_BOARD_MODES+1];
+            assert!(Bank::new(&[c],&too_many,192_000,21_600.0,12,true).is_err());
+        }
+    }
+
+    #[test]
+    fn bass_retention_can_reach_the_audio_band_instead_of_stopping_at_128_partials() {
+        let mut c=super::super::geometry::demonstration_scale().unwrap()[0];
+        c.unison=1;c.duplex_length_m=0.0;
+        let mut b=Bank::new(&[c],&super::super::board::demonstration(),192_000,
+            21_600.0,MAX_STRING_MODES,false).unwrap();
+        assert!(b.modes.len()>128);
+        assert!(b.modes.len()<=MAX_STRING_MODES);
+        assert!(b.modes.iter().all(|m|m.omega/TAU<=21_600.0));
+        let forces=[0.1];
+        for _ in 0..20 {
+            let before=b.energy();b.predict();b.finish(&forces);
+            let work=forces[0]*(b.contact_position(0,&b.next_q)-b.contact_position(0,&b.q));
+            let defect=b.energy_at(&b.next_q,&b.next_v)-before+b.last_modal_loss_j-work;
+            assert!(defect.abs()<1e-10,"wide bass work defect {defect:e}");b.commit();
+        }
+    }
+
+    #[test]
+    fn cached_force_response_matches_the_original_solve_for_sparse_and_zero_forces() {
+        let mut b=bank(true);let mut force=vec![0.0;b.contact_strings.len()];
+        for k in 0..b.q.len(){b.q[k]=1e-8*det::sin(k as f64);b.v[k]=1e-4*det::cos(k as f64);}
+        let pointers=(b.next_q.as_ptr(),b.next_v.as_ptr(),b.contact_response.as_ptr());
+        for sample in 0..100 {
+            force.fill(0.0);if sample%3!=0 {let c=sample%force.len();force[c]=0.2;}
+            let (free,q,v,loss)=unfactored(&b,&force);
+            b.predict();close(&free,&b.free_contact);b.finish(&force);
+            close(&q,&b.next_q);close(&v,&b.next_v);
+            assert!((loss-b.last_modal_loss_j).abs()<1e-12);b.commit();
+        }
+        assert_eq!(pointers,(b.next_q.as_ptr(),b.next_v.as_ptr(),b.contact_response.as_ptr()));
     }
 }

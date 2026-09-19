@@ -14,7 +14,7 @@
 //! measurements: https://www.steinway.com/pianos/steinway/grand/model-d
 //! The caller must supply those inputs and their authority explicitly.
 
-use super::linear::BoardMode;
+use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_math::det;
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateModel,
@@ -24,9 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 pub const HEADER: &str = "frankensim-board-geometry-si-v1";
-// Matches board::read and the small dense bridge owner. Never truncate a
-// certified slice silently just because the runtime budget is smaller.
-const MAX_BOARD_MODES: usize = 32;
+// Use the SAME retention budget as modal import, bridge mechanics and radiation.
+// Never silently truncate the certified frequency slice to meet this budget.
 const MAX_NODES: usize = 20_000;
 const MAX_TRIANGLES: usize = 40_000;
 

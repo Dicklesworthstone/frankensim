@@ -1,7 +1,7 @@
 //! Board modal input is a physical port table, not a bank of assigned pitches.
 //! A measured or fs-plate-derived table can replace the explicitly authored
 //! demonstration without changing the runtime or string material/geometry.
-use super::linear::BoardMode;
+use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_math::det;
 use std::f64::consts::PI;
 
@@ -39,7 +39,7 @@ pub fn read(text:&str,keys:&[u8])->Result<Vec<BoardMode>,String> {
         if f.len()!=6{return Err(format!("board line {}: expected six columns",line+1));}
         let mode=f[0].parse::<usize>().map_err(|_|"invalid board mode index")?;
         let key=f[4].parse::<u8>().map_err(|_|"invalid board MIDI key")?;
-        if mode>=32 || !(21..=108).contains(&key){return Err("board mode/key out of range".into());}
+        if mode>=MAX_BOARD_MODES || !(21..=108).contains(&key){return Err("board mode/key out of range".into());}
         let parse=|i:usize|f[i].parse::<f64>().map_err(|_|format!("board line {}: invalid scalar",line+1));
         let (hz,zeta,volume,g)=(parse(1)?,parse(2)?,parse(3)?,parse(5)?);
         if [hz,zeta,volume,g].iter().any(|x|!x.is_finite())||hz<=0.0||zeta<0.0{return Err("invalid board scalar".into());}
@@ -64,4 +64,35 @@ pub fn write(modes:&[BoardMode])->String {
         text.push_str(&format!("{i},{:.17e},{:.17e},{:.17e},{},{:.17e}\n",b.frequency_hz,b.damping_ratio,b.volume,k+21,g));
     }}
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn table(count:usize)->String {
+        let mut text=format!("{HEADER}\n");
+        for mode in 0..count {
+            text.push_str(&format!("{mode},{},0.01,0.1,69,{}\n",90.0+mode as f64*10.0,mode as f64*0.001));
+        }
+        text
+    }
+    #[test]
+    fn wider_board_tables_keep_every_supplied_mode_and_bridge_coefficient() {
+        for count in [33,64,MAX_BOARD_MODES] {
+            let modes=read(&table(count),&[69]).unwrap();
+            assert_eq!(modes.len(),count);
+            for (i,m) in modes.iter().enumerate() {
+                assert_eq!(m.frequency_hz,90.0+i as f64*10.0);
+                assert_eq!(m.bridge[48],i as f64*0.001);
+            }
+            let roundtrip=read(&write(&modes),&[69]).unwrap();
+            assert_eq!(roundtrip.len(),count);
+            assert_eq!(roundtrip[count-1].bridge,modes[count-1].bridge);
+        }
+    }
+    #[test]
+    fn larger_capacity_does_not_admit_missing_measurements_or_truncate_overbudget_input() {
+        assert!(read(&table(MAX_BOARD_MODES),&[60,69]).is_err());
+        assert!(read(&table(MAX_BOARD_MODES+1),&[69]).is_err());
+    }
 }
