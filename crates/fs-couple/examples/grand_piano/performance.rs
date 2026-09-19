@@ -1,6 +1,9 @@
 //! Prepared sample-accurate control stream. Parsing/allocation is cold; dispatch
 //! is a monotone cursor over a prevalidated schedule, not a scan per audio sample.
-//! Values for note_on are post-escapement hammer velocity in m/s, not MIDI gain.
+//! note_on values are post-escapement hammer velocity in m/s, not MIDI gain.
+//! jack_staccato/jack_legato values are PEAK JACK FORCE IN NEWTONS, with
+//! 7/100 ms sin-squared pulses (Chabassier/Durufle JSV 2014 Table 3). The
+//! mechanical engine, not this schedule, determines let-off and strike velocity.
 
 use super::engine::Instrument;
 
@@ -10,6 +13,7 @@ const MAX_EVENTS: usize = 1_000_000;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Control {
     NoteOn { key: u8, velocity_m_s: f64 },
+    JackOn { key: u8, peak_n: f64, duration_s: f64 },
     NoteOff { key: u8 },
     Sustain(f64),
     Sostenuto(bool),
@@ -52,6 +56,9 @@ impl Performance {
                 let control = match f[1] {
                     "note_on" if keys.contains(&key) && value > 0.0 && value <= 8.0 =>
                         Control::NoteOn { key, velocity_m_s: value },
+                    "jack_staccato" | "jack_legato" if keys.contains(&key) && value > 0.0 && value <= 200.0 =>
+                        Control::JackOn { key, peak_n:value,
+                            duration_s:if f[1]=="jack_staccato" {0.007}else{0.100} },
                     "note_off" if keys.contains(&key) && value == 0.0 => Control::NoteOff { key },
                     "sustain" if key == 0 && (0.0..=1.0).contains(&value) => Control::Sustain(value),
                     "sostenuto" if key == 0 && (value == 0.0 || value == 1.0) => Control::Sostenuto(value == 1.0),
@@ -78,6 +85,7 @@ impl Performance {
             if event.sample < sample { return Err("performance cursor skipped a scheduled sample".into()); }
             match event.control {
                 Control::NoteOn { key, velocity_m_s } => piano.note_on(key, velocity_m_s),
+                Control::JackOn { key, peak_n, duration_s } => piano.jack_on(key, peak_n, duration_s),
                 Control::NoteOff { key } => piano.note_off(key),
                 Control::Sustain(value) => piano.set_sustain(value),
                 Control::Sostenuto(on) => { piano.set_sostenuto(on); Ok(()) }
@@ -171,5 +179,14 @@ mod tests {
         assert!(Performance::demonstration(&[36], 48_000, 288_000, Some(69), None).is_err());
         assert!(Performance::demonstration(&[36], 0, 288_000, None, None).is_err());
         assert!(Performance::demonstration(&[36], 48_000, 0, None, None).is_err());
+    }
+    #[test]
+    fn jack_force_is_not_parsed_as_hammer_velocity() {
+        let p=Performance::read(&format!("{HEADER}\n0,jack_staccato,27,70\n50,jack_legato,69,30\n"),&[27,69],100).unwrap();
+        assert_eq!(p.events[0].control,Control::JackOn{key:27,peak_n:70.0,duration_s:0.007});
+        assert_eq!(p.events[1].control,Control::JackOn{key:69,peak_n:30.0,duration_s:0.1});
+        for row in ["0,jack_staccato,28,70","0,jack_legato,27,201","0,jack_legato,27,NaN","0,jack_legato,27,0"] {
+            assert!(Performance::read(&format!("{HEADER}\n{row}"),&[27],100).is_err());
+        }
     }
 }
