@@ -8,6 +8,9 @@
 //! model is silently added. See Smith, Physical Audio Signal Processing,
 //! Digital Waveguide Theory, acoustic tubes and energy-density waves.
 
+/// Connected, variable-impedance characteristic sections and passive junctions.
+pub mod network;
+
 /// Parameters of an initially quiescent bidirectional characteristic line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveguideSpec {
@@ -209,12 +212,18 @@ impl PassiveWaveguide {
     pub fn step(&mut self, outgoing: f64) -> Result<WaveguideFrame, WaveguideError> {
         let frame = self.preview_step(outgoing)?;
         let reflected = self.spec.reflection * self.waves[self.head];
+        self.commit_pair(outgoing, reflected);
+        Ok(frame)
+    }
+
+    // A network supplies BOTH endpoint waves after validating all junctions.
+    // Keep the actual two-direction shift and energy update in one owner.
+    fn commit_pair(&mut self, outgoing: f64, reflected: f64) {
         self.replace_leaf(0, self.wave_energy(outgoing));
         self.replace_leaf(2 * self.leaves, self.wave_energy(reflected));
         self.waves[self.head] = outgoing;
         self.waves[self.spec.one_way_samples + self.head] = reflected;
         self.head = (self.head + 1) % self.spec.one_way_samples;
-        Ok(frame)
     }
 }
 
