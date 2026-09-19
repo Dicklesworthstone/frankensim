@@ -20,6 +20,7 @@ pub mod interior;
 pub mod lbfgs;
 pub mod nsga;
 pub mod pareto;
+pub mod reverse_study;
 pub mod riemann;
 pub mod runner;
 pub mod sqp;
@@ -40,7 +41,8 @@ pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weig
 
 pub use auglag::{AugLagReport, KktResidual, augmented_lagrangian};
 pub use interior::{InteriorReport, interior_point};
-pub use lbfgs::{LbfgsReport, LbfgsState};
+pub use lbfgs::{LbfgsError, LbfgsReport, LbfgsState};
+pub use reverse_study::{ReverseStudy, ReverseStudyError};
 pub use riemann::{RiemannianLbfgs, RiemannianReport, retract, tangent_project};
 pub use runner::{
     Packing, STUDY_CANCELLATION_BOUNDARY_VERSION, Study, StudyError, StudyForkReceipt,
