@@ -23,6 +23,8 @@ pub mod audio;
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
 pub mod membrane;
+mod prepared;
+pub use prepared::PreparedImpactSystem;
 pub mod felt;
 pub mod striker;
 use felt::FeltPad;
@@ -128,6 +130,8 @@ pub enum ImpactError {
     Invalid(&'static str),
     /// Existing owner rejected the solve or constitutive construction.
     Owner(String),
+    /// Prepared numerical owner refusal, without allocating an error string.
+    PreparedSolve(fs_phs::PhsError),
     /// Gate requested cancellation before publication.
     Cancelled,
     /// Lifetime accepted-step budget is exhausted.
@@ -294,32 +298,11 @@ impl ImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before=self.stored_energy_j();
-        let record=fs_phs::step(&self.system,&self.x,external,self.config.dt_s).map_err(|e|ImpactError::Owner(e.to_string()))?;
+        let mut record=fs_phs::step(&self.system,&self.x,external,self.config.dt_s).map_err(|e|ImpactError::Owner(e.to_string()))?;
         if record.x.iter().chain(&record.y).any(|v|!v.is_finite()) {return Err(invalid("impact solve left finite state"));}
-        for (_,offset,film) in &self.membranes { film.observe_interleaved(&record.x,*offset)?; }
-        let frozen=self.system.hamiltonian(&record.x);let mut crush=0.0;
-        let mut candidate=self.histories.borrow().clone();
-        for (pad,h) in self.pads.iter().zip(&mut candidate) {
-            let strain=pad.strain(&record.x,self.modes);
-            if !strain.is_finite() || strain>pad.spec.law.eps_densify {return Err(invalid("felt trial exceeds densification validity"));}
-            let new=pad.spec.law.update_state(strain,h);
-            let loss=pad.spec.path_energy(strain,h)-pad.spec.recovered(strain,&new);
-            if !loss.is_finite() || loss < -64.0*f64::EPSILON*frozen.abs() {return Err(invalid("felt history update creates energy"));}
-            crush+=loss;*h=new;
-        }
-        let after=frozen-crush;let dissipated=record.dissipated+crush;
-        let residual=after-before+dissipated-record.supplied;
-        let tolerance=self.config.energy_absolute_tolerance_j+self.config.energy_relative_tolerance
-            *(before.abs()+after.abs()+dissipated.abs()+record.supplied.abs());
-        if ![after,dissipated,residual,record.supplied,record.solver_residual,tolerance].iter().all(|v|v.is_finite())
-            || after<0.0 || after>self.config.maximum_energy_j || record.dissipated<0.0 {
-            return Err(invalid("impact candidate exceeds finite energy limits"));
-        }
-        if residual.abs()>tolerance {return Err(ImpactError::Energy{residual_j:residual,tolerance_j:tolerance});}
-        if gate.is_requested() {return Err(ImpactError::Cancelled);}
-        self.x=record.x;*self.histories.borrow_mut()=candidate;self.sample+=1;
-        Ok(ImpactFrame{sample:self.sample,time_s:self.sample as f64*self.config.dt_s,stored_energy_j:after,
-            dissipated_energy_j:dissipated,felt_crush_loss_j:crush,supplied_work_j:record.supplied,
-            balance_residual_j:residual,solver_residual:record.solver_residual})
+        let ledger=fs_phs::PreparedStepRecord {delta_h:record.delta_h,dissipated:record.dissipated,
+            supplied:record.supplied,newton_iters:record.newton_iters,solver_residual:record.solver_residual};
+        let mut histories=self.histories.borrow().clone();
+        self.accept_step(&mut record.x,&mut histories,before,ledger,gate)
     }
 }

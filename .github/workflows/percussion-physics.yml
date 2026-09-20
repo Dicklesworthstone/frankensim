@@ -29,22 +29,15 @@ jobs:
           path: percussion-source.tar.gz
           retention-days: 3
       - name: Materialize the repository's pinned dependencies
-        run: |
-          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
-            python3 - <<'PY'
-          import pathlib, subprocess
-          root = pathlib.Path('../franken_numpy')
-          path = 'legacy_numpy_code/numpy/doc/make.bat'
-          git_dir = subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--absolute-git-dir'], text=True).strip()
-          attributes = pathlib.Path(git_dir) / 'info/attributes'
-          attributes.parent.mkdir(parents=True, exist_ok=True)
-          with attributes.open('a') as f:
-              f.write('\n' + path + ' -text\n')
-          (root / path).write_bytes(subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + path]))
-          PY
-            cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
-          fi
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      # Keep provenance failures red, but report actual compiler/test results
+      # independently. A legacy NumPy .bat EOL check must not hide these results.
       - name: Test the nonlinear time owner
-        run: cargo test --release -p fs-phs --tests
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-phs --test prepared_step --test phs
+      - name: Test nonlinear percussion and material history
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact
       - name: Test the actual percussion construction
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --example percussion -- --test-threads=1
