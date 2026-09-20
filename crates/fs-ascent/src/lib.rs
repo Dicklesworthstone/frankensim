@@ -22,6 +22,7 @@ pub mod interior;
 pub mod lbfgs;
 pub mod nsga;
 pub mod pareto;
+pub mod projected_al;
 pub mod reverse_manifold;
 pub mod reverse_newton;
 pub mod reverse_sqp;
