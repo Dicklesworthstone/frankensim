@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 mod stress;
+mod checkpoint;
 
 fn quoted(value: &str) -> String {
     let mut out = String::new();
@@ -125,8 +126,12 @@ fn write_attempts(
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
+    if args.first().is_some_and(|arg| arg == "--resume") {
+        return checkpoint::resume(&args[1..]);
+    }
+    let (args, checkpoint_options) = checkpoint::options(args)?;
     // Constraint input is checked before any path reads, solver work or output.
-    let (positional, stress_limit) = stress::options(args)?;
+    let (positional, stress_limit) = stress::options(&args)?;
     let args = positional.as_slice();
     if !(2..=9).contains(&args.len()) {
         return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--stress-limit MAX] [--stress-tolerance ABS]".into());
@@ -178,14 +183,45 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if let Some(limit) = stress_limit {
         optimizer = optimizer.with_sampled_stress_limit(limit)?;
     }
+    run_optimizer(output, optimizer, &field, checkpoint_options)
+}
+
+fn run_optimizer(
+    output: &Path, mut optimizer: MultiLoadProjectedOptimizer, field: &GridSdf,
+    checkpoint_options: checkpoint::Options,
+) -> Result<u8, Box<dyn Error>> {
+    let settings = optimizer.settings();
+    let level = settings.level;
+    let iterations = settings.iterations;
+    let volfrac = settings.volfrac;
+    let max_candidates = optimizer.controls().max_candidates;
+    let max_solves = optimizer.max_solves();
+    let projection = optimizer.projection_settings();
+    let aggregate = optimizer.aggregate();
+    let cases = optimizer.load_cases().to_vec();
+    let stress_limit = optimizer.stress_limit();
+    let segment_start = optimizer.next_iteration();
+    if !(2..=7).contains(&level) || !(1..=200).contains(&iterations)
+        || !(1..=16).contains(&max_candidates)
+    {
+        return Err(format!("checkpoint exceeds this executable's grid/update/candidate bounds; recovery_solves_started={}", checkpoint_options.recovery_solves).into());
+    }
     std::fs::create_dir(output)?;
-    write_field(&output.join("input-level-set.csv"), &field)?;
-    write_field(&output.join("baseline-level-set.csv"), optimizer.geometry())?;
+    write_field(&output.join("input-level-set.csv"), field)?;
+    write_field(&output.join("baseline-level-set.csv"), optimizer.baseline_geometry())?;
     write_loads(&output.join("load-cases.csv"), &cases)?;
     let mut trace = writer(&output.join("trajectory.jsonl"))?;
     let mut attempts = writer(&output.join("attempts.jsonl"))?;
+    if checkpoint_options.enabled {
+        checkpoint::save(&output.join(format!("checkpoint-{segment_start:06}.fscp")), &optimizer)?;
+    }
     let (status, exit, failure) = loop {
         let iteration = optimizer.next_iteration();
+        if iteration < iterations && checkpoint_options.pause_after
+            .is_some_and(|count| iteration - segment_start >= count)
+        {
+            break ("paused", 14, None);
+        }
         match optimizer.advance_one() {
             Ok(MultiLoadProjectedProgress::Accepted(step)) => {
                 write_attempts(&mut attempts, iteration, &step.attempts, stress_limit)?;
@@ -197,6 +233,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
                     step.proposal_events.len(), step.proposal_load_pad_nodes, optimizer.solves_started(),
                 )?;
                 trace.flush()?;
+                if checkpoint_options.enabled {
+                    checkpoint::save(&output.join(format!("checkpoint-{:06}.fscp", optimizer.next_iteration())), &optimizer)?;
+                }
             }
             Ok(MultiLoadProjectedProgress::IterationLimit) => break ("iteration_limit", 0, None),
             Ok(MultiLoadProjectedProgress::NoDescent(rows)) => {
@@ -215,6 +254,10 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     trace.flush()?;
     attempts.flush()?;
     write_field(&output.join("level-set.csv"), optimizer.geometry())?;
+    let checkpoint_summary = if checkpoint_options.enabled {
+        checkpoint::save(&output.join("checkpoint.fscp"), &optimizer)?;
+        format!(",\"checkpoint\":{{\"path\":\"checkpoint.fscp\",\"segment_start_iteration\":{segment_start},\"recovery_solves_started\":{}}}", checkpoint_options.recovery_solves)
+    } else { String::new() };
     let aggregate_name = match aggregate {
         RobustAggregate::WeightedSum => "weighted_sum",
         RobustAggregate::WorstWeightedCase => "worst_weighted_case",
@@ -229,7 +272,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         None => ("projected-multiload-v1", String::new()),
     };
     let summary = format!(
-        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
+        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
         optimizer.next_iteration(), cases.len(), projection.tolerance, optimizer.solves_started(),
         state_json(optimizer.baseline()), state_json(&optimizer.current()),
     );

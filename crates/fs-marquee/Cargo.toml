@@ -78,3 +78,7 @@ required-features = ["marquee"]
 [[test]]
 name = "projected_multiload"
 required-features = ["marquee"]
+
+[[test]]
+name = "projected_resume"
+required-features = ["marquee"]
