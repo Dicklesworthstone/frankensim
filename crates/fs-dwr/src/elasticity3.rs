@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::ElasticityError3;
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
+use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octant3;
 
@@ -142,6 +143,24 @@ pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: Referenc
     let qc = transfer.coarse().reference_load(goal, &mut checkpoint)?;
     let qf = transfer.fine().reference_load(goal, &mut checkpoint)?;
     estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed: None },
+        &qc, &qf, fields, options, &mut checkpoint)
+}
+
+/// Linear response estimate with nonzero prescribed motion on embedded supports.
+/// Reintegrate the same pure g on each grid with its inherited physical scales.
+/// Primal residuals include b_g; observation adjoints have homogeneous motion.
+/// Reusing the primal as an adjoint is generally INVALID when g is nonzero.
+/// Uses the shared vector-goal decomposition, including the newer response
+/// estimator's field admission and finite-solve terms. No continuum bound.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_motion_goal3(transfer: &AdaptiveTransfer3<'_>, load: ReferenceLoad3<'_>,
+    prescribed: Option<&PrescribedMotion3<'_>>, goal: ReferenceLoad3<'_>,
+    fields: GoalFields3<'_>, options: GoalOptions3,
+    mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
+    admit_transfer3(transfer, options, &mut checkpoint)?;
+    let qc = transfer.coarse().reference_load(goal, &mut checkpoint)?;
+    let qf = transfer.fine().reference_load(goal, &mut checkpoint)?;
+    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed },
         &qc, &qf, fields, options, &mut checkpoint)
 }
 
