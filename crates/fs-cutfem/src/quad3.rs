@@ -8,12 +8,16 @@
 //! The rule is NUMERICAL, not an enclosure of arbitrary integrals. Separately,
 //! `volume_bounds` encloses domain volume by counting every unresolved cut box
 //! in full. It does not confuse tiny root brackets with a base-quadrature error
-//! bound. No surface rule, octree balancing, or high-order convergence claim.
+//! bound. Optional oriented surface integration lives in [`surface`]; its
+//! numerical endpoint convention does not change the bulk enclosure contract.
 
 use std::ops::ControlFlow;
 
 use crate::{CutSdf3, HeightAxis, HexCell};
 use fs_ivl::Interval;
+
+pub mod surface;
+use surface::{SurfaceOptions3, SurfaceRules3, surface_cell_rules3};
 
 const AXES: [HeightAxis; 3] = [HeightAxis::X, HeightAxis::Y, HeightAxis::Z];
 const GAUSS: [(f64, f64); 3] = [
@@ -29,7 +33,8 @@ pub struct QuadratureOptions3 {
     pub depth: u32,
     /// Maximum visited boxes, including fully classified boxes.
     pub max_boxes: usize,
-    /// Maximum emitted bulk points, across all calls and failed trials.
+    /// Maximum emitted bulk AND optional surface points across all calls and
+    /// failed trials. A bulk-only caller retains its original point accounting.
     pub max_points: usize,
     /// Maximum interval contraction steps in each height line (1..=96).
     pub root_iterations: usize,
@@ -51,7 +56,7 @@ impl Default for QuadratureOptions3 {
 pub struct QuadratureWork3 {
     /// Visited boxes.
     pub boxes: usize,
-    /// Calls into the implicit-field interval producers.
+    /// Calls into interval producers and optional surface scalar samples.
     pub field_evaluations: usize,
     /// Emitted points; discarded candidates still consume the allowance.
     pub points: usize,
@@ -133,6 +138,7 @@ pub struct CutRules3 {
     bulk: Vec<([f64; 3], f64)>,
     volume_bounds: Interval,
     cut_boxes: usize,
+    surface: Option<SurfaceRules3>,
 }
 
 impl CutRules3 {
@@ -149,6 +155,10 @@ impl CutRules3 {
     /// Leaf boxes whose geometry needed a height rule.
     #[must_use]
     pub const fn cut_boxes(&self) -> usize { self.cut_boxes }
+    /// Optional interface rules integrated from the SAME field and box. None
+    /// means not requested, not a claim that the boundary is empty.
+    #[must_use]
+    pub fn surface(&self) -> Option<&SurfaceRules3> { self.surface.as_ref() }
 }
 
 /// Construct a 3-D bulk rule; no partial points escape on a returned failure.
@@ -157,13 +167,25 @@ pub fn cut_cell_rules3(
     sdf: &dyn CutSdf3, cell: HexCell, control: &mut QuadratureControl3<'_>,
 ) -> Result<CutRules3, QuadratureError3> {
     control.poll()?;
-    let mut result = CutRules3 { bulk: Vec::new(), volume_bounds: Interval::new(0.0, 0.0), cut_boxes: 0 };
+    let mut result = CutRules3 { bulk: Vec::new(), volume_bounds: Interval::new(0.0, 0.0), cut_boxes: 0, surface: None };
     visit(sdf, cell, control.options.depth, control, &mut result)?;
     // Outward additions around exact zero can produce a negative subnormal.
     result.volume_bounds = Interval::new(result.volume_bounds.lo().max(0.0), result.volume_bounds.hi());
     if !result.volume().is_finite() || !result.volume_bounds.hi().is_finite() {
         return Err(QuadratureError3::Invalid("quadrature volume overflow"));
     }
+    control.poll()?;
+    Ok(result)
+}
+
+/// Opt into a matching oriented interface rule without changing the bulk
+/// arithmetic or volume enclosure. The two traversals share all work limits;
+/// a failed surface traversal does not publish the already computed bulk rule.
+pub fn cut_cell_rules3_with_surface(sdf: &dyn CutSdf3, cell: HexCell, options: SurfaceOptions3,
+    control: &mut QuadratureControl3<'_>) -> Result<CutRules3, QuadratureError3> {
+    options.validate()?;
+    let mut result = cut_cell_rules3(sdf, cell, control)?;
+    result.surface = Some(surface_cell_rules3(sdf, cell, options, control)?);
     control.poll()?;
     Ok(result)
 }
@@ -233,22 +255,7 @@ fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, control: &mut QuadratureC
         }
         return Ok(());
     }
-    let mut selected = None;
-    let mut best = 0.0;
-    for (a, axis) in AXES.into_iter().enumerate() {
-        // Unusable derivatives disqualify only that direction. A field
-        // enclosure itself must still be finite to classify the box.
-        control.poll()?;
-        control.work.field_evaluations = control.work.field_evaluations.checked_add(1)
-            .ok_or(QuadratureError3::Invalid("field counter overflow"))?;
-        let d = sdf.derivative_enclose(lo, hi, axis);
-        control.poll()?;
-        let bound = if d.lo().is_finite() && d.hi().is_finite() && d.lo() <= d.hi() {
-            if d.lo() > 0.0 { d.lo() } else if d.hi() < 0.0 { -d.hi() } else { 0.0 }
-        } else { 0.0 };
-        if bound > best { best = bound; selected = Some((a, d.lo() > 0.0)); }
-    }
-    let (axis, increasing) = selected.ok_or(QuadratureError3::UnresolvedCell(cell))?;
+    let (axis, increasing, best) = select_height(sdf, cell, control)?;
     out.cut_boxes += 1;
     out.volume_bounds = out.volume_bounds + Interval::new(0.0, volume.hi());
     let bases: Vec<usize> = (0..3).filter(|&a| a != axis).collect();
@@ -268,6 +275,29 @@ fn visit(sdf: &dyn CutSdf3, cell: HexCell, depth: u32, control: &mut QuadratureC
         }
     } }
     Ok(())
+}
+
+// The original derivative selection, shared by bulk and surface traversals.
+fn select_height(sdf: &dyn CutSdf3, cell: HexCell, control: &mut QuadratureControl3<'_>)
+    -> Result<(usize, bool, f64), QuadratureError3> {
+    let (lo, hi) = (cell.lo(), cell.hi());
+    let mut selected = None;
+    let mut best = 0.0;
+    for (a, axis) in AXES.into_iter().enumerate() {
+        // Unusable derivatives disqualify only that direction. A field
+        // enclosure itself must still be finite to classify the box.
+        control.poll()?;
+        control.work.field_evaluations = control.work.field_evaluations.checked_add(1)
+            .ok_or(QuadratureError3::Invalid("field counter overflow"))?;
+        let d = sdf.derivative_enclose(lo, hi, axis);
+        control.poll()?;
+        let bound = if d.lo().is_finite() && d.hi().is_finite() && d.lo() <= d.hi() {
+            if d.lo() > 0.0 { d.lo() } else if d.hi() < 0.0 { -d.hi() } else { 0.0 }
+        } else { 0.0 };
+        if bound > best { best = bound; selected = Some((a, d.lo() > 0.0)); }
+    }
+    let (axis, increasing) = selected.ok_or(QuadratureError3::UnresolvedCell(cell))?;
+    Ok((axis, increasing, best))
 }
 
 // Enclose the CLAMPED height threshold, not a root-count assertion. Monotonicity
