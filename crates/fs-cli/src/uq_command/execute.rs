@@ -10,6 +10,7 @@ mod checkpoint;
 #[path = "compliance.rs"]
 mod compliance;
 mod design;
+mod qmc;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -18,6 +19,7 @@ pub(super) struct Options {
     max_new_samples: Option<usize>,
     compliance: Option<Policy>,
     design: Option<DesignGrid>,
+    qmc_replicates: Option<usize>,
 }
 
 impl Options {
@@ -30,7 +32,11 @@ impl Options {
         while index < args.len() {
             let flag = &args[index];
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
-            if flag == "--checkpoint" && options.checkpoint.is_none() {
+            if flag == "--qmc-replicates" && options.qmc_replicates.is_none() {
+                let count = count_option(value, "--qmc-replicates")?;
+                if !(2..=256).contains(&count) { return Err(bad("--qmc-replicates must be in 2..=256")); }
+                options.qmc_replicates = Some(count);
+            } else if flag == "--checkpoint" && options.checkpoint.is_none() {
                 options.checkpoint = Some(PathBuf::from(value.as_os_str()));
             } else if flag == "--resume" && options.resume.is_none() {
                 options.resume = Some(PathBuf::from(value.as_os_str()));
@@ -62,6 +68,11 @@ impl Options {
         }
         if options.max_new_samples.is_some() && options.checkpoint.is_none() {
             return Err(bad("--max-new-samples requires --checkpoint so the unfinished prefix is retained"));
+        }
+        if options.qmc_replicates.is_some()
+            && (options.checkpoint.is_some() || options.resume.is_some() || options.max_new_samples.is_some()
+                || options.compliance.is_some() || options.design.is_some()) {
+            return Err(bad("QMC currently requires a fixed sample layout without MC checkpoints, sequential compliance or candidate-selection flags"));
         }
         Ok(options)
     }
@@ -106,6 +117,9 @@ pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
 pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
+    if let Some(replicates) = options.qmc_replicates {
+        return qmc::execute(&base, &config, replicates);
+    }
     if let Some(grid) = &options.design {
         return design::execute(base_text,&base,&config,options,grid);
     }
