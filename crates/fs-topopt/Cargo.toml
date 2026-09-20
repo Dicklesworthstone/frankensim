@@ -23,6 +23,7 @@ fs-math = { path = "../fs-math" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-spectral = { path = "../fs-spectral" }
 
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
