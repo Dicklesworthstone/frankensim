@@ -11,8 +11,10 @@ use fs_cutfem::elastic3::ElasticityError3;
 use std::ops::ControlFlow;
 
 mod design;
+mod projected;
 pub mod refinement;
 pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
+pub use projected::{ProjectedResponseIteration3, ProjectedResponseOptions3, ProjectedResponseStudy3};
 
 /// One fixed linear observation of independent displacement coordinates.
 /// Assemble `q` with the operator's body/reference-load integrators to observe

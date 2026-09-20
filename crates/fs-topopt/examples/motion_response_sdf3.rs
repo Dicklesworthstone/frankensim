@@ -8,6 +8,9 @@
 //! Append --estimate to compare the accepted objective with an enriched grid
 //! under the remaining solve budget and mark up to two ORIGINAL-grid cells.
 //! This reports a two-grid discrepancy, not a reoptimized or certified design.
+//! --projected selects linear-storage box/volume augmented Lagrangian instead
+//! of dense SQP; --level 3 exposes 384 active density variables on this fixture.
+//! Neither method promises nonlinear-volume feasibility at intermediate steps.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::elastic3::{adaptive::AdaptiveElasticity3,ElasticityOptions3};
@@ -19,7 +22,7 @@ use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use fs_topopt::{SimpParams,SolveControl,SolveBudget};
 use fs_topopt::sdf3::CutDensityStudy3;
-use fs_topopt::sdf3::response::{ResponseCase3,ResponseTarget3,ResponseDesignStudy3,ResponseDesignOptions3};
+use fs_topopt::sdf3::response::{ResponseCase3,ResponseTarget3,ResponseDesignStudy3,ResponseDesignOptions3,ProjectedResponseStudy3,ProjectedResponseOptions3};
 use fs_topopt::sdf3::response::refinement::{ReferenceResponseCase3,ReferenceResponseTarget3,ResponseRefinementOptions3};
 struct Slab;
 impl CutSdf3 for Slab {
@@ -34,11 +37,20 @@ impl CutSdf3 for Slab {
 fn motion(p:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[0.02,0.0,0.0]}else{[0.0,0.0,0.007*p[1]]}}
 fn other(p:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[0.0,0.01,0.005*p[2]]}else{[-0.01,0.0,0.0]}}
 fn main()->Result<(),Box<dyn std::error::Error>>{
-    let mut args:Vec<_>=std::env::args().skip(1).collect();
-    let estimate=args.last().is_some_and(|s|s=="--estimate");
-    if estimate {let _=args.pop();}
+    let mut input=std::env::args().skip(1);let mut args=Vec::new();
+    let (mut estimate,mut projected,mut level_given)=(false,false,false);let mut level=1_u8;
+    while let Some(arg)=input.next(){
+        match arg.as_str(){
+            "--estimate" if !estimate=>estimate=true,
+            "--projected" if !projected=>projected=true,
+            "--level" if !level_given=>{level=input.next().ok_or("--level requires a value")?.parse::<u8>()?;level_given=true;}
+            _ if arg.starts_with("--")=>return Err(format!("unknown or repeated option: {arg}").into()),
+            _=>args.push(arg),
+        }
+    }
+    if !(1..=3).contains(&level){return Err("initial level must be in 1..=3".into());}
     if args.len()>2&&args.len()!=6{return Err("usage: motion_response_sdf3 [STEPS [TOTAL_KRYLOV [T00 T01 T10 T11]]]".into());}
-    let steps=args.first().map_or(Ok(40),|s|s.parse::<usize>())?;
+    let steps=args.first().map_or(Ok(if projected{200}else{40}),|s|s.parse::<usize>())?;
     let budget=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
     let supplied=if args.len()==6{
         let v=args[2..].iter().map(|s|s.parse::<f64>()).collect::<Result<Vec<_>,_>>()?;
@@ -46,7 +58,7 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
     }else{None};
     let mut gp=|_|ControlFlow::Continue(());let mut geometry=QuadratureControl3::new(QuadratureOptions3::default(),&mut gp)?;
     let op=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
-        &Octree3::uniform(1,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
+        &Octree3::uniform(level,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
         ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
     let force=op.body_load(&|_|[0.002,0.0,-0.003],||ControlFlow::Continue(()))?;
     let other_force:Vec<_>=force.iter().map(|v|-0.5*v).collect();
@@ -68,25 +80,41 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
     let t0=[ResponseTarget3{target:values[0],..template[0]},ResponseTarget3{target:values[1],..template[1]}];
     let t1=[ResponseTarget3{target:values[2],..template[0]},ResponseTarget3{target:values[3],..template[1]}];
     let cases=[ResponseCase3{force:&force,prescribed:Some(&motion),targets:&t0},ResponseCase3{force:&other_force,prescribed:Some(&other),targets:&t1}];
-    let initial=vec![0.5;study.cells()];let options=ResponseDesignOptions3::default();
-    let mut design=ResponseDesignStudy3::new(&mut study,&cases,&initial,options,&mut control)?;
-    let outcome=design.run(steps);
+    let initial=vec![0.5;study.cells()];
+    eprintln!("optimizer={}; active_densities={}; level={level}",if projected{"projected-al"}else{"dense-sqp"},study.cells());
     println!("iteration,objective,volume_fraction,constraint_violation");
-    for row in design.history(){println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.objective,row.volume_fraction,row.constraint_violation);}
+    let (accepted,work,violation,evaluations,response_options,tolerance,outcome)=if projected{
+        let options=ProjectedResponseOptions3::default();
+        let mut design=ProjectedResponseStudy3::new(&mut study,&cases,&initial,options,&mut control)?;
+        let result=design.run(steps);
+        for row in design.history(){println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.objective,row.volume_fraction,row.constraint_violation);}
+        let status:Result<(),Box<dyn std::error::Error>>=result.map(|r|{
+            eprintln!("stop={:?}; numerical_projected_kkt={:?}; multiplier={:.9e}; penalty={:.9e}; multiplier_updates={}; converged={}",
+                r.stop,r.kkt,r.multiplier,r.penalty,r.work.multiplier_updates,r.stop==fs_ascent::projected_al::ProjectedAlStop::Converged);
+        }).map_err(|e|Box::new(e) as Box<dyn std::error::Error>);
+        (design.accepted().clone(),design.work(),design.constraint_violation(),design.evaluations(),options.response,options.optimizer.tolerance,status)
+    }else{
+        let options=ResponseDesignOptions3::default();
+        let mut design=ResponseDesignStudy3::new(&mut study,&cases,&initial,options,&mut control)?;
+        let result=design.run(steps);
+        for row in design.history(){println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.objective,row.volume_fraction,row.constraint_violation);}
+        let status:Result<(),Box<dyn std::error::Error>>=result.map(|r|{
+            eprintln!("stop={:?}; numerical_kkt={:?}; converged={}",r.stop,r.solution.kkt,r.solution.converged);
+        }).map_err(|e|Box::new(e) as Box<dyn std::error::Error>);
+        (design.accepted().clone(),design.work(),design.constraint_violation(),design.evaluations(),options.response,options.tolerance,status)
+    };
     println!("case,observation,response,target");
-    for (i,case) in design.accepted().responses.iter().enumerate(){for (j,value) in case.iter().enumerate(){println!("{i},{j},{value:.17e},{:.17e}",values[2*i+j]);}}
+    for (i,case) in accepted.responses.iter().enumerate(){for (j,value) in case.iter().enumerate(){println!("{i},{j},{value:.17e},{:.17e}",values[2*i+j]);}}
     println!("cell,raw_density,projected_density");
-    for (i,(r,p)) in design.point().iter().zip(&design.accepted().projected_rho).enumerate(){println!("{i},{r:.17e},{p:.17e}");}
+    for (i,(r,p)) in accepted.rho.iter().zip(&accepted.projected_rho).enumerate(){println!("{i},{r:.17e},{p:.17e}");}
     eprintln!("evaluations={}; linear_iterations={}; setup_applications={}; galerkin_products={}; feasible={}; continuum_certified=false",
-        design.evaluations(),design.work().linear_iterations,design.work().preconditioner_operator_applications,
-        design.work().preconditioner_galerkin_products,design.constraint_violation()<=options.tolerance);
-    let report=outcome?;eprintln!("stop={:?}; numerical_kkt={:?}; converged={}",report.stop,report.solution.kkt,report.solution.converged);
-    if design.constraint_violation()>options.tolerance{return Err("accepted SQP point is still infeasible; no feasible design claimed".into());}
+        evaluations,work.linear_iterations,work.preconditioner_operator_applications,
+        work.preconditioner_galerkin_products,violation<=tolerance);
+    outcome?;
+    if violation>tolerance{return Err("accepted point is still infeasible; no feasible design claimed".into());}
     if estimate {
-        let accepted=design.accepted().clone();
-        drop(design);
         let fine=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
-            &Octree3::uniform(2,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
+            &Octree3::uniform(level+1,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
             ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
         let f=|_:[f64;3]|[0.002,0.0,-0.003];
         let f_other=|p|f(p).map(|v|-0.5*v);
@@ -102,7 +130,7 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
             ReferenceResponseCase3{load:ReferenceLoad3::body(&f_other),prescribed:Some(&other),targets:&targets1},
         ];
         let evidence=study.estimate_response_enrichment(AdaptiveSolveSpace3::jacobi(fine,100_000_000),
-            &accepted,&experiments,ResponseRefinementOptions3{response:options.response,..Default::default()},&mut control)?;
+            &accepted,&experiments,ResponseRefinementOptions3{response:response_options,..Default::default()},&mut control)?;
         let marked=evidence.mark(0.5,2,||ControlFlow::Continue(()))?;
         eprintln!("coarse_objective={:.17e}; enriched_objective={:.17e}; two_grid_change={:.17e}; identity_defect={:.3e}; marking_fraction={:.6}; target_met={}; marked={:?}; linear_iterations={}; continuum_certified=false",
             evidence.coarse_objective,evidence.fine_objective,evidence.correction(),evidence.identity_relative_defect,
