@@ -18,6 +18,8 @@ use fs_cutfem::{
     CutStabilizationScaling, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree,
 };
 use fs_material::IsotropicElastic;
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 
 const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
 const SOLVER_TOL: f64 = 1e-12;
@@ -149,15 +151,12 @@ fn validate_geometry(
 fn strain_at(
     grid: &Quadtree,
     solution: &CutElasticitySolution,
+    cell: (u32, u32, u32),
     point: [f64; 2],
 ) -> Option<[f64; 3]> {
-    let level = grid.max_level();
-    let nf = f64::from(1u32 << level);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ci = ((point[0] * nf).floor().clamp(0.0, nf - 1.0)) as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cj = ((point[1] * nf).floor().clamp(0.0, nf - 1.0)) as u32;
-    let cell = (level, ci, cj);
+    // A Q1 displacement gradient is discontinuous across cell boundaries.
+    // Evaluate the quadrature OWNER's trace, including interface points exactly
+    // on lattice lines; floor(point / h) can select an unrepresented neighbour.
     let (lo, hi) = grid.rect(cell);
     let corners = grid.corner_nodes(cell);
     let nodal = solution.nodal();
@@ -216,25 +215,47 @@ fn sample_solution(
     lambda: f64,
     mu: f64,
 ) -> Result<(f64, [f64; 2], usize), CutFemError> {
+    match sample_solution_controlled(grid, phi, solution, lambda, mu, |_| {
+        ControlFlow::<Infallible>::Continue(())
+    })? {
+        ControlFlow::Continue(samples) => Ok(samples),
+        ControlFlow::Break(never) => match never {},
+    }
+}
+
+/// Sample a crate-owned matching displacement/geometry pair without another PDE
+/// solve. Cancellation is polled before each quadrature cell. No partial maximum
+/// escapes; callers must retain the previous complete state on Break or Err.
+pub(crate) fn sample_solution_controlled<B>(
+    grid: &Quadtree,
+    phi: &GridSdf,
+    solution: &CutElasticitySolution,
+    lambda: f64,
+    mu: f64,
+    mut control: impl FnMut(usize) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, (f64, [f64; 2], usize)>, CutFemError> {
     let mut maximum = 0.0_f64;
     let mut location = [0.0, 0.0];
     let mut count = 0usize;
-    let mut observe = |point: [f64; 2]| -> Result<(), CutFemError> {
-        if let Some(strain) = strain_at(grid, solution, point) {
-            let stress = von_mises(lambda, mu, strain);
-            if !(stress.is_finite() && stress >= 0.0) {
-                return Err(invalid("robust sampled von Mises stress is invalid"));
-            }
-            count = count.checked_add(1)
-                .ok_or_else(|| invalid("robust stress sample count overflowed"))?;
-            if stress > maximum {
-                maximum = stress;
-                location = point;
-            }
+    let mut observe = |cell, point: [f64; 2]| -> Result<(), CutFemError> {
+        let strain = strain_at(grid, solution, cell, point)
+            .ok_or_else(|| invalid("material stress probe is missing its owning-cell displacement"))?;
+        let stress = von_mises(lambda, mu, strain);
+        if !(stress.is_finite() && stress >= 0.0) {
+            return Err(invalid("robust sampled von Mises stress is invalid"));
+        }
+        count = count.checked_add(1)
+            .ok_or_else(|| invalid("robust stress sample count overflowed"))?;
+        if count == 1 || stress > maximum {
+            maximum = stress;
+            location = point;
         }
         Ok(())
     };
-    for cell in grid.leaves() {
+    for (ordinal, cell) in grid.leaves().enumerate() {
+        if let ControlFlow::Break(reason) = control(ordinal) {
+            return Ok(ControlFlow::Break(reason));
+        }
         let (lo, hi) = grid.rect(cell);
         let enclosure = phi.enclose(lo, hi);
         if enclosure.lo() > 0.0 {
@@ -242,22 +263,28 @@ fn sample_solution(
         }
         if enclosure.hi() < 0.0 {
             for point in full_cell_points(lo, hi) {
-                observe(point)?;
+                observe(cell, point)?;
             }
         } else {
             let rules = cut_cell_rules(phi, lo, hi, 2);
+            // An interface-only exterior neighbour has no material-side Q1
+            // displacement. Its trace belongs to the positive-volume cell on
+            // the other side, not to a fabricated or silently skipped sample.
+            if !rules.bulk.iter().any(|&(_, weight)| weight > 0.0) {
+                continue;
+            }
             for &(point, weight) in &rules.bulk {
-                if weight > 0.0 { observe(point)?; }
+                if weight > 0.0 { observe(cell, point)?; }
             }
             for &(point, weight, _) in &rules.iface {
-                if weight > 0.0 { observe(point)?; }
+                if weight > 0.0 { observe(cell, point)?; }
             }
         }
     }
     if count == 0 {
         return Err(invalid("robust stress evaluation found no material stress samples"));
     }
-    Ok((maximum, location, count))
+    Ok(ControlFlow::Continue((maximum, location, count)))
 }
 
 /// Re-solve every scenario on one exact geometry and bind robust compliance and
@@ -506,6 +533,35 @@ mod tests {
 
     fn settings(level: u32) -> OptimizeSettings {
         OptimizeSettings { level, iterations: 1, nucleation_period: 0, ..OptimizeSettings::default() }
+    }
+
+    #[test]
+    fn aligned_interface_samples_cover_every_positive_volume_owner() {
+        let phi = GridSdf::from_fn(8, &|_, y| (y - 0.5).abs() - 0.25);
+        let grid = Quadtree::uniform(3);
+        let cases = [RobustLoadCase::new(
+            DesignBoxEdge::Right, 0.375, 0.625, [0.0, -1.0], 1.0,
+        ).unwrap()];
+        let evaluation = evaluate_robust_sampled_stress(
+            &phi, &cases, settings(3), RobustAggregate::WeightedSum,
+        ).expect("material-side traces on an exactly lattice-aligned interface");
+        let mut expected = 0;
+        for cell in grid.leaves() {
+            let (lo, hi) = grid.rect(cell);
+            let enclosure = phi.enclose(lo, hi);
+            if enclosure.lo() > 0.0 { continue; }
+            if enclosure.hi() < 0.0 {
+                expected += 5;
+            } else {
+                let rules = cut_cell_rules(&phi, lo, hi, 2);
+                let bulk = rules.bulk.iter().filter(|(_, weight)| *weight > 0.0).count();
+                if bulk > 0 {
+                    expected += bulk + rules.iface.iter().filter(|(_, weight, _)| *weight > 0.0).count();
+                }
+            }
+        }
+        assert!(expected > 0);
+        assert_eq!(evaluation.case_sample_counts, [expected]);
     }
 
     #[test]

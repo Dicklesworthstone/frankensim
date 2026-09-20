@@ -6,10 +6,13 @@
 //! than trusting the previously active load. Weights are not probabilities.
 
 use super::*;
+use crate::{RobustSampledStressEvaluation, SampledStressLimit};
 use crate::volume::{
     VolumeProjectionReport, VolumeProjectionSettings, VolumeProjectionStage,
     project_material_volume, project_material_volume_controlled,
 };
+
+mod stress;
 
 /// Bounded candidate search and actual case-solve allowance.
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +50,8 @@ pub enum MultiLoadProjectedStage {
     Projection(usize, VolumeProjectionStage),
     /// Before (`complete=false`) or after one independent case solve.
     CaseSolve { candidate: usize, case: usize, complete: bool },
+    /// Before a cell's stress probes on an already solved independent load case.
+    StressCell { candidate: usize, case: usize, cell: usize },
     /// Complete projected-field family and acceptance gates passed, before mutation.
     Publish(usize),
 }
@@ -89,6 +94,8 @@ pub struct MultiLoadProjectedAttempt {
     pub projection: Option<VolumeProjectionReport>,
     /// Never present for a partly solved scenario family.
     pub state: Option<MultiLoadProjectedState>,
+    /// Complete-family sampled stress; absent when disabled or sampling refuses.
+    pub stress: Option<RobustSampledStressEvaluation>,
     /// Numerical refusal or failed acceptance gate, not a convergence claim.
     pub refusal: Option<String>,
 }
@@ -102,6 +109,8 @@ pub struct MultiLoadProjectedStep {
     pub previous: MultiLoadProjectedState,
     /// Fully evaluated same-area accepted state.
     pub state: MultiLoadProjectedState,
+    /// Complete-family stress of the accepted state, when a limit is installed.
+    pub stress: Option<RobustSampledStressEvaluation>,
     /// Projection applied before the accepted state's independent load solves.
     pub projection: VolumeProjectionReport,
     /// Unprojected evolution audit, deliberately separate from final metrics.
@@ -141,6 +150,9 @@ pub struct MultiLoadProjectedOptimizer {
     next_iteration: usize,
     ell: f64,
     solves_started: usize,
+    stress_limit: Option<SampledStressLimit>,
+    baseline_stress: Option<RobustSampledStressEvaluation>,
+    current_stress: Option<RobustSampledStressEvaluation>,
 }
 
 impl MultiLoadProjectedOptimizer {
@@ -189,6 +201,7 @@ impl MultiLoadProjectedOptimizer {
         Ok(Self {
             kernel, current, baseline, fixed, projection, controls,
             next_iteration: 0, ell: settings.ell0, solves_started: load_cases.len(),
+            stress_limit: None, baseline_stress: None, current_stress: None,
         })
     }
 
@@ -261,7 +274,7 @@ impl MultiLoadProjectedOptimizer {
                 return Ok(ControlFlow::Break(reason));
             }
             let mut attempt = MultiLoadProjectedAttempt {
-                index, move_cells, projection: None, state: None, refusal: None,
+                index, move_cells, projection: None, state: None, stress: None, refusal: None,
             };
             let trial = self.kernel.propose_with_move(&self.current, &direction, self.ell, move_cells);
             move_cells *= self.controls.contraction;
@@ -309,8 +322,24 @@ impl MultiLoadProjectedOptimizer {
             };
             let state = MultiLoadProjectedState::of(&candidate);
             attempt.state = Some(state.clone());
+            let stress = if self.stress_limit.is_some() {
+                match self.sample_stress_controlled(&candidate, |case, cell| {
+                    control(MultiLoadProjectedStage::StressCell { candidate: index, case, cell })
+                }) {
+                    Ok(ControlFlow::Continue(evaluation)) => Some(evaluation),
+                    Ok(ControlFlow::Break(reason)) => return Ok(ControlFlow::Break(reason)),
+                    Err(error) => {
+                        attempt.refusal = Some(format!("projected stress family: {error}"));
+                        attempts.push(attempt);
+                        continue;
+                    }
+                }
+            } else { None };
+            attempt.stress = stress.clone();
             if (state.volume - self.projection.target).abs() > self.projection.tolerance {
                 attempt.refusal = Some("projected area gate failed".into());
+            } else if let Err(error) = stress::require_feasible(self.stress_limit, stress.as_ref()) {
+                attempt.refusal = Some(error.to_string());
             } else if !(state.objective < limit) {
                 attempt.refusal = Some("insufficient same-material aggregate decrease".into());
             } else {
@@ -326,11 +355,12 @@ impl MultiLoadProjectedOptimizer {
                 attempts.push(attempt);
                 let step = MultiLoadProjectedStep {
                     iteration: self.next_iteration,
-                    previous: self.current(), state, projection,
+                    previous: self.current(), state, stress: stress.clone(), projection,
                     proposal_audit: audit, proposal_events: events,
                     proposal_load_pad_nodes: load_pad_nodes, attempts,
                 };
                 self.current = candidate;
+                self.current_stress = stress;
                 self.ell = next_ell.max(0.0);
                 self.next_iteration += 1;
                 return Ok(ControlFlow::Continue(MultiLoadProjectedProgress::Accepted(Box::new(step))));
