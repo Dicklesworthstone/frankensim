@@ -55,3 +55,7 @@ required-features = ["equilibrium-design"]
 [[test]]
 name = "equilibrium_fit"
 required-features = ["equilibrium-design"]
+
+[[test]]
+name = "equilibrium_playback_cli"
+required-features = ["equilibrium-design"]

@@ -2,6 +2,8 @@
 //! adjoints, SQP steps and KKT checks; this executable only connects those owners.
 #[path = "equilibrium_fit/scenarios.rs"]
 mod scenarios;
+#[path = "equilibrium_fit/playback.rs"]
+mod playback;
 
 use fs_ascent::{EquilibriumStudy, SqpRunReport};
 use fs_couple::render::schedule::force::file::MAX_MODAL_PERFORMANCE_BYTES;
@@ -16,18 +18,19 @@ use fs_exec::CancelGate;
 use std::fmt::Write as _;
 use std::io::Read;
 
-const USAGE: &str = "equilibrium_fit MODEL.performance DESIGN.fit [--scenarios TOLERANCES.txt] [--iterations N] [--evaluations N] [--tolerance T] [--max-kkt-dimension N]";
+const USAGE: &str = "equilibrium_fit MODEL.performance DESIGN.fit [--scenarios TOLERANCES.txt] [--iterations N] [--evaluations N] [--tolerance T] [--max-kkt-dimension N] [--playback-wav OUT.wav --playback-case NAME --playback-samples N --playback-release SAMPLE --playback-full-scale-pa PA [--playback-block N]]";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Limits { iterations: usize, evaluations: usize, tolerance: f64, kkt_dimension: usize }
 impl Default for Limits {
     fn default() -> Self { Self { iterations:128, evaluations:256, tolerance:1e-8, kkt_dimension:384 } }
 }
-struct Options { model: String, design: String, scenarios: Option<String>, limits: Limits }
+struct Options { model: String, design: String, scenarios: Option<String>, playback: Option<playback::PlaybackOptions>, limits: Limits }
 fn options(args: &[String]) -> Result<Options, String> {
     let mut paths = Vec::new();
     let mut limits = Limits::default();
     let mut scenario_file = None;
+    let mut playback = playback::Builder::default();
     let mut seen = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -36,6 +39,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         seen.push(arg.clone());
         let value = args.next().ok_or_else(|| format!("missing value for {arg}"))?;
         match arg.as_str() {
+            key if key.starts_with("--playback-") => playback.set(key, value)?,
             "--scenarios" => scenario_file = Some(value.clone()),
             "--iterations" => limits.iterations = value.parse::<usize>().ok().filter(|v| *v <= 512)
                 .ok_or("--iterations must be in 0..=512")?,
@@ -49,7 +53,11 @@ fn options(args: &[String]) -> Result<Options, String> {
         }
     }
     let [model, design] = paths.as_slice() else { return Err(USAGE.into()); };
-    Ok(Options { model:model.clone(), design:design.clone(), scenarios:scenario_file, limits })
+    let playback = playback.finish()?;
+    if playback.is_some() && scenario_file.is_some() {
+        return Err("playback currently requires a nominal fit; no tolerance realization is selected implicitly".into());
+    }
+    Ok(Options { model:model.clone(), design:design.clone(), scenarios:scenario_file, playback, limits })
 }
 fn read_bounded(path: &str, limit: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
@@ -159,7 +167,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let design = read_bounded(&options.design, MAX_EQUILIBRIUM_DESIGN_BYTES)?;
     let gate = CancelGate::new();
     let loaded = EquilibriumDesignFile::from_bytes(&model, &design, &gate)?;
-    if let Some(path) = options.scenarios {
+    if let Some(render) = &options.playback {
+        println!("{}", playback::fit_and_render(&loaded, options.limits, render, &gate)?);
+    } else if let Some(path) = options.scenarios {
         let bytes = read_bounded(&path, scenarios::MAX_SCENARIO_BYTES)?;
         println!("{}", scenarios::run(&loaded, &bytes, options.limits, &gate)?);
     } else {
