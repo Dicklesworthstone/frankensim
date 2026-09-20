@@ -272,6 +272,16 @@ impl Segment {
         }
     }
 
+    /// Radius at the segment's inlet plane, where an upstream source couples.
+    #[must_use]
+    pub fn inlet_radius(&self) -> f64 {
+        match *self {
+            Segment::Cylinder { radius, .. } => radius,
+            Segment::Cone { inlet_radius, .. } => inlet_radius,
+            Segment::ToneHole { bore_radius, .. } => bore_radius,
+        }
+    }
+
     /// Radius at the segment's outlet plane.
     #[must_use]
     pub fn outlet_radius(&self) -> f64 {
