@@ -1,5 +1,14 @@
 use super::*;
+use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
+
+mod projected;
+pub use projected::{
+    MultiLoadProjectedAttempt, MultiLoadProjectedOptimizer, MultiLoadProjectedProgress,
+    MultiLoadProjectedSettings, MultiLoadProjectedStage, MultiLoadProjectedState,
+    MultiLoadProjectedStep,
+};
 
 struct MultiState {
     phi: GridSdf,
@@ -54,6 +63,19 @@ impl Kernel {
     }
 
     fn evaluate(&self, phi: GridSdf) -> Result<MultiState, CutFemError> {
+        match self.evaluate_controlled(phi, |_, _| ControlFlow::<Infallible>::Continue(()))? {
+            ControlFlow::Continue(state) => Ok(state),
+            ControlFlow::Break(never) => match never {},
+        }
+    }
+
+    // The callback brackets each real case solve. A late interruption or
+    // refusal drops the whole unpublished family, never a partial aggregate.
+    fn evaluate_controlled<B>(
+        &self,
+        phi: GridSdf,
+        mut control: impl FnMut(usize, bool) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, MultiState>, CutFemError> {
         if phi.nodes().iter().any(|value| !value.is_finite()) {
             return Err(invalid("multi-load evolution produced non-finite level-set nodes"));
         }
@@ -74,7 +96,10 @@ impl Kernel {
         };
         let mut solutions = Vec::with_capacity(self.load_cases.len());
         let mut compliances = Vec::with_capacity(self.load_cases.len());
-        for (case, support) in self.load_cases.iter().zip(&self.supports) {
+        for (index, (case, support)) in self.load_cases.iter().zip(&self.supports).enumerate() {
+            if let ControlFlow::Break(reason) = control(index, false) {
+                return Ok(ControlFlow::Break(reason));
+            }
             let value = case.traction();
             let traction = move |_: f64, _: f64| value;
             let solution = solver.solve_with_boundary_traction(
@@ -82,6 +107,9 @@ impl Kernel {
                 &|_, _| [0.0, 0.0],
                 BoundaryTraction::EdgeBand { support: *support, value: &traction },
             )?;
+            if let ControlFlow::Break(reason) = control(index, true) {
+                return Ok(ControlFlow::Break(reason));
+            }
             let compliance = solution.compliance();
             if !(compliance.is_finite() && compliance >= 0.0) {
                 return Err(invalid("multi-load case produced invalid compliance"));
@@ -105,7 +133,9 @@ impl Kernel {
         if !(objective.is_finite() && objective >= 0.0 && volume.is_finite() && volume > 0.0) {
             return Err(invalid("multi-load evaluation produced invalid aggregate or area"));
         }
-        Ok(MultiState { phi, solutions, compliances, active, objective, volume })
+        Ok(ControlFlow::Continue(MultiState {
+            phi, solutions, compliances, active, objective, volume,
+        }))
     }
 
     fn direction(&self, state: &MultiState, iteration: usize) -> Result<Direction, CutFemError> {
@@ -220,6 +250,16 @@ impl Kernel {
     }
 
     fn propose(&self, state: &MultiState, direction: &Direction, ell: f64) -> Result<Trial, CutFemError> {
+        self.propose_with_move(state, direction, ell, self.settings.move_cells)
+    }
+
+    fn propose_with_move(
+        &self,
+        state: &MultiState,
+        direction: &Direction,
+        ell: f64,
+        move_cells: f64,
+    ) -> Result<Trial, CutFemError> {
         let h = state.phi.h();
         let mut phi = state.phi.clone();
         let vn: Vec<f64> = direction.smooth.iter().map(|w| w - ell).collect();
@@ -228,7 +268,7 @@ impl Kernel {
         }
         let vmax = vn.iter().fold(0.0f64, |m, value| m.max(value.abs())).max(1e-12);
         let band = build_band(&phi, self.settings.band_cells);
-        let duration = self.settings.move_cells * h / vmax;
+        let duration = move_cells * h / vmax;
         if !duration.is_finite() {
             return Err(invalid("multi-load advection duration overflowed"));
         }

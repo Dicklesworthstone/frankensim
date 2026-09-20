@@ -245,6 +245,11 @@ fn active_case(compliances: &[f64], loads: &[RobustLoadCase]) -> usize {
 
 mod engine;
 pub use engine::optimize_compliance_multi_load;
+pub use engine::{
+    MultiLoadProjectedAttempt, MultiLoadProjectedOptimizer, MultiLoadProjectedProgress,
+    MultiLoadProjectedSettings, MultiLoadProjectedStage, MultiLoadProjectedState,
+    MultiLoadProjectedStep,
+};
 mod guarded_impl;
 pub use guarded_impl::optimize_compliance_multi_load_guarded;
 
