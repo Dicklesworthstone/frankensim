@@ -5,6 +5,9 @@
 use super::*;
 use crate::quad3::surface::{surface_cell_rules3, SurfaceOptions3};
 
+mod reference;
+pub use reference::{ReferenceLoad3, SurfaceForce3};
+
 /// Integrated surface load and its unmasked physical totals. Resultant and
 /// moment INCLUDE the parts applied at clamped nodes; `rhs` excludes those
 /// entries since prescribed zero displacements do no virtual work there.

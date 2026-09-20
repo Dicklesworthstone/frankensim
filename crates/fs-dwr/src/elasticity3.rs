@@ -11,16 +11,17 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::ElasticityError3;
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
+use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octant3;
 
 /// Externally solved homogeneous master fields, checked against actual operators.
 #[derive(Clone, Copy)]
 pub struct GoalFields3<'a> {
-    /// Coarse primal for the supplied body force.
+    /// Coarse primal for the supplied reference load.
     pub coarse_primal: &'a [f64],
     /// Enriched primal with the SAME inherited physical stiffness distribution.
     pub fine_primal: &'a [f64],
-    /// Coarse adjoint for the supplied linear volume goal.
+    /// Coarse adjoint for the supplied linear volume/surface goal.
     pub coarse_adjoint: &'a [f64],
     /// Enriched adjoint; computing it only on the coarse space is insufficient.
     pub fine_adjoint: &'a [f64],
@@ -110,16 +111,29 @@ impl GoalEstimate3 {
 }
 
 /// Evaluate a linear VOLUME goal `integral goal_density dot u` on two grids.
-/// `body` and `goal_density` must be pure and match their primal/adjoint solves.
+/// This body-only entry point uses the same mixed-load estimator below.
 /// For compliance pass body for both and use `GoalFields3::compliance`.
-///
-/// No solves occur here: the caller retains control of all work budgets. Both
-/// primal and adjoint fields are rechecked, and fine stiffness scales must be
-/// the exact parent-inherited PHYSICAL scales, not a refiltered raw design.
-/// The weak hierarchical localization is not a strong-residual recovery method.
-/// Error beyond this enriched space and any quadrature error remain unbounded.
 pub fn estimate_goal3(transfer: &AdaptiveTransfer3<'_>, body: &dyn Fn([f64; 3]) -> [f64; 3],
     goal_density: &dyn Fn([f64; 3]) -> [f64; 3], fields: GoalFields3<'_>, options: GoalOptions3,
+    checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
+    estimate_reference_goal3(transfer, ReferenceLoad3::body(body), ReferenceLoad3::body(goal_density),
+        fields, options, checkpoint)
+}
+
+/// Evaluate a linear volume/surface goal for a mixed reference load. Both laws
+/// are independently integrated on each grid using its retained bulk and surface
+/// rules; nodal loads are NOT prolonged. Pressure is inward-positive and fixed
+/// in the reference configuration. Observation density may differ from loading,
+/// requiring its own actual coarse and enriched adjoint fields.
+///
+/// No solves occur here: the caller owns their budgets. Every supplied field is
+/// rechecked against its actual load and operator. Exact parent-inherited
+/// PHYSICAL stiffness is required. The decomposition retains surface quadrature
+/// and goal-transfer differences rather than assuming Galerkin orthogonality.
+/// Missing surface rules refuse, never mean zero traction. Error beyond the
+/// enriched space and the numerical surface/volume quadrature remain unbounded.
+pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: ReferenceLoad3<'_>,
+    goal: ReferenceLoad3<'_>, fields: GoalFields3<'_>, options: GoalOptions3,
     mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
     poll(&mut checkpoint)?;
     if ![options.residual_tolerance, options.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0) {
@@ -134,10 +148,10 @@ pub fn estimate_goal3(transfer: &AdaptiveTransfer3<'_>, body: &dyn Fn([f64; 3]) 
             return Err(GoalError3::Invalid("enriched physical stiffness is not parent-inherited"));
         }
     }
-    let bc = coarse.body_load(body, &mut checkpoint)?;
-    let bf = fine.body_load(body, &mut checkpoint)?;
-    let qc = coarse.body_load(goal_density, &mut checkpoint)?;
-    let qf = fine.body_load(goal_density, &mut checkpoint)?;
+    let bc = coarse.reference_load(load, &mut checkpoint)?;
+    let bf = fine.reference_load(load, &mut checkpoint)?;
+    let qc = coarse.reference_load(goal, &mut checkpoint)?;
+    let qf = fine.reference_load(goal, &mut checkpoint)?;
     let mut residuals = [0.0; 4];
     for (i, (name, op, x, b)) in [
         ("coarse-primal", coarse, fields.coarse_primal, &bc),
@@ -154,10 +168,10 @@ pub fn estimate_goal3(transfer: &AdaptiveTransfer3<'_>, body: &dyn Fn([f64; 3]) 
     let t = transfer.prolongate(fields.coarse_adjoint, &mut checkpoint)?;
     let weight: Vec<_> = fields.fine_adjoint.iter().zip(&t).map(|(z, t)| z - t).collect();
     let error: Vec<_> = fields.fine_primal.iter().zip(&v).map(|(u, v)| u - v).collect();
-    let local = fine.cell_residuals(&v, &weight, body, &mut checkpoint)?;
-    let consistency = fine.cell_residuals(&v, &t, body, &mut checkpoint)?;
-    let primal_defect = fine.cell_residuals(fields.fine_primal, fields.fine_adjoint, body, &mut checkpoint)?;
-    let adjoint_defect = fine.cell_residuals(fields.fine_adjoint, &error, goal_density, &mut checkpoint)?;
+    let local = fine.cell_reference_residuals(&v, &weight, load, &mut checkpoint)?;
+    let consistency = fine.cell_reference_residuals(&v, &t, load, &mut checkpoint)?;
+    let primal_defect = fine.cell_reference_residuals(fields.fine_primal, fields.fine_adjoint, load, &mut checkpoint)?;
+    let adjoint_defect = fine.cell_reference_residuals(fields.fine_adjoint, &error, goal, &mut checkpoint)?;
     let mut cells: BTreeMap<_, GoalCell3> = coarse.leaves().iter().map(|&c| (c, GoalCell3::default())).collect();
     for (term, &parent) in local.iter().zip(transfer.parents()) {
         poll(&mut checkpoint)?;

@@ -1,6 +1,7 @@
 //! Conforming inter-grid transfer and localized weak residuals for 3-D goals.
 //! These are numerical operators, not continuum-error certificates.
 use super::*;
+use crate::elastic3::surface::ReferenceLoad3;
 
 pub mod precondition;
 
@@ -131,7 +132,7 @@ impl<'a> AdaptiveTransfer3<'a> {
 /// Ghost faces are apportioned half to each incident cell, exactly once in total.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CellResidual3 {
-    /// Integrated body-force work against w.
+    /// Integrated volume plus reference-surface work against w.
     pub load: f64,
     /// Density-scaled elasticity bilinear form a_bulk(u,w).
     pub bulk: f64,
@@ -143,6 +144,18 @@ impl CellResidual3 {
     #[must_use] pub fn residual(self) -> f64 { self.load - self.bulk - self.ghost }
 }
 impl AdaptiveElasticity3 {
+    /// Assemble mixed reference loads, then apply the actual hanging-node
+    /// transpose. Both contributions are forces on the same reference geometry;
+    /// there is no interpolation of coarse nodal forces onto a refined mesh.
+    pub fn reference_load(&self, law: ReferenceLoad3<'_>,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
+        let raw = self.raw.reference_load(law, &mut checkpoint)?;
+        let mut rhs = vec![0.0; self.n()];
+        self.restrict(&raw, &mut rhs);
+        if !rhs.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("reduced reference load overflow")); }
+        poll(&mut checkpoint)?; Ok(rhs)
+    }
+
     /// Recompute the true Euclidean residual for an externally retained field.
     /// Used to reject stale/partial fields before assigning them error evidence.
     pub fn field_residual(&self, x: &[f64], rhs: &[f64], mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<f64, ElasticityError3> {
@@ -157,13 +170,22 @@ impl AdaptiveElasticity3 {
         Ok(residual)
     }
 
-    /// Localize the ACTUAL cut-operator weak residual using retained cell blocks
-    /// and ghost jumps; there is no recovered stress or substituted stiffness.
-    /// The body producer must be pure and match the solve's force density.
-    /// This works on unconverged u (e.g. a prolonged coarse field) intentionally.
+    /// Body-only entry point into the shared physical residual kernel.
     pub fn cell_residuals(&self, u: &[f64], w: &[f64], body: &dyn Fn([f64; 3]) -> [f64; 3],
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<CellResidual3>, ElasticityError3> {
+        self.cell_reference_residuals(u, w, ReferenceLoad3::body(body), checkpoint)
+    }
+
+    /// Localize the ACTUAL cut-operator weak residual with volume and surface
+    /// forces. Surface work uses the retained oriented rules and Q1 trace of the
+    /// SAME reconstructed test field. Missing rules refuse before any load law.
+    /// The body, bulk and ghost arithmetic is shared with the body-only API.
+    /// Pure load producers must match the solve; unconverged u is intentionally
+    /// admitted (for a prolonged coarse field). No continuum bound is asserted.
+    pub fn cell_reference_residuals(&self, u: &[f64], w: &[f64], law: ReferenceLoad3<'_>,
         mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<CellResidual3>, ElasticityError3> {
         poll(&mut checkpoint)?; field(self, u)?; field(self, w)?;
+        law.admit(&self.raw, &mut checkpoint)?;
         let u = self.physical_displacements(u)?;
         let w = self.physical_displacements(w)?;
         let mut result = vec![CellResidual3::default(); self.cells()];
@@ -175,13 +197,27 @@ impl AdaptiveElasticity3 {
                 let applied: f64 = cell.stiffness[i].iter().zip(&uc).map(|(a, x)| a * x).sum();
                 result[id].bulk += self.scales()[id] * wi * applied;
             }
-            for &(p, weight) in cell.rules.bulk() {
-                poll(&mut checkpoint)?;
-                let f = body(p);
-                poll(&mut checkpoint)?;
-                if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite residual body force")); }
-                let (n, _) = q1(cell.bounds, p);
-                for a in 0..8 { for c in 0..3 { result[id].load += weight * n[a] * f[c] * wc[3 * a + c]; } }
+            if let Some(body) = law.body {
+                for &(p, weight) in cell.rules.bulk() {
+                    poll(&mut checkpoint)?;
+                    let f = body(p);
+                    poll(&mut checkpoint)?;
+                    if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite residual body force")); }
+                    let (n, _) = q1(cell.bounds, p);
+                    for a in 0..8 { for c in 0..3 { result[id].load += weight * n[a] * f[c] * wc[3 * a + c]; } }
+                }
+            }
+            if let Some(surface) = law.surface {
+                for point in cell.rules.surface().expect("surface family admitted").points() {
+                    poll(&mut checkpoint)?;
+                    let f = surface.value(point.position, point.normal);
+                    poll(&mut checkpoint)?;
+                    if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite residual surface force")); }
+                    let (n, _) = q1(cell.bounds, point.position);
+                    for a in 0..8 { for c in 0..3 {
+                        result[id].load += point.weight * n[a] * f[c] * wc[3 * a + c];
+                    } }
+                }
             }
         }
         for face in &self.raw.ghosts {
