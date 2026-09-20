@@ -9,7 +9,7 @@
 //!
 //! Memoryless dissipative ports ([`bernoulli_volume_flow`],
 //! [`quasistatic_aperture_opening`]) are first-class: a valve, a
-//! vocal fold, and a beating reed are the same jet plus a 1-DOF
+//! vocal fold, a leaflet, and a beating reed are the same jet plus a 1-DOF
 //! [`mass_spring_damper`] or its quasistatic reduction.
 //!
 //! Three pillars:
@@ -45,6 +45,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use fs_la::factor::lu;
+
+mod prepared;
+pub use prepared::{PreparedStepError, PreparedStepRecord, StepWorkspace};
 use fs_math::c64::C64;
 use fs_math::det;
 
@@ -950,14 +953,26 @@ pub fn step_descriptor(
 /// when used in the midpoint step (the pinned formula choice).
 #[must_use]
 pub fn discrete_gradient(storage: &dyn Storage, a: &[f64], b: &[f64]) -> Vec<f64> {
+    let mut mid = vec![0.0; a.len()];
+    let mut dg = vec![0.0; a.len()];
+    discrete_gradient_into_unchecked(storage, a, b, &mut mid, &mut dg);
+    dg
+}
+
+// Shared by allocating and prepared execution; callers own dimension checks.
+fn discrete_gradient_into_unchecked(
+    storage: &dyn Storage,
+    a: &[f64],
+    b: &[f64],
+    mid: &mut [f64],
+    dg: &mut [f64],
+) {
     let n = a.len();
-    let mid: Vec<f64> = a
-        .iter()
-        .zip(b)
-        .map(|(&p, &q)| f64::midpoint(p, q))
-        .collect();
-    let mut dg = vec![0.0; n];
-    storage.gradient(&mid, &mut dg);
+    for i in 0..n {
+        mid[i] = f64::midpoint(a[i], b[i]);
+    }
+    dg.fill(0.0);
+    storage.gradient(mid, dg);
     let mut dx_norm_sq = 0.0;
     let mut mid_dot = 0.0;
     for i in 0..n {
@@ -979,7 +994,6 @@ pub fn discrete_gradient(storage: &dyn Storage, a: &[f64], b: &[f64]) -> Vec<f64
             dg[i] += corr * (b[i] - a[i]);
         }
     }
-    dg
 }
 
 /// One completed discrete-gradient step with its exact energy ledger.
@@ -1856,6 +1870,7 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
 
 /// Compact radiation on the last flux: series `R = Re Z` and
 /// added mass `L = −X/ω` from [`compact_radiation_impedance`].
+///
 /// `scale` is 1 on a physical-`U` line and `x_out²` on a ψ-line
 /// so `Z_ψ = x² Z_phys`. Unflanged `X` is the Levine–Schwinger
 /// `Δℓ = 0.6133 a`; flanged is `0.8216 a`. A flanged mouth
@@ -2317,7 +2332,7 @@ impl Default for ViscothermalPin {
 /// Specific impedance under `e^{-iωt}` is `Z' = r − iωσ + i K/ω`
 /// ([`wall_specific_impedance`]). Acoustic shunt on a cell of wall
 /// area `A_w = 2π a dx` (`×√(1+s²)` on a taper) is the same LC the
-/// bore already is: `L = σ / A_w`, `C = A_w / K`, series `R = r / A_w`,
+/// bore already is: `L = σ / A_w`, `C = A_w/K`, series `R = r/A_w`,
 /// joined at the cell compliance. `None` is a rigid wall; a
 /// non-physical pin (`σ ≤ 0` or `K ≤ 0`) is refused.
 /// This is not a plate, not a 3-D shell, and not mean flow.
