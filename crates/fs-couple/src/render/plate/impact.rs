@@ -19,6 +19,8 @@ use crate::modal_acoustic_time::ModalAcousticState;
 
 /// Solver-derived causal listener pressure and streamed audio.
 pub mod audio;
+/// Reciprocal interior acoustic modes in the existing nonlinear execution.
+pub mod cavity;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
