@@ -1,5 +1,6 @@
 [package]
 name = "fs-cli"
+default-run = "frankensim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
