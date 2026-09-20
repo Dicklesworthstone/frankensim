@@ -7,6 +7,9 @@ use crate::render::schedule::force::{coupled::contact::multiple::MultiContactCon
 use crate::render::RenderError;
 use fs_dcontact::Obstacle;
 
+/// Complete observation Jacobians and weighted calibration residuals.
+pub mod observations;
+
 pub mod forward;
 use forward::{PreparedDesign, SolvedDesignCase};
 
