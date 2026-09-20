@@ -2,10 +2,10 @@
   "schema": "frankensim-constellation-lock-v2",
   "identity_domain": "org.frankensim.xtask.constellation-lock.v1",
   "identity_version": 1,
-  "lock_hash": "eeb4c5fe79ab0e14",
+  "lock_hash": "4a103d082c1cae8d",
   "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)",
   "libraries": [
-    {"lib": "asupersync", "version": "0.4.10", "git_head": "03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
+    {"lib": "asupersync", "version": "0.5.0", "git_head": "7a0f2f55047c9405118d1717c74e51c27ec95196", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
     {"lib": "franken_networkx", "version": "0.2.0", "git_head": "ab73033517f47250ac9477148fc055f148e838b0", "remote": "https://github.com/Dicklesworthstone/franken_networkx.git", "path": "/Users/jemanuel/projects/franken_networkx"},
     {"lib": "franken_numpy", "version": "0.2.0", "git_head": "9b6b5828317dbeda36a6a9e53c8fa754527f0d0c", "remote": "https://github.com/Dicklesworthstone/franken_numpy.git", "path": "/Users/jemanuel/projects/franken_numpy"},
     {"lib": "frankenpandas", "version": "0.2.0", "git_head": "38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "path": "/Users/jemanuel/projects/frankenpandas"},
