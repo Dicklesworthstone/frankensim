@@ -243,3 +243,6 @@ pub mod file;
 
 /// Two-way spring/damper exchange over the existing modal stepper.
 pub mod coupled;
+
+/// Prescribed sample-timed momentum inputs over the existing modal renderer.
+pub mod impulse;
