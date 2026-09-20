@@ -28,7 +28,8 @@ independent physical loading experiment; forces are not added before solving.
 Weights are not normalized or interpreted as probabilities. Zero-weight rows
 still require a successful solve and valid support. `sum` may trade off
 individual cases; `worst` minimizes the largest WEIGHTED compliance. Neither
-mode adds a stress limit or a per-case compliance constraint.
+mode adds a stress limit by default or a per-case compliance constraint. An
+explicit sample-scoped stress constraint is available as described below.
 
 Coordinates, traction, Young's modulus and compliance use the existing
 normalized unit-square plane-strain model (`E=1`, `nu=0.3`), not implicit SI units.
@@ -100,3 +101,57 @@ lexical, delimiter, whitespace and format-string checks are not a Rust build or
 PDE result. All metrics remain numerical estimates; no continuum-volume
 certificate, experimental validation, 3-D result or full Journey B closure is
 claimed.
+
+## Optional sampled-stress constraint
+
+Pass `--stress-limit MAX` and optionally `--stress-tolerance ABS` anywhere after
+`--projected`. The limit must be positive and finite; tolerance must be finite
+and nonnegative, with a finite sum. Tolerance without a limit, repeated options
+and unknown options refuse before input-file reads or physics. For example:
+
+```sh
+cargo run --release -p fs-marquee --bin fs-marquee-elasticity-robust -- \
+  --projected /tmp/stress-limited-study loads.csv 4 30 0.45 6 worst 362 \
+  --stress-limit 100 --stress-tolerance 0.01
+```
+
+The illustrative bound is in the SAME normalized stress units as the existing
+`E=1`, `nu=0.3` model. It is not a material allowable in pascals, a calibration,
+or a physical safety recommendation. The caller supplies a meaningful bound.
+
+The area-projected baseline must satisfy the stress constraint before the output
+directory is created. Every accepted candidate must preserve both area and
+sampled-stress feasibility while strictly reducing the selected compliance
+aggregate. All cases participate in stress admission, including zero-weight
+cases and cases that do not govern worst-weighted compliance. An overstressed
+baseline is refused: no stress-feasibility restoration or stress adjoint is
+implemented. The existing compliance-generated search may stall at a stress
+boundary; this is `no_descent`, never an optimality claim.
+
+`projected-multiload-stress-v1` summaries add `baseline_stress` and `final_stress`;
+accepted and attempted rows add `sampled_stress`. These carry the exact limit
+and tolerance, every case's sampled maximum, first maximum location and sample
+count, the governing case, and the matching geometry snapshot. Missing samples
+are `unavailable`, never feasible. Runs without these options keep the original
+`projected-multiload-v1` output and do not perform or claim stress assessment.
+
+Stress uses the existing robust sampler over four Gauss probes plus the centre
+of full material cells and retained positive-weight bulk/interface points of
+positive-volume cut cells. Gradients use each quadrature cell's own material
+trace; interface-only exterior neighbours are not material sampling owners.
+Missing owning-cell displacement refuses instead of silently omitting a probe.
+This is a numerical sample maximum, not a bound on stress between probes or at
+singularities. The report explicitly denies a continuum-maximum certificate and
+validation of the user-supplied physical allowable.
+
+The library builder `with_sampled_stress_limit` uses already solved displacement
+fields and installs the immutable constraint before candidate solves/updates.
+Sampling adds no hidden PDE solves. `advance_one_controlled` additionally polls
+at every stress cell; cancellation preserves prior accepted geometry and stress
+evidence while leaving attempted solves charged. Baseline sampling is synchronous.
+
+Eight added core regressions and six added CLI regressions cover these paths,
+including actual acceptance and independent final re-solves. They remain
+unexecuted in the implementation environment: Cargo, rustc, rustfmt, DSR and RCH
+are absent. Independent affine-Q1/principal-stress reference controls are not
+native Rust or CutFEM execution, and do not establish continuum validity.

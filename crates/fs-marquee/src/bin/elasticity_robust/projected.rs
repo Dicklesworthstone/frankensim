@@ -6,11 +6,13 @@ use fs_topols::robust_descent::{
     MultiLoadProjectedSettings, MultiLoadProjectedState,
 };
 use fs_topols::volume::VolumeProjectionSettings;
-use fs_topols::{GridSdf, OptimizeSettings, RobustAggregate, RobustLoadCase};
+use fs_topols::{GridSdf, OptimizeSettings, RobustAggregate, RobustLoadCase, SampledStressLimit};
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+
+mod stress;
 
 fn quoted(value: &str) -> String {
     let mut out = String::new();
@@ -104,16 +106,18 @@ fn write_loads(path: &Path, cases: &[RobustLoadCase]) -> Result<(), Box<dyn Erro
 
 fn write_attempts(
     file: &mut impl Write, iteration: usize, attempts: &[MultiLoadProjectedAttempt],
+    stress_limit: Option<SampledStressLimit>,
 ) -> std::io::Result<()> {
     for attempt in attempts {
         let state = attempt.state.as_ref().map_or_else(|| "null".into(), state_json);
         let refusal = attempt.refusal.as_deref().map_or_else(|| "null".into(), quoted);
+        let stress = stress::fields(stress_limit, attempt.stress.as_ref());
         let projection = attempt.projection.map_or_else(|| "null".into(), |report| format!(
             "{{\"volume\":{:.17e},\"shift\":{:.17e},\"evaluations\":{}}}",
             report.volume, report.shift, report.evaluations,
         ));
         writeln!(file,
-            "{{\"iteration\":{iteration},\"candidate\":{},\"move_cells\":{:.17e},\"projection\":{projection},\"state\":{state},\"refusal\":{refusal}}}",
+            "{{\"iteration\":{iteration},\"candidate\":{},\"move_cells\":{:.17e},\"projection\":{projection},\"state\":{state}{stress},\"refusal\":{refusal}}}",
             attempt.index, attempt.move_cells,
         )?;
     }
@@ -121,8 +125,11 @@ fn write_attempts(
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
+    // Constraint input is checked before any path reads, solver work or output.
+    let (positional, stress_limit) = stress::options(args)?;
+    let args = positional.as_slice();
     if !(2..=9).contains(&args.len()) {
-        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv]".into());
+        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--stress-limit MAX] [--stress-tolerance ABS]".into());
     }
     let output = Path::new(&args[0]);
     if output.try_exists()? { return Err("output directory already exists; refusing to overwrite it".into()); }
@@ -168,6 +175,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         field.clone(), &cases, settings, aggregate, fixed, projection,
         MultiLoadProjectedSettings { max_candidates, max_solves, ..MultiLoadProjectedSettings::default() },
     )?;
+    if let Some(limit) = stress_limit {
+        optimizer = optimizer.with_sampled_stress_limit(limit)?;
+    }
     std::fs::create_dir(output)?;
     write_field(&output.join("input-level-set.csv"), &field)?;
     write_field(&output.join("baseline-level-set.csv"), optimizer.geometry())?;
@@ -178,9 +188,10 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         let iteration = optimizer.next_iteration();
         match optimizer.advance_one() {
             Ok(MultiLoadProjectedProgress::Accepted(step)) => {
-                write_attempts(&mut attempts, iteration, &step.attempts)?;
+                write_attempts(&mut attempts, iteration, &step.attempts, stress_limit)?;
+                let stress = stress::fields(stress_limit, step.stress.as_ref());
                 writeln!(trace,
-                    "{{\"iteration\":{},\"previous\":{},\"state\":{},\"projection_shift\":{:.17e},\"proposal_drift_h\":{:.17e},\"proposal_nucleation_count\":{},\"proposal_load_pad_nodes\":{},\"solves_started\":{}}}",
+                    "{{\"iteration\":{},\"previous\":{},\"state\":{}{stress},\"projection_shift\":{:.17e},\"proposal_drift_h\":{:.17e},\"proposal_nucleation_count\":{},\"proposal_load_pad_nodes\":{},\"solves_started\":{}}}",
                     step.iteration, state_json(&step.previous), state_json(&step.state),
                     step.projection.shift, step.proposal_audit.interface_drift_h,
                     step.proposal_events.len(), step.proposal_load_pad_nodes, optimizer.solves_started(),
@@ -189,11 +200,11 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
             }
             Ok(MultiLoadProjectedProgress::IterationLimit) => break ("iteration_limit", 0, None),
             Ok(MultiLoadProjectedProgress::NoDescent(rows)) => {
-                write_attempts(&mut attempts, iteration, &rows)?;
+                write_attempts(&mut attempts, iteration, &rows, stress_limit)?;
                 break ("no_descent", 11, None);
             }
             Ok(MultiLoadProjectedProgress::SolveBudget(rows)) => {
-                write_attempts(&mut attempts, iteration, &rows)?;
+                write_attempts(&mut attempts, iteration, &rows, stress_limit)?;
                 break ("solve_budget", 13, None);
             }
             Err(error) => break ("refused", 12, Some(error.to_string())),
@@ -209,8 +220,16 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         RobustAggregate::WorstWeightedCase => "worst_weighted_case",
     };
     let failure_json = failure.as_deref().map_or_else(|| "null".into(), quoted);
+    let (schema, stress_summary) = match stress_limit {
+        Some(limit) => ("projected-multiload-stress-v1", format!(
+            ",\"baseline_stress\":{},\"final_stress\":{}",
+            stress::json(limit, optimizer.baseline_stress()),
+            stress::json(limit, optimizer.current_stress()),
+        )),
+        None => ("projected-multiload-v1", String::new()),
+    };
     let summary = format!(
-        "{{\"schema\":\"projected-multiload-v1\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
+        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
         optimizer.next_iteration(), cases.len(), projection.tolerance, optimizer.solves_started(),
         state_json(optimizer.baseline()), state_json(&optimizer.current()),
     );

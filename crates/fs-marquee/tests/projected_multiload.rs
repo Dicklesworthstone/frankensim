@@ -118,3 +118,97 @@ fn existing_output_is_not_overwritten_or_reported_as_success() {
     assert!(!root.join("occupied/summary.json").exists());
     assert_eq!(std::fs::read_to_string(root.join("occupied/keep.txt")).unwrap(), "original");
 }
+
+fn run_stress(root: &Path, output: &str, max_solves: &str, limit: f64) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_fs-marquee-elasticity-robust"))
+        .arg("--projected").arg(root.join(output)).arg(root.join("loads.csv"))
+        .args(["3", "1", "0.6", "8", "sum", max_solves, "--stress-limit"])
+        .arg(format!("{limit:.17e}"))
+        .output().unwrap()
+}
+
+#[test]
+fn actual_stress_limited_update_replays_the_exported_geometry_and_samples() {
+    let root = workspace();
+    let result = run_stress(&root, "stress", "64", 1e8);
+    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
+    let output = root.join("stress");
+    check_final(&output);
+    let summary = std::fs::read_to_string(output.join("summary.json")).unwrap();
+    assert!(summary.contains("\"schema\":\"projected-multiload-stress-v1\""));
+    assert!(summary.contains("\"accepted_updates\":1"));
+    let final_stress = summary.split("\"final_stress\":").nth(1).unwrap()
+        .split(",\"refusal\":").next().unwrap();
+    let cases = [
+        RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.0, -1.0], 0.7).unwrap(),
+        RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.5, 0.0], 0.3).unwrap(),
+    ];
+    let reference = fs_topols::evaluate_robust_sampled_stress(
+        &field(&output.join("level-set.csv")), &cases,
+        OptimizeSettings { level: 3, ..OptimizeSettings::default() }, RobustAggregate::WeightedSum,
+    ).unwrap();
+    assert!(final_stress.contains("\"status\":\"sampled_feasible\""));
+    assert!(final_stress.contains("\"continuous_maximum_certificate\":false"));
+    assert!(final_stress.contains(&format!("\"snapshot\":\"{:#018x}\"", reference.snapshot)));
+    assert!(final_stress.contains(&format!("\"worst_von_mises\":{:.17e}", reference.worst_sampled_von_mises)));
+    assert!(final_stress.contains(&format!("\"case_maxima\":[{:.17e},{:.17e}]",
+        reference.case_sampled_max_von_mises[0], reference.case_sampled_max_von_mises[1])));
+    let trace = std::fs::read_to_string(output.join("trajectory.jsonl")).unwrap();
+    assert!(trace.contains("\"sampled_stress\":{\"scope\":\"q1-positive-volume-material-cell-probes-v1\""));
+    assert_eq!(trace.lines().count(), 1);
+}
+
+#[test]
+fn stress_budget_stop_retains_feasible_baseline_without_extra_case_solves() {
+    let root = workspace();
+    let result = run_stress(&root, "stress-budget", "2", 1e8);
+    assert_eq!(result.status.code(), Some(13), "{}", String::from_utf8_lossy(&result.stderr));
+    let summary = std::fs::read_to_string(root.join("stress-budget/summary.json")).unwrap();
+    assert!(summary.contains("\"solves_started\":2"));
+    assert!(summary.contains("\"accepted_updates\":0"));
+    assert_eq!(summary.matches("\"status\":\"sampled_feasible\"").count(), 2);
+    assert_eq!(std::fs::read(root.join("stress-budget/baseline-level-set.csv")).unwrap(),
+        std::fs::read(root.join("stress-budget/level-set.csv")).unwrap());
+    assert!(std::fs::read(root.join("stress-budget/trajectory.jsonl")).unwrap().is_empty());
+    assert_eq!(run(&root, "unconstrained", "2", None).status.code(), Some(13));
+    let original = std::fs::read_to_string(root.join("unconstrained/summary.json")).unwrap();
+    assert!(original.contains("\"schema\":\"projected-multiload-v1\""));
+    assert!(!original.contains("sampled_stress") && !original.contains("sampled_feasible"));
+}
+
+#[test]
+fn zero_weight_overload_refuses_without_outputs_or_input_changes() {
+    let root = workspace();
+    let loads = "right,0.375,0.625,0,-1,1\nright,0.375,0.625,0,4,0\n";
+    std::fs::write(root.join("loads.csv"), loads).unwrap();
+    assert_eq!(run(&root, "reference", "2", None).status.code(), Some(13));
+    let cases = [
+        RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.0, -1.0], 1.0).unwrap(),
+        RobustLoadCase::new(DesignBoxEdge::Right, 0.375, 0.625, [0.0, 4.0], 0.0).unwrap(),
+    ];
+    let reference = fs_topols::evaluate_robust_sampled_stress(
+        &field(&root.join("reference/level-set.csv")), &cases,
+        OptimizeSettings { level: 3, ..OptimizeSettings::default() }, RobustAggregate::WeightedSum,
+    ).unwrap();
+    assert_eq!(reference.worst_stress_case, 1);
+    let limit = 2.0 * reference.case_sampled_max_von_mises[0];
+    assert!(reference.worst_sampled_von_mises > limit);
+    let result = run_stress(&root, "refused-stress", "64", limit);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("sampled stress limit exceeded in case 1"));
+    assert!(result.stdout.is_empty());
+    assert!(!root.join("refused-stress").exists());
+    assert_eq!(std::fs::read_to_string(root.join("loads.csv")).unwrap(), loads);
+}
+
+#[test]
+fn malformed_stress_policy_refuses_before_reading_a_missing_input() {
+    let root = workspace();
+    let result = Command::new(env!("CARGO_BIN_EXE_fs-marquee-elasticity-robust"))
+        .arg("--projected").arg(root.join("malformed-stress")).arg(root.join("missing.csv"))
+        .args(["--stress-tolerance", "0.1"]).output().unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--stress-tolerance requires --stress-limit"));
+    assert!(result.stdout.is_empty());
+    assert!(!root.join("malformed-stress").exists());
+}
