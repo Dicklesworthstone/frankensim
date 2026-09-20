@@ -2,10 +2,30 @@
 //! No new sampler or confidence-sequence formula lives here. QMC is refused.
 use fs_uq::{AnytimeEstimate, PropagationMethod, UqExecution, UqPlan, UqResult, UqStatus};
 
+/// Fixed before sampling; never take the tighter bound after looking at data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Method { GaussianMixture, BernoulliMixture }
+impl Method {
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        match value {
+            "gaussian-mixture" => Ok(Self::GaussianMixture),
+            "bernoulli-mixture" => Ok(Self::BernoulliMixture),
+            _ => Err("--confidence-method must be gaussian-mixture or bernoulli-mixture"),
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GaussianMixture => "gaussian-mixture-indicator-confidence-sequence",
+            Self::BernoulliMixture => "beta-half-bernoulli-mixture-confidence-sequence",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Policy {
     pub probability: f64,
     pub alpha: f64,
+    pub method: Method,
 }
 impl Policy {
     pub fn new(probability: f64, alpha: f64) -> Result<Self, &'static str> {
@@ -15,7 +35,7 @@ impl Policy {
         if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 || !alpha.recip().is_finite() {
             return Err("--confidence-alpha must be inside (0,1) with a finite reciprocal");
         }
-        Ok(Self { probability, alpha })
+        Ok(Self { probability, alpha, method: Method::GaussianMixture })
     }
 }
 
@@ -76,8 +96,13 @@ where F: FnMut(&[f64]) -> Result<f64, E>, E: core::fmt::Display, C: FnMut() -> b
             return Ok(McRun { result, assessment: None });
         }
         let assessment = match policy {
-            Some(policy) => Some(Assessment::from_interval(policy,
-                execution.assess_compliance(policy.alpha, 0.0)?.ok_or("missing completed MC confidence prefix")?)),
+            Some(policy) => {
+                let interval = match policy.method {
+                    Method::GaussianMixture => execution.assess_compliance(policy.alpha, 0.0)?,
+                    Method::BernoulliMixture => execution.assess_bernoulli_compliance(policy.alpha, 0.0)?,
+                }.ok_or("missing completed MC confidence prefix")?;
+                Some(Assessment::from_interval(policy, interval))
+            }
             None => None,
         };
         if result.status == UqStatus::Complete
@@ -168,3 +193,8 @@ mod tests {
             |_| -> Result<f64, &str> { panic!("QMC must not enter the MC confidence owner") }).is_err());
     }
 }
+
+
+#[cfg(test)]
+#[path = "confidence/bernoulli_tests.rs"]
+mod bernoulli_tests;

@@ -19,11 +19,11 @@ use std::io::Read;
 
 #[path = "equilibrium_uq/confidence.rs"]
 mod confidence;
-use confidence::{Assessment, Decision, Policy};
+use confidence::{Assessment, Decision, Method, Policy};
 #[path = "equilibrium_uq/joint.rs"]
 mod joint;
 
-const USAGE: &str = "equilibrium_uq MODEL.performance DESIGN.fit --method mc|rqmc [--replicates R] --samples N --seed U64 (--case NAME --target INDEX --limit-m METRES | --all-constraints [--equality-tolerance NAME PHYSICAL_UNITS]...) [--require-probability P --confidence-alpha A] --independent (--uniform-x VARIABLE LOWER UPPER | --fixed-x VARIABLE VALUE)...";
+const USAGE: &str = "equilibrium_uq MODEL.performance DESIGN.fit --method mc|rqmc [--replicates R] --samples N --seed U64 (--case NAME --target INDEX --limit-m METRES | --all-constraints [--equality-tolerance NAME PHYSICAL_UNITS]...) [--require-probability P --confidence-alpha A [--confidence-method gaussian-mixture|bernoulli-mixture]] --independent (--uniform-x VARIABLE LOWER UPPER | --fixed-x VARIABLE VALUE)...";
 const NO_CLAIM: &str = "Estimated under the declared independent bounded input law and fixed numerical model; no physical-validation, fit-error, finite-grid or inverse-normal bias, discretization, confidence-interval or optional-stopping guarantee";
 
 const CONFIDENCE_SCOPE: &str = "Sampling-only, time-uniform compliance bounds under the fixed-model bounded-indicator assumptions of UqExecution::assess_compliance; no physical-validation, material, discretization, finite-grid bias, or model-error guarantee. Not an outward-rounded certificate. Mean/dispersion standard errors at a data-dependent stop remain descriptive. Searching across models, seeds or thresholds needs multiplicity control";
@@ -44,6 +44,15 @@ struct Options {
     policy: Option<Policy>,
     all_constraints: bool,
     equality_tolerances: Vec<(String, f64)>,
+}
+
+// Both output modes retain the old wording unless the new method is selected.
+fn confidence_scope(policy: Option<Policy>) -> &'static str {
+    match policy.map(|p| p.method) {
+        None => NO_CLAIM,
+        Some(Method::GaussianMixture) => CONFIDENCE_SCOPE,
+        Some(Method::BernoulliMixture) => "Sampling-only time-uniform bounds from UqExecution::assess_bernoulli_compliance under fixed conditional Bernoulli success probability. The fixed Beta(1/2,1/2) mixing law is inference tuning, not a physical prior or posterior interval. No physical-validation, material, discretization, finite-grid or model-error guarantee; not outward-rounded. Mean/dispersion standard errors at optional stops remain descriptive. Choose method, alpha and event before inspecting samples; post-selection across methods, seeds or models needs multiplicity control",
+    }
 }
 
 fn finite(value: &str) -> Result<f64, String> {
@@ -67,6 +76,7 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut limit_m = None;
     let mut probability = None;
     let mut alpha = None;
+    let mut confidence_method = None;
     let mut all_constraints = false;
     let mut equality_tolerances = Vec::new();
     let mut independent = false;
@@ -111,6 +121,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--limit-m" => limit_m = Some(finite(value)?),
             "--require-probability" => probability = Some(finite(value)?),
             "--confidence-alpha" => alpha = Some(finite(value)?),
+            "--confidence-method" => confidence_method = Some(Method::parse(value)?),
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -123,12 +134,15 @@ fn options(args: &[String]) -> Result<Options, String> {
             if samples % r == 0 && samples / r >= 2 && (samples / r).is_power_of_two() => {}
         _ => return Err("mc forbids --replicates; rqmc needs explicit replicates times a complete power-of-two net of at least two points".into()),
     }
-    let policy = match (probability, alpha) {
+    let mut policy = match (probability, alpha) {
         (None, None) => None,
         (Some(p), Some(a)) if method == PropagationMethod::MonteCarlo => Some(Policy::new(p, a)?),
         (Some(_), Some(_)) => return Err("compliance confidence stopping is MC-only; QMC points are not iid observations".into()),
         _ => return Err("--require-probability and --confidence-alpha must be declared together before sampling".into()),
     };
+    if let Some(method) = confidence_method {
+        policy.as_mut().ok_or("--confidence-method requires --require-probability and --confidence-alpha")?.method = method;
+    }
     let (case, target, limit_m) = if all_constraints {
         if case.is_some() || target.is_some() || limit_m.is_some() {
             return Err("--all-constraints forbids --case, --target and --limit-m; every authored row participates".into());
@@ -296,7 +310,7 @@ fn output(loaded: &EquilibriumDesignFile, options: &Options, result: &Outcome) -
     let mut out = format!("{{\"schema\":\"frankensim-equilibrium-uq-v2\",\"method\":\"{}\",\"status\":\"{}\",\"evidence\":\"Estimated\",\"no_claim\":{},\"model_blake3\":\"{}\",\"design_blake3\":\"{}\",\"seed\":\"{}\",\"case\":{},\"target\":{},\"unit\":\"m\",\"compliance_event\":\"displacement_m <= limit_m\",\"limit_m\":{:.17e},\"samples\":{},\"case_solves\":{},\"mean_m\":{:.17e},\"mean_standard_error_m\":{},\"displacement_std_dev_m\":{},\"compliance_probability\":{:.17e},\"uncertainty_coordinates\":\"dimensionless x; physical p = reference + scale*x\",\"dependence\":\"independent\",\"variables\":[",
         if options.method == PropagationMethod::MonteCarlo { "mc" } else { "rqmc" },
         result.status.label(),
-        json_string(if options.policy.is_some() { CONFIDENCE_SCOPE } else { NO_CLAIM }), loaded.model_info().input_hash.to_hex(), loaded.design_hash().to_hex(), options.seed,
+        json_string(confidence_scope(options.policy)), loaded.model_info().input_hash.to_hex(), loaded.design_hash().to_hex(), options.seed,
         json_string(&options.case), options.target, options.limit_m, result.samples, result.work.case_solves,
         result.mean_m, number(result.mean_standard_error_m), number(result.displacement_std_dev_m), result.compliance_probability);
     write_variables(&mut out, loaded, options);
@@ -329,9 +343,10 @@ fn write_assessment(out: &mut String, options: &Options, result: &Outcome) {
     write!(out, ",\"planned_samples\":{},\"stop_reason\":{},\"compliance_assessment\":",
         options.samples, json_string(stop)).expect("String write");
     if let Some(assessment) = &result.assessment {
-        write!(out, "{{\"decision\":{},\"requirement\":\"probability >= required_probability\",\"required_probability\":{:.17e},\"alpha\":{:.17e},\"lower\":{:.17e},\"upper\":{:.17e},\"samples\":{},\"method\":\"gaussian-mixture-indicator-confidence-sequence\"}}",
+        write!(out, "{{\"decision\":{},\"requirement\":\"probability >= required_probability\",\"required_probability\":{:.17e},\"alpha\":{:.17e},\"lower\":{:.17e},\"upper\":{:.17e},\"samples\":{},\"method\":\"{}\"}}",
             json_string(assessment.decision.label()), assessment.policy.probability, assessment.policy.alpha,
-            assessment.lower, assessment.upper, assessment.samples).expect("String write");
+            assessment.lower, assessment.upper, assessment.samples, assessment.policy.method.label()).expect("String write");
+
     } else { out.push_str("null"); }
 }
 fn read_bounded(path: &str, cap: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

@@ -103,3 +103,57 @@ impl UqExecution {
         }))
     }
 }
+
+
+impl UqExecution {
+    /// Bernoulli-specific alternative for the SAME fixed compliance event.
+    /// Replays every retained `QoI <= threshold` indicator through fs-eproc's
+    /// fixed Beta(1/2,1/2) likelihood-mixture owner, using O(n) time and O(1)
+    /// extra storage. No model calls, resampling or discarded outcomes.
+    ///
+    /// Choose this method, alpha, model and threshold BEFORE seeing results;
+    /// selecting the tighter of multiple intervals afterwards needs multiplicity
+    /// control. The mathematical sequence is time-uniform for Bernoulli data
+    /// with fixed conditional success probability. QMC points, missing/selected
+    /// outcomes, physical-model error and numerical-error bounds are not covered.
+    /// The mixing distribution is a tuning choice, not a physical prior.
+    ///
+    /// Bounds are asymmetric. `converged` requires BOTH distances from the
+    /// empirical mean to be <= `target_half_width`; no center/radius convention
+    /// or zero variance shortcut is imposed. None means no observations. The
+    /// original execution status/statistics/checkpoint bytes are never changed.
+    /// This is numerical inference, not an outward-rounded certificate.
+    ///
+    /// # Errors
+    /// Uses the same alpha/half-width and complete-execution admission as
+    /// `assess_compliance`; any likelihood-envelope or arithmetic failure refuses.
+    pub fn assess_bernoulli_compliance(
+        &self,
+        alpha: f64,
+        target_half_width: f64,
+    ) -> Result<Option<AnytimeEstimate>, UqComplianceError> {
+        if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 || !alpha.recip().is_finite() {
+            return Err(UqComplianceError::InvalidAlpha);
+        }
+        if !target_half_width.is_finite() || target_half_width < 0.0 {
+            return Err(UqComplianceError::InvalidHalfWidth);
+        }
+        let threshold = self.plan.compliance_threshold.ok_or(UqComplianceError::MissingThreshold)?;
+        if self.status == UqStatus::Refused || self.failure.is_some() {
+            return Err(UqComplianceError::RefusedExecution);
+        }
+        let mut cs = fs_eproc::bernoulli::BernoulliMixtureCs::new(alpha)
+            .map_err(|_| UqComplianceError::NumericalRange)?;
+        for &value in &self.values {
+            cs.observe(value <= threshold).map_err(|_| UqComplianceError::NumericalRange)?;
+        }
+        let Some(interval) = cs.interval().map_err(|_| UqComplianceError::NumericalRange)? else {
+            return Ok(None);
+        };
+        let radius = (interval.mean - interval.lo).max(interval.hi - interval.mean);
+        Ok(Some(AnytimeEstimate {
+            mean: interval.mean, lo: interval.lo, hi: interval.hi, n: interval.n,
+            converged: radius <= target_half_width,
+        }))
+    }
+}

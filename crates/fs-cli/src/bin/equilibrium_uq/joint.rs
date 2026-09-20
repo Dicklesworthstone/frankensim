@@ -93,7 +93,7 @@ fn sense(sense: ConstraintSense) -> &'static str {
 pub(super) fn output(loaded: &EquilibriumDesignFile, options: &Options, result: &Outcome, event: &Event) -> String {
     let mut out = format!("{{\"schema\":\"frankensim-equilibrium-reliability-v1\",\"method\":\"{}\",\"status\":\"{}\",\"evidence\":\"Estimated\",\"no_claim\":{},\"model_blake3\":\"{}\",\"design_blake3\":\"{}\",\"seed\":\"{}\",\"unit\":\"1\",\"compliance_event\":\"all authored response constraints hold on the same parameter draw\",\"compliance_scope\":\"joint-all-authored-response-constraints\",\"unassessed_response_constraints\":0,\"physics_evaluation\":\"primal-only\",\"samples\":{},\"case_solves\":{},\"compliance_probability\":{:.17e},\"probability_of_any_failure\":{:.17e},\"compliance_standard_error\":{},\"completed_replicates\":{},\"standard_error_basis\":{},\"per_constraint_statistics\":\"descriptive same-draw marginals and empirical ranges; not simultaneous confidence bounds\",\"constraints\":[",
         if options.method == PropagationMethod::MonteCarlo { "mc" } else { "rqmc" }, result.status.label(),
-        json_string(if options.policy.is_some() { CONFIDENCE_SCOPE } else { NO_CLAIM }),
+        json_string(confidence_scope(options.policy)),
         loaded.model_info().input_hash.to_hex(), loaded.design_hash().to_hex(), options.seed,
         result.samples, result.work.case_solves, result.compliance_probability, result.mean_m,
         number(result.compliance_standard_error), result.completed_replicates.map_or_else(|| "null".into(), |n| n.to_string()),
