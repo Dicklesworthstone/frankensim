@@ -1,5 +1,8 @@
 //! File-driven physical inverse design. The library owns parsing, physics,
 //! adjoints, SQP steps and KKT checks; this executable only connects those owners.
+#[path = "equilibrium_fit/scenarios.rs"]
+mod scenarios;
+
 use fs_ascent::{EquilibriumStudy, SqpRunReport};
 use fs_couple::render::schedule::force::file::MAX_MODAL_PERFORMANCE_BYTES;
 use fs_couple::render::schedule::force::file::design::{
@@ -13,17 +16,18 @@ use fs_exec::CancelGate;
 use std::fmt::Write as _;
 use std::io::Read;
 
-const USAGE: &str = "equilibrium_fit MODEL.performance DESIGN.fit [--iterations N] [--evaluations N] [--tolerance T] [--max-kkt-dimension N]";
+const USAGE: &str = "equilibrium_fit MODEL.performance DESIGN.fit [--scenarios TOLERANCES.txt] [--iterations N] [--evaluations N] [--tolerance T] [--max-kkt-dimension N]";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Limits { iterations: usize, evaluations: usize, tolerance: f64, kkt_dimension: usize }
 impl Default for Limits {
     fn default() -> Self { Self { iterations:128, evaluations:256, tolerance:1e-8, kkt_dimension:384 } }
 }
-struct Options { model: String, design: String, limits: Limits }
+struct Options { model: String, design: String, scenarios: Option<String>, limits: Limits }
 fn options(args: &[String]) -> Result<Options, String> {
     let mut paths = Vec::new();
     let mut limits = Limits::default();
+    let mut scenario_file = None;
     let mut seen = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -32,6 +36,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         seen.push(arg.clone());
         let value = args.next().ok_or_else(|| format!("missing value for {arg}"))?;
         match arg.as_str() {
+            "--scenarios" => scenario_file = Some(value.clone()),
             "--iterations" => limits.iterations = value.parse::<usize>().ok().filter(|v| *v <= 512)
                 .ok_or("--iterations must be in 0..=512")?,
             "--evaluations" => limits.evaluations = value.parse::<usize>().ok().filter(|v| (2..=4096).contains(v))
@@ -44,7 +49,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         }
     }
     let [model, design] = paths.as_slice() else { return Err(USAGE.into()); };
-    Ok(Options { model:model.clone(), design:design.clone(), limits })
+    Ok(Options { model:model.clone(), design:design.clone(), scenarios:scenario_file, limits })
 }
 fn read_bounded(path: &str, limit: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
@@ -100,14 +105,21 @@ fn output(loaded: &EquilibriumDesignFile, result: &Outcome) -> String {
         write!(&mut out, "{{\"name\":{},\"value\":{value:.17e},\"decision\":{:.17e},\"lower_multiplier_decision\":{:.17e},\"upper_multiplier_decision\":{:.17e}}}",
             json_string(&variable.name), s.x[i], s.nu[2*i], s.nu[2*i+1]).expect("String write");
     }
-    out.push_str("],\"cases\":[");
-    for (i, (case, actual)) in loaded.problem().load_cases().iter().zip(&result.audited.cases).enumerate() {
+    out.push(']');
+    append_physics(&mut out, loaded, &result.audited, &s.lambda, &s.nu[2*loaded.problem().variables().len()..]);
+    out.push('}'); out
+}
+fn append_physics(out: &mut String, loaded: &EquilibriumDesignFile, evaluation: &DesignEvaluation,
+    equality_multipliers: &[f64], inequality_multipliers: &[f64])
+{
+    out.push_str(",\"cases\":[");
+    for (i, (case, actual)) in loaded.problem().load_cases().iter().zip(&evaluation.cases).enumerate() {
         if i != 0 { out.push(','); }
-        write!(&mut out, "{{\"name\":{},\"objective\":{:.17e},\"active_contacts\":{},\"adjoint_relative_residual\":{:.17e},\"observations\":[",
+        write!(out, "{{\"name\":{},\"objective\":{:.17e},\"active_contacts\":{},\"adjoint_relative_residual\":{:.17e},\"observations\":[",
             json_string(&case.name), actual.value, actual.equilibrium.active_contacts, actual.adjoint_relative_residual).expect("String write");
         for (j, (target, observed)) in case.targets.iter().zip(&actual.observations_m).enumerate() {
             if j != 0 { out.push(','); }
-            write!(&mut out, "{{\"predicted_m\":{observed:.17e},\"target_m\":{:.17e},\"scale_m\":{:.17e},\"weight\":{:.17e}}}",
+            write!(out, "{{\"predicted_m\":{observed:.17e},\"target_m\":{:.17e},\"scale_m\":{:.17e},\"weight\":{:.17e}}}",
                 target.target_m, target.scale_m, target.weight).expect("String write");
         }
         out.push_str("]}");
@@ -116,13 +128,13 @@ fn output(loaded: &EquilibriumDesignFile, result: &Outcome) -> String {
     if !loaded.problem().constraints().is_empty() {
         out.push_str(",\"constraints\":[");
         let mut equality = 0;
-        let mut inequality = 2*loaded.problem().variables().len();
-        for (i, (constraint, row)) in loaded.problem().constraints().iter().zip(&result.audited.constraints).enumerate() {
+        let mut inequality = 0;
+        for (i, (constraint, row)) in loaded.problem().constraints().iter().zip(&evaluation.constraints).enumerate() {
             if i != 0 { out.push(','); }
             let (sense, multiplier, violation) = match constraint.sense {
-                ConstraintSense::Equal => { let dual = s.lambda[equality]; equality += 1; ("equal", dual, row.residual.abs()) }
+                ConstraintSense::Equal => { let dual = equality_multipliers[equality]; equality += 1; ("equal", dual, row.residual.abs()) }
                 other => {
-                    let dual = s.nu[inequality]; inequality += 1;
+                    let dual = inequality_multipliers[inequality]; inequality += 1;
                     (if other == ConstraintSense::AtMost { "at-most" } else { "at-least" }, dual, row.residual.max(0.0))
                 }
             };
@@ -132,13 +144,12 @@ fn output(loaded: &EquilibriumDesignFile, result: &Outcome) -> String {
                 ResponseQuantity::ContactForce(_) => ("contact-force", "N"),
                 ResponseQuantity::ContactPenetration(_) => ("contact-penetration", "m"),
             };
-            write!(&mut out, "{{\"name\":{},\"case\":{},\"quantity\":\"{quantity}\",\"unit\":\"{unit}\",\"sense\":\"{sense}\",\"value\":{:.17e},\"bound\":{:.17e},\"scale\":{:.17e},\"residual\":{:.17e},\"violation\":{violation:.17e},\"multiplier_normalized\":{multiplier:.17e},\"adjoint_relative_residual\":{:.17e}}}",
+            write!(out, "{{\"name\":{},\"case\":{},\"quantity\":\"{quantity}\",\"unit\":\"{unit}\",\"sense\":\"{sense}\",\"value\":{:.17e},\"bound\":{:.17e},\"scale\":{:.17e},\"residual\":{:.17e},\"violation\":{violation:.17e},\"multiplier_normalized\":{multiplier:.17e},\"adjoint_relative_residual\":{:.17e}}}",
                 json_string(&constraint.name), constraint.case, row.value, constraint.bound, constraint.scale,
                 row.residual, row.adjoint_relative_residual).expect("String write");
         }
         out.push(']');
     }
-    out.push('}'); out
 }
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -148,8 +159,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let design = read_bounded(&options.design, MAX_EQUILIBRIUM_DESIGN_BYTES)?;
     let gate = CancelGate::new();
     let loaded = EquilibriumDesignFile::from_bytes(&model, &design, &gate)?;
-    let result = solve(&loaded, options.limits, &gate)?;
-    println!("{}", output(&loaded, &result));
+    if let Some(path) = options.scenarios {
+        let bytes = read_bounded(&path, scenarios::MAX_SCENARIO_BYTES)?;
+        println!("{}", scenarios::run(&loaded, &bytes, options.limits, &gate)?);
+    } else {
+        let result = solve(&loaded, options.limits, &gate)?;
+        println!("{}", output(&loaded, &result));
+    }
     Ok(())
 }
 fn main() {
