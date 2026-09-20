@@ -126,3 +126,6 @@ impl EquilibriumDesign {
         })
     }
 }
+
+/// Continue fitted equilibria as physical force-driven performances.
+pub mod playback;
