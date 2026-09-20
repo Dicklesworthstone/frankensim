@@ -23,10 +23,14 @@ pub mod friction;
 /// Two-direction set-valued Coulomb graph on the same compliant contact network.
 pub mod coulomb;
 
+/// Hard normal-contact ceiling. Larger bundles must also fit the caller's
+/// quadratic setup budget and bounded per-step sweep/root budgets.
+pub const MAX_NORMAL_CONTACTS: usize = 512;
+
 /// Aggregate contact-set work limits, in addition to each contact's own limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultiContactConfig {
-    /// Maximum admitted contacts, in 1..=32. At least one must be supplied.
+    /// Maximum admitted contacts, in 1..=MAX_NORMAL_CONTACTS. At least one must be supplied.
     pub max_contacts: usize,
     /// Maximum joint nonlinear sweeps per physical sample, in 1..=128.
     /// Each coordinate uses its original ModalContactConfig::max_iterations.
@@ -122,6 +126,7 @@ pub struct MultiContactModalSystem {
     old_x: Vec<f64>,
     free_x: Vec<f64>,
     reactions: Vec<f64>,
+    laws: Vec<SlitContactStep>,
     staged_points: Vec<ContactPointFrame>,
     frame: MultiContactFrame,
     friction: Option<friction::TangentialSet>,
@@ -138,7 +143,7 @@ impl MultiContactModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
         poll(Some(gate))?;
-        if network.samples_rendered() != 0 || !(1..=32).contains(&config.max_contacts)
+        if network.samples_rendered() != 0 || !(1..=MAX_NORMAL_CONTACTS).contains(&config.max_contacts)
             || contacts.is_empty() || contacts.len() > config.max_contacts
             || !(1..=128).contains(&config.max_sweeps) {
             return Err(invalid("multiple contacts require a sample-zero network and bounded nonempty contact/sweep counts"));
@@ -154,13 +159,14 @@ impl MultiContactModalSystem {
             return Err(invalid("multi-contact setup exceeds max_setup_terms"));
         }
         let mut points = Vec::with_capacity(p);
+        let mut laws = Vec::with_capacity(p);
         for (contact, c) in contacts {
             poll(Some(gate))?;
             let column = contact_column(&network, &contact, c)?;
             let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
                 .map_err(ModalCouplingError::ContactLaw)?;
             let x = extension(&network.models, &column, 0.0)?;
-            SlitContactStep::new(&contact.law, -x).map_err(ModalCouplingError::ContactLaw)?;
+            laws.push(SlitContactStep::new(&contact.law, -x).map_err(ModalCouplingError::ContactLaw)?);
             let point = ContactPoint { contact, config: c, column, storage };
             point.penetration(x)?;
             points.push(point);
@@ -177,7 +183,7 @@ impl MultiContactModalSystem {
             }
         }
         let system = Self {
-            network, points, config, compliance, forces: vec![0.0; n], free_q: vec![0.0; n],
+            network, points, config, compliance, laws, forces: vec![0.0; n], free_q: vec![0.0; n],
             old_x: vec![0.0; p], free_x: vec![0.0; p], reactions: vec![0.0; p],
             staged_points: vec![ContactPointFrame::default(); p], friction: None,
             frame: MultiContactFrame { contacts: vec![ContactPointFrame::default(); p], ..MultiContactFrame::default() },
@@ -241,13 +247,14 @@ impl MultiContactModalSystem {
             }
         }
         let p = self.points.len();
-        let mut laws = Vec::with_capacity(p);
+        // Reuse trial storage without retaining any speculative reaction.
+        let laws = &mut self.laws;
         for i in 0..p {
             poll(gate)?;
             self.old_x[i] = dot(&self.points[i].column, &self.network.old_q)?;
             self.free_x[i] = dot(&self.points[i].column, &self.free_q)?;
-            laws.push(SlitContactStep::new(&self.points[i].contact.law, -self.old_x[i])
-                .map_err(ModalCouplingError::ContactLaw)?);
+            laws[i] = SlitContactStep::new(&self.points[i].contact.law, -self.old_x[i])
+                .map_err(ModalCouplingError::ContactLaw)?;
         }
         // Scratch guesses restart deterministically after every failed/cancelled
         // attempt. No speculative contact memory leaks into the accepted state.

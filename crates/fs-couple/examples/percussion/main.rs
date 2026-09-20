@@ -17,6 +17,7 @@ use fs_dcontact::Obstacle;
 use std::io::Write;
 
 mod acoustics;
+mod snare;
 mod mechanics;
 use mechanics::Mechanics;
 
@@ -110,9 +111,15 @@ fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None,acoustics})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
+    drum_with_wires(steps,dt_s,audio,prepared,None)
+}
+fn drum_with_wires(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>)->Result<Experiment,Error> {
+    if snares.is_some() && !prepared {return Err("wire bank requires the explicit prepared mechanical image".into());}
+    let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
     // Pearl MM6 published 14x6.5in,7.5mm maple shell. Rigid cylindrical cavity
     // and clear-span radius below are geometric approximations of that shell;
-    // maple elasticity, bearing-edge shape, hoops and snare wires are NOT solved.
+    // maple elasticity, bearing-edge shape and hoops are NOT solved. A wire bank
+    // is attached only by the explicit snare commands, after this shared reduction.
     let radius=0.1778-0.0075;let depth=0.1651;let pi=std::f64::consts::PI;
     let mut films=Vec::new();let mut mode_sets=Vec::new();
     for (thickness,tension) in [(0.000254,3000.0),(0.0000762,1500.0)] {
@@ -124,7 +131,7 @@ fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
         mode_sets.push(modes);films.push(film);
     }
     let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,0.1778)?)}else{None};
-    let (stick,stick_weight)=stick()?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>();
+    let (stick,stick_weight)=stick()?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes;
     let mut contact=vec![0.0;n];contact[0]=stick_weight;let mut area=vec![0.0;n];let mut top=vec![0.0;n];let mut bottom=vec![0.0;n];let mut offset=1;
     for (head,(film,modes)) in films.iter().zip(&mode_sets).enumerate() {
         let point=film.mesh.nodes.iter().enumerate().min_by(|(_,a),(_,b)|
@@ -140,15 +147,25 @@ fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
         bodies.push(zero_body(BodyPotential::Linear(omegas.clone()),&omegas));offset+=modes.len();
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}; PET constants and tension are estimates",film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     }
+    let mut contacts=vec![elastic_contact(contact)?];
+    if let Some(spec)=snares {
+        let bottom_start=1+mode_sets[0].len();
+        let (wire_bodies,wire_contacts)=spec.assemble(&films[1],&mode_sets[1],
+            bottom_start..offset,offset,n)?;
+        bodies.extend(wire_bodies);contacts.extend(wire_contacts);
+    }
     let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:pi*radius*radius*depth,areas:area};
     // Both images consume the identical geometric reduction, strike port,
     // constitutive contact, loss coefficients and air volume. Only the discrete
     // realization changes. Neither path modifies the microphone/BEM boundary.
-    let contact=elastic_contact(contact)?;
     let system=if prepared {
-        Mechanics::prepared(bodies,vec![contact],volume.clone(),pi*radius*radius,steps,dt_s)?
+        if snares.is_some() {
+            Mechanics::prepared_snares(bodies,contacts,volume.clone(),pi*radius*radius,steps,dt_s)?
+        } else {
+            Mechanics::prepared(bodies,contacts,volume.clone(),pi*radius*radius,steps,dt_s)?
+        }
     }else{
-        Mechanics::Reference(ImpactSystem::new(bodies,vec![contact],vec![],vec![volume.clone()],config(steps,dt_s))?)
+        Mechanics::Reference(ImpactSystem::new(bodies,contacts,vec![],vec![volume.clone()],config(steps,dt_s))?)
     };
     Ok(Experiment{system,force:vec![0.0;n],observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics})
 }
@@ -160,9 +177,9 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 }
 fn run()->Result<(),Error> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md and PREPARED.md".into());}
-    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic");
-    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav");
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling".into());}
+    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic");
+    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav");
     if args.len()>3 && (!microphone || args.len()!=6) {return Err("microphone position needs exactly x_m y_m z_m after frames and full-scale".into());}
     if !audio && args.len()>2 {return Err("mechanics CSV accepts only a step count".into());}
     let count=if args.len()>=2 {args[1].parse::<u64>()?}else if audio {48000}else{4096};
@@ -180,6 +197,8 @@ fn run()->Result<(),Error> {
         "splash"|"splash-wav"|"splash-mic"=>splash(steps,dt_s,audio)?,
         "drum"|"drum-wav"|"drum-mic"=>drum(steps,dt_s,audio,false)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum(steps,dt_s,audio,true)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_wires(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)))?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_wires(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)))?,
         _=>return Err("unknown experiment".into()),
     };
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());

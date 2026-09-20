@@ -53,7 +53,22 @@ impl Mechanics {
     pub fn prepared(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
         reference_area_m2: f64, steps: u64, dt_s: f64) -> Result<Self, Error>
     {
-        let configuration = prepared_config(steps, dt_s)?;
+        Self::with_configuration(bodies,contacts,volume,reference_area_m2,prepared_config(steps,dt_s)?)
+    }
+    /// Separate explicit work envelope for the multi-strand example. Existing
+    /// drum and cymbal commands keep their original limits and numerical image.
+    pub fn prepared_snares(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
+        reference_area_m2: f64, steps: u64, dt_s: f64) -> Result<Self, Error>
+    {
+        let mut configuration=prepared_config(steps,dt_s)?;
+        configuration.coupling.max_modes=256;
+        configuration.multiple.max_contacts=512;
+        configuration.multiple.max_setup_terms=50_000_000;
+        Self::with_configuration(bodies,contacts,volume,reference_area_m2,configuration)
+    }
+    fn with_configuration(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
+        reference_area_m2: f64, configuration: LinearImpactConfig) -> Result<Self, Error>
+    {
         let system = LinearImpactSystem::new(bodies, contacts,
             vec![VolumeConnection { spring: volume, reference_area_m2 }], configuration,
             &CancelGate::new_clock_free())?;

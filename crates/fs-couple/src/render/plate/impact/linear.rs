@@ -24,7 +24,7 @@ use crate::render::schedule::force::coupled::{
     CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig,
     ModalCouplingError,
     contact::{ContactModalSystem, ModalContact, ModalContactConfig},
-    contact::multiple::{MultiContactConfig, MultiContactModalSystem},
+    contact::multiple::{MultiContactConfig, MultiContactModalSystem, MAX_NORMAL_CONTACTS},
 };
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
@@ -190,7 +190,7 @@ impl LinearImpactSystem {
         }
         let point_count = contacts.iter().try_fold(0usize, |n, c| n.checked_add(c.n_points()))
             .ok_or_else(|| invalid("linear impact contact count overflow"))?;
-        if point_count > 32 || (point_count > 1 && point_count > config.multiple.max_contacts) {
+        if point_count > MAX_NORMAL_CONTACTS || (point_count > 1 && point_count > config.multiple.max_contacts) {
             return Err(invalid("linear impact distributed contacts exceed the original contact budget"));
         }
         let mut models = Vec::with_capacity(bodies.len());

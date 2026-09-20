@@ -145,3 +145,38 @@ fn cancellation_and_refusal_keep_wire_vibration_and_the_joint_contact_clock() {
     for _ in 32..128 {a.step(&[0.0;4],&gate).unwrap();b.step(&[0.0;4],&gate).unwrap();}
     assert_eq!(a.state(),b.state());assert_eq!(a.frame(),b.frame());
 }
+
+fn bundle(mut limits: LinearImpactConfig) -> Result<LinearImpactSystem, fs_couple::render::plate::impact::ImpactError> {
+    let strands=6; let n=1+3*strands;
+    let receiver=ImpactBody { potential:BodyPotential::Linear(vec![1000.0]),
+        initial:vec![ModalAcousticState{displacement_m_sqrt_kg:0.0,velocity_m_sqrt_kg_per_s:0.02}],
+        damping_per_s:vec![2.0] };
+    let mut bodies=vec![receiver];let mut contacts=Vec::new();
+    for i in 0..strands {
+        let w=wire();let l=line(6,5e8);
+        contacts.push(w.contact(&l,&vec![vec![10.0];6],0..1,1+3*i..4+3*i,n).unwrap());
+        bodies.push(w.body(vec![ModalAcousticState::default();3]).unwrap());
+    }
+    limits.coupling.max_modes=128;
+    LinearImpactSystem::new(bodies,contacts,vec![],limits,&CancelGate::new_clock_free())
+}
+#[test]
+fn a_distributed_bundle_exceeds_the_old_point_cap_without_bypassing_work_limits() {
+    use fs_couple::render::schedule::force::coupled::contact::multiple::MAX_NORMAL_CONTACTS;
+    let mut c=config(512);c.multiple.max_contacts=MAX_NORMAL_CONTACTS;
+    let mut system=bundle(c).unwrap();assert_eq!(system.contact_count(),36);
+    let gate=CancelGate::new_clock_free();let mut peak=0.0_f64;
+    for _ in 0..512 {
+        let frame=system.step(&[0.0;19],&gate).unwrap();
+        assert!(frame.balance_residual_j.abs()<1e-8);
+        peak=peak.max(system.state()[3].abs());
+        // Identical but independent strands receive the same shared-head load.
+        for strand in 1..6 { for k in 0..6 {
+            assert!((system.state()[2+k]-system.state()[2+6*strand+k]).abs()<1e-8);
+        }}
+    }
+    assert!(peak>1e-6);
+    let mut too_small=c;too_small.multiple.max_contacts=32;assert!(bundle(too_small).is_err());
+    let mut no_work=c;no_work.multiple.max_setup_terms=0;assert!(bundle(no_work).is_err());
+    let mut excess=c;excess.multiple.max_contacts=MAX_NORMAL_CONTACTS+1;assert!(bundle(excess).is_err());
+}
