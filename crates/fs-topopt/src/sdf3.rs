@@ -12,6 +12,7 @@
 
 mod operator;
 mod refine;
+pub mod response;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
 use fs_cutfem::elastic3::CutElasticity3;
