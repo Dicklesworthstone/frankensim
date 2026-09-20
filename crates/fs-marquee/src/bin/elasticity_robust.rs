@@ -11,9 +11,12 @@ use fs_topols::{
 };
 use std::error::Error;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
+
+#[path = "elasticity_robust/projected.rs"]
+mod projected;
 
 fn writer(path: &Path) -> std::io::Result<BufWriter<File>> {
     OpenOptions::new().write(true).create_new(true).open(path).map(BufWriter::new)
@@ -40,7 +43,8 @@ fn edge(value: &str) -> Result<DesignBoxEdge, Box<dyn Error>> {
 }
 
 fn load_cases(path: &Path) -> Result<Vec<RobustLoadCase>, Box<dyn Error>> {
-    let text = std::fs::read_to_string(path)?;
+    let mut text = String::new();
+    File::open(path)?.take(1_048_577).read_to_string(&mut text)?;
     if text.len() > 1_048_576 {
         return Err("load-case CSV exceeds 1 MiB".into());
     }
@@ -85,6 +89,9 @@ fn numbers(values: &[f64]) -> String {
 
 fn run() -> Result<u8, Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--projected") {
+        return projected::run(&args[1..]);
+    }
     if args.len() < 2 || args.len() > 7 {
         return Err(
             "usage: fs-marquee-elasticity-robust OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [ITERATIONS=12] [VOLFRAC=0.45] [MAX_CANDIDATES=5] [AGGREGATE=worst]"
