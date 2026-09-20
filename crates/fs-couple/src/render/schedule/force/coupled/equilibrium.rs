@@ -184,3 +184,6 @@ impl StaticResponse {
         Ok(q)
     }
 }
+
+/// Fixed-activity tangent solves and parameter pullbacks of settled states.
+pub mod sensitivity;

@@ -525,7 +525,8 @@ fn poll(gate: Option<&CancelGate>) -> Result<(), ModalCouplingError> {
 }
 fn invalid(what: &'static str) -> ModalCouplingError { ModalCouplingError::Invalid { what } }
 
-mod equilibrium;
+/// Static preload and local implicit equilibrium sensitivities.
+pub mod equilibrium;
 /// Scheduled rendering of connected modal components.
 pub mod render;
 
