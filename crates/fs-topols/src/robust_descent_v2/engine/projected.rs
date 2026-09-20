@@ -13,6 +13,7 @@ use crate::volume::{
 };
 
 mod stress;
+mod checkpoint;
 
 /// Bounded candidate search and actual case-solve allowance.
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +145,7 @@ pub struct MultiLoadProjectedOptimizer {
     kernel: Kernel,
     current: MultiState,
     baseline: MultiLoadProjectedState,
+    baseline_geometry: GridSdf,
     fixed: Vec<(usize, f64)>,
     projection: VolumeProjectionSettings,
     controls: MultiLoadProjectedSettings,
@@ -198,8 +200,9 @@ impl MultiLoadProjectedOptimizer {
             return Err(invalid("projected multi-load baseline failed the independent area gate"));
         }
         let baseline = MultiLoadProjectedState::of(&current);
+        let baseline_geometry = current.phi.clone();
         Ok(Self {
-            kernel, current, baseline, fixed, projection, controls,
+            kernel, current, baseline, baseline_geometry, fixed, projection, controls,
             next_iteration: 0, ell: settings.ell0, solves_started: load_cases.len(),
             stress_limit: None, baseline_stress: None, current_stress: None,
         })
