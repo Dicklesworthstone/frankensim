@@ -686,7 +686,7 @@ fn realize_coupled(
         .ok_or(AcousticRealizeError::InvalidDescription {
             what: "duct has no segments",
         })?
-        .outlet_radius();
+        .inlet_radius();
     let area = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area;
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
@@ -4212,17 +4212,7 @@ fn realize_reed_ode(
     // reject non-finite/nonphysical attack ramps and reed stiffnesses
     // up front, or NaN slips past typed refusals into generic per-step
     // Nonlinear noise mid-integration (bead frankensim-dtb76).
-    if !(reed.rest_opening_m > 0.0
-        && reed.width_m > 0.0
-        && reed.closing_pressure_pa > 0.0
-        && reed.blowing_pressure_pa >= 0.0
-        && reed.attack_s >= 0.0
-        && reed.mass_kg >= 0.0
-        && reed.stiffness_n_m >= 0.0
-        && reed.damping_ratio >= 0.0
-        && reed.damping_ratio.is_finite()
-        && reed.mass_kg.is_finite())
-    {
+    if !crate::reed_bore::reed_parameters_valid(reed) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "reed parameters must be physical and finite",
         });
@@ -4432,7 +4422,7 @@ fn realize_blown_with_body(
         .ok_or(AcousticRealizeError::InvalidDescription {
             what: "duct has no segments",
         })?
-        .outlet_radius();
+        .inlet_radius();
     let area = core::f64::consts::PI * inlet_r * inlet_r;
     let zc = gas.density * gas.sound_speed / area;
     let dt = 1.0 / f64::from(sample_rate_hz);

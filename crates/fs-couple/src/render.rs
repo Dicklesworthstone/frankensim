@@ -52,6 +52,68 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_scenario::BeatingReed;
 
+#[cfg(test)]
+mod inlet_geometry_tests {
+    use super::*;
+    use fs_duct::Segment;
+    use fs_material::gas::GasSpec;
+
+    /// G0: the source impedance uses the local inlet area, not the downstream
+    /// area of a tapered segment. Cylinders preserve their previous value.
+    #[test]
+    fn reed_source_uses_the_upstream_cross_section() {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        for segment in [
+            Segment::Cylinder {
+                radius: 0.002,
+                length: 0.5,
+            },
+            Segment::Cone {
+                inlet_radius: 0.002,
+                outlet_radius: 0.0015,
+                length: 0.5,
+            },
+            Segment::Cone {
+                inlet_radius: 0.002,
+                outlet_radius: 0.0022,
+                length: 0.5,
+            },
+        ] {
+            assert_eq!(segment.inlet_radius(), 0.002);
+            let mut voice = ReedBoreVoice::new(
+                &Duct {
+                    segments: vec![segment],
+                },
+                &gas,
+                BeatingReed {
+                    rest_opening_m: 4e-4,
+                    width_m: 0.013,
+                    closing_pressure_pa: 6000.0,
+                    blowing_pressure_pa: 2800.0,
+                    attack_s: 0.008,
+                    mass_kg: 0.0,
+                    stiffness_n_m: 0.0,
+                    damping_ratio: 0.35,
+                },
+                Termination::UnflangedOpen,
+                PlateBank::default(),
+                1.0,
+                48_000,
+                4096,
+                None,
+            )
+            .unwrap();
+            let area = core::f64::consts::PI * 0.002 * 0.002;
+            assert_eq!(voice.area_bore, area);
+            assert_eq!(voice.zc, gas.density * gas.sound_speed / area);
+            let mut pressure = [0.0; 256];
+            voice.step_block(&mut pressure).unwrap();
+            assert!(pressure.iter().all(|p| p.is_finite()));
+            assert!(pressure.iter().any(|p| p.abs() > 0.0));
+        }
+    }
+}
+
 /// One reed-on-a-characteristic-line voice: the `realize_reed_bore`
 /// physics, restructured so a caller can advance it block by block. The
 /// one-shot realizer is now a thin wrapper over this type, so the two
@@ -100,17 +162,7 @@ impl ReedBoreVoice {
         line_samples: usize,
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
-        if !(reed.rest_opening_m > 0.0
-            && reed.width_m > 0.0
-            && reed.closing_pressure_pa > 0.0
-            && reed.blowing_pressure_pa >= 0.0
-            && reed.attack_s >= 0.0
-            && reed.mass_kg >= 0.0
-            && reed.stiffness_n_m >= 0.0
-            && reed.damping_ratio >= 0.0
-            && reed.damping_ratio.is_finite()
-            && reed.rest_opening_m.is_finite())
-        {
+        if !crate::reed_bore::reed_parameters_valid(reed) {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "reed parameters must be physical and finite",
             });
@@ -126,7 +178,7 @@ impl ReedBoreVoice {
             .ok_or(AcousticRealizeError::InvalidDescription {
                 what: "duct has no segments",
             })?
-            .outlet_radius();
+            .inlet_radius();
         let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
         let zc = gas.density * gas.sound_speed / area_bore;
         let mut line = characteristic_line(
@@ -356,7 +408,9 @@ impl ModalStringVoice {
     /// Model refusals (budget ceilings, non-finite states).
     pub fn step_block(&mut self, out: &mut [f64]) -> Result<(), ModalAcousticTimeError> {
         for slot in out.iter_mut() {
-            let frame = self.model.step_into(&self.held_force, &mut self.workspace)?;
+            let frame = self
+                .model
+                .step_into(&self.held_force, &mut self.workspace)?;
             *slot = frame.observer_pressure_pa;
             self.sample_index += 1;
         }

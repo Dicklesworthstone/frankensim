@@ -14,6 +14,32 @@ use fs_scenario::gesture::{
     GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue,
 };
 
+#[test]
+fn signed_gesture_ramp_is_finite_through_the_public_sampler() {
+    let schedule = GestureSchedule::try_new(
+        4,
+        vec![GestureTrack {
+            id: "velocity".into(),
+            target: GestureTarget::JetSpeed,
+            initial: GestureValue::VelocityMPerS(-f64::MAX),
+            events: vec![GestureEvent {
+                time_s: 0.0,
+                transition_s: 1.0,
+                value: GestureValue::VelocityMPerS(f64::MAX),
+            }],
+        }],
+    )
+    .unwrap();
+    let values: Vec<_> = (0..=4)
+        .map(|tick| schedule.sample("velocity", tick).unwrap())
+        .collect();
+    assert!(values.iter().all(|value| value.is_finite()));
+    assert_eq!(values[0], -f64::MAX);
+    assert_eq!(values[2], 0.0);
+    assert_eq!(values[4], f64::MAX);
+    assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
 fn voice() -> ReedBoreVoice {
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
     let duct = Duct {

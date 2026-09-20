@@ -32,6 +32,171 @@ fn run(args: &[&str]) -> (bool, String) {
 }
 
 #[test]
+fn physical_inputs_reach_real_cli_audio_and_provenance() {
+    // Keep artifacts; unique creation avoids overwriting an earlier run.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("physical-inputs-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let render = |name: &str, extra: &[&str]| {
+        let path = dir.join(format!("{name}.wav"));
+        let mut args = vec![
+            "reed",
+            path.to_str().unwrap(),
+            "--seconds",
+            "0.1",
+            "--full-scale-pa",
+            "200000",
+        ];
+        args.extend_from_slice(extra);
+        let (ok, stdout) = run(&args);
+        assert!(ok, "{stdout}");
+        (
+            std::fs::read(&path).unwrap(),
+            std::fs::read_to_string(path.with_extension("provenance.json")).unwrap(),
+        )
+    };
+    let (baseline, _) = render("baseline", &[]);
+    let (explicit_dry, dry_provenance) = render("dry", &["--relative-humidity", "0"]);
+    assert_eq!(baseline, explicit_dry);
+    assert!(dry_provenance.contains("\"spec\":\"dry_air_ussa1976\""));
+    assert!(dry_provenance.contains("\"relative_humidity\":0e0"));
+    let (humid, humid_provenance) =
+        render("humid-37", &["--relative-humidity", "0.8", "--block", "37"]);
+    let (humid_replay, _) = render(
+        "humid-512",
+        &["--relative-humidity", "0.8", "--block", "512"],
+    );
+    assert_ne!(humid, baseline);
+    assert_eq!(humid, humid_replay);
+    assert!(humid_provenance.contains("\"spec\":\"moist_air_ussa1976_water_vapor_nist\""));
+    assert!(humid_provenance.contains("\"relative_humidity\":8e-1"));
+    // Interrupt an unfinished ramp, then ramp from the value actually reached.
+    // Exercise decoding, control compilation and the retained voice together.
+    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureValue};
+    let mut track = pressure_performance().tracks()[0].clone();
+    track.initial = GestureValue::PressurePa(0.0);
+    track.events = vec![
+        GestureEvent {
+            time_s: 0.0,
+            transition_s: 0.08,
+            value: GestureValue::PressurePa(4000.0),
+        },
+        GestureEvent {
+            time_s: 0.02,
+            transition_s: 0.02,
+            value: GestureValue::PressurePa(2000.0),
+        },
+    ];
+    let source = dir.join("interrupted.gesture");
+    let schedule = GestureSchedule::try_new(137, vec![track.clone()]).unwrap();
+    std::fs::write(&source, schedule.to_canonical_bytes()).unwrap();
+    let (performed, _) = render(
+        "interrupted-37",
+        &["--schedule", source.to_str().unwrap(), "--block", "37"],
+    );
+    let (replayed, _) = render(
+        "interrupted-512",
+        &["--schedule", source.to_str().unwrap(), "--block", "512"],
+    );
+    assert_eq!(performed, replayed);
+    assert_ne!(performed, baseline);
+    // The same physical trajectory with its first ramp explicitly shortened:
+    // 4000 Pa * (0.02 / 0.08) = 1000 Pa at interruption.
+    track.events[0].transition_s = 0.02;
+    track.events[0].value = GestureValue::PressurePa(1000.0);
+    let equivalent = GestureSchedule::try_new(137, vec![track]).unwrap();
+    let equivalent_source = dir.join("equivalent.gesture");
+    std::fs::write(&equivalent_source, equivalent.to_canonical_bytes()).unwrap();
+    let (equivalent_audio, _) = render(
+        "equivalent",
+        &["--schedule", equivalent_source.to_str().unwrap()],
+    );
+    assert_eq!(performed, equivalent_audio);
+    let options = [
+        "--temperature-k",
+        "313.15",
+        "--ambient-pressure-pa",
+        "80000",
+        "--relative-humidity",
+        "0.5",
+        "--duct-length-m",
+        "0.6",
+        "--duct-radius-m",
+        "0.002",
+        "--duct-outlet-radius-m",
+        "0.0015",
+    ];
+    let mut a_args = options.to_vec();
+    a_args.extend_from_slice(&["--block", "37"]);
+    let (a, provenance) = render("a", &a_args);
+    let mut b_args = options.to_vec();
+    b_args.extend_from_slice(&["--block", "512"]);
+    let (b, _) = render("b", &b_args);
+    assert_eq!(a, b);
+    assert_ne!(a, baseline);
+    assert_eq!(&a[..4], b"RIFF");
+    for field in [
+        "\"temperature_k\":3.1315e2",
+        "\"pressure_pa\":8e4",
+        "\"relative_humidity\":5e-1",
+        "\"spec\":\"moist_air_ussa1976_water_vapor_nist\"",
+        "\"shape\":\"cone\"",
+        "\"length_m\":6e-1",
+        "\"inlet_radius_m\":2e-3",
+        "\"outlet_radius_m\":1.5e-3",
+    ] {
+        assert!(provenance.contains(field), "missing {field}: {provenance}");
+    }
+    for (index, (fixture, option, value)) in [
+        ("reed", "--temperature-k", "NaN"),
+        ("reed", "--ambient-pressure-pa", "0"),
+        ("reed", "--relative-humidity", "NaN"),
+        ("reed", "--relative-humidity", "inf"),
+        ("reed", "--relative-humidity", "-0.1"),
+        ("reed", "--relative-humidity", "1.1"),
+        ("reed", "--duct-outlet-radius-m", "-1"),
+        ("string", "--duct-outlet-radius-m", "0.002"),
+        ("string", "--temperature-k", "313.15"),
+        ("string", "--relative-humidity", "0.5"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.join(format!("refused-{index}.wav"));
+        let (ok, stdout) = run(&[fixture, path.to_str().unwrap(), option, value]);
+        assert!(!ok, "{stdout}");
+        assert!(stdout.contains("\"verdict\":\"refused\""));
+        assert!(!path.exists());
+        assert!(!path.with_extension("provenance.json").exists());
+    }
+    // Mixture-owner limits must refuse before opening output files, even
+    // where the dry-gas constructor alone would admit the temperature/pressure.
+    for (name, extra) in [
+        ("hot-moist", ["--temperature-k", "400"]),
+        ("vapor-rich", ["--ambient-pressure-pa", "1000"]),
+    ] {
+        let path = dir.join(format!("{name}.wav"));
+        let (ok, stdout) = run(&[
+            "reed",
+            path.to_str().unwrap(),
+            "--relative-humidity",
+            "1",
+            extra[0],
+            extra[1],
+        ]);
+        assert!(!ok, "{stdout}");
+        assert!(stdout.contains("ambient gas state refused"), "{stdout}");
+        assert!(!path.exists());
+        assert!(!path.with_extension("provenance.json").exists());
+    }
+    println!("retained CLI artifacts: {}", dir.display());
+}
+
+#[test]
 fn renders_deterministically_with_provenance() {
     let dir = scratch("determinism");
     let a = dir.join("a.wav");
@@ -200,24 +365,30 @@ fn full_scale_is_physics_not_normalization() {
 }
 
 fn pressure_performance() -> fs_scenario::gesture::GestureSchedule {
-    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
-    GestureSchedule::try_new(137, vec![GestureTrack {
-        id: "blow\"quoted".to_string(),
-        target: GestureTarget::BlowingPressure,
-        initial: GestureValue::PressurePa(2800.0),
-        events: vec![
-            GestureEvent {
-                time_s: 0.02,
-                transition_s: 0.01,
-                value: GestureValue::PressurePa(0.0),
-            },
-            GestureEvent {
-                time_s: 0.06,
-                transition_s: 0.01,
-                value: GestureValue::PressurePa(3500.0),
-            },
-        ],
-    }]).expect("performance admits")
+    use fs_scenario::gesture::{
+        GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue,
+    };
+    GestureSchedule::try_new(
+        137,
+        vec![GestureTrack {
+            id: "blow\"quoted".to_string(),
+            target: GestureTarget::BlowingPressure,
+            initial: GestureValue::PressurePa(2800.0),
+            events: vec![
+                GestureEvent {
+                    time_s: 0.02,
+                    transition_s: 0.01,
+                    value: GestureValue::PressurePa(0.0),
+                },
+                GestureEvent {
+                    time_s: 0.06,
+                    transition_s: 0.01,
+                    value: GestureValue::PressurePa(3500.0),
+                },
+            ],
+        }],
+    )
+    .expect("performance admits")
 }
 
 #[test]
@@ -238,20 +409,43 @@ fn gesture_file_changes_real_physics_and_replays_across_audio_blocks() {
         (&replay, &moved_source, "37"),
     ] {
         let (ok, stdout) = run(&[
-            "reed", output.to_str().unwrap(), "--seconds", "0.1",
-            "--full-scale-pa", "200000", "--block", block,
-            "--schedule", source.to_str().unwrap(),
+            "reed",
+            output.to_str().unwrap(),
+            "--seconds",
+            "0.1",
+            "--full-scale-pa",
+            "200000",
+            "--block",
+            block,
+            "--schedule",
+            source.to_str().unwrap(),
         ]);
         assert!(ok, "scheduled render must succeed: {stdout}");
         assert!(stdout.contains("\"verdict\":\"rendered\""));
     }
     let audio = std::fs::read(&a).unwrap();
-    assert_eq!(audio, std::fs::read(&b).unwrap(), "host block size changed the performed audio");
-    assert_eq!(audio, std::fs::read(&replay).unwrap(), "source relocation changed the performed audio");
+    assert_eq!(
+        audio,
+        std::fs::read(&b).unwrap(),
+        "host block size changed the performed audio"
+    );
+    assert_eq!(
+        audio,
+        std::fs::read(&replay).unwrap(),
+        "source relocation changed the performed audio"
+    );
     let provenance = std::fs::read_to_string(a.with_extension("provenance.json")).unwrap();
-    assert_eq!(provenance, std::fs::read_to_string(replay.with_extension("provenance.json")).unwrap());
+    assert_eq!(
+        provenance,
+        std::fs::read_to_string(replay.with_extension("provenance.json")).unwrap()
+    );
     #[allow(clippy::format_collect)]
-    let source_hash: String = schedule.content_hash().0.iter().map(|b| format!("{b:02x}")).collect();
+    let source_hash: String = schedule
+        .content_hash()
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     assert!(provenance.contains(&format!("\"blake3\":\"{source_hash}\"")));
     assert!(provenance.contains("\"control_rate_hz\":137"));
     assert!(provenance.contains("\"track\":\"blow\\\"quoted\""));
@@ -261,57 +455,110 @@ fn gesture_file_changes_real_physics_and_replays_across_audio_blocks() {
     // Require the same real voice WITHOUT the authored release/re-entry to differ.
     let held = dir.join("held.wav");
     let (ok, stdout) = run(&[
-        "reed", held.to_str().unwrap(), "--seconds", "0.1",
-        "--full-scale-pa", "200000", "--block", "37",
+        "reed",
+        held.to_str().unwrap(),
+        "--seconds",
+        "0.1",
+        "--full-scale-pa",
+        "200000",
+        "--block",
+        "37",
     ]);
     assert!(ok, "unscheduled reference failed: {stdout}");
-    assert_ne!(audio, std::fs::read(&held).unwrap(), "gesture input had no physical effect");
+    assert_ne!(
+        audio,
+        std::fs::read(&held).unwrap(),
+        "gesture input had no physical effect"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn malformed_or_unsupported_schedules_refuse_before_writing_artifacts() {
-    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+    use fs_scenario::gesture::{
+        GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue,
+    };
     let dir = scratch("gesture-refusals");
     let valid = pressure_performance().to_canonical_bytes();
     let mut trailing = valid.clone();
     trailing.extend_from_slice(b"ignored\n");
-    let unsupported = GestureSchedule::try_new(137, vec![GestureTrack {
-        id: "pedal".to_string(),
-        target: GestureTarget::SustainPedal,
-        initial: GestureValue::Fraction(0.0),
-        events: Vec::new(),
-    }]).unwrap().to_canonical_bytes();
+    let unsupported = GestureSchedule::try_new(
+        137,
+        vec![GestureTrack {
+            id: "pedal".to_string(),
+            target: GestureTarget::SustainPedal,
+            initial: GestureValue::Fraction(0.0),
+            events: Vec::new(),
+        }],
+    )
+    .unwrap()
+    .to_canonical_bytes();
     let mut overlapping_track = pressure_performance().tracks()[0].clone();
     overlapping_track.events = vec![
-        GestureEvent { time_s: 0.0, transition_s: 0.1, value: GestureValue::PressurePa(3000.0) },
-        GestureEvent { time_s: 0.01, transition_s: 0.0, value: GestureValue::PressurePa(0.0) },
+        GestureEvent {
+            time_s: 0.0,
+            transition_s: 0.1,
+            value: GestureValue::PressurePa(3000.0),
+        },
+        GestureEvent {
+            time_s: 0.01,
+            transition_s: 0.0,
+            value: GestureValue::PressurePa(0.0),
+        },
     ];
-    let overlapping = GestureSchedule::try_new(137, vec![overlapping_track]).unwrap().to_canonical_bytes();
-    let excessive = b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t137\ntracks\t18446744073709551615\n".to_vec();
+    let overlapping = GestureSchedule::try_new(137, vec![overlapping_track])
+        .unwrap()
+        .to_canonical_bytes();
+    let excessive =
+        b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t137\ntracks\t18446744073709551615\n"
+            .to_vec();
     for (index, (bytes, needle)) in [
         (trailing, "canonical"),
         (unsupported, "not a blowing-pressure input"),
-        (overlapping, "overlapping ramps"),
         (excessive, "count"),
-    ].into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let source = dir.join(format!("bad-{index}.gesture"));
         let output = dir.join(format!("bad-{index}.wav"));
         std::fs::write(&source, bytes).unwrap();
         let (ok, stdout) = run(&[
-            "reed", output.to_str().unwrap(), "--schedule", source.to_str().unwrap(),
+            "reed",
+            output.to_str().unwrap(),
+            "--schedule",
+            source.to_str().unwrap(),
         ]);
         assert!(!ok, "invalid schedule rendered: {stdout}");
         assert!(stdout.contains(needle), "wrong refusal: {stdout}");
-        assert_eq!(stdout.lines().count(), 1, "refusal must be one escaped JSON record");
+        assert_eq!(
+            stdout.lines().count(),
+            1,
+            "refusal must be one escaped JSON record"
+        );
         assert!(!output.exists());
         assert!(!output.with_extension("provenance.json").exists());
     }
+    let source = dir.join("interrupted.gesture");
+    let output = dir.join("interrupted.wav");
+    std::fs::write(&source, overlapping).unwrap();
+    let (ok, stdout) = run(&[
+        "reed",
+        output.to_str().unwrap(),
+        "--seconds",
+        "0.1",
+        "--schedule",
+        source.to_str().unwrap(),
+    ]);
+    assert!(ok, "supported interrupted ramp refused: {stdout}");
     let source = dir.join("valid.gesture");
     std::fs::write(&source, valid).unwrap();
     let output = dir.join("string.wav");
     let (ok, stdout) = run(&[
-        "string", output.to_str().unwrap(), "--schedule", source.to_str().unwrap(),
+        "string",
+        output.to_str().unwrap(),
+        "--schedule",
+        source.to_str().unwrap(),
     ]);
     assert!(!ok);
     assert!(stdout.contains("requires the reed fixture"));
@@ -331,7 +578,11 @@ fn argument_and_sidecar_refusals_preserve_existing_evidence() {
     ] {
         let (ok, stdout) = run(&args);
         assert!(!ok, "invalid arguments must refuse");
-        assert_eq!(stdout.lines().count(), 1, "diagnostic contains a raw newline: {stdout}");
+        assert_eq!(
+            stdout.lines().count(),
+            1,
+            "diagnostic contains a raw newline: {stdout}"
+        );
         assert!(stdout.contains("\"verdict\":\"refused\""));
         assert!(!out.exists());
     }

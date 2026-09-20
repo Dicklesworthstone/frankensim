@@ -145,6 +145,45 @@ fn reed_voice_refuses_invalid_damping_ratio() {
     }
 }
 
+#[test]
+fn reed_voice_refuses_every_nonfinite_parameter_before_realization() {
+    for field in 0..8 {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut invalid = reed();
+            let slot = match field {
+                0 => &mut invalid.rest_opening_m,
+                1 => &mut invalid.width_m,
+                2 => &mut invalid.closing_pressure_pa,
+                3 => &mut invalid.blowing_pressure_pa,
+                4 => &mut invalid.attack_s,
+                5 => &mut invalid.mass_kg,
+                6 => &mut invalid.stiffness_n_m,
+                _ => &mut invalid.damping_ratio,
+            };
+            *slot = value;
+            assert!(
+                matches!(
+                    ReedBoreVoice::new(
+                        &clarinet_ish(),
+                        &air(),
+                        invalid,
+                        Termination::UnflangedOpen,
+                        PlateBank::default(),
+                        1.0,
+                        RATE,
+                        N,
+                        None,
+                    ),
+                    Err(
+                        fs_couple::acoustic_realize::AcousticRealizeError::InvalidDescription { .. }
+                    )
+                ),
+                "field {field}, value {value}"
+            );
+        }
+    }
+}
+
 /// Render N samples through the context in fixed-size blocks.
 fn render_blocked(block_len: usize) -> Vec<f64> {
     let mut context = RenderContext::new(vec![RenderVoice::ReedBore(reed_voice())], N);

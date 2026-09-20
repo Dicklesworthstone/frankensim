@@ -88,6 +88,23 @@ pub(crate) fn reed_pressure_face(reed: BeatingReed) -> f64 {
     }
 }
 
+/// Shared primitive-domain admission for characteristic and ODE reed paths.
+/// Zero mass/stiffness retain the existing quasistatic/derived-stiffness cases.
+pub(crate) fn reed_parameters_valid(reed: BeatingReed) -> bool {
+    [reed.rest_opening_m, reed.width_m, reed.closing_pressure_pa]
+        .iter()
+        .all(|x| x.is_finite() && *x > 0.0)
+        && [
+            reed.blowing_pressure_pa,
+            reed.attack_s,
+            reed.mass_kg,
+            reed.stiffness_n_m,
+            reed.damping_ratio,
+        ]
+        .iter()
+        .all(|x| x.is_finite() && *x >= 0.0)
+}
+
 pub(crate) fn reed_structural(reed: BeatingReed) -> (f64, f64) {
     let face = reed_pressure_face(reed);
     let k = if reed.stiffness_n_m > 0.0 {

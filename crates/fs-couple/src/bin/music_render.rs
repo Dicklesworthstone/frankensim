@@ -4,6 +4,17 @@
 //!
 //! ```text
 //! music_render <fixture> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE]
+//! Reed runs also accept `--temperature-k K` and `--ambient-pressure-pa PA`.
+//! `--relative-humidity RH` selects the shared moist-air mixture (fraction
+//! in [0, 1], default 0). Its saturation-fit and vapor-fraction limits apply;
+//! condensation and moisture uptake by solids are not modeled.
+//! `--duct-length-m M` and `--duct-radius-m M` set its cylindrical air column.
+//! `--duct-outlet-radius-m M` optionally makes that column a linear cone;
+//! `--duct-radius-m` then names the inlet radius.
+//! These set the shared gas state, not a pitch shift or output gain.
+//! They do not model structural heating or phase change of the reed or duct.
+//! GasState's declared validity limits apply; a gas-model admission is not proof
+//! that the fixed solid specimen remains valid at that ambient temperature.
 //! ```
 //!
 //! `music_render modal INPUT.performance OUT.wav [--block N]` renders supplied
@@ -18,8 +29,9 @@
 //!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
-//! typed blowing-pressure track, bound to voice zero. Unsupported targets and
-//! overlapping ramps refuse; no controls are silently discarded. The source
+//! typed blowing-pressure track, bound to voice zero. A new command interrupts
+//! a ramp at its current value. Unsupported targets refuse; no controls are
+//! silently discarded. The source
 //! clock is independent of `--block`, and the schedule digest is retained in
 //! the provenance sidecar. This is not an assembly loader or a MIDI renderer.
 //!
@@ -49,12 +61,12 @@
 //! content hash is the replay check). Sample rate is pinned at 48 kHz to
 //! keep the ecosystem coherent (fs-psycho refuses other rates).
 
-#[path = "music_render/stream_output.rs"]
-mod stream_output;
 #[path = "music_render/modal_input.rs"]
 mod modal_input;
 #[path = "music_render/plate_input.rs"]
 mod plate_input;
+#[path = "music_render/stream_output.rs"]
+mod stream_output;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -64,7 +76,9 @@ use fs_couple::render::schedule::{
 use fs_couple::render::{ModalStringVoice, ReedBoreVoice, RenderContext, RenderVoice};
 use fs_couple::thin_plate::PlateBank;
 use fs_duct::{Duct, Segment, Termination};
-use fs_material::gas::{GasSpec, GasState};
+#[cfg(test)]
+use fs_material::gas::GasSpec;
+use fs_material::gas::GasState;
 use fs_scenario::BeatingReed;
 use fs_scenario::gesture::GestureSchedule;
 use std::io::{Read, Write};
@@ -118,8 +132,13 @@ fn decode_schedule(bytes: &[u8]) -> Result<GestureSchedule, String> {
     // The existing decoder reserves from the declared counts. Bound EVERY
     // count before calling it, including counts in malformed/trailing records.
     for line in text.lines() {
-        if let Some(count) = line.strip_prefix("tracks\t").or_else(|| line.strip_prefix("events\t")) {
-            let count = count.parse::<usize>().map_err(|_| "invalid schedule item count".to_string())?;
+        if let Some(count) = line
+            .strip_prefix("tracks\t")
+            .or_else(|| line.strip_prefix("events\t"))
+        {
+            let count = count
+                .parse::<usize>()
+                .map_err(|_| "invalid schedule item count".to_string())?;
             if count > MAX_SCHEDULE_ITEMS || count > lines {
                 return Err("schedule item count exceeds the input/16384-item budget".to_string());
             }
@@ -129,7 +148,9 @@ fn decode_schedule(bytes: &[u8]) -> Result<GestureSchedule, String> {
     // Reject ignored suffixes, extra fields and lossy decoder aliases. The
     // accepted file is exactly the artifact whose digest will be published.
     if schedule.to_canonical_bytes() != bytes {
-        return Err("schedule must be canonical bytes without trailing or ignored fields".to_string());
+        return Err(
+            "schedule must be canonical bytes without trailing or ignored fields".to_string(),
+        );
     }
     Ok(schedule)
 }
@@ -152,26 +173,46 @@ fn scheduled_controls(
         return Ok((Vec::new(), String::new()));
     };
     if fixture != "reed" {
-        return Err("--schedule currently requires the reed fixture and a blowing-pressure track".to_string());
+        return Err(
+            "--schedule currently requires the reed fixture and a blowing-pressure track"
+                .to_string(),
+        );
     }
     let schedule = load_schedule(path)?;
     let [track] = schedule.tracks() else {
-        return Err("the reed fixture requires exactly one gesture track bound to voice zero".to_string());
+        return Err(
+            "the reed fixture requires exactly one gesture track bound to voice zero".to_string(),
+        );
     };
-    let bindings = [PressureGestureBinding { track: track.id.clone(), voice: 0 }];
+    let bindings = [PressureGestureBinding {
+        track: track.id.clone(),
+        voice: 0,
+    }];
     let controls = compile_pressure_gestures(
-        &schedule, &bindings, RATE, samples as u64, MAX_SCHEDULE_WORK,
-    ).map_err(|e| e.to_string())?;
+        &schedule,
+        &bindings,
+        RATE,
+        samples as u64,
+        MAX_SCHEDULE_WORK,
+    )
+    .map_err(|e| e.to_string())?;
     // Source paths are deliberately absent: relocation cannot change replay
     // identity. v1 fixture-only sidecars remain byte-for-byte unchanged.
     #[allow(clippy::format_collect)]
-    let schedule_hash: String = schedule.content_hash().0.iter().map(|b| format!("{b:02x}")).collect();
+    let schedule_hash: String = schedule
+        .content_hash()
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let provenance = format!(
         ",\"gesture_schedule\":{{\"blake3\":\"{}\",\"control_rate_hz\":{},\
          \"track\":{},\"voice\":0,\"compiled_controls\":{},\
          \"clock_policy\":\"ceil-control-tick-to-audio-sample\"}}",
-        schedule_hash, schedule.control_rate_hz,
-        json_string(&track.id), controls.len()
+        schedule_hash,
+        schedule.control_rate_hz,
+        json_string(&track.id),
+        controls.len()
     );
     Ok((controls, provenance))
 }
@@ -179,26 +220,52 @@ fn scheduled_controls(
 // create_new closes the exists-check race without replacing evidence. An I/O
 // failure may leave incomplete NEW files; it always refuses and never claims
 // a rendered artifact. No existing file is truncated and no path is deleted.
-fn create_outputs(out: &Path, sidecar: &Path)
-    -> Result<(std::fs::File, std::fs::File), String>
-{
+fn create_outputs(out: &Path, sidecar: &Path) -> Result<(std::fs::File, std::fs::File), String> {
     // Read access is needed only for bounded hashing of the finalized WAV.
-    let audio_file = std::fs::OpenOptions::new().read(true).write(true)
-        .create_new(true).open(out).map_err(|e| format!("wav create refused: {e}"))?;
-    let sidecar_file = std::fs::OpenOptions::new().write(true).create_new(true)
-        .open(sidecar).map_err(|e| format!("sidecar create refused: {e}"))?;
+    let audio_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(out)
+        .map_err(|e| format!("wav create refused: {e}"))?;
+    let sidecar_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(sidecar)
+        .map_err(|e| format!("sidecar create refused: {e}"))?;
     Ok((audio_file, sidecar_file))
 }
 
-fn reed_context(samples: usize, block: usize) -> RenderContext {
-    let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)
-        .unwrap_or_else(|_| fail("gas state refused"));
-    let duct = Duct {
-        segments: vec![Segment::Cylinder {
-            radius: 0.0022,
-            length: 0.50,
-        }],
+#[cfg(test)]
+fn cylindrical_duct(length: f64, radius: f64) -> Result<Duct, &'static str> {
+    axial_duct(length, radius, radius)
+}
+
+fn axial_duct(length: f64, inlet: f64, outlet: f64) -> Result<Duct, &'static str> {
+    if [length, inlet, outlet]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err("duct length and endpoint radii must be finite positive metres");
+    }
+    let segment = if inlet == outlet {
+        Segment::Cylinder {
+            radius: inlet,
+            length,
+        }
+    } else {
+        Segment::Cone {
+            inlet_radius: inlet,
+            outlet_radius: outlet,
+            length,
+        }
     };
+    Ok(Duct {
+        segments: vec![segment],
+    })
+}
+
+fn reed_context(samples: usize, block: usize, air: &GasState, duct: &Duct) -> RenderContext {
     let reed = BeatingReed {
         rest_opening_m: 4.0e-4,
         width_m: 0.013,
@@ -210,8 +277,8 @@ fn reed_context(samples: usize, block: usize) -> RenderContext {
         damping_ratio: 0.35,
     };
     let voice = ReedBoreVoice::new(
-        &duct,
-        &air,
+        duct,
+        air,
         reed,
         Termination::UnflangedOpen,
         PlateBank::default(),
@@ -268,9 +335,52 @@ fn main() {
     let mut block = 512usize;
     let mut full_scale_pa = 200.0f64;
     let mut schedule_path: Option<PathBuf> = None;
+    let mut temperature_k = 293.15;
+    let mut ambient_pressure_pa = 101_325.0;
+    let mut relative_humidity = 0.0;
+    let mut ambient_explicit = false;
+    let mut duct_length_m = 0.50;
+    let mut duct_radius_m = 0.0022;
+    let mut duct_outlet_radius_m = None;
+    let mut geometry_explicit = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--relative-humidity" => {
+                relative_humidity = iter
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_else(|| fail("--relative-humidity requires a fraction in [0, 1]"));
+                ambient_explicit = true;
+            }
+            "--duct-length-m" | "--duct-radius-m" | "--duct-outlet-radius-m" => {
+                let value = iter
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_else(|| fail("duct dimensions require a number in metres"));
+                if arg == "--duct-length-m" {
+                    duct_length_m = value;
+                } else if arg == "--duct-radius-m" {
+                    duct_radius_m = value;
+                } else {
+                    duct_outlet_radius_m = Some(value);
+                }
+                geometry_explicit = true;
+            }
+            "--temperature-k" | "--ambient-pressure-pa" => {
+                let value = iter
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_else(|| {
+                        fail("ambient options require a number in Kelvin or Pascal")
+                    });
+                if arg == "--temperature-k" {
+                    temperature_k = value;
+                } else {
+                    ambient_pressure_pa = value;
+                }
+                ambient_explicit = true;
+            }
             "--seconds" => {
                 seconds = iter
                     .next()
@@ -293,7 +403,9 @@ fn main() {
                 if schedule_path.is_some() {
                     fail("--schedule may only be specified once");
                 }
-                let path = iter.next().unwrap_or_else(|| fail("--schedule needs a file path"));
+                let path = iter
+                    .next()
+                    .unwrap_or_else(|| fail("--schedule needs a file path"));
                 schedule_path = Some(PathBuf::from(path.as_str()));
             }
             other if other.starts_with('-') => fail(&format!("unknown option: {other}")),
@@ -302,7 +414,7 @@ fn main() {
     }
     let [fixture, out_path] = positional.as_slice() else {
         fail(
-            "usage: music_render <reed|string> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE]",
+            "usage: music_render <reed|string> <out.wav> [--seconds S] [--block N] [--full-scale-pa P] [--schedule FILE] [--temperature-k K] [--ambient-pressure-pa PA] [--relative-humidity RH] [--duct-length-m M] [--duct-radius-m M] [--duct-outlet-radius-m M] (ambient and duct options require reed)",
         );
     };
     if !(seconds > 0.0 && seconds <= 600.0) {
@@ -327,11 +439,41 @@ fn main() {
     if samples == 0 {
         fail("--seconds must round to at least one audio sample");
     }
-    let (controls, schedule_provenance) = scheduled_controls(
-        fixture, schedule_path.as_deref(), samples,
-    ).unwrap_or_else(|e| fail(&e));
+    let (controls, schedule_provenance) =
+        scheduled_controls(fixture, schedule_path.as_deref(), samples).unwrap_or_else(|e| fail(&e));
+    if ambient_explicit && fixture != "reed" {
+        fail("ambient gas options require reed; the string fixture has no gas coupling");
+    }
+    if geometry_explicit && fixture != "reed" {
+        fail("duct geometry options require reed; the string fixture has no duct");
+    }
+    let mut ambient_provenance = String::new();
     let context = match fixture.as_str() {
-        "reed" => reed_context(samples, block),
+        "reed" => {
+            let outlet = duct_outlet_radius_m.unwrap_or(duct_radius_m);
+            let duct = axial_duct(duct_length_m, duct_radius_m, outlet).unwrap_or_else(|e| fail(e));
+            let air =
+                GasState::try_new_moist_air(temperature_k, ambient_pressure_pa, relative_humidity)
+                    .unwrap_or_else(|e| fail(&format!("ambient gas state refused: {e:?}")));
+            let gas_spec = if relative_humidity == 0.0 {
+                "dry_air_ussa1976"
+            } else {
+                "moist_air_ussa1976_water_vapor_nist"
+            };
+            let geometry = if outlet == duct_radius_m {
+                format!(
+                    "{{\"shape\":\"cylinder\",\"length_m\":{duct_length_m:e},\"radius_m\":{duct_radius_m:e}}}"
+                )
+            } else {
+                format!(
+                    "{{\"shape\":\"cone\",\"length_m\":{duct_length_m:e},\"inlet_radius_m\":{duct_radius_m:e},\"outlet_radius_m\":{outlet:e}}}"
+                )
+            };
+            ambient_provenance = format!(
+                ",\"ambient_gas\":{{\"spec\":\"{gas_spec}\",\"temperature_k\":{temperature_k:e},\"pressure_pa\":{ambient_pressure_pa:e},\"relative_humidity\":{relative_humidity:e}}},\"duct\":{geometry}"
+            );
+            reed_context(samples, block, &air, &duct)
+        }
         "string" => string_context(block),
         _ => fail("fixture must be `reed` or `string`"),
     };
@@ -341,11 +483,16 @@ fn main() {
     // Reserve both paths before advancing the physical performance. An error
     // leaves only new incomplete files, never a success sidecar or overwritten
     // evidence. Waveforms are streamed; no full pressure/PCM history is staged.
-    let (mut audio_file, mut sidecar_file) = create_outputs(out, &sidecar)
-        .unwrap_or_else(|e| fail(&e));
+    let (mut audio_file, mut sidecar_file) =
+        create_outputs(out, &sidecar).unwrap_or_else(|e| fail(&e));
     let rendered = stream_output::render_waveform(
-        &mut renderer, &mut audio_file, samples, block, full_scale_pa,
-    ).unwrap_or_else(|e| fail(&e));
+        &mut renderer,
+        &mut audio_file,
+        samples,
+        block,
+        full_scale_pa,
+    )
+    .unwrap_or_else(|e| fail(&e));
     let clipped = rendered.clipped;
     let peak = rendered.peak_pa;
     let rms = rendered.rms_pa;
@@ -359,7 +506,7 @@ fn main() {
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
          \"full_scale_pa\":{full_scale_pa:e},\"clipped_samples\":{clipped},\
          \"peak_pa\":{peak:e},\"rms_pa\":{rms:e},\"wav_blake3\":\"{hash_hex}\",\
-         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\"{schedule_provenance}}}"
+         \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\"{schedule_provenance}{ambient_provenance}}}"
     );
     writeln!(sidecar_file, "{provenance}")
         .and_then(|_| sidecar_file.flush())
@@ -378,13 +525,122 @@ mod schedule_input_tests {
     use super::*;
     use fs_scenario::gesture::{GestureTarget, GestureTrack, GestureValue};
 
+    #[test]
+    fn tapered_ducts_render_from_endpoint_geometry() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(axial_duct(0.5, 0.002, bad).is_err());
+        }
+        assert!(matches!(
+            axial_duct(0.5, 0.002, 0.002).unwrap().segments[0],
+            Segment::Cylinder { .. }
+        ));
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let render = |outlet, block| {
+            let duct = axial_duct(0.5, 0.002, outlet).unwrap();
+            assert_eq!(duct.segments[0].inlet_radius(), 0.002);
+            assert_eq!(duct.segments[0].outlet_radius(), outlet);
+            let mut context = reed_context(4096, block, &gas, &duct);
+            let mut output = vec![0.0; 4096];
+            for chunk in output.chunks_mut(block) {
+                context.block(chunk).unwrap();
+            }
+            assert!(output.iter().all(|p| p.is_finite()));
+            assert!(output.iter().any(|p| p.abs() > 1.0));
+            output
+        };
+        let cylinder = render(0.002, 37);
+        for outlet in [0.0015, 0.0022] {
+            let cone = render(outlet, 37);
+            assert!(
+                cone.iter()
+                    .zip(&cylinder)
+                    .any(|(a, b)| a.to_bits() != b.to_bits())
+            );
+            assert!(
+                cone.iter()
+                    .zip(render(outlet, 512))
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn declared_duct_dimensions_drive_audio_and_refuse_invalid_geometry() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(cylindrical_duct(bad, 0.0022).is_err());
+            assert!(cylindrical_duct(0.5, bad).is_err());
+        }
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();
+        let render = |length, radius, block| {
+            let duct = cylindrical_duct(length, radius).unwrap();
+            let mut context = reed_context(4096, block, &gas, &duct);
+            let mut output = vec![0.0; 4096];
+            for chunk in output.chunks_mut(block) {
+                context.block(chunk).unwrap();
+            }
+            assert!(output.iter().all(|x| x.is_finite()));
+            assert!(output.iter().any(|x| x.abs() > 1.0));
+            output
+        };
+        let baseline = render(0.5, 0.0022, 37);
+        for (length, radius) in [(0.6, 0.0022), (0.5, 0.0020)] {
+            let changed = render(length, radius, 37);
+            assert!(
+                changed
+                    .iter()
+                    .zip(&baseline)
+                    .any(|(a, b)| a.to_bits() != b.to_bits())
+            );
+            let other_partition = render(length, radius, 512);
+            assert!(
+                changed
+                    .iter()
+                    .zip(other_partition)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn ambient_gas_changes_physical_reed_audio_without_callback_dependence() {
+        let render = |temperature, pressure, block| {
+            let gas =
+                GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, pressure).unwrap();
+            let duct = cylindrical_duct(0.50, 0.0022).unwrap();
+            let mut context = reed_context(4096, block, &gas, &duct);
+            let mut output = vec![0.0; 4096];
+            for chunk in output.chunks_mut(block) {
+                context.block(chunk).unwrap();
+            }
+            assert!(output.iter().all(|x| x.is_finite()));
+            assert!(output.iter().any(|x| x.abs() > 1.0));
+            output
+        };
+        let baseline = render(293.15, 101_325.0, 37);
+        for (temperature, pressure) in [(313.15, 101_325.0), (293.15, 80_000.0)] {
+            let changed = render(temperature, pressure, 37);
+            assert!(
+                changed
+                    .iter()
+                    .zip(&baseline)
+                    .any(|(a, b)| a.to_bits() != b.to_bits())
+            );
+            assert_eq!(changed, render(temperature, pressure, 512));
+        }
+    }
+
     fn canonical_schedule() -> Vec<u8> {
-        GestureSchedule::try_new(200, vec![GestureTrack {
-            id: "blow".to_string(),
-            target: GestureTarget::BlowingPressure,
-            initial: GestureValue::PressurePa(2800.0),
-            events: Vec::new(),
-        }]).unwrap().to_canonical_bytes()
+        GestureSchedule::try_new(
+            200,
+            vec![GestureTrack {
+                id: "blow".to_string(),
+                target: GestureTarget::BlowingPressure,
+                initial: GestureValue::PressurePa(2800.0),
+                events: Vec::new(),
+            }],
+        )
+        .unwrap()
+        .to_canonical_bytes()
     }
 
     #[test]
@@ -394,8 +650,13 @@ mod schedule_input_tests {
         assert_eq!(schedule.to_canonical_bytes(), bytes);
         let mut trailing = bytes.clone();
         trailing.extend_from_slice(b"ignored\n");
-        assert!(decode_schedule(&trailing).unwrap_err().contains("canonical"));
-        let extra = String::from_utf8(bytes).unwrap()
+        assert!(
+            decode_schedule(&trailing)
+                .unwrap_err()
+                .contains("canonical")
+        );
+        let extra = String::from_utf8(bytes)
+            .unwrap()
             .replace("blowing-pressure\n", "blowing-pressure\textra\n");
         assert!(decode_schedule(extra.as_bytes()).is_err());
     }
@@ -403,7 +664,8 @@ mod schedule_input_tests {
     #[test]
     fn untrusted_declared_sizes_are_rejected_before_decoder_reservation() {
         for bytes in [
-            b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t200\ntracks\t18446744073709551615\n".as_slice(),
+            b"frankensim-gesture-schedule-v1\ncontrol_rate_hz\t200\ntracks\t18446744073709551615\n"
+                .as_slice(),
             b"events\t9999999999999999999999999999999999999999\n".as_slice(),
             b"tracks\t16385\n".as_slice(),
             b"events\t100\n".as_slice(),

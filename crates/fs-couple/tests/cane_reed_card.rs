@@ -35,7 +35,10 @@ use fs_material::state_point::{
     IsotropicElasticStatePoint, MaterialPropertySelection, resolve_isotropic_elastic_state_point,
 };
 use fs_qty::{Dims, Pressure};
-use fs_solid::reduce::{OrificeSpec, ValveCard, ValveCardRequest, reduce_valve};
+use fs_solid::reduce::{
+    OrificeSpec, PressureLoadedValve, ValveCard, ValveCardRequest, reduce_pressure_loaded_valve,
+    reduce_valve,
+};
 
 const RATE: u32 = 48_000;
 
@@ -45,6 +48,10 @@ const CANE_E_HEEL_PA: f64 = 5.0e9;
 const CANE_E_SIGMA_PA: f64 = 0.7e9;
 const CANE_RHO_BLANK_LOW: f64 = 778.9;
 const CANE_ETA: f64 = 0.025;
+
+// Preserve this benchmark's former loading assumption explicitly. This is
+// an authored effective face length, NOT the mesh's pressure-load projection.
+const RESEARCH_PRESSURE_FACE_LENGTH_M: f64 = 0.025;
 
 /// The measured-geometry lay chart: a circular-arc facing.
 #[derive(Clone, Copy, Debug)]
@@ -210,6 +217,10 @@ fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
 
 /// Mint the cane reed card for a lay chart and a cane stiffness.
 fn mint_card(lay: LayChart, e_pa: f64) -> ValveCard {
+    mint_pressure_card(lay, e_pa).card().clone()
+}
+
+fn mint_pressure_card(lay: LayChart, e_pa: f64) -> PressureLoadedValve {
     // The vibrating vamp over the facing: the thin working region of
     // the reed (heel-side vamp ~1.2 mm thinning to the 0.15 mm tip),
     // free length = the facing length scale.
@@ -226,8 +237,32 @@ fn mint_card(lay: LayChart, e_pa: f64) -> ValveCard {
         }
     }
     let state = resolve_cane(e_pa);
+    // Uniform pressure on the complete planar underside, independently of
+    // the tip strip used to observe opening. P1 triangle load = area/3 per
+    // vertex. Positive vectors point toward opening (+z); closing pressure
+    // in the runtime acts against them. The fixture's underside is z=0.
+    let mut pressure_load = vec![[0.0; 3]; nodes.len()];
+    for tet in &tets {
+        for face in [
+            [tet[0], tet[1], tet[2]],
+            [tet[0], tet[1], tet[3]],
+            [tet[0], tet[2], tet[3]],
+            [tet[1], tet[2], tet[3]],
+        ] {
+            if face.iter().all(|&i| nodes[i][2] == 0.0) {
+                let [a, b, c] = face.map(|i| nodes[i]);
+                let area =
+                    0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+                for i in face {
+                    pressure_load[i][2] += area / 3.0;
+                }
+            }
+        }
+    }
+    let loaded_area: f64 = pressure_load.iter().map(|v| v[2]).sum();
+    assert!((loaded_area / (l * w) - 1.0).abs() < 1e-12);
     with_cx(|cx| {
-        reduce_valve(
+        reduce_pressure_loaded_valve(
             &ValveCardRequest {
                 nodes_m: &nodes,
                 tetrahedra: &tets,
@@ -246,6 +281,7 @@ fn mint_card(lay: LayChart, e_pa: f64) -> ValveCard {
                 loss_factor: CANE_ETA,
                 source_id: "music/cane-reed-vamp/20x13mm-taper1.0-0.1/v1",
             },
+            &pressure_load,
             cx,
         )
         .expect("cane reed reduces")
@@ -269,7 +305,13 @@ fn clarinet_bore() -> Duct {
 #[allow(clippy::items_after_statements)] // stage-local imports document provenance
 fn render(card: &ValveCard, blowing_pa: f64, seconds: f64) -> (f64, f64, f64) {
     let n = (seconds * f64::from(RATE)) as usize;
-    let reed = card.beating_reed(blowing_pa, 0.02);
+    let reed = card
+        .beating_reed(
+            card.width_m * RESEARCH_PRESSURE_FACE_LENGTH_M,
+            blowing_pa,
+            0.02,
+        )
+        .expect("declared pressure face");
     let mut plates = PlateBank::default();
     let out = realize_reed_bore(
         &clarinet_bore(),
@@ -342,7 +384,15 @@ fn threshold_pa(card: &ValveCard) -> f64 {
 #[test]
 fn cr_001_the_minted_card_carries_the_provenance_chain() {
     let lay = LayChart::try_new(1.0e-3, 0.017).expect("lay");
-    let card = mint_card(lay, CANE_E_HEEL_PA);
+    let loaded = mint_pressure_card(lay, CANE_E_HEEL_PA);
+    let card = loaded.card();
+    let projected_area = loaded.effective_areas_m2()[0];
+    assert!(projected_area.is_finite() && projected_area > 0.0);
+    assert_ne!(loaded.identity(), card.identity);
+    let projected_reed = loaded.beating_reed(100.0, 0.01).expect("projected reed");
+    let recovered = projected_reed.stiffness_n_m / projected_reed.closing_pressure_pa
+        * projected_reed.rest_opening_m;
+    assert!((recovered / projected_area - 1.0).abs() < 1e-14);
     for line in card.debug_lines() {
         println!("{line}");
     }
@@ -363,12 +413,44 @@ fn cr_001_the_minted_card_carries_the_provenance_chain() {
     assert!((card.rest_gap_m - 1.0e-3).abs() < 1e-12);
     // Provenance chain: identities present and reproducible.
     assert_eq!(card.identity, card.recomputed_identity());
-    let reed = card.beating_reed(2000.0, 0.01);
+    let reed = card
+        .beating_reed(card.width_m * RESEARCH_PRESSURE_FACE_LENGTH_M, 2000.0, 0.01)
+        .expect("declared pressure face");
     assert_eq!(reed.damping_ratio, 0.5 * CANE_ETA);
     let playing_damping = 2.0 * reed.damping_ratio * (reed.stiffness_n_m * reed.mass_kg).sqrt();
     assert!(
         (playing_damping - card.modes[0].damping_n_s_m).abs()
             <= 1e-14 * card.modes[0].damping_n_s_m
+    );
+    // The explicit pressure area must reach the existing moving-aperture
+    // junction, not merely change a card field. Hold material, structural
+    // mechanics, slit width and excitation fixed while varying that area.
+    let pressure_trace = |area_scale| {
+        let input = card
+            .beating_reed(area_scale * projected_area, 100.0, 0.01)
+            .unwrap();
+        let output = realize_reed_bore(
+            &clarinet_bore(),
+            &air20(),
+            input,
+            Termination::IdealOpen,
+            &mut PlateBank::default(),
+            1.0,
+            RATE,
+            512,
+            None,
+        )
+        .expect("physical pressure-area sweep");
+        assert!(output.iter().all(|p| p.is_finite()));
+        output
+    };
+    let baseline = pressure_trace(1.0);
+    let larger = pressure_trace(2.0);
+    assert!(
+        baseline
+            .iter()
+            .zip(larger)
+            .any(|(a, b)| (a - b).abs() > 1e-8)
     );
     assert!(!card.source_id.is_empty());
     // The lay's arc radius is a real facing-scale number (~0.14 m).

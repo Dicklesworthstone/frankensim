@@ -358,6 +358,29 @@ compositions render through the block API and encode through the ONE
 pascals→PCM owner, `pcm_wav::encode_pcm16_wav` — the recorded seam
 decision (beads ib15w + h7xu5.7.8): the cinematic stereo/receipt-hashed
 encoder stays cinematic, no third RIFF writer exists in the music lane.
+Reed runs accept `--temperature-k K` and `--ambient-pressure-pa PA`; these
+feed the shared `GasState` into the existing duct/reed calculation.
+Optional `--relative-humidity RH` supplies a dimensionless fraction in `[0, 1]`
+to the shared `GasState::try_new_moist_air` mixture owner. Default zero follows
+the exact dry-air path. Nonzero humidity changes the gas properties consumed
+by the duct and reed calculation; it is not an output pitch/gain adjustment.
+For nonzero humidity the owner refuses temperatures outside its saturation-fit
+window and excessive vapor fractions. This does not model condensation or
+moisture uptake in solids. The ambient values, relative humidity and gas
+specification are recorded in the sidecar. Other fixtures refuse these
+overrides. This is a stationary gas-state change, not
+solid thermal expansion, heat transfer or phase change. Reed runs also accept
+`--duct-length-m M` and `--duct-radius-m M` for the cylindrical duct, feeding
+the declared geometry to the existing acoustic solver and recording it in the
+sidecar. These dimensions must be finite and positive; other fixtures refuse
+them. Optional `--duct-outlet-radius-m M` selects a linear cone when different
+from `--duct-radius-m` (the inlet); omission or equal radii retains the cylinder.
+Both cone endpoint radii are recorded for replay. Other fixtures refuse
+them. Existing acoustic admission also applies: a positive radius can still
+exceed the selected radiation model's `ka` limit and must refuse.
+Geometry remains fixed during the performance. No automatic wall-material
+response is implied. Gas-model validity
+limits do not certify the fixed solid specimen at extreme temperatures.
 
 ### `bakeoff`
 
