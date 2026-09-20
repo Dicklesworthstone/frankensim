@@ -273,20 +273,18 @@ impl Obstacle {
     /// Penetration `p_i = (Phi q)_i - c_i`, clamped one-sided, for the
     /// interleaved `[q, p]` state.
     fn penetrations(&self, n_modes: usize, x: &[f64]) -> Vec<f64> {
-        (0..self.n_points)
-            .map(|i| {
-                let mut disp = 0.0;
-                for k in 0..n_modes {
-                    disp += self.collocation[i * n_modes + k] * x[2 * k];
-                }
-                let penetration = disp - self.gaps[i];
-                if penetration.is_nan() {
-                    penetration
-                } else {
-                    penetration.max(0.0)
-                }
-            })
-            .collect()
+        (0..self.n_points).map(|i| self.penetration_at(n_modes, x, i)).collect()
+    }
+
+    // Shared scalar kernel: storage evaluation must not allocate a point vector
+    // on every Hamiltonian/gradient call in the implicit Newton solve.
+    fn penetration_at(&self, n_modes: usize, x: &[f64], i: usize) -> f64 {
+        let mut disp = 0.0;
+        for k in 0..n_modes {
+            disp += self.collocation[i * n_modes + k] * x[2 * k];
+        }
+        let penetration = disp - self.gaps[i];
+        if penetration.is_nan() { penetration } else { penetration.max(0.0) }
     }
 
     /// Hunt–Crossley modal forces `f_k = −Σ_i w_i χ K [p_i]_+^α ṗ_i Φ_ik`.
@@ -411,7 +409,8 @@ impl ContactStorage {
         let mut max_p = 0.0f64;
         let mut energy = 0.0f64;
         for ob in &self.obstacles {
-            for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
                 if p <= 0.0 {
                     continue;
                 }
@@ -455,7 +454,8 @@ impl Storage for ContactStorage {
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         let mut h = self.inner.hamiltonian(x);
         for ob in &self.obstacles {
-            for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
                 if p <= 0.0 {
                     continue;
                 }
@@ -468,7 +468,8 @@ impl Storage for ContactStorage {
     fn gradient(&self, x: &[f64], out: &mut [f64]) {
         self.inner.gradient(x, out);
         for ob in &self.obstacles {
-            for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
+            for i in 0..ob.n_points {
+                let p = ob.penetration_at(self.n_modes, x, i);
                 if p <= 0.0 {
                     continue;
                 }
