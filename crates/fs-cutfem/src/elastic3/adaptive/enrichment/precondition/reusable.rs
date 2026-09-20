@@ -1,8 +1,9 @@
-//! Reuse a geometric correction space while density changes between solves.
-//! Only the sparse interpolation is retained: every preparation recomputes the
-//! diagonal and Galerkin factor from the CURRENT fine operator. There is no
-//! stale-factor reuse, geometry rebuild, or fallback to a different solver.
+//! Reuse geometric correction spaces while density changes between solves.
+//! Sparse interpolation is retained; diagonals and Galerkin operators/factors
+//! are recomputed from the CURRENT fine density. No stale-factor reuse.
 use super::*;
+use super::multilevel::{AdaptiveHierarchy3, AdaptiveMultilevelOptions3, AdaptiveSetupWork3};
+use fs_solver::op::multilevel::SparseMultilevel;
 use fs_sparse::Csr;
 
 /// Size/work limits for a reusable two-level correction space. Numerical setup
@@ -23,82 +24,98 @@ impl Default for AdaptiveSolveOptions3 {
     }
 }
 
-/// An adaptive operator and its inseparable geometry-owned correction space.
-///
-/// The operator cannot be replaced or mutably borrowed from this value. Only
-/// stiffness scales can change; consequently the retained interpolation cannot
-/// accidentally be reused on another mesh with the same number of unknowns.
-/// The coarse operator is needed only during construction, not kept alive.
-/// The existing two-level owner clones/transposes the retained sparse matrix
-/// for each numerical preparation; this does not recompute geometric transfer.
+/// Fine operator and its inseparable geometry-owned correction space.
+/// Only stiffness scales can change; numerical preparations immutably borrow
+/// the operator. Coarse geometry is needed only during construction.
 pub struct AdaptiveSolveSpace3 {
     operator: AdaptiveElasticity3,
     interpolation: Option<Csr>,
     options: AdaptiveSolveOptions3,
+    hierarchy: Option<AdaptiveHierarchy3>,
 }
 impl AdaptiveSolveSpace3 {
     /// Opt into exact constrained Jacobi for repeated density evaluations.
-    /// Numerical diagonal admission happens at preparation, not construction.
     #[must_use]
     pub fn jacobi(operator: AdaptiveElasticity3, max_diagonal_contributions: usize) -> Self {
-        Self { operator, interpolation: None,
+        Self { operator, interpolation: None, hierarchy: None,
             options: AdaptiveSolveOptions3 { max_diagonal_contributions, ..Default::default() } }
     }
-
-    /// Bind one geometric correction space to the owned fine operator.
-    /// This constructs interpolation only: no fine stiffness applications or
-    /// coarse factorization are performed until `prepare` is called.
-    /// The same box/material/support/refinement admission as AdaptiveTransfer3
-    /// applies. Coarse stiffness scales do not enter the correction matrix.
+    /// Bind one geometric correction space to the owned fine operator. No
+    /// stiffness applications or coarse factorization occur until preparation.
     pub fn two_level(operator: AdaptiveElasticity3, coarse: &AdaptiveElasticity3,
         options: AdaptiveSolveOptions3, mut checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Self, AdaptivePreconditionError3> {
         let transfer = AdaptiveTransfer3::new(coarse, &operator, options.max_transfer_terms, &mut checkpoint)
             .map_err(AdaptivePreconditionError3::Physics)?;
         let interpolation = transfer.vector_prolongation(options.two_level, &mut checkpoint)?;
-        // End the temporary transfer's borrow before moving the fine operator.
         drop(transfer);
         poll(&mut checkpoint).map_err(AdaptivePreconditionError3::Physics)?;
-        Ok(Self { operator, interpolation: Some(interpolation), options })
+        Ok(Self { operator, interpolation: Some(interpolation), options, hierarchy: None })
     }
-
-    /// Actual geometry, loads, residuals and density contractions. Read-only
-    /// access permits observation without invalidating the correction space.
-    #[must_use]
-    pub fn elasticity(&self) -> &AdaptiveElasticity3 { &self.operator }
-
-    /// Explicitly discard the correction space and recover its physical model.
-    #[must_use]
-    pub fn into_elasticity(self) -> AdaptiveElasticity3 { self.operator }
-
+    /// Bind a sequence of strictly coarser geometric spaces, nearest first.
+    /// Intermediate spaces may exceed 512 coordinates; only the final compact
+    /// space must fit the bottom-factor cap. Every adjacent pair uses the same
+    /// admitted Q1/hanging-node transfer as enrichment. Geometry construction
+    /// does not perform a stiffness solve or Galerkin product.
+    pub fn multilevel(operator: AdaptiveElasticity3, coarser: &[&AdaptiveElasticity3],
+        options: AdaptiveMultilevelOptions3, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Self, AdaptivePreconditionError3> {
+        let hierarchy = AdaptiveHierarchy3::new(&operator, coarser, options, checkpoint)?;
+        Ok(Self { operator, interpolation: None, options: AdaptiveSolveOptions3::default(), hierarchy: Some(hierarchy) })
+    }
+    /// Actual retained physics; no mutable replacement of its geometry.
+    #[must_use] pub fn elasticity(&self) -> &AdaptiveElasticity3 { &self.operator }
+    /// Explicitly discard preparation geometry and recover the physical model.
+    #[must_use] pub fn into_elasticity(self) -> AdaptiveElasticity3 { self.operator }
     /// Transactional density change through the original material admission.
-    /// Prepared values borrow this object, so scales cannot change while any
-    /// numeric preconditioner is live. No update occurs on invalid input.
-    pub fn set_scales(&mut self, scales: &[f64]) -> Result<(), ElasticityError3> {
-        self.operator.set_scales(scales)
+    pub fn set_scales(&mut self, scales: &[f64]) -> Result<(), ElasticityError3> { self.operator.set_scales(scales) }
+    /// First correction dimension; zero for Jacobi. Not necessarily bottom size.
+    #[must_use] pub fn coarse_dofs(&self) -> usize {
+        match &self.hierarchy {
+            Some(h) => h.transfers[0].ncols(),
+            None => self.interpolation.as_ref().map_or(0, Csr::ncols),
+        }
     }
-
-    /// Dimension of the retained geometric correction (zero for Jacobi).
-    #[must_use]
-    pub fn coarse_dofs(&self) -> usize { self.interpolation.as_ref().map_or(0, Csr::ncols) }
-
-    /// Scalar entries retained in the vector interpolation (zero for Jacobi).
-    #[must_use]
-    pub fn transfer_entries(&self) -> usize { self.interpolation.as_ref().map_or(0, Csr::nnz) }
-
-    /// Build numeric factors for the current density exactly once, then share
-    /// them across its independent loads. Call again after changing density.
-    /// All completed Galerkin applications are exposed to the callback even
-    /// when it cancels. No partial diagonal/factor is returned on failure.
+    /// Total retained interpolation entries; zero for Jacobi.
+    #[must_use] pub fn transfer_entries(&self) -> usize {
+        match &self.hierarchy {
+            Some(h) => h.transfers.iter().map(Csr::nnz).sum(),
+            None => self.interpolation.as_ref().map_or(0, Csr::nnz),
+        }
+    }
+    /// Geometry-only sizes including the finest and compact correction spaces.
+    #[must_use] pub fn level_sizes(&self) -> Vec<usize> {
+        let mut sizes = vec![self.n()];
+        if let Some(h) = &self.hierarchy { sizes.extend(h.transfers.iter().map(Csr::ncols)); }
+        else if let Some(p) = &self.interpolation { sizes.push(p.ncols()); }
+        sizes
+    }
+    /// Original fine-application progress view. Recursive sparse setup uses no
+    /// fine applications; use `prepare_with_work` to observe its local products.
+    /// Both entry points poll the same work boundaries and return the same action.
     pub fn prepare(&self, mut checkpoint: impl FnMut(TwoLevelWork) -> ControlFlow<()>)
         -> Result<AdaptivePrepared3<'_>, AdaptivePreconditionError3> {
-        let diagonal = self.operator.prepare_jacobi(self.options.max_diagonal_contributions,
-            || checkpoint(TwoLevelWork::default())).map_err(AdaptivePreconditionError3::Physics)?;
+        self.prepare_with_work(|w| checkpoint(TwoLevelWork { operator_applications: w.operator_applications }))
+    }
+    /// Prepare CURRENT density once, then reuse for its independent RHS family.
+    /// Recursive setup contracts retained bulk and ghost terms into the first
+    /// sparse coarse operator, without full fine assembly or coordinate probing.
+    /// Failed/cancelled construction exposes spent products but no partial action.
+    pub fn prepare_with_work(&self, mut checkpoint: impl FnMut(AdaptiveSetupWork3) -> ControlFlow<()>)
+        -> Result<AdaptivePrepared3<'_>, AdaptivePreconditionError3> {
+        let cap = self.hierarchy.as_ref().map_or(self.options.max_diagonal_contributions,
+            |h| h.options.max_diagonal_contributions);
+        let diagonal = self.operator.prepare_jacobi(cap,
+            || checkpoint(AdaptiveSetupWork3::default())).map_err(AdaptivePreconditionError3::Physics)?;
+        if let Some(hierarchy) = &self.hierarchy {
+            return hierarchy.prepare(&self.operator, diagonal.inverse_diagonal(), checkpoint).map(AdaptivePrepared3::Multilevel);
+        }
         match &self.interpolation {
             None => Ok(AdaptivePrepared3::Jacobi(diagonal)),
             Some(p) => AdditiveTwoLevel::new(&self.operator, diagonal.inverse_diagonal(), p.clone(),
-                self.options.two_level, checkpoint)
-                .map(AdaptivePrepared3::TwoLevel).map_err(AdaptivePreconditionError3::Coarse),
+                self.options.two_level, |w| checkpoint(AdaptiveSetupWork3 {
+                    operator_applications: w.operator_applications, galerkin_products: 0,
+                })).map(AdaptivePrepared3::TwoLevel).map_err(AdaptivePreconditionError3::Coarse),
         }
     }
 }
@@ -108,29 +125,31 @@ impl LinearOp for AdaptiveSolveSpace3 {
     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) { self.operator.apply_transpose(x, y); }
 }
 
-/// One immutable-density numerical preparation, reusable for any RHS family.
-/// Both variants retain the physical operator's lifetime; neither permits a
-/// stiffness mutation while its numerical data are live.
+/// One immutable-density numerical action, reusable across an RHS family.
 pub enum AdaptivePrepared3<'a> {
-    /// Exact diagonal of the current constrained stiffness.
     Jacobi(AdaptiveJacobi3<'a>),
-    /// Fixed linear SPD additive coarse correction for the current stiffness.
     TwoLevel(AdditiveTwoLevel<'a, AdaptiveElasticity3>),
+    Multilevel(SparseMultilevel<'a, AdaptiveElasticity3>),
 }
 impl AdaptivePrepared3<'_> {
-    /// Completed setup applications; diagonal-only setup uses no fine applies.
-    #[must_use]
-    pub fn work(&self) -> TwoLevelWork {
-        match self { Self::Jacobi(_) => TwoLevelWork::default(), Self::TwoLevel(p) => p.work() }
+    /// Fine-application count; recursive assembly instead reports products in
+    /// `setup_work()`. This method retains the original two-level accounting.
+    #[must_use] pub fn work(&self) -> TwoLevelWork {
+        TwoLevelWork { operator_applications: self.setup_work().operator_applications }
     }
-    /// The exact physical operator used to prepare this numerical action.
-    #[must_use]
-    pub fn operator(&self) -> &AdaptiveElasticity3 {
-        match self { Self::Jacobi(p) => p.operator(), Self::TwoLevel(p) => p.operator() }
+    #[must_use] pub fn setup_work(&self) -> AdaptiveSetupWork3 {
+        match self {
+            Self::Jacobi(_) => AdaptiveSetupWork3::default(),
+            Self::TwoLevel(p) => AdaptiveSetupWork3 { operator_applications: p.work().operator_applications, galerkin_products: 0 },
+            Self::Multilevel(p) => AdaptiveSetupWork3 { operator_applications: 0, galerkin_products: p.work().galerkin_products },
+        }
+    }
+    #[must_use] pub fn operator(&self) -> &AdaptiveElasticity3 {
+        match self { Self::Jacobi(p) => p.operator(), Self::TwoLevel(p) => p.operator(), Self::Multilevel(p) => p.operator() }
     }
 }
 impl Precond for AdaptivePrepared3<'_> {
     fn apply(&self, r: &[f64], z: &mut [f64]) {
-        match self { Self::Jacobi(p) => p.apply(r, z), Self::TwoLevel(p) => p.apply(r, z) }
+        match self { Self::Jacobi(p) => p.apply(r, z), Self::TwoLevel(p) => p.apply(r, z), Self::Multilevel(p) => p.apply(r, z) }
     }
 }
