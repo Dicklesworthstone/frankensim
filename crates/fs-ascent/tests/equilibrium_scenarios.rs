@@ -99,3 +99,6 @@ fn complete_realizations_relocate_and_user_labels_are_escaped_without_input_muta
     assert_eq!(std::fs::read_to_string(d).unwrap(),DESIGN);
     assert_eq!(std::fs::read_to_string(s).unwrap(),scenarios);
 }
+
+#[path = "equilibrium_scenarios/cvar.rs"]
+mod cvar;

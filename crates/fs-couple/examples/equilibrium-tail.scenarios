@@ -1,0 +1,11 @@
+frankensim-equilibrium-scenarios-v1
+risk empirical-cvar 0.4
+scenarios 4
+scenario baseline-a
+offset load-N 0
+scenario baseline-b
+offset load-N 0
+scenario baseline-c
+offset load-N 0
+scenario high-load
+offset load-N 4
