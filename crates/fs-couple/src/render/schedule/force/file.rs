@@ -55,6 +55,8 @@
 mod contact;
 // Version 5 adds an explicit friction declaration for every normal contact.
 mod friction;
+/// File-driven static design over the same authored mechanical models.
+pub mod design;
 
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use fs_blake3::{ContentHash, hash_domain};
@@ -67,6 +69,9 @@ use super::{ForceInitialization, ForceRenderConfig, ModalForceEvent, ModalForceV
 use super::super::ScheduledRenderer;
 use super::coupled::{ModalAttachment, ModalConnection, ModalCouplingConfig};
 use fs_exec::CancelGate;
+use super::coupled::contact::{ModalContact, ModalContactConfig};
+use super::coupled::contact::multiple::MultiContactConfig;
+use super::coupled::contact::multiple::friction::ModalFriction;
 
 /// Schema token at the beginning of each file.
 pub const MODAL_PERFORMANCE_SCHEMA: &str = "frankensim-modal-performance-v1";
@@ -176,6 +181,34 @@ impl ModalPerformance {
     /// Malformed, oversized or incomplete input; invalid physical data; and any
     /// existing modal-state, preload, projection or schedule admission refusal.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, ModalPerformanceError> {
+        ParsedPerformance::from_bytes(bytes, max_block)?.compile()
+    }
+
+    /// Read the frozen input description without advancing the renderer.
+    #[must_use]
+    pub const fn info(&self) -> ModalPerformanceInfo { self.info }
+
+    /// Move the admitted runtime to the existing scheduler/audio export APIs.
+    #[must_use]
+    pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }
+}
+
+// Parsed components retain their source port maps. Audio compilation consumes
+// them unchanged; static design checks its own stronger template conditions.
+// Parsing alone does not claim complete network/preload/schedule admission.
+struct ParsedPerformance {
+    info: ModalPerformanceInfo,
+    voices: Vec<ModalForceVoice>,
+    events: Vec<ModalForceEvent>,
+    force_config: ForceRenderConfig,
+    coupled: Option<(Vec<ModalConnection>, ModalCouplingConfig)>,
+    contact: Option<(ModalContact, ModalContactConfig)>,
+    multiple: Option<(Vec<(ModalContact, ModalContactConfig)>, MultiContactConfig)>,
+    frictions: Option<Vec<Option<ModalFriction>>>,
+}
+
+impl ParsedPerformance {
+    fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, ModalPerformanceError> {
         if bytes.len() > MAX_MODAL_PERFORMANCE_BYTES || !(1..=65_536).contains(&max_block) {
             return Err(input(1, "input exceeds 4 MiB or callback size is outside 1..=65536"));
         }
@@ -365,7 +398,25 @@ impl ModalPerformance {
         let force_config = ForceRenderConfig {
             sample_rate_hz, max_block, max_events: event_count, max_controls, max_projection_terms,
         };
-        let (renderer, connection_count, domain) = match coupled {
+        let domain = match schema {
+            MODAL_COUPLED_PERFORMANCE_SCHEMA => MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN,
+            MODAL_CONTACT_PERFORMANCE_SCHEMA => MODAL_CONTACT_PERFORMANCE_HASH_DOMAIN,
+            MODAL_MULTI_CONTACT_PERFORMANCE_SCHEMA => MODAL_MULTI_CONTACT_PERFORMANCE_HASH_DOMAIN,
+            MODAL_FRICTION_PERFORMANCE_SCHEMA => MODAL_FRICTION_PERFORMANCE_HASH_DOMAIN,
+            _ => MODAL_PERFORMANCE_HASH_DOMAIN,
+        };
+        let connection_count = coupled.as_ref().map_or(0, |(items, _)| items.len());
+        Ok(Self {
+            info: ModalPerformanceInfo { schema, connections: connection_count, contacts: contact_count, friction_contacts: friction_count,
+                sample_rate_hz, samples, full_scale_pa, input_hash: hash_domain(domain, bytes),
+                voices: voice_count, modes: total_modes, force_events: event_count },
+            voices, events, force_config, coupled, contact, multiple, frictions,
+        })
+    }
+
+    fn compile(self) -> Result<ModalPerformance, ModalPerformanceError> {
+        let Self { info, voices, events, force_config, coupled, contact, multiple, frictions } = self;
+        let (renderer, _, _) = match coupled {
             Some((connections, coupling)) => {
                 let count = connections.len();
                 match multiple {
@@ -388,21 +439,8 @@ impl ModalPerformance {
             }
             None => (ScheduledRenderer::from_modal_forces(voices, events, force_config)?, 0, MODAL_PERFORMANCE_HASH_DOMAIN),
         };
-        Ok(Self {
-            info: ModalPerformanceInfo { schema, connections: connection_count, contacts: contact_count, friction_contacts: friction_count,
-                sample_rate_hz, samples, full_scale_pa, input_hash: hash_domain(domain, bytes),
-                voices: voice_count, modes: total_modes, force_events: event_count },
-            renderer,
-        })
+        Ok(ModalPerformance { info, renderer })
     }
-
-    /// Read the frozen input description without advancing the renderer.
-    #[must_use]
-    pub const fn info(&self) -> ModalPerformanceInfo { self.info }
-
-    /// Move the admitted runtime to the existing scheduler/audio export APIs.
-    #[must_use]
-    pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }
 }
 
 fn read_attachment(reader: &mut Reader<'_>, key: &str, voices: &[ModalForceVoice], total_weights: &mut usize)
