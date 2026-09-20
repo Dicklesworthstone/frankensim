@@ -141,7 +141,7 @@ impl MembraneReduction {
             fixed[node] = true;
         }
         if fixed_nodes.len() < 2 { return Err(bad("in-plane membrane rigid motions require explicit supports")); }
-        let mut free = 0;
+        let mut free = 0usize;
         let mut map = vec![[None; 2]; nodes];
         for node in 0..nodes { if !fixed[node] {
             map[node] = [Some(free), Some(free+1)]; free += 2;

@@ -21,6 +21,8 @@ use fs_exec::CancelGate;
 
 /// Geometry-derived cylindrical pressure basis, using the existing eigensolver.
 pub mod cylinder;
+/// Passive inertial openings coupled to the same distributed pressure field.
+pub mod neck;
 
 
 /// Cold-compiled acoustic storage. Interface signs are OUTWARD from the gas,
@@ -34,6 +36,8 @@ pub struct CavityCoupling {
     springs: Vec<VolumeSpring>,
     dynamic: Vec<Option<usize>>,
     total: usize,
+    medium: crate::vibroacoustic::AcousticMedium,
+    necks: Vec<neck::CompiledNeck>,
 }
 impl CavityCoupling {
     /// Compile the existing row-major structural-by-acoustic overlap matrix.
@@ -84,13 +88,15 @@ impl CavityCoupling {
             springs.push(VolumeSpring { bulk_modulus_pa:bulk, volume_m3:cavity.lambdas[j], areas });
         }
         Ok(Self { structural, omegas:cavity.omegas.clone(), damping:damping_per_s.to_vec(),
-            springs, dynamic, total })
+            springs, dynamic, total,
+            medium: crate::vibroacoustic::AcousticMedium {rho0:cavity.rho0,c0:cavity.c0},
+            necks:Vec::new() })
     }
 
     /// Original solid/striker coordinates; these keep their original addresses.
     #[must_use]
     pub fn structural_modes(&self) -> usize { self.structural }
-    /// All interleaved coordinates, including nonzero-frequency acoustic inertia.
+    /// All mechanical coordinates, including standing-wave and neck inertia.
     #[must_use]
     pub fn total_modes(&self) -> usize { self.total }
     /// Retained cavity basis size, including uniform compression when supplied.
@@ -98,15 +104,17 @@ impl CavityCoupling {
     pub fn cavity_modes(&self) -> usize { self.omegas.len() }
 
     /// Compose before execution, preserving every original body's initial motion
-    /// and every pad's declared conditioning. Acoustic inertial coordinates start
-    /// at zero: initial pressure is -rho*c^2/Lambda * C.q, not silently relaxed.
+    /// and every pad's declared conditioning. Standing-wave coordinates start
+    /// at zero; necks use their explicit initial volumes/flows. Initial pressure
+    /// includes those volumes and is not silently relaxed.
     /// Cavity springs REPLACE the compact VolumeSpring; there is no argument for
     /// adding a second copy of that same gas compliance. Contact/pad rows are
     /// extended by exact zeros so solid contact never acts directly on gas modes.
     /// Caller forces and radiation projections must likewise append exact zeros.
     ///
     /// Acoustic momentum drag is passive. Its pressure equation is
-    /// a''+d*a'+omega^2*a = -A*C.(q''+d*q'), not hysteretic stiffness loss.
+    /// a''+d*a'+omega^2*a = -A*C.(q''+d*q') without necks; with necks the same
+    /// equation includes their outward volume derivatives. Not hysteretic loss.
     /// No radiation load, mean flow, thermoviscous spectrum or RT claim is inferred.
     pub fn build(self, mut bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
         mut pads: Vec<FeltPad>, config: ImpactConfig, gate: &CancelGate)
@@ -117,6 +125,7 @@ impl CavityCoupling {
         if count != Some(self.structural) || contacts.len() > 32 || pads.len() > 16
             || !config.dt_s.is_finite() || config.dt_s <= 0.0
             || self.omegas.iter().any(|w| w*config.dt_s >= 0.9*core::f64::consts::PI)
+            || self.necks.iter().any(|n| n.fixed_wall_omega*config.dt_s >= 0.9*core::f64::consts::PI)
         { return Err(invalid("cavity/body basis mismatch or acoustic Nyquist limit")); }
         let mut extended = Vec::with_capacity(contacts.len());
         for contact in contacts {
@@ -139,10 +148,17 @@ impl CavityCoupling {
             pad.weights.resize(self.total,0.0);
         }
         if self.total > self.structural {
+            let mut initial=vec![ModalAcousticState::default();self.total-self.structural];
+            let mut damping=vec![0.0;initial.len()];
+            for (coordinate,&drag) in self.dynamic.iter().zip(&self.damping) {
+                if let Some(i)=coordinate { damping[*i-self.structural]=drag; }
+            }
+            for neck in &self.necks {
+                initial[neck.coordinate-self.structural]=neck.initial;
+                damping[neck.coordinate-self.structural]=neck.drag_per_s;
+            }
             bodies.push(ImpactBody { potential:BodyPotential::Linear(vec![0.0;self.total-self.structural]),
-                initial:vec![ModalAcousticState::default();self.total-self.structural],
-                damping_per_s:self.dynamic.iter().zip(&self.damping)
-                    .filter_map(|(i,&d)| i.map(|_|d)).collect() });
+                initial,damping_per_s:damping });
         }
         let system = ImpactSystem::new(bodies,extended,pads,self.springs.clone(),config)?;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
