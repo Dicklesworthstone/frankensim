@@ -107,3 +107,6 @@ fn resume_refuses_policy_changes_and_existing_destinations() {
     assert_eq!(std::fs::read(root.join("occupied/keep")).unwrap(), b"original");
     assert!(result.stdout.is_empty());
 }
+
+#[path = "projected_resume/refinement.rs"]
+mod refinement;

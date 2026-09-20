@@ -47,7 +47,7 @@ pub(super) fn save(path: &Path, optimizer: &MultiLoadProjectedOptimizer) -> Resu
     Ok(())
 }
 
-fn load(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+pub(super) fn load(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     const MAX_BYTES: u64 = 4 * 1024 * 1024 + 65;
     let mut bytes = Vec::new();
     File::open(path)?.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
@@ -86,7 +86,7 @@ pub(super) fn resume(args: &[String]) -> Result<u8, Box<dyn Error>> {
     let input = optimizer.geometry().clone();
     run_optimizer(output, optimizer, &input, Options {
         enabled: true, pause_after: pause, recovery_solves: budget - remaining,
-    })
+    }, None)
 }
 
 #[cfg(test)]

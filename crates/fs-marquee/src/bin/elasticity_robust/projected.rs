@@ -14,6 +14,7 @@ use std::path::Path;
 
 mod stress;
 mod checkpoint;
+mod refinement;
 
 fn quoted(value: &str) -> String {
     let mut out = String::new();
@@ -129,6 +130,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if args.first().is_some_and(|arg| arg == "--resume") {
         return checkpoint::resume(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "--refine") {
+        return refinement::run(&args[1..]);
+    }
     let (args, checkpoint_options) = checkpoint::options(args)?;
     // Constraint input is checked before any path reads, solver work or output.
     let (positional, stress_limit) = stress::options(&args)?;
@@ -183,12 +187,13 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if let Some(limit) = stress_limit {
         optimizer = optimizer.with_sampled_stress_limit(limit)?;
     }
-    run_optimizer(output, optimizer, &field, checkpoint_options)
+    run_optimizer(output, optimizer, &field, checkpoint_options, None)
 }
 
 fn run_optimizer(
     output: &Path, mut optimizer: MultiLoadProjectedOptimizer, field: &GridSdf,
     checkpoint_options: checkpoint::Options,
+    refinement: Option<&refinement::Handoff>,
 ) -> Result<u8, Box<dyn Error>> {
     let settings = optimizer.settings();
     let level = settings.level;
@@ -207,6 +212,13 @@ fn run_optimizer(
         return Err(format!("checkpoint exceeds this executable's grid/update/candidate bounds; recovery_solves_started={}", checkpoint_options.recovery_solves).into());
     }
     std::fs::create_dir(output)?;
+    let refinement_summary = if let Some(handoff) = refinement {
+        let json = handoff.json();
+        let mut file = writer(&output.join("refinement.json"))?;
+        writeln!(file, "{json}")?;
+        file.flush()?;
+        format!(",\"refinement\":{json}")
+    } else { String::new() };
     write_field(&output.join("input-level-set.csv"), field)?;
     write_field(&output.join("baseline-level-set.csv"), optimizer.baseline_geometry())?;
     write_loads(&output.join("load-cases.csv"), &cases)?;
@@ -272,7 +284,7 @@ fn run_optimizer(
         None => ("projected-multiload-v1", String::new()),
     };
     let summary = format!(
-        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
+        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary}{refinement_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
         optimizer.next_iteration(), cases.len(), projection.tolerance, optimizer.solves_started(),
         state_json(optimizer.baseline()), state_json(&optimizer.current()),
     );
