@@ -385,7 +385,9 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   `TetLinearElasticProblem` -> `fs_modal::slice_window` -> per-mode
   re-normalization from the solver's `phi^T M phi = 1` convention to
   UNIT MEAN TRANSLATION of the orifice face (mass normalization would
-  destroy the units), minting physical `m_eff = phi^T M phi` [kg],
+  destroy the units). The mean includes every declared face node, with
+  constrained components contributing zero; duplicate face nodes refuse.
+  This mints physical `m_eff = phi^T M phi` [kg],
   `k_eff = lambda m_eff` [N/m], and `c = eta sqrt(k m)` from the card's
   AUTHORED loss factor (the lab does not invent Q values). The
   retained-compliance law: the modal compliance
@@ -397,15 +399,39 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   floor REFUSES (`RetainedComplianceTooLow`). Orifice geometry is
   MEASURED from the mesh: the face is the surface strip facing the
   opposing plane, gap = closest approach, width/channel-thickness =
-  face extents. The card carries the provenance chain (mesh digest,
+  face extents. Opening and width axes must be perpendicular (normalized
+  dot-product tolerance 1e-12); nonfinite opposing-plane offsets refuse
+  before assembly. An oblique frame is not silently projected or rescaled.
+  The card carries the provenance chain (mesh digest,
   material state-point receipt identity, source id) under a
   domain-separated schema-versioned content identity with
-  canonical-bytes round-trip and tamper refusal; `beating_reed()`
-  mints the `fs_scenario::BeatingReed` with the runtime's own face
-  convention `P_c = k H / (w * 0.025)` so the massless and massive
-  branches agree. It also passes the card loss as explicit reed damping
+  canonical-bytes round-trip and tamper refusal. Loading requires at least
+  one mode, bounds mode allocation by available input rows, and refuses
+  trailing records after the identity. `beating_reed()`
+  requires an explicit effective pressure area `A` [m²], conjugate to the
+  mean-opening coordinate, and mints `fs_scenario::BeatingReed` with
+  `P_c = k H / A`. No fixed pressure-face length is assumed. Distributed
+  pressure-load projection is available through `reduce_pressure_loaded_valve`;
+  authored areas supplied directly to the plain card remain research inputs.
+  Empty cards and invalid converted parameters refuse.
+  It also passes the card loss as explicit reed damping
   `zeta = eta/2`, preserving `c = eta sqrt(k m)` in the playing dynamics.
   This is the existing reduced viscous model, not a broadband loss-law fit.
+  `reduce_pressure_loaded_valve` accepts one finite mesh-axis force-per-pascal
+  vector [m²] per node. It projects the load onto each retained mode using
+  `A = phi^T load / mean_face(phi)`. This is the same work-conjugate coefficient
+  for generalized force `p A` and swept-volume flow `A v`; constrained DOFs
+  do no virtual work. The loaded surface need not equal the opening-observation
+  face. The returned `PressureLoadedValve` retains the card, signed per-mode
+  areas and an identity covering card/load/projections, and converts its first
+  mode without a separately authored area. Nonpositive first-mode area refuses
+  the positive-closing reed conversion instead of taking an absolute value.
+  The caller owns consistent surface-load assembly, pressure orientation and
+  units. This does not discover wetted surfaces, solve a pressure field, or
+  certify pressure-load modal convergence from the opening-compliance fraction.
+  The existing card serialization remains structural; it does not serialize
+  this pressure port. The cane integration assembles uniform-pressure loads
+  from its planar underside triangles and exercises the resulting bore response.
 
 ## Invariants
 

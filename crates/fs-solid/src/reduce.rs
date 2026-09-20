@@ -117,7 +117,8 @@ pub struct OrificeSpec<'a> {
     pub face_nodes: &'a [usize],
     /// Unit opening axis (the face moves along this to close the gap).
     pub opening_axis: [f64; 3],
-    /// Unit width axis (the slit's long direction).
+    /// Unit width axis (the slit's long direction), perpendicular to the
+    /// opening axis within 1e-12 in normalized dot product.
     pub width_axis: [f64; 3],
     /// Offset of the opposing surface along the opening axis [m]; the
     /// rest gap is measured FROM THE MESH as the CLOSEST approach
@@ -197,6 +198,49 @@ pub struct ValveCard {
     pub total_mass_kg: f64,
 }
 
+/// A valve reduction with a work-conjugate distributed pressure port.
+/// Load vectors describe force per pascal toward opening; the reed's positive
+/// closing pressure acts against them. Areas may be signed for higher modes.
+#[derive(Debug, Clone)]
+pub struct PressureLoadedValve {
+    card: ValveCard,
+    effective_areas_m2: Vec<f64>,
+    identity: ContentHash,
+}
+
+impl PressureLoadedValve {
+    /// Structural reduction with its material and mesh identities.
+    #[must_use]
+    pub fn card(&self) -> &ValveCard {
+        &self.card
+    }
+
+    /// Generalized force per pascal, also volume flow per modal velocity.
+    #[must_use]
+    pub fn effective_areas_m2(&self) -> &[f64] {
+        &self.effective_areas_m2
+    }
+
+    /// Identity of the structural card, nodal pressure load and projections.
+    #[must_use]
+    pub fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Convert the first mode using its projected area, without authored area.
+    /// # Errors
+    /// Refuses nonpositive first-mode area or invalid reed inputs. Signed or
+    /// zero ports cannot be represented by this positive-closing reed model.
+    pub fn beating_reed(
+        &self,
+        pressure_pa: f64,
+        attack_s: f64,
+    ) -> Result<fs_scenario::BeatingReed, ReduceError> {
+        self.card
+            .beating_reed(self.effective_areas_m2[0], pressure_pa, attack_s)
+    }
+}
+
 fn unit(v: [f64; 3]) -> Result<[f64; 3], ReduceError> {
     let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if !(n > 0.0 && n.is_finite()) {
@@ -224,6 +268,25 @@ fn mesh_digest(nodes: &[[f64; 3]], tets: &[[usize; 4]]) -> ContentHash {
     h.finalize()
 }
 
+// The face is a set of nodes (validated by the caller). Prescribed zero
+// components contribute zero to its mean, but their nodes remain in the
+// denominator. Counting free x components would change normalization under
+// unrelated constraints or a permutation of coordinate axes.
+fn mean_face_translation(
+    phi: &[f64],
+    free_dofs: &[usize],
+    face_nodes: &[usize],
+    axis: [f64; 3],
+) -> f64 {
+    let mut sum = 0.0;
+    for (&value, &full) in phi.iter().zip(free_dofs) {
+        if face_nodes.contains(&(full / 3)) {
+            sum += value * axis[full % 3];
+        }
+    }
+    sum / face_nodes.len() as f64
+}
+
 /// Run the reduction: assemble, certify modes, renormalize, disclose the
 /// retained compliance, measure the orifice, and mint the card.
 ///
@@ -232,9 +295,65 @@ fn mesh_digest(nodes: &[[f64; 3]], tets: &[[usize; 4]]) -> ContentHash {
 /// retained-compliance law).
 #[allow(clippy::too_many_lines)] // one reduction pipeline, kept whole
 pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<ValveCard, ReduceError> {
+    reduce_valve_impl(request, cx, None).map(|(card, _)| card)
+}
+
+/// Reduce with explicit nodal force-per-pascal vectors [m²], in mesh axes.
+/// Each vector is the consistent nodal integral of the chosen pressure shape
+/// over the caller's loaded surface. Fixed DOFs do no virtual work. The load
+/// may cover a different surface than the orifice's opening observation.
+/// For a unit-mean-opening mode psi, A = psi^T load, so F = p A and Q = A v.
+/// This uses the existing structural modes; it does not solve pressure fields
+/// or certify modal adequacy for this load from the opening-compliance test.
+/// # Errors
+/// Refuses mismatched/nonfinite load fields, nonfinite projections, or any
+/// ordinary reduction refusal. Negative/zero areas are retained, not clamped.
+pub fn reduce_pressure_loaded_valve(
+    request: &ValveCardRequest<'_>,
+    nodal_load_per_pa_m2: &[[f64; 3]],
+    cx: &Cx<'_>,
+) -> Result<PressureLoadedValve, ReduceError> {
+    if nodal_load_per_pa_m2.len() != request.nodes_m.len()
+        || !nodal_load_per_pa_m2.iter().flatten().all(|v| v.is_finite())
+    {
+        return Err(ReduceError::Invalid {
+            what: "pressure load must contain one finite vector per mesh node",
+        });
+    }
+    let (card, effective_areas_m2) = reduce_valve_impl(request, cx, Some(nodal_load_per_pa_m2))?;
+    let mut hash = DomainHasher::new("org.frankensim.fs-solid.pressure-loaded-valve.v1");
+    hash.update(card.identity.as_bytes());
+    hash.update(&(nodal_load_per_pa_m2.len() as u64).to_le_bytes());
+    for value in nodal_load_per_pa_m2
+        .iter()
+        .flatten()
+        .chain(effective_areas_m2.iter())
+    {
+        hash.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(PressureLoadedValve {
+        card,
+        effective_areas_m2,
+        identity: hash.finalize(),
+    })
+}
+
+fn pressure_area(phi: &[f64], free_dofs: &[usize], load: &[[f64; 3]], mean_opening: f64) -> f64 {
+    phi.iter()
+        .zip(free_dofs)
+        .map(|(value, full)| value * load[full / 3][full % 3])
+        .sum::<f64>()
+        / mean_opening
+}
+
+fn reduce_valve_impl(
+    request: &ValveCardRequest<'_>,
+    cx: &Cx<'_>,
+    pressure_load: Option<&[[f64; 3]]>,
+) -> Result<(ValveCard, Vec<f64>), ReduceError> {
     if request.face_nodes_invalid() {
         return Err(ReduceError::Invalid {
-            what: "orifice face nodes must be non-empty and in range",
+            what: "orifice face nodes must be non-empty, unique and in range",
         });
     }
     if !(request.window_hz.0 > 0.0 && request.window_hz.1 > request.window_hz.0) {
@@ -254,6 +373,17 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
     }
     let axis = unit(request.orifice.opening_axis)?;
     let width_axis = unit(request.orifice.width_axis)?;
+    let alignment: f64 = axis.iter().zip(width_axis).map(|(a, w)| a * w).sum();
+    if alignment.abs() > 1e-12 {
+        return Err(ReduceError::Invalid {
+            what: "orifice opening and width axes must be perpendicular",
+        });
+    }
+    if !request.orifice.opposing_plane_offset_m.is_finite() {
+        return Err(ReduceError::Invalid {
+            what: "orifice opposing-plane offset must be finite",
+        });
+    }
 
     // 1. Assemble the (K, M) pencil.
     let material = TetElasticMaterial::from_resolved_elastic_state(request.material);
@@ -322,27 +452,17 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
     //    base-excitation participation, a different animal; the first
     //    build used it and retained 1e-11 of the compliance).
     let mut modes = Vec::new();
+    let mut effective_areas_m2 = Vec::new();
     let mut retained = 0.0f64;
-    let mean_face = |phi: &[f64]| -> f64 {
-        // Mean opening-axis translation of the face nodes.
-        let mut acc = 0.0f64;
-        let mut count = 0usize;
-        for (red, &full) in assembly.free_dofs.iter().enumerate() {
-            let node = full / 3;
-            let comp = full % 3;
-            if request.orifice.face_nodes.contains(&node) {
-                acc += phi[red] * axis[comp];
-                if comp == 0 {
-                    count += 1;
-                }
-            }
-        }
-        acc / (count.max(1) as f64)
-    };
     for pair in &report.modes {
         let gamma: f64 = pair.phi.iter().zip(&r).map(|(a, b)| a * b).sum();
         retained += gamma * gamma / pair.lambda;
-        let u_face = mean_face(&pair.phi);
+        let u_face = mean_face_translation(
+            &pair.phi,
+            &assembly.free_dofs,
+            request.orifice.face_nodes,
+            axis,
+        );
         if u_face.abs() < 1e-30 {
             // A mode that does not move the face contributes no valve
             // dynamics; keep it out of the card's realizations.
@@ -354,6 +474,15 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
         let mass_kg = scale * scale;
         let stiffness_n_m = pair.lambda * mass_kg;
         let damping_n_s_m = request.loss_factor * (stiffness_n_m * mass_kg).sqrt();
+        if let Some(load) = pressure_load {
+            let area = pressure_area(&pair.phi, &assembly.free_dofs, load, u_face);
+            if !area.is_finite() {
+                return Err(ReduceError::Invalid {
+                    what: "projected pressure area is not finite",
+                });
+            }
+            effective_areas_m2.push(area);
+        }
         modes.push(ReducedMode {
             frequency_hz: pair.lambda.sqrt() / tau,
             mass_kg,
@@ -420,7 +549,7 @@ pub fn reduce_valve(request: &ValveCardRequest<'_>, cx: &Cx<'_>) -> Result<Valve
         total_mass_kg: assembly.total_mass_kg,
     };
     card.identity = card.recomputed_identity();
-    Ok(card)
+    Ok((card, effective_areas_m2))
 }
 
 impl ValveCardRequest<'_> {
@@ -430,7 +559,8 @@ impl ValveCardRequest<'_> {
                 .orifice
                 .face_nodes
                 .iter()
-                .any(|&n| n >= self.nodes_m.len())
+                .enumerate()
+                .any(|(i, &n)| n >= self.nodes_m.len() || self.orifice.face_nodes[..i].contains(&n))
     }
 }
 
@@ -576,6 +706,14 @@ impl ValveCard {
             .map_err(|_| ReduceError::Card {
                 what: "bad mode count",
             })?;
+        // Every mode needs an input row, followed by one identity row.
+        // Do not allocate from an unchecked file count. A zero-mode card
+        // also cannot supply the first mode required by beating_reed().
+        if n_modes == 0 || n_modes > lines.len().saturating_sub(cursor).saturating_sub(1) {
+            return Err(ReduceError::Card {
+                what: "mode count must be nonzero and fit the remaining input rows",
+            });
+        }
         let mut modes = Vec::with_capacity(n_modes);
         for _ in 0..n_modes {
             let line = lines.get(cursor).copied().ok_or(ReduceError::Card {
@@ -607,6 +745,11 @@ impl ValveCard {
                 what: "bad identity hex",
             },
         )?;
+        if cursor != lines.len() {
+            return Err(ReduceError::Card {
+                what: "trailing records after card identity",
+            });
+        }
         let card = ValveCard {
             identity,
             source_id,
@@ -629,27 +772,57 @@ impl ValveCard {
     }
 
     /// The card's 1-DOF island as an `fs_scenario::BeatingReed` (massive
-    /// branch: mode 0's mass and stiffness; the closing pressure follows
-    /// the runtime's own face convention `P_c = k H / (w * 0.025)` so the
-    /// massless and massive branches agree — see
-    /// fs-couple `reed_structural`).
-    #[must_use]
+    /// branch: mode 0's mass and stiffness). The caller supplies the effective
+    /// pressure area [m²], conjugate to this mode's mean-opening coordinate;
+    /// `P_c = k H / A` makes the pressure force and swept flow use that area.
+    /// The reduction does not yet derive this distributed-load projection.
+    /// Supplying an authored area does not upgrade the card's authority.
+    ///
+    /// # Errors
+    /// Refuses empty cards, nonphysical converted parameters and unrepresentable
+    /// closing pressure. No default face length or pressure area is substituted.
     pub fn beating_reed(
         &self,
+        effective_pressure_area_m2: f64,
         blowing_pressure_pa: f64,
         attack_s: f64,
-    ) -> fs_scenario::BeatingReed {
-        let m0 = &self.modes[0];
-        fs_scenario::BeatingReed {
+    ) -> Result<fs_scenario::BeatingReed, ReduceError> {
+        let m0 = self.modes.first().ok_or(ReduceError::Card {
+            what: "reed conversion requires a retained mode",
+        })?;
+        if ![
+            effective_pressure_area_m2,
+            self.rest_gap_m,
+            self.width_m,
+            m0.mass_kg,
+            m0.stiffness_n_m,
+        ]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+            || ![self.loss_factor, blowing_pressure_pa, attack_s]
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0)
+        {
+            return Err(ReduceError::Card {
+                what: "reed conversion requires finite physical area, mechanics and excitation",
+            });
+        }
+        let closing_pressure_pa = m0.stiffness_n_m * self.rest_gap_m / effective_pressure_area_m2;
+        if !closing_pressure_pa.is_finite() || closing_pressure_pa <= 0.0 {
+            return Err(ReduceError::Card {
+                what: "reed closing pressure is not positive finite",
+            });
+        }
+        Ok(fs_scenario::BeatingReed {
             rest_opening_m: self.rest_gap_m,
             width_m: self.width_m,
-            closing_pressure_pa: m0.stiffness_n_m * self.rest_gap_m / (self.width_m * 0.025),
+            closing_pressure_pa,
             blowing_pressure_pa,
             attack_s,
             mass_kg: m0.mass_kg,
             stiffness_n_m: m0.stiffness_n_m,
             damping_ratio: 0.5 * self.loss_factor,
-        }
+        })
     }
 
     /// JSON-lines log rows: the modal ladder with participations and the
@@ -688,6 +861,47 @@ impl ValveCard {
 #[cfg(test)]
 mod reduce_tests {
     use super::*;
+
+    #[test]
+    fn pressure_projection_preserves_virtual_work_and_mode_sign() {
+        // Nonuniform z motion at two free nodes; node 2 is clamped.
+        let phi = [2.0, 4.0];
+        let free = [2, 5];
+        let loads = [[0.0, 0.0, 0.3], [0.0, 0.0, 0.6], [0.0, 0.0, 99.0]];
+        let mean = mean_face_translation(&phi, &free, &[0, 1], [0.0, 0.0, 1.0]);
+        let area = pressure_area(&phi, &free, &loads, mean);
+        assert!((area - 1.0).abs() < 1e-14);
+        let (pressure, velocity) = (7.0, 0.2);
+        let nodal_power = pressure * (0.3 * (2.0 / 3.0) + 0.6 * (4.0 / 3.0)) * velocity;
+        assert!((pressure * area * velocity - nodal_power).abs() < 1e-14);
+        assert_eq!(pressure_area(&[-2.0, -4.0], &free, &loads, -mean), area);
+        let opposite = loads.map(|v| v.map(|x| -x));
+        assert_eq!(pressure_area(&phi, &free, &opposite, mean), -area);
+    }
+
+    #[test]
+    fn face_mean_preserves_partial_constraints_and_coordinate_permutations() {
+        // Two face nodes move 2 and 4 along z; both x components are fixed.
+        // G1: the nodal mean is 3, not the sum 6. The old denominator
+        // understated effective mass (and stiffness) by a factor of four.
+        let z_mean = mean_face_translation(&[2.0, 4.0], &[2, 5], &[0, 1], [0.0, 0.0, 1.0]);
+        assert_eq!(z_mean, 3.0);
+        assert_eq!((1.0 / z_mean).powi(2), 1.0 / 9.0);
+        // G3: relabel z as x, preserving the physical displacements.
+        let x_mean = mean_face_translation(&[2.0, 4.0], &[0, 3], &[0, 1], [1.0, 0.0, 0.0]);
+        assert_eq!(z_mean, x_mean);
+        // Releasing a transverse zero component cannot change the mean.
+        assert_eq!(
+            mean_face_translation(&[0.0, 2.0, 4.0], &[0, 2, 5], &[0, 1], [0.0, 0.0, 1.0]),
+            z_mean
+        );
+        // A fully clamped face node contributes zero, but still belongs to
+        // the declared face. Non-face motion does not enter its mean.
+        assert_eq!(
+            mean_face_translation(&[2.0, 4.0, 99.0], &[2, 5, 11], &[0, 1, 2], [0.0, 0.0, 1.0]),
+            2.0
+        );
+    }
     use fs_evidence::ValidityDomain;
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
@@ -1057,6 +1271,28 @@ mod reduce_tests {
             };
             let empty = reduce_valve(&base(&[]), cx);
             let oob = reduce_valve(&base(&[usize::MAX]), cx);
+            let duplicate = reduce_valve(&base(&[0, 0]), cx);
+            assert!(matches!(duplicate, Err(ReduceError::Invalid { .. })));
+            for width in [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 1.0, 1.0]] {
+                let mut oblique = base(&[0]);
+                oblique.orifice.width_axis = width;
+                assert!(matches!(
+                    reduce_valve(&oblique, cx),
+                    Err(ReduceError::Invalid {
+                        what: "orifice opening and width axes must be perpendicular"
+                    })
+                ));
+            }
+            for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut nonfinite = base(&[0]);
+                nonfinite.orifice.opposing_plane_offset_m = offset;
+                assert!(matches!(
+                    reduce_valve(&nonfinite, cx),
+                    Err(ReduceError::Invalid {
+                        what: "orifice opposing-plane offset must be finite"
+                    })
+                ));
+            }
             // Retained-compliance floor: a window that EXCLUDES the
             // compliant fundamental keeps only stiff high modes.
             let mut high = base(Box::leak(fx.tip.clone().into_boxed_slice()));
@@ -1110,15 +1346,59 @@ mod reduce_tests {
             let bytes = card.to_canonical_bytes();
             let back = ValveCard::from_canonical_bytes(&bytes).expect("round trip");
             let identical = back == card;
+            let mut empty = card.clone();
+            empty.modes.clear();
+            empty.identity = empty.recomputed_identity();
+            assert!(matches!(
+                ValveCard::from_canonical_bytes(&empty.to_canonical_bytes()),
+                Err(ReduceError::Card {
+                    what: "mode count must be nonzero and fit the remaining input rows"
+                })
+            ));
+            let mut suffixed = bytes.clone();
+            suffixed.extend_from_slice(b"mode\t1\t1\t1\t1\t1\n");
+            assert!(matches!(
+                ValveCard::from_canonical_bytes(&suffixed),
+                Err(ReduceError::Card {
+                    what: "trailing records after card identity"
+                })
+            ));
             // Tamper with one stiffness digit: the identity must refuse.
             let text = String::from_utf8(bytes).expect("utf8");
-            let tampered = text.replacen("mode\t", "mode\t", 1); // no-op guard
-            assert_eq!(tampered, text, "guard");
+            for count in [card.modes.len() + 1, usize::MAX] {
+                let oversized = text.replacen(
+                    &format!("modes\t{}\n", card.modes.len()),
+                    &format!("modes\t{count}\n"),
+                    1,
+                );
+                assert!(matches!(
+                    ValveCard::from_canonical_bytes(oversized.as_bytes()),
+                    Err(ReduceError::Card {
+                        what: "mode count must be nonzero and fit the remaining input rows"
+                    })
+                ));
+            }
             let mut altered = text.clone();
             let pos = altered.find("rest_gap_m\t").expect("field");
             altered.replace_range(pos + 11..pos + 12, "9");
             let refused = ValveCard::from_canonical_bytes(altered.as_bytes());
-            let beating = card.beating_reed(2000.0, 0.01);
+            let area = 1.0e-4;
+            let beating = card.beating_reed(area, 2000.0, 0.01).expect("reed");
+            let wider = card
+                .beating_reed(2.0 * area, 2000.0, 0.01)
+                .expect("wider pressure face");
+            assert_eq!(wider.closing_pressure_pa, 0.5 * beating.closing_pressure_pa);
+            assert_eq!(wider.mass_kg, beating.mass_kg);
+            assert_eq!(wider.stiffness_n_m, beating.stiffness_n_m);
+            let recovered_area =
+                beating.stiffness_n_m / beating.closing_pressure_pa * beating.rest_opening_m;
+            assert!((recovered_area / area - 1.0).abs() < 1e-14);
+            assert!(empty.beating_reed(area, 2000.0, 0.01).is_err());
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert!(card.beating_reed(bad, 2000.0, 0.01).is_err());
+            }
+            assert!(card.beating_reed(area, -1.0, 0.01).is_err());
+            assert!(card.beating_reed(area, 2000.0, f64::NAN).is_err());
             let reed_ok = beating.mass_kg > 0.0
                 && beating.stiffness_n_m > 0.0
                 && beating.rest_opening_m == card.rest_gap_m
