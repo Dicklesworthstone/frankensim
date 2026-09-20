@@ -116,7 +116,7 @@ impl MultiLoadProjectedOptimizer {
     /// authenticity. Transport must provide byte integrity (the CLI hashes it).
     /// Future evolution changes require an explicit checkpoint-version change.
     #[must_use]
-    pub fn checkpoint_bytes(&self) -> Vec<u8> {
+    pub(super) fn checkpoint_v1_bytes(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         let s = self.kernel.settings;
         word(&mut out, u64::from(s.level)); number(&mut out, s.volfrac);
@@ -179,7 +179,12 @@ impl MultiLoadProjectedOptimizer {
     pub fn restore_checkpoint(
         bytes: &[u8], remaining_recovery_solves: &mut usize,
     ) -> Result<Self, CutFemError> {
-        if bytes.len() > MAX_BYTES || !bytes.starts_with(MAGIC) {
+        if bytes.len() > MAX_BYTES {
+            return Err(invalid("unsupported or oversized projected checkpoint"));
+        }
+        let original_bytes = bytes;
+        let (bytes, restoration_reduction, restoration_updates) = restoration::checkpoint_payload(bytes)?;
+        if !bytes.starts_with(MAGIC) {
             return Err(invalid("unsupported or oversized projected checkpoint"));
         }
         let mut r = Reader { bytes, at: MAGIC.len() };
@@ -238,6 +243,8 @@ impl MultiLoadProjectedOptimizer {
         }
         let minimum_spent = (ordinal + 1) * case_count;
         if case_count == 0 || settings.iterations == 0 || controls.max_candidates == 0
+            || restoration_updates > ordinal
+            || (restoration_reduction.is_some() && stress_limit.is_none())
             || projection.target.to_bits() != settings.volfrac.to_bits()
             || !(settings.move_cells.is_finite() && settings.move_cells > 0.0)
             || !(controls.contraction.is_finite() && controls.contraction > 0.0 && controls.contraction < 1.0)
@@ -275,7 +282,7 @@ impl MultiLoadProjectedOptimizer {
         let current = evaluate(geometry)?;
         if (baseline.volume - projection.target).abs() > projection.tolerance
             || (current.volume - projection.target).abs() > projection.tolerance
-            || (ordinal > 0 && !(current.objective < baseline.objective))
+            || (restoration_reduction.is_none() && ordinal > 0 && !(current.objective < baseline.objective))
         {
             return Err(invalid("checkpoint independent feasibility/descent check failed"));
         }
@@ -283,6 +290,7 @@ impl MultiLoadProjectedOptimizer {
             kernel, current, baseline: MultiLoadProjectedState::of(&baseline), baseline_geometry,
             fixed, projection, controls, next_iteration: ordinal, ell, solves_started: spent,
             stress_limit, baseline_stress: None, current_stress: None,
+            restoration_reduction, restoration_updates,
         };
         if stress_limit.is_some() {
             let sample = |state: &MultiState| -> Result<RobustSampledStressEvaluation, CutFemError> {
@@ -293,12 +301,15 @@ impl MultiLoadProjectedOptimizer {
             };
             let baseline_stress = sample(&baseline)?;
             let current_stress = sample(&restored.current)?;
-            stress::require_feasible(stress_limit, Some(&baseline_stress))?;
-            stress::require_feasible(stress_limit, Some(&current_stress))?;
+            if restoration_reduction.is_none() {
+                stress::require_feasible(stress_limit, Some(&baseline_stress))?;
+                stress::require_feasible(stress_limit, Some(&current_stress))?;
+            }
             restored.baseline_stress = Some(baseline_stress);
             restored.current_stress = Some(current_stress);
         }
-        if restored.checkpoint_bytes() != bytes {
+        restored.check_restoration_history()?;
+        if restored.checkpoint_bytes() != original_bytes {
             return Err(invalid("checkpoint evidence differs from independent replay; no optimizer restored"));
         }
         Ok(restored)

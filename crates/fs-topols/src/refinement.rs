@@ -117,7 +117,8 @@ pub fn prolongate_level_set(
 /// borrowed and is unchanged on both success and refusal. Loads/order, material,
 /// objective, candidate controls, fixed regions and area/stress policies are
 /// inherited. Area is restored before all baseline loads and optional stresses
-/// are checked. An overstressed fine baseline refuses rather than weakening the
+/// are checked. Strict mode refuses an overstressed fine baseline; an explicitly
+/// inherited restoration policy retains it as infeasible, never enlarging the
 /// limit. No unassessed or merely interpolated displacement is published.
 ///
 /// The new baseline, update ordinal and nucleation/AL schedule start a NEW study;
@@ -155,7 +156,10 @@ pub fn refine_projected_study(
         refined.fixed_nodes, coarse.projection_settings(), controls,
     )?;
     if let Some(limit) = coarse.stress_limit() {
-        fine = fine.with_sampled_stress_limit(limit)?;
+        fine = match coarse.stress_restoration_reduction() {
+            Some(reduction) => fine.with_stress_restoration(limit, reduction)?,
+            None => fine.with_sampled_stress_limit(limit)?,
+        };
     }
     let max_projection_change = transferred.nodes().iter().zip(fine.geometry().nodes())
         .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);

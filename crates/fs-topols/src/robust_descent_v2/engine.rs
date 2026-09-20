@@ -139,6 +139,24 @@ impl Kernel {
     }
 
     fn direction(&self, state: &MultiState, iteration: usize) -> Result<Direction, CutFemError> {
+        self.direction_for_case(state, iteration, None)
+    }
+
+    // A restoration proposal uses the governing stress case's UNWEIGHTED
+    // compliance field. This is a search direction, not a stress derivative.
+    // The original objective and load declaration are never modified.
+    fn direction_for_case(
+        &self, state: &MultiState, iteration: usize, focus: Option<usize>,
+    ) -> Result<Direction, CutFemError> {
+        if focus.is_some_and(|index| index >= self.load_cases.len()
+            || index >= state.solutions.len())
+        {
+            return Err(invalid("restoration direction requires an evaluated load case"));
+        }
+        let active = focus.or(state.active);
+        let weight = |index: usize| {
+            if focus.is_some() { 1.0 } else { self.load_cases[index].weight() }
+        };
         let phi = &state.phi;
         let n = phi.n();
         let h = phi.h();
@@ -160,10 +178,10 @@ impl Kernel {
                     (p[1] - 0.75 * h * g[1] / gn).clamp(0.0, 1.0),
                 ];
                 if phi.value_at(q) > 0.0 { continue; }
-                let value = match state.active {
+                let value = match active {
                     Some(index) => {
                         let (eps, ok) = strain_at(&self.grid, &state.solutions[index], q);
-                        if ok { self.load_cases[index].weight() * stress_energy(self.lambda, self.mu, eps).1 } else { 0.0 }
+                        if ok { weight(index) * stress_energy(self.lambda, self.mu, eps).1 } else { 0.0 }
                     }
                     None => {
                         let mut total = 0.0;
@@ -212,12 +230,12 @@ impl Kernel {
                     if phi.value_at(p) > -2.0 * h { continue; }
                     let mut value = 0.0;
                     let mut any = false;
-                    match state.active {
+                    match active {
                         Some(index) => {
                             let (eps, ok) = strain_at(&self.grid, &state.solutions[index], p);
                             if ok {
                                 let (stress, _) = stress_energy(self.lambda, self.mu, eps);
-                                value = self.load_cases[index].weight()
+                                value = weight(index)
                                     * topological_derivative(self.lambda, self.mu, stress, eps);
                                 any = true;
                             }

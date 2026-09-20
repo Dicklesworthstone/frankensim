@@ -14,6 +14,7 @@ use crate::volume::{
 
 mod stress;
 mod checkpoint;
+mod restoration;
 
 /// Bounded candidate search and actual case-solve allowance.
 #[derive(Debug, Clone, Copy)]
@@ -106,9 +107,12 @@ pub struct MultiLoadProjectedAttempt {
 pub struct MultiLoadProjectedStep {
     /// Global accepted-update ordinal.
     pub iteration: usize,
-    /// Fully evaluated feasible previous state.
+    /// This update reduces stress violation, not necessarily compliance.
+    pub restoration: bool,
+    /// Fully evaluated area-feasible previous state.
     pub previous: MultiLoadProjectedState,
-    /// Fully evaluated same-area accepted state.
+    /// Fully evaluated same-area accepted state. During restoration its stress
+    /// may still exceed the declared limit; inspect `restoration` and `stress`.
     pub state: MultiLoadProjectedState,
     /// Complete-family stress of the accepted state, when a limit is installed.
     pub stress: Option<RobustSampledStressEvaluation>,
@@ -155,6 +159,8 @@ pub struct MultiLoadProjectedOptimizer {
     stress_limit: Option<SampledStressLimit>,
     baseline_stress: Option<RobustSampledStressEvaluation>,
     current_stress: Option<RobustSampledStressEvaluation>,
+    restoration_reduction: Option<f64>,
+    restoration_updates: usize,
 }
 
 impl MultiLoadProjectedOptimizer {
@@ -205,6 +211,7 @@ impl MultiLoadProjectedOptimizer {
             kernel, current, baseline, baseline_geometry, fixed, projection, controls,
             next_iteration: 0, ell: settings.ell0, solves_started: load_cases.len(),
             stress_limit: None, baseline_stress: None, current_stress: None,
+            restoration_reduction: None, restoration_updates: 0,
         })
     }
 
@@ -265,10 +272,16 @@ impl MultiLoadProjectedOptimizer {
         if let ControlFlow::Break(reason) = control(MultiLoadProjectedStage::Direction) {
             return Ok(ControlFlow::Break(reason));
         }
-        let direction = self.kernel.direction(&self.current, self.next_iteration)?;
+        let restoring = self.is_restoring_stress();
+        let direction = if restoring {
+            let case = self.current_stress.as_ref()
+                .ok_or_else(|| invalid("restoration requires complete current stress"))?.worst_stress_case;
+            self.kernel.direction_for_case(&self.current, self.next_iteration, Some(case))?
+        } else {
+            self.kernel.direction(&self.current, self.next_iteration)?
+        };
         let mut attempts = Vec::with_capacity(self.controls.max_candidates);
         let mut move_cells = self.kernel.settings.move_cells;
-        let limit = self.current.objective * (1.0 - self.controls.min_relative_improvement);
         for index in 0..self.controls.max_candidates {
             if self.controls.max_solves - self.solves_started < count {
                 return Ok(ControlFlow::Continue(MultiLoadProjectedProgress::SolveBudget(attempts)));
@@ -341,10 +354,8 @@ impl MultiLoadProjectedOptimizer {
             attempt.stress = stress.clone();
             if (state.volume - self.projection.target).abs() > self.projection.tolerance {
                 attempt.refusal = Some("projected area gate failed".into());
-            } else if let Err(error) = stress::require_feasible(self.stress_limit, stress.as_ref()) {
+            } else if let Err(error) = self.require_candidate(&state, stress.as_ref()) {
                 attempt.refusal = Some(error.to_string());
-            } else if !(state.objective < limit) {
-                attempt.refusal = Some("insufficient same-material aggregate decrease".into());
             } else {
                 let next_ell = self.ell + self.kernel.settings.mu_al
                     * direction.mean_energy.abs().max(1e-30)
@@ -358,6 +369,7 @@ impl MultiLoadProjectedOptimizer {
                 attempts.push(attempt);
                 let step = MultiLoadProjectedStep {
                     iteration: self.next_iteration,
+                    restoration: restoring,
                     previous: self.current(), state, stress: stress.clone(), projection,
                     proposal_audit: audit, proposal_events: events,
                     proposal_load_pad_nodes: load_pad_nodes, attempts,
@@ -366,6 +378,7 @@ impl MultiLoadProjectedOptimizer {
                 self.current_stress = stress;
                 self.ell = next_ell.max(0.0);
                 self.next_iteration += 1;
+                if restoring { self.restoration_updates += 1; }
                 return Ok(ControlFlow::Continue(MultiLoadProjectedProgress::Accepted(Box::new(step))));
             }
             attempts.push(attempt);
