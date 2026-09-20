@@ -10,6 +10,9 @@ use crate::SolveWork;
 use fs_cutfem::elastic3::ElasticityError3;
 use std::ops::ControlFlow;
 
+mod design;
+pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
+
 /// One fixed linear observation of independent displacement coordinates.
 /// Assemble `q` with the operator's body/reference-load integrators to observe
 /// a volume/surface integral. The coefficients and target must describe the

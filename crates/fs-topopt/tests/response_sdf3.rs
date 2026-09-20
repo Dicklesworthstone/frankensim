@@ -120,3 +120,68 @@ fn g0_late_invalid_observation_refuses_before_filter_or_elasticity_work() {
     assert!(matches!(s.evaluate_responses(&vec![0.5;s.cells()],&cases,Default::default(),&mut c),Err(ResponseError3::Invalid(_))));
     assert_eq!(c.work().linear_solves,0);
 }
+
+use fs_ascent::sqp::{SqpError, SqpStop};
+use fs_topopt::sdf3::response::{ResponseDesignStudy3, ResponseDesignOptions3};
+#[test]
+fn g1_response_sqp_fits_two_prescribed_motion_experiments_with_volume_constraints() {
+    let op=build(false);let (f,q,r)=vectors(&op);let negative:Vec<_>=f.iter().map(|v|-0.5*v).collect();let mut s=study(op);
+    let t=[ResponseTarget3{q:&q,target:0.0,scale:0.02,weight:0.7},ResponseTarget3{q:&r,target:0.0,scale:0.02,weight:0.3}];
+    let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let reference=s.evaluate_responses(&(0..s.cells()).map(|i|0.30+0.05*(i%5)as f64).collect::<Vec<_>>(),&[
+        ResponseCase3{force:&f,prescribed:Some(&motion),targets:&t},ResponseCase3{force:&negative,prescribed:Some(&other_motion),targets:&t}],Default::default(),&mut c).unwrap();
+    let t0=[ResponseTarget3{target:reference.responses[0][0],..t[0]},ResponseTarget3{target:reference.responses[0][1],..t[1]}];
+    let t1=[ResponseTarget3{target:reference.responses[1][0],..t[0]},ResponseTarget3{target:reference.responses[1][1],..t[1]}];
+    let cases=[ResponseCase3{force:&f,prescribed:Some(&motion),targets:&t0},ResponseCase3{force:&negative,prescribed:Some(&other_motion),targets:&t1}];
+    let rho=vec![0.5;s.cells()];
+    let mut design=ResponseDesignStudy3::new(&mut s,&cases,&rho,Default::default(),&mut c).unwrap();
+    let initial=design.accepted().objective;let result=design.run(40).unwrap();
+    assert!(design.iterations()>0);assert!(design.accepted().objective<0.1*initial,"{result:?}");
+    assert!(design.constraint_violation()<1e-6,"{result:?}");
+    assert_eq!(design.point(),result.solution.x);assert_eq!(design.accepted().rho,design.point());
+    assert_eq!(design.sample().ci.len(),1+2*rho.len());assert_eq!(design.sample().ci[1],0.001-design.point()[0]);
+    let accepted=design.accepted().clone();drop(design);
+    let again=s.evaluate_responses(&accepted.rho,&cases,Default::default(),&mut c).unwrap();
+    assert_eq!(accepted.displacements,again.displacements);assert_eq!(accepted.gradient,again.gradient);
+}
+#[test]
+fn g5_response_sqp_chunked_continuation_keeps_bfgs_fields_and_work() {
+    let op=build(false);let(f,q,_)=vectors(&op);let mut a=study(op);let mut b=study(build(false));
+    let t=[ResponseTarget3{q:&q,target:0.003,scale:0.02,weight:1.0}];
+    let cases=[ResponseCase3{force:&f,prescribed:Some(&motion),targets:&t}];let rho=vec![0.5;a.cells()];
+    let mut p=|_|ControlFlow::Continue(());let mut ca=SolveControl::new(SolveBudget::default(),&mut p);
+    let mut p=|_|ControlFlow::Continue(());let mut cb=SolveControl::new(SolveBudget::default(),&mut p);
+    let mut a=ResponseDesignStudy3::new(&mut a,&cases,&rho,Default::default(),&mut ca).unwrap();
+    let mut b=ResponseDesignStudy3::new(&mut b,&cases,&rho,Default::default(),&mut cb).unwrap();
+    a.run(3).unwrap();for _ in 0..3 {b.run(1).unwrap();}
+    assert_eq!(a.point(),b.point());assert_eq!(a.sample(),b.sample());assert_eq!(a.work(),b.work());
+    assert_eq!(a.accepted().displacements,b.accepted().displacements);assert_eq!(a.evaluations(),b.evaluations());
+}
+#[test]
+fn g4_response_sqp_failure_preserves_accepted_fields_and_can_resume() {
+    let op=build(false);let(f,q,_)=vectors(&op);let mut s=study(op);
+    let t=[ResponseTarget3{q:&q,target:0.003,scale:0.02,weight:1.0}];let cases=[ResponseCase3{force:&f,prescribed:Some(&motion),targets:&t}];let rho=vec![0.5;s.cells()];
+    let armed=std::cell::Cell::new(false);
+    let mut p=|s:SolveProgress|if armed.get()&&s.stage=="sdf3-response-adjoint"&&s.solve_iterations>0{ControlFlow::Break(())}else{ControlFlow::Continue(())};
+    let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let mut design=ResponseDesignStudy3::new(&mut s,&cases,&rho,Default::default(),&mut c).unwrap();
+    let accepted=design.accepted().clone();let scales=design.study().operator().scales().to_vec();let before=design.work();
+    armed.set(true);let result=design.run(1);
+    assert!(matches!(result,Err(SqpError::Evaluation(ResponseError3::Evaluation(EvaluationStop::Cancelled)))));
+    assert_eq!(design.point(),accepted.rho);assert_eq!(design.accepted().displacements,accepted.displacements);
+    assert_eq!(design.study().operator().scales(),scales);assert!(design.work().linear_iterations>before.linear_iterations);
+    armed.set(false);design.run(1).unwrap();assert_eq!(design.point(),design.accepted().rho);
+}
+#[test]
+fn g0_response_sqp_budgets_and_infeasible_starts_are_not_mislabeled() {
+    let op=build(false);let(f,q,_)=vectors(&op);let mut s=study(op);
+    let t=[ResponseTarget3{q:&q,target:0.0,scale:0.02,weight:1.0}];let cases=[ResponseCase3{force:&f,prescribed:Some(&motion),targets:&t}];let rho=vec![0.8;s.cells()];
+    let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
+    let cap=3*s.cells();
+    assert!(matches!(ResponseDesignStudy3::new(&mut s,&cases,&rho,ResponseDesignOptions3{max_kkt_dimension:cap,..Default::default()},&mut c),Err(SqpError::Invalid(_))));
+    assert_eq!(c.work().linear_solves,0);
+    let mut design=ResponseDesignStudy3::new(&mut s,&cases,&rho,ResponseDesignOptions3{max_evaluations:1,..Default::default()},&mut c).unwrap();
+    assert!(design.constraint_violation()>0.1);let work=design.work();let report=design.run(10).unwrap();
+    assert_eq!(report.stop,SqpStop::EvaluationLimit);assert!(!report.solution.converged);assert_eq!(design.work(),work);
+    assert_eq!(report.solution.evals,1);assert_eq!(design.point(),rho);
+}
