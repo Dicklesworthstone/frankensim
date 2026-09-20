@@ -135,10 +135,10 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     }
     let (args, checkpoint_options) = checkpoint::options(args)?;
     // Constraint input is checked before any path reads, solver work or output.
-    let (positional, stress_limit) = stress::options(&args)?;
+    let (positional, stress_limit, restoration_reduction) = stress::options(&args)?;
     let args = positional.as_slice();
     if !(2..=9).contains(&args.len()) {
-        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--stress-limit MAX] [--stress-tolerance ABS]".into());
+        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--stress-limit MAX] [--stress-tolerance ABS] [--restore-stress] [--restoration-reduction FRACTION]".into());
     }
     let output = Path::new(&args[0]);
     if output.try_exists()? { return Err("output directory already exists; refusing to overwrite it".into()); }
@@ -185,7 +185,10 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         MultiLoadProjectedSettings { max_candidates, max_solves, ..MultiLoadProjectedSettings::default() },
     )?;
     if let Some(limit) = stress_limit {
-        optimizer = optimizer.with_sampled_stress_limit(limit)?;
+        optimizer = match restoration_reduction {
+            Some(reduction) => optimizer.with_stress_restoration(limit, reduction)?,
+            None => optimizer.with_sampled_stress_limit(limit)?,
+        };
     }
     run_optimizer(output, optimizer, &field, checkpoint_options, None)
 }
@@ -238,8 +241,12 @@ fn run_optimizer(
             Ok(MultiLoadProjectedProgress::Accepted(step)) => {
                 write_attempts(&mut attempts, iteration, &step.attempts, stress_limit)?;
                 let stress = stress::fields(stress_limit, step.stress.as_ref());
+                let phase = if optimizer.stress_restoration_reduction().is_some() {
+                    let name = if step.restoration { "stress_restoration" } else { "compliance" };
+                    format!(",\"acceptance_phase\":\"{name}\"")
+                } else { String::new() };
                 writeln!(trace,
-                    "{{\"iteration\":{},\"previous\":{},\"state\":{}{stress},\"projection_shift\":{:.17e},\"proposal_drift_h\":{:.17e},\"proposal_nucleation_count\":{},\"proposal_load_pad_nodes\":{},\"solves_started\":{}}}",
+                    "{{\"iteration\":{},\"previous\":{},\"state\":{}{stress}{phase},\"projection_shift\":{:.17e},\"proposal_drift_h\":{:.17e},\"proposal_nucleation_count\":{},\"proposal_load_pad_nodes\":{},\"solves_started\":{}}}",
                     step.iteration, state_json(&step.previous), state_json(&step.state),
                     step.projection.shift, step.proposal_audit.interface_drift_h,
                     step.proposal_events.len(), step.proposal_load_pad_nodes, optimizer.solves_started(),
@@ -249,10 +256,14 @@ fn run_optimizer(
                     checkpoint::save(&output.join(format!("checkpoint-{:06}.fscp", optimizer.next_iteration())), &optimizer)?;
                 }
             }
-            Ok(MultiLoadProjectedProgress::IterationLimit) => break ("iteration_limit", 0, None),
+            Ok(MultiLoadProjectedProgress::IterationLimit) => {
+                let (status, exit) = stress::terminal(optimizer.is_restoring_stress(), true);
+                break (status, exit, None);
+            }
             Ok(MultiLoadProjectedProgress::NoDescent(rows)) => {
                 write_attempts(&mut attempts, iteration, &rows, stress_limit)?;
-                break ("no_descent", 11, None);
+                let (status, exit) = stress::terminal(optimizer.is_restoring_stress(), false);
+                break (status, exit, None);
             }
             Ok(MultiLoadProjectedProgress::SolveBudget(rows)) => {
                 write_attempts(&mut attempts, iteration, &rows, stress_limit)?;
@@ -283,8 +294,18 @@ fn run_optimizer(
         )),
         None => ("projected-multiload-v1", String::new()),
     };
+    let (schema, restoration_summary) = match optimizer.stress_restoration_reduction() {
+        Some(reduction) => {
+            let phase = if optimizer.is_restoring_stress() { "restoring" } else { "sampled_feasible" };
+            ("projected-multiload-restoration-v1", format!(
+                ",\"stress_restoration\":{{\"min_relative_reduction\":{reduction:.17e},\"phase\":\"{phase}\",\"restoration_updates\":{},\"compliance_updates\":{}}}",
+                optimizer.restoration_updates(), optimizer.next_iteration() - optimizer.restoration_updates(),
+            ))
+        }
+        None => (schema, String::new()),
+    };
     let summary = format!(
-        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary}{refinement_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
+        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary}{refinement_summary}{restoration_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
         optimizer.next_iteration(), cases.len(), projection.tolerance, optimizer.solves_started(),
         state_json(optimizer.baseline()), state_json(&optimizer.current()),
     );

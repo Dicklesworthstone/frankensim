@@ -110,3 +110,6 @@ fn resume_refuses_policy_changes_and_existing_destinations() {
 
 #[path = "projected_resume/refinement.rs"]
 mod refinement;
+
+#[path = "projected_resume/restoration.rs"]
+mod restoration;
