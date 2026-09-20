@@ -6,6 +6,8 @@
 //! replacement of nonlinear storage is introduced here.
 use crate::{PhsError, PortHamiltonian, NEWTON_MAX, NEWTON_TOL, discrete_gradient_into_unchecked};
 use fs_la::LuWorkspace;
+mod structure;
+use structure::FlowPattern;
 
 /// Scalar ledger from a prepared step; state and port output use caller buffers.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,7 +68,10 @@ impl std::error::Error for PreparedStepError {}
 /// This remains a dense central-difference Newton solve, not a hard-real-time
 /// performance certificate. The LU traversal is unblocked and may differ from
 /// [`crate::step`] by floating-point roundoff. Both paths use the same Gonzalez
-/// kernel. No existing reference-path bit semantics are changed.
+/// kernel. Exact nonzero J-R dependency rows are retained across Newton probes;
+/// they are refreshed from the current operators before every step. No numerical
+/// threshold drops couplings. The Jacobian and LU remain dense. No existing
+/// reference-path bit semantics are changed.
 #[derive(Debug)]
 pub struct StepWorkspace {
     n: usize,
@@ -85,6 +90,7 @@ pub struct StepWorkspace {
     jacobian: Vec<f64>,
     output: Vec<f64>,
     lu: LuWorkspace,
+    flow: FlowPattern,
 }
 
 fn dimensions(what: &'static str) -> PhsError { PhsError::Dimension { what } }
@@ -107,15 +113,15 @@ fn zeroed(len: usize) -> Result<Vec<f64>, PhsError> {
 
 #[allow(clippy::too_many_arguments)] // one residual with explicitly borrowed scratch
 fn residual_into(sys: &PortHamiltonian, x0: &[f64], x: &[f64], gu: &[f64],
-    dt: f64, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64]) -> Result<f64, PhsError>
+    dt: f64, pattern: &FlowPattern, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64]) -> Result<f64, PhsError>
 {
     norm(x)?;
     discrete_gradient_into_unchecked(sys.storage.as_ref(), x0, x, midpoint, effort);
     norm(effort)?;
     for (row, value) in out.iter_mut().enumerate() {
         let mut flow = 0.0;
-        for (col, &e) in effort.iter().enumerate() {
-            flow += (sys.j[row * sys.n + col] - sys.r[row * sys.n + col]) * e;
+        for &col in pattern.row(row) {
+            flow += (sys.j[row * sys.n + col] - sys.r[row * sys.n + col]) * effort[col];
         }
         *value = x[row] - x0[row] - dt * (flow + gu[row]);
     }
@@ -143,6 +149,7 @@ impl StepWorkspace {
             plus: zeroed(n)?, minus: zeroed(n)?, forcing: zeroed(n)?,
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
             lu: LuWorkspace::new(n).map_err(|_| dimensions("prepared LU capacity"))?,
+            flow: FlowPattern::new(n)?,
         })
     }
 
@@ -210,6 +217,9 @@ impl StepWorkspace {
         let mut scale = norm(x0)?.max(1.0e-30);
         norm(u)?;
         norm(&sys.j)?; norm(&sys.r)?; norm(&sys.g)?;
+        // Inspect structure once per step, not once per Newton residual probe.
+        // Refresh even on workspace reuse with another same-dimension system.
+        self.flow.refresh(sys)?;
         let h0 = sys.hamiltonian(x0);
         if !h0.is_finite() { return Err(dimensions("nonfinite initial Hamiltonian").into()); }
         self.forcing.fill(0.0);
@@ -228,7 +238,7 @@ impl StepWorkspace {
         let mut iterations = 0;
         loop {
             poll()?;
-            let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt,
+            let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                 &mut self.midpoint, &mut self.effort, &mut self.residual)?;
             if iterations == 0 { initial_norm = rnorm; }
             let improved = rnorm < best_norm;
@@ -251,10 +261,10 @@ impl StepWorkspace {
                 if !h.is_finite() || h <= 0.0 { return Err(dimensions("invalid finite-difference increment").into()); }
                 self.trial.copy_from_slice(&self.x);
                 self.trial[col] += h;
-                residual_into(sys, x0, &self.trial, &self.forcing, dt,
+                residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
                     &mut self.midpoint, &mut self.effort, &mut self.plus)?;
                 self.trial[col] = self.x[col] - h;
-                residual_into(sys, x0, &self.trial, &self.forcing, dt,
+                residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
                     &mut self.midpoint, &mut self.effort, &mut self.minus)?;
                 for row in 0..n {
                     self.jacobian[row * n + col] = (self.plus[row] - self.minus[row]) / (2.0 * h);
@@ -269,7 +279,7 @@ impl StepWorkspace {
         }
         // Re-evaluate at the accepted candidate: FD probes and best-iterate
         // restoration must never leave a stale effort in the energy ledger.
-        let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt,
+        let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
             &mut self.midpoint, &mut self.effort, &mut self.residual)?;
         let mut dissipated = 0.0;
         for row in 0..n {

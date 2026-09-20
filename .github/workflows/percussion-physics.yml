@@ -34,7 +34,7 @@ jobs:
       # independently. A legacy NumPy .bat EOL check must not hide these results.
       - name: Test the nonlinear time owner
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-phs --test prepared_step --test phs
+        run: cargo test --release -p fs-phs --lib --test prepared_step --test phs
       - name: Test nonlinear percussion and material history
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact
