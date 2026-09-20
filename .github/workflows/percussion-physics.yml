@@ -1,0 +1,50 @@
+name: Percussion physics
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  percussion:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[percussion-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Retain the exact mechanical source for failure reproduction
+        run: >-
+          git archive --format=tar.gz -o percussion-source.tar.gz HEAD
+          crates/fs-phs crates/fs-couple crates/fs-plate crates/fs-material
+          crates/fs-dcontact crates/fs-la .beads/issues.jsonl
+          COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md
+          COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: percussion-source
+          path: percussion-source.tar.gz
+          retention-days: 3
+      - name: Materialize the repository's pinned dependencies
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            python3 - <<'PY'
+          import pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          path = 'legacy_numpy_code/numpy/doc/make.bat'
+          git_dir = subprocess.check_output(['git', '-C', str(root), 'rev-parse', '--absolute-git-dir'], text=True).strip()
+          attributes = pathlib.Path(git_dir) / 'info/attributes'
+          attributes.parent.mkdir(parents=True, exist_ok=True)
+          with attributes.open('a') as f:
+              f.write('\n' + path + ' -text\n')
+          (root / path).write_bytes(subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + path]))
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
+          fi
+      - name: Test the nonlinear time owner
+        run: cargo test --release -p fs-phs --tests
+      - name: Test the actual percussion construction
+        run: cargo test --release -p fs-couple --example percussion -- --test-threads=1
