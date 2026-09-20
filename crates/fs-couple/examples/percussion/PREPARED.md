@@ -1,4 +1,42 @@
-# Prepared linear-head percussion image
+# Prepared percussion execution
+
+## Nonlinear cymbal and stretching-drum execution
+
+`--prepared-nonlinear` selects reusable Gonzalez execution **after the same
+physical construction**. It works with `splash`, `drum`, `drum-stretch`, and their
+`-wav` and `-mic` forms. Omitting the flag retains the original numerical path.
+The flag changes neither geometry nor material parameters, modal bandwidth,
+strike position/velocity, felt conditioning, cavity volume or sample clocks.
+
+```sh
+cargo run --release -p fs-couple --example percussion -- \
+  splash 4096 --prepared-nonlinear > splash-prepared.csv
+cargo run --release -p fs-couple --example percussion -- \
+  drum-stretch 4096 --prepared-nonlinear --strike-speed-m-s 4 > drum-stretch-prepared.csv
+(set -C; cargo run --release -p fs-couple --example percussion -- \
+  drum-stretch-mic 48000 20 0.08 0.05 0.35 --prepared-nonlinear \
+  --strike-speed-m-s 4 --strike-position-m 0.06 0.01 > drum-stretch-prepared.wav)
+```
+
+The existing BEM receiver preparation, decimation, propagation and PCM encoder
+are unchanged. Pressure remains an observed physical response, not a fabricated
+strike waveform or normalized modal sum. This flag also works with far-field WAV
+export. Acoustic baking is still offline and limited to its declared band.
+
+Library callers can use `ImpactSystem::prepare()` and feed the result directly
+to `ImpactPressureRenderer`. It retains a current strike and its material history;
+`into_reference()` moves back without resetting either. Physical acceptance is
+shared with the reference: rejected solves never advance motion, felt state or
+the clock. Numerical cancellation is additionally polled inside Newton/Jacobian
+work. The read-only reference observations remain available on the prepared host.
+
+Preparation removes solver/host scratch allocation, not the dense Newton cost.
+Storage callbacks must also avoid allocation. This is not a native deadline or
+allocation certificate, and does not expand the existing geometric/material
+validity range. `drum-modal` and `snare` explicitly refuse this flag rather than
+silently replacing their distinct linear-body/contact realization.
+
+## Prepared linear-head image
 
 `drum-modal` compiles the existing two-head drum into the retained exact-ZOH
 modal/contact owners. This removes the all-coordinate finite-difference Newton

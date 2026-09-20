@@ -2,7 +2,7 @@
 //! No mesh, material, force, radiation or output code is duplicated here.
 use super::{Error, config};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
-use fs_couple::render::plate::impact::{ImpactBody, ImpactError, ImpactSystem, VolumeSpring};
+use fs_couple::render::plate::impact::{ImpactBody, ImpactError, ImpactSystem, PreparedImpactSystem, VolumeSpring};
 use fs_couple::render::plate::impact::linear::{LinearImpactSystem, LinearImpactConfig, VolumeConnection};
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,
     contact::{ModalContactConfig, multiple::MultiContactConfig}};
@@ -12,6 +12,7 @@ use fs_exec::CancelGate;
 pub enum Mechanics {
     Reference(ImpactSystem),
     Prepared(LinearImpactSystem),
+    Nonlinear(PreparedImpactSystem),
 }
 /// Only the diagnostics shared by both images. In particular, a normal-force
 /// residual is not exposed under the reference solver's different residual unit.
@@ -49,7 +50,24 @@ fn prepared_config(steps: u64, dt_s: f64) -> Result<LinearImpactConfig, Error> {
         multiple: MultiContactConfig { max_contacts: 32, max_sweeps: 100, max_setup_terms: 100000 },
     })
 }
+/// Extract only the numerical option; the existing playing parser owns physics.
+pub fn prepared_option(args: &mut Vec<String>) -> Result<bool, Error> {
+    let count = args.iter().filter(|arg| arg.as_str() == "--prepared-nonlinear").count();
+    if count > 1 { return Err("--prepared-nonlinear may be supplied only once".into()); }
+    args.retain(|arg| arg != "--prepared-nonlinear");
+    Ok(count == 1)
+}
 impl Mechanics {
+    /// Prepare the exact nonlinear model after construction, with no reset,
+    /// retiming, modal truncation, or replacement by the linear-contact image.
+    pub fn into_prepared_nonlinear(self) -> Result<Self, Error> {
+        match self {
+            Self::Reference(system) => Ok(Self::Nonlinear(system.prepare()?)),
+            Self::Nonlinear(system) => Ok(Self::Nonlinear(system)),
+            Self::Prepared(_) => Err("--prepared-nonlinear needs splash, drum or drum-stretch; the modal/snare image is a different physical admission".into()),
+        }
+    }
+
     pub fn prepared(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
         reference_area_m2: f64, steps: u64, dt_s: f64) -> Result<Self, Error>
     {
@@ -76,14 +94,21 @@ impl Mechanics {
         Ok(Self::Prepared(system))
     }
     pub fn membrane_observation(&self,body:usize) -> Option<fs_couple::render::plate::impact::membrane::MembraneObservation> {
-        match self { Self::Reference(s)=>s.membrane_observation(body), Self::Prepared(_)=>None }
+        match self { Self::Reference(s)=>s.membrane_observation(body), Self::Prepared(_)=>None,
+            Self::Nonlinear(s)=>s.membrane_observation(body) }
     }
     pub fn state(&self) -> &[f64] {
-        match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state() }
+        match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state(), Self::Nonlinear(s) => s.state() }
     }
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<Frame, ImpactError> {
         Ok(match self {
             Self::Reference(s) => {
+                let f = s.step(external, gate)?;
+                Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
+                    felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
+                    balance_residual_j: f.balance_residual_j }
+            }
+            Self::Nonlinear(s) => {
                 let f = s.step(external, gate)?;
                 Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
                     felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
@@ -135,5 +160,52 @@ mod tests {
             }
         }
         assert!(delta < 1e-3, "prepared/reference onset discrepancy {delta}");
+    }
+}
+
+#[cfg(test)]
+mod nonlinear_tests {
+    use super::*;
+    #[test]
+    fn numerical_flag_does_not_change_physical_arguments() {
+        let mut args=vec!["drum-stretch-mic".into(),"100".into(),"--prepared-nonlinear".into(),
+            "--strike-speed-m-s".into(),"4.0".into()];
+        assert!(prepared_option(&mut args).unwrap());
+        let (positional,stroke)=super::super::playing::parse(args).unwrap();
+        assert_eq!(positional,vec!["drum-stretch-mic","100"]); assert_eq!(stroke.speed_m_s,4.0);
+        assert!(prepared_option(&mut vec!["--prepared-nonlinear".into();2]).is_err());
+    }
+    #[test]
+    fn actual_stretching_drum_prepares_without_changing_geometry_or_initial_motion() {
+        let mut experiment=super::super::drum_with_playing(64,2e-6,false,false,None,true,
+            super::super::Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])}).unwrap();
+        let state=experiment.system.state().to_vec(); let force=experiment.force.clone();
+        let observation=experiment.observer_a.clone();
+        experiment.system=experiment.system.into_prepared_nonlinear().unwrap();
+        assert_eq!(experiment.system.state(),state);
+        assert_eq!(experiment.force,force); assert_eq!(experiment.observer_a,observation);
+        assert!(matches!(&experiment.system,Mechanics::Nonlinear(_)));
+        let gate=CancelGate::new_clock_free(); let mut stretch=0.0_f64;
+        for _ in 0..64 {
+            let f=experiment.system.step(&experiment.force,&gate).unwrap();
+            assert!(f.balance_residual_j.abs()<1e-7);
+            let head=experiment.system.membrane_observation(1).unwrap();
+            stretch=stretch.max(head.stretching_energy_j); assert!(head.maximum_slope<=0.2);
+        }
+        assert!(stretch>0.0,"the prepared executable must retain actual nonlinear head storage");
+    }
+    #[test]
+    fn actual_splash_preserves_shell_and_each_felt_history_when_prepared() {
+        let mut experiment=super::super::splash(192,2e-6,false).unwrap();
+        let state=experiment.system.state().to_vec();
+        let Mechanics::Reference(reference)=&experiment.system else {panic!("reference construction");};
+        let histories:Vec<_>=(0..6).map(|i|reference.felt_history(i)).collect();
+        let energy=reference.stored_energy_j();
+        experiment.system=experiment.system.into_prepared_nonlinear().unwrap();
+        let Mechanics::Nonlinear(prepared)=&experiment.system else {panic!("prepared construction");};
+        assert_eq!(prepared.state(),state); assert_eq!(prepared.stored_energy_j().to_bits(),energy.to_bits());
+        for (i,h) in histories.iter().enumerate() {assert_eq!(&prepared.felt_history(i),h);}
+        let gate=CancelGate::new_clock_free();
+        for _ in 0..192 {experiment.system.step(&experiment.force,&gate).unwrap();}
     }
 }

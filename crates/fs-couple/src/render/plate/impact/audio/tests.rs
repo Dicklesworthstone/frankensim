@@ -246,3 +246,5 @@ fn prepared_contact_image_reaches_the_same_radiation_decimator_and_pcm_stream() 
         assert_eq!(actual.source().mechanics().state(),baseline.source().mechanics().state());
     }
 }
+
+mod prepared;

@@ -38,6 +38,9 @@ jobs:
       - name: Test nonlinear percussion and material history
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact
+      - name: Test the physical pressure and PCM consumers
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --lib render::plate::impact::audio::tests
       - name: Test the actual percussion construction
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --example percussion -- --test-threads=1

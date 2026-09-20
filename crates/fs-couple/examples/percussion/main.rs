@@ -209,8 +209,14 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
         .map(|(i,a)|a*state[2*i]).sum::<f64>()
 }
 fn run()->Result<(),Error> {
-    let (args,stroke)=playing::parse(std::env::args().skip(1).collect())?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs".into());}
+    let mut raw_args=std::env::args().skip(1).collect();
+    let prepared_nonlinear=mechanics::prepared_option(&mut raw_args)?;
+    let (args,stroke)=playing::parse(raw_args)?;
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model".into());}
+    if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
+        "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
+        return Err("--prepared-nonlinear applies only to splash, drum and drum-stretch; no silent conversion of modal/snare mechanics".into());
+    }
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -236,6 +242,10 @@ fn run()->Result<(),Error> {
         "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke)?,
         _=>return Err("unknown experiment".into()),
     };
+    if prepared_nonlinear {
+        experiment.system=experiment.system.into_prepared_nonlinear()?;
+        eprintln!("mechanical image: prepared nonlinear Gonzalez; unchanged geometry, materials, felt history and clocks; real-time performance unqualified");
+    }
     eprintln!("physical stroke: speed_m_s={}, explicit_xy_m={:?}; no output normalization or pitch control",stroke.speed_m_s,stroke.position_m);
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
