@@ -2,14 +2,14 @@
   "schema": "frankensim-constellation-lock-v2",
   "identity_domain": "org.frankensim.xtask.constellation-lock.v1",
   "identity_version": 1,
-  "lock_hash": "0730b0a5295eeab7",
+  "lock_hash": "eeb4c5fe79ab0e14",
   "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)",
   "libraries": [
     {"lib": "asupersync", "version": "0.4.10", "git_head": "03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
     {"lib": "franken_networkx", "version": "0.2.0", "git_head": "ab73033517f47250ac9477148fc055f148e838b0", "remote": "https://github.com/Dicklesworthstone/franken_networkx.git", "path": "/Users/jemanuel/projects/franken_networkx"},
     {"lib": "franken_numpy", "version": "0.2.0", "git_head": "9b6b5828317dbeda36a6a9e53c8fa754527f0d0c", "remote": "https://github.com/Dicklesworthstone/franken_numpy.git", "path": "/Users/jemanuel/projects/franken_numpy"},
     {"lib": "frankenpandas", "version": "0.2.0", "git_head": "38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "path": "/Users/jemanuel/projects/frankenpandas"},
-    {"lib": "frankenscipy", "version": "0.1.0", "git_head": "a75ad6ed2e9f72e72b8d393fd92805909958630b", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "path": "/Users/jemanuel/projects/frankenscipy"},
+    {"lib": "frankenscipy", "version": "0.2.0", "git_head": "06108aea50fbb1541863101d371f9cd503e283d2", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "path": "/Users/jemanuel/projects/frankenscipy"},
     {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f", "remote": "https://github.com/Dicklesworthstone/frankensqlite.git", "path": "/Users/jemanuel/projects/frankensqlite"},
     {"lib": "frankentorch", "version": "0.1.0", "git_head": "74df606bd5f1440d109deea115a0ab1bdf4cfd1b", "remote": "https://github.com/Dicklesworthstone/frankentorch.git", "path": "/Users/jemanuel/projects/frankentorch"}
   ]
