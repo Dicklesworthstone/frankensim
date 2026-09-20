@@ -3,6 +3,9 @@
 //! a physical displacement does not require differentiability at contact onset.
 use super::*;
 
+mod responses;
+pub use responses::{ForwardConstraintResult, ForwardDesignResponses};
+
 // Shared preparation belongs to the physical evaluator, not its consumers.
 pub(super) struct PreparedDesign {
     pub parameters: Vec<f64>,
@@ -63,8 +66,32 @@ impl EquilibriumDesign {
     pub fn evaluate_forward(&self, point: &[f64], control: &mut DesignControl, gate: &CancelGate)
         -> Result<ForwardDesignEvaluation, DesignError>
     {
+        self.forward_query(point, control, gate, false).map(|result| result.observations)
+    }
+
+    /// Evaluate EVERY authored response constraint on the same solved cases as
+    /// the observations, without constructing an adjoint or requiring an activity
+    /// margin. Constraint values are signed physical observations; a violated
+    /// design requirement is not a failed physical solve. Equality residuals
+    /// carry no implicit acceptance tolerance. No derivative or certificate is
+    /// returned, and no partially evaluated family escapes on any refusal.
+    ///
+    /// Reuses the original spring reaction and fs-dcontact potential gradient.
+    /// Work is bounded by admitted modes/cases/ports and the existing 64-row
+    /// constraint cap; this does not add primal solves or refund failed work.
+    pub fn evaluate_forward_with_constraints(&self, point: &[f64], control: &mut DesignControl,
+        gate: &CancelGate) -> Result<ForwardDesignResponses, DesignError>
+    {
+        self.forward_query(point, control, gate, true)
+    }
+
+    fn forward_query(&self, point: &[f64], control: &mut DesignControl, gate: &CancelGate,
+        include_constraints: bool) -> Result<ForwardDesignResponses, DesignError>
+    {
         let prepared = self.prepare(point, control, gate)?;
         let mut cases = Vec::with_capacity(prepared.cases.len());
+        let count = if include_constraints { self.constraints.len() } else { 0 };
+        let mut rows = vec![None; count];
         for (index, case) in prepared.cases.iter().enumerate() {
             let solved = self.solve_case(&prepared, index, control, gate)?;
             let q: Vec<f64> = solved.network.models.iter().flat_map(|m| m.states())
@@ -79,10 +106,23 @@ impl EquilibriumDesign {
                 // displacement_objective, with no objective residual arithmetic.
                 observations_m.push(dot(&map.shapes, component_q).map_err(|e| case_error(index, e))?);
             }
+            if include_constraints {
+                for (row, constraint) in self.constraints.iter().enumerate() {
+                    if constraint.case == index {
+                        rows[row] = Some(responses::observe(constraint, &solved.network, &q,
+                            &prepared.contacts, gate).map_err(|e| case_error(index, e))?);
+                    }
+                }
+            }
             cases.push(ForwardDesignCase { observations_m, stored_energy_j: solved.stored_energy_j });
         }
+        let constraints = rows.into_iter().map(|row|
+            row.ok_or_else(|| bad("missing complete forward constraint row"))).collect::<Result<_,_>>()?;
         checkpoint(gate)?;
-        Ok(ForwardDesignEvaluation { physical_parameters: prepared.parameters, cases,
-            unassessed_response_constraints: self.constraints.len() })
+        Ok(ForwardDesignResponses {
+            observations: ForwardDesignEvaluation { physical_parameters: prepared.parameters, cases,
+                unassessed_response_constraints: self.constraints.len() - count },
+            constraints,
+        })
     }
 }
