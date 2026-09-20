@@ -17,13 +17,16 @@ pub mod factor;
 pub mod gemm;
 pub mod mixed;
 pub mod rand_nla;
+/// Reusable dense solves for repeated small nonlinear systems.
+pub mod prepared_lu;
+pub use prepared_lu::{LuWorkspace, LuWorkspaceError};
 
 pub use gemm::{
     GEMM_BUILD_FINGERPRINT, GEMM_DEPGRAPH_RECEIPT, GEMM_DEPGRAPH_RECEIPT_DIGEST,
     GEMM_DEPGRAPH_RECEIPT_DOMAIN, GEMM_GRAPH_EVIDENCE, GEMM_GRAPH_EVIDENCE_KIND,
     GEMM_IMPLEMENTATION_VERSION, GEMM_MAX_FMAS_BETWEEN_POLLS, GEMM_PANEL_RUN_DOMAIN,
     GEMM_SCALAR_SEMANTICS_VERSION, GemmCancelled, GemmGraphEvidence, GemmGraphEvidenceClass,
-    GemmMemoryEnvelope, GemmMemoryReport, GemmRunError, GemmRunReport, GemmScalar, GemmShapeError,
+    GemmMemoryEnvelope, GemmMemoryReport, GemmRunError, GemmScalar, GemmShapeError,
     Trans, gemm_build_identity, gemm_execution_tier, gemm_f32, gemm_f64, gemm_f64_op,
     gemm_f64_parallel, gemm_f64_parallel_with, gemm_f64_parallel_with_cancel,
     gemm_f64_parallel_with_pool, gemm_f64_parallel_with_pool_budgeted,
