@@ -140,3 +140,98 @@ fn independent_material_and_gap_variation_reaches_nonlinear_contact_observations
     assert_eq!(number(&output, "\"completed_replicates\":"), 4.0);
     assert!(number(&output, "\"mean_standard_error_m\":").is_finite());
 }
+
+#[test]
+fn contact_onset_is_observable_without_derivative_budget_for_both_samplers() {
+    let model = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.model");
+    let design = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.fit");
+    let (m, d) = inputs(model, design);
+    // The admitted design intentionally gives NO tangent/query work and a
+    // positive exclusion margin. Forward physics must not invoke an adjoint.
+    for method in ["mc", "rqmc"] {
+        let mut flags = vec!["--method", method, "--samples", "8", "--seed", "73",
+            "--case", "applied-force", "--target", "0", "--limit-m", "0.02", "--independent",
+            "--fixed-x", "force-N", "0"];
+        if method == "rqmc" { flags.extend(["--replicates", "2"]); }
+        let output = successful(run(&m, &d, &flags));
+        assert!((number(&output, "\"mean_m\":") - 1.0/64.0).abs() < 1e-12);
+        assert_eq!(number(&output, "\"compliance_probability\":"), 1.0);
+        assert_eq!(number(&output, "\"case_solves\":"), 8.0);
+        assert!(output.contains("\"physics_evaluation\":\"primal-only\""));
+        assert!(output.contains("\"compliance_scope\":\"selected-displacement-only\""));
+        assert_eq!(number(&output, "\"unassessed_response_constraints\":"), 0.0);
+    }
+}
+
+#[test]
+fn uncertain_loads_cross_contact_onset_without_truncating_the_distribution() {
+    let model = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.model");
+    let design = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.fit");
+    let (m, d) = inputs(model, design);
+    let output = successful(run(&m, &d, &["--method", "rqmc", "--replicates", "4",
+        "--samples", "1024", "--seed", "73", "--case", "applied-force", "--target", "0",
+        "--limit-m", "0.015625", "--independent", "--uniform-x", "force-N", "-0.5", "0.5"]));
+    // F~Uniform[0.5,1.5] N. q=F/64 below contact; q=(F+2)/192 above.
+    // Exact integral of these two physical branches is 11/768 m.
+    assert!((number(&output, "\"mean_m\":") - 11.0/768.0).abs() < 1.0/(64.0*256.0));
+    assert!((number(&output, "\"compliance_probability\":") - 0.5).abs() <= 1.0/256.0);
+    assert_eq!(number(&output, "\"samples\":"), 1024.0);
+    assert_eq!(number(&output, "\"case_solves\":"), 1024.0);
+    assert_eq!(successful(run(&m, &d, &["--method", "rqmc", "--replicates", "4",
+        "--samples", "1024", "--seed", "73", "--case", "applied-force", "--target", "0",
+        "--limit-m", "0.015625", "--independent", "--uniform-x", "force-N", "-0.5", "0.5"])), output);
+}
+
+#[test]
+fn physical_compliance_decisions_stop_early_and_report_sampling_only_bounds() {
+    let model = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.model");
+    let design = include_str!("../../../examples/equilibrium-uncertainty/contact-onset.fit");
+    let (m, d) = inputs(model, design);
+    for (limit, decision) in [("0.02", "satisfied"), ("0.01", "violated")] {
+        let flags = ["--method", "mc", "--samples", "4096", "--seed", "73",
+            "--case", "applied-force", "--target", "0", "--limit-m", limit, "--independent",
+            "--fixed-x", "force-N", "0", "--require-probability", "0.5", "--confidence-alpha", "0.05"];
+        let output = successful(run(&m, &d, &flags));
+        let count = number(&output, "\"samples\":");
+        assert!(count > 2.0 && count < 4096.0);
+        assert_eq!(count, number(&output, "\"case_solves\":"));
+        assert_eq!(number(&output, "\"planned_samples\":"), 4096.0);
+        assert!(output.contains("\"status\":\"budget-truncated\""));
+        assert!(output.contains(&format!("\"stop_reason\":\"compliance-{decision}\"")));
+        assert!(output.contains(&format!("\"decision\":\"{decision}\"")));
+        assert!(output.contains("\"evidence\":\"Estimated\""));
+        assert!(output.contains("data-dependent stop remain descriptive"));
+        let lower = number(&output, "\"lower\":"); let upper = number(&output, "\"upper\":");
+        if decision == "satisfied" { assert!(lower >= 0.5 && lower < 1.0); }
+        else { assert!(upper < 0.5 && upper > 0.0); }
+        assert_eq!(successful(run(&m, &d, &flags)), output);
+    }
+}
+
+#[test]
+fn undecided_confidence_budget_is_not_a_pass_despite_zero_observed_failures() {
+    let (m, d) = inputs(MODEL, DESIGN);
+    let output = successful(run(&m, &d, &["--method", "mc", "--samples", "2", "--seed", "73",
+        "--case", "applied-force", "--target", "0", "--limit-m", "0.02", "--independent",
+        "--fixed-x", "force-N", "0", "--require-probability", "0.99", "--confidence-alpha", "0.05"]));
+    assert_eq!(number(&output, "\"compliance_probability\":"), 1.0);
+    assert!(output.contains("\"status\":\"complete\""));
+    assert!(output.contains("\"stop_reason\":\"sample-budget\""));
+    assert!(output.contains("\"decision\":\"inconclusive\""));
+    assert!(number(&output, "\"lower\":") < 0.99);
+}
+
+#[test]
+fn incompatible_confidence_sampling_and_half_declared_policies_fail_before_file_reads() {
+    let model = Path::new("nonexistent-equilibrium-model");
+    let design = Path::new("nonexistent-equilibrium-design");
+    let mut rqmc = valid_flags(); rqmc[1] = "rqmc";
+    rqmc.extend(["--replicates", "4", "--require-probability", "0.5", "--confidence-alpha", "0.05"]);
+    let result = run(model, design, &rqmc);
+    assert!(!result.status.success()); assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("MC-only"));
+    let mut partial = valid_flags(); partial.extend(["--require-probability", "0.5"]);
+    let result = run(model, design, &partial);
+    assert!(!result.status.success()); assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("declared together"));
+}

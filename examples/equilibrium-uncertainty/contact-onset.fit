@@ -1,0 +1,11 @@
+frankensim-equilibrium-design-v1
+preload_limits 1 128 10000
+sensitivity_limits 1 0 0 0.02
+design_limits 1 1 1 2
+cases 1
+case applied-force 1 1
+load 0 0 1
+target 0 0 0 1 1
+variables 1
+variable force-N 1 1 0.5 1.5 1
+bind actuator-force 0 0
