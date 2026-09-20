@@ -224,3 +224,6 @@ impl<'problem, 'work> EquilibriumStudy<'problem, 'work> {
 #[cfg(test)]
 #[path = "equilibrium/constraints_tests.rs"]
 mod constraints_tests;
+
+/// Finite-scenario worst-case physical optimization through the same SQP engine.
+pub mod scenarios;
