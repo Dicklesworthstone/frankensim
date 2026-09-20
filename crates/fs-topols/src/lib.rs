@@ -45,6 +45,8 @@
 //!   simultaneous independent load cases with robust final replay.
 //! - [`volume`]: bounded hard-area projection with prescribed fixed nodes and
 //!   transactional cancellation; uses the optimizer's numerical area functional.
+//! - [`projected`]: feasible-baseline hard-area descent, independently re-solved
+//!   accepted geometry and exact accepted-state continuation.
 
 pub mod checkpoint;
 pub mod evaluated;
@@ -52,6 +54,7 @@ pub mod fim;
 pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
+pub mod projected;
 pub mod robust;
 #[path = "robust_descent_v2.rs"]
 pub mod robust_descent;
