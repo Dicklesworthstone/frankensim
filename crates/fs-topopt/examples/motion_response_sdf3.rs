@@ -5,10 +5,14 @@
 //! Without targets a disclosed synthetic forward design supplies them, using
 //! the SAME work budget. Synthetic fitting is not experimental calibration or
 //! unique density recovery. The geometry, loads and length units are dimensionless.
+//! Append --estimate to compare the accepted objective with an enriched grid
+//! under the remaining solve budget and mark up to two ORIGINAL-grid cells.
+//! This reports a two-grid discrepancy, not a reoptimized or certified design.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::elastic3::{adaptive::AdaptiveElasticity3,ElasticityOptions3};
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::AdaptiveSolveSpace3;
+use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octree3;
 use fs_cutfem::quad3::{QuadratureControl3,QuadratureOptions3};
 use fs_ivl::Interval;
@@ -16,6 +20,7 @@ use fs_material::IsotropicElastic;
 use fs_topopt::{SimpParams,SolveControl,SolveBudget};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::{ResponseCase3,ResponseTarget3,ResponseDesignStudy3,ResponseDesignOptions3};
+use fs_topopt::sdf3::response::refinement::{ReferenceResponseCase3,ReferenceResponseTarget3,ResponseRefinementOptions3};
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64{(p[0]-0.17)*(p[0]-0.83)}
@@ -29,7 +34,9 @@ impl CutSdf3 for Slab {
 fn motion(p:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[0.02,0.0,0.0]}else{[0.0,0.0,0.007*p[1]]}}
 fn other(p:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[0.0,0.01,0.005*p[2]]}else{[-0.01,0.0,0.0]}}
 fn main()->Result<(),Box<dyn std::error::Error>>{
-    let args:Vec<_>=std::env::args().skip(1).collect();
+    let mut args:Vec<_>=std::env::args().skip(1).collect();
+    let estimate=args.last().is_some_and(|s|s=="--estimate");
+    if estimate {let _=args.pop();}
     if args.len()>2&&args.len()!=6{return Err("usage: motion_response_sdf3 [STEPS [TOTAL_KRYLOV [T00 T01 T10 T11]]]".into());}
     let steps=args.first().map_or(Ok(40),|s|s.parse::<usize>())?;
     let budget=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
@@ -75,5 +82,31 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
         design.work().preconditioner_galerkin_products,design.constraint_violation()<=options.tolerance);
     let report=outcome?;eprintln!("stop={:?}; numerical_kkt={:?}; converged={}",report.stop,report.solution.kkt,report.solution.converged);
     if design.constraint_violation()>options.tolerance{return Err("accepted SQP point is still infeasible; no feasible design claimed".into());}
+    if estimate {
+        let accepted=design.accepted().clone();
+        drop(design);
+        let fine=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
+            &Octree3::uniform(2,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
+            ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
+        let f=|_:[f64;3]|[0.002,0.0,-0.003];
+        let f_other=|p|f(p).map(|v|-0.5*v);
+        let observe_q=|p:[f64;3]|[0.0,0.0,1.0+p[0]];
+        let observe_r=|p:[f64;3]|[1.0+p[1],0.0,0.0];
+        let targets0=[
+            ReferenceResponseTarget3{observation:ReferenceLoad3::body(&observe_q),target:values[0],scale:0.02,weight:0.7},
+            ReferenceResponseTarget3{observation:ReferenceLoad3::body(&observe_r),target:values[1],scale:0.02,weight:0.3},
+        ];
+        let targets1=[ReferenceResponseTarget3{target:values[2],..targets0[0]},ReferenceResponseTarget3{target:values[3],..targets0[1]}];
+        let experiments=[
+            ReferenceResponseCase3{load:ReferenceLoad3::body(&f),prescribed:Some(&motion),targets:&targets0},
+            ReferenceResponseCase3{load:ReferenceLoad3::body(&f_other),prescribed:Some(&other),targets:&targets1},
+        ];
+        let evidence=study.estimate_response_enrichment(AdaptiveSolveSpace3::jacobi(fine,100_000_000),
+            &accepted,&experiments,ResponseRefinementOptions3{response:options.response,..Default::default()},&mut control)?;
+        let marked=evidence.mark(0.5,2,||ControlFlow::Continue(()))?;
+        eprintln!("coarse_objective={:.17e}; enriched_objective={:.17e}; two_grid_change={:.17e}; identity_defect={:.3e}; marking_fraction={:.6}; target_met={}; marked={:?}; linear_iterations={}; continuum_certified=false",
+            evidence.coarse_objective,evidence.fine_objective,evidence.correction(),evidence.identity_relative_defect,
+            marked.achieved_fraction,marked.target_met,marked.marked,evidence.work.linear_iterations);
+    }
     Ok(())
 }

@@ -11,6 +11,7 @@ use fs_cutfem::elastic3::ElasticityError3;
 use std::ops::ControlFlow;
 
 mod design;
+pub mod refinement;
 pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
 
 /// One fixed linear observation of independent displacement coordinates.
