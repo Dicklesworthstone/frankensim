@@ -19,6 +19,9 @@ fs-opt = { path = "../fs-opt" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
+# Physical inverse-design example only; optimizer runtime dependencies stay unchanged.
+fs-couple = { path = "../fs-couple" }
+fs-dcontact = { path = "../fs-dcontact" }
 fs-alloc = { path = "../fs-alloc" }
 fs-casebook = { path = "../fs-casebook" }
 # Constellation (FrankenScipy 0.1.0 per constellation.lock): the
