@@ -2,8 +2,8 @@
 //!
 //! Integrates `lambda div(u) div(v) + 2 mu eps(u):eps(v)` over the retained
 //! `quad3` bulk rules. The embedded surface is naturally traction free. Zero
-//! displacement clamps act on selected background-box nodes; this module does
-//! NOT impose embedded Dirichlet data. Shared faces touching a cut cell carry
+//! displacement clamps act on selected background-box nodes; `dirichlet` adds
+//! weak displacement conditions on the actual interface. Shared faces carry
 //! a positive first-normal-derivative ghost penalty, independently of cut volume.
 //!
 //! Cell stiffness scales can change without repeating geometric integration.
@@ -86,6 +86,7 @@ pub struct CutElasticity3 {
     ghosts: Vec<GhostPoint3>,
     scales: Vec<f64>,
     volume_bounds: Interval,
+    embedded: Option<dirichlet::DirichletData3>,
 }
 
 /// A solved discrete field admitted only by a recomputed `b-Au` residual.
@@ -150,6 +151,18 @@ impl CutElasticity3 {
         domain: HexCell, counts: [usize; 3], sdf: &dyn CutSdf3,
         material: &IsotropicElastic, clamp: &dyn Fn([f64; 3]) -> bool,
         options: ElasticityOptions3, control: &mut QuadratureControl3<'_>,
+    ) -> Result<Self, ElasticityError3> {
+        Self::build_core(domain, counts, sdf, material, clamp, options, true, control)
+    }
+
+    // Only the embedded-boundary builder may defer support admission. It must
+    // attach a nonempty boundary rule before publishing the resulting operator.
+    #[allow(clippy::too_many_arguments)]
+    fn build_core(
+        domain: HexCell, counts: [usize; 3], sdf: &dyn CutSdf3,
+        material: &IsotropicElastic, clamp: &dyn Fn([f64; 3]) -> bool,
+        options: ElasticityOptions3, require_box_support: bool,
+        control: &mut QuadratureControl3<'_>,
     ) -> Result<Self, ElasticityError3> {
         control.poll()?;
         let count = counts.iter().try_fold(1usize, |n, &v| n.checked_mul(v))
@@ -224,7 +237,7 @@ impl CutElasticity3 {
             }
             fixed.push(selected);
         }
-        if !fixed.iter().any(|b| *b) { return Err(ElasticityError3::Invalid("no displacement support selected")); }
+        if require_box_support && !fixed.iter().any(|b| *b) { return Err(ElasticityError3::Invalid("no displacement support selected")); }
         for cell in &mut cells { cell.nodes = std::array::from_fn(|a| ids[&node_key(cell.key,a)]); }
         let by_key: BTreeMap<_,_> = cells.iter().enumerate().map(|(id,c)| (c.key,id)).collect();
         let mut ghosts = Vec::new();
@@ -240,7 +253,7 @@ impl CutElasticity3 {
         }
         control.poll()?;
         let scales = vec![1.0;cells.len()];
-        Ok(Self { nodes, fixed, cells, ghosts, scales, volume_bounds })
+        Ok(Self { nodes, fixed, cells, ghosts, scales, volume_bounds, embedded: None })
     }
 
     /// Active node positions, in deterministic lattice-key order.
@@ -298,8 +311,10 @@ impl CutElasticity3 {
     }
 
     /// `u^T (dK/dscale_c) u` for each cell, including its half of adjacent
-    /// ghost energies. For a matching solved load the compliance derivative is
-    /// the negative of this vector. This is a discrete scale derivative, NOT an
+    /// ghost energies and any embedded Nitsche terms. For a matching FIXED load
+    /// the compliance derivative is the negative of this vector. Nonzero
+    /// prescribed motion adds a density-dependent RHS: include its load
+    /// derivative as well. This is a discrete scale derivative, NOT an
     /// SDF/shape derivative; arbitrary supplied vectors carry no solution claim.
     pub fn scale_quadratic_forms(&self, u: &[f64]) -> Result<Vec<f64>, ElasticityError3> {
         if u.len() != self.n() || !u.iter().all(|v|v.is_finite()) {
@@ -449,3 +464,6 @@ pub mod adaptive;
 
 /// Oriented reference-surface traction and pressure loads.
 pub mod surface;
+
+/// Weak prescribed displacement on selected zero-level surface patches.
+pub mod dirichlet;

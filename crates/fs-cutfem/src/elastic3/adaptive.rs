@@ -10,11 +10,14 @@ use crate::octree3::{Octant3,Octree3,OctreeNode3,OctreeError3};
 type Row=Vec<(OctreeNode3,f64)>;
 
 pub mod enrichment;
+pub mod dirichlet;
 
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {
     domain: HexCell,
-    reference: [f64; 3],
+    // The fourth entry distinguishes natural and embedded support methods and
+    // their penalty. As with the SDF, patch equivalence is a caller obligation.
+    reference: [f64; 4],
     master_lattice: Vec<OctreeNode3>,
     raw: CutElasticity3,
     rows: Vec<Vec<(usize,f64)>>,
@@ -58,6 +61,13 @@ impl AdaptiveElasticity3 {
     pub fn build(domain:HexCell,tree:&Octree3,sdf:&dyn CutSdf3,material:&IsotropicElastic,
         clamp:&dyn Fn([f64;3])->bool,options:ElasticityOptions3,control:&mut QuadratureControl3<'_>)
         ->Result<Self,ElasticityError3> {
+        Self::build_core(domain, tree, sdf, material, clamp, options, true, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_core(domain:HexCell,tree:&Octree3,sdf:&dyn CutSdf3,material:&IsotropicElastic,
+        clamp:&dyn Fn([f64;3])->bool,options:ElasticityOptions3,require_box_support:bool,
+        control:&mut QuadratureControl3<'_>) ->Result<Self,ElasticityError3> {
         control.poll()?;
         if tree.leaves().len()>options.max_cells || !options.ghost_gamma.is_finite() || options.ghost_gamma<0.0 {
             return Err(ElasticityError3::Invalid("invalid adaptive assembly allowance"));
@@ -120,7 +130,7 @@ impl AdaptiveElasticity3 {
             if selected && !(0..3).any(|a|key[a]==0||key[a]==tree.extent()) {return Err(ElasticityError3::Invalid("clamp is not on box boundary"));}
             fixed.push(selected);
         }
-        if !fixed.iter().any(|v|*v){return Err(ElasticityError3::Invalid("no displacement support selected"));}
+        if require_box_support && !fixed.iter().any(|v|*v){return Err(ElasticityError3::Invalid("no displacement support selected"));}
         for (cell,&leaf) in cells.iter_mut().zip(&leaves) {cell.nodes=tree.corners(leaf).map(|n|raw_ids[&n]);}
         let cell_ids:BTreeMap<_,_>=leaves.iter().enumerate().map(|(i,&c)|(c,i)).collect();
         let mut ghosts=Vec::new();let mut edges=Vec::new();
@@ -138,9 +148,9 @@ impl AdaptiveElasticity3 {
         }
         let raw_nodes:Vec<_>=keys.iter().map(|&n|tree.position(n,domain)).collect();
         let raw=CutElasticity3 {fixed:vec![false;raw_nodes.len()],nodes:raw_nodes,scales:vec![1.0;cells.len()],cells,ghosts,
-            volume_bounds:Interval::new(volume_bounds.lo().max(0.0),volume_bounds.hi())};
+            volume_bounds:Interval::new(volume_bounds.lo().max(0.0),volume_bounds.hi()),embedded:None};
         let master_lattice = masters.iter().map(|n| n.map(|v| v * ((1u32 << 20) / tree.extent()))).collect();
-        let reference = [material.youngs, material.poisson, options.ghost_gamma];
+        let reference = [material.youngs, material.poisson, options.ghost_gamma, 0.0];
         control.poll()?;Ok(Self {domain,reference,master_lattice,raw,rows,nodes,fixed,leaves,edges})
     }
     /// Independent master positions; reduced displacement coefficients use this order.
