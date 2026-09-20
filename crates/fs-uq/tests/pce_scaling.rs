@@ -35,6 +35,19 @@ fn twenty_germ_quadratic_fit_recovers_a_known_surrogate() {
             ((sample * 17 + j * 7) % 31) as f64 / 10.0 - 1.5
         }).collect();
         assert!((model.eval(&x) - response(&x)).abs() < 1e-7);
+        let (value, gradient) = model.eval_with_gradient(&x);
+        assert!((value - response(&x)).abs() < 1e-7);
+        for j in 0..dim {
+            let expected = match j {
+                0 => 0.7,
+                2 => 0.4 * x[11],
+                5 => 0.3 * fs_math::det::sqrt(2.0) * x[5],
+                11 => 0.4 * x[2],
+                19 => -1.2,
+                _ => 0.0,
+            };
+            assert!((gradient[j] - expected).abs() < 1e-7);
+        }
     }
     // The fitted surrogate feeds the global-sensitivity API directly.
     let sensitivity = model.sobol_indices().unwrap();

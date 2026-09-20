@@ -117,6 +117,57 @@ impl PceModel {
             .sum()
     }
 
+    /// Evaluate the surrogate and its analytic gradient in germ coordinates.
+    ///
+    /// Uses d h_k(x)/dx = sqrt(k) h_(k-1)(x). Prefix/suffix products form
+    /// tensor-product derivatives without dividing by basis values, so Hermite
+    /// roots and zero germs are ordinary evaluation points, not singularities.
+    /// Work is linear in the represented term dimensions (plus univariate
+    /// Hermite recurrence work); no finite differences or simulator calls.
+    /// Physical-parameter gradients additionally need the caller's germ-map
+    /// chain rule. The result differentiates the surrogate, not its fit error.
+    ///
+    /// # Panics
+    /// Refuses dimension/count mismatches, non-finite inputs or coefficients,
+    /// and arithmetic that does not produce a finite value and gradient.
+    #[must_use]
+    pub fn eval_with_gradient(&self, xi: &[f64]) -> (f64, Vec<f64>) {
+        assert_eq!(xi.len(), self.dim, "PCE evaluation dimension mismatch");
+        assert_eq!(self.indices.len(), self.coefficients.len(),
+                   "PCE basis/coefficient count mismatch");
+        assert!(xi.iter().all(|x| x.is_finite()), "PCE non-finite germ");
+        for (alpha, coefficient) in self.indices.iter().zip(&self.coefficients) {
+            assert_eq!(alpha.len(), self.dim, "PCE basis dimension mismatch");
+            assert!(coefficient.is_finite(), "PCE non-finite coefficient");
+        }
+        let mut value = 0.0;
+        let mut gradient = vec![0.0; self.dim];
+        let mut basis = vec![1.0; self.dim];
+        let mut prefix = vec![1.0; self.dim + 1];
+        for (alpha, &coefficient) in self.indices.iter().zip(&self.coefficients) {
+            if coefficient == 0.0 {
+                continue;
+            }
+            for j in 0..self.dim {
+                basis[j] = hermite_orthonormal(alpha[j], xi[j]);
+                prefix[j + 1] = prefix[j] * basis[j];
+            }
+            value += coefficient * prefix[self.dim];
+            let mut suffix = 1.0;
+            for j in (0..self.dim).rev() {
+                if alpha[j] != 0 {
+                    let derivative = fs_math::det::sqrt(alpha[j] as f64)
+                        * hermite_orthonormal(alpha[j] - 1, xi[j]);
+                    gradient[j] += coefficient * prefix[j] * derivative * suffix;
+                }
+                suffix *= basis[j];
+            }
+        }
+        assert!(value.is_finite() && gradient.iter().all(|g| g.is_finite()),
+                "PCE non-finite value or gradient");
+        (value, gradient)
+    }
+
     /// Mean = coefficient of the constant basis function.
     #[must_use]
     pub fn mean(&self) -> f64 {
