@@ -6,6 +6,18 @@
 use super::*;
 use fs_blake3::DomainHasher;
 use fs_topols::OptimizeCheckpoint;
+use fs_topols::checkpoint::CheckpointStage;
+use std::ops::ControlFlow;
+
+// Bounds additional CG iterations, not wall-clock latency of assembly,
+// smoothing, advection or an individual vector operation.
+const CG_POLL_ITERS: usize = 32;
+
+fn stop_status(cancelled: bool, consumed_wall: f64, wall_limit: f64) -> Option<&'static str> {
+    if cancelled { Some("cancelled") }
+    else if consumed_wall >= wall_limit { Some("budget-exhausted") }
+    else { None }
+}
 
 pub(super) struct Evidence {
     producer: ContentHash,
@@ -154,6 +166,14 @@ fn retained_error(mut error: Failure, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
+    drive_observed(spec, ledger, cap, gate, prior, |_, _| {})
+}
+
+// The observer allows deterministic request injection at real kernel
+// boundaries. It cannot supply fields, objectives, stop statuses or receipts.
+fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
+    gate: &CancelGate, prior: Option<&Loaded>,
+    mut observe: impl FnMut(usize, CheckpointStage)) -> Result<Outcome> {
     if ledger.in_transaction() {
         return Err(fail("cli-study-elasticity-transaction", "study requires its own ledger transaction"));
     }
@@ -237,9 +257,28 @@ pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 retained_wall + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
-        let step = state.advance_one()
-            .map_err(|error| retained_error(fail("cli-study-elasticity-solve", format!("{error:?}")), last.as_ref()))?
-            .ok_or_else(|| malformed("optimizer completed before the declared target"))?;
+        let ordinal = state.next_iteration();
+        let step = state.advance_one_controlled(CG_POLL_ITERS, |stage| {
+            observe(ordinal, stage);
+            match stop_status(gate.is_requested(),
+                retained_wall + start.elapsed().as_secs_f64(), spec.wall_s) {
+                Some(status) => ControlFlow::Break(status),
+                None => ControlFlow::Continue(()),
+            }
+        }).map_err(|error| retained_error(
+            fail("cli-study-elasticity-solve", format!("{error:?}")), last.as_ref()))?;
+        let step = match step {
+            ControlFlow::Continue(Some(step)) => step,
+            ControlFlow::Continue(None) => return Err(malformed("optimizer completed before the declared target")),
+            ControlFlow::Break(status) => {
+                // The checkpoint owns rollback of the UNPUBLISHED candidate.
+                // Persist only the unchanged accepted geometry and prior rows;
+                // work spent on the discarded attempt still consumes wall time.
+                return persist(spec, ledger, state.geometry(), &report, status,
+                    retained_wall + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                    .map_err(|error| retained_error(error, last.as_ref()));
+            }
+        };
         append(&mut report, step);
         evidence.updates += 1;
         let accepted = persist(spec, ledger, state.geometry(), &report, "running",
@@ -252,3 +291,6 @@ pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod interruption;
