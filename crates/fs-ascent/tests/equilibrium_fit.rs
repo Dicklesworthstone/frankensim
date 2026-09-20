@@ -91,3 +91,6 @@ fn malformed_inputs_fail_without_a_partial_result_and_names_are_json_escaped() {
     let result = text(run(&m,&d,&["--evaluations","2"]));
     assert!(result.contains("\"name\":\"load-\\\"\\\\N\""));
 }
+
+#[path = "equilibrium_fit/response_constraints.rs"]
+mod response_constraints;

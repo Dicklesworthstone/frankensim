@@ -15,6 +15,7 @@ use crate::render::schedule::force::coupled::equilibrium::sensitivity::{
 use crate::render::schedule::force::coupled::equilibrium::sensitivity::objective::design::{
     DesignBudget, DesignError, DesignField, DesignLoad, DesignLoadCase,
     DesignVariable, EquilibriumDesign,
+    constraints::{ResponseConstraint, ResponseQuantity, ConstraintSense},
 };
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
@@ -71,9 +72,11 @@ impl EquilibriumDesignFile {
     /// connection and contact limits remain unchanged. Joint preload limits may
     /// tighten, never enlarge, an existing v4 contact-set budget.
     ///
-    /// Shape copies across ALL loads/targets are capped at 65536 coefficients,
+    /// Shape copies across loads, targets and constraints are capped at 65536 coefficients,
     /// independently of the source's shape cap. Counts are checked before their
-    /// allocations. Every target names an explicitly declared source port.
+    /// allocations. Displacement rows name explicitly declared source ports.
+    /// An optional constraint_limits/constraints section follows all variables;
+    /// absent sections preserve the original unconstrained design semantics.
     pub fn from_bytes(model_bytes: &[u8], design_bytes: &[u8], gate: &CancelGate)
         -> Result<Self, DesignFileError>
     {
@@ -197,13 +200,17 @@ impl EquilibriumDesignFile {
             }
             variables.push(DesignVariable { name, reference, scale, minimum, maximum, fields });
         }
+        let (constraints, maximum_constraints) = if reader.lines.clone().next().is_some() {
+            read_constraints(&mut reader, &parsed.voices, &mut remaining_shapes, gate)?
+        } else { (Vec::new(), 0) };
         if reader.lines.next().is_some() { return Err(input(reader.line + 1, "unexpected trailing design record").into()); }
         let contacts = match parsed.multiple {
             Some((contacts, _)) => contacts,
             None => parsed.contact.into_iter().collect(),
         };
         let models = parsed.voices.into_iter().map(|voice| voice.model).collect();
-        let problem = EquilibriumDesign::new(models, connections, contacts, cases, variables, budget, gate)?;
+        let problem = EquilibriumDesign::new(models, connections, contacts, cases, variables, budget, gate)?
+            .with_constraints(constraints, maximum_constraints, gate)?;
         poll(gate)?;
         Ok(Self { problem, model_info: parsed.info,
             design_hash: hash_domain(EQUILIBRIUM_DESIGN_HASH_DOMAIN, design_bytes) })
@@ -243,3 +250,44 @@ fn model_error(what: &'static str) -> DesignFileError { DesignFileError::Model(i
 fn poll(gate: &CancelGate) -> Result<(), DesignFileError> {
     if gate.is_requested() { Err(DesignError::Cancelled.into()) } else { Ok(()) }
 }
+
+// Additive, strict section: no alternate mechanical parser or implicit units.
+fn read_constraints(reader: &mut Reader<'_>, voices: &[ModalForceVoice], remaining_shapes: &mut usize,
+    gate: &CancelGate) -> Result<(Vec<ResponseConstraint>, usize), DesignFileError>
+{
+    let mut row = reader.row("constraint_limits")?;
+    let maximum = row.count(64)?;
+    row.finish()?;
+    let mut row = reader.row("constraints")?;
+    let count = row.count(maximum)?;
+    row.finish()?;
+    let mut constraints = Vec::with_capacity(count);
+    for _ in 0..count {
+        poll(gate)?;
+        let mut row = reader.row("constraint")?;
+        let name = name(&mut row)?;
+        let case = row.parse()?;
+        let quantity = match row.word()? {
+            "displacement" => ResponseQuantity::Displacement(port(&mut row, voices, remaining_shapes)?),
+            "spring-force" => ResponseQuantity::SpringForce(row.parse()?),
+            "contact-force" => ResponseQuantity::ContactForce(row.parse()?),
+            "contact-penetration" => ResponseQuantity::ContactPenetration(row.parse()?),
+            _ => return Err(input(row.line, "unknown physical constraint response").into()),
+        };
+        let sense = match row.word()? {
+            "at-most" => ConstraintSense::AtMost,
+            "at-least" => ConstraintSense::AtLeast,
+            "equal" => ConstraintSense::Equal,
+            _ => return Err(input(row.line, "expected at-most, at-least or equal").into()),
+        };
+        let bound = row.scalar()?;
+        let scale = row.scalar()?;
+        row.finish()?;
+        constraints.push(ResponseConstraint { name, case, quantity, sense, bound, scale });
+    }
+    Ok((constraints, maximum))
+}
+
+#[cfg(test)]
+#[path = "design/constraints_tests.rs"]
+mod constraints_tests;

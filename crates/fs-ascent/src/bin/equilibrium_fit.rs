@@ -7,6 +7,7 @@ use fs_couple::render::schedule::force::file::design::{
 };
 use fs_couple::render::schedule::force::coupled::equilibrium::sensitivity::objective::design::{
     DesignControl, DesignEvaluation, DesignWork,
+    constraints::{ConstraintSense, ResponseQuantity},
 };
 use fs_exec::CancelGate;
 use std::fmt::Write as _;
@@ -111,7 +112,33 @@ fn output(loaded: &EquilibriumDesignFile, result: &Outcome) -> String {
         }
         out.push_str("]}");
     }
-    out.push_str("]}"); out
+    out.push(']');
+    if !loaded.problem().constraints().is_empty() {
+        out.push_str(",\"constraints\":[");
+        let mut equality = 0;
+        let mut inequality = 2*loaded.problem().variables().len();
+        for (i, (constraint, row)) in loaded.problem().constraints().iter().zip(&result.audited.constraints).enumerate() {
+            if i != 0 { out.push(','); }
+            let (sense, multiplier, violation) = match constraint.sense {
+                ConstraintSense::Equal => { let dual = s.lambda[equality]; equality += 1; ("equal", dual, row.residual.abs()) }
+                other => {
+                    let dual = s.nu[inequality]; inequality += 1;
+                    (if other == ConstraintSense::AtMost { "at-most" } else { "at-least" }, dual, row.residual.max(0.0))
+                }
+            };
+            let (quantity, unit) = match &constraint.quantity {
+                ResponseQuantity::Displacement(_) => ("displacement", "m"),
+                ResponseQuantity::SpringForce(_) => ("spring-force", "N"),
+                ResponseQuantity::ContactForce(_) => ("contact-force", "N"),
+                ResponseQuantity::ContactPenetration(_) => ("contact-penetration", "m"),
+            };
+            write!(&mut out, "{{\"name\":{},\"case\":{},\"quantity\":\"{quantity}\",\"unit\":\"{unit}\",\"sense\":\"{sense}\",\"value\":{:.17e},\"bound\":{:.17e},\"scale\":{:.17e},\"residual\":{:.17e},\"violation\":{violation:.17e},\"multiplier_normalized\":{multiplier:.17e},\"adjoint_relative_residual\":{:.17e}}}",
+                json_string(&constraint.name), constraint.case, row.value, constraint.bound, constraint.scale,
+                row.residual, row.adjoint_relative_residual).expect("String write");
+        }
+        out.push(']');
+    }
+    out.push('}'); out
 }
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
