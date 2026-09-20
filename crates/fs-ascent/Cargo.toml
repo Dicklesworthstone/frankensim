@@ -46,3 +46,12 @@ workspace = true
 [[test]]
 name = "equilibrium_study"
 required-features = ["equilibrium-design"]
+
+[[bin]]
+name = "equilibrium_fit"
+path = "src/bin/equilibrium_fit.rs"
+required-features = ["equilibrium-design"]
+
+[[test]]
+name = "equilibrium_fit"
+required-features = ["equilibrium-design"]

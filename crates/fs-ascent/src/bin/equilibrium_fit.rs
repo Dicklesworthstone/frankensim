@@ -1,0 +1,149 @@
+//! File-driven physical inverse design. The library owns parsing, physics,
+//! adjoints, SQP steps and KKT checks; this executable only connects those owners.
+use fs_ascent::{EquilibriumStudy, SqpRunReport};
+use fs_couple::render::schedule::force::file::MAX_MODAL_PERFORMANCE_BYTES;
+use fs_couple::render::schedule::force::file::design::{
+    EquilibriumDesignFile, MAX_EQUILIBRIUM_DESIGN_BYTES,
+};
+use fs_couple::render::schedule::force::coupled::equilibrium::sensitivity::objective::design::{
+    DesignControl, DesignEvaluation, DesignWork,
+};
+use fs_exec::CancelGate;
+use std::fmt::Write as _;
+use std::io::Read;
+
+const USAGE: &str = "equilibrium_fit MODEL.performance DESIGN.fit [--iterations N] [--evaluations N] [--tolerance T] [--max-kkt-dimension N]";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Limits { iterations: usize, evaluations: usize, tolerance: f64, kkt_dimension: usize }
+impl Default for Limits {
+    fn default() -> Self { Self { iterations:128, evaluations:256, tolerance:1e-8, kkt_dimension:384 } }
+}
+struct Options { model: String, design: String, limits: Limits }
+fn options(args: &[String]) -> Result<Options, String> {
+    let mut paths = Vec::new();
+    let mut limits = Limits::default();
+    let mut seen = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if !arg.starts_with('-') { paths.push(arg.clone()); continue; }
+        if seen.contains(arg) { return Err(format!("duplicate option {arg}")); }
+        seen.push(arg.clone());
+        let value = args.next().ok_or_else(|| format!("missing value for {arg}"))?;
+        match arg.as_str() {
+            "--iterations" => limits.iterations = value.parse::<usize>().ok().filter(|v| *v <= 512)
+                .ok_or("--iterations must be in 0..=512")?,
+            "--evaluations" => limits.evaluations = value.parse::<usize>().ok().filter(|v| (2..=4096).contains(v))
+                .ok_or("--evaluations must be in 2..=4096, including final re-solve")?,
+            "--tolerance" => limits.tolerance = value.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or("--tolerance must be finite and positive")?,
+            "--max-kkt-dimension" => limits.kkt_dimension = value.parse::<usize>().ok().filter(|v| (1..=384).contains(v))
+                .ok_or("--max-kkt-dimension must be in 1..=384")?,
+            _ => return Err(format!("unknown option {arg}")),
+        }
+    }
+    let [model, design] = paths.as_slice() else { return Err(USAGE.into()); };
+    Ok(Options { model:model.clone(), design:design.clone(), limits })
+}
+fn read_bounded(path: &str, limit: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take((limit+1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > limit { return Err(format!("input exceeds {limit} bytes: {path}").into()); }
+    Ok(bytes)
+}
+
+struct Outcome { initial: f64, report: SqpRunReport, audited: DesignEvaluation, work: DesignWork }
+fn solve(loaded: &EquilibriumDesignFile, limits: Limits, gate: &CancelGate)
+    -> Result<Outcome, Box<dyn std::error::Error>>
+{
+    let problem = loaded.problem();
+    let case_limit = limits.evaluations.checked_mul(problem.load_cases().len()).ok_or("case budget overflow")?;
+    let mut control = DesignControl::new(limits.evaluations, case_limit);
+    let (initial, report, cached) = {
+        let mut study = EquilibriumStudy::new(problem, &vec![0.0;problem.variables().len()],
+            &mut control, limits.kkt_dimension, gate)?;
+        let initial = study.accepted().value;
+        // Reserve one complete physical/adjoint evaluation within the TOTAL
+        // allowance. The SQP engine, not an infinity barrier, owns the bounds.
+        let report = study.run(limits.tolerance, limits.iterations, limits.evaluations-1, gate)?;
+        (initial, report, study.accepted().clone())
+    };
+    let audited = problem.evaluate(&report.solution.x, &mut control, gate)?;
+    // The immutable problem and deterministic owner must reproduce the complete
+    // accepted sample. Do not attach cached multipliers to a changed objective.
+    if audited != cached { return Err("final physical re-solve differs from the accepted objective/derivatives".into()); }
+    Ok(Outcome { initial, report, audited, work:control.work() })
+}
+
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""), '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"), '\r' => out.push_str("\\r"), '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{001f}' => { write!(&mut out, "\\u{:04x}", u32::from(ch)).expect("String write"); }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"'); out
+}
+fn output(loaded: &EquilibriumDesignFile, result: &Outcome) -> String {
+    let s = &result.report.solution;
+    let kkt = &s.kkt;
+    let mut out = format!("{{\"schema\":\"frankensim-equilibrium-fit-v1\",\"scope\":\"local-static-authored-model\",\"model_blake3\":\"{}\",\"design_blake3\":\"{}\",\"stop\":\"{:?}\",\"converged\":{},\"initial_objective\":{:.17e},\"objective\":{:.17e},\"iterations\":{},\"evaluations_including_audit\":{},\"case_solves\":{},\"kkt\":{{\"stationarity\":{:.17e},\"feasibility\":{:.17e},\"dual_feasibility\":{:.17e},\"complementarity\":{:.17e}}},\"parameters\":[",
+        loaded.model_info().input_hash.to_hex(), loaded.design_hash().to_hex(), result.report.stop, s.converged,
+        result.initial, result.audited.value, s.iters, result.work.evaluations, result.work.case_solves,
+        kkt.stationarity, kkt.feasibility, kkt.dual_feasibility, kkt.complementarity);
+    for (i, (variable, value)) in loaded.problem().variables().iter().zip(&result.audited.physical_parameters).enumerate() {
+        if i != 0 { out.push(','); }
+        write!(&mut out, "{{\"name\":{},\"value\":{value:.17e},\"decision\":{:.17e},\"lower_multiplier_decision\":{:.17e},\"upper_multiplier_decision\":{:.17e}}}",
+            json_string(&variable.name), s.x[i], s.nu[2*i], s.nu[2*i+1]).expect("String write");
+    }
+    out.push_str("],\"cases\":[");
+    for (i, (case, actual)) in loaded.problem().load_cases().iter().zip(&result.audited.cases).enumerate() {
+        if i != 0 { out.push(','); }
+        write!(&mut out, "{{\"name\":{},\"objective\":{:.17e},\"active_contacts\":{},\"adjoint_relative_residual\":{:.17e},\"observations\":[",
+            json_string(&case.name), actual.value, actual.equilibrium.active_contacts, actual.adjoint_relative_residual).expect("String write");
+        for (j, (target, observed)) in case.targets.iter().zip(&actual.observations_m).enumerate() {
+            if j != 0 { out.push(','); }
+            write!(&mut out, "{{\"predicted_m\":{observed:.17e},\"target_m\":{:.17e},\"scale_m\":{:.17e},\"weight\":{:.17e}}}",
+                target.target_m, target.scale_m, target.weight).expect("String write");
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}"); out
+}
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "--help" { println!("{USAGE}"); return Ok(()); }
+    let options = options(&args)?;
+    let model = read_bounded(&options.model, MAX_MODAL_PERFORMANCE_BYTES)?;
+    let design = read_bounded(&options.design, MAX_EQUILIBRIUM_DESIGN_BYTES)?;
+    let gate = CancelGate::new();
+    let loaded = EquilibriumDesignFile::from_bytes(&model, &design, &gate)?;
+    let result = solve(&loaded, options.limits, &gate)?;
+    println!("{}", output(&loaded, &result));
+    Ok(())
+}
+fn main() {
+    if let Err(error) = run() { eprintln!("equilibrium_fit refused: {error}"); std::process::exit(1); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn malformed_or_duplicate_execution_limits_are_refused() {
+        for tail in [vec!["--evaluations","1"], vec!["--iterations","513"], vec!["--tolerance","NaN"],
+            vec!["--max-kkt-dimension","385"], vec!["--unknown","x"], vec!["--iterations"],
+            vec!["--evaluations","4","--evaluations","5"]] {
+            let args: Vec<String> = ["model","design"].into_iter().chain(tail).map(str::to_owned).collect();
+            assert!(options(&args).is_err());
+        }
+    }
+    #[test]
+    fn user_supplied_names_are_escaped_without_losing_their_values() {
+        assert_eq!(json_string("a\"b\\c\n\u{0001}"), "\"a\\\"b\\\\c\\n\\u0001\"");
+        assert_eq!(json_string("force-α"), "\"force-α\"");
+    }
+}
