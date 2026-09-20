@@ -43,6 +43,8 @@
 //!   transactional volume/stress-limited candidate publication.
 //! - [`robust_stress`]: worst-scenario sampled-stress admission across
 //!   simultaneous independent load cases with robust final replay.
+//! - [`volume`]: bounded hard-area projection with prescribed fixed nodes and
+//!   transactional cancellation; uses the optimizer's numerical area functional.
 
 pub mod checkpoint;
 pub mod evaluated;
@@ -57,6 +59,7 @@ pub mod robust_stress;
 pub mod stress;
 pub mod topder;
 pub mod veloext;
+pub mod volume;
 pub mod weno;
 
 pub use checkpoint::OptimizeCheckpoint;
