@@ -114,3 +114,6 @@ impl EquilibriumLinearization<'_> {
         Ok(())
     }
 }
+
+/// Reusable multi-load-case objectives for physical inverse design.
+pub mod design;
