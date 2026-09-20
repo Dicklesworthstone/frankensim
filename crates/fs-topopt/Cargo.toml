@@ -72,3 +72,7 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "surface_loaded_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "surface_sdf3_goal"
+required-features = ["cutfem-marquee"]

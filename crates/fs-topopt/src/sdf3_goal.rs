@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{ElasticityError3, adaptive::AdaptiveElasticity3};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
+use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octant3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
     AdaptiveJacobi3, AdaptivePreconditionError3, AdaptiveMultilevelOptions3, AdaptiveSolveSpace3,
@@ -12,7 +13,7 @@ use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
 use fs_solver::op::two_level::{AdditiveTwoLevel, TwoLevelBudget, TwoLevelError};
 use fs_solver::op::multilevel::MultilevelError;
 use fs_sparse::precond::Precond;
-use fs_dwr::elasticity3::{GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3, estimate_goal3};
+use fs_dwr::elasticity3::{GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3, estimate_reference_goal3};
 use crate::{EvaluationStop, SolveControl, SolveWork};
 use crate::sdf3::{AdaptiveSdf3Elasticity, Sdf3Elasticity, CutDensityStudy3};
 
@@ -24,6 +25,30 @@ pub struct GoalBodyLoad3<'a> {
     pub density: &'a dyn Fn([f64; 3]) -> [f64; 3],
     /// Nonnegative weight; weights are not automatically normalized.
     pub weight: f64,
+}
+/// One independent reference load, potentially combining a body force with
+/// surface traction or pressure. Its pure laws must match the accepted solve.
+/// Reintegrating the law on the enriched grid is NOT prolongating nodal forces.
+#[derive(Clone, Copy)]
+pub struct GoalReferenceLoad3<'a> {
+    /// Physical reference-configuration load law, not a density-dependent load.
+    pub load: ReferenceLoad3<'a>,
+    /// Nonnegative objective weight, without implicit normalization.
+    pub weight: f64,
+}
+// Keep the body-only public API and mixed-load API on one implementation,
+// without allocating/copying a second load family or exposing a callback solver.
+trait GoalLaw3 {
+    fn load(&self) -> ReferenceLoad3<'_>;
+    fn weight(&self) -> f64;
+}
+impl GoalLaw3 for GoalBodyLoad3<'_> {
+    fn load(&self) -> ReferenceLoad3<'_> { ReferenceLoad3::body(self.density) }
+    fn weight(&self) -> f64 { self.weight }
+}
+impl GoalLaw3 for GoalReferenceLoad3<'_> {
+    fn load(&self) -> ReferenceLoad3<'_> { self.load }
+    fn weight(&self) -> f64 { self.weight }
 }
 /// Explicit enriched-solve policy. The default preserves the original solver;
 /// the runnable adaptive example opts into bounded two-level preparation.
@@ -145,36 +170,60 @@ impl ComplianceRefinement3 {
     }
 }
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
-    /// Estimate an accepted design using one independently solved enriched RHS
-    /// per case. All coarse fields are revalidated before numerical preparation.
-    /// The enriched model inherits physical parent scales, not a refiltered raw
-    /// design. Failed setup or solves cannot mutate the accepted study and do not
-    /// publish a partial estimate family. Differences are not continuum bounds.
-    ///
-    /// This entry point supplies no extra coarse spaces. Recursive preparation
-    /// can still use the accepted grid as its bottom if that grid fits the cap;
-    /// otherwise use `estimate_compliance_enrichment_with_coarse_levels`.
+    /// Body-only compliance enrichment using the shared reference-load path.
+    /// Each coarse field is revalidated; no partially solved family is returned.
     pub fn estimate_compliance_enrichment(&self, enriched: AdaptiveElasticity3,
         loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
         control: &mut SolveControl<'_>) -> Result<ComplianceRefinement3, GoalRefinementError3> {
-        self.estimate_compliance_enrichment_with_coarse_levels(enriched, &[], loads, coarse_displacements, options, control)
+        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, control)
+    }
+    /// Body-only enrichment with extra correction geometries BELOW the accepted
+    /// grid. Extra levels are admitted only for the multilevel solve policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_compliance_enrichment_with_coarse_levels(&self, enriched: AdaptiveElasticity3,
+        coarser: &[&AdaptiveElasticity3], loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
+        options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+        -> Result<ComplianceRefinement3, GoalRefinementError3> {
+        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, control)
     }
 
-    /// Recursive goal solve using an explicit sequence of geometries BELOW the
-    /// accepted grid, nearest first. The accepted grid itself is always the
-    /// first correction space for the enriched operator. Every deeper operator
-    /// is Galerkin-coarsened from that same fine stiffness, not rediscretized.
-    /// Extra geometries are rejected for other policies rather than ignored.
-    /// Preparation is shared across loads; setup limits apply to the whole
-    /// hierarchy per call and consumed work remains visible after failure.
+    /// Refine pressure-, traction-, body-, or mixed-loaded compliance studies.
+    /// Both operators must retain surface rules when any law uses the interface.
+    /// Each law is reintegrated on its actual grid; coarse nodal loads are never
+    /// prolonged and loads are never rescaled with density. Fine geometry and
+    /// pure load laws must describe the same reference design as the coarse one.
+    ///
+    /// Validate the COMPLETE accepted load family before numeric preparation;
+    /// share one fixed preconditioner and one cumulative solve budget. Stale
+    /// fields, unavailable surface rules, cancellation or an exhausted solve
+    /// return no partial estimates and cannot mutate the accepted study.
+    /// Surface quadrature/transfer differences remain in the two-grid identity;
+    /// the reported correction is not a continuum-error or shape certificate.
+    pub fn estimate_reference_compliance_enrichment(&self, enriched: AdaptiveElasticity3,
+        loads: &[GoalReferenceLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
+        control: &mut SolveControl<'_>) -> Result<ComplianceRefinement3, GoalRefinementError3> {
+        self.estimate_load_family(enriched, &[], loads, coarse_displacements, options, control)
+    }
+    /// Mixed reference-load enrichment with additional ordered coarse geometries.
+    /// The accepted grid is always the first correction space. Additional levels
+    /// are geometry only: stiffness is inherited/Galerkin-coarsened from the fine
+    /// physical design. No current optimizer model or accepted field is replaced.
     #[allow(clippy::too_many_arguments)]
-    pub fn estimate_compliance_enrichment_with_coarse_levels(&self, mut enriched: AdaptiveElasticity3,
-        coarser: &[&AdaptiveElasticity3], loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
+    pub fn estimate_reference_compliance_enrichment_with_coarse_levels(&self, enriched: AdaptiveElasticity3,
+        coarser: &[&AdaptiveElasticity3], loads: &[GoalReferenceLoad3<'_>], coarse_displacements: &[Vec<f64>],
+        options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+        -> Result<ComplianceRefinement3, GoalRefinementError3> {
+        self.estimate_load_family(enriched, coarser, loads, coarse_displacements, options, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn estimate_load_family<L: GoalLaw3>(&self, mut enriched: AdaptiveElasticity3,
+        coarser: &[&AdaptiveElasticity3], loads: &[L], coarse_displacements: &[Vec<f64>],
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ComplianceRefinement3, GoalRefinementError3> {
         control.checkpoint("sdf3-goal-start")?;
         if loads.is_empty() || loads.len() > options.max_load_cases || loads.len() != coarse_displacements.len()
-            || !loads.iter().any(|l| l.weight > 0.0) || loads.iter().any(|l| !l.weight.is_finite() || l.weight < 0.0)
+            || !loads.iter().any(|l| l.weight() > 0.0) || loads.iter().any(|l| !l.weight().is_finite() || l.weight() < 0.0)
             || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0)
             || coarser.len() > 18 || (!coarser.is_empty() && !matches!(options.preconditioner, GoalPreconditioner3::Multilevel { .. })) {
             return Err(GoalRefinementError3::Invalid("invalid load family or numerical/resource policy"));
@@ -184,7 +233,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         enriched.set_scales(&scales)?;
         for (load, coarse) in loads.iter().zip(coarse_displacements) {
             // Reject the entire stale family BEFORE spending setup or a fine solve.
-            let rhs_coarse = coarse_operator.body_load(load.density, || poll(control))?;
+            let rhs_coarse = coarse_operator.reference_load(load.load(), || poll(control))?;
             let residual = coarse_operator.field_residual(coarse, &rhs_coarse, || poll(control))?;
             if residual > options.numerical.residual_tolerance {
                 return Err(GoalError3::FieldResidual { field: "coarse-primal", value: residual }.into());
@@ -227,24 +276,25 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     }
 }
 
-// All policies share the exact independent-load solve and DWR acceptance path.
-fn complete_family(transfer: &AdaptiveTransfer3<'_>, loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
+// All policies and load kinds share the actual independent-load/DWR path.
+fn complete_family<L: GoalLaw3>(transfer: &AdaptiveTransfer3<'_>, loads: &[L], coarse_displacements: &[Vec<f64>],
     options: GoalRefinementOptions3, prepared: &impl Precond, control: &mut SolveControl<'_>)
     -> Result<ComplianceRefinement3, GoalRefinementError3> {
     let enriched = transfer.fine();
-    let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight).collect(),
+    let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight()).collect(),
         coarse_value: 0.0, fine_value: 0.0, correction: 0.0, marking_mass: BTreeMap::new(), work: control.work(), preconditioner: options.preconditioner };
     for (load, coarse) in loads.iter().zip(coarse_displacements) {
-        let rhs = enriched.body_load(load.density, || poll(control))?;
+        let law = load.load();
+        let rhs = enriched.reference_load(law, || poll(control))?;
         let fine = control.solve_preconditioned(enriched, prepared, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
         // The DWR owner rechecks true residuals before using this CG output.
-        let estimate = estimate_goal3(transfer, load.density, load.density,
+        let estimate = estimate_reference_goal3(transfer, law, law,
             GoalFields3::compliance(coarse, &fine), options.numerical, || poll(control))?;
-        report.coarse_value += load.weight * estimate.coarse_value;
-        report.fine_value += load.weight * estimate.fine_value;
-        report.correction += load.weight * estimate.correction();
+        report.coarse_value += load.weight() * estimate.coarse_value;
+        report.fine_value += load.weight() * estimate.fine_value;
+        report.correction += load.weight() * estimate.correction();
         for (&cell, value) in &estimate.cells {
-            *report.marking_mass.entry(cell).or_insert(0.0) += load.weight * value.marking_mass;
+            *report.marking_mass.entry(cell).or_insert(0.0) += load.weight() * value.marking_mass;
         }
         report.cases.push(estimate);
     }
