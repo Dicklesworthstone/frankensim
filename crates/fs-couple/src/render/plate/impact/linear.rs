@@ -13,6 +13,9 @@
 //! silently linearized. This image has no pressure observer or inferred loss.
 //! The underlying contact path still allocates; no hard-real-time claim follows.
 
+/// Geometry-derived tensioned filaments with reciprocal distributed contact.
+pub mod wire;
+
 use super::{BodyPotential, ImpactBody, ImpactError, VolumeSpring};
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
