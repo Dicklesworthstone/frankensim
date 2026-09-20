@@ -1,13 +1,14 @@
 //! Bounded physical inverse design using the existing small-dense SQP engine.
 //!
 //! `fs-couple` owns every preload solve and implicit equilibrium adjoint; this
-//! module only supplies their results and affine parameter bounds to SQP. It
+//! module supplies their results, physical constraints and parameter bounds to SQP. It
 //! does not differentiate solver iterations, relax contact admission, or infer
 //! material identifiability from a small optimization residual.
 
 use crate::sqp::{SqpError, SqpRunReport, SqpSample, SqpState, SqpStop};
 use fs_couple::render::schedule::force::coupled::equilibrium::sensitivity::objective::design::{
     DesignControl, DesignError, DesignEvaluation, DesignWork, EquilibriumDesign,
+    constraints::ConstraintSense,
 };
 use fs_exec::CancelGate;
 
@@ -30,8 +31,9 @@ fn admit(problem: &EquilibriumDesign, maximum_kkt_dimension: usize)
     -> Result<(), EquilibriumStudyError>
 {
     let n = problem.variables().len();
-    if n == 0 || n.checked_mul(3).is_none_or(|d| d > maximum_kkt_dimension) {
-        return Err(SqpError::Invalid("decisions plus both box faces exceed the dense KKT cap"));
+    if n == 0 || n.checked_mul(3).and_then(|d| d.checked_add(problem.constraints().len()))
+        .is_none_or(|d| d > maximum_kkt_dimension) {
+        return Err(SqpError::Invalid("decisions, box faces and physical constraints exceed the dense KKT cap"));
     }
     for variable in problem.variables() {
         // All constraint residuals must be representable in decision units.
@@ -59,10 +61,21 @@ fn sample(problem: &EquilibriumDesign, evaluation: &DesignEvaluation) -> SqpSamp
         ji[(2 * i) * n + i] = -1.0;
         ji[(2 * i + 1) * n + i] = 1.0;
     }
-    SqpSample {
-        f: evaluation.value, gradient: evaluation.gradient.clone(),
-        ce: Vec::new(), ci, je: Vec::new(), ji,
+    let mut ce = Vec::new();
+    let mut je = Vec::new();
+    // Box inequalities remain first. Physical rows retain declaration order
+    // within each equality/inequality family, including signed feasible slack.
+    for (constraint, row) in problem.constraints().iter().zip(&evaluation.constraints) {
+        if constraint.sense == ConstraintSense::Equal {
+            ce.push(row.residual);
+            je.extend_from_slice(&row.gradient);
+        } else {
+            ci.push(row.residual);
+            ji.extend_from_slice(&row.gradient);
+        }
     }
+    SqpSample { f: evaluation.value, gradient: evaluation.gradient.clone(), ce, ci, je, ji }
+
 }
 
 /// A solve bound to one immutable physical problem and caller-owned work ledger.
@@ -73,7 +86,8 @@ fn sample(problem: &EquilibriumDesign, evaluation: &DesignEvaluation) -> SqpSamp
 /// Neither mutable optimizer state nor a replacement problem can be supplied.
 ///
 /// Domain bounds are actual SQP inequalities. This is a local box-constrained
-/// stationary-design search, not a global optimum or identifiability certificate.
+/// stationary-design search with optional physical response equalities/inequalities,
+/// not a global optimum or identifiability certificate.
 /// The oracle's fixed modal bases and contact activity-margin restrictions still
 /// apply. Dense QP/BFGS phases are bounded but not internally cancellable.
 pub struct EquilibriumStudy<'problem, 'work> {
@@ -86,7 +100,7 @@ pub struct EquilibriumStudy<'problem, 'work> {
 
 impl<'problem, 'work> EquilibriumStudy<'problem, 'work> {
     /// Evaluate a complete initial load-case family once, then initialize SQP.
-    /// The dense cap includes n decisions and 2*n inequality rows. An invalid
+    /// The dense cap includes decisions, both box faces and all physical rows. An invalid
     /// initial physical point is an error, not an artificial penalty sample.
     /// The caller's work ledger remains charged even if initialization fails.
     pub fn new(
@@ -206,3 +220,7 @@ impl<'problem, 'work> EquilibriumStudy<'problem, 'work> {
         Ok(report)
     }
 }
+
+#[cfg(test)]
+#[path = "equilibrium/constraints_tests.rs"]
+mod constraints_tests;

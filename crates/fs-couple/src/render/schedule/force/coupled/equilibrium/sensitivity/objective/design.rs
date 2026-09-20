@@ -7,6 +7,10 @@ use crate::render::schedule::force::{coupled::contact::multiple::MultiContactCon
 use crate::render::RenderError;
 use fs_dcontact::Obstacle;
 
+/// Physical response equalities and inequalities with analytic Jacobian rows.
+pub mod constraints;
+use constraints::{ResponseConstraint, ResponseConstraintResult};
+
 /// A field assigned a physical value by a design variable. Indices refer to
 /// construction order, not the flattened modal layout. Damping is deliberately
 /// absent: static observations cannot identify it.
@@ -179,6 +183,8 @@ pub struct DesignEvaluation {
     pub physical_parameters: Vec<f64>,
     /// Every completed experiment, never a partial family.
     pub cases: Vec<DesignCaseResult>,
+    /// Complete physical-constraint rows in declaration order; empty by default.
+    pub constraints: Vec<ResponseConstraintResult>,
 }
 
 /// Immutable, reusable physical problem, with no retained speculative states.
@@ -190,6 +196,7 @@ pub struct EquilibriumDesign {
     contacts: Vec<(ModalContact, ModalContactConfig)>,
     cases: Vec<DesignLoadCase>,
     variables: Vec<DesignVariable>,
+    constraints: Vec<ResponseConstraint>,
     budget: DesignBudget,
     modes: usize,
     offsets: Vec<usize>,
@@ -256,7 +263,7 @@ impl EquilibriumDesign {
         }
         checkpoint(gate)?;
         Ok(Self { modes: template.mode_count(), offsets: template.offsets.clone(), models: template.models,
-            springs, contacts, cases, variables, budget })
+            springs, contacts, cases, variables, constraints: Vec::new(), budget })
     }
     #[must_use]
     /// Decision definitions and their physical scaling.
@@ -279,7 +286,8 @@ impl EquilibriumDesign {
     }
 
     /// Re-solve each independent case at the trial parameters, then use one
-    /// existing adjoint per case. No partial objective/gradient escapes. A case
+    /// existing objective adjoint per case plus one per physical constraint.
+    /// No partial objective, constraint or Jacobian family escapes. A case
     /// changing contact activity is re-admitted from its own solved state; a
     /// near-switch derivative still refuses under the original margin rule.
     pub fn evaluate(&self, point: &[f64], control: &mut DesignControl, gate: &CancelGate)
@@ -320,7 +328,8 @@ impl EquilibriumDesign {
             }
         }
         let mut result = DesignEvaluation { value: 0.0, gradient: vec![0.0; self.variables.len()],
-            physical_parameters: parameters, cases: Vec::with_capacity(cases.len()) };
+            physical_parameters: parameters, cases: Vec::with_capacity(cases.len()), constraints: Vec::new() };
+        let mut constraint_results = vec![None; self.constraints.len()];
         for (index, case) in cases.iter().enumerate() {
             checkpoint(gate)?;
             control.work.case_solves += 1;
@@ -350,24 +359,23 @@ impl EquilibriumDesign {
             for (j, variable) in self.variables.iter().enumerate() {
                 let mut physical = 0.0;
                 for &field in &variable.fields {
-                    let pullback = &objective.residual_pullback;
-                    let derivative = match field {
-                        DesignField::SpringStiffness(i) => -pullback.springs[i].stiffness,
-                        DesignField::SpringRest(i) => -pullback.springs[i].rest_extension,
-                        DesignField::ContactStiffness(i) => -pullback.contacts[i].stiffness,
-                        DesignField::ContactGap(i) => -pullback.contacts[i].gap,
-                        DesignField::ContactWeight(i) => -pullback.contacts[i].weight,
-                        DesignField::ActuatorForce { case, actuator } => if case == index {
-                            objective.physical_force_gradient[actuator]
-                        } else { 0.0 },
-                    };
+                    let derivative = field_derivative(field, index, &objective.residual_pullback,
+                        &objective.physical_force_gradient);
                     physical = number(physical + derivative)?;
                 }
                 result.gradient[j] = number(result.gradient[j] + number(physical * variable.scale)?)?;
             }
+            for (row, constraint) in self.constraints.iter().enumerate() {
+                if constraint.case == index {
+                    constraint_results[row] = Some(constraints::evaluate(constraint, &linear, &contacts,
+                        case, &self.variables, gate).map_err(|source| case_error(index, source))?);
+                }
+            }
             result.cases.push(DesignCaseResult { value: objective.value, observations_m: objective.observations_m,
                 equilibrium: linear.report(), adjoint_relative_residual: objective.adjoint.relative_residual });
         }
+        result.constraints = constraint_results.into_iter().map(|row|
+            row.ok_or_else(|| bad("missing complete physical constraint row"))).collect::<Result<_,_>>()?;
         checkpoint(gate)?;
         Ok(result)
     }
@@ -404,4 +412,19 @@ fn checkpoint(gate: &CancelGate) -> Result<(), DesignError> { if gate.is_request
 fn bad(what: &'static str) -> DesignError { DesignError::Invalid { what } }
 fn case_error(case: usize, source: ModalCouplingError) -> DesignError {
     if matches!(&source, ModalCouplingError::Cancelled) { DesignError::Cancelled } else { DesignError::Case { case, source } }
+}
+
+// Shared indirect derivative convention for objectives and physical responses.
+// Explicit constitutive terms, when present, are added by the response owner.
+fn field_derivative(field: DesignField, index: usize, pullback: &EquilibriumParameterPullback,
+    physical_forces: &[f64]) -> f64
+{
+    match field {
+        DesignField::SpringStiffness(i) => -pullback.springs[i].stiffness,
+        DesignField::SpringRest(i) => -pullback.springs[i].rest_extension,
+        DesignField::ContactStiffness(i) => -pullback.contacts[i].stiffness,
+        DesignField::ContactGap(i) => -pullback.contacts[i].gap,
+        DesignField::ContactWeight(i) => -pullback.contacts[i].weight,
+        DesignField::ActuatorForce { case, actuator } => if case == index { physical_forces[actuator] } else { 0.0 },
+    }
 }
