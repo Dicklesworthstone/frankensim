@@ -1,5 +1,5 @@
 //! Geometry/basis regressions; analytic roots are independent reference values.
-use fs_couple::render::plate::impact::{ImpactError,cavity::cylinder::{CylinderSpec,CylindricalCavity}};
+use fs_couple::render::plate::impact::{ImpactError,cavity::cylinder::{CylinderSpec,CylindricalCavity,SidewallAperture}};
 use fs_couple::vibroacoustic::AcousticMedium;
 use fs_exec::CancelGate;
 fn spec(intervals:usize)->CylinderSpec {CylinderSpec {radius_m:0.1703,depth_m:0.1651,
@@ -78,4 +78,55 @@ fn complete_pair_capacity_bad_geometry_points_and_cancellation_refuse_explicitly
 }
 fn build_result(s:CylinderSpec)->Result<CylindricalCavity,ImpactError> {
     CylindricalCavity::new(s,AcousticMedium {rho0:1.2,c0:343.0},&CancelGate::new_clock_free())
+}
+
+fn opening()->SidewallAperture {SidewallAperture {radius_m:0.016,azimuth_rad:0.4,
+    axial_position_m:0.06,radial_rings:8,angular_points:32,maximum_terms:100000}}
+
+#[test]
+fn g1_finite_sidewall_area_converges_to_the_independent_fourier_disk_integral() {
+    let air=build(spec(16));let gate=CancelGate::new_clock_free();let s=air.spec();let aperture=opening();
+    let centre=air.values_at([s.radius_m*aperture.azimuth_rad.cos(),
+        s.radius_m*aperture.azimuth_rad.sin(),aperture.axial_position_m]).unwrap();
+    // The disk characteristic function is 2 J1(x)/x. Independent convergent
+    // reference series, NOT a second implementation of the production quadrature.
+    let exact:Vec<_>=air.modes().iter().zip(&centre).map(|(mode,value)| {
+        let x=aperture.radius_m*(mode.azimuthal_order as f64/s.radius_m)
+            .hypot(core::f64::consts::PI*mode.axial_order as f64/s.depth_m);
+        let mut term=1.0;let mut factor=1.0;
+        for k in 1..=18 {term*= -x*x/(4.0*f64::from(k)*f64::from(k+1));factor+=term;}
+        value*factor
+    }).collect();
+    let mut previous=f64::INFINITY;
+    for radial_rings in [2,4,8,16] {
+        let mean=air.sidewall_averages(SidewallAperture {radial_rings,..aperture},&gate).unwrap();
+        assert_eq!(mean[0],1.0,"constant pressure gives exactly the physical opening area");
+        let error=mean.iter().zip(&exact).map(|(a,b)|(a-b).abs()).fold(0.0_f64,f64::max);
+        assert!(error<0.35*previous);previous=error;
+    }
+    assert!(previous<1e-7);
+    assert!(exact.iter().zip(&centre).any(|(a,b)|(a-b).abs()>1e-3),"a finite opening cannot be replaced by a point");
+    let original=air.sidewall_averages(aperture,&gate).unwrap();
+    let opposite=air.sidewall_averages(SidewallAperture {
+        azimuth_rad:aperture.azimuth_rad+core::f64::consts::PI,
+        axial_position_m:s.depth_m-aperture.axial_position_m,..aperture},&gate).unwrap();
+    for ((a,b),mode) in original.iter().zip(opposite).zip(air.modes()) {
+        let parity=if (mode.azimuthal_order+mode.axial_order)%2==0 {1.0}else{-1.0};
+        assert!((a-parity*b).abs()<1e-12);
+    }
+}
+
+#[test]
+fn g0_g4_sidewall_average_refuses_outside_geometry_work_and_cancellation() {
+    let air=build(spec(8));let gate=CancelGate::new_clock_free();let good=opening();
+    for bad in [SidewallAperture {radius_m:0.0,..good},
+        SidewallAperture {radius_m:0.02,..good},SidewallAperture {axial_position_m:0.0,..good},
+        SidewallAperture {azimuth_rad:f64::NAN,..good},SidewallAperture {radial_rings:0,..good},
+        SidewallAperture {angular_points:7,..good},SidewallAperture {maximum_terms:1,..good}] {
+        assert!(air.sidewall_averages(bad,&gate).is_err());
+    }
+    let expected=air.sidewall_averages(good,&gate).unwrap();
+    let cancelled=CancelGate::new_clock_free();cancelled.request();
+    assert!(matches!(air.sidewall_averages(good,&cancelled),Err(ImpactError::Cancelled)));
+    assert_eq!(expected,air.sidewall_averages(good,&gate).unwrap());
 }

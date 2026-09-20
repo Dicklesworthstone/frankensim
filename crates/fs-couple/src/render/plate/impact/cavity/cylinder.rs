@@ -48,6 +48,23 @@ pub struct CylinderMode {
 #[derive(Debug,Clone)]
 pub struct CylindricalCavity {spec:CylinderSpec,medium:AcousticMedium,modes:Vec<CylinderMode>}
 
+/// Circular opening on the unrolled cylindrical sidewall. Its area is pi*a^2;
+/// arc displacement s maps to theta+s/R, without a flat-plane projection.
+/// This small-opening chart requires a <= R/10 and cannot intersect either head.
+#[derive(Debug,Clone,Copy)]
+pub struct SidewallAperture {
+    pub radius_m:f64,
+    pub azimuth_rad:f64,
+    /// Centre measured from the z=0 head plane [m].
+    pub axial_position_m:f64,
+    /// Midpoint quadrature in squared radius (1..=64); refine independently.
+    pub radial_rings:usize,
+    /// Uniform periodic azimuthal samples per ring (8..=256).
+    pub angular_points:usize,
+    /// Ceiling on rings * angular_points * retained pressure modes.
+    pub maximum_terms:usize,
+}
+
 fn radial_pencil(intervals:usize,order:usize)->(Vec<f64>,Vec<f64>) {
     let skip=usize::from(order>0);let n=intervals+1-skip;
     let(mut k,mut mass)=(vec![0.0;n*n],vec![0.0;n*n]);
@@ -145,6 +162,52 @@ impl CylindricalCavity {
     #[must_use]
     pub fn spec(&self)->CylinderSpec {self.spec}
 
+    /// Average every retained pressure shape over the SAME positive-area opening
+    /// used for neck flow. A finite opening is not replaced by its centre point.
+    /// Equal-area radial midpoint/periodic angular quadrature is a convergent
+    /// estimate, not a certified error bound. The norm/order is unchanged.
+    ///
+    /// # Errors
+    /// Refuses invalid/out-of-wall geometry, exceeded work or cancellation;
+    /// never publishes a partially averaged basis.
+    pub fn sidewall_averages(&self,opening:SidewallAperture,gate:&CancelGate)
+        ->Result<Vec<f64>,ImpactError> {
+        if gate.is_requested() {return Err(ImpactError::Cancelled);}
+        let a=opening.radius_m;
+        if !a.is_finite() || a<=0.0 || a>0.1*self.spec.radius_m
+            || !opening.azimuth_rad.is_finite() || !opening.axial_position_m.is_finite()
+            || opening.axial_position_m-a<0.0 || opening.axial_position_m+a>self.spec.depth_m
+            || !(1..=64).contains(&opening.radial_rings)
+            || !(8..=256).contains(&opening.angular_points) {
+            return Err(invalid("sidewall opening must be finite, small, inside the wall and quadrature-bounded"));
+        }
+        let points=opening.radial_rings*opening.angular_points;
+        if points.checked_mul(self.modes.len()).is_none_or(|n|n>opening.maximum_terms) {
+            return Err(invalid("sidewall pressure averaging exceeds its work budget"));
+        }
+        // Reduce before adding tiny offsets, so large finite turns cannot erase
+        // the aperture width through floating-point addition.
+        let theta=opening.azimuth_rad.rem_euclid(core::f64::consts::TAU);
+        let mut averages=vec![0.0;self.modes.len()];
+        for ring in 0..opening.radial_rings {
+            let r=a*((ring as f64+0.5)/opening.radial_rings as f64).sqrt();
+            for sample in 0..opening.angular_points {
+                if sample%16==0 && gate.is_requested() {return Err(ImpactError::Cancelled);}
+                let phi=core::f64::consts::TAU*(sample as f64+0.5)/opening.angular_points as f64;
+                let angle=theta+r*det::cos(phi)/self.spec.radius_m;
+                let z=opening.axial_position_m+r*det::sin(phi);
+                let point=[self.spec.radius_m*det::cos(angle),self.spec.radius_m*det::sin(angle),z];
+                for (sum,value) in averages.iter_mut().zip(self.values_at(point)?) {*sum+=value;}
+            }
+        }
+        for value in &mut averages {
+            *value/=points as f64;
+            if !value.is_finite() {return Err(invalid("sidewall pressure average overflow"));}
+        }
+        if gate.is_requested() {return Err(ImpactError::Cancelled);}
+        Ok(averages)
+    }
+
     /// Dimensionless pressure mode values inside the cylinder, in retained order.
     /// Geometry origin is the centre of the z=0 end plane, not the cavity centre.
     pub fn values_at(&self,point:[f64;3])->Result<Vec<f64>,ImpactError> {
@@ -171,7 +234,7 @@ impl CylindricalCavity {
     /// Damping is not inferred from geometry. The caller supplies it to the time
     /// adapter or explicitly sets frequency-domain losses on its separate image.
     pub fn sample(&self,points:&[[f64;3]],maximum_terms:usize)->Result<CavityModes,ImpactError> {
-        if points.is_empty() || self.modes.len().checked_mul(points.len()).is_none_or(|n|n>maximum_terms) {
+        if points.is_empty() || points.len().checked_mul(self.modes.len()).is_none_or(|n|n>maximum_terms) {
             return Err(invalid("cylinder interface sample budget exceeded"));
         }
         let mut interface=vec![vec![0.0;points.len()];self.modes.len()];

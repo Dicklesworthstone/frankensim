@@ -130,10 +130,11 @@ fn drum_with_wires(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sna
     drum_with_playing(steps,dt_s,audio,prepared,snares,false,Stroke::default())
 }
 fn drum_with_playing(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke)->Result<Experiment,Error> {
-    drum_with_air(steps,dt_s,audio,prepared,snares,stretching,stroke,false)
+    drum_with_air(steps,dt_s,audio,prepared,snares,stretching,stroke,false,None)
 }
 #[allow(clippy::too_many_arguments)]
-fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool)->Result<Experiment,Error> {
+fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>)->Result<Experiment,Error> {
+    if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
     if distributed_cavity && (prepared || snares.is_some()) {return Err("distributed cavity requires the nonlinear host; use --prepared-nonlinear, not drum-modal/snare".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
     if snares.is_some() && !prepared {return Err("wire bank requires the explicit prepared mechanical image".into());}
@@ -199,7 +200,7 @@ fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare
     // realization changes. Neither path modifies the microphone/BEM boundary.
     let mut air=None;
     let system=if distributed_cavity {
-        let (system,probe)=cavity::build(&films,&mode_sets,bodies,contacts,radius,depth,steps,dt_s)?;
+        let (system,probe)=cavity::build(&films,&mode_sets,bodies,contacts,radius,depth,steps,dt_s,neck)?;
         air=Some(probe);Mechanics::Reference(system)
     }else if prepared {
         if snares.is_some() {
@@ -225,6 +226,7 @@ fn run()->Result<(),Error> {
     let mut raw_args=std::env::args().skip(1).collect();
     let prepared_nonlinear=mechanics::prepared_option(&mut raw_args)?;
     let distributed_cavity=cavity::option(&mut raw_args)?;
+    let neck=cavity::neck_option(&mut raw_args)?;
     let (args,stroke)=playing::parse(raw_args)?;
     if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to drum/drum-stretch (see CAVITY.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
@@ -235,6 +237,7 @@ fn run()->Result<(),Error> {
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
         return Err("--cavity-modes applies only to drum and drum-stretch, including WAV/microphone variants".into());
     }
+    cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -253,8 +256,8 @@ fn run()->Result<(),Error> {
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let mut experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash_with_stroke(steps,dt_s,audio,stroke)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_air(steps,dt_s,audio,false,None,false,stroke,distributed_cavity)?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_air(steps,dt_s,audio,false,None,true,stroke,distributed_cavity)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_air(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_air(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_playing(steps,dt_s,audio,true,None,false,stroke)?,
         "snare"|"snare-wav"|"snare-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke)?,
         "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke)?,
@@ -274,12 +277,16 @@ fn run()->Result<(),Error> {
     let gate=CancelGate::new_clock_free();
     let extra=if stretching {",batter_slope,resonant_slope,head_stretching_energy_j"}else{""};
     let air_columns=if distributed_cavity {",cavity_point_a_pa,cavity_point_b_pa"}else{""};
-    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}")?;
+    let neck_columns=if neck.is_some() {",neck_volume_m3,neck_flow_m3_s,neck_pressure_pa,neck_loss_power_w"}else{""};
+    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}{neck_columns}")?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
         let displacement=|weights:&[f64]|weights.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
         let velocity=experiment.observer_a.iter().enumerate().map(|(i,b)|b*x[2*i+1]).sum::<f64>();
-        let pressure=experiment.pressure.as_ref().map_or(0.0,|v|cavity_pressure(v,x));
+        let pressure=match &experiment.air {
+            Some(air)=>air.uniform_pressure(x)?,
+            None=>experiment.pressure.as_ref().map_or(0.0,|v|cavity_pressure(v,x)),
+        };
         write!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
             f.time_s,displacement(&experiment.observer_a),velocity,displacement(&experiment.observer_b),pressure,
             f.stored_energy_j,f.felt_crush_loss_j,f.dissipated_energy_j,f.balance_residual_j)?;
@@ -290,6 +297,11 @@ fn run()->Result<(),Error> {
         }
         if let Some(air)=&experiment.air {
             let (a,b)=air.points(x)?;write!(out,",{a:.17e},{b:.17e}")?;
+            if air.coupling.neck_count()>0 {
+                let n=air.coupling.neck_observation(x,0)?;
+                write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",n.displaced_volume_m3,
+                    n.volume_flow_m3_s,n.driving_pressure_pa,n.dissipated_power_w)?;
+            }
         }
         writeln!(out)?;
     }

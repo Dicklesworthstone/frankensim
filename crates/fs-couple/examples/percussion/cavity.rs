@@ -1,6 +1,7 @@
 //! Distributed enclosed air from the same drum dimensions and actual head modes.
 use super::{Error,ImpactBody,ImpactSystem,ModePair,Obstacle,TensionedDisk,config};
-use fs_couple::render::plate::impact::cavity::{CavityCoupling,cylinder::{CylinderSpec,CylindricalCavity}};
+use fs_couple::render::plate::impact::cavity::{CavityCoupling,
+    cylinder::{CylinderSpec,CylindricalCavity,SidewallAperture},neck::CavityNeck};
 use fs_couple::vibroacoustic::{AcousticMedium,StructuralModes,assemble_coupling};
 use fs_exec::CancelGate;
 
@@ -10,9 +11,50 @@ pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
     args.retain(|a|a!="--cavity-modes");Ok(count==1)
 }
 
+/// All neck physics and position are explicit; this is not a measured drum card.
+#[derive(Debug,Clone,Copy,PartialEq)]
+pub struct NeckOptions {
+    pub radius_m:f64,
+    pub effective_length_m:f64,
+    pub resistance_pa_s_m3:f64,
+    pub azimuth_rad:f64,
+    pub axial_position_m:f64,
+}
+
+pub fn neck_option(args:&mut Vec<String>)->Result<Option<NeckOptions>,Error> {
+    let mut positions=args.iter().enumerate().filter(|(_,v)|v.as_str()=="--cavity-neck");
+    let Some((start,_))=positions.next() else {return Ok(None);};
+    if positions.next().is_some() || args.len()-start<6 {
+        return Err("--cavity-neck needs one radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m declaration".into());
+    }
+    let mut values=[0.0_f64;5];
+    for (value,text) in values.iter_mut().zip(&args[start+1..start+6]) {*value=text.parse()?;}
+    if values.iter().any(|v|!v.is_finite()) || values[0]<=0.0 || values[1]<=0.0 || values[2]<0.0 {
+        return Err("neck needs positive finite radius/length, passive resistance and finite wall coordinates".into());
+    }
+    let neck=NeckOptions {radius_m:values[0],effective_length_m:values[1],
+        resistance_pa_s_m3:values[2],azimuth_rad:values[3],axial_position_m:values[4]};
+    args.drain(start..start+6);
+    Ok(Some(neck))
+}
+
+pub fn admit_neck_command(neck:Option<NeckOptions>,distributed:bool,command:&str)->Result<(),Error> {
+    if neck.is_some() && (!distributed || !matches!(command,"drum"|"drum-stretch")) {
+        return Err("--cavity-neck requires --cavity-modes and drum/drum-stretch CSV; vented exterior radiation is not implemented, so WAV/microphone export is refused".into());
+    }
+    Ok(())
+}
+
 /// Cached interior observations, not an exterior microphone or extra force.
 pub struct InteriorPressure {pub coupling:CavityCoupling,first:Vec<f64>,second:Vec<f64>}
 impl InteriorPressure {
+    pub fn uniform_pressure(&self,state:&[f64])->Result<f64,Error> {
+        let mut pressure=[0.0;8];
+        self.coupling.pressures_into(state,&mut pressure[..self.coupling.cavity_modes()])?;
+        // The cylindrical basis owns an exact constant first member. Include
+        // displaced neck volume here, not only the old solid-head contraction.
+        Ok(pressure[0])
+    }
     pub fn points(&self,state:&[f64])->Result<(f64,f64),Error> {
         Ok((self.coupling.pressure_at(state,&self.first)?,
             self.coupling.pressure_at(state,&self.second)?))
@@ -69,7 +111,7 @@ fn interface(films:&[TensionedDisk],modes:&[Vec<ModePair>],air:&CylindricalCavit
 /// would double it. Acoustic state only reaches exterior sound through head motion.
 #[allow(clippy::too_many_arguments)]
 pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
-    contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64)
+    contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
     ->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();let air=basis(radius,depth,&gate)?;
     let coupling=interface(films,modes,&air,&gate)?;
@@ -77,7 +119,19 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
     let sampled=air.sample(&[[0.0,0.0,0.0]],8)?;
     eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; explicit zero acoustic drag; rigid cylindrical sidewall, not calibrated losses",
         sampled.omegas.iter().map(|w|w/core::f64::consts::TAU).collect::<Vec<_>>());
-    let compiled=CavityCoupling::new(&sampled,structural,&coupling,&vec![0.0;air.modes().len()])?;
+    let mut compiled=CavityCoupling::new(&sampled,structural,&coupling,&vec![0.0;air.modes().len()])?;
+    if let Some(neck)=neck {
+        let averages=air.sidewall_averages(SidewallAperture {radius_m:neck.radius_m,
+            azimuth_rad:neck.azimuth_rad,axial_position_m:neck.axial_position_m,
+            radial_rings:8,angular_points:32,maximum_terms:2048},&gate)?;
+        compiled=compiled.with_necks(vec![CavityNeck {
+            area_m2:core::f64::consts::PI*neck.radius_m*neck.radius_m,
+            effective_length_m:neck.effective_length_m,resistance_pa_s_m3:neck.resistance_pa_s_m3,
+            pressure_shape_averages:averages,initial_volume_m3:0.0,initial_flow_m3_s:0.0,
+        }],&gate)?;
+        eprintln!("compact neck: radius={}m, effective_length={}m, resistance={}Pa*s/m^3, azimuth={}rad, z={}m; 8x32 wall-area quadrature; zero-gauge reservoir; parameters are declarations, not calibrated losses; exterior audio refused",
+            neck.radius_m,neck.effective_length_m,neck.resistance_pa_s_m3,neck.azimuth_rad,neck.axial_position_m);
+    }
     let (system,compiled)=compiled.build(bodies,contacts,vec![],config(steps,dt_s),&gate)?;
     let first=air.values_at([0.4*radius,0.2*radius,0.0])?;
     let second=air.values_at([-0.4*radius,-0.2*radius,depth])?;
@@ -87,6 +141,30 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn neck_arguments_preserve_playing_controls_and_refuse_unimplemented_audio() {
+        let mut args:Vec<String>=["drum-stretch","128","--cavity-neck","0.005","0.012","1000","0.4","0.08",
+            "--cavity-modes","--strike-speed-m-s","4","--prepared-nonlinear"].map(String::from).to_vec();
+        let neck=neck_option(&mut args).unwrap().unwrap();
+        assert_eq!(neck.radius_m,0.005);assert_eq!(neck.effective_length_m,0.012);
+        assert_eq!(neck.resistance_pa_s_m3,1000.0);assert_eq!(neck.azimuth_rad,0.4);assert_eq!(neck.axial_position_m,0.08);
+        assert!(option(&mut args).unwrap());
+        assert!(super::super::mechanics::prepared_option(&mut args).unwrap());
+        let (positional,stroke)=super::super::playing::parse(args).unwrap();
+        assert_eq!(positional,["drum-stretch","128"]);assert_eq!(stroke.speed_m_s,4.0);
+        assert!(admit_neck_command(Some(neck),true,"drum-stretch").is_ok());
+        for command in ["drum-mic","drum-wav","drum-stretch-mic","drum-stretch-wav","snare","splash"] {
+            assert!(admit_neck_command(Some(neck),true,command).is_err());
+        }
+        assert!(admit_neck_command(Some(neck),false,"drum").is_err());
+        assert!(admit_neck_command(None,false,"splash").is_ok());
+        for declaration in ["--cavity-neck", "--cavity-neck 0.005 0.012 -1 0 0.08",
+            "--cavity-neck NaN 0.012 1000 0 0.08", "--cavity-neck 0 0.012 1000 0 0.08",
+            "--cavity-neck 0.005 0.012 1000 0 0.08 --cavity-neck 0.005 0.012 1000 0 0.08"] {
+            let mut args:Vec<String>=declaration.split_whitespace().map(String::from).collect();
+            let original=args.clone();assert!(neck_option(&mut args).is_err());assert_eq!(args,original);
+        }
+    }
     #[test]
     fn cavity_flag_preserves_playing_controls_and_rejects_duplicates() {
         let mut args=vec!["drum-mic".into(),"--cavity-modes".into(),"128".into(),
@@ -124,8 +202,8 @@ mod tests {
     #[test]
     fn distributed_air_changes_real_struck_head_motion_without_direct_acoustic_drive() {
         let stroke=super::super::Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])};
-        let mut compact=super::super::drum_with_air(128,2e-6,false,false,None,true,stroke,false).unwrap();
-        let mut distributed=super::super::drum_with_air(128,2e-6,false,false,None,true,stroke,true).unwrap();
+        let mut compact=super::super::drum_with_air(128,2e-6,false,false,None,true,stroke,false,None).unwrap();
+        let mut distributed=super::super::drum_with_air(128,2e-6,false,false,None,true,stroke,true,None).unwrap();
         let solid=compact.force.len();
         assert_eq!(compact.system.state(),&distributed.system.state()[..2*solid]);
         assert_eq!(&compact.observer_a[..],&distributed.observer_a[..solid]);
@@ -144,5 +222,43 @@ mod tests {
         }
         assert!(changed>1e-12);assert!(nonuniform>1e-5);
         assert!(distributed.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
+    }
+
+    #[test]
+    fn finite_neck_changes_struck_stretching_heads_and_pressure_contains_outward_slug_volume() {
+        let stroke=super::super::Stroke {speed_m_s:4.0,position_m:Some([0.06,0.01])};
+        let neck=NeckOptions {radius_m:0.005,effective_length_m:0.012,resistance_pa_s_m3:1000.0,
+            azimuth_rad:0.4,axial_position_m:0.08};
+        let mut sealed=super::super::drum_with_air(256,2e-6,false,false,None,true,stroke,true,None).unwrap();
+        let mut vented=super::super::drum_with_air(256,2e-6,false,false,None,true,stroke,true,Some(neck)).unwrap();
+        let original=sealed.force.len();
+        assert_eq!(vented.force.len(),original+1);
+        assert_eq!(sealed.system.state(),&vented.system.state()[..2*original]);
+        assert_eq!(vented.observer_a[original],0.0);assert_eq!(vented.observer_b[original],0.0);
+        assert_eq!(vented.force[original],0.0);assert!(vented.acoustics.is_none());
+        sealed.system=sealed.system.into_prepared_nonlinear().unwrap();
+        vented.system=vented.system.into_prepared_nonlinear().unwrap();
+        let gate=CancelGate::new_clock_free();let mut changed=0.0_f64;let mut flow=0.0_f64;let mut loss=0.0_f64;
+        for _ in 0..256 {
+            sealed.system.step(&sealed.force,&gate).unwrap();
+            let f=vented.system.step(&vented.force,&gate).unwrap();
+            let x=vented.system.state();let air=vented.air.as_ref().unwrap();
+            let n=air.coupling.neck_observation(x,0).unwrap();
+            // The old volume column knows only head displacement and would
+            // falsely report sealed compression. This checks the CSV observable.
+            let volume=vented.pressure.as_ref().unwrap();
+            let heads=super::super::cavity_pressure(volume,x);
+            let expected=heads-volume.bulk_modulus_pa/volume.volume_m3*n.displaced_volume_m3;
+            assert!((air.uniform_pressure(x).unwrap()-expected).abs()<1e-7*(1.0+expected.abs()));
+            let solid=air.coupling.structural_modes();
+            changed=changed.max(sealed.system.state()[..2*solid].iter().zip(&x[..2*solid])
+                .map(|(a,b)|(a-b).abs()).fold(0.0_f64,f64::max));
+            flow=flow.max(n.volume_flow_m3_s.abs());loss+=n.dissipated_power_w*2e-6;
+            assert!(f.balance_residual_j.abs()<1e-7);
+        }
+        assert!(changed>1e-12);assert!(flow>1e-10);assert!(loss>0.0);
+        assert!(vented.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
+        // Reject before any geometry or exterior transfer is constructed.
+        assert!(super::super::drum_with_air(1,2e-6,true,false,None,true,stroke,true,Some(neck)).is_err());
     }
 }
