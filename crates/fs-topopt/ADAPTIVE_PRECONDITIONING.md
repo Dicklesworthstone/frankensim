@@ -1,73 +1,88 @@
 # Adaptive optimization and enrichment preconditioning
 
-The `adaptive_elastic_sdf3` example prepares numerical factors once per evaluated
-optimization density, and separately once per enriched goal-load family. Each
-preparation is shared by that density's independent loads. Geometry, density
-pullbacks, OC acceptance and the DWR estimator retain their original mathematics.
-Bare library backends still select identity, without additional setup work.
+`CutDensityStudy3` uses one numerical preparation per evaluated density and
+shares it across independent loads. Goal refinement separately prepares once
+for its enriched physical design. Geometry stays fixed inside each optimization
+call; numeric factors are never reused after a density change. Bare library
+backends retain identity preconditioning.
 
 ```sh
-# Arguments: rounds, updates, outer iteration budget, enrichment mode,
-# then optimization mode (jacobi by default; two-level also supported).
+# Existing defaults: two-level enrichment, Jacobi optimization, initial level 1.
 cargo run --locked -p fs-topopt --features cutfem-marquee --release \
-  --example adaptive_elastic_sdf3 -- 2 3 250000 two-level jacobi
+  --example adaptive_elastic_sdf3 -- 2 3 250000
+# Recursive correction for BOTH optimization and enriched goal solves:
 cargo run --locked -p fs-topopt --features cutfem-marquee --release \
-  --example adaptive_elastic_sdf3 -- 2 3 250000 two-level two-level
-# Compare enrichment modes with the same optimization preparation:
+  --example adaptive_elastic_sdf3 -- 2 3 250000 multilevel multilevel 2
+# Start at level 3 to exercise an enriched first coarse space above 512 DOFs.
 cargo run --locked -p fs-topopt --features cutfem-marquee --release \
-  --example adaptive_elastic_sdf3 -- 2 3 250000 identity jacobi
+  --example adaptive_elastic_sdf3 -- 2 2 250000 multilevel multilevel 3
 ```
 
-Use the repository's RCH execution lane where required.
+Use the repository's DSR/RCH execution lane where available. Arguments are
+rounds, updates per round, cumulative outer iteration limit, enrichment mode,
+optimization mode, and initial uniform level. Enrichment modes are identity,
+Jacobi, two-level and multilevel; optimization modes are Jacobi, two-level and
+multilevel. All size, geometry and numeric-work refusals remain explicit.
 
-## Repeated optimization solves
+## Recursive correction
 
-Construct `fs_cutfem::elastic3::adaptive::enrichment::precondition::AdaptiveSolveSpace3`
-with `jacobi(fine, max_diagonal_contributions)` or
-`two_level(fine, &coarse, AdaptiveSolveOptions3, checkpoint)`, then pass the
-result to the existing `CutDensityStudy3::new`. The same evaluator and optimizer
-accept this backend; it is not a separate optimization implementation.
+Construct `AdaptiveSolveSpace3::multilevel(fine, &coarser, options, checkpoint)`
+from the existing CutFEM preconditioning module. The borrowed coarse geometries
+are ordered nearest-to-farthest; construction retains their sparse Q1 transfer,
+not their stiffness matrices. Every adjacent pair must satisfy the existing
+box, reference material, clamp, active-support and refinement admission.
+The example retains uniform lower-resolution spaces across refinement rounds;
+other callers may supply valid locally refined nested spaces.
 
-The backend owns the fine operator and its geometric interpolation, so a matrix
-cannot be substituted just because its dimension happens to match. Only scales
-can change. Interpolation is constructed once per grid; the constrained diagonal
-and coarse factor are rebuilt at **every evaluated density**, including rejected
-trials. They are shared across all loads of that density, never carried forward
-as stale factors. The current generic solver clones/transposes the retained CSR
-interpolation at preparation; this is not a zero-allocation cache.
+The finest action is additive: `D_f^-1 + P_f V P_f^T`. Intermediate `V` levels
+use forward Gauss-Seidel, recursive residual correction, and the backward
+adjoint sweep. Only the final level is factored densely. The finest operator
+remains matrix-free; this is a hybrid recursive preconditioner, not a claim
+that every level is matrix-free or a full finest-level multiplicative V-cycle.
 
-The example's optional optimization correction uses a fixed one-cell slab space.
-It is a correction space only, not a replacement coarse physics solve or a
-claim of sufficient resolution. The coarsest space is not suitable for every
-implicit geometry. Failed support, transfer or factor admission refuses rather
-than constructing missing geometry or silently falling back. The existing
-Jacobi option has no Galerkin setup applications and may be cheaper on small
-load families. Preconditioning can change roundoff and subsequent optimizer
-trajectories; only the original identity path promises its original arithmetic.
+The physics owner contracts the actual constrained element blocks and
+current-density ghost jumps into `P_f^T A_f P_f`. It does not probe every fine
+coordinate, assemble the full fine matrix, re-integrate geometry or substitute
+a rediscretized coarse stiffness. Deeper matrices are sparse Galerkin products.
+Intermediate dimensions can exceed 512; only the bottom factor has that hard
+ceiling (default 192). Entry, transfer, level and accumulated-product caps bound
+setup structures and arithmetic categories, not peak RSS or wall-clock time.
 
-## Enriched goal solves
+`prepare_with_work` rebuilds the diagonal, sparse matrices and bottom factor at
+every evaluated density, including rejected trials. Prepared values borrow the
+fine operator and are fixed throughout each outer CG solve. Symmetric smoothing
+and a direct bottom inverse avoid a residual-dependent nonlinear inner solve.
+Rank/positivity failures refuse without pivot shifts or silent fallback.
 
-Programmatic callers select `GoalRefinementOptions3::preconditioner`:
-`Identity` retains the old default, `Jacobi` uses the exact condensed diagonal,
-and `TwoLevel` adds the geometric Galerkin correction. Both bare and prepared
-adaptive studies pass their identical underlying physical operator and accepted
-fields to this estimator. Supply explicit diagonal and `TwoLevelBudget` limits.
-The default budget admits 384 coarse coordinates; the generic coarse solve is
-hard-capped at 512. This is not a recursive multigrid hierarchy.
+## Goal refinement
 
-The coarse matrix is `P^T A_fine P`, not the separately integrated coarse
-elasticity operator. Hanging-node cross terms and density-dependent ghost terms
-are included in the diagonal. Every preconditioner is fixed during CG; its
-borrow prevents a mutable stiffness update while its numerical data are live.
+Select `GoalPreconditioner3::Multilevel` and call
+`estimate_compliance_enrichment_with_coarse_levels`. The accepted grid is always
+the first correction space for the enriched problem; pass only additional
+geometries BELOW it, nearest first. With no extra levels, the original enrichment
+entry point also admits a single sparse bottom when it fits the cap. Other
+policies reject extra ladders instead of ignoring them.
 
-`SolveWork::linear_iterations` counts outer Krylov iterations.
-`preconditioner_operator_applications` separately retains all Galerkin setup
-applications, including cancelled/failed and rejected-trial work. Setup limits
-apply per preparation, separately from the cumulative Krylov cap. Count both
-before comparing work; neither measures wall-clock time or total arithmetic.
-A refused preparation, interrupted load family or rejected trial cannot replace
-accepted scales or fields. The true-residual gate still checks the actual PDE.
+The complete accepted coarse load family is checked before numerical setup.
+Physical stiffness inheritance, independent fine solves, actual-field residual
+checks and the DWR decomposition remain shared by all solve policies. Refinement
+marks apply to the original coarse tree, not the globally enriched probe.
+Two-grid differences are not continuum bounds, and zero marking signal is not
+an accuracy certificate.
 
-No continuum certificate, asymptotic scalability, mesh-independent iteration
-count, or allocation-free/real-time claim is made. Native Rust execution is
-pending; numerical development references do not substitute for Rust tests.
+## Work and limits
+
+`SolveWork` separates `linear_iterations`,
+`preconditioner_operator_applications` and `preconditioner_galerkin_products`.
+The latter counts admitted sparse upper-triangle summands, including discarded
+and cancelled construction. Do not add those three numbers as equivalent work
+units. Two-level fine applications and recursive local products are different
+setup mechanisms. Sparse setup has a whole-hierarchy per-preparation budget;
+outer iterations retain their existing cumulative campaign budget. Callbacks
+can enforce an additional campaign-level policy from the cumulative counters.
+
+Original identity, exact Jacobi and dense two-level paths remain available.
+Recursive cycles allocate temporary vectors and are not preemptible within a
+single apply. No allocation-free, hard-real-time, mesh-independent convergence,
+asymptotic scalability or continuum certificate is claimed. Native Rust tests
+remain pending; independent numerical references are not Rust execution.

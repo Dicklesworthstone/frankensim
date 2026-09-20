@@ -35,6 +35,10 @@ pub struct SolveWork {
     /// failed/cancelled preparation. Governed by the separate setup budget;
     /// not misreported as outer Krylov iterations.
     pub preconditioner_operator_applications: usize,
+    /// Sparse Galerkin summands, including rejected and interrupted setup.
+    /// Governed by the hierarchy's product cap; not equivalent to a fine apply,
+    /// an outer iteration, total arithmetic, or wall-clock time.
+    pub preconditioner_galerkin_products: usize,
 }
 
 /// Context provided to cancellation/wall-time callbacks.
@@ -104,8 +108,16 @@ impl<'a> SolveControl<'a> {
     }
 
     pub(crate) fn record_preconditioner_applications(&mut self, additional: usize) -> Result<(), EvaluationStop> {
-        self.work.preconditioner_operator_applications = self.work.preconditioner_operator_applications
-            .checked_add(additional).ok_or(EvaluationStop::TotalBudget { stage: "preconditioner-setup" })?;
+        self.record_preconditioner_setup(additional, 0)
+    }
+
+    pub(crate) fn record_preconditioner_setup(&mut self, applications: usize, products: usize) -> Result<(), EvaluationStop> {
+        let applications = self.work.preconditioner_operator_applications.checked_add(applications)
+            .ok_or(EvaluationStop::TotalBudget { stage: "preconditioner-setup" })?;
+        let products = self.work.preconditioner_galerkin_products.checked_add(products)
+            .ok_or(EvaluationStop::TotalBudget { stage: "preconditioner-setup" })?;
+        self.work.preconditioner_operator_applications = applications;
+        self.work.preconditioner_galerkin_products = products;
         self.checkpoint("preconditioner-setup")
     }
 

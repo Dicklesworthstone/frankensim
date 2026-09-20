@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
-use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3};
-use fs_solver::op::{LinearOp, two_level::TwoLevelError};
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
+use fs_solver::op::{LinearOp, two_level::TwoLevelError, multilevel::MultilevelError};
 use fs_sparse::precond::{IdentityPrecond, Precond};
 use crate::{EvaluationStop, SolveControl};
 mod sealed {pub trait Sealed {}}
@@ -72,15 +72,17 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     type Prepared<'a> = AdaptivePrepared3<'a>;
     fn prepare_elasticity(&self, control: &mut SolveControl<'_>) -> Result<AdaptivePrepared3<'_>, EvaluationStop> {
         control.checkpoint("sdf3-preconditioner-start")?;
-        let mut recorded = 0usize;
+        let mut recorded = AdaptiveSetupWork3::default();
         let mut setup_stop = None;
-        let prepared = self.prepare(|work| {
-            let Some(additional) = work.operator_applications.checked_sub(recorded) else {
+        let prepared = self.prepare_with_work(|work| {
+            let additional = work.operator_applications.checked_sub(recorded.operator_applications)
+                .zip(work.galerkin_products.checked_sub(recorded.galerkin_products));
+            let Some((applications, products)) = additional else {
                 setup_stop = Some(EvaluationStop::Breakdown { stage: "preconditioner-accounting" });
                 return ControlFlow::Break(());
             };
-            recorded = work.operator_applications;
-            match control.record_preconditioner_applications(additional) {
+            recorded = work;
+            match control.record_preconditioner_setup(applications, products) {
                 Ok(()) => ControlFlow::Continue(()),
                 Err(stop) => { setup_stop = Some(stop); ControlFlow::Break(()) }
             }
@@ -88,8 +90,10 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
         if let Some(stop) = setup_stop { return Err(stop); }
         let prepared = prepared.map_err(|e| match e {
             AdaptivePreconditionError3::Physics(ElasticityError3::Cancelled)
-                | AdaptivePreconditionError3::Coarse(TwoLevelError::Cancelled) => EvaluationStop::Cancelled,
-            AdaptivePreconditionError3::Coarse(TwoLevelError::Budget(_)) =>
+                | AdaptivePreconditionError3::Coarse(TwoLevelError::Cancelled)
+                | AdaptivePreconditionError3::Hierarchy(MultilevelError::Cancelled) => EvaluationStop::Cancelled,
+            AdaptivePreconditionError3::Coarse(TwoLevelError::Budget(_))
+                | AdaptivePreconditionError3::Hierarchy(MultilevelError::Budget(_)) =>
                 EvaluationStop::TotalBudget { stage: "sdf3-preconditioner-setup" },
             _ => EvaluationStop::Breakdown { stage: "sdf3-preconditioner" },
         })?;

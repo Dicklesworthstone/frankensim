@@ -6,12 +6,15 @@ use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{ElasticityError3, adaptive::AdaptiveElasticity3};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::octree3::Octant3;
-use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptiveJacobi3, AdaptivePreconditionError3};
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
+    AdaptiveJacobi3, AdaptivePreconditionError3, AdaptiveMultilevelOptions3, AdaptiveSolveSpace3,
+};
 use fs_solver::op::two_level::{AdditiveTwoLevel, TwoLevelBudget, TwoLevelError};
+use fs_solver::op::multilevel::MultilevelError;
 use fs_sparse::precond::Precond;
 use fs_dwr::elasticity3::{GoalError3, GoalEstimate3, GoalFields3, GoalMarking3, GoalOptions3, dorfler3, estimate_goal3};
 use crate::{EvaluationStop, SolveControl, SolveWork};
-use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3};
+use crate::sdf3::{AdaptiveSdf3Elasticity, Sdf3Elasticity, CutDensityStudy3};
 
 /// One independent dead body-force density with its objective weight.
 /// The callback must be pure and identical to the accepted coarse solve's law.
@@ -32,6 +35,10 @@ pub enum GoalPreconditioner3 {
     Jacobi { max_contributions: usize },
     /// Fixed SPD Galerkin correction, prepared once for the entire load family.
     TwoLevel { budget: TwoLevelBudget, max_diagonal_contributions: usize },
+    /// Recursive sparse correction. The accepted grid is its first coarse
+    /// space; supply still-coarser geometries through the explicit ladder API
+    /// when that grid is larger than the bottom-factor allowance.
+    Multilevel { options: AdaptiveMultilevelOptions3 },
 }
 enum PreparedGoal3<'a> {
     Identity,
@@ -90,7 +97,8 @@ impl From<AdaptivePreconditionError3> for GoalRefinementError3 {
     fn from(e: AdaptivePreconditionError3) -> Self {
         match e {
             AdaptivePreconditionError3::Physics(e) => e.into(),
-            AdaptivePreconditionError3::Coarse(TwoLevelError::Cancelled) => Self::Evaluation(EvaluationStop::Cancelled),
+            AdaptivePreconditionError3::Coarse(TwoLevelError::Cancelled)
+                | AdaptivePreconditionError3::Hierarchy(MultilevelError::Cancelled) => Self::Evaluation(EvaluationStop::Cancelled),
             other => Self::Preconditioner(other),
         }
     }
@@ -126,8 +134,8 @@ pub struct ComplianceRefinement3 {
     pub marking_mass: BTreeMap<Octant3, f64>,
     /// Cumulative solve work, including earlier optimization and this enrichment.
     pub work: SolveWork,
-    /// Actual explicitly selected solve policy. Setup applications are included
-    /// separately in `work.preconditioner_operator_applications`.
+    /// Selected solve policy. Work separates sparse Galerkin products, fine
+    /// setup applications and outer iterations; they are different cost units.
     pub preconditioner: GoalPreconditioner3,
 }
 impl ComplianceRefinement3 {
@@ -137,37 +145,43 @@ impl ComplianceRefinement3 {
     }
 }
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
-    /// Estimate the current accepted design using one enriched solve per case.
+    /// Estimate an accepted design using one independently solved enriched RHS
+    /// per case. All coarse fields are revalidated before numerical preparation.
+    /// The enriched model inherits physical parent scales, not a refiltered raw
+    /// design. Failed setup or solves cannot mutate the accepted study and do not
+    /// publish a partial estimate family. Differences are not continuum bounds.
     ///
-    /// `coarse_displacements` must be the complete accepted fields, in body-load
-    /// order. Recomputed residuals reject stale states or different load laws.
-    /// `enriched` must come from a refinement of the SAME implicit design domain,
-    /// reference material and box supports. It is consumed so preparation and
-    /// failure cannot mutate a caller's other accepted operator. Its existing
-    /// stiffness scales are replaced by exact parent-inherited physical scales.
-    /// No density filtering, optimization step or coarse re-solve occurs here.
-    ///
-    /// All enriched Krylov work uses `control`, including failed solves. No
-    /// partial estimate family or mark set escapes on cancellation/exhaustion.
-    /// All coarse fields are checked before preconditioner setup. Preparation
-    /// happens once per load family and is invalidated with the consumed fine
-    /// operator. Setup fine-applications remain visible in `control.work()` even
-    /// on an interrupted setup or a later failed solve; they do not consume the
-    /// outer-iteration allowance and have their own explicit setup budget.
-    /// The returned differences are not certified continuum-error bounds.
-    pub fn estimate_compliance_enrichment(&self, mut enriched: AdaptiveElasticity3,
+    /// This entry point supplies no extra coarse spaces. Recursive preparation
+    /// can still use the accepted grid as its bottom if that grid fits the cap;
+    /// otherwise use `estimate_compliance_enrichment_with_coarse_levels`.
+    pub fn estimate_compliance_enrichment(&self, enriched: AdaptiveElasticity3,
         loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>], options: GoalRefinementOptions3,
         control: &mut SolveControl<'_>) -> Result<ComplianceRefinement3, GoalRefinementError3> {
+        self.estimate_compliance_enrichment_with_coarse_levels(enriched, &[], loads, coarse_displacements, options, control)
+    }
+
+    /// Recursive goal solve using an explicit sequence of geometries BELOW the
+    /// accepted grid, nearest first. The accepted grid itself is always the
+    /// first correction space for the enriched operator. Every deeper operator
+    /// is Galerkin-coarsened from that same fine stiffness, not rediscretized.
+    /// Extra geometries are rejected for other policies rather than ignored.
+    /// Preparation is shared across loads; setup limits apply to the whole
+    /// hierarchy per call and consumed work remains visible after failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_compliance_enrichment_with_coarse_levels(&self, mut enriched: AdaptiveElasticity3,
+        coarser: &[&AdaptiveElasticity3], loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
+        options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
+        -> Result<ComplianceRefinement3, GoalRefinementError3> {
         control.checkpoint("sdf3-goal-start")?;
         if loads.is_empty() || loads.len() > options.max_load_cases || loads.len() != coarse_displacements.len()
             || !loads.iter().any(|l| l.weight > 0.0) || loads.iter().any(|l| !l.weight.is_finite() || l.weight < 0.0)
-            || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0) {
+            || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0)
+            || coarser.len() > 18 || (!coarser.is_empty() && !matches!(options.preconditioner, GoalPreconditioner3::Multilevel { .. })) {
             return Err(GoalRefinementError3::Invalid("invalid load family or numerical/resource policy"));
         }
         let coarse_operator = self.operator().adaptive();
         let scales = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?.inherited_scales();
         enriched.set_scales(&scales)?;
-        let transfer = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?;
         for (load, coarse) in loads.iter().zip(coarse_displacements) {
             // Reject the entire stale family BEFORE spending setup or a fine solve.
             let rhs_coarse = coarse_operator.body_load(load.density, || poll(control))?;
@@ -176,6 +190,15 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 return Err(GoalError3::FieldResidual { field: "coarse-primal", value: residual }.into());
             }
         }
+        if let GoalPreconditioner3::Multilevel { options: hierarchy_options } = options.preconditioner {
+            let mut levels = Vec::with_capacity(coarser.len()+1);
+            levels.push(coarse_operator); levels.extend_from_slice(coarser);
+            let space = AdaptiveSolveSpace3::multilevel(enriched, &levels, hierarchy_options, || poll(control))?;
+            let transfer = AdaptiveTransfer3::new(coarse_operator, space.elasticity(), options.max_transfer_terms, || poll(control))?;
+            let prepared = space.prepare_elasticity(control)?;
+            return complete_family(&transfer, loads, coarse_displacements, options, &prepared, control);
+        }
+        let transfer = AdaptiveTransfer3::new(coarse_operator, &enriched, options.max_transfer_terms, || poll(control))?;
         let prepared = match options.preconditioner {
             GoalPreconditioner3::Identity => PreparedGoal3::Identity,
             GoalPreconditioner3::Jacobi { max_contributions } => {
@@ -198,26 +221,35 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 if let Some(stop) = setup_stop { return Err(stop.into()); }
                 PreparedGoal3::TwoLevel(result?)
             }
+            GoalPreconditioner3::Multilevel { .. } => unreachable!("recursive branch returns above"),
         };
-        let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight).collect(),
-            coarse_value: 0.0, fine_value: 0.0, correction: 0.0, marking_mass: BTreeMap::new(), work: control.work(), preconditioner: options.preconditioner };
-        for (load, coarse) in loads.iter().zip(coarse_displacements) {
-            let rhs = enriched.body_load(load.density, || poll(control))?;
-            let fine = control.solve_preconditioned(&enriched, &prepared, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
-            // The DWR owner rechecks true residuals before using this CG output.
-            let estimate = estimate_goal3(&transfer, load.density, load.density,
-                GoalFields3::compliance(coarse, &fine), options.numerical, || poll(control))?;
-            report.coarse_value += load.weight * estimate.coarse_value;
-            report.fine_value += load.weight * estimate.fine_value;
-            report.correction += load.weight * estimate.correction();
-            for (&cell, value) in &estimate.cells {
-                *report.marking_mass.entry(cell).or_insert(0.0) += load.weight * value.marking_mass;
-            }
-            report.cases.push(estimate);
-        }
-        if ![report.coarse_value, report.fine_value, report.correction].iter().all(|v| v.is_finite())
-            || !report.marking_mass.values().all(|v| v.is_finite()) { return Err(GoalRefinementError3::Invalid("weighted goal overflow")); }
-        control.checkpoint("sdf3-goal-publish")?;
-        report.work = control.work(); Ok(report)
+        complete_family(&transfer, loads, coarse_displacements, options, &prepared, control)
     }
+}
+
+// All policies share the exact independent-load solve and DWR acceptance path.
+fn complete_family(transfer: &AdaptiveTransfer3<'_>, loads: &[GoalBodyLoad3<'_>], coarse_displacements: &[Vec<f64>],
+    options: GoalRefinementOptions3, prepared: &impl Precond, control: &mut SolveControl<'_>)
+    -> Result<ComplianceRefinement3, GoalRefinementError3> {
+    let enriched = transfer.fine();
+    let mut report = ComplianceRefinement3 { cases: Vec::with_capacity(loads.len()), weights: loads.iter().map(|l| l.weight).collect(),
+        coarse_value: 0.0, fine_value: 0.0, correction: 0.0, marking_mass: BTreeMap::new(), work: control.work(), preconditioner: options.preconditioner };
+    for (load, coarse) in loads.iter().zip(coarse_displacements) {
+        let rhs = enriched.body_load(load.density, || poll(control))?;
+        let fine = control.solve_preconditioned(enriched, prepared, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
+        // The DWR owner rechecks true residuals before using this CG output.
+        let estimate = estimate_goal3(transfer, load.density, load.density,
+            GoalFields3::compliance(coarse, &fine), options.numerical, || poll(control))?;
+        report.coarse_value += load.weight * estimate.coarse_value;
+        report.fine_value += load.weight * estimate.fine_value;
+        report.correction += load.weight * estimate.correction();
+        for (&cell, value) in &estimate.cells {
+            *report.marking_mass.entry(cell).or_insert(0.0) += load.weight * value.marking_mass;
+        }
+        report.cases.push(estimate);
+    }
+    if ![report.coarse_value, report.fine_value, report.correction].iter().all(|v| v.is_finite())
+        || !report.marking_mass.values().all(|v| v.is_finite()) { return Err(GoalRefinementError3::Invalid("weighted goal overflow")); }
+    control.checkpoint("sdf3-goal-publish")?;
+    report.work = control.work(); Ok(report)
 }
