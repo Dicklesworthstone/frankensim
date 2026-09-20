@@ -21,12 +21,14 @@ pub mod product_checkpoint;
 pub mod product_compliance;
 pub mod product_execution;
 pub mod product_plan;
+pub mod product_qmc;
 pub mod seismic;
 
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 pub use product_checkpoint::UqCheckpointError;
 pub use product_compliance::UqComplianceError;
 pub use product_execution::UqExecution;
+pub use product_qmc::{QmcConfig, QmcEstimate, QmcExecution, QmcReport};
 pub use product_plan::{
     CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqPlan,
     UqPropagator, UqResult, UqStatus,
