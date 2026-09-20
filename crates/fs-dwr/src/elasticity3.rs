@@ -14,6 +14,9 @@ use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octant3;
 
+pub mod response;
+use response::EquilibriumLoad3;
+
 /// Externally solved homogeneous master fields, checked against actual operators.
 #[derive(Clone, Copy)]
 pub struct GoalFields3<'a> {
@@ -135,7 +138,16 @@ pub fn estimate_goal3(transfer: &AdaptiveTransfer3<'_>, body: &dyn Fn([f64; 3]) 
 pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: ReferenceLoad3<'_>,
     goal: ReferenceLoad3<'_>, fields: GoalFields3<'_>, options: GoalOptions3,
     mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
-    poll(&mut checkpoint)?;
+    admit_transfer3(transfer, options, &mut checkpoint)?;
+    let qc = transfer.coarse().reference_load(goal, &mut checkpoint)?;
+    let qf = transfer.fine().reference_load(goal, &mut checkpoint)?;
+    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed: None },
+        &qc, &qf, fields, options, &mut checkpoint)
+}
+
+fn admit_transfer3(transfer: &AdaptiveTransfer3<'_>, options: GoalOptions3,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), GoalError3> {
+    poll(checkpoint)?;
     if ![options.residual_tolerance, options.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0) {
         return Err(GoalError3::Invalid("invalid numerical goal gates"));
     }
@@ -148,16 +160,26 @@ pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: Referenc
             return Err(GoalError3::Invalid("enriched physical stiffness is not parent-inherited"));
         }
     }
-    let bc = coarse.reference_load(load, &mut checkpoint)?;
-    let bf = fine.reference_load(load, &mut checkpoint)?;
-    let qc = coarse.reference_load(goal, &mut checkpoint)?;
-    let qf = fine.reference_load(goal, &mut checkpoint)?;
+    Ok(())
+}
+
+// One decomposition/field-admission owner for fixed linear goals and quadratic
+// response linearizations. qc and qf may differ because the latter are evaluated
+// at their own solved fields. No caller-supplied residuals or substituted K.
+#[allow(clippy::too_many_arguments)]
+fn estimate_vectors3(transfer: &AdaptiveTransfer3<'_>, load: EquilibriumLoad3<'_>,
+    qc: &[f64], qf: &[f64], fields: GoalFields3<'_>, options: GoalOptions3,
+    mut checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
+    admit_transfer3(transfer, options, checkpoint)?;
+    let (coarse, fine) = (transfer.coarse(), transfer.fine());
+    let bc = load.assemble(coarse, &mut *checkpoint)?;
+    let bf = load.assemble(fine, &mut *checkpoint)?;
     let mut residuals = [0.0; 4];
     for (i, (name, op, x, b)) in [
-        ("coarse-primal", coarse, fields.coarse_primal, &bc),
-        ("fine-primal", fine, fields.fine_primal, &bf),
-        ("coarse-adjoint", coarse, fields.coarse_adjoint, &qc),
-        ("fine-adjoint", fine, fields.fine_adjoint, &qf),
+        ("coarse-primal", coarse, fields.coarse_primal, bc.as_slice()),
+        ("fine-primal", fine, fields.fine_primal, bf.as_slice()),
+        ("coarse-adjoint", coarse, fields.coarse_adjoint, qc),
+        ("fine-adjoint", fine, fields.fine_adjoint, qf),
     ].into_iter().enumerate() {
         residuals[i] = op.field_residual(x, b, &mut checkpoint)?;
         if residuals[i] > options.residual_tolerance {
@@ -168,10 +190,14 @@ pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: Referenc
     let t = transfer.prolongate(fields.coarse_adjoint, &mut checkpoint)?;
     let weight: Vec<_> = fields.fine_adjoint.iter().zip(&t).map(|(z, t)| z - t).collect();
     let error: Vec<_> = fields.fine_primal.iter().zip(&v).map(|(u, v)| u - v).collect();
-    let local = fine.cell_reference_residuals(&v, &weight, load, &mut checkpoint)?;
-    let consistency = fine.cell_reference_residuals(&v, &t, load, &mut checkpoint)?;
-    let primal_defect = fine.cell_reference_residuals(fields.fine_primal, fields.fine_adjoint, load, &mut checkpoint)?;
-    let adjoint_defect = fine.cell_reference_residuals(fields.fine_adjoint, &error, goal, &mut checkpoint)?;
+    let local = load.residuals(fine, &v, &weight, checkpoint)?;
+    let consistency = load.residuals(fine, &v, &t, checkpoint)?;
+    let primal_defect = load.residuals(fine, fields.fine_primal, fields.fine_adjoint, checkpoint)?;
+    // The zero-load residual is exactly -a(z_f,error); use the same physical
+    // bilinear owner rather than acquiring another solver-layer dependency.
+    let adjoint_form = fine.cell_reference_residuals(fields.fine_adjoint, &error,
+        ReferenceLoad3::default(), &mut *checkpoint)?;
+    let adjoint_defect = dot(qf,&error) + adjoint_form.iter().map(|r|r.residual()).sum::<f64>();
     let mut cells: BTreeMap<_, GoalCell3> = coarse.leaves().iter().map(|&c| (c, GoalCell3::default())).collect();
     for (term, &parent) in local.iter().zip(transfer.parents()) {
         poll(&mut checkpoint)?;
@@ -184,7 +210,7 @@ pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: Referenc
         dwr: local.iter().map(|t| t.residual()).sum(),
         coarse_space: consistency.iter().map(|t| t.residual()).sum(),
         goal_transfer: dot(&qf, &v) - dot(&qc, fields.coarse_primal),
-        algebraic: -primal_defect.iter().map(|t| t.residual()).sum::<f64>() + adjoint_defect.iter().map(|t| t.residual()).sum::<f64>(),
+        algebraic: -primal_defect.iter().map(|t| t.residual()).sum::<f64>() + adjoint_defect,
         identity_relative_defect: 0.0, field_residuals: residuals, cells,
     };
     let numbers = [report.coarse_value, report.fine_value, report.dwr, report.coarse_space, report.goal_transfer, report.algebraic];
