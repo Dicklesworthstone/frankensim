@@ -4,6 +4,10 @@
 //! out of the coefficients (orthonormal basis) — verified against
 //! closed forms in the battery.
 
+mod sensitivity;
+
+pub use sensitivity::{PceSensitivityError, SobolComponent, SobolIndices};
+
 /// Probabilists' Hermite Heₖ, ORTHONORMALIZED (divided by √k!):
 /// E[hᵢ(ξ)hⱼ(ξ)] = δᵢⱼ under ξ ~ N(0,1).
 #[must_use]
@@ -130,6 +134,10 @@ impl PceModel {
 /// (normal equations + ridge 1e−12 through fs-la Cholesky). The
 /// design should oversample the basis (n ≥ 2·|basis| is the usual
 /// rule; asserted).
+///
+/// # Panics
+/// Refuses empty, mismatched, undersampled or non-finite data, unrepresentable
+/// basis/matrix sizes, non-finite arithmetic, and non-SPD normal equations.
 #[must_use]
 pub fn fit_pce(xi: &[Vec<f64>], y: &[f64], p: usize) -> PceModel {
     let n = xi.len();

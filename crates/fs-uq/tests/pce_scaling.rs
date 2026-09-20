@@ -36,6 +36,15 @@ fn twenty_germ_quadratic_fit_recovers_a_known_surrogate() {
         }).collect();
         assert!((model.eval(&x) - response(&x)).abs() < 1e-7);
     }
+    // The fitted surrogate feeds the global-sensitivity API directly.
+    let sensitivity = model.sobol_indices().unwrap();
+    let variance = 0.7 * 0.7 + 1.2 * 1.2 + 0.4 * 0.4 + 0.3 * 0.3;
+    for j in 0..dim {
+        let main = match j { 0 => 0.49, 5 => 0.09, 19 => 1.44, _ => 0.0 };
+        let total = main + if j == 2 || j == 11 { 0.16 } else { 0.0 };
+        assert!((sensitivity.first_order[j] - main / variance).abs() < 1e-7);
+        assert!((sensitivity.total_order[j] - total / variance).abs() < 1e-7);
+    }
     let replay = fit_pce(&xi, &y, 2);
     assert_eq!(model.indices, replay.indices);
     assert!(model.coefficients.iter().zip(&replay.coefficients)
