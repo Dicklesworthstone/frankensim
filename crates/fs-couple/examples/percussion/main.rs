@@ -19,6 +19,8 @@ use std::io::Write;
 mod acoustics;
 mod snare;
 mod mechanics;
+mod playing;
+use playing::Stroke;
 use mechanics::Mechanics;
 
 type Error=Box<dyn std::error::Error>;
@@ -30,7 +32,9 @@ fn zero_body(potential:BodyPotential,omegas:&[f64])->ImpactBody {
         // Explicit research loss; not identified from a Zildjian or Remo sample.
         damping_per_s:omegas.iter().map(|w|0.002*w).collect()}
 }
-fn stick()->Result<(ImpactBody,f64),Error> {
+fn stick()->Result<(ImpactBody,f64),Error> { stick_with_speed(0.8) }
+fn stick_with_speed(speed_m_s:f64)->Result<(ImpactBody,f64),Error> {
+    if !speed_m_s.is_finite() || !(0.0..=20.0).contains(&speed_m_s) {return Err("strike speed must be finite in 0..=20 m/s".into());}
     // Only total length/maximum shaft diameter, wood category and oval/medium
     // taper designation are published Z5A data. The stations and density below
     // are EDITABLE ESTIMATES, not a manufacturer CAD file or batch measurement.
@@ -40,8 +44,9 @@ fn stick()->Result<(ImpactBody,f64),Error> {
     let mass=StrikerProperties::from_profile(&profile,800.0,0.12,0.400)?;
     eprintln!("estimated_Z5A_shape: full_mass_kg={:.8}, contact_effective_mass_kg={:.8}, grip_m=0.12",
         mass.mass_kg,mass.contact_effective_mass_kg);
-    // A 0.2mm approach gap and 0.8m/s downward free stroke are authored inputs.
-    Ok(ImpactBody::free_mass(mass.contact_effective_mass_kg,-0.0002,0.8)?)
+    // The 0.2mm gap and declared downward launch speed are mechanical inputs.
+    // Changing speed changes kinetic energy, not the observer gain.
+    Ok(ImpactBody::free_mass(mass.contact_effective_mass_kg,-0.0002,speed_m_s)?)
 }
 fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     let n=weights.len();
@@ -53,6 +58,9 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
 }
 struct Experiment {system:Mechanics,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
+    splash_with_stroke(steps,dt_s,audio,Stroke::default())
+}
+fn splash_with_stroke(steps:u64,dt_s:f64,audio:bool,stroke:Stroke)->Result<Experiment,Error> {
     // Published anchors: diameter 203.2mm; bell diameter78mm; hole diameter12.3mm;
     // edge thickness0.5mm; literature B20 E112.6GPa,nu.342,rho8607.
     // ALL interior heights and thicknesses below are explicit estimates.
@@ -88,8 +96,12 @@ fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
             let cy=t.iter().map(|i|shell.mesh.nodes[*i][1]/3.0).sum::<f64>();(cx-x).hypot(cy-y)};
         distance(a).total_cmp(&distance(b))
     }).map(|(i,_)|i).expect("nonempty admitted shell");
-    let port=reduction.point_port(nearest(0.1016*2.0/3.0,0.0),[1.0/3.0;3],[0.0,0.0,-1.0])?;
-    let (stick,stick_weight)=stick()?;let n=1+modes.len();let mut contact=vec![stick_weight];
+    let (triangle,barycentric)=match stroke.position_m {
+        Some(p)=>playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,p)?,
+        None=>(nearest(0.1016*2.0/3.0,0.0),[1.0/3.0;3]),
+    };
+    let port=reduction.point_port(triangle,barycentric,[0.0,0.0,-1.0])?;
+    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let n=1+modes.len();let mut contact=vec![stick_weight];
     contact.extend(port.iter().map(|b|-b));
     let mut pads=Vec::new();
     // Estimated felt annulus: OD30mm/ID13mm,6mm thickness,three loaded patches
@@ -114,6 +126,10 @@ fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
 }
 fn drum_with_wires(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>)->Result<Experiment,Error> {
+    drum_with_playing(steps,dt_s,audio,prepared,snares,false,Stroke::default())
+}
+fn drum_with_playing(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke)->Result<Experiment,Error> {
+    if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
     if snares.is_some() && !prepared {return Err("wire bank requires the explicit prepared mechanical image".into());}
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
     // Pearl MM6 published 14x6.5in,7.5mm maple shell. Rigid cylindrical cavity
@@ -131,20 +147,37 @@ fn drum_with_wires(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sna
         mode_sets.push(modes);films.push(film);
     }
     let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,0.1778)?)}else{None};
-    let (stick,stick_weight)=stick()?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes;
+    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes;
     let mut contact=vec![0.0;n];contact[0]=stick_weight;let mut area=vec![0.0;n];let mut top=vec![0.0;n];let mut bottom=vec![0.0;n];let mut offset=1;
     for (head,(film,modes)) in films.iter().zip(&mode_sets).enumerate() {
         let point=film.mesh.nodes.iter().enumerate().min_by(|(_,a),(_,b)|
             (a.0-0.06).hypot(a.1).total_cmp(&(b.0-0.06).hypot(b.1))).unwrap().0;
+        let explicit_shapes=match stroke.position_m {
+            Some(position)=>Some(fs_couple::render::plate::impact::linear::wire::film_shapes(film,modes,&[position])?.remove(0)),
+            None=>None,
+        };
         for (i,mode) in modes.iter().enumerate() {
-            let shape=film.model.dof_map[3*point].map_or(0.0,|k|mode.phi[k]);
+            let shape=explicit_shapes.as_ref().map_or_else(
+                ||film.model.dof_map[3*point].map_or(0.0,|k|mode.phi[k]),|row|row[i]);
             // Both head coordinates are positive downward: this signed area
             // integrates COMPRESSION (negative exterior swept volume).
             area[offset+i]=(if head==0 {1.0}else{-1.0})*film.modal_area(&mode.phi)?;
             if head==0 {contact[offset+i]=-shape;top[offset+i]=shape;}else{bottom[offset+i]=shape;}
         }
         let omegas:Vec<_>=modes.iter().map(|m|m.lambda.sqrt()).collect();
-        bodies.push(zero_body(BodyPotential::Linear(omegas.clone()),&omegas));offset+=modes.len();
+        let potential=if stretching {
+            let rim:Vec<_>=(0..film.mesh.nodes.len()).filter(|&i|film.model.dof_map[3*i].is_none()).collect();
+            let law=fs_couple::render::plate::impact::membrane::MembranePotential::from_pencil(
+                &film.mesh,&film.section,&film.model,modes,&rim,
+                fs_plate::shell::head::nonlinear::MembraneReductionBudget {
+                    max_modes:31,max_nodes:512,max_facet_pairs:1_000_000,
+                    max_solve_entries:2_000_000,relative_tolerance:1e-5,
+                },0.2)?;
+            eprintln!("head {head}: geometric stretching enabled, in_plane_residual={}, maximum_accepted_slope={}; fixed in-plane rim, relaxed interior",
+                law.reduction().solve_residual(),law.slope_limit());
+            BodyPotential::Membrane(law)
+        }else{BodyPotential::Linear(omegas.clone())};
+        bodies.push(zero_body(potential,&omegas));offset+=modes.len();
         eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}; PET constants and tension are estimates",film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     }
     let mut contacts=vec![elastic_contact(contact)?];
@@ -176,10 +209,11 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
         .map(|(i,a)|a*state[2*i]).sum::<f64>()
 }
 fn run()->Result<(),Error> {
-    let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling".into());}
-    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic");
-    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav");
+    let (args,stroke)=playing::parse(std::env::args().skip(1).collect())?;
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs".into());}
+    let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
+    let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
+    let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
     if args.len()>3 && (!microphone || args.len()!=6) {return Err("microphone position needs exactly x_m y_m z_m after frames and full-scale".into());}
     if !audio && args.len()>2 {return Err("mechanics CSV accepts only a step count".into());}
     let count=if args.len()>=2 {args[1].parse::<u64>()?}else if audio {48000}else{4096};
@@ -194,13 +228,15 @@ fn run()->Result<(),Error> {
     let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let mut experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash(steps,dt_s,audio)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum(steps,dt_s,audio,false)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum(steps,dt_s,audio,true)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_wires(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)))?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_wires(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)))?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_stroke(steps,dt_s,audio,stroke)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_playing(steps,dt_s,audio,false,None,false,stroke)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_playing(steps,dt_s,audio,false,None,true,stroke)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_playing(steps,dt_s,audio,true,None,false,stroke)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke)?,
         _=>return Err("unknown experiment".into()),
     };
+    eprintln!("physical stroke: speed_m_s={}, explicit_xy_m={:?}; no output normalization or pitch control",stroke.speed_m_s,stroke.position_m);
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
         // Render and admit the complete candidate before writing a WAV header.
@@ -208,15 +244,22 @@ fn run()->Result<(),Error> {
         out.write_all(&wav)?;out.flush()?;return Ok(());
     }
     let gate=CancelGate::new_clock_free();
-    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j")?;
+    let extra=if stretching {",batter_slope,resonant_slope,head_stretching_energy_j"}else{""};
+    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}")?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
         let displacement=|weights:&[f64]|weights.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
         let velocity=experiment.observer_a.iter().enumerate().map(|(i,b)|b*x[2*i+1]).sum::<f64>();
         let pressure=experiment.pressure.as_ref().map_or(0.0,|v|cavity_pressure(v,x));
-        writeln!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
+        write!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
             f.time_s,displacement(&experiment.observer_a),velocity,displacement(&experiment.observer_b),pressure,
             f.stored_energy_j,f.felt_crush_loss_j,f.dissipated_energy_j,f.balance_residual_j)?;
+        if stretching {
+            let a=experiment.system.membrane_observation(1).ok_or("missing batter stretching state")?;
+            let b=experiment.system.membrane_observation(2).ok_or("missing resonant-head stretching state")?;
+            write!(out,",{:.17e},{:.17e},{:.17e}",a.maximum_slope,b.maximum_slope,a.stretching_energy_j+b.stretching_energy_j)?;
+        }
+        writeln!(out)?;
     }
     out.flush()?;Ok(())
 }
@@ -231,5 +274,43 @@ mod tests {
         assert!((cavity_pressure(&v,&[0.,0.,0.2,0.,0.,0.])-30.0).abs()<1e-13);
         assert!((cavity_pressure(&v,&[0.,0.,0.,0.,0.2,0.])+30.0).abs()<1e-13);
         assert_eq!(cavity_pressure(&v,&[0.,0.,0.2,0.,0.2,0.]),0.0);
+    }
+}
+
+#[cfg(test)]
+mod stretching_tests {
+    use super::*;
+
+    #[test]
+    fn stronger_stick_launch_changes_kinetic_energy_not_mass_geometry_or_gap() {
+        let (a,wa)=stick().unwrap(); let (b,wb)=stick_with_speed(1.6).unwrap();
+        assert_eq!(wa.to_bits(),wb.to_bits());
+        assert_eq!(a.initial[0].displacement_m_sqrt_kg.to_bits(),b.initial[0].displacement_m_sqrt_kg.to_bits());
+        assert_eq!(b.initial[0].velocity_m_sqrt_kg_per_s,2.0*a.initial[0].velocity_m_sqrt_kg_per_s);
+        assert_eq!(a.damping_per_s,b.damping_per_s);
+        assert!(stick_with_speed(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn stretching_drum_changes_actual_head_motion_without_changing_the_basis_or_air() {
+        let stroke=Stroke{speed_m_s:4.0,position_m:Some([0.06,0.01])};
+        let mut linear=drum_with_playing(64,2e-6,false,false,None,false,stroke).unwrap();
+        let mut nonlinear=drum_with_playing(64,2e-6,false,false,None,true,stroke).unwrap();
+        assert_eq!(linear.system.state(),nonlinear.system.state());
+        assert_eq!(linear.observer_a,nonlinear.observer_a);
+        assert_eq!(linear.observer_b,nonlinear.observer_b);
+        assert_eq!(linear.pressure.as_ref().unwrap().areas,nonlinear.pressure.as_ref().unwrap().areas);
+        assert!(linear.system.membrane_observation(1).is_none());
+        assert_eq!(nonlinear.system.membrane_observation(1).unwrap().stretching_energy_j,0.0);
+        let gate=CancelGate::new_clock_free(); let mut stretch=0.0_f64; let mut changed=0.0_f64;
+        for _ in 0..64 {
+            linear.system.step(&linear.force,&gate).unwrap();
+            nonlinear.system.step(&nonlinear.force,&gate).unwrap();
+            let state=nonlinear.system.membrane_observation(1).unwrap();
+            assert!(state.maximum_slope<=0.2); stretch=stretch.max(state.stretching_energy_j);
+            for (&a,&b) in linear.system.state().iter().zip(nonlinear.system.state()) { changed=changed.max((a-b).abs()); }
+        }
+        assert!(stretch>0.0 && changed>1e-16,"stretching must enter the actual contact/air/mechanics solve");
+        assert!(drum_with_playing(64,2e-6,false,true,None,true,stroke).is_err());
     }
 }

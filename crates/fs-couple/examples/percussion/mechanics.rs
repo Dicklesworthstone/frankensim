@@ -75,6 +75,9 @@ impl Mechanics {
         eprintln!("mechanical image: prepared exact-ZOH bodies plus simultaneous volume/contact reactions; unchanged physical cards; native real-time performance is unqualified");
         Ok(Self::Prepared(system))
     }
+    pub fn membrane_observation(&self,body:usize) -> Option<fs_couple::render::plate::impact::membrane::MembraneObservation> {
+        match self { Self::Reference(s)=>s.membrane_observation(body), Self::Prepared(_)=>None }
+    }
     pub fn state(&self) -> &[f64] {
         match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state() }
     }
