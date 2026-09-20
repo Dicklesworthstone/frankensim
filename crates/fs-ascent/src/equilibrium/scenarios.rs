@@ -4,10 +4,14 @@
 //! constraint in EVERY supplied scenario. The extra epigraph coordinate avoids
 //! inventing a smooth gradient for max(J_s) at a tie. No probability, interval
 //! coverage, unseen-scenario guarantee, new contact law or optimizer is implied.
+//! `with_cvar` explicitly selects equally weighted empirical tail risk instead.
+//! It retains all per-scenario physical requirements and uses the same SQP engine.
 use super::{sample as physical_sample, DesignControl, DesignError,
     DesignEvaluation, DesignWork, EquilibriumDesign, SqpError, SqpRunReport, SqpSample,
     SqpState, SqpStop};
 use fs_exec::CancelGate;
+
+mod cvar;
 
 /// One fixed realization of additive parameter tolerances. A shared variable's
 /// offset follows ALL its bound fields, exactly like its nominal value.
@@ -77,6 +81,7 @@ pub struct ScenarioProblem<'a> {
     lower: Vec<f64>,
     upper: Vec<f64>,
     maximum_kkt_dimension: usize,
+    tail: Option<cvar::EmpiricalTail>,
 }
 impl<'a> ScenarioProblem<'a> {
     /// Admit 1..=32 declared scenarios and a bounded dense SQP system before
@@ -134,7 +139,7 @@ impl<'a> ScenarioProblem<'a> {
         if lower.iter().zip(&upper).any(|(lo, hi)| lo >= hi) {
             return Err(ScenarioError::Invalid("scenarios have no common positive-width nominal parameter domain"));
         }
-        Ok(Self { problem, scenarios, shifts, lower, upper, maximum_kkt_dimension })
+        Ok(Self { problem, scenarios, shifts, lower, upper, maximum_kkt_dimension, tail: None })
     }
     /// Original physical model, response constraints and declared variable units.
     #[must_use]
@@ -176,6 +181,7 @@ impl<'a> ScenarioProblem<'a> {
     }
 
     fn sample(&self, point: &[f64], evaluation: &ScenarioEvaluation) -> SqpSample {
+        if let Some(tail) = self.tail { return self.cvar_sample(point, evaluation, tail); }
         let n = self.lower.len();
         let width = n+1;
         let mut gradient = vec![0.0; width]; gradient[n] = 1.0;
@@ -208,8 +214,9 @@ fn normalize(error: ScenarioStudyError) -> ScenarioStudyError {
     match error { SqpError::Evaluation(ScenarioError::Cancelled) => SqpError::Cancelled, other => other }
 }
 
-/// Resumable minimax study. A single accepted checkpoint binds all scenarios;
-/// the epigraph t is the last optimizer coordinate, never a physical parameter.
+/// Resumable worst-case or explicitly selected empirical-CVaR study. A single
+/// accepted checkpoint binds all scenarios. Coordinate n is the epigraph t or
+/// threshold eta; CVaR appends one excess slack per scenario, never a physical parameter.
 /// This searches a local finite-scenario KKT point, not a continuum guarantee.
 pub struct ScenarioEquilibriumStudy<'problem, 'work> {
     ensemble: ScenarioProblem<'problem>,
@@ -227,12 +234,14 @@ impl<'problem, 'work> ScenarioEquilibriumStudy<'problem, 'work> {
     {
         let accepted = ensemble.evaluate(nominal, control, gate).map_err(SqpError::Evaluation).map_err(normalize)?;
         let mut initial = nominal.to_vec(); initial.push(accepted.worst_objective);
+        // eta=max(loss), z=0 is feasible without computing or rounding a quantile.
+        if ensemble.tail.is_some() { initial.resize(initial.len()+ensemble.scenarios.len(), 0.0); }
         let state = SqpState::try_new(&initial, ensemble.maximum_kkt_dimension,
             &mut |_| Ok::<_, ScenarioError>(Some(ensemble.sample(&initial, &accepted))), None)?;
         poll(gate).map_err(SqpError::Evaluation).map_err(normalize)?;
         Ok(Self { ensemble, control, state, accepted, last_domain_rejection: None })
     }
-    /// Accepted SQP state, with the epigraph in its final coordinate.
+    /// Accepted SQP state: physical decisions, then threshold, then optional CVaR slacks.
     #[must_use]
     pub fn optimizer(&self) -> &SqpState { &self.state }
     /// Full physical evidence for exactly the accepted nominal point.
