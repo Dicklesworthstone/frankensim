@@ -20,8 +20,10 @@ use std::io::Read;
 #[path = "equilibrium_uq/confidence.rs"]
 mod confidence;
 use confidence::{Assessment, Decision, Policy};
+#[path = "equilibrium_uq/joint.rs"]
+mod joint;
 
-const USAGE: &str = "equilibrium_uq MODEL.performance DESIGN.fit --method mc|rqmc [--replicates R] --samples N --seed U64 --case NAME --target INDEX --limit-m METRES [--require-probability P --confidence-alpha A] --independent (--uniform-x VARIABLE LOWER UPPER | --fixed-x VARIABLE VALUE)...";
+const USAGE: &str = "equilibrium_uq MODEL.performance DESIGN.fit --method mc|rqmc [--replicates R] --samples N --seed U64 (--case NAME --target INDEX --limit-m METRES | --all-constraints [--equality-tolerance NAME PHYSICAL_UNITS]...) [--require-probability P --confidence-alpha A] --independent (--uniform-x VARIABLE LOWER UPPER | --fixed-x VARIABLE VALUE)...";
 const NO_CLAIM: &str = "Estimated under the declared independent bounded input law and fixed numerical model; no physical-validation, fit-error, finite-grid or inverse-normal bias, discretization, confidence-interval or optional-stopping guarantee";
 
 const CONFIDENCE_SCOPE: &str = "Sampling-only, time-uniform compliance bounds under the fixed-model bounded-indicator assumptions of UqExecution::assess_compliance; no physical-validation, material, discretization, finite-grid bias, or model-error guarantee. Not an outward-rounded certificate. Mean/dispersion standard errors at a data-dependent stop remain descriptive. Searching across models, seeds or thresholds needs multiplicity control";
@@ -40,6 +42,8 @@ struct Options {
     limit_m: f64,
     laws: Vec<Law>,
     policy: Option<Policy>,
+    all_constraints: bool,
+    equality_tolerances: Vec<(String, f64)>,
 }
 
 fn finite(value: &str) -> Result<f64, String> {
@@ -63,6 +67,8 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut limit_m = None;
     let mut probability = None;
     let mut alpha = None;
+    let mut all_constraints = false;
+    let mut equality_tolerances = Vec::new();
     let mut independent = false;
     let mut laws = Vec::new();
     let mut seen = BTreeSet::new();
@@ -77,8 +83,19 @@ fn options(args: &[String]) -> Result<Options, String> {
             laws.push(Law { name, lo, hi });
             continue;
         }
+        if flag == "--equality-tolerance" {
+            let name = next(&mut args, flag)?.to_owned();
+            let tolerance = finite(next(&mut args, flag)?)?;
+            if name.is_empty() || tolerance < 0.0 || equality_tolerances.len() == 64
+                || equality_tolerances.iter().any(|(key, _)| key == &name) {
+                return Err("each equality tolerance needs a distinct name and finite nonnegative physical value".into());
+            }
+            equality_tolerances.push((name, tolerance));
+            continue;
+        }
         if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
         if flag == "--independent" { independent = true; continue; }
+        if flag == "--all-constraints" { all_constraints = true; continue; }
         let value = next(&mut args, flag)?;
         match flag.as_str() {
             "--method" if value == "mc" => method = Some(PropagationMethod::MonteCarlo),
@@ -112,10 +129,19 @@ fn options(args: &[String]) -> Result<Options, String> {
         (Some(_), Some(_)) => return Err("compliance confidence stopping is MC-only; QMC points are not iid observations".into()),
         _ => return Err("--require-probability and --confidence-alpha must be declared together before sampling".into()),
     };
+    let (case, target, limit_m) = if all_constraints {
+        if case.is_some() || target.is_some() || limit_m.is_some() {
+            return Err("--all-constraints forbids --case, --target and --limit-m; every authored row participates".into());
+        }
+        // Private unused displacement fields; no length-valued output in joint mode.
+        (String::new(), 0, 0.0)
+    } else {
+        if !equality_tolerances.is_empty() { return Err("--equality-tolerance requires --all-constraints".into()); }
+        (case.ok_or("--case is required")?, target.ok_or("--target is required")?, limit_m.ok_or("--limit-m is required")?)
+    };
     Ok(Options {
-        model, design, method, replicates, samples, policy,
-        seed: seed.ok_or("--seed is required")?, case: case.ok_or("--case is required")?,
-        target: target.ok_or("--target is required")?, limit_m: limit_m.ok_or("--limit-m is required")?, laws,
+        model, design, method, replicates, samples, policy, all_constraints, equality_tolerances,
+        seed: seed.ok_or("--seed is required")?, case, target, limit_m, laws,
     })
 }
 
@@ -124,16 +150,21 @@ fn options(args: &[String]) -> Result<Options, String> {
 // physical bindings; the sampler neither guesses units nor independently varies
 // fields that the design declared to be shared.
 fn plan(problem: &EquilibriumDesign, options: &Options) -> Result<(UqPlan, usize), String> {
-    let case = problem.load_cases().iter().position(|c| c.name == options.case)
-        .ok_or_else(|| format!("unknown load case {}", options.case))?;
-    if options.target >= problem.load_cases()[case].targets.len() {
-        return Err("target index is outside the selected case's displacement observations".into());
-    }
+    let case = if options.all_constraints { 0 } else {
+        let index = problem.load_cases().iter().position(|c| c.name == options.case)
+            .ok_or_else(|| format!("unknown load case {}", options.case))?;
+        if options.target >= problem.load_cases()[index].targets.len() {
+            return Err("target index is outside the selected case's displacement observations".into());
+        }
+        index
+    };
     if options.laws.len() != problem.variables().len() {
         return Err("declare --uniform-x or --fixed-x for EVERY variable; none may be left unstated".into());
     }
-    let mut plan = UqPlan::new("selected-equilibrium-displacement-m", options.method, options.samples)
-        .with_correlation(CorrelationModel::Independent).with_compliance_threshold(options.limit_m);
+    let qoi = if options.all_constraints { "any-authored-response-failure" } else { "selected-equilibrium-displacement-m" };
+    let threshold = if options.all_constraints { 0.0 } else { options.limit_m };
+    let mut plan = UqPlan::new(qoi, options.method, options.samples)
+        .with_correlation(CorrelationModel::Independent).with_compliance_threshold(threshold);
     plan.seed = options.seed;
     let mut lower = Vec::new();
     let mut upper = Vec::new();
@@ -152,6 +183,8 @@ fn plan(problem: &EquilibriumDesign, options: &Options) -> Result<(UqPlan, usize
 }
 
 struct Outcome {
+    // Scalar sampling fields are displacement statistics in the legacy path;
+    // joint mode uses a dimensionless failure indicator and a distinct output.
     mean_m: f64,
     mean_standard_error_m: Option<f64>,
     displacement_std_dev_m: Option<f64>,
@@ -162,6 +195,7 @@ struct Outcome {
     work: DesignWork,
     status: UqStatus,
     assessment: Option<Assessment>,
+    joint: Option<joint::Event>,
 }
 
 fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
@@ -169,6 +203,10 @@ fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
 {
     let problem = loaded.problem();
     let (plan, case) = plan(problem, options)?;
+    // Admit the entire joint event and equality bands BEFORE any model call.
+    let mut joint = if options.all_constraints {
+        Some(joint::Event::new(problem, &options.equality_tolerances)?)
+    } else { None };
     let max_cases = options.samples.checked_mul(problem.load_cases().len()).ok_or("case budget overflow")?;
     let mut work = DesignControl::new(options.samples, max_cases);
     // Each draw uses the original primal gates, not derivative-only contact
@@ -177,8 +215,11 @@ fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
     match options.method {
         PropagationMethod::MonteCarlo => {
             let run = confidence::run(&plan, options.policy, || gate.is_requested(), |x| {
-                let solved = problem.evaluate_forward(x, &mut work, gate)?;
-                Ok::<_, DesignError>(solved.cases[case].observations_m[options.target])
+                if let Some(event) = &mut joint { event.evaluate(problem, x, &mut work, gate) }
+                else {
+                    let solved = problem.evaluate_forward(x, &mut work, gate)?;
+                    Ok::<_, DesignError>(solved.cases[case].observations_m[options.target])
+                }
             })?;
             let result = run.result;
             let decided = run.assessment.as_ref().is_some_and(|a| a.decision != Decision::Inconclusive);
@@ -191,9 +232,10 @@ fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
                 mean_standard_error_m: result.std_dev.map(|_| result.sampling_error),
                 displacement_std_dev_m: result.std_dev,
                 compliance_probability: result.probability_of_compliance.ok_or("missing compliance estimate")?,
-                compliance_standard_error: None, completed_replicates: None,
+                compliance_standard_error: if joint.is_some() { result.std_dev.map(|_| result.sampling_error) } else { None },
+                completed_replicates: None,
                 samples: result.samples_evaluated, work: work.work(),
-                status: result.status, assessment: run.assessment,
+                status: result.status, assessment: run.assessment, joint,
             })
         }
         PropagationMethod::QuasiMonteCarlo => {
@@ -201,8 +243,11 @@ fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
             let config = QmcConfig { replicates, samples_per_replicate: options.samples / replicates };
             let mut execution = QmcExecution::new(&plan, config)?;
             let result = execution.advance(options.samples, || gate.is_requested(), |x| {
-                let solved = problem.evaluate_forward(x, &mut work, gate)?;
-                Ok::<_, DesignError>(solved.cases[case].observations_m[options.target])
+                if let Some(event) = &mut joint { event.evaluate(problem, x, &mut work, gate) }
+                else {
+                    let solved = problem.evaluate_forward(x, &mut work, gate)?;
+                    Ok::<_, DesignError>(solved.cases[case].observations_m[options.target])
+                }
             });
             if result.status != UqStatus::Complete {
                 return Err(incomplete(result.status, result.samples_evaluated, work.work(),
@@ -219,7 +264,7 @@ fn solve(loaded: &EquilibriumDesignFile, options: &Options, gate: &CancelGate)
                 compliance_standard_error: compliance.standard_error,
                 completed_replicates: Some(result.completed_replicates),
                 samples: result.samples_evaluated, work: work.work(),
-                status: result.status, assessment: None,
+                status: result.status, assessment: None, joint,
             })
         }
         _ => Err("unsupported uncertainty method".into()),
@@ -247,40 +292,47 @@ fn number(value: Option<f64>) -> String {
     value.map_or_else(|| "null".into(), |v| format!("{v:.17e}"))
 }
 fn output(loaded: &EquilibriumDesignFile, options: &Options, result: &Outcome) -> String {
+    if let Some(event) = &result.joint { return joint::output(loaded, options, result, event); }
     let mut out = format!("{{\"schema\":\"frankensim-equilibrium-uq-v2\",\"method\":\"{}\",\"status\":\"{}\",\"evidence\":\"Estimated\",\"no_claim\":{},\"model_blake3\":\"{}\",\"design_blake3\":\"{}\",\"seed\":\"{}\",\"case\":{},\"target\":{},\"unit\":\"m\",\"compliance_event\":\"displacement_m <= limit_m\",\"limit_m\":{:.17e},\"samples\":{},\"case_solves\":{},\"mean_m\":{:.17e},\"mean_standard_error_m\":{},\"displacement_std_dev_m\":{},\"compliance_probability\":{:.17e},\"uncertainty_coordinates\":\"dimensionless x; physical p = reference + scale*x\",\"dependence\":\"independent\",\"variables\":[",
         if options.method == PropagationMethod::MonteCarlo { "mc" } else { "rqmc" },
         result.status.label(),
         json_string(if options.policy.is_some() { CONFIDENCE_SCOPE } else { NO_CLAIM }), loaded.model_info().input_hash.to_hex(), loaded.design_hash().to_hex(), options.seed,
         json_string(&options.case), options.target, options.limit_m, result.samples, result.work.case_solves,
         result.mean_m, number(result.mean_standard_error_m), number(result.displacement_std_dev_m), result.compliance_probability);
-    for (i, variable) in loaded.problem().variables().iter().enumerate() {
-        if i != 0 { out.push(','); }
-        // Admission already found exactly one law for every physical variable.
-        let law = options.laws.iter().find(|law| law.name == variable.name).expect("admitted law");
-        write!(&mut out, "{{\"name\":{},\"law\":\"{}\",\"lower_x\":{:.17e},\"upper_x\":{:.17e},\"physical_reference\":{:.17e},\"physical_scale\":{:.17e}}}",
-            json_string(&variable.name), if law.lo == law.hi { "fixed" } else { "uniform" },
-            law.lo, law.hi, variable.reference, variable.scale).expect("String write");
-    }
+    write_variables(&mut out, loaded, options);
     write!(&mut out, "],\"physics_evaluation\":\"primal-only\",\"compliance_scope\":\"selected-displacement-only\",\"unassessed_response_constraints\":{},\"completed_replicates\":{},\"compliance_standard_error\":{},\"standard_error_basis\":\"{}\"",
         loaded.problem().constraints().len(),
         result.completed_replicates.map_or_else(|| "null".into(), |n| n.to_string()),
         number(result.compliance_standard_error),
         if options.method == PropagationMethod::MonteCarlo { "individual-monte-carlo-observations" }
         else { "complete-independent-scramble-means" }).expect("String write");
+    write_assessment(&mut out, options, result);
+    out.push('}');
+    out
+}
+fn write_variables(out: &mut String, loaded: &EquilibriumDesignFile, options: &Options) {
+    for (i, variable) in loaded.problem().variables().iter().enumerate() {
+        if i != 0 { out.push(','); }
+        // Admission already found exactly one law for every physical variable.
+        let law = options.laws.iter().find(|law| law.name == variable.name).expect("admitted law");
+        write!(out, "{{\"name\":{},\"law\":\"{}\",\"lower_x\":{:.17e},\"upper_x\":{:.17e},\"physical_reference\":{:.17e},\"physical_scale\":{:.17e}}}",
+            json_string(&variable.name), if law.lo == law.hi { "fixed" } else { "uniform" },
+            law.lo, law.hi, variable.reference, variable.scale).expect("String write");
+    }
+}
+fn write_assessment(out: &mut String, options: &Options, result: &Outcome) {
     let stop = match result.assessment.as_ref().map(|a| a.decision) {
         Some(Decision::Satisfied) => "compliance-satisfied",
         Some(Decision::Violated) => "compliance-violated",
         _ => "sample-budget",
     };
-    write!(&mut out, ",\"planned_samples\":{},\"stop_reason\":{},\"compliance_assessment\":",
+    write!(out, ",\"planned_samples\":{},\"stop_reason\":{},\"compliance_assessment\":",
         options.samples, json_string(stop)).expect("String write");
     if let Some(assessment) = &result.assessment {
-        write!(&mut out, "{{\"decision\":{},\"requirement\":\"probability >= required_probability\",\"required_probability\":{:.17e},\"alpha\":{:.17e},\"lower\":{:.17e},\"upper\":{:.17e},\"samples\":{},\"method\":\"gaussian-mixture-indicator-confidence-sequence\"}}",
+        write!(out, "{{\"decision\":{},\"requirement\":\"probability >= required_probability\",\"required_probability\":{:.17e},\"alpha\":{:.17e},\"lower\":{:.17e},\"upper\":{:.17e},\"samples\":{},\"method\":\"gaussian-mixture-indicator-confidence-sequence\"}}",
             json_string(assessment.decision.label()), assessment.policy.probability, assessment.policy.alpha,
             assessment.lower, assessment.upper, assessment.samples).expect("String write");
     } else { out.push_str("null"); }
-    out.push('}');
-    out
 }
 fn read_bounded(path: &str, cap: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();

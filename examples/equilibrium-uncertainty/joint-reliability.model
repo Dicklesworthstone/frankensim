@@ -1,0 +1,20 @@
+frankensim-modal-performance-v3
+sample_rate_hz 24000
+samples 1
+full_scale_pa 1
+limits 0.9 1 100 1000 1000
+compile_limits 0 1
+voices 1
+voice free-mass 1 1
+mass 0.25 0 0
+port 0 2
+coupling_limits 1 10000 0.9 1000 1000 1000 1e-10 1e-10 1e-8
+connections 1
+connection 64 0 0
+left 0 2
+right 0 0
+contact_limits 128 10000 0.1 1e-12 1e-13
+contact 128 1 0 0.015625 1 synthetic-joint-reliability
+contact_left 0 2
+contact_right 0 0
+events 0
