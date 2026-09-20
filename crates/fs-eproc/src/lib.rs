@@ -21,6 +21,9 @@
 //! logical-identity streams, every tournament is bit-replayable from its
 //! seed (Bet 8's reproducible-racing requirement).
 
+/// Likelihood-mixture inference for binary compliance outcomes.
+pub mod bernoulli;
+
 #[cfg(feature = "conformal-hardening")]
 pub mod hardening;
 
