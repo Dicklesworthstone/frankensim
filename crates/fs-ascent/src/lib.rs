@@ -16,6 +16,8 @@
 //! and stalled are DISTINGUISHABLE outcomes.
 
 pub mod auglag;
+#[cfg(feature = "equilibrium-design")]
+pub mod equilibrium;
 pub mod interior;
 pub mod lbfgs;
 pub mod nsga;
@@ -43,6 +45,8 @@ pub use nsga::{
 pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep};
 
 pub use auglag::{AugLagReport, KktResidual, augmented_lagrangian};
+#[cfg(feature = "equilibrium-design")]
+pub use equilibrium::{EquilibriumStudy, EquilibriumStudyError};
 pub use interior::{InteriorReport, interior_point};
 pub use lbfgs::{LbfgsError, LbfgsReport, LbfgsState};
 pub use reverse_manifold::{ReverseManifoldError, ReverseManifoldReport, ReverseManifoldStudy};

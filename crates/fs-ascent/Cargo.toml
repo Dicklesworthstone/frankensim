@@ -10,8 +10,13 @@ description = "The gradient-based optimizer stack: L-BFGS with strong-Wolfe sear
 [package.metadata.frankensim]
 layer = "L4"
 
+[features]
+# Opt-in physical inverse design; the default optimizer dependency graph is unchanged.
+equilibrium-design = ["dep:fs-couple"]
+
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
+fs-couple = { path = "../fs-couple", optional = true }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
@@ -19,7 +24,7 @@ fs-opt = { path = "../fs-opt" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
-# Physical inverse-design example only; optimizer runtime dependencies stay unchanged.
+# Physical inverse-design consumers; normal fs-couple use is opt-in above.
 fs-couple = { path = "../fs-couple" }
 fs-dcontact = { path = "../fs-dcontact" }
 fs-alloc = { path = "../fs-alloc" }
@@ -37,3 +42,7 @@ fs-sparse = { path = "../fs-sparse" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "equilibrium_study"
+required-features = ["equilibrium-design"]
