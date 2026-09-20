@@ -7,6 +7,9 @@ use crate::render::schedule::force::{coupled::contact::multiple::MultiContactCon
 use crate::render::RenderError;
 use fs_dcontact::Obstacle;
 
+pub mod forward;
+use forward::{PreparedDesign, SolvedDesignCase};
+
 /// Physical response equalities and inequalities with analytic Jacobian rows.
 pub mod constraints;
 use constraints::{ResponseConstraint, ResponseConstraintResult};
@@ -124,9 +127,10 @@ impl std::error::Error for DesignError {}
 /// operation budgets; these counts describe calls, not exact flops or elapsed time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DesignWork {
-    /// Objective callback attempts, including invalid candidate points.
+    /// Forward or objective callback attempts, including invalid candidate points.
     pub evaluations: usize,
-    /// Attempted primal-plus-adjoint load cases.
+    /// Attempted load cases. `evaluate` includes an adjoint;
+    /// `evaluate_forward` performs only the original primal solve.
     pub case_solves: usize,
 }
 
@@ -293,6 +297,45 @@ impl EquilibriumDesign {
     pub fn evaluate(&self, point: &[f64], control: &mut DesignControl, gate: &CancelGate)
         -> Result<DesignEvaluation, DesignError>
     {
+        let prepared = self.prepare(point, control, gate)?;
+        let mut result = DesignEvaluation { value: 0.0, gradient: vec![0.0; self.variables.len()],
+            physical_parameters: prepared.parameters.clone(), cases: Vec::with_capacity(prepared.cases.len()), constraints: Vec::new() };
+        let mut constraint_results = vec![None; self.constraints.len()];
+        for (index, case) in prepared.cases.iter().enumerate() {
+            let solved = self.solve_case(&prepared, index, control, gate)?;
+            let linear = EquilibriumLinearization::new(&solved.network, &solved.external, &prepared.contacts, self.budget.sensitivity, gate)
+                .map_err(|source| case_error(index, source))?;
+            let objective = linear.displacement_objective(&case.targets, &solved.actuators, self.budget.max_ports_per_case, gate)
+                .map_err(|source| case_error(index, source))?;
+            result.value = number(result.value + objective.value)?;
+            for (j, variable) in self.variables.iter().enumerate() {
+                let mut physical = 0.0;
+                for &field in &variable.fields {
+                    let derivative = field_derivative(field, index, &objective.residual_pullback,
+                        &objective.physical_force_gradient);
+                    physical = number(physical + derivative)?;
+                }
+                result.gradient[j] = number(result.gradient[j] + number(physical * variable.scale)?)?;
+            }
+            for (row, constraint) in self.constraints.iter().enumerate() {
+                if constraint.case == index {
+                    constraint_results[row] = Some(constraints::evaluate(constraint, &linear, &prepared.contacts,
+                        case, &self.variables, gate).map_err(|source| case_error(index, source))?);
+                }
+            }
+            result.cases.push(DesignCaseResult { value: objective.value, observations_m: objective.observations_m,
+                equilibrium: linear.report(), adjoint_relative_residual: objective.adjoint.relative_residual });
+        }
+        result.constraints = constraint_results.into_iter().map(|row|
+            row.ok_or_else(|| bad("missing complete physical constraint row"))).collect::<Result<_,_>>()?;
+        checkpoint(gate)?;
+        Ok(result)
+    }
+    // Candidate binding and work admission are identical for forward queries
+    // and optimization. Do not duplicate these when adding a new observer.
+    fn prepare(&self, point: &[f64], control: &mut DesignControl, gate: &CancelGate)
+        -> Result<PreparedDesign, DesignError>
+    {
         checkpoint(gate)?;
         if control.work.evaluations >= control.maximum_evaluations { return Err(DesignError::Budget { what: "evaluations" }); }
         control.work.evaluations += 1;
@@ -327,58 +370,38 @@ impl EquilibriumDesign {
                     .map_err(|source| case_error(0, ModalCouplingError::ContactLaw(source)))?;
             }
         }
-        let mut result = DesignEvaluation { value: 0.0, gradient: vec![0.0; self.variables.len()],
-            physical_parameters: parameters, cases: Vec::with_capacity(cases.len()), constraints: Vec::new() };
-        let mut constraint_results = vec![None; self.constraints.len()];
-        for (index, case) in cases.iter().enumerate() {
-            checkpoint(gate)?;
-            control.work.case_solves += 1;
-            let mut network = CoupledModalSystem::new(self.models.clone(), springs.clone(), self.budget.coupling, gate)
-                .map_err(|source| case_error(index, source))?;
-            let mut columns = Vec::with_capacity(case.loads.len());
-            let mut forces = Vec::with_capacity(case.loads.len());
-            let mut actuators = Vec::with_capacity(case.loads.len());
-            for load in &case.loads {
-                let mut column = vec![0.0; self.modes];
-                let start = self.offsets[load.attachment.component];
-                column[start..start + load.attachment.shapes.len()].copy_from_slice(&load.attachment.shapes);
-                columns.push(column); forces.push(load.force_n); actuators.push(load.attachment.clone());
-            }
-            // Reuse the same physical-to-modal force projection as rendering.
-            let external = if columns.is_empty() { vec![0.0; self.modes] } else {
-                project(&columns, &forces).map_err(|source| DesignError::Projection { case: index, source })?
-            };
-            if contacts.is_empty() { network.initialize_static_equilibrium(&external, gate) }
-            else { network.initialize_contact_equilibrium(&external, &contacts, self.budget.contact, gate) }
-                .map_err(|source| case_error(index, source))?;
-            let linear = EquilibriumLinearization::new(&network, &external, &contacts, self.budget.sensitivity, gate)
-                .map_err(|source| case_error(index, source))?;
-            let objective = linear.displacement_objective(&case.targets, &actuators, self.budget.max_ports_per_case, gate)
-                .map_err(|source| case_error(index, source))?;
-            result.value = number(result.value + objective.value)?;
-            for (j, variable) in self.variables.iter().enumerate() {
-                let mut physical = 0.0;
-                for &field in &variable.fields {
-                    let derivative = field_derivative(field, index, &objective.residual_pullback,
-                        &objective.physical_force_gradient);
-                    physical = number(physical + derivative)?;
-                }
-                result.gradient[j] = number(result.gradient[j] + number(physical * variable.scale)?)?;
-            }
-            for (row, constraint) in self.constraints.iter().enumerate() {
-                if constraint.case == index {
-                    constraint_results[row] = Some(constraints::evaluate(constraint, &linear, &contacts,
-                        case, &self.variables, gate).map_err(|source| case_error(index, source))?);
-                }
-            }
-            result.cases.push(DesignCaseResult { value: objective.value, observations_m: objective.observations_m,
-                equilibrium: linear.report(), adjoint_relative_residual: objective.adjoint.relative_residual });
-        }
-        result.constraints = constraint_results.into_iter().map(|row|
-            row.ok_or_else(|| bad("missing complete physical constraint row"))).collect::<Result<_,_>>()?;
-        checkpoint(gate)?;
-        Ok(result)
+        Ok(PreparedDesign { parameters, springs, contacts, cases })
     }
+
+    // The original whole-network preload owner checks force balance, contact
+    // reaction, penetration and energy before publishing any component state.
+    fn solve_case(&self, prepared: &PreparedDesign, index: usize,
+        control: &mut DesignControl, gate: &CancelGate) -> Result<SolvedDesignCase, DesignError>
+    {
+        let case = &prepared.cases[index];
+        checkpoint(gate)?;
+        control.work.case_solves += 1;
+        let mut network = CoupledModalSystem::new(self.models.clone(), prepared.springs.clone(), self.budget.coupling, gate)
+            .map_err(|source| case_error(index, source))?;
+        let mut columns = Vec::with_capacity(case.loads.len());
+        let mut forces = Vec::with_capacity(case.loads.len());
+        let mut actuators = Vec::with_capacity(case.loads.len());
+        for load in &case.loads {
+            let mut column = vec![0.0; self.modes];
+            let start = self.offsets[load.attachment.component];
+            column[start..start + load.attachment.shapes.len()].copy_from_slice(&load.attachment.shapes);
+            columns.push(column); forces.push(load.force_n); actuators.push(load.attachment.clone());
+        }
+        // Reuse the same physical-to-modal force projection as rendering.
+        let external = if columns.is_empty() { vec![0.0; self.modes] } else {
+            project(&columns, &forces).map_err(|source| DesignError::Projection { case: index, source })?
+        };
+        let stored_energy_j = if prepared.contacts.is_empty() { network.initialize_static_equilibrium(&external, gate) }
+        else { network.initialize_contact_equilibrium(&external, &prepared.contacts, self.budget.contact, gate) }
+            .map_err(|source| case_error(index, source))?;
+        Ok(SolvedDesignCase { network, external, actuators, stored_energy_j })
+    }
+
 }
 
 fn check_map(network: &CoupledModalSystem, map: &ModalAttachment) -> Result<(), DesignError> {
