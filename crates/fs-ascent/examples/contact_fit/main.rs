@@ -1,7 +1,9 @@
-//! Actual optimization of shared physical parameters with the existing L-BFGS.
+//! Physical inverse design through existing L-BFGS or opt-in bounded SQP.
 //! This example fixes one supported-mass test rig, not an arbitrary assembly
 //! importer. The reusable EquilibriumDesign evaluator accepts other networks.
 mod problem;
+#[cfg(feature = "equilibrium-design")]
+mod bounded;
 use fs_ascent::{LbfgsError, LbfgsReport, LbfgsState, StopReason, StopRule};
 use fs_couple::render::schedule::force::coupled::equilibrium::sensitivity::objective::design::{
     DesignControl, DesignError, DesignEvaluation, EquilibriumDesign,
@@ -70,10 +72,13 @@ impl<'a> FitSession<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Solver { Lbfgs, Sqp }
+
 #[derive(Debug, PartialEq)]
-struct Options { data: Option<String>, iterations: usize, evaluations: usize, scale_m: f64 }
+struct Options { data: Option<String>, iterations: usize, evaluations: usize, scale_m: f64, solver: Solver }
 fn options(args: &[String]) -> Result<Options, String> {
-    let mut result = Options { data: None, iterations: 128, evaluations: 256, scale_m: 0.0002 };
+    let mut result = Options { data: None, iterations: 128, evaluations: 256, scale_m: 0.0002, solver: Solver::Lbfgs };
     let mut seen = Vec::new();
     let mut args = args.iter();
     while let Some(flag) = args.next() {
@@ -82,6 +87,11 @@ fn options(args: &[String]) -> Result<Options, String> {
         let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--data" => result.data = Some(value.clone()),
+            "--solver" => result.solver = match value.as_str() {
+                "lbfgs" => Solver::Lbfgs,
+                "sqp" => Solver::Sqp,
+                _ => return Err("--solver must be lbfgs or sqp".into()),
+            },
             "--iterations" => result.iterations = value.parse::<usize>().ok().filter(|x| *x <= 512)
                 .ok_or("--iterations must be in 0..=512")?,
             "--evaluations" => result.evaluations = value.parse::<usize>().ok().filter(|x| (2..=4096).contains(x))
@@ -97,10 +107,14 @@ fn options(args: &[String]) -> Result<Options, String> {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() == 1 && args[0] == "--help" {
-        println!("contact_fit [--data observations.txt] [--iterations 128] [--evaluations 256] [--scale-m 0.0002]\nEach data row: load_N mass_displacement_m receiver_displacement_m. Without --data, use disclosed synthetic targets.");
+        println!("contact_fit [--solver lbfgs|sqp] [--data observations.txt] [--iterations 128] [--evaluations 256] [--scale-m 0.0002]\nEach data row: load_N mass_displacement_m receiver_displacement_m. Without --data, use disclosed synthetic targets. SQP requires --features equilibrium-design; L-BFGS remains the default.");
         return Ok(());
     }
     let options = options(&args)?;
+    #[cfg(not(feature = "equilibrium-design"))]
+    if options.solver == Solver::Sqp {
+        return Err("--solver sqp requires cargo run --features equilibrium-design".into());
+    }
     let (data, source) = if let Some(path) = &options.data {
         let mut bytes = Vec::new();
         std::fs::File::open(path)?.take(8193).read_to_end(&mut bytes)?;
@@ -108,6 +122,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else { (problem::synthetic_data(), "synthetic-quadratic-oracle") };
     let gate = CancelGate::new();
     let problem = problem::build(&data, options.scale_m, &gate)?;
+    #[cfg(feature = "equilibrium-design")]
+    if options.solver == Solver::Sqp {
+        return bounded::run(&problem, source, options.iterations, options.evaluations, &gate);
+    }
     let mut fit = FitSession::new(&problem, options.evaluations, &gate)?;
     let initial = fit.state.f;
     let report = fit.run(options.iterations, &gate)?;
@@ -173,6 +191,15 @@ mod tests {
     }
 
     #[test]
+    fn solver_selection_is_explicit_and_preserves_the_default() {
+        assert_eq!(options(&[]).unwrap().solver, Solver::Lbfgs);
+        let args = vec!["--solver".into(), "sqp".into()];
+        assert_eq!(options(&args).unwrap().solver, Solver::Sqp);
+        let repeated = vec!["--solver".into(), "sqp".into(), "--solver".into(), "lbfgs".into()];
+        assert!(options(&repeated).is_err());
+    }
+
+    #[test]
     fn external_observations_and_options_require_complete_finite_units() {
         assert_eq!(problem::parse_data(b"0.8 0.0003 0.00006\n1.6 0.0004 0.00013\n").unwrap().len(),2);
         for input in [b"".as_slice(),b"1 2",b"1 2 3 4",b"1 NaN 3",b"1 2 3\n\n"] {
@@ -180,7 +207,7 @@ mod tests {
         }
         assert!(problem::parse_data(&vec![b' ';8193]).is_err());
         for values in [vec!["--evaluations","1"],vec!["--scale-m","NaN"],vec!["--unknown","x"],
-            vec!["--data","a","--data","b"],vec!["--iterations"]] {
+            vec!["--data","a","--data","b"],vec!["--iterations"],vec!["--solver","unknown"]] {
             assert!(options(&values.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
     }

@@ -155,8 +155,10 @@ fn callback_limit_is_hard_and_initialization_failures_leave_work_visible() {
         assert_eq!(result.solution.evals, 1);
         assert_eq!(study.work(), DesignWork { evaluations: 1, case_solves: 3 });
     }
-    let result = EquilibriumStudy::new(&problem, &[-2.0], &mut control, 3, &gate);
-    assert!(matches!(result, Err(SqpError::Evaluation(DesignError::OutsideBounds { .. }))));
+    {
+        let result = EquilibriumStudy::new(&problem, &[-2.0], &mut control, 3, &gate);
+        assert!(matches!(result, Err(SqpError::Evaluation(DesignError::OutsideBounds { .. }))));
+    }
     assert_eq!(control.work(), DesignWork { evaluations: 2, case_solves: 3 });
 }
 
