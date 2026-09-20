@@ -19,6 +19,9 @@ use crate::vibroacoustic::CavityModes;
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
+/// Geometry-derived cylindrical pressure basis, using the existing eigensolver.
+pub mod cylinder;
+
 
 /// Cold-compiled acoustic storage. Interface signs are OUTWARD from the gas,
 /// unlike a compression-positive drum pickup. Cavity norms and couplings must
