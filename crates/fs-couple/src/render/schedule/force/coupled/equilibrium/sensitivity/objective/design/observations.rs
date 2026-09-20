@@ -173,3 +173,6 @@ impl EquilibriumDesign {
         Ok(result)
     }
 }
+
+/// Local weighted-observation information using the existing dense eigensolver.
+pub mod information;

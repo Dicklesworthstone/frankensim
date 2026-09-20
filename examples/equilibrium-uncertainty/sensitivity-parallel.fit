@@ -1,0 +1,16 @@
+frankensim-equilibrium-design-v1
+preload_limits 0 128 16384
+sensitivity_limits 0 16384 16384 0
+design_limits 2 2 2 4
+cases 2
+case load-one 1 1
+load 0 0 1
+target 0 0 0.0078125 0.01 1
+case load-two 1 1
+load 0 0 2
+target 0 0 0.015625 0.01 1
+variables 2
+variable left 64 64 32 128 1
+bind spring-stiffness 0
+variable right 64 64 32 128 1
+bind spring-stiffness 1
