@@ -21,6 +21,8 @@ use crate::modal_acoustic_time::ModalAcousticState;
 pub mod audio;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
+/// Statically relaxed geometric stretching of prestressed films.
+pub mod membrane;
 pub mod felt;
 pub mod striker;
 use felt::FeltPad;
@@ -32,18 +34,20 @@ pub const MAX_IMPACT_MODES:usize=64;
 pub enum BodyPotential {
     /// Actual nonlinear curved-shell membrane and DKT energy.
     Shell(ShellReduction),
+    /// Geometry-owned planar-film stretching, not an authored pitch bend.
+    Membrane(membrane::MembranePotential),
     /// Linear reduced pencil (e.g. tensioned film). Zero frequency is an
     /// explicitly free inertial coordinate, not a low-frequency oscillator.
     Linear(Vec<f64>),
 }
 impl BodyPotential {
-    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
-    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Linear(w)=>w}}
+    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::Linear(w)=>w.len()}}
+    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::Linear(w)=>w}}
     fn potential(&self,q:&[f64])->f64 {match self {
-        Self::Shell(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
+        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
     }}
     fn gradient(&self,q:&[f64],g:&mut[f64]) {match self {
-        Self::Shell(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
+        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
     }}
 }
 /// One body in the concatenated mechanical basis.
@@ -188,6 +192,8 @@ impl Storage for MechanicalStorage {
 pub struct ImpactSystem {
     system:PortHamiltonian,x:Vec<f64>,pads:Vec<Pad>,histories:Rc<RefCell<Vec<WoolFeltState>>>,
     modes:usize,config:ImpactConfig,sample:u64,
+    // Immutable shared laws plus body/start addresses; no duplicate mesh data.
+    membranes:Vec<(usize,usize,membrane::MembranePotential)>,
 }
 impl ImpactSystem {
     /// Compose real body storage, elastic contacts, felt patches and fluid volume.
@@ -207,8 +213,8 @@ impl ImpactSystem {
             return Err(invalid("impact needs bounded nonempty modes and finite positive time/energy/work limits"));
         }
         let mut x=vec![0.0;2*modes];let mut damping=Vec::with_capacity(modes);let mut potentials=Vec::new();
-        let mut offset=0;
-        for body in bodies {
+        let mut offset=0;let mut membranes=Vec::new();
+        for (body_index,body) in bodies.into_iter().enumerate() {
             let n=body.potential.count();
             if n==0 || body.initial.len()!=n || body.damping_per_s.len()!=n
                 || body.potential.omegas().iter().any(|w|!w.is_finite() || *w<0.0 || *w*config.dt_s>=0.9*core::f64::consts::PI)
@@ -216,6 +222,10 @@ impl ImpactSystem {
                 return Err(invalid("body mode/state/damping dimensions or linear Nyquist guard failed"));
             }
             for (i,s) in body.initial.iter().enumerate() {x[2*(offset+i)]=s.displacement_m_sqrt_kg;x[2*(offset+i)+1]=s.velocity_m_sqrt_kg_per_s;}
+            if let BodyPotential::Membrane(film)=&body.potential {
+                film.observe_interleaved(&x,offset)?;
+                membranes.push((body_index,offset,film.clone()));
+            }
             damping.extend(body.damping_per_s);offset+=n;potentials.push(body.potential);
         }
         let mut admitted=Vec::with_capacity(contacts.len());
@@ -247,7 +257,7 @@ impl ImpactSystem {
         let system=PortHamiltonian::new(dim,modes,j,r,g,Box::new(storage)).map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -258,6 +268,12 @@ impl ImpactSystem {
     /// Actual current storage including conditioning and creep.
     #[must_use]
     pub fn stored_energy_j(&self)->f64 {self.system.hamiltonian(&self.x)}
+    /// Physical stretching diagnostics for a body in original construction order.
+    /// Returns None for non-membrane bodies; observing consumes no mechanical time.
+    pub fn membrane_observation(&self,body:usize)->Option<membrane::MembraneObservation> {
+        let (_,offset,film)=self.membranes.iter().find(|(index,_,_)|*index==body)?;
+        film.observe_interleaved(&self.x,*offset).ok()
+    }
     /// Copy one accepted material history, not a new fitted material.
     #[must_use]
     pub fn felt_history(&self,pad:usize)->Option<WoolFeltState> {self.histories.borrow().get(pad).cloned()}
@@ -280,6 +296,7 @@ impl ImpactSystem {
         let before=self.stored_energy_j();
         let record=fs_phs::step(&self.system,&self.x,external,self.config.dt_s).map_err(|e|ImpactError::Owner(e.to_string()))?;
         if record.x.iter().chain(&record.y).any(|v|!v.is_finite()) {return Err(invalid("impact solve left finite state"));}
+        for (_,offset,film) in &self.membranes { film.observe_interleaved(&record.x,*offset)?; }
         let frozen=self.system.hamiltonian(&record.x);let mut crush=0.0;
         let mut candidate=self.histories.borrow().clone();
         for (pad,h) in self.pads.iter().zip(&mut candidate) {
