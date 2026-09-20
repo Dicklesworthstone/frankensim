@@ -55,6 +55,7 @@ pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
 pub mod projected;
+pub mod refinement;
 pub mod robust;
 #[path = "robust_descent_v2.rs"]
 pub mod robust_descent;

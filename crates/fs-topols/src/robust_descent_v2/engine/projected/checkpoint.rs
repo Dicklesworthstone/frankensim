@@ -101,6 +101,10 @@ impl MultiLoadProjectedOptimizer {
     #[must_use]
     pub fn controls(&self) -> MultiLoadProjectedSettings { self.controls }
 
+    /// Prescribed row-major nodal values in canonical index order.
+    #[must_use]
+    pub fn fixed_nodes(&self) -> &[(usize, f64)] { &self.fixed }
+
     /// Immutable numerical area policy.
     #[must_use]
     pub fn projection_settings(&self) -> VolumeProjectionSettings { self.projection }
