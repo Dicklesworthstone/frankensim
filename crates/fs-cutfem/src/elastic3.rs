@@ -446,3 +446,6 @@ fn add_ghosts(cells:&[Cell3],left:usize,right:usize,axis:usize,coefficient:f64,
 
 /// Q1-conforming locally refined octree execution of this 3-D kernel.
 pub mod adaptive;
+
+/// Oriented reference-surface traction and pressure loads.
+pub mod surface;

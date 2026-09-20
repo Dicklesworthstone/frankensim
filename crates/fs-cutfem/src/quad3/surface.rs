@@ -35,8 +35,11 @@ impl SurfaceOptions3 {
 /// follows phi<0, not the coordinate direction chosen for height integration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfacePoint3 {
+    /// Global reference position, in the box's length unit.
     pub position: [f64; 3],
+    /// Numerical unit normal pointing out of phi<0 material.
     pub normal: [f64; 3],
+    /// Positive surface-area weight, in squared length units.
     pub weight: f64,
 }
 /// Completed interface rule. Empty means no sampled crossing, NOT a certificate
@@ -49,6 +52,12 @@ impl SurfaceRules3 {
     #[must_use] pub fn points(&self) -> &[SurfacePoint3] { &self.points }
     /// Numerical area, not a certified enclosure or a box-boundary area.
     #[must_use] pub fn area(&self) -> f64 { self.points.iter().map(|p| p.weight).sum() }
+}
+
+impl CutRules3 {
+    // Only geometry builders inside this crate may attach a matching rule to
+    // unpublished physical cells. Public consumers have read-only access.
+    pub(crate) fn retain_surface(&mut self, rules: SurfaceRules3) { self.surface = Some(rules); }
 }
 
 /// Integrate only the zero-level interface inside a box. Artificial background

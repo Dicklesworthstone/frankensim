@@ -235,7 +235,7 @@ impl LinearOp for AdaptiveElasticity3 {
 }
 #[allow(clippy::too_many_arguments)]
 fn patch_ghosts(cells:&[Cell3],left:usize,right:usize,axis:usize,lo:[f64;3],hi:[f64;3],coefficient:f64,
-    control:&mut QuadratureControl3<'_>,out:&mut Vec<GhostPoint3>)->Result<(),ElasticityError3> {
+    control:&mut QuadratureControl3<'_>,out:&mut Vec<GhostPoint3>) -> Result<(),ElasticityError3> {
     let l=&cells[left];let r=&cells[right];let (a,b)=((axis+1)%3,(axis+2)%3);
     let h=(l.bounds.hi()[axis]-l.bounds.lo()[axis]).min(r.bounds.hi()[axis]-r.bounds.lo()[axis]);
     let gauss=[(-0.774_596_669_241_483_4,5.0/9.0),(0.0,8.0/9.0),(0.774_596_669_241_483_4,5.0/9.0)];
@@ -248,4 +248,42 @@ fn patch_ghosts(cells:&[Cell3],left:usize,right:usize,axis:usize,lo:[f64;3],hi:[
         if !weight.is_finite()||weight<=0.0||!jump.values().all(|j:&f64|j.is_finite()){return Err(ElasticityError3::Invalid("adaptive ghost overflow"));}
         let (nodes,jump)=jump.into_iter().unzip();out.push(GhostPoint3{cells:[left,right],nodes,jump,weight});
     }}Ok(())
+}
+
+impl AdaptiveElasticity3 {
+    /// Build the original constrained operator and its matching reference-surface
+    /// rule from one pure implicit field. Surface work shares the geometry budget;
+    /// failure returns no partially prepared operator. No stiffness reassembly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_surface(domain: HexCell, tree: &Octree3, sdf: &dyn CutSdf3,
+        material: &IsotropicElastic, clamp: &dyn Fn([f64; 3]) -> bool,
+        options: ElasticityOptions3, surface_options: crate::quad3::surface::SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>) -> Result<Self, ElasticityError3> {
+        surface_options.validate()?;
+        let mut operator = Self::build(domain, tree, sdf, material, clamp, options, control)?;
+        operator.raw.integrate_surface(sdf, surface_options, control)?;
+        Ok(operator)
+    }
+
+    /// Reference traction loads use the SAME T^T as stiffness and body forces.
+    /// Unmasked physical resultant/moment survive reduction; only the nodal RHS
+    /// changes to independent coordinates. A restriction apply is not preemptible.
+    /// Legacy bulk-only operators refuse rather than silently return zero loads.
+    pub fn surface_load(&self, traction: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<super::surface::SurfaceLoad3, ElasticityError3> {
+        let mut load = self.raw.surface_load(traction, &mut checkpoint)?;
+        let mut reduced = vec![0.0; self.n()];
+        self.restrict(&load.rhs, &mut reduced);
+        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+        if !reduced.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("reduced surface load overflow")); }
+        load.rhs = reduced;
+        Ok(load)
+    }
+
+    /// Positive pressure acts inward on the fixed reference surface. This is
+    /// not deformation-following pressure or a shape derivative.
+    pub fn pressure_load(&self, pressure: &dyn Fn([f64; 3]) -> f64,
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<super::surface::SurfaceLoad3, ElasticityError3> {
+        self.surface_load(&|p, n| { let value = pressure(p); n.map(|v| -value*v) }, checkpoint)
+    }
 }
