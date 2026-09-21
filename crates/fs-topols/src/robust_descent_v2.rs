@@ -19,12 +19,17 @@ use crate::topder::{NucleationEvent, nucleate, topological_derivative};
 use crate::veloext::extend_velocity;
 use crate::weno::{Velocity, advect, build_band};
 use fs_cutfem::{
-    BoundaryTraction, CutElasticity, CutElasticitySolution, CutFemError,
+    BoundaryTraction, CutElasticity, CutFemError, NodeKey,
     CutStabilizationScaling, DesignBoxEdge, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO,
     Quadtree,
 };
 use fs_material::IsotropicElastic;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+
+// Only a completed, residual-admitted solve supplies these cached fields.
+// Geometry/sensitivity consumers do not need the solver's private work buffers.
+type NodalField = BTreeMap<NodeKey, [f64; 2]>;
 
 const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
 const SOLVER_TOL: f64 = 1e-12;
@@ -184,7 +189,7 @@ fn fnv(phi: &GridSdf) -> u64 {
     hash
 }
 
-fn strain_at(grid: &Quadtree, sol: &CutElasticitySolution, p: [f64; 2]) -> ([f64; 3], bool) {
+fn strain_at(grid: &Quadtree, nodal: &NodalField, p: [f64; 2]) -> ([f64; 3], bool) {
     let level = grid.max_level();
     let nf = f64::from(1u32 << level);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -194,7 +199,6 @@ fn strain_at(grid: &Quadtree, sol: &CutElasticitySolution, p: [f64; 2]) -> ([f64
     let cell = (level, ci, cj);
     let (lo, hi) = grid.rect(cell);
     let corners = grid.corner_nodes(cell);
-    let nodal = sol.nodal();
     let mut vals = [[0.0f64; 2]; 4];
     for (a, c) in corners.iter().enumerate() {
         match nodal.get(c) {

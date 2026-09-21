@@ -18,6 +18,7 @@ use fs_cutfem::{
     CutStabilizationScaling, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO, Quadtree,
 };
 use fs_material::IsotropicElastic;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 
@@ -150,7 +151,7 @@ fn validate_geometry(
 
 fn strain_at(
     grid: &Quadtree,
-    solution: &CutElasticitySolution,
+    nodal: &BTreeMap<fs_cutfem::NodeKey, [f64; 2]>,
     cell: (u32, u32, u32),
     point: [f64; 2],
 ) -> Option<[f64; 3]> {
@@ -159,7 +160,6 @@ fn strain_at(
     // on lattice lines; floor(point / h) can select an unrepresented neighbour.
     let (lo, hi) = grid.rect(cell);
     let corners = grid.corner_nodes(cell);
-    let nodal = solution.nodal();
     let mut values = [[0.0; 2]; 4];
     for (index, corner) in corners.iter().enumerate() {
         values[index] = *nodal.get(corner)?;
@@ -232,13 +232,26 @@ pub(crate) fn sample_solution_controlled<B>(
     solution: &CutElasticitySolution,
     lambda: f64,
     mu: f64,
+    control: impl FnMut(usize) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, (f64, [f64; 2], usize)>, CutFemError> {
+    sample_nodal_solution_controlled(grid, phi, solution.nodal(), lambda, mu, control)
+}
+
+// Shared by ordinary and polled solves. The caller owns the matching geometry
+// and COMPLETE residual-admitted nodal field; no stress or quadrature fork.
+pub(crate) fn sample_nodal_solution_controlled<B>(
+    grid: &Quadtree,
+    phi: &GridSdf,
+    nodal: &BTreeMap<fs_cutfem::NodeKey, [f64; 2]>,
+    lambda: f64,
+    mu: f64,
     mut control: impl FnMut(usize) -> ControlFlow<B>,
 ) -> Result<ControlFlow<B, (f64, [f64; 2], usize)>, CutFemError> {
     let mut maximum = 0.0_f64;
     let mut location = [0.0, 0.0];
     let mut count = 0usize;
     let mut observe = |cell, point: [f64; 2]| -> Result<(), CutFemError> {
-        let strain = strain_at(grid, solution, cell, point)
+        let strain = strain_at(grid, nodal, cell, point)
             .ok_or_else(|| invalid("material stress probe is missing its owning-cell displacement"))?;
         let stress = von_mises(lambda, mu, strain);
         if !(stress.is_finite() && stress >= 0.0) {

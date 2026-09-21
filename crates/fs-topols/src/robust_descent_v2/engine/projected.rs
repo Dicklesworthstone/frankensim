@@ -40,8 +40,9 @@ impl Default for MultiLoadProjectedSettings {
     }
 }
 
-/// Cooperative boundaries. Individual solves, smoothing and area evaluations
-/// are not internally preempted; this is not a hard wall-time guarantee.
+/// Cooperative boundaries. `advance_one_polling` also polls inside candidate
+/// CG solves. Assembly, smoothing and area evaluations remain indivisible;
+/// neither entry point gives a hard wall-time guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultiLoadProjectedStage {
     /// Before sensitivity construction or any candidate work for an update.
@@ -52,6 +53,9 @@ pub enum MultiLoadProjectedStage {
     Projection(usize, VolumeProjectionStage),
     /// Before (`complete=false`) or after one independent case solve.
     CaseSolve { candidate: usize, case: usize, complete: bool },
+    /// Candidate CG progress, including true-residual correction passes. Only
+    /// emitted by `advance_one_polling`; iterations are cumulative per case.
+    CaseIterations { candidate: usize, case: usize, iterations: usize },
     /// Before a cell's stress probes on an already solved independent load case.
     StressCell { candidate: usize, case: usize, cell: usize },
     /// Complete projected-field family and acceptance gates passed, before mutation.
@@ -260,6 +264,40 @@ impl MultiLoadProjectedOptimizer {
     /// refusals are retained in attempt records and permit bounded backtracking.
     pub fn advance_one_controlled<B>(
         &mut self,
+        control: impl FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, MultiLoadProjectedProgress>, CutFemError> {
+        self.advance_one_scheduled(None, control)
+    }
+
+    /// Advance using the original CutFEM solver with at most `poll_iters`
+    /// additional CG iterations between callbacks, including correction passes.
+    /// Every previous projection, stress, case and publication boundary remains.
+    /// Interrupted candidate fields never replace the accepted solution family;
+    /// their attempted case solves remain charged exactly once per start.
+    ///
+    /// This is a per-call scheduling choice, not a new physical/study policy.
+    /// It is not serialized; a checkpoint can resume using either entry point.
+    /// Baseline construction and checkpoint recovery are still synchronous.
+    /// Assembly, reductions, sparse applies, smoothing and area evaluations are
+    /// not preemptible. No hard deadline or mid-CG checkpoint is promised.
+    ///
+    /// # Errors
+    /// Refuses zero polling before work; otherwise follows the same numerical
+    /// refusal and complete-family publication rules as `advance_one_controlled`.
+    pub fn advance_one_polling<B>(
+        &mut self,
+        poll_iters: usize,
+        control: impl FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, MultiLoadProjectedProgress>, CutFemError> {
+        if poll_iters == 0 {
+            return Err(invalid("multi-load CG polling interval must be positive"));
+        }
+        self.advance_one_scheduled(Some(poll_iters), control)
+    }
+
+    fn advance_one_scheduled<B>(
+        &mut self,
+        poll_iters: Option<usize>,
         mut control: impl FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, MultiLoadProjectedProgress>, CutFemError> {
         if self.next_iteration == self.kernel.settings.iterations {
@@ -316,15 +354,24 @@ impl MultiLoadProjectedOptimizer {
             };
             attempt.projection = Some(projection);
             let spent = &mut self.solves_started;
-            let candidate = self.kernel.evaluate_controlled(phi, |case, complete| {
-                if let ControlFlow::Break(reason) = control(MultiLoadProjectedStage::CaseSolve {
-                    candidate: index, case, complete,
-                }) {
+            let candidate = self.kernel.evaluate_scheduled(phi, poll_iters, |case, progress| {
+                let stage = match progress {
+                    CaseProgress::Start => MultiLoadProjectedStage::CaseSolve {
+                        candidate: index, case, complete: false,
+                    },
+                    CaseProgress::Complete => MultiLoadProjectedStage::CaseSolve {
+                        candidate: index, case, complete: true,
+                    },
+                    CaseProgress::Iterations(iterations) => MultiLoadProjectedStage::CaseIterations {
+                        candidate: index, case, iterations,
+                    },
+                };
+                if let ControlFlow::Break(reason) = control(stage) {
                     return ControlFlow::Break(reason);
                 }
                 // The complete family was admitted before any proposal work.
                 // Charge BEFORE the solve, so numerical refusal spends budget.
-                if !complete { *spent += 1; }
+                if matches!(progress, CaseProgress::Start) { *spent += 1; }
                 ControlFlow::Continue(())
             });
             let candidate = match candidate {
@@ -389,3 +436,6 @@ impl MultiLoadProjectedOptimizer {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod polling_tests;

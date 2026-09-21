@@ -12,11 +12,18 @@ pub use projected::{
 
 struct MultiState {
     phi: GridSdf,
-    solutions: Vec<CutElasticitySolution>,
+    solutions: Vec<NodalField>,
     compliances: Vec<f64>,
     active: Option<usize>,
     objective: f64,
     volume: f64,
+}
+
+#[derive(Clone, Copy)]
+enum CaseProgress {
+    Start,
+    Iterations(usize),
+    Complete,
 }
 
 struct Direction {
@@ -76,6 +83,25 @@ impl Kernel {
         phi: GridSdf,
         mut control: impl FnMut(usize, bool) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, MultiState>, CutFemError> {
+        self.evaluate_scheduled(phi, None, |case, stage| match stage {
+            CaseProgress::Start => control(case, false),
+            CaseProgress::Complete => control(case, true),
+            CaseProgress::Iterations(_) => ControlFlow::Continue(()),
+        })
+    }
+
+    // Same assembly and complete-family aggregation for both scheduling modes.
+    // The ordinary route stays literal; polling delegates to fs-cutfem's
+    // existing true-residual correction solver, never a second CG algorithm.
+    fn evaluate_scheduled<B>(
+        &self,
+        phi: GridSdf,
+        poll_iters: Option<usize>,
+        mut control: impl FnMut(usize, CaseProgress) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, MultiState>, CutFemError> {
+        if poll_iters == Some(0) {
+            return Err(invalid("multi-load CG polling interval must be positive"));
+        }
         if phi.nodes().iter().any(|value| !value.is_finite()) {
             return Err(invalid("multi-load evolution produced non-finite level-set nodes"));
         }
@@ -97,25 +123,38 @@ impl Kernel {
         let mut solutions = Vec::with_capacity(self.load_cases.len());
         let mut compliances = Vec::with_capacity(self.load_cases.len());
         for (index, (case, support)) in self.load_cases.iter().zip(&self.supports).enumerate() {
-            if let ControlFlow::Break(reason) = control(index, false) {
+            if let ControlFlow::Break(reason) = control(index, CaseProgress::Start) {
                 return Ok(ControlFlow::Break(reason));
             }
             let value = case.traction();
             let traction = move |_: f64, _: f64| value;
-            let solution = solver.solve_with_boundary_traction(
-                &|_, _| [0.0, 0.0],
-                &|_, _| [0.0, 0.0],
-                BoundaryTraction::EdgeBand { support: *support, value: &traction },
-            )?;
-            if let ControlFlow::Break(reason) = control(index, true) {
+            let boundary = BoundaryTraction::EdgeBand { support: *support, value: &traction };
+            let (compliance, nodal) = if let Some(poll_iters) = poll_iters {
+                let operator = solver.assemble_with_boundary_traction(
+                    &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0], boundary,
+                )?;
+                let solution = match operator.solve_controlled(
+                    SOLVER_TOL, SOLVER_MAX_ITERS, poll_iters,
+                    |iters| control(index, CaseProgress::Iterations(iters)),
+                )? {
+                    ControlFlow::Continue(solution) => solution,
+                    ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+                };
+                (solution.compliance(), solution.nodal().clone())
+            } else {
+                let solution = solver.solve_with_boundary_traction(
+                    &|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0], boundary,
+                )?;
+                (solution.compliance(), solution.nodal().clone())
+            };
+            if let ControlFlow::Break(reason) = control(index, CaseProgress::Complete) {
                 return Ok(ControlFlow::Break(reason));
             }
-            let compliance = solution.compliance();
             if !(compliance.is_finite() && compliance >= 0.0) {
                 return Err(invalid("multi-load case produced invalid compliance"));
             }
             compliances.push(compliance);
-            solutions.push(solution);
+            solutions.push(nodal);
         }
         let active = match self.aggregate {
             RobustAggregate::WeightedSum => None,

@@ -5,7 +5,7 @@
 //! limits can exhaust the compliance-generated candidate family without a step.
 
 use super::*;
-use crate::robust_stress::sample_solution_controlled;
+use crate::robust_stress::sample_nodal_solution_controlled;
 
 /// The same gate admits the baseline and every candidate. Missing measurements
 /// cannot satisfy an installed constraint, and zero-weight cases remain present.
@@ -95,7 +95,7 @@ impl MultiLoadProjectedOptimizer {
         let mut weighted_sum = 0.0;
         let mut worst_weighted = 0.0_f64;
         for (case, solution) in state.solutions.iter().enumerate() {
-            let (maximum, location, samples) = match sample_solution_controlled(
+            let (maximum, location, samples) = match sample_nodal_solution_controlled(
                 &self.kernel.grid, &state.phi, solution, self.kernel.lambda, self.kernel.mu,
                 |cell| control(case, cell),
             )? {
