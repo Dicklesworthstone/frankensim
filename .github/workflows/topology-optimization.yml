@@ -68,3 +68,6 @@ jobs:
       - name: Test native elasticity studies and constrained continuation
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --lib study::elasticity
+      - name: Test native study, resume and retained report commands
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cli --test study_checkpoint_cli
