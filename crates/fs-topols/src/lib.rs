@@ -47,6 +47,8 @@
 //!   transactional cancellation; uses the optimizer's numerical area functional.
 //! - [`projected`]: feasible-baseline hard-area descent, independently re-solved
 //!   accepted geometry and exact accepted-state continuation.
+//! - [`projected_stress`]: sampled-stress admission at every same-area update,
+//!   bounded candidate retries and exact continuation of a feasible design.
 
 pub mod checkpoint;
 pub mod design_regions;
@@ -56,6 +58,7 @@ pub mod gridsdf;
 pub mod guarded;
 pub mod optimize;
 pub mod projected;
+pub mod projected_stress;
 pub mod refinement;
 pub mod robust;
 #[path = "robust_descent_v2.rs"]
@@ -79,6 +82,7 @@ pub use guarded::{
     optimize_compliance_guarded,
 };
 pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compliance};
+pub use projected_stress::{ProjectedStressCheck, ProjectedStressOptimizer, ProjectedStressUpdate};
 pub use robust::{
     RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
     RobustStop, evaluate_robust_design, optimize_compliance_robust_guarded,

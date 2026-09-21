@@ -234,6 +234,18 @@ impl ProjectedOptimizer {
     /// Propagates an internal checkpoint admission failure.
     pub fn advance_one_controlled<B>(
         &mut self,
+        control: impl FnMut(ProjectedStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, ProjectedProgress>, CutFemError> {
+        self.advance_one_admitted(|_, _, _| Ok(None), control)
+    }
+
+    // The stress-constrained consumer shares the exact proposal/projection
+    // search, rather than accepting an unconstrained step and checking it later.
+    // An admission refusal consumes this candidate and contracts the next move;
+    // the last accepted checkpoint and AL multiplier stay untouched.
+    pub(crate) fn advance_one_admitted<B>(
+        &mut self,
+        mut admit: impl FnMut(usize, &GridSdf, EvaluatedFinalState) -> Result<Option<String>, CutFemError>,
         mut control: impl FnMut(ProjectedStage) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, ProjectedProgress>, CutFemError> {
         if self.checkpoint.is_complete() {
@@ -307,19 +319,25 @@ impl ProjectedOptimizer {
             } else if !(state.compliance < limit) {
                 attempt.refusal = Some("insufficient same-material compliance decrease".to_string());
             } else {
-                let accepted = OptimizeCheckpoint::restore(
-                    geometry, fixture, settings, ordinal + 1, proposal_ell,
-                )?;
-                if let ControlFlow::Break(reason) = control(ProjectedStage::Publish(index)) {
-                    return Ok(ControlFlow::Break(reason));
-                }
-                attempts.push(attempt);
-                let step = ProjectedStep {
-                    iteration: ordinal, previous: self.current, state, projection, proposal, attempts,
+                attempt.refusal = match admit(index, &geometry, state) {
+                    Ok(reason) => reason,
+                    Err(error) => Some(format!("candidate constraint: {error}")),
                 };
-                self.checkpoint = accepted;
-                self.current = state;
-                return Ok(ControlFlow::Continue(ProjectedProgress::Accepted(Box::new(step))));
+                if attempt.refusal.is_none() {
+                    let accepted = OptimizeCheckpoint::restore(
+                        geometry, fixture, settings, ordinal + 1, proposal_ell,
+                    )?;
+                    if let ControlFlow::Break(reason) = control(ProjectedStage::Publish(index)) {
+                        return Ok(ControlFlow::Break(reason));
+                    }
+                    attempts.push(attempt);
+                    let step = ProjectedStep {
+                        iteration: ordinal, previous: self.current, state, projection, proposal, attempts,
+                    };
+                    self.checkpoint = accepted;
+                    self.current = state;
+                    return Ok(ControlFlow::Continue(ProjectedProgress::Accepted(Box::new(step))));
+                }
             }
             attempts.push(attempt);
             move_cells *= self.controls.contraction;
@@ -407,5 +425,28 @@ mod tests {
         assert_eq!(std::mem::discriminant(&a), std::mem::discriminant(&b));
         assert_eq!(continued.current().snapshot, resumed.current().snapshot);
         assert_eq!(continued.current().compliance.to_bits(), resumed.current().compliance.to_bits());
+    }
+
+    #[test]
+    fn candidate_constraint_refusal_retries_without_publishing() {
+        let mut optimizer = optimizer();
+        let before = optimizer.clone();
+        let mut screened = 0;
+        let result = optimizer.advance_one_admitted(|_, _, state| {
+            assert!(state.compliance < before.current().compliance);
+            screened += 1;
+            Ok(Some("constraint falsifier".to_string()))
+        }, |_| ControlFlow::<Infallible>::Continue(())).unwrap();
+        let ControlFlow::Continue(ProjectedProgress::NoDescent(attempts)) = result else {
+            panic!("a refused candidate cannot be published");
+        };
+        assert!(screened > 0);
+        assert_eq!(attempts.len(), optimizer.controls.max_candidates);
+        assert!(attempts.iter().any(|a| a.refusal.as_deref() == Some("constraint falsifier")));
+        assert!(attempts.windows(2).all(|a| a[1].move_cells < a[0].move_cells));
+        assert_eq!(optimizer.checkpoint().geometry().nodes(), before.checkpoint().geometry().nodes());
+        assert_eq!(optimizer.checkpoint().ell().to_bits(), before.checkpoint().ell().to_bits());
+        assert_eq!(optimizer.checkpoint().next_iteration(), before.checkpoint().next_iteration());
+        assert_eq!(optimizer.current().compliance.to_bits(), before.current().compliance.to_bits());
     }
 }

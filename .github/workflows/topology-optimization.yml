@@ -1,0 +1,32 @@
+name: Topology optimization
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  projected-stress:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[topology-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test same-material and stress-constrained descent
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-topols --lib projected 2>&1 | tee topology-tests.log
+      - name: Test existing projected consumers
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-marquee --test projected_resume --test design_regions 2>&1 | tee topology-consumers.log
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: topology-test-output
+          path: topology-*.log
+          retention-days: 3
