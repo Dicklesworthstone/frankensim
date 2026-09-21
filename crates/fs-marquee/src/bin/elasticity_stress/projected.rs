@@ -53,8 +53,24 @@ fn attempt_rows(output: &mut impl Write, iteration: usize, rows: &[ProjectedAtte
 }
 
 pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
+    run_at(args, Instant::now())
+}
+
+fn poll_wall(started: Instant, wall_seconds: u64) -> ControlFlow<()> {
+    if started.elapsed() >= Duration::from_secs(wall_seconds) { ControlFlow::Break(()) }
+    else { ControlFlow::Continue(()) }
+}
+
+fn stopped_before_study(phase: &str) -> u8 {
+    eprintln!("wall budget exhausted during {phase}; no study published");
+    6
+}
+
+// An explicit start also permits deadline regressions without sleeping or
+// adding test-only flags to the user-facing command.
+fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
     if args.first().is_some_and(|arg| arg == "--resume") {
-        return checkpoint::resume(&args[1..]);
+        return checkpoint::resume(&args[1..], started);
     }
     let (args, checkpoint_options) = checkpoint::options(args)?;
     if args.len() < 2 || args.len() > 8 {
@@ -76,7 +92,9 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     {
         return Err("projected stress mode requires LEVEL in [2,7], ITERATIONS in [1,200], VOLFRAC in (0.001,0.999), MAX_CANDIDATES in [1,16], WALL_SECONDS in [1,3600]".into());
     }
-    let started = Instant::now();
+    if poll_wall(started, wall_seconds).is_break() {
+        return Ok(stopped_before_study("initialization"));
+    }
     let executable = if checkpoint_options.enabled { Some(checkpoint::executable()?) } else { None };
     let n = 1usize << level;
     let geometry = GridSdf::from_fn(n, &|_, y| (y - 0.5).abs() - 0.35);
@@ -93,9 +111,19 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     };
     let controls = ProjectedSettings { max_candidates, ..ProjectedSettings::default() };
     let policy = checkpoint::Policy { fixed: fixed.clone(), projection, controls };
-    let area_optimizer = ProjectedOptimizer::new(geometry,
-        Cantilever { load: 1.0, band: 0.125 }, settings, fixed, projection, controls)?;
-    let optimizer = ProjectedStressOptimizer::new(area_optimizer, limit)?;
+    let area_optimizer = match ProjectedOptimizer::new_controlled(&geometry,
+        Cantilever { load: 1.0, band: 0.125 }, settings, fixed, projection, controls,
+        |_| poll_wall(started, wall_seconds),
+    )? {
+        ControlFlow::Continue(optimizer) => optimizer,
+        ControlFlow::Break(()) => return Ok(stopped_before_study("area-feasible initialization")),
+    };
+    let optimizer = match ProjectedStressOptimizer::new_controlled(&area_optimizer, limit,
+        |_| poll_wall(started, wall_seconds),
+    )? {
+        ControlFlow::Continue(optimizer) => optimizer,
+        ControlFlow::Break(()) => return Ok(stopped_before_study("baseline stress admission")),
+    };
     run_optimizer(output_dir, optimizer, policy, checkpoint_options, executable, started, wall_seconds, false)
 }
 
@@ -109,6 +137,9 @@ fn run_optimizer(
     wall_seconds: u64,
     resumed: bool,
 ) -> Result<u8, Box<dyn Error>> {
+    if poll_wall(started, wall_seconds).is_break() {
+        return Ok(stopped_before_study("study publication"));
+    }
     let wall_budget = Duration::from_secs(wall_seconds);
     let baseline = optimizer.baseline().clone();
     let start_iteration = optimizer.checkpoint().next_iteration();
@@ -211,3 +242,7 @@ fn run_optimizer(
     println!("{summary}");
     Ok(match status { "iteration_limit" => 0, "wall_budget" | "paused" => 6, _ => 11 })
 }
+
+#[cfg(test)]
+#[path = "projected/cancellation_tests.rs"]
+mod cancellation_tests;

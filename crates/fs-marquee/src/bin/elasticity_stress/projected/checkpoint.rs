@@ -3,6 +3,7 @@
 //! saved field and refuses changed mechanics before any new study is published.
 use super::*;
 use fs_topols::OptimizeCheckpoint;
+use fs_topols::projected_stress::ProjectedStressSetupStage;
 use std::fs::File;
 use std::io::{self, Read};
 
@@ -234,9 +235,10 @@ fn same_state(a: &SampledStressEvaluation, b: &SampledStressEvaluation) -> bool 
             .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
-pub(super) fn load(
+pub(super) fn load_controlled<B>(
     path: &Path, executable: &str,
-) -> Result<(ProjectedStressOptimizer, Policy), Box<dyn Error>> {
+    control: impl FnMut(ProjectedStressSetupStage) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, (ProjectedStressOptimizer, Policy)>, Box<dyn Error>> {
     let mut bytes = Vec::new();
     File::open(path)?.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_BYTES || bytes.len() < 65 || bytes[64] != b'\n' {
@@ -249,15 +251,19 @@ pub(super) fn load(
     let policy = saved.policy;
     // Neither serialized metrics nor the content hash confer feasibility. Two
     // canonical solves reconstruct mechanics and stress on the retained field.
-    let optimizer = ProjectedStressOptimizer::from_checkpoint(saved.checkpoint,
-        policy.fixed.clone(), policy.projection, policy.controls, saved.limit)?;
+    let optimizer = match ProjectedStressOptimizer::from_checkpoint_controlled(&saved.checkpoint,
+        policy.fixed.clone(), policy.projection, policy.controls, saved.limit, control,
+    )? {
+        ControlFlow::Continue(optimizer) => optimizer,
+        ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+    };
     if !same_state(optimizer.current(), &saved.expected) {
         return Err("restored mechanics/stress differ from the retained accepted state".into());
     }
-    Ok((optimizer, policy))
+    Ok(ControlFlow::Continue((optimizer, policy)))
 }
 
-pub(super) fn resume(args: &[String]) -> Result<u8, Box<dyn Error>> {
+pub(super) fn resume(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
     if args.len() < 4 || args.len() > 6 {
         return Err("usage: --projected --resume CHECKPOINT NEW_OUTPUT_DIR --wall-seconds N [--pause-after N]".into());
     }
@@ -276,9 +282,16 @@ pub(super) fn resume(args: &[String]) -> Result<u8, Box<dyn Error>> {
     let wall = wall.ok_or("resume requires an explicit --wall-seconds budget")?;
     let output = Path::new(&args[1]);
     if output.try_exists()? { return Err("output directory already exists; refusing to overwrite it".into()); }
-    let started = Instant::now();
+    if poll_wall(started, wall).is_break() {
+        return Ok(stopped_before_study("checkpoint recovery"));
+    }
     let executable = executable()?;
-    let (optimizer, policy) = load(Path::new(&args[0]), &executable)?;
+    let (optimizer, policy) = match load_controlled(Path::new(&args[0]), &executable,
+        |_| poll_wall(started, wall),
+    )? {
+        ControlFlow::Continue(state) => state,
+        ControlFlow::Break(()) => return Ok(stopped_before_study("checkpoint recovery")),
+    };
     run_optimizer(output, optimizer, policy, Options { enabled: true, pause_after: pause },
         Some(executable), started, wall, true)
 }

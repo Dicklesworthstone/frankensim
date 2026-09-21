@@ -34,8 +34,22 @@ Recovery independently solves compliance/area and sampled stress before it
 publishes a new study. Saved metrics must agree bit-for-bit. The digest is a
 corruption check, not authentication or proof of historical execution. Replay
 assumes the same admitted deterministic execution profile; no cross-ISA promise
-is added. Initialization/recovery and stress solves remain indivisible; wall
-budgets are cooperative, not hard deadlines.
+is added.
+
+The wall budget covers baseline construction, checkpoint recovery and subsequent
+updates. It is polled inside the existing true-residual CG solves, between area
+projection evaluations, and before each cell's stress probes. The retained
+`poll_iters` controls CG batching in both proposal and final solves. Assembly,
+individual area-quadrature evaluations, one cell's probes, bounded checkpoint
+I/O/decoding and executable fingerprinting remain indivisible. This is a
+cooperative work boundary, not a hard wall-time deadline.
+
+A timeout before full baseline/recovery admission, or before the first study
+publication, exits 6, writes a diagnostic to stderr and creates no output study
+or success summary. The source checkpoint is untouched. A timeout after study
+publication retains the last fully accepted field/checkpoint and reports
+`wall_budget`; it never publishes the interrupted candidate or a partial stress
+maximum. Retrying recovery re-solves the saved state, not its previous updates.
 
 Summary schema `fs-marquee-projected-stress-v2` names the last checkpoint,
 global `accepted_updates`, `start_iteration`, and `segment_accepted_updates`.
