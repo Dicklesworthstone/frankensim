@@ -51,6 +51,20 @@ pub struct ShellReduction {
     area_normals:Vec<[f64;3]>,
 }
 fn bad(what:&'static str)->PlateError {PlateError::BadSection{what}}
+// Use the existing shell rigid-motion conformance scale, not the very small
+// retained elastic eigenvalues, for cancellation in an assembled K projection.
+// This is a floating-point admission allowance, not a physical soft spring.
+const RIGID_PROJECTION_ROUNDOFF: f64 = 2.0e-12;
+
+// Recognize only an EXACT supplied translation with zero physical rotations.
+// Near-rigid eigenvectors and rigid rotations keep the ordinary spectral gate.
+fn exact_translation(mesh:&ShellMesh, model:&ShellModel, mode:&ModePair)->bool {
+    if mode.lambda!=0.0 {return false;}
+    let at=|node:usize,c:usize|model.dof_map[6*node+c].map_or(0.0,|i|mode.phi[i]);
+    let reference:[f64;3]=core::array::from_fn(|c|at(0,c));
+    reference.iter().any(|v|*v!=0.0) && (0..mesh.nodes.len()).all(|node|
+        (0..3).all(|c|at(node,c)==reference[c]) && (3..6).all(|c|at(node,c)==0.0))
+}
 fn dot(a:[f64;3],b:[f64;3])->f64 {a[0]*b[0]+a[1]*b[1]+a[2]*b[2]}
 fn mul(a:&[f64;9],x:[f64;3])->[f64;3] {
     [a[0]*x[0]+a[1]*x[1]+a[2]*x[2],a[3]*x[0]+a[4]*x[1]+a[5]*x[2],a[6]*x[0]+a[7]*x[1]+a[8]*x[2]]
@@ -83,8 +97,11 @@ impl ShellReduction {
             return Err(bad("shell modal basis and pencil dimensions or frequencies disagree"));
         }
         let nn=n.checked_mul(n).ok_or_else(||bad("shell projection size overflow"))?;
+        let translation:Vec<_>=modes.iter().map(|m|exact_translation(mesh,model,m)).collect();
         let mut original=vec![0.0;nn];
+        let mut roundoff=vec![0.0;nn];
         let mut work=vec![0.0;model.free];
+        let mut absolute_work=vec![0.0;model.free];
         for j in 0..n {
             model.m.spmv(&modes[j].phi,&mut work);
             for i in 0..n {
@@ -94,11 +111,34 @@ impl ShellReduction {
                 }
             }
             model.k.spmv(&modes[j].phi,&mut work);
-            for i in 0..n {original[i*n+j]=modes[i].phi.iter().zip(&work).map(|(a,b)|a*b).sum();}
+            if translation.iter().any(|v|*v) {
+                for (row,out) in absolute_work.iter_mut().enumerate() {
+                    let (columns,values)=model.k.row(row);
+                    *out=columns.iter().zip(values).map(|(&column,value)|
+                        value.abs()*modes[j].phi[column].abs()).sum();
+                    if !out.is_finite() {return Err(bad("shell rigid projection scale overflow"));}
+                    // A geometrically constant displacement must also be a
+                    // numerical null vector of the supplied pencil. A grounded
+                    // or mismatched model must not get a free mode by declaration.
+                    if translation[j] && (!work[row].is_finite()
+                        || work[row].abs()>RIGID_PROJECTION_ROUNDOFF*(*out).max(1.0)) {
+                        return Err(bad("shell supplied translation is not free in its pencil"));
+                    }
+                }
+            }
+            for i in 0..n {
+                original[i*n+j]=modes[i].phi.iter().zip(&work).map(|(a,b)|a*b).sum();
+                if translation[i] || translation[j] {
+                    roundoff[i*n+j]=RIGID_PROJECTION_ROUNDOFF*modes[i].phi.iter()
+                        .zip(&absolute_work).map(|(a,b)|a.abs()*b).sum::<f64>();
+                    if !roundoff[i*n+j].is_finite() {return Err(bad("shell rigid projection allowance overflow"));}
+                }
+            }
         }
-        // Exact rigid-body basis vectors may carry lambda=0. Their numerical
-        // residual is judged against a small, disclosed fraction of the retained
-        // spectral scale; no positive spring or frequency is inserted.
+        // The ordinary spectral criterion is unchanged for elastic modes.
+        // Exact translations additionally use |Phi|^T |K| |Phi| to account for
+        // cancellation of large assembled entries, not an arbitrary floor on
+        // the physical eigenvalues. No spring or frequency is inserted.
         let spectral_scale=modes.iter().map(|m|m.lambda).fold(0.0_f64,f64::max);
         if spectral_scale<=0.0 {return Err(bad("shell basis must retain at least one elastic mode"));}
         let scale_for=|i:usize| modes[i].lambda.max(1e-10*spectral_scale);
@@ -106,7 +146,7 @@ impl ShellReduction {
             let expected=if i==j { modes[i].lambda } else { 0.0 };
             let scale=scale_for(i).sqrt()*scale_for(j).sqrt();
             if !original[i*n+j].is_finite() || !scale.is_finite()
-                || (original[i*n+j]-expected).abs()>budget.relative_tolerance*scale {
+                || (original[i*n+j]-expected).abs()>budget.relative_tolerance*scale+roundoff[i*n+j] {
                 return Err(bad("shell frequencies/shapes are not eigenpairs of the supplied pencil"));
             }
         }}
@@ -125,12 +165,18 @@ impl ShellReduction {
             let mut local=vec![[0.0;18];n];let mut strains=Vec::with_capacity(n);
             for (k,mode) in modes.iter().enumerate() {
                 let(mut dx,mut dy)=([0.0;3],[0.0;3]);
+                let reference=translations[k*mesh.nodes.len()+tri[0]];
                 for a in 0..3 {
                     let u=translations[k*mesh.nodes.len()+tri[a]];
-                    for c in 0..3 {dx[c]+=g.gradient[a][0]*u[c];dy[c]+=g.gradient[a][1]*u[c];}
-                    for group in 0..2 {
-                        let global=core::array::from_fn(|c|model.dof_map[6*tri[a]+3*group+c].map_or(0.0,|i|mode.phi[i]));
-                        for c in 0..3 {local[k][6*a+3*group+c]=dot(g.frame[c],global);}
+                    // Partition of unity: use differences BEFORE derivatives.
+                    // This makes every constant translation exactly strain-free,
+                    // including large rigid displacement beside elastic motion.
+                    let difference=core::array::from_fn(|c|u[c]-reference[c]);
+                    for c in 0..3 {dx[c]+=g.gradient[a][0]*difference[c];dy[c]+=g.gradient[a][1]*difference[c];}
+                    let rotation=core::array::from_fn(|c|model.dof_map[6*tri[a]+3+c].map_or(0.0,|i|mode.phi[i]));
+                    for c in 0..3 {
+                        local[k][6*a+c]=dot(g.frame[c],difference);
+                        local[k][6*a+3+c]=dot(g.frame[c],rotation);
                     }
                 }
                 strains.push(ModeStrain{dx,dy,linear:[dot(g.frame[0],dx),dot(g.frame[1],dy),
@@ -152,7 +198,7 @@ impl ShellReduction {
             let actual=remainder[i*n+j]+membrane_linear[i*n+j];
             let scale=scale_for(i).sqrt()*scale_for(j).sqrt();
             if !actual.is_finite() || !scale.is_finite() || scale<=0.0
-                || (actual-original[i*n+j]).abs()>budget.relative_tolerance*scale {
+                || (actual-original[i*n+j]).abs()>budget.relative_tolerance*scale+roundoff[i*n+j] {
                 return Err(bad("shell reduction's small-signal stiffness does not match supplied pencil"));
             }
         }}

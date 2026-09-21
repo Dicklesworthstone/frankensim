@@ -68,3 +68,58 @@ fn force_projection_is_reciprocal_and_reduction_does_not_accept_invented_frequen
     assert!(ShellReduction::new(&mesh,&sections,&model,&modes,cap).is_err());
     let mut g=vec![0.0;1];r.gradient(&[],&mut g);assert!(g[0].is_nan());
 }
+
+#[test]
+fn free_splash_translation_has_no_strain_stiffness_or_nonlinear_force() {
+    use fs_plate::shell::{modes_shell, profile::{ProfileStation, ProfileBudget, revolve}};
+    // Same explicitly estimated geometry/material/window as the actual splash
+    // example, not a calibrated specimen or a mode list chosen to pass a gate.
+    let stations=[(0.00615,0.022,0.0016),(0.012,0.0215,0.0016),
+        (0.020,0.020,0.0015),(0.039,0.008,0.0011),(0.050,0.0055,0.0009),
+        (0.070,0.003,0.00075),(0.085,0.0015,0.0006),(0.1016,0.0,0.0005)]
+        .map(|(radius_m,height_m,thickness_m)|ProfileStation{radius_m,height_m,thickness_m});
+    let shell=revolve(&stations,32,112.6e9,0.342,8607.0,&[],&[],ProfileBudget {
+        max_nodes:10000,max_triangles:20000,max_feature_evaluations:100000,
+    }).unwrap();
+    let model=shell.assemble(&[],ShellSupport::Free).unwrap();
+    let tau=core::f64::consts::TAU;
+    let elastic=modes_shell(&model,((tau*50.0).powi(2),(tau*1200.0).powi(2)),
+        &fs_plate::SliceOptions::default()).unwrap().modes;
+    assert!(!elastic.is_empty() && elastic.len()<32);
+    let amplitude=1.0/shell.mass_kg.sqrt();
+    let mut phi=vec![0.0;model.free];
+    for node in 0..shell.mesh.nodes.len() {phi[model.dof_map[6*node+2].unwrap()]=amplitude;}
+    let mut work=vec![0.0;model.free];model.k.spmv(&phi,&mut work);
+    let residual=work.iter().enumerate().map(|(i,r)|r*r/model.m.get(i,i)).sum::<f64>().sqrt();
+    let mut modes=vec![ModePair{lambda:0.0,phi,residual,interval:(-residual,residual)}];
+    modes.extend(elastic);
+    let budget=ReductionBudget{max_modes:32,max_facet_modes:20000,relative_tolerance:1e-5};
+    let r=ShellReduction::new(&shell.mesh,&shell.sections,&model,&modes,budget).unwrap();
+    assert_eq!(r.omegas()[0],0.0);assert_eq!(r.mode_count(),modes.len());
+    let mut q=vec![0.0;modes.len()];let mut gradient=q.clone();q[0]=0.1;
+    assert_eq!(r.potential(&q),0.0);r.gradient(&q,&mut gradient);
+    assert!(gradient.iter().all(|v|*v==0.0));
+    // Rigid translation is eliminated only from strain, never from a physical
+    // contact port. Every point still travels by its mass-normalized amplitude.
+    let port=r.point_port(0,[0.2,0.3,0.5],[0.0,0.0,1.0]).unwrap();
+    assert!((port[0]-amplitude).abs()<1e-14*amplitude);
+    q[0]=0.0;q[1]=1e-6;
+    let energy=r.potential(&q);r.gradient(&q,&mut gradient);
+    assert!(energy>0.0);
+    for shift in [-0.1,0.1] {
+        q[0]=shift;let mut moved=vec![0.0;modes.len()];r.gradient(&q,&mut moved);
+        assert_eq!(r.potential(&q).to_bits(),energy.to_bits());
+        for (a,b) in moved.iter().zip(&gradient) {assert_eq!(a.to_bits(),b.to_bits());}
+    }
+    // Neither forged zero frequencies nor a real grounding spring may borrow
+    // the assembled-matrix cancellation allowance reserved for a translation.
+    let mut forged=modes.clone();forged[1].lambda=0.0;
+    assert!(ShellReduction::new(&shell.mesh,&shell.sections,&model,&forged,budget).is_err());
+    let mut grounded=model.clone();let mut k=fs_sparse::Coo::new(model.free,model.free);
+    for row in 0..model.free {
+        let (columns,values)=model.k.row(row);
+        for (&column,&value) in columns.iter().zip(values) {k.push(row,column,value);}
+    }
+    let z=model.dof_map[2].unwrap();k.push(z,z,1e5);grounded.k=k.assemble();
+    assert!(ShellReduction::new(&shell.mesh,&shell.sections,&grounded,&modes,budget).is_err());
+}
