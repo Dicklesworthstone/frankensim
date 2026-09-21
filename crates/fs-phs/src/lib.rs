@@ -1098,6 +1098,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let mut x1 = x0.to_vec();
     let mut iters = 0usize;
     let mut stagnant = 0usize;
+    let mut previous_norm = f64::INFINITY;
     let mut best: Option<(Vec<f64>, f64)> = None;
     let mut r_init: Option<f64> = None;
     loop {
@@ -1114,15 +1115,17 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         if rnorm <= NEWTON_TOL * scale {
             break;
         }
-        // Stagnation with an approximate (finite-difference) Jacobian:
-        // Newton residuals are not monotone far from the solution, so
-        // allow a few non-improving iterates before accepting the best
-        // one (review finding: first-non-improving aborts spuriously).
-        if improved {
+        // Judge stagnation against the PREVIOUS iterate, while retaining the
+        // global best independently. At first impact the initially free-flight
+        // residual can be smaller than several converging contact iterates.
+        // Counting those as stagnant aborts a recovering Newton solve. The hard
+        // update budget and both convergence/acceptance tolerances are unchanged.
+        if rnorm < previous_norm {
             stagnant = 0;
         } else {
             stagnant += 1;
         }
+        previous_norm = rnorm;
         if stagnant >= 3 || iters >= NEWTON_MAX {
             let (bx, brnorm) = best.expect("at least one iterate");
             // Acceptance scale includes the ITERATE's own magnitude:

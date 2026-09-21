@@ -233,6 +233,7 @@ impl StepWorkspace {
         }
         self.x.copy_from_slice(x0);
         let mut best_norm = f64::INFINITY;
+        let mut previous_norm = f64::INFINITY;
         let mut initial_norm = 0.0;
         let mut stagnant = 0;
         let mut iterations = 0;
@@ -244,7 +245,11 @@ impl StepWorkspace {
             let improved = rnorm < best_norm;
             if improved { self.best.copy_from_slice(&self.x); best_norm = rnorm; }
             if rnorm <= NEWTON_TOL * scale { break; }
-            if improved { stagnant = 0; } else { stagnant += 1; }
+            // Contact onset may first increase the residual. Falling residuals
+            // after that are progress even before they beat the entry iterate.
+            // Keep the global best for admission, not for the stagnation clock.
+            if rnorm < previous_norm { stagnant = 0; } else { stagnant += 1; }
+            previous_norm = rnorm;
             if stagnant >= 3 || iterations >= self.max_iterations {
                 // Preserve the reference's disclosed FD-noise-floor acceptance.
                 // A zero budget must not silently admit a nonzero initial residual.

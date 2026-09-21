@@ -195,3 +195,69 @@ fn prepared_maxwell_history_retains_reference_storage_and_work() {
     }
     assert_ne!(x[2], 0.0);
 }
+
+// Synthetic, mass-normalized striker/two-receiver fixture. It deliberately
+// crosses the Hertz surface from free flight with a large launch momentum.
+// The old all-time-best stagnation counter refused at first contact even while
+// Newton was recovering. This is not a measured drum or a new production law.
+struct ContactRecovery {
+    stiffness: [[f64; 3]; 3],
+    contact: [f64; 3],
+    hertz: f64,
+}
+impl Storage for ContactRecovery {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        let mut energy = (0..3).map(|i| 0.5*x[2*i+1]*x[2*i+1]).sum::<f64>();
+        for i in 0..3 { for j in 0..3 {
+            energy += 0.5*x[2*i]*self.stiffness[i][j]*x[2*j];
+        }}
+        let penetration = self.contact.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>().max(0.0);
+        energy + self.hertz/2.5*fs_math::det::pow(penetration,2.5)
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        let penetration = self.contact.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>().max(0.0);
+        let force = self.hertz*fs_math::det::pow(penetration,1.5);
+        for i in 0..3 {
+            out[2*i] = (0..3).map(|j|self.stiffness[i][j]*x[2*j]).sum::<f64>()+self.contact[i]*force;
+            out[2*i+1] = x[2*i+1];
+        }
+    }
+}
+
+#[test]
+fn recovering_hertz_newton_is_not_stalled_until_it_beats_the_free_flight_residual() {
+    let mass = 0.00724314_f64;
+    let roots = [0.0, core::f64::consts::TAU*204.6189730766819,
+        core::f64::consts::TAU*264.1200719782793];
+    let areas = [0.0,0.22,-0.3];
+    let bulk_over_volume = 1.2*343.0*343.0/(core::f64::consts::PI*0.1703*0.1703*0.1651);
+    let stiffness: [[f64;3];3] = core::array::from_fn(|i|core::array::from_fn(|j|
+        (if i==j {roots[i]*roots[i]} else {0.0}) + bulk_over_volume*areas[i]*areas[j]));
+    let mut j = vec![0.0;36]; let mut r = vec![0.0;36];
+    for i in 0..3 {
+        j[(2*i)*6+2*i+1] = 1.0; j[(2*i+1)*6+2*i] = -1.0;
+        if i>0 {r[(2*i+1)*6+2*i+1] = 0.002*stiffness[i][i].sqrt();}
+    }
+    let system = PortHamiltonian::new(6,0,j,r,vec![],Box::new(ContactRecovery {
+        stiffness,contact:[1.0/mass.sqrt(),-16.0,0.0],hertz:4.0/3.0*0.8e9*0.003_f64.sqrt(),
+    })).unwrap();
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let mut state = [-0.0002*mass.sqrt(),4.0*mass.sqrt(),0.0,0.0,0.0,0.0];
+    let mut reference = state.to_vec(); let mut candidate = [0.0;6];
+    let initial_energy = system.hamiltonian(&state);
+    let mut loss = 0.0; let mut iterations = 0; let mut receiver_peak = 0.0_f64;
+    for _ in 0..512 {
+        let expected = step(&system,&reference,&[],2e-6).unwrap();
+        let actual = workspace.step_into(&system,&state,&[],2e-6,&mut candidate,&mut []).unwrap();
+        for (a,b) in candidate.iter().zip(&expected.x) {assert!((a-b).abs()<1e-8);}
+        assert!(actual.balance_residual().abs()<1e-9);
+        assert!(actual.supply_defect()<=1e-9);
+        assert!(actual.newton_iters<=50);
+        iterations = iterations.max(actual.newton_iters);
+        receiver_peak = receiver_peak.max(candidate[2].abs());
+        loss += actual.dissipated; state = candidate; reference = expected.x;
+    }
+    assert!(iterations>3,"exercise recovery past the former premature stagnation stop");
+    assert!(receiver_peak>1e-6,"contact must actually excite the receiver");
+    assert!((system.hamiltonian(&state)+loss-initial_energy).abs()<1e-8);
+}
