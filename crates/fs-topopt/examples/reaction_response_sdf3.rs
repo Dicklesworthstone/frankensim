@@ -1,7 +1,9 @@
 //! Fit an imposed-motion actuator reaction and a displacement observation.
 //! cargo run -p fs-topopt --features cutfem-marquee --release \
-//!   --example reaction_response_sdf3 -- 40 250000 0.0012
+//!   --example reaction_response_sdf3 -- 40 250000 0.0012 --estimate
 //! Arguments: accepted updates, total Krylov budget, target axial reaction.
+//! Optional --estimate compares the complete mixed objective on an enriched
+//! physical grid and marks original-grid cells. It does not refit that grid.
 //! Defaults are declared design targets, NOT measured/calibrated specimen data.
 //! All dimensions are reference/dimensionless: E=1, nu=0, strain=0.02, slab
 //! thickness=0.66, unit cross-section, projected volume cap=0.5. Reaction sign
@@ -10,6 +12,7 @@ use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::elastic3::{adaptive::AdaptiveElasticity3,ElasticityOptions3};
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::AdaptiveSolveSpace3;
+use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octree3;
 use fs_cutfem::quad3::{QuadratureControl3,QuadratureOptions3};
 use fs_ivl::Interval;
@@ -17,6 +20,7 @@ use fs_material::IsotropicElastic;
 use fs_topopt::{SimpParams,SolveBudget,SolveControl};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::{ReactionTarget3,ResponseCase3,ResponseTarget3,ProjectedResponseStudy3,ProjectedResponseOptions3};
+use fs_topopt::sdf3::response::refinement::{ReferenceResponseCase3,ReferenceResponseTarget3,ResponseRefinementOptions3};
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64{(p[0]-0.17)*(p[0]-0.83)}
@@ -30,8 +34,9 @@ impl CutSdf3 for Slab {
 fn motion(p:[f64;3],_:[f64;3])->[f64;3]{[0.02*(p[0]-0.17),0.0,0.0]}
 fn right(_:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[1.0,0.0,0.0]}else{[0.0;3]}}
 fn main()->Result<(),Box<dyn std::error::Error>>{
-    let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]]".into());}
+    let mut args:Vec<_>=std::env::args().skip(1).collect();
+    let estimate=args.last().is_some_and(|s|s=="--estimate");if estimate {let _=args.pop();}
+    if args.len()>3{return Err("usage: reaction_response_sdf3 [UPDATES [KRYLOV [TARGET_REACTION]]] [--estimate]".into());}
     let steps=args.first().map_or(Ok(40),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
     let target=args.get(2).map_or(Ok(0.0012),|s|s.parse::<f64>())?;
@@ -60,5 +65,22 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
     eprintln!("targets_source=declared_design_objective; continuum_certified=false; unique_recovery_claimed=false; actuator_energy_claimed=false; work={:?}",session.work());
     let report=outcome?;eprintln!("stop={:?}; numerical_kkt={:?}; volume_violation={:.9e}",report.stop,report.kkt,session.constraint_violation());
     if session.constraint_violation()>options.optimizer.tolerance{return Err("retained design still violates volume cap".into());}
+    if estimate {
+        let accepted=session.accepted().clone();drop(session);
+        let fine=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
+            &Octree3::uniform(2,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.0,1.0)?,&|_|false,&|_,_|true,
+            ElasticityOptions3::default(),Default::default(),Default::default(),&mut geometry)?;
+        let zero=|_:[f64;3]|[0.0;3];let observe=|_:[f64;3]|[1.0,0.0,0.0];
+        let targets=[ReferenceResponseTarget3{observation:ReferenceLoad3::body(&observe),
+            target:displacements[0].target,scale:displacements[0].scale,weight:displacements[0].weight}];
+        let laws=[ReferenceResponseCase3{load:ReferenceLoad3::body(&zero),prescribed:Some(&motion),targets:&targets}];
+        let evidence=study.estimate_response_enrichment_with_reactions(AdaptiveSolveSpace3::jacobi(fine,100_000_000),
+            &accepted,&laws,&family,ResponseRefinementOptions3{response:options.response,..Default::default()},&mut control)?;
+        let marks=evidence.mark(0.5,2,||ControlFlow::Continue(()))?;
+        let offset:f64=evidence.cases.iter().map(|c|c.reaction_offset_correction).sum();
+        eprintln!("coarse_loss={:.17e}; enriched_loss={:.17e}; two_grid_change={:.17e}; reaction_offset_change={offset:.17e}; identity_defect={:.3e}; marked={:?}; marking_fraction={:.6}; target_met={}; work={:?}; continuum_certified=false",
+            evidence.coarse_objective,evidence.fine_objective,evidence.correction(),evidence.identity_relative_defect,
+            marks.marked,marks.achieved_fraction,marks.target_met,evidence.work);
+    }
     Ok(())
 }

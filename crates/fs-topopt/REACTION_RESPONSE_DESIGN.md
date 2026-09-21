@@ -54,10 +54,36 @@ The same projected state retains bounds, multiplier/spectral history, work and
 accepted physical fields across `run` calls. Probes restore incoming scales;
 only accepted optimizer states install new scales. No dense KKT system is added.
 
-Reaction-aware DWR and adaptive reaction refitting are not supplied here.
-`estimate_response_enrichment` rejects nonempty reaction observations instead
-of returning a displacement-only error estimate for a mixed objective. This
-numerical support-traction response is not a continuum-force bound, physical
-actuator energy, follower load, shape derivative or unique material identification.
-Native Rust compilation/tests remain unverified in the development environment;
-independent NumPy checks are not execution of the Rust physics or optimizer.
+## Reaction-aware two-grid refinement
+
+Append `--estimate` to the example to assess the retained mixed objective under
+the remaining geometry and linear-work budgets. It reports coarse and enriched
+loss, reaction-offset transfer, the complete correction and original-grid marks.
+The globally enriched probe is not installed or reoptimized.
+
+Programmatic callers use `estimate_response_enrichment_with_reactions`, passing
+the same reference experiment laws and parallel reaction target slices used by
+the fit. Each grid reintegrates observations and reactions with its own retained
+rules. Physical stiffness is parent-inherited for estimation, not produced by
+refiltering raw densities. All coarse fields and the complete mixed objective
+are checked before preparing either grid. A failure returns no partial estimate
+and restores incoming source scales. The existing identity/Jacobi/two-level/
+multilevel backends prepare once per grid and share their actions across cases.
+
+The secant coefficient `w*(R_f+R_c-2*target)/(2*scale^2)` reconstructs the exact
+quadratic loss change in exact arithmetic, including at an exact coarse fit.
+Reaction is affine in displacement, so the separate constant-term change must
+be retained in addition to derivative-weighted residuals. Cancellation between
+these terms can be large; the reported identity defect is scaled by its actual
+terms and does not certify relative accuracy of a near-zero fitted loss.
+
+Marking uses real hierarchical residual contributions. Reaction-offset and
+volume-measure transfers remain separate rather than becoming invented local
+indicators. Empty marks do not certify accuracy. The original displacement-only
+entry point still rejects reaction-bearing results instead of dropping targets.
+Automatic reaction-aware adaptive refitting is not yet connected.
+
+These numerical two-grid differences are not continuum-force bounds, physical
+actuator energy, follower loads, shape derivatives or unique identification.
+The focused native reaction workflow includes the relevant Rust tests; check
+its individual test results separately from dependency-bootstrap status.

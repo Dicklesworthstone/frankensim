@@ -106,3 +106,6 @@ fn g0_admission_and_unsupported_reaction_refinement_fail_before_physics(){
     let result=study.estimate_response_enrichment(fine,&accepted,&[],Default::default(),&mut c);
     assert!(result.is_err());assert_eq!(c.work(),spent);
 }
+
+#[path = "reaction_response_sdf3/refinement.rs"]
+mod refinement;

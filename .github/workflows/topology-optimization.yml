@@ -47,6 +47,9 @@ jobs:
       - name: Test embedded reaction physics
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cutfem --test embedded_reaction3
+      - name: Test affine reaction and prescribed-motion goals
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-dwr --test reaction_goal3 --test motion_goal3
       - name: Test force and displacement response fitting
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-topopt --features cutfem-marquee --test reaction_response_sdf3 --test response_sdf3 --test projected_response_sdf3
+        run: cargo test --release -p fs-topopt --features cutfem-marquee --test reaction_response_sdf3 --test response_sdf3 --test projected_response_sdf3 --test response_goal3 --example reaction_response_sdf3
