@@ -100,3 +100,7 @@ required-features = ["cutfem-marquee"]
 [[test]]
 name = "projected_response_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "adaptive_response_sdf3"
+required-features = ["cutfem-marquee"]

@@ -12,6 +12,7 @@ use std::ops::ControlFlow;
 
 mod design;
 mod projected;
+pub mod adaptive;
 pub mod refinement;
 pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
 pub use projected::{ProjectedResponseIteration3, ProjectedResponseOptions3, ProjectedResponseStudy3};

@@ -40,17 +40,26 @@ impl<O:Sdf3Elasticity> CutDensityStudy3<O> {
     /// of this restoration path, not a proof of global infeasibility.
     pub fn feasible_start(&self,incoming:&[f64],cap:f64,tolerance:f64,control:&mut SolveControl<'_>)
         ->Result<Vec<f64>,EvaluationStop> {
+        self.feasible_start_with_floor(incoming,cap,tolerance,1e-3,control)
+    }
+
+    /// The same restoration for an explicitly declared raw-density floor.
+    /// In particular, a projected-response study must not silently inherit
+    /// OC's 1e-3 floor when its optimizer admits a different material range.
+    pub fn feasible_start_with_floor(&self,incoming:&[f64],cap:f64,tolerance:f64,floor:f64,control:&mut SolveControl<'_>)
+        ->Result<Vec<f64>,EvaluationStop> {
         assert!(cap.is_finite()&&cap>0.0&&cap<=1.0&&tolerance.is_finite()&&tolerance>=0.0&&tolerance<cap,"invalid volume restoration policy");
-        assert!(incoming.iter().all(|r|r.is_finite()&&(1e-3..=1.0).contains(r)),"invalid incoming raw design");
+        assert!(floor.is_finite()&&floor>0.0&&floor<1.0,"invalid raw density floor");
+        assert!(incoming.iter().all(|r|r.is_finite()&&(floor..=1.0).contains(r)),"invalid incoming raw design");
         let limit=cap+tolerance;
         if self.design(incoming,control)?.volume<=limit {return Ok(incoming.to_vec());}
-        let mut feasible=vec![1e-3;incoming.len()];
+        let mut feasible=vec![floor;incoming.len()];
         if self.design(&feasible,control)?.volume>limit {return Err(EvaluationStop::Breakdown{stage:"sdf3-volume-restoration"});}
         let (mut low,mut high)=(0.0,1.0);
         for _ in 0..64 {
             control.checkpoint("sdf3-volume-restoration")?;
             let mid=f64::midpoint(low,high);if mid<=low||mid>=high {break;}
-            let trial:Vec<f64>=incoming.iter().map(|r|(1e-3+mid*(r-1e-3)).clamp(1e-3,1.0)).collect();
+            let trial:Vec<f64>=incoming.iter().map(|r|(floor+mid*(r-floor)).clamp(floor,1.0)).collect();
             if self.design(&trial,control)?.volume<=limit {low=mid;feasible=trial;}else{high=mid;}
         }
         control.checkpoint("sdf3-volume-restoration-publish")?;Ok(feasible)
