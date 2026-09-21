@@ -61,8 +61,11 @@ pub mod projected;
 pub mod projected_stress;
 pub mod refinement;
 pub mod robust;
-#[path = "robust_descent_v2.rs"]
-pub mod robust_descent;
+// Load under the physical name so nested modules resolve in robust_descent_v2/.
+// Keep the established public path without compiling a second implementation.
+#[doc(hidden)]
+pub mod robust_descent_v2;
+pub use robust_descent_v2 as robust_descent;
 pub mod robust_stress;
 pub mod stress;
 pub mod topder;
@@ -81,7 +84,7 @@ pub use guarded::{
     GuardedCandidate, GuardedOptimizeReport, GuardedSettings, GuardedStop,
     optimize_compliance_guarded,
 };
-pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, optimize_compliance};
+pub use optimize::{Cantilever, OptimizeReport, OptimizeSettings, material_volume, optimize_compliance};
 pub use projected_stress::{ProjectedStressCheck, ProjectedStressOptimizer, ProjectedStressUpdate};
 pub use robust::{
     RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
