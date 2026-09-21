@@ -13,9 +13,13 @@ use std::ops::ControlFlow;
 use fs_cutfem::CutFemError;
 
 use crate::checkpoint::OptimizeCheckpoint;
+use crate::stress::evaluate_sampled_stress_controlled;
 use crate::projected::{ProjectedOptimizer, ProjectedProgress, ProjectedSettings, ProjectedStage};
 use crate::volume::VolumeProjectionSettings;
 use crate::{EvaluatedFinalState, SampledStressEvaluation, SampledStressLimit, evaluate_sampled_stress};
+
+mod lifecycle;
+pub use lifecycle::ProjectedStressSetupStage;
 
 /// Stress evaluation for one otherwise improving, same-area candidate.
 #[derive(Debug, Clone)]
@@ -147,10 +151,10 @@ impl ProjectedStressOptimizer {
 
     /// Transactional controlled update using the shared descent checkpoints.
     ///
-    /// The stress solve is indivisible: cancellation is checked before it at
-    /// `Evaluated` and before successful publication at `Publish`, or before the
-    /// next candidate after a refusal. No accepted geometry or stress is changed
-    /// on cancellation. This does not claim intra-solve cancellation latency.
+    /// Cancellation reaches both final CG solves and each cell's stress probes.
+    /// No accepted geometry, multiplier, ordinal or stress changes on a stop,
+    /// even after the full candidate stress evaluation. Assembly, area quadrature
+    /// and one cell's sampling remain indivisible; this is not a hard deadline.
     ///
     /// # Errors
     /// Propagates checkpoint admission errors without publishing a partial state.
@@ -161,11 +165,16 @@ impl ProjectedStressOptimizer {
         let fixture = self.checkpoint().fixture();
         let settings = self.checkpoint().settings();
         let limit = self.limit;
+        let poll_iters = self.optimizer.controls().poll_iters;
         let mut next = self.current.clone();
         let mut stress_checks = Vec::new();
-        let progress = self.optimizer.advance_one_admitted(|index, geometry, state| {
-            let (evaluation, refusal) = match evaluate_sampled_stress(geometry, fixture, settings) {
-                Ok(evaluation) => {
+        let progress = self.optimizer.advance_one_admitted_controlled(|index, geometry, state, control| {
+            let (evaluation, refusal) = match evaluate_sampled_stress_controlled(
+                geometry, fixture, settings, poll_iters,
+                |stage| control(ProjectedStage::Stress(index, stage)),
+            ) {
+                Ok(ControlFlow::Break(reason)) => return Ok(ControlFlow::Break(reason)),
+                Ok(ControlFlow::Continue(evaluation)) => {
                     let refusal = admission_reason(&evaluation, state, limit);
                     if refusal.is_none() { next = evaluation.clone(); }
                     (Some(evaluation), refusal)
@@ -173,7 +182,7 @@ impl ProjectedStressOptimizer {
                 Err(error) => (None, Some(format!("stress solve refused: {error}"))),
             };
             stress_checks.push(ProjectedStressCheck { index, evaluation, refusal: refusal.clone() });
-            Ok(refusal)
+            Ok(ControlFlow::Continue(refusal))
         }, control)?;
         match progress {
             ControlFlow::Break(reason) => Ok(ControlFlow::Break(reason)),

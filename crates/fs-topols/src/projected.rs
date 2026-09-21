@@ -10,6 +10,7 @@
 //! continuum-volume certificate is claimed.
 
 use crate::checkpoint::{CheckpointStage, OptimizeCheckpoint};
+use crate::evaluated::{DesignEvaluationStage, evaluate_compliance_design_controlled};
 use crate::volume::{
     VolumeProjectionReport, VolumeProjectionSettings, VolumeProjectionStage,
     project_material_volume, project_material_volume_controlled,
@@ -22,6 +23,9 @@ use fs_cutfem::CutFemError;
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 
+mod lifecycle;
+pub use lifecycle::ProjectedSetupStage;
+
 /// Per-update search and cooperative-solver work controls.
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectedSettings {
@@ -31,7 +35,7 @@ pub struct ProjectedSettings {
     pub contraction: f64,
     /// Strict relative decrease required against the CURRENT feasible design.
     pub min_relative_improvement: f64,
-    /// CG iterations between cancellation callbacks in the proposal solves.
+    /// CG iterations between cancellation callbacks in proposal and final solves.
     pub poll_iters: usize,
 }
 
@@ -41,8 +45,8 @@ impl Default for ProjectedSettings {
     }
 }
 
-/// Cooperative stages. The final re-evaluation is checked at its boundaries,
-/// not internally preempted. One quadrature evaluation is also indivisible.
+/// Cooperative stages, including CG polls in final mechanics and stress solves.
+/// Assembly, area quadrature and one cell's stress probes remain indivisible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectedStage {
     /// Before staging an attempt; candidate indices are zero-based.
@@ -53,6 +57,10 @@ pub enum ProjectedStage {
     Projection(usize, VolumeProjectionStage),
     /// Before independently solving the projected geometry.
     Evaluate(usize),
+    /// An inner final-mechanics boundary or CG poll.
+    Evaluation(usize, DesignEvaluationStage),
+    /// An inner stress-constraint boundary, CG poll or cell-sampling boundary.
+    Stress(usize, DesignEvaluationStage),
     /// After the independent solve, including candidates that will be rejected.
     Evaluated(usize),
     /// All gates passed, but durable accepted state is still unchanged.
@@ -206,6 +214,10 @@ impl ProjectedOptimizer {
     #[must_use]
     pub fn checkpoint(&self) -> &OptimizeCheckpoint { &self.checkpoint }
 
+    /// Immutable candidate-search and solver-polling controls.
+    #[must_use]
+    pub const fn controls(&self) -> ProjectedSettings { self.controls }
+
     /// Independently solved same-material baseline for this segment.
     #[must_use]
     pub const fn baseline(&self) -> EvaluatedFinalState { self.baseline }
@@ -246,6 +258,21 @@ impl ProjectedOptimizer {
     pub(crate) fn advance_one_admitted<B>(
         &mut self,
         mut admit: impl FnMut(usize, &GridSdf, EvaluatedFinalState) -> Result<Option<String>, CutFemError>,
+        control: impl FnMut(ProjectedStage) -> ControlFlow<B>,
+    ) -> Result<ControlFlow<B, ProjectedProgress>, CutFemError> {
+        self.advance_one_admitted_controlled(
+            |index, geometry, state, _| admit(index, geometry, state).map(ControlFlow::Continue),
+            control,
+        )
+    }
+
+    // Pass the one controller through the constraint hook. A constraint's
+    // cancellation is neither an admissible result nor a reason to try again.
+    pub(crate) fn advance_one_admitted_controlled<B>(
+        &mut self,
+        mut admit: impl FnMut(usize, &GridSdf, EvaluatedFinalState,
+            &mut dyn FnMut(ProjectedStage) -> ControlFlow<B>)
+            -> Result<ControlFlow<B, Option<String>>, CutFemError>,
         mut control: impl FnMut(ProjectedStage) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, ProjectedProgress>, CutFemError> {
         if self.checkpoint.is_complete() {
@@ -301,8 +328,12 @@ impl ProjectedOptimizer {
             if let ControlFlow::Break(reason) = control(ProjectedStage::Evaluate(index)) {
                 return Ok(ControlFlow::Break(reason));
             }
-            let state = match evaluate_compliance_design(&geometry, fixture, settings) {
-                Ok(state) => state,
+            let state = match evaluate_compliance_design_controlled(
+                &geometry, fixture, settings, self.controls.poll_iters,
+                |stage| control(ProjectedStage::Evaluation(index, stage)),
+            ) {
+                Ok(ControlFlow::Continue(state)) => state,
+                Ok(ControlFlow::Break(reason)) => return Ok(ControlFlow::Break(reason)),
                 Err(error) => {
                     attempt.refusal = Some(format!("projected-state solve: {error}"));
                     attempts.push(attempt);
@@ -319,8 +350,9 @@ impl ProjectedOptimizer {
             } else if !(state.compliance < limit) {
                 attempt.refusal = Some("insufficient same-material compliance decrease".to_string());
             } else {
-                attempt.refusal = match admit(index, &geometry, state) {
-                    Ok(reason) => reason,
+                attempt.refusal = match admit(index, &geometry, state, &mut control) {
+                    Ok(ControlFlow::Continue(reason)) => reason,
+                    Ok(ControlFlow::Break(reason)) => return Ok(ControlFlow::Break(reason)),
                     Err(error) => Some(format!("candidate constraint: {error}")),
                 };
                 if attempt.refusal.is_none() {
