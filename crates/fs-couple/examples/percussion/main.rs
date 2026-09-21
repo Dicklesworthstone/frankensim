@@ -7,7 +7,7 @@ use fs_couple::render::plate::impact::felt::{FeltPad,KelvinBranch};
 use fs_couple::render::plate::impact::striker::{RadiusStation,StrikerProperties};
 use fs_couple::modal_acoustic_time::ModalAcousticState;
 use fs_material::fiber::WoolFelt;
-use fs_plate::shell::profile::{ProfileStation,ProfileBudget,revolve};
+use fs_plate::shell::profile::ProfileBudget;
 use fs_plate::shell::reduction::{ShellReduction,ReductionBudget};
 use fs_plate::shell::head::{TensionedDisk,TensionedDiskSpec};
 use fs_plate::shell::{ShellSupport,modes_shell};
@@ -21,6 +21,7 @@ mod cavity;
 mod snare;
 mod mechanics;
 mod playing;
+mod specimen;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -62,19 +63,18 @@ fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     splash_with_stroke(steps,dt_s,audio,Stroke::default())
 }
 fn splash_with_stroke(steps:u64,dt_s:f64,audio:bool,stroke:Stroke)->Result<Experiment,Error> {
-    // Published anchors: diameter 203.2mm; bell diameter78mm; hole diameter12.3mm;
-    // edge thickness0.5mm; literature B20 E112.6GPa,nu.342,rho8607.
-    // ALL interior heights and thicknesses below are explicit estimates.
-    let stations=[(0.00615,0.022,0.0016),(0.012,0.0215,0.0016),(0.020,0.020,0.0015),
-        (0.039,0.008,0.0011),(0.050,0.0055,0.0009),(0.070,0.003,0.00075),
-        (0.085,0.0015,0.0006),(0.1016,0.0,0.0005)]
-        .map(|(radius_m,height_m,thickness_m)|ProfileStation{radius_m,height_m,thickness_m});
-    // Unknown proprietary hammer pattern is NOT fabricated as measured data.
-    // profile::revolve accepts explicit dents/lathe relief when surveyed.
-    let shell=revolve(&stations,32,112.6e9,0.342,8607.0,&[],&[],mesh_budget())?;
+    splash_with_specimen(steps,dt_s,audio,stroke,None)
+}
+fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>)->Result<Experiment,Error> {
+    let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
+    let shell=specimen.build()?;
     let model=shell.assemble(&[],ShellSupport::Free)?;
     let pi=std::f64::consts::PI;
-    let report=modes_shell(&model,((2.0*pi*50.0).powi(2),(2.0*pi*1200.0).powi(2)),&SliceOptions::default())?;
+    let [lower,upper]=specimen.band_hz;
+    if !dt_s.is_finite() || dt_s<=0.0 || 2.0*pi*upper*dt_s>=0.9*pi {
+        return Err("supplied shell frequency window exceeds the mechanical Nyquist guard".into());
+    }
+    let report=modes_shell(&model,((2.0*pi*lower).powi(2),(2.0*pi*upper).powi(2)),&SliceOptions::default())?;
     // Keep a true vertical free-translation coordinate for felt mounting.
     // Other rigid rotations/translations are omitted in this bounded example;
     // this is NOT a fully rocking 6-DOF cymbal stand model.
@@ -99,6 +99,10 @@ fn splash_with_stroke(steps:u64,dt_s:f64,audio:bool,stroke:Stroke)->Result<Exper
     }).map(|(i,_)|i).expect("nonempty admitted shell");
     let (triangle,barycentric)=match stroke.position_m {
         Some(p)=>playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,p)?,
+        None if imported=>{
+            let inner=specimen.stations[0].radius_m;let outer=specimen.stations.last().unwrap().radius_m;
+            playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,[(inner+2.0*outer)/3.0,0.0])?
+        }
         None=>(nearest(0.1016*2.0/3.0,0.0),[1.0/3.0;3]),
     };
     let port=reduction.point_port(triangle,barycentric,[0.0,0.0,-1.0])?;
@@ -109,14 +113,20 @@ fn splash_with_stroke(steps:u64,dt_s:f64,audio:bool,stroke:Stroke)->Result<Exper
     // on each face. NOT published Zildjian dimensions or material coefficients.
     let area=pi*(0.015_f64.powi(2)-0.0065_f64.powi(2))/3.0;
     for i in 0..3 {let angle=2.0*pi*i as f64/3.0;
-        let weights=reduction.point_port(nearest(0.012*angle.cos(),0.012*angle.sin()),[1.0/3.0;3],[0.0,0.0,1.0])?;
+        let p=[0.012*angle.cos(),0.012*angle.sin()];
+        // Supplied geometry cannot snap a stand pad across a mounting hole.
+        // Hardware dimensions/materials remain explicit estimates of this host.
+        let (face,bary)=if imported {playing::shell_location(&shell.mesh.nodes,&shell.mesh.tris,p)?}
+            else {(nearest(p[0],p[1]),[1.0/3.0;3])};
+        let weights=reduction.point_port(face,bary,[0.0,0.0,1.0])?;
         for sign in [-1.0,1.0] {let mut b=vec![0.0];b.extend(weights.iter().map(|b|sign*b));
             pads.push(FeltPad{area_m2:area,thickness_m:0.006,precompression_m:0.0003,weights:b,
                 law:WoolFelt::new(30000.0,0.2,2.2,3.0,0.15,0.7)?,prior_maximum_strain:0.05,
                 creep:vec![KelvinBranch{stiffness_n_m:1500.0,viscosity_n_s_m:8.0}]});
         }
     }
-    eprintln!("estimated splash reconstruction: mass_kg={},modes={},facets={},max_edge_m={}",shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
+    eprintln!("shell input={}, mass_kg={},modes={},facets={},max_edge_m={},band_hz={lower}..{upper}; stand felt, stick and contact remain estimated; no calibration or full-band claim",
+        if imported {"supplied profile"}else{"estimated splash"},shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
     let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
@@ -227,6 +237,7 @@ fn run()->Result<(),Error> {
     let prepared_nonlinear=mechanics::prepared_option(&mut raw_args)?;
     let distributed_cavity=cavity::option(&mut raw_args)?;
     let neck=cavity::neck_option(&mut raw_args)?;
+    let shell_path=specimen::option(&mut raw_args)?;
     let (args,stroke)=playing::parse(raw_args)?;
     if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to drum/drum-stretch (see CAVITY.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
@@ -238,6 +249,7 @@ fn run()->Result<(),Error> {
         return Err("--cavity-modes applies only to drum and drum-stretch, including WAV/microphone variants".into());
     }
     cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
+    specimen::admit_command(shell_path.as_deref(),&args[0])?;
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -254,8 +266,9 @@ fn run()->Result<(),Error> {
     }else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
+    let supplied_shell=shell_path.as_deref().map(specimen::Specimen::load).transpose()?;
     let mut experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_stroke(steps,dt_s,audio,stroke)?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_specimen(steps,dt_s,audio,stroke,supplied_shell)?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_air(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_air(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_playing(steps,dt_s,audio,true,None,false,stroke)?,

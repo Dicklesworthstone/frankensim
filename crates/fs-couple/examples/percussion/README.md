@@ -97,3 +97,59 @@ full-band accuracy and radiation loading remain open. A moving receiver should
 use the existing broadband directional facility rather than this fixed bank. A room response is downstream, not a substitute for source
 physics. Finite-amplitude membrane/shell validity and aliasing must be checked
 separately. None of those missing gates is promoted by the tests here.
+
+## Supply the actual shell specimen
+
+`--shell-profile PATH` replaces the hard-coded splash geometry, isotropic material
+and elastic frequency window before shell assembly. It works with `splash`,
+`splash-wav` and `splash-mic`, including `--prepared-nonlinear`. The existing shell
+FEM, nonlinear reduction, two-sided acoustic surface and BEM microphone path all
+consume that same geometry and thickness; nothing is converted into an output EQ.
+
+```sh
+(set -C; cargo run --release -p fs-couple --example percussion -- \
+  splash 4096 --prepared-nonlinear \
+  --shell-profile crates/fs-couple/examples/percussion/estimated-splash.profile \
+  --strike-position-m 0.067 0 > supplied-shell.csv)
+```
+
+The distributed file reproduces the **estimated** reference meridian and material,
+not a new measurement. Replace its records with specimen data. The strict text
+format begins with `frankensim-shell-profile-v1`, accepts `#` comments, and uses
+comma-separated numeric records. `material,E_Pa,nu,rho_kg_m3`, `azimuths,N` and
+`band_hz,lower,upper` are each mandatory exactly once. At least two
+`station,radius_m,height_m,thickness_m` rows describe the meridian in strictly
+increasing radius. Zero inner radius makes a disk; nonzero radius makes a hole.
+All heights are reference midsurface coordinates, all thicknesses are physical.
+There is no implicit unit conversion, random detail, material-name lookup or
+fallback to the example when input is invalid.
+
+Optional `ring,radius_m,half_width_m,height_delta_m,thickness_delta_m` records use
+the existing annular-relief law. Optional
+`dent,center_x_m,center_y_m,radius_m,height_delta_m,thickness_delta_m` records use
+its compact C1 indentation law. Both alter actual mechanical geometry and section
+stiffness/mass, not a rendering normal map. They describe a stress-free reference
+shape, **not** simulated manufacturing, work hardening or residual forming stress.
+The existing mesh/work budgets remain in force. Nonintersecting detail and details
+flagged underresolved by the geometry owner refuse; add meridian stations and
+azimuths rather than treating invisible detail as simulated. Passing this coarse
+resolution screen is not convergence certification.
+
+The shell can have different diameter, bell, taper, relief and material, but this
+command still supplies the same **estimated stand, stick and Hertz-contact model**.
+Its pad centres are at 12 mm radius and are located on the supplied surface, never
+snapped across the hole. Geometry that does not support those pads refuses.
+Without an explicit strike position, supplied profiles use the point two-thirds
+of the way from inner to outer radius on positive x. The no-file reference retains
+its original contact/pad sampling. Thus identical profile geometry alone does not
+assert bit-identical trajectories between the two hardware sampling choices.
+A differently suspended gong still needs its own support model; this importer
+does not silently make the stand appropriate for every shell.
+
+The window remains limited to 31 elastic modes plus vertical translation and to
+the mechanical clock's Nyquist guard. Increasing its upper edge is not proof of
+an adequate in-plane basis or nonlinear bandwidth. The fixed-receiver acoustic
+bake remains 40–1640 Hz. Large scans, sharp features or broader frequency windows
+can exceed the existing budgets and should refuse, not truncate silently. An
+input file carries no automatic measured/calibrated status. Native execution and
+measured response comparisons remain required for instrument-fidelity claims.
