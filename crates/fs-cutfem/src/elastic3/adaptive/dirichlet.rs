@@ -5,6 +5,8 @@ use crate::quad3::surface::SurfaceOptions3;
 use crate::elastic3::surface::ReferenceLoad3;
 use super::enrichment::CellResidual3;
 
+mod reaction;
+
 /// Pure displacement law on the already selected reference support patch.
 pub type PrescribedMotion3<'a> = dyn Fn([f64; 3], [f64; 3]) -> [f64; 3] + 'a;
 

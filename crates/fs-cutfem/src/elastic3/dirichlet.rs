@@ -14,6 +14,9 @@
 use super::*;
 use crate::quad3::surface::{SurfaceOptions3, SurfacePoint3};
 
+mod reaction;
+pub use reaction::EmbeddedReaction3;
+
 /// Explicit Nitsche penalty; it never uses the possibly tiny cut volume.
 #[derive(Debug, Clone, Copy)]
 pub struct EmbeddedDirichletOptions3 {
