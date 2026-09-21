@@ -38,9 +38,9 @@ jobs:
       - name: Test nonlinear percussion and material history
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact --test modal_cavity_impact --test cylindrical_cavity 2>&1 | tee percussion-mechanics.log
-      - name: Test the physical pressure and PCM consumers
+      - name: Test prepared cavity, physical pressure and PCM consumers
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-couple --lib render::plate::impact::audio::tests 2>&1 | tee percussion-audio.log
+        run: set -o pipefail; cargo test --release -p fs-couple --lib render::plate::impact:: 2>&1 | tee percussion-audio.log
       - name: Test the actual percussion construction
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-couple --example percussion -- --test-threads=1 2>&1 | tee percussion-example.log

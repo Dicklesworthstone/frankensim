@@ -4,11 +4,23 @@ use fs_couple::render::plate::impact::cavity::{CavityCoupling,
     cylinder::{CylinderSpec,CylindricalCavity,SidewallAperture},neck::CavityNeck};
 use fs_couple::vibroacoustic::{AcousticMedium,StructuralModes,assemble_coupling};
 use fs_exec::CancelGate;
+use fs_couple::render::plate::impact::linear::{LinearImpactConfig,LinearImpactSystem};
 
 pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
     let count=args.iter().filter(|a|a.as_str()=="--cavity-modes").count();
     if count>1 {return Err("--cavity-modes may be supplied only once".into());}
     args.retain(|a|a!="--cavity-modes");Ok(count==1)
+}
+
+/// Both existing mechanical images can now consume the same enclosed air.
+pub fn admit_command(distributed:bool,command:&str)->Result<(),Error> {
+    if distributed && !matches!(command,"drum"|"drum-wav"|"drum-mic"|
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"|
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"|
+        "snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic") {
+        return Err("--cavity-modes requires a drum or snare command, including WAV/microphone variants".into());
+    }
+    Ok(())
 }
 
 /// All neck physics and position are explicit; this is not a measured drum card.
@@ -113,29 +125,64 @@ fn interface(films:&[TensionedDisk],modes:&[Vec<ModePair>],air:&CylindricalCavit
 pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
     ->Result<(ImpactSystem,InteriorPressure),Error> {
-    let gate=CancelGate::new_clock_free();let air=basis(radius,depth,&gate)?;
-    let coupling=interface(films,modes,&air,&gate)?;
+    let gate=CancelGate::new_clock_free();
     let structural=1+modes.iter().map(Vec::len).sum::<usize>();
+    let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
+        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,&gate)?;
+    let (system,coupling)=coupling.build(bodies,contacts,vec![],config(steps,dt_s),&gate)?;
+    Ok((system,InteriorPressure {coupling,first,second}))
+}
+
+/// Same cavity basis and surface integrals, with wires retained after the heads.
+/// No direct air coupling for the striker or filaments; wire reactions act on
+/// the resonant head. Appended inertia follows EVERY original solid coordinate.
+#[allow(clippy::too_many_arguments)]
+pub fn build_prepared(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,radius:f64,depth:f64,configuration:LinearImpactConfig)
+    ->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    let gate=CancelGate::new_clock_free();
+    let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
+        .ok_or("prepared cavity body-count overflow")?;
+    let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
+        configuration.coupling.max_modes,None,&gate)?;
+    let (system,coupling)=coupling.build_linear(bodies,contacts,
+        core::f64::consts::PI*radius*radius,configuration,&gate)?;
+    eprintln!("mechanical image: prepared modal heads/wires plus simultaneous distributed-air/contact reactions; no wire homogenization or direct gas audio; real-time performance unqualified");
+    Ok((system,InteriorPressure {coupling,first,second}))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
+    structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,gate:&CancelGate)
+    ->Result<InteriorPressure,Error> {
+    let heads=1+modes.iter().map(Vec::len).sum::<usize>();
+    if structural<heads || structural>maximum_modes || maximum_modes>4096 {
+        return Err("cavity needs the original head prefix and a bounded structural layout".into());
+    }
+    let air=basis(radius,depth,gate)?;
+    let head_coupling=interface(films,modes,&air,gate)?;
+    let mut coupling=vec![0.0;structural*air.modes().len()];
+    coupling[..head_coupling.len()].copy_from_slice(&head_coupling);
     let sampled=air.sample(&[[0.0,0.0,0.0]],8)?;
     eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; explicit zero acoustic drag; rigid cylindrical sidewall, not calibrated losses",
         sampled.omegas.iter().map(|w|w/core::f64::consts::TAU).collect::<Vec<_>>());
-    let mut compiled=CavityCoupling::new(&sampled,structural,&coupling,&vec![0.0;air.modes().len()])?;
+    let mut compiled=CavityCoupling::new_with_mode_budget(&sampled,structural,&coupling,
+        &vec![0.0;air.modes().len()],maximum_modes)?;
     if let Some(neck)=neck {
         let averages=air.sidewall_averages(SidewallAperture {radius_m:neck.radius_m,
             azimuth_rad:neck.azimuth_rad,axial_position_m:neck.axial_position_m,
-            radial_rings:8,angular_points:32,maximum_terms:2048},&gate)?;
+            radial_rings:8,angular_points:32,maximum_terms:2048},gate)?;
         compiled=compiled.with_necks(vec![CavityNeck {
             area_m2:core::f64::consts::PI*neck.radius_m*neck.radius_m,
             effective_length_m:neck.effective_length_m,resistance_pa_s_m3:neck.resistance_pa_s_m3,
             pressure_shape_averages:averages,initial_volume_m3:0.0,initial_flow_m3_s:0.0,
-        }],&gate)?;
+        }],gate)?;
         eprintln!("compact neck: radius={}m, effective_length={}m, resistance={}Pa*s/m^3, azimuth={}rad, z={}m; 8x32 wall-area quadrature; zero-gauge reservoir; parameters are declarations, not calibrated losses; exterior audio refused",
             neck.radius_m,neck.effective_length_m,neck.resistance_pa_s_m3,neck.azimuth_rad,neck.axial_position_m);
     }
-    let (system,compiled)=compiled.build(bodies,contacts,vec![],config(steps,dt_s),&gate)?;
     let first=air.values_at([0.4*radius,0.2*radius,0.0])?;
     let second=air.values_at([-0.4*radius,-0.2*radius,depth])?;
-    Ok((system,InteriorPressure {coupling:compiled,first,second}))
+    Ok(InteriorPressure {coupling:compiled,first,second})
 }
 
 #[cfg(test)]
@@ -262,3 +309,7 @@ mod tests {
         assert!(super::super::drum_with_air(1,2e-6,true,false,None,true,stroke,true,Some(neck)).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "cavity_prepared_tests.rs"]
+mod prepared_tests;

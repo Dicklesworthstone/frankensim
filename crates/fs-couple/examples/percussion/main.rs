@@ -150,7 +150,7 @@ fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare
 #[allow(clippy::too_many_arguments)]
 fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>)->Result<Experiment,Error> {
     if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
-    if distributed_cavity && (prepared || snares.is_some()) {return Err("distributed cavity requires the nonlinear host; use --prepared-nonlinear, not drum-modal/snare".into());}
+    if neck.is_some() && prepared {return Err("prepared drum/snare cavity does not admit neck momentum drag; use the nonlinear drum image".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
     if snares.is_some() && !prepared {return Err("wire bank requires the explicit prepared mechanical image".into());}
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
@@ -218,8 +218,14 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
     // realization changes. Neither path modifies the microphone/BEM boundary.
     let mut air=None;
     let system=if distributed_cavity {
-        let (system,probe)=cavity::build(&films,&mode_sets,bodies,contacts,radius,depth,steps,dt_s,neck)?;
-        air=Some(probe);Mechanics::Reference(system)
+        if prepared {
+            let configuration=mechanics::coupled_config(steps,dt_s,snares.is_some())?;
+            let (system,probe)=cavity::build_prepared(&films,&mode_sets,bodies,contacts,radius,depth,configuration)?;
+            air=Some(probe);Mechanics::Prepared(system)
+        } else {
+            let (system,probe)=cavity::build(&films,&mode_sets,bodies,contacts,radius,depth,steps,dt_s,neck)?;
+            air=Some(probe);Mechanics::Reference(system)
+        }
     }else if prepared {
         if snares.is_some() {
             Mechanics::prepared_snares(bodies,contacts,volume.clone(),pi*radius*radius,steps,dt_s)?
@@ -248,15 +254,12 @@ fn run()->Result<(),Error> {
     let shell_path=specimen::option(&mut raw_args)?;
     let drum_path=drum_spec::option(&mut raw_args)?;
     let (args,stroke)=playing::parse(raw_args)?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to drum/drum-stretch (see CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to all drum/snare commands (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
         return Err("--prepared-nonlinear applies only to splash, drum and drum-stretch; no silent conversion of modal/snare mechanics".into());
     }
-    if distributed_cavity && !matches!(args[0].as_str(),"drum"|"drum-wav"|"drum-mic"|
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
-        return Err("--cavity-modes applies only to drum and drum-stretch, including WAV/microphone variants".into());
-    }
+    cavity::admit_command(distributed_cavity,&args[0])?;
     cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
     specimen::admit_command(shell_path.as_deref(),&args[0])?;
     drum_spec::admit_command(drum_path.as_deref(),&args[0])?;
@@ -282,9 +285,9 @@ fn run()->Result<(),Error> {
         "splash"|"splash-wav"|"splash-mic"=>splash_with_specimen(steps,dt_s,audio,stroke,supplied_shell)?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_spec(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_spec(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_spec(steps,dt_s,audio,true,None,false,stroke,false,None,supplied_drum)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,false,None,supplied_drum)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,false,None,supplied_drum)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_spec(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,None,supplied_drum)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,distributed_cavity,None,supplied_drum)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,distributed_cavity,None,supplied_drum)?,
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {

@@ -50,6 +50,17 @@ fn prepared_config(steps: u64, dt_s: f64) -> Result<LinearImpactConfig, Error> {
         multiple: MultiContactConfig { max_contacts: 32, max_sweeps: 100, max_setup_terms: 100000 },
     })
 }
+/// Identical work envelope for compact and distributed-air prepared images.
+/// The larger configuration retains individual snare coordinates and contacts.
+pub(super) fn coupled_config(steps: u64, dt_s: f64, snares: bool) -> Result<LinearImpactConfig, Error> {
+    let mut configuration = prepared_config(steps, dt_s)?;
+    if snares {
+        configuration.coupling.max_modes = 256;
+        configuration.multiple.max_contacts = 512;
+        configuration.multiple.max_setup_terms = 50_000_000;
+    }
+    Ok(configuration)
+}
 /// Extract only the numerical option; the existing playing parser owns physics.
 pub fn prepared_option(args: &mut Vec<String>) -> Result<bool, Error> {
     let count = args.iter().filter(|arg| arg.as_str() == "--prepared-nonlinear").count();
@@ -78,11 +89,7 @@ impl Mechanics {
     pub fn prepared_snares(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
         reference_area_m2: f64, steps: u64, dt_s: f64) -> Result<Self, Error>
     {
-        let mut configuration=prepared_config(steps,dt_s)?;
-        configuration.coupling.max_modes=256;
-        configuration.multiple.max_contacts=512;
-        configuration.multiple.max_setup_terms=50_000_000;
-        Self::with_configuration(bodies,contacts,volume,reference_area_m2,configuration)
+        Self::with_configuration(bodies,contacts,volume,reference_area_m2,coupled_config(steps,dt_s,true)?)
     }
     fn with_configuration(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
         reference_area_m2: f64, configuration: LinearImpactConfig) -> Result<Self, Error>
