@@ -22,6 +22,7 @@ mod snare;
 mod mechanics;
 mod playing;
 mod specimen;
+mod drum_spec;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -144,32 +145,35 @@ fn drum_with_playing(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<s
 }
 #[allow(clippy::too_many_arguments)]
 fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>)->Result<Experiment,Error> {
+    drum_with_spec(steps,dt_s,audio,prepared,snares,stretching,stroke,distributed_cavity,neck,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>)->Result<Experiment,Error> {
     if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
     if distributed_cavity && (prepared || snares.is_some()) {return Err("distributed cavity requires the nonlinear host; use --prepared-nonlinear, not drum-modal/snare".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
     if snares.is_some() && !prepared {return Err("wire bank requires the explicit prepared mechanical image".into());}
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
-    // Pearl MM6 published 14x6.5in,7.5mm maple shell. Rigid cylindrical cavity
-    // and clear-span radius below are geometric approximations of that shell;
-    // maple elasticity, bearing-edge shape and hoops are NOT solved. A wire bank
-    // is attached only by the explicit snare commands, after this shared reduction.
-    let radius=0.1778-0.0075;let depth=0.1651;let pi=std::f64::consts::PI;
-    let mut films=Vec::new();let mut mode_sets=Vec::new();
-    for (thickness,tension) in [(0.000254,3000.0),(0.0000762,1500.0)] {
-        let film=TensionedDisk::new(TensionedDiskSpec{radius_m:radius,thickness_m:thickness,
-            young_pa:4e9,poisson:0.38,density_kg_m3:1390.0,tension_n_m:tension,radial_intervals:5,azimuths:32},mesh_budget())?;
-        let modes=fs_modal::slice_window(&film.model.k,&film.model.m,
-            ((2.0*pi*80.0).powi(2),(2.0*pi*500.0).powi(2)),&SliceOptions::default())?.modes;
-        if modes.is_empty() {return Err("head frequency window is empty".into());}
-        mode_sets.push(modes);films.push(film);
-    }
-    let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,0.1778)?)}else{None};
+    // One declaration supplies BOTH head pencils, the air volume and the
+    // closed exterior. No independently retuned oscillator or stock drum mesh.
+    let imported=supplied.is_some();let spec=supplied.unwrap_or_else(drum_spec::Spec::reference);
+    spec.admit_clock(dt_s,audio)?;
+    if let Some(wires)=snares {spec.admit_snare(wires)?;}
+    let radius=spec.radius_m;let depth=spec.depth_m;let pi=std::f64::consts::PI;
+    let (films,mode_sets)=spec.prepare(dt_s,audio)?;
+    let acoustics=if audio {Some(acoustics::Boundary::drum(&films,&mode_sets,depth,spec.outer_radius_m)?)}else{None};
+    // Keep the original nearest-node strike for the no-file reference. A new
+    // geometry instead gets an interior relative location unless explicitly set.
+    let position=stroke.position_m.or_else(||imported.then_some([0.35*radius,0.0]));
+    eprintln!("drum input={}; clear_radius_m={radius}, depth_m={depth}, outer_radius_m={}, head_window_hz={:?}, radial_intervals={}, azimuths={}, strike_xy_m={position:?}; rigid shell/rim, unchanged declared gas and estimated stick/contact; no specimen certification",
+        if imported {"supplied SI specification"}else{"estimated 14x6.5in reference"},
+        spec.outer_radius_m,spec.band_hz,spec.radial_intervals,spec.azimuths);
     let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes;
     let mut contact=vec![0.0;n];contact[0]=stick_weight;let mut area=vec![0.0;n];let mut top=vec![0.0;n];let mut bottom=vec![0.0;n];let mut offset=1;
     for (head,(film,modes)) in films.iter().zip(&mode_sets).enumerate() {
         let point=film.mesh.nodes.iter().enumerate().min_by(|(_,a),(_,b)|
             (a.0-0.06).hypot(a.1).total_cmp(&(b.0-0.06).hypot(b.1))).unwrap().0;
-        let explicit_shapes=match stroke.position_m {
+        let explicit_shapes=match position {
             Some(position)=>Some(fs_couple::render::plate::impact::linear::wire::film_shapes(film,modes,&[position])?.remove(0)),
             None=>None,
         };
@@ -194,8 +198,12 @@ fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare
                 law.reduction().solve_residual(),law.slope_limit());
             BodyPotential::Membrane(law)
         }else{BodyPotential::Linear(omegas.clone())};
-        bodies.push(zero_body(potential,&omegas));offset+=modes.len();
-        eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}; PET constants and tension are estimates",film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
+        let mut body=zero_body(potential,&omegas);
+        body.damping_per_s=omegas.iter().map(|w|2.0*spec.heads[head].damping_ratio*w).collect();
+        bodies.push(body);offset+=modes.len();
+        eprintln!("head {head}: film_mass_kg={},frequencies_hz={:?}, tension_n_m={}, damping_ratio={}; material authority belongs to the input, not a brand name",
+            film.mass_kg,omegas.iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>(),
+            spec.heads[head].tension_n_m,spec.heads[head].damping_ratio);
     }
     let mut contacts=vec![elastic_contact(contact)?];
     if let Some(spec)=snares {
@@ -204,7 +212,7 @@ fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare
             bottom_start..offset,offset,n)?;
         bodies.extend(wire_bodies);contacts.extend(wire_contacts);
     }
-    let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:pi*radius*radius*depth,areas:area};
+    let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:spec.volume_m3(),areas:area};
     // Both images consume the identical geometric reduction, strike port,
     // constitutive contact, loss coefficients and air volume. Only the discrete
     // realization changes. Neither path modifies the microphone/BEM boundary.
@@ -238,8 +246,9 @@ fn run()->Result<(),Error> {
     let distributed_cavity=cavity::option(&mut raw_args)?;
     let neck=cavity::neck_option(&mut raw_args)?;
     let shell_path=specimen::option(&mut raw_args)?;
+    let drum_path=drum_spec::option(&mut raw_args)?;
     let (args,stroke)=playing::parse(raw_args)?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to drum/drum-stretch (see CAVITY.md)".into());}
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to drum/drum-stretch (see CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
         return Err("--prepared-nonlinear applies only to splash, drum and drum-stretch; no silent conversion of modal/snare mechanics".into());
@@ -250,6 +259,7 @@ fn run()->Result<(),Error> {
     }
     cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
     specimen::admit_command(shell_path.as_deref(),&args[0])?;
+    drum_spec::admit_command(drum_path.as_deref(),&args[0])?;
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -267,13 +277,14 @@ fn run()->Result<(),Error> {
     let steps=if audio {count.checked_mul(acoustics::SUBSTEPS as u64).ok_or("sample budget overflow")?}else{count};
     let dt_s=if audio {acoustics::MECHANICAL_DT}else{2e-6};
     let supplied_shell=shell_path.as_deref().map(specimen::Specimen::load).transpose()?;
+    let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let mut experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash_with_specimen(steps,dt_s,audio,stroke,supplied_shell)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_air(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck)?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_air(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_playing(steps,dt_s,audio,true,None,false,stroke)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_playing(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_spec(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_spec(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_spec(steps,dt_s,audio,true,None,false,stroke,false,None,supplied_drum)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,false,None,supplied_drum)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,false,None,supplied_drum)?,
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {
