@@ -49,6 +49,7 @@
 //!   accepted geometry and exact accepted-state continuation.
 
 pub mod checkpoint;
+pub mod design_regions;
 pub mod evaluated;
 pub mod fim;
 pub mod gridsdf;
