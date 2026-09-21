@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{self, Read};
 
 const MAGIC: &[u8] = b"fs-marquee-projected-stress-checkpoint-v1\n";
+const REGION_MAGIC: &[u8] = b"fs-marquee-projected-stress-checkpoint-v2\n";
 const MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone)]
@@ -95,7 +96,10 @@ fn encode(optimizer: &ProjectedStressOptimizer, policy: &Policy, executable: &st
     let controls = policy.controls;
     let limit = optimizer.limit();
     let state = optimizer.current();
-    let mut out = MAGIC.to_vec();
+    // Leave the boundary-only representation unchanged. Expanded fixed masks
+    // require v2 so an older reader refuses rather than discarding constraints.
+    let expanded = policy.fixed.len() > 2 * (checkpoint.geometry().n() + 1);
+    let mut out = if expanded { REGION_MAGIC } else { MAGIC }.to_vec();
     out.extend_from_slice(executable.as_bytes());
     for value in [u64::from(settings.level), settings.iterations as u64,
         checkpoint.next_iteration() as u64, settings.nucleation_period as u64,
@@ -164,7 +168,10 @@ struct Saved {
 
 fn decode(bytes: &[u8], executable: &str) -> Result<Saved, Box<dyn Error>> {
     if bytes.len() as u64 > MAX_BYTES { return Err("checkpoint byte budget exceeded".into()); }
-    let bytes = bytes.strip_prefix(MAGIC).ok_or("unsupported stress checkpoint schema")?;
+    let (bytes, expanded) = match bytes.strip_prefix(MAGIC) {
+        Some(bytes) => (bytes, false),
+        None => (bytes.strip_prefix(REGION_MAGIC).ok_or("unsupported stress checkpoint schema")?, true),
+    };
     if bytes.get(..64) != Some(executable.as_bytes()) {
         return Err("checkpoint requires the original executable; cross-build resume refused".into());
     }
@@ -178,9 +185,13 @@ fn decode(bytes: &[u8], executable: &str) -> Result<Saved, Box<dyn Error>> {
     let max_evaluations = reader.count(64)?;
     let max_candidates = reader.count(16)?;
     let poll_iters = reader.count(60_000)?;
-    let fixed_count = reader.count(2 * (n + 1))?;
+    let boundary_count = 2 * (n + 1);
+    let fixed_count = reader.count(if expanded { (n + 1) * (n + 1) } else { boundary_count })?;
+    if expanded && fixed_count <= boundary_count {
+        return Err("fixed-region checkpoint schema requires an expanded fixed-node mask".into());
+    }
     let node_count = reader.count((n + 1) * (n + 1))?;
-    if fixed_count != 2 * (n + 1) || node_count != (n + 1) * (n + 1) {
+    if fixed_count < boundary_count || node_count != (n + 1) * (n + 1) {
         return Err("checkpoint must retain the complete lattice and both fixed boundary traces".into());
     }
     let settings = OptimizeSettings {
@@ -208,14 +219,19 @@ fn decode(bytes: &[u8], executable: &str) -> Result<Saved, Box<dyn Error>> {
     }
     // Resource admission above precedes lattice allocation and all PDE work.
     let mut fixed = Vec::with_capacity(fixed_count);
-    for j in 0..=n {
-        for side in [0, n] {
-            let index = reader.count(node_count - 1)?;
-            if index != j * (n + 1) + side {
-                return Err("checkpoint fixed traces are missing, duplicated or reordered".into());
-            }
-            fixed.push((index, reader.real()?));
+    let mut previous = None;
+    let mut retained_boundary = 0;
+    for _ in 0..fixed_count {
+        let index = reader.count(node_count - 1)?;
+        if previous.is_some_and(|old| index <= old) {
+            return Err("checkpoint fixed traces are missing, duplicated or reordered".into());
         }
+        if index % (n + 1) == 0 || index % (n + 1) == n { retained_boundary += 1; }
+        fixed.push((index, reader.real()?));
+        previous = Some(index);
+    }
+    if retained_boundary != boundary_count {
+        return Err("checkpoint fixed traces are missing, duplicated or reordered".into());
     }
     let mut geometry = GridSdf::from_fn(n, &|_, _| 0.0);
     for value in geometry.nodes_mut() { *value = reader.real()?; }
@@ -248,6 +264,7 @@ pub(super) fn load_controlled<B>(
         return Err("stress checkpoint content hash mismatch".into());
     }
     let saved = decode(&bytes[65..], executable)?;
+    super::input::require_load_support(saved.checkpoint.geometry(), saved.checkpoint.fixture())?;
     let policy = saved.policy;
     // Neither serialized metrics nor the content hash confer feasibility. Two
     // canonical solves reconstruct mechanics and stress on the retained field.

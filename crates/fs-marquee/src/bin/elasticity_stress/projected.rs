@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 mod checkpoint;
 #[path = "projected/input.rs"]
 mod input;
+#[path = "projected/regions.rs"]
+mod regions;
 
 fn field(path: &Path, phi: &GridSdf) -> Result<(), Box<dyn Error>> {
     let mut output = writer(path)?;
@@ -74,10 +76,11 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
     if args.first().is_some_and(|arg| arg == "--resume") {
         return checkpoint::resume(&args[1..], started);
     }
-    let (args, input_options) = input::options(args)?;
+    let (args, region_path) = regions::options(args)?;
+    let (args, input_options) = input::options(&args)?;
     let (args, checkpoint_options) = checkpoint::options(&args)?;
     if args.len() < 2 || args.len() > 8 {
-        return Err("usage: fs-marquee-elasticity-stress --projected OUTPUT_DIR MAX_SAMPLED_VON_MISES [LEVEL=3] [ITERATIONS=30] [VOLFRAC=0.6] [MAX_CANDIDATES=8] [ABS_STRESS_TOL=0] [WALL_SECONDS=300] [--checkpoint] [--pause-after N] [--initial-field FIELD.csv] [--load F] [--load-band HALF_WIDTH] [--youngs E] [--poisson NU]".into());
+        return Err("usage: fs-marquee-elasticity-stress --projected OUTPUT_DIR MAX_SAMPLED_VON_MISES [LEVEL=3] [ITERATIONS=30] [VOLFRAC=0.6] [MAX_CANDIDATES=8] [ABS_STRESS_TOL=0] [WALL_SECONDS=300] [--checkpoint] [--pause-after N] [--initial-field FIELD.csv] [--load F] [--load-band HALF_WIDTH] [--youngs E] [--poisson NU] [--design-regions REGIONS.csv]".into());
     }
     let output_dir = Path::new(&args[0]);
     if output_dir.try_exists()? {
@@ -104,12 +107,25 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
         level, iterations, volfrac, move_cells: 0.1,
         nucleation_period: 0, ..OptimizeSettings::default()
     };
-    let (geometry, fixture) = input_options.prepare(&mut settings)?;
-    input::require_load_support(&geometry, fixture)?;
+    let (source, fixture) = input_options.prepare(&mut settings)?;
     // Preserve both support and load traces during projection. In particular,
     // disappearing loaded-edge material cannot masquerade as reduced compliance.
-    let fixed: Vec<_> = geometry.nodes().iter().copied().enumerate()
+    let fixed: Vec<_> = source.nodes().iter().copied().enumerate()
         .filter(|(index, _)| index % (n + 1) == 0 || index % (n + 1) == n).collect();
+    let authored = match region_path.as_deref() {
+        Some(path) => match regions::load_controlled(Path::new(path), &source, &fixed,
+            |_| poll_wall(started, wall_seconds),
+        )? {
+            ControlFlow::Continue(regions) => Some(regions),
+            ControlFlow::Break(()) => return Ok(stopped_before_study("design-region authoring")),
+        },
+        None => None,
+    };
+    let (geometry, fixed) = match authored.as_ref() {
+        Some(regions) => (regions.prepared().geometry.clone(), regions.prepared().fixed_nodes.clone()),
+        None => (source.clone(), fixed),
+    };
+    input::require_load_support(&geometry, fixture)?;
     let projection = VolumeProjectionSettings {
         target: volfrac, tolerance: 1e-4, max_shift: 2.0, max_evaluations: 64,
     };
@@ -129,7 +145,7 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
         ControlFlow::Break(()) => return Ok(stopped_before_study("baseline stress admission")),
     };
     run_optimizer_with_input(output_dir, optimizer, policy, checkpoint_options, executable,
-        started, wall_seconds, false, Some(&geometry))
+        started, wall_seconds, false, Some(&source), authored.as_ref())
 }
 
 fn run_optimizer(
@@ -143,7 +159,7 @@ fn run_optimizer(
     resumed: bool,
 ) -> Result<u8, Box<dyn Error>> {
     run_optimizer_with_input(output_dir, optimizer, policy, options, executable,
-        started, wall_seconds, resumed, None)
+        started, wall_seconds, resumed, None, None)
 }
 
 fn run_optimizer_with_input(
@@ -156,6 +172,7 @@ fn run_optimizer_with_input(
     wall_seconds: u64,
     resumed: bool,
     source: Option<&GridSdf>,
+    authored: Option<&regions::Regions>,
 ) -> Result<u8, Box<dyn Error>> {
     if poll_wall(started, wall_seconds).is_break() {
         return Ok(stopped_before_study("study publication"));
@@ -168,6 +185,10 @@ fn run_optimizer_with_input(
     let limit = optimizer.limit();
     std::fs::create_dir(output_dir)?;
     if let Some(source) = source { field(&output_dir.join("input-level-set.csv"), source)?; }
+    let design_regions = match authored {
+        Some(regions) => regions.export(output_dir)?,
+        None => "null".to_string(),
+    };
     field(&output_dir.join("baseline-level-set.csv"), optimizer.checkpoint().geometry())?;
     let mut last_checkpoint = None;
     if let Some(executable) = executable.as_deref() {
@@ -251,6 +272,7 @@ fn run_optimizer_with_input(
         "\"resumed\":{},\"start_iteration\":{},\"segment_accepted_updates\":{},",
         "\"baseline_scope\":\"current_segment\",\"checkpoint\":{},",
         "\"fixed_boundaries\":[\"left\",\"right\"],",
+        "\"fixed_node_count\":{},\"design_regions\":{},",
         "\"material\":{{\"youngs\":{:.17e},\"poisson\":{:.17e}}},",
         "\"load\":{{\"traction_y\":{:.17e},\"band_half_width\":{:.17e}}},\"initial_field\":{},",
         "\"claims\":{{\"converged\":false,\"global_optimum\":false,\"physical_validation\":false,",
@@ -259,6 +281,7 @@ fn run_optimizer_with_input(
         policy.controls.max_candidates, wall_seconds, settings.volfrac, policy.projection.tolerance,
         limit.max_von_mises, limit.absolute_tolerance, stress_json(&baseline), stress_json(current), reduction,
         resumed, start_iteration, optimizer.checkpoint().next_iteration() - start_iteration, checkpoint,
+        policy.fixed.len(), design_regions,
         settings.youngs, settings.poisson, -fixture.load, fixture.band, input_field,
     );
     let mut completion = writer(&output_dir.join("summary.json"))?;

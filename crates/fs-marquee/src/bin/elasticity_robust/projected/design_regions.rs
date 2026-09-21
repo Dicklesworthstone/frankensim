@@ -1,11 +1,13 @@
 //! Bounded authored non-design regions, baked into existing fixed-node state.
 use super::{numbers, write_field, writer};
-use fs_topols::design_regions::{DesignPhase, DesignRegion, PreparedDesignRegions, prepare_design_regions};
+use fs_topols::design_regions::{DesignPhase, DesignRegion, PreparedDesignRegions, DesignRegionStage, prepare_design_regions_controlled};
 use fs_topols::GridSdf;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::ops::ControlFlow;
+use std::convert::Infallible;
 
 pub(super) fn options(args: &[String]) -> Result<(Vec<String>, Option<String>), Box<dyn Error>> {
     if args.len() > 32 { return Err("too many projected study arguments".into()); }
@@ -60,13 +62,26 @@ pub(super) struct Authoring {
 pub(super) fn load(
     path: &Path, field: &GridSdf, fixed: &[(usize, f64)],
 ) -> Result<Authoring, Box<dyn Error>> {
+    match load_controlled(path, field, fixed, |_| ControlFlow::<Infallible>::Continue(()))? {
+        ControlFlow::Continue(authored) => Ok(authored),
+        ControlFlow::Break(never) => match never {},
+    }
+}
+
+pub(super) fn load_controlled<B>(
+    path: &Path, field: &GridSdf, fixed: &[(usize, f64)],
+    control: impl FnMut(DesignRegionStage) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, Authoring>, Box<dyn Error>> {
     const MAX_BYTES: u64 = 1_048_576;
     let mut text = String::new();
     File::open(path)?.take(MAX_BYTES + 1).read_to_string(&mut text)?;
     if text.len() as u64 > MAX_BYTES { return Err("design-region CSV exceeds 1 MiB".into()); }
     let records = parse(&text)?;
-    let prepared = prepare_design_regions(field, fixed, &records)?;
-    Ok(Authoring { records, prepared })
+    let prepared = match prepare_design_regions_controlled(field, fixed, &records, control)? {
+        ControlFlow::Continue(prepared) => prepared,
+        ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+    };
+    Ok(ControlFlow::Continue(Authoring { records, prepared }))
 }
 
 impl Authoring {
