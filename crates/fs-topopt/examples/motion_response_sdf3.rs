@@ -11,6 +11,9 @@
 //! --projected selects linear-storage box/volume augmented Lagrangian instead
 //! of dense SQP; --level 3 exposes 384 active density variables on this fixture.
 //! Neither method promises nonlinear-volume feasibility at intermediate steps.
+//! --adapt-rounds 2..4 with --projected closes fit/estimate/refine/refit under
+//! the same cumulative work budget. An optional --estimate audits the LAST
+//! retained grid too. Target values are frozen before any adaptive round.
 use std::ops::ControlFlow;
 use fs_cutfem::{CutSdf3,HeightAxis,HexCell};
 use fs_cutfem::elastic3::{adaptive::AdaptiveElasticity3,ElasticityOptions3};
@@ -24,6 +27,8 @@ use fs_topopt::{SimpParams,SolveControl,SolveBudget};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::response::{ResponseCase3,ResponseTarget3,ResponseDesignStudy3,ResponseDesignOptions3,ProjectedResponseStudy3,ProjectedResponseOptions3};
 use fs_topopt::sdf3::response::refinement::{ReferenceResponseCase3,ReferenceResponseTarget3,ResponseRefinementOptions3};
+#[path = "motion_response_sdf3/adaptive.rs"]
+mod adaptive;
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64{(p[0]-0.17)*(p[0]-0.83)}
@@ -39,16 +44,21 @@ fn other(p:[f64;3],n:[f64;3])->[f64;3]{if n[0]>0.0{[0.0,0.01,0.005*p[2]]}else{[-
 fn main()->Result<(),Box<dyn std::error::Error>>{
     let mut input=std::env::args().skip(1);let mut args=Vec::new();
     let (mut estimate,mut projected,mut level_given)=(false,false,false);let mut level=1_u8;
+    let mut adaptive_rounds=None;
     while let Some(arg)=input.next(){
         match arg.as_str(){
             "--estimate" if !estimate=>estimate=true,
             "--projected" if !projected=>projected=true,
             "--level" if !level_given=>{level=input.next().ok_or("--level requires a value")?.parse::<u8>()?;level_given=true;}
+            "--adapt-rounds" if adaptive_rounds.is_none()=>{
+                adaptive_rounds=Some(input.next().ok_or("--adapt-rounds requires a value")?.parse::<usize>()?);
+            }
             _ if arg.starts_with("--")=>return Err(format!("unknown or repeated option: {arg}").into()),
             _=>args.push(arg),
         }
     }
     if !(1..=3).contains(&level){return Err("initial level must be in 1..=3".into());}
+    if let Some(rounds)=adaptive_rounds {adaptive::validate(rounds,projected)?;}
     if args.len()>2&&args.len()!=6{return Err("usage: motion_response_sdf3 [STEPS [TOTAL_KRYLOV [T00 T01 T10 T11]]]".into());}
     let steps=args.first().map_or(Ok(if projected{200}else{40}),|s|s.parse::<usize>())?;
     let budget=args.get(1).map_or(Ok(250000),|s|s.parse::<usize>())?;
@@ -112,6 +122,10 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
         work.preconditioner_galerkin_products,violation<=tolerance);
     outcome?;
     if violation>tolerance{return Err("accepted point is still infeasible; no feasible design claimed".into());}
+    if let Some(rounds)=adaptive_rounds {
+        return adaptive::run(&mut study,accepted,level,steps,rounds,&values,estimate,
+            ProjectedResponseOptions3{response:response_options,..Default::default()},&mut geometry,&mut control);
+    }
     if estimate {
         let fine=AdaptiveElasticity3::build_with_embedded_dirichlet(HexCell::try_new([0.0;3],[1.0;3])?,
             &Octree3::uniform(level+1,4,4096)?,&Slab,&IsotropicElastic::new(1.0,0.3,1.0)?,&|_|false,&|_,_|true,
