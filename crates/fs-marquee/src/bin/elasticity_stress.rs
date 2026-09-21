@@ -15,6 +15,9 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
+#[path = "elasticity_stress/projected.rs"]
+mod projected;
+
 fn writer(path: &Path) -> std::io::Result<BufWriter<File>> {
     OpenOptions::new().write(true).create_new(true).open(path).map(BufWriter::new)
 }
@@ -52,6 +55,9 @@ where
 
 fn run() -> Result<u8, Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--projected") {
+        return projected::run(&args[1..]);
+    }
     if args.len() < 2 || args.len() > 7 {
         return Err("usage: fs-marquee-elasticity-stress OUTPUT_DIR MAX_SAMPLED_VON_MISES [LEVEL=4] [ITERATIONS=12] [VOLFRAC=0.45] [MAX_CANDIDATES=5] [ABS_STRESS_TOL=0]".into());
     }

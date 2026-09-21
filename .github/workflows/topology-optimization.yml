@@ -23,7 +23,7 @@ jobs:
         run: set -o pipefail; cargo test --release -p fs-topols --lib projected 2>&1 | tee topology-tests.log
       - name: Test existing projected consumers
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-marquee --test projected_resume --test design_regions 2>&1 | tee topology-consumers.log
+        run: set -o pipefail; cargo test --release -p fs-marquee --test projected_resume --test design_regions --test projected_stress 2>&1 | tee topology-consumers.log
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
