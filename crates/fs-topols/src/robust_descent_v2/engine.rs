@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 mod projected;
+mod projected_load_support;
 pub use projected::{
     MultiLoadProjectedAttempt, MultiLoadProjectedOptimizer, MultiLoadProjectedProgress,
     MultiLoadProjectedSettings, MultiLoadProjectedStage, MultiLoadProjectedState,
@@ -126,6 +127,7 @@ impl Kernel {
             if let ControlFlow::Break(reason) = control(index, CaseProgress::Start) {
                 return Ok(ControlFlow::Break(reason));
             }
+            projected_load_support::require(&phi, *support, index)?;
             let value = case.traction();
             let traction = move |_: f64, _: f64| value;
             let boundary = BoundaryTraction::EdgeBand { support: *support, value: &traction };
