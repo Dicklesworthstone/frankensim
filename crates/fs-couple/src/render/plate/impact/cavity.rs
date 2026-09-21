@@ -23,6 +23,8 @@ use fs_exec::CancelGate;
 pub mod cylinder;
 /// Passive inertial openings coupled to the same distributed pressure field.
 pub mod neck;
+/// Prepared linear bodies, simultaneous contact and distributed air.
+pub mod prepared;
 
 
 /// Cold-compiled acoustic storage. Interface signs are OUTWARD from the gas,
@@ -48,8 +50,20 @@ impl CavityCoupling {
     pub fn new(cavity: &CavityModes, structural: usize, coupling: &[f64],
         damping_per_s: &[f64]) -> Result<Self, ImpactError>
     {
+        Self::new_with_mode_budget(cavity, structural, coupling, damping_per_s, MAX_IMPACT_MODES)
+    }
+
+    /// The same cavity storage with an explicit total-coordinate budget.
+    /// Prepared linear bodies may exceed the nonlinear reference's 64 modes;
+    /// this does not enlarge that reference solver's admission. The hard limit
+    /// is the existing modal owner's 4096 coordinates. No mode is truncated.
+    pub fn new_with_mode_budget(cavity: &CavityModes, structural: usize, coupling: &[f64],
+        damping_per_s: &[f64], maximum_modes: usize) -> Result<Self, ImpactError>
+    {
         let count = cavity.omegas.len();
-        if structural == 0 || structural > MAX_IMPACT_MODES || count == 0 || count > 8
+        if maximum_modes == 0
+            || maximum_modes > crate::modal_acoustic_time::MAX_TIME_DOMAIN_ACOUSTIC_MODES
+            || structural == 0 || structural > maximum_modes || count == 0 || count > 8
             || cavity.lambdas.len() != count || cavity.interface.len() != count
             || coupling.len() != structural*count || damping_per_s.len() != count
             || cavity.loss_factor != 0.0
@@ -62,7 +76,7 @@ impl CavityCoupling {
         { return Err(invalid("cavity requires bounded consistent basis, finite overlaps and explicit causal loss")); }
         let bulk = cavity.rho0*cavity.c0*cavity.c0;
         let total = structural + cavity.omegas.iter().filter(|&&w| w > 0.0).count();
-        if !bulk.is_finite() || bulk <= 0.0 || total > MAX_IMPACT_MODES {
+        if !bulk.is_finite() || bulk <= 0.0 || total > maximum_modes {
             return Err(invalid("cavity exceeds mechanical state or finite bulk-modulus budget"));
         }
         let mut next = structural;
@@ -116,19 +130,36 @@ impl CavityCoupling {
     /// a''+d*a'+omega^2*a = -A*C.(q''+d*q') without necks; with necks the same
     /// equation includes their outward volume derivatives. Not hysteretic loss.
     /// No radiation load, mean flow, thermoviscous spectrum or RT claim is inferred.
-    pub fn build(self, mut bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
-        mut pads: Vec<FeltPad>, config: ImpactConfig, gate: &CancelGate)
+    pub fn build(self, bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
+        pads: Vec<FeltPad>, config: ImpactConfig, gate: &CancelGate)
         -> Result<(ImpactSystem, Self), ImpactError>
+    {
+        if gate.is_requested() { return Err(ImpactError::Cancelled); }
+        if self.total > MAX_IMPACT_MODES {
+            return Err(invalid("distributed cavity exceeds the nonlinear reference mode budget"));
+        }
+        let (bodies, contacts, pads) = self.extend_parts(bodies, contacts, pads, config.dt_s, gate)?;
+        let system = ImpactSystem::new(bodies, contacts, pads, self.springs.clone(), config)?;
+        if gate.is_requested() { return Err(ImpactError::Cancelled); }
+        Ok((system, self))
+    }
+
+    // Both numerical images use exactly this address/initial-state lowering.
+    // Only the downstream solver and its own work admission differ.
+    fn extend_parts(&self, mut bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
+        mut pads: Vec<FeltPad>, dt_s: f64, gate: &CancelGate)
+        -> Result<(Vec<ImpactBody>, Vec<Obstacle>, Vec<FeltPad>), ImpactError>
     {
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         let count = bodies.iter().try_fold(0usize, |n,b| n.checked_add(b.potential.count()));
         if count != Some(self.structural) || contacts.len() > 32 || pads.len() > 16
-            || !config.dt_s.is_finite() || config.dt_s <= 0.0
-            || self.omegas.iter().any(|w| w*config.dt_s >= 0.9*core::f64::consts::PI)
-            || self.necks.iter().any(|n| n.fixed_wall_omega*config.dt_s >= 0.9*core::f64::consts::PI)
+            || !dt_s.is_finite() || dt_s <= 0.0
+            || self.omegas.iter().any(|w| w*dt_s >= 0.9*core::f64::consts::PI)
+            || self.necks.iter().any(|n| n.fixed_wall_omega*dt_s >= 0.9*core::f64::consts::PI)
         { return Err(invalid("cavity/body basis mismatch or acoustic Nyquist limit")); }
         let mut extended = Vec::with_capacity(contacts.len());
         for contact in contacts {
+            if gate.is_requested() { return Err(ImpactError::Cancelled); }
             if contact.n_points() > 4096 || contact.collocation().len() != contact.n_points()*self.structural {
                 return Err(invalid("cavity contact must use original structural coordinates"));
             }
@@ -160,9 +191,8 @@ impl CavityCoupling {
             bodies.push(ImpactBody { potential:BodyPotential::Linear(vec![0.0;self.total-self.structural]),
                 initial,damping_per_s:damping });
         }
-        let system = ImpactSystem::new(bodies,extended,pads,self.springs.clone(),config)?;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
-        Ok((system,self))
+        Ok((bodies, extended, pads))
     }
 
     /// Pressure coefficients [Pa] of the accepted state in the supplied basis.
