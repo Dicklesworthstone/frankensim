@@ -200,8 +200,10 @@ pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
     last_frame: Option<M::Frame>,
 }
 fn input(what: &'static str) -> RenderError { RenderError::Control { what } }
-fn owner(error: impl core::fmt::Display) -> RenderError {
-    RenderError::Voice(crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string()))
+// The radiation owner exposes a structured Debug refusal, not Display. Keep
+// its variant and context rather than requiring a trait it does not implement.
+fn owner(error: impl core::fmt::Debug) -> RenderError {
+    RenderError::Voice(crate::acoustic_realize::AcousticRealizeError::Nonlinear(format!("{error:?}")))
 }
 impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
     /// Bind the exact mechanical and radiation clocks, coordinate IDs and fixed
