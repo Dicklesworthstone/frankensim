@@ -13,6 +13,10 @@ use std::ops::ControlFlow;
 // smoothing, advection or an individual vector operation.
 const CG_POLL_ITERS: usize = 32;
 
+#[path = "continuation/projected.rs"]
+mod projected;
+pub(super) use projected::{Controls as ProjectedControls, PROJECTED_SCOPE, parse_controls};
+
 fn stop_status(cancelled: bool, consumed_wall: f64, wall_limit: f64) -> Option<&'static str> {
     if cancelled { Some("cancelled") }
     else if consumed_wall >= wall_limit { Some("budget-exhausted") }
@@ -23,12 +27,29 @@ pub(super) struct Evidence {
     producer: ContentHash,
     updates: usize,
     legacy_replayed: usize,
+    projected: Option<projected::ConstraintEvidence>,
 }
 
 impl Evidence {
     pub(super) fn json(&self) -> String {
-        format!("{{\"version\":1,\"producer\":\"{}\",\"updates_this_invocation\":{},\"legacy_prefix_updates_replayed\":{},\"mode\":\"accepted-state-continuation\"}}",
+        let constraints = self.constraint_fields();
+        format!("{{\"version\":1,\"producer\":\"{}\",\"updates_this_invocation\":{},\"legacy_prefix_updates_replayed\":{},\"mode\":\"accepted-state-continuation\"{constraints}}}",
             self.producer.to_hex(), self.updates, self.legacy_replayed)
+    }
+}
+
+impl Evidence {
+    pub(super) fn constraint_fields(&self) -> String {
+        self.projected.as_ref().map_or_else(String::new,
+            |state| format!(",\"constraints\":{}", state.json()))
+    }
+
+    pub(super) fn projected_current(&self) -> Option<&fs_topols::SampledStressEvaluation> {
+        self.projected.as_ref().map(projected::ConstraintEvidence::current)
+    }
+
+    pub(super) fn constraint_html(&self) -> String {
+        self.projected.as_ref().map_or_else(String::new, |state| state.html())
     }
 }
 
@@ -139,7 +160,7 @@ fn decode(spec: &ElasticitySpec, receipt: &JsonValue, design: &JsonValue,
     if report.snapshots.last().is_some_and(|&last| last != actual_snapshot) {
         return Err(malformed("final iteration and retained geometry are different designs"));
     }
-    if count == 0 && phi.nodes().iter().zip(initial_phi(spec).nodes())
+    if count == 0 && spec.projected.is_none() && phi.nodes().iter().zip(initial_phi(spec).nodes())
         .any(|(a, b)| a.to_bits() != b.to_bits()) {
         return Err(malformed("zero-update geometry differs from the declared initial design"));
     }
@@ -166,7 +187,11 @@ fn retained_error(mut error: Failure, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
-    drive_observed(spec, ledger, cap, gate, prior, |_, _| {})
+    if spec.projected.is_some() {
+        projected::drive(spec, ledger, cap, gate, prior)
+    } else {
+        drive_observed(spec, ledger, cap, gate, prior, |_, _| {})
+    }
 }
 
 // The observer allows deterministic request injection at real kernel
@@ -178,7 +203,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         return Err(fail("cli-study-elasticity-transaction", "study requires its own ledger transaction"));
     }
     let start = Instant::now();
-    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0 };
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
     let mut predecessor = prior.map(|loaded| loaded.hash);
     let mut retained_wall = 0.0;
     let mut last = None;

@@ -53,3 +53,18 @@ jobs:
       - name: Test force and displacement response fitting
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-topopt --features cutfem-marquee --test reaction_response_sdf3 --test response_sdf3 --test projected_response_sdf3 --test response_goal3 --example reaction_response_sdf3
+  native-study:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[native-study-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test native elasticity studies and constrained continuation
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cli --lib study::elasticity

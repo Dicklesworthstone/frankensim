@@ -1,0 +1,371 @@
+//! Hard-area and sampled-stress admission in the existing native study/ledger.
+//! Numerical work belongs to fs-topols; this module only binds declarations,
+//! retained accepted state, stopping and reports to that existing controller.
+use super::*;
+use std::fmt::Write as _;
+use fs_topols::projected::{ProjectedOptimizer, ProjectedProgress, ProjectedSettings, ProjectedStage};
+use fs_topols::projected_stress::ProjectedStressSetupStage;
+use fs_topols::volume::VolumeProjectionSettings;
+use fs_topols::{ProjectedStressOptimizer, SampledStressEvaluation, SampledStressLimit};
+
+pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a deterministic sampled von Mises limit. Improvement is measured against the separately projected, stress-feasible study baseline under identical loads. Every accepted state is independently re-solved and durably retained. CG and cell-sampling boundaries are cancellable; assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Controls {
+    area: VolumeProjectionSettings,
+    search: ProjectedSettings,
+    stress: SampledStressLimit,
+}
+
+pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Controls>> {
+    let mode = fields.windows(2).find(|pair|
+        matches!(&pair[0].kind, NodeKind::Keyword(key) if key == "constraint-mode"));
+    let Some(mode) = mode else { return Ok(None) };
+    if !matches!(&mode[1].kind, NodeKind::Symbol(value) if value == "projected-stress") {
+        return Err(malformed("constraint-mode must be projected-stress"));
+    }
+    let real = |key| super::super::number(field(fields, key)?, key);
+    let count = |key| integer_node(field(fields, key)?, key);
+    let controls = Controls {
+        area: VolumeProjectionSettings {
+            target, tolerance: real("area-tolerance-m2")?,
+            max_shift: real("max-projection-shift")?,
+            max_evaluations: count("max-area-evaluations")?,
+        },
+        search: ProjectedSettings {
+            max_candidates: count("max-candidates")?, contraction: real("contraction")?,
+            min_relative_improvement: real("min-relative-improvement")?,
+            poll_iters: count("cg-poll-iters")?,
+        },
+        stress: SampledStressLimit::new(real("sampled-stress-limit-pa")?, real("stress-tolerance-pa")?)
+            .map_err(|error| malformed(&error.to_string()))?,
+    };
+    let a = controls.area;
+    let s = controls.search;
+    if !(a.tolerance > 0.0 && a.tolerance <= 0.01 && a.max_shift > 0.0)
+        || !(3..=64).contains(&a.max_evaluations)
+        || !(1..=16).contains(&s.max_candidates)
+        || !(s.contraction > 0.0 && s.contraction < 1.0)
+        || !(0.0..1.0).contains(&s.min_relative_improvement)
+        || !(1..=60_000).contains(&s.poll_iters)
+    {
+        return Err(malformed("projected-stress requires area tolerance in (0,0.01], positive shift, 3..=64 area evaluations, 1..=16 candidates, contraction (0,1), relative decrease [0,1), and 1..=60000 CG polling iterations"));
+    }
+    Ok(Some(controls))
+}
+
+impl Controls {
+    pub(crate) fn canonical(&self, out: &mut String) {
+        let _ = writeln!(out, "    :constraint-mode projected-stress");
+        for (key, value) in [("area-tolerance-m2", self.area.tolerance),
+            ("max-projection-shift", self.area.max_shift)]
+        { let _ = writeln!(out, "    :{key} {}", canonical_float(value)); }
+        let _ = writeln!(out, "    :max-area-evaluations {}", self.area.max_evaluations);
+        let _ = writeln!(out, "    :max-candidates {}", self.search.max_candidates);
+        let _ = writeln!(out, "    :contraction {}", canonical_float(self.search.contraction));
+        let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
+        let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
+        let _ = writeln!(out, "    :sampled-stress-limit-pa {}", canonical_float(self.stress.max_von_mises));
+        let _ = writeln!(out, "    :stress-tolerance-pa {})", canonical_float(self.stress.absolute_tolerance));
+    }
+}
+
+fn stress_json(s: &SampledStressEvaluation) -> String {
+    format!("{{\"compliance_j\":{:.17e},\"area_m2\":{:.17e},\"sampled_von_mises_pa\":{:.17e},\"max_x\":{:.17e},\"max_y\":{:.17e},\"sample_count\":{},\"snapshot\":\"{:#018x}\"}}",
+        s.compliance, s.volume, s.sampled_max_von_mises, s.max_location[0], s.max_location[1], s.sample_count, s.snapshot)
+}
+
+fn read_stress(value: &JsonValue, policy: Controls) -> Result<SampledStressEvaluation> {
+    let real = |key| number(value, key).map(|(number, _)| number);
+    let state = SampledStressEvaluation {
+        compliance: real("compliance_j")?, volume: real("area_m2")?,
+        sampled_max_von_mises: real("sampled_von_mises_pa")?,
+        max_location: [real("max_x")?, real("max_y")?],
+        sample_count: integer(value, "sample_count")?,
+        snapshot: hexadecimal(value.str_field("snapshot").ok_or_else(|| malformed("missing stress snapshot"))?, true)?,
+    };
+    if state.compliance < 0.0 || state.volume <= 0.0 || state.sample_count == 0
+        || state.sample_count > 100_000_000
+        || state.max_location.iter().any(|v| !(0.0..=1.0).contains(v))
+        || (state.volume - policy.area.target).abs() > policy.area.tolerance
+        || state.sampled_max_von_mises < 0.0
+        || state.sampled_max_von_mises > policy.stress.admitted_max()
+    { return Err(malformed("retained projected stress state violates the declared constraints")); }
+    Ok(state)
+}
+
+fn same(a: &SampledStressEvaluation, b: &SampledStressEvaluation) -> bool {
+    a.snapshot == b.snapshot && a.sample_count == b.sample_count
+        && [a.compliance, a.volume, a.sampled_max_von_mises, a.max_location[0], a.max_location[1]]
+            .iter().zip([b.compliance, b.volume, b.sampled_max_von_mises, b.max_location[0], b.max_location[1]])
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// Small accepted-state history, bounded by the native 32-update envelope.
+/// Detailed proposal attempts remain owned by fs-topols; final refusal reasons
+/// are retained here rather than disguised as convergence or a completed study.
+pub(super) struct ConstraintEvidence {
+    policy: Controls,
+    baseline: SampledStressEvaluation,
+    accepted: Vec<SampledStressEvaluation>,
+    attempts: Vec<usize>,
+    refusals: Vec<String>,
+}
+
+impl ConstraintEvidence {
+    pub(super) fn current(&self) -> &SampledStressEvaluation {
+        self.accepted.last().unwrap_or(&self.baseline)
+    }
+
+    pub(super) fn html(&self) -> String {
+        format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Sampled stress limit: {:.8e} Pa + {:.8e} Pa allowance. Feasible baseline compliance: {:.8e} J. Current sampled maximum: {:.8e} Pa. Stress is sample-scoped, not a continuous-domain bound.</p>",
+            self.policy.area.target, self.policy.area.tolerance,
+            self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
+            self.baseline.compliance, self.current().sampled_max_von_mises)
+    }
+
+    pub(super) fn json(&self) -> String {
+        let reduction = if self.baseline.compliance > 0.0 {
+            (self.baseline.compliance - self.current().compliance) / self.baseline.compliance
+        } else { 0.0 };
+        format!(concat!("{{\"mode\":\"projected-stress-v1\",\"baseline_scope\":\"feasible_study_start\",",
+            "\"area_target_m2\":{:.17e},\"area_tolerance_m2\":{:.17e},",
+            "\"stress_limit_pa\":{:.17e},\"stress_tolerance_pa\":{:.17e},",
+            "\"baseline\":{},\"accepted\":[{}],\"candidate_counts\":[{}],",
+            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}}}"),
+            self.policy.area.target, self.policy.area.tolerance,
+            self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
+            stress_json(&self.baseline), self.accepted.iter().map(stress_json).collect::<Vec<_>>().join(","),
+            self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
+            self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction)
+    }
+
+    fn read(value: &JsonValue, report: &OptimizeReport, policy: Controls) -> Result<Self> {
+        if value.str_field("mode") != Some("projected-stress-v1")
+            || value.str_field("baseline_scope") != Some("feasible_study_start")
+        { return Err(malformed("missing projected-stress baseline identity")); }
+        for (key, expected) in [("area_target_m2", policy.area.target),
+            ("area_tolerance_m2", policy.area.tolerance),
+            ("stress_limit_pa", policy.stress.max_von_mises),
+            ("stress_tolerance_pa", policy.stress.absolute_tolerance)]
+        {
+            if number(value, key)?.0.to_bits() != expected.to_bits() {
+                return Err(malformed("retained constraints differ from the canonical study"));
+            }
+        }
+        let array = |key| value.get(key).and_then(JsonValue::as_array)
+            .ok_or_else(|| malformed("missing constrained history array"));
+        let baseline = read_stress(value.get("baseline").ok_or_else(|| malformed("missing feasible baseline"))?, policy)?;
+        let accepted_values = array("accepted")?;
+        let attempts = array("candidate_counts")?;
+        let refused = array("terminal_refusals")?;
+        if accepted_values.len() != report.rows.len() || attempts.len() != report.rows.len()
+            || refused.len() > policy.search.max_candidates
+        { return Err(malformed("constraint history lengths disagree with the accepted trajectory")); }
+        let mut accepted = Vec::with_capacity(accepted_values.len());
+        let mut counts = Vec::with_capacity(attempts.len());
+        let mut previous = baseline.compliance;
+        for (i, (state, count)) in accepted_values.iter().zip(attempts).enumerate() {
+            let state = read_stress(state, policy)?;
+            let count: usize = count.number_raw().and_then(|v| v.parse().ok())
+                .ok_or_else(|| malformed("invalid candidate count"))?;
+            if !(1..=policy.search.max_candidates).contains(&count)
+                || state.snapshot != report.snapshots[i]
+                || state.compliance.to_bits() != report.compliance[i].to_bits()
+                || state.volume.to_bits() != report.volume[i].to_bits()
+                || !(state.compliance < previous * (1.0 - policy.search.min_relative_improvement))
+            { return Err(malformed("accepted constraint history does not match the decreasing trajectory")); }
+            previous = state.compliance;
+            accepted.push(state);
+            counts.push(count);
+        }
+        let refusals = refused.iter().map(|v| v.as_str().map(str::to_string)
+            .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
+        Ok(Self { policy, baseline, accepted, attempts: counts, refusals })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Stage {
+    Setup(ProjectedStressSetupStage),
+    Update(ProjectedStage),
+}
+
+fn constraints_stop(status: &'static str, last: Option<&Outcome>) -> Failure {
+    retained_error(Failure {
+        code: "cli-study-elasticity-constraint-stop",
+        message: format!("{status} before complete constrained-state admission; no new feasible state published"),
+        exit: if status == "cancelled" { exit::CANCELLED } else { exit::BUDGET },
+    }, last)
+}
+
+pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
+    gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
+    drive_observed(spec, ledger, cap, gate, prior, |_| {})
+}
+
+fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
+    gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(Stage)) -> Result<Outcome> {
+    if ledger.in_transaction() { return Err(malformed("constrained study requires its own ledger transaction")); }
+    let policy = spec.projected.ok_or_else(|| malformed("missing projected controls"))?;
+    let start = Instant::now();
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
+    let mut predecessor = prior.map(|old| old.hash);
+    let mut last = None;
+    let mut consumed = 0.0;
+    let mut report = OptimizeReport::default();
+    let initial = initial_phi(spec);
+    let fixed: Vec<_> = initial.nodes().iter().copied().enumerate()
+        .filter(|(i, _)| i % (initial.n() + 1) == 0 || i % (initial.n() + 1) == initial.n()).collect();
+    // This native domain is a plate with STRICTLY interior circular holes.
+    // Its complete left/right traces must be material. Freezing every trace
+    // node preserves their linear interpolants, so no supported sub-band can
+    // disappear during projection. CutFEM still performs its own cut-edge gate.
+    if fixed.iter().any(|(_, value)| !value.is_finite() || *value >= 0.0) {
+        return Err(malformed("declared plate must retain material on both fixed boundary traces"));
+    }
+    let mut state = if let Some(old) = prior {
+        if old.value.str_field("study_id") != Some(spec.id.to_hex().as_str()) {
+            return Err(malformed("retained study identity changed"));
+        }
+        let binding = old.value.get("continuation").ok_or_else(|| malformed("constrained resume needs accepted-state continuation"))?;
+        if integer(binding, "version")? != 1
+            || binding.str_field("producer") != Some(evidence.producer.to_hex().as_str())
+        { return Err(malformed("constrained resume requires the identical executable")); }
+        let design = document(&linked(ledger, &old.value, "design", "study-design")?)?;
+        let iterations = document(&linked(ledger, &old.value, "iterations", "study-iterations")?)?;
+        let (phi, decoded) = decode(spec, &old.value, &design, &iterations)?;
+        report = decoded;
+        let retained = ConstraintEvidence::read(binding.get("constraints")
+            .ok_or_else(|| malformed("missing retained constrained history"))?, &report, policy)?;
+        if snapshot(&phi) != retained.current().snapshot {
+            return Err(malformed("retained stress and geometry differ"));
+        }
+        let status = match old.value.str_field("status") {
+            Some("running") => "running", Some("completed") => "completed",
+            Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
+            Some("no-feasible-descent") => "no-feasible-descent",
+            _ => return Err(malformed("unknown constrained study terminal")),
+        };
+        last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
+        consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or_else(|| malformed("invalid retained wall charge"))?;
+        let checkpoint = OptimizeCheckpoint::restore(phi, fixture(spec), settings(spec, spec.steps),
+            report.rows.len(), report.ell.last().copied().unwrap_or(spec.ell0))
+            .map_err(|error| malformed(&error.to_string()))?;
+        let restored = ProjectedStressOptimizer::from_checkpoint_controlled(&checkpoint, fixed,
+            policy.area, policy.search, policy.stress, |stage| {
+                observe(Stage::Setup(stage));
+                match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+        let restored = match restored {
+            ControlFlow::Continue(restored) => restored,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, last.as_ref())),
+        };
+        if !same(restored.current(), retained.current()) {
+            return Err(malformed("independent constrained replay differs from the retained endpoint"));
+        }
+        evidence.projected = Some(retained);
+        if status == "completed" || status == "no-feasible-descent" {
+            return last.ok_or_else(|| malformed("terminal constrained study has no receipt"));
+        }
+        restored
+    } else {
+        let area = ProjectedOptimizer::new_controlled(&initial, fixture(spec), settings(spec, spec.steps),
+            fixed, policy.area, policy.search, |stage| {
+                observe(Stage::Setup(ProjectedStressSetupStage::Area(stage)));
+                match stop_status(gate.is_requested(), start.elapsed().as_secs_f64(), spec.wall_s) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| malformed(&error.to_string()))?;
+        let area = match area { ControlFlow::Continue(area) => area,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, None)) };
+        let state = ProjectedStressOptimizer::new_controlled(&area, policy.stress, |stage| {
+            observe(Stage::Setup(stage));
+            match stop_status(gate.is_requested(), start.elapsed().as_secs_f64(), spec.wall_s) {
+                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+            }
+        }).map_err(|error| malformed(&error.to_string()))?;
+        let state = match state { ControlFlow::Continue(state) => state,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, None)) };
+        evidence.projected = Some(ConstraintEvidence { policy, baseline: state.current().clone(),
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new() });
+        state
+    };
+    let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
+    if last.is_none() {
+        if let Some(status) = stop_status(gate.is_requested(), start.elapsed().as_secs_f64(), spec.wall_s) {
+            return Err(constraints_stop(status, None));
+        }
+        let initial = persist(spec, ledger, state.checkpoint().geometry(), &report, "running",
+            consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)?;
+        predecessor = initial.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
+        last = Some(initial);
+    }
+    loop {
+        let status = stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
+            .or_else(|| (state.checkpoint().next_iteration() == target)
+                .then_some(if state.checkpoint().is_complete() { "completed" } else { "budget-exhausted" }));
+        if let Some(status) = status {
+            return persist(spec, ledger, state.checkpoint().geometry(), &report, status,
+                consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                .map_err(|error| retained_error(error, last.as_ref()));
+        }
+        let update = state.advance_one_controlled(|stage| {
+            observe(Stage::Update(stage));
+            match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
+                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+            }
+        }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+        let update = match update {
+            ControlFlow::Continue(update) => update,
+            ControlFlow::Break(status) => return persist(spec, ledger, state.checkpoint().geometry(), &report,
+                status, consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                .map_err(|error| retained_error(error, last.as_ref())),
+        };
+        let retained = evidence.projected.as_mut().expect("admitted constrained state");
+        match update.progress {
+            ProjectedProgress::Accepted(step) => {
+                let current = state.current();
+                if step.iteration != report.rows.len() || step.state.snapshot != current.snapshot
+                    || step.state.compliance.to_bits() != current.compliance.to_bits()
+                    || step.state.volume.to_bits() != current.volume.to_bits()
+                { return Err(retained_error(malformed("accepted mechanics and stress are inconsistent"), last.as_ref())); }
+                let audit = step.proposal.audits.first().ok_or_else(|| malformed("proposal audit is missing"))?;
+                let drift = audit.interface_drift_h;
+                let pad = step.proposal.load_pad_nodes.first().copied().ok_or_else(|| malformed("proposal load-pad count is missing"))?;
+                let ell = state.checkpoint().ell();
+                report.rows.push(format!("{{\"iter\":{},\"compliance\":{:.17e},\"volume\":{:.17e},\"ell\":{ell:.17e},\"drift_h\":{drift:.17e},\"load_pad_nodes\":{pad},\"snapshot\":\"{:#018x}\"}}",
+                    step.iteration, current.compliance, current.volume, current.snapshot));
+                report.compliance.push(current.compliance);
+                report.volume.push(current.volume);
+                report.ell.push(ell);
+                report.snapshots.push(current.snapshot);
+                report.load_pad_nodes.push(pad);
+                retained.accepted.push(current.clone());
+                retained.attempts.push(step.attempts.len());
+                retained.refusals.clear();
+                evidence.updates += 1;
+            }
+            ProjectedProgress::NoDescent(attempts) => {
+                retained.refusals = attempts.into_iter().map(|attempt| attempt.refusal
+                    .unwrap_or_else(|| "candidate was not admitted".into())).collect();
+                return persist(spec, ledger, state.checkpoint().geometry(), &report, "no-feasible-descent",
+                    consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                    .map_err(|error| retained_error(error, last.as_ref()));
+            }
+            ProjectedProgress::IterationLimit => return Err(malformed("constrained optimizer completed before target")),
+        }
+        let accepted = persist(spec, ledger, state.checkpoint().geometry(), &report, "running",
+            consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+            .map_err(|error| retained_error(error, last.as_ref()))?;
+        predecessor = accepted.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
+        last = Some(accepted);
+    }
+}
+
+#[cfg(test)]
+#[path = "projected/tests.rs"]
+mod tests;

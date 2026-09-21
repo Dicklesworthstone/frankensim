@@ -96,6 +96,7 @@ struct ElasticitySpec {
     memory_bytes: u64,
     max_iterations: usize,
     id: ContentHash,
+    projected: Option<continuation::ProjectedControls>,
 }
 
 fn list<'a>(node: &'a Node, what: &'static str) -> Result<&'a [Node]> {
@@ -251,7 +252,12 @@ fn canonical(spec: &ElasticitySpec) -> String {
         "    :hole-radius-cells {}",
         canonical_float(spec.hole_radius_cells)
     );
-    let _ = writeln!(out, "    :steps {})", spec.steps);
+    if let Some(controls) = &spec.projected {
+        let _ = writeln!(out, "    :steps {}", spec.steps);
+        controls.canonical(&mut out);
+    } else {
+        let _ = writeln!(out, "    :steps {})", spec.steps);
+    }
     let _ = writeln!(out, ")");
     out
 }
@@ -309,6 +315,8 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
     let max_iterations = budgets
         .max_iterations
         .ok_or_else(|| fail("cli-study-elasticity-budget", "max-iterations is required"))?;
+    let projected = continuation::parse_controls(optimizer_fields,
+        base.constraints.as_ref().expect("validated constraints").volume_fraction)?;
     let mut parsed = ElasticitySpec {
         base,
         canonical: String::new(),
@@ -329,6 +337,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         memory_bytes,
         max_iterations,
         id: ContentHash([0; 32]),
+        projected,
     };
     validate_model(&parsed)?;
     parsed.canonical = canonical(&parsed);
@@ -578,6 +587,7 @@ fn render(out: Outcome, mode: OutputMode) -> CommandOutput {
     let exit_code = match out.status {
         "completed" => exit::SUCCESS,
         "cancelled" => exit::CANCELLED,
+        "no-feasible-descent" => exit::REFUSED,
         _ => exit::BUDGET,
     };
     let stdout = match mode {
@@ -652,6 +662,9 @@ fn persist(
     evidence: &continuation::Evidence,
 ) -> Result<Outcome> {
     let continuation = evidence.json();
+    let constraints = evidence.constraint_fields();
+    let constraint_html = evidence.constraint_html();
+    let no_claim = if spec.projected.is_some() { continuation::PROJECTED_SCOPE } else { NO_CLAIM };
     let count = report.rows.len();
     let trace = trace_hash(&report.rows);
     let mut rows = format!(
@@ -666,17 +679,19 @@ fn persist(
     let design = design_json(phi);
     let final_compliance = report
         .compliance
-        .last()
+        .last().copied()
+        .or_else(|| evidence.projected_current().map(|state| state.compliance))
         .map_or("null".to_string(), |value| format!("{value:.17e}"));
-    let final_volume = report.volume.last().copied();
+    let final_volume = report.volume.last().copied()
+        .or_else(|| evidence.projected_current().map(|state| state.volume));
     let final_snapshot = report.snapshots.last().copied().unwrap_or_else(|| snapshot(phi));
     let summary = format!(
-        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}}}",
         spec.id.to_hex(),
         spec.steps,
         final_volume.map_or("null".to_string(), |value| format!("{value:.17e}")),
         trace.to_hex(),
-        quoted(NO_CLAIM)
+        quoted(no_claim)
     );
     let mut table = String::new();
     for (index, ((compliance, volume), snap)) in report
@@ -695,7 +710,7 @@ fn persist(
         );
     }
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{NO_CLAIM}</p><p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}<p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
         spec.steps,
         geometry_svg(phi),
         trace.to_hex()
