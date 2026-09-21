@@ -82,3 +82,7 @@ required-features = ["marquee"]
 [[test]]
 name = "projected_resume"
 required-features = ["marquee"]
+
+[[test]]
+name = "design_regions"
+required-features = ["marquee"]

@@ -15,6 +15,7 @@ use std::path::Path;
 mod stress;
 mod checkpoint;
 mod refinement;
+mod design_regions;
 
 fn quoted(value: &str) -> String {
     let mut out = String::new();
@@ -133,12 +134,13 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
     if args.first().is_some_and(|arg| arg == "--refine") {
         return refinement::run(&args[1..]);
     }
-    let (args, checkpoint_options) = checkpoint::options(args)?;
+    let (args, region_path) = design_regions::options(args)?;
+    let (args, checkpoint_options) = checkpoint::options(&args)?;
     // Constraint input is checked before any path reads, solver work or output.
     let (positional, stress_limit, restoration_reduction) = stress::options(&args)?;
     let args = positional.as_slice();
     if !(2..=9).contains(&args.len()) {
-        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--stress-limit MAX] [--stress-tolerance ABS] [--restore-stress] [--restoration-reduction FRACTION]".into());
+        return Err("usage: fs-marquee-elasticity-robust --projected OUTPUT_DIR LOAD_CASES.csv [LEVEL=4] [UPDATES=30] [AREA=0.45] [CANDIDATES=6] [AGGREGATE=worst] [MAX_SOLVES] [INITIAL_FIELD.csv] [--design-regions REGIONS.csv] [--stress-limit MAX] [--stress-tolerance ABS] [--restore-stress] [--restoration-reduction FRACTION]".into());
     }
     let output = Path::new(&args[0]);
     if output.try_exists()? { return Err("output directory already exists; refusing to overwrite it".into()); }
@@ -168,11 +170,18 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         Some(path) => read_field(Path::new(path), n)?,
         None => GridSdf::from_fn(n, &|_, y| (y - 0.5).abs() - 0.42),
     };
-    let fixed = field.nodes().iter().copied().enumerate().filter(|(index, _)| {
+    let fixed: Vec<_> = field.nodes().iter().copied().enumerate().filter(|(index, _)| {
         let i = index % (n + 1);
         let j = index / (n + 1);
         i == 0 || i == n || j == 0 || j == n
     }).collect();
+    let authored = region_path.as_deref().map(|path| {
+        design_regions::load(Path::new(path), &field, &fixed)
+    }).transpose()?;
+    let (geometry, fixed) = match &authored {
+        Some(regions) => (regions.prepared.geometry.clone(), regions.prepared.fixed_nodes.clone()),
+        None => (field.clone(), fixed),
+    };
     let projection = VolumeProjectionSettings {
         target: volfrac, tolerance: 1e-4, max_shift: 2.0, max_evaluations: 64,
     };
@@ -181,7 +190,7 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
         nucleation_period: 4, hole_radius_cells: 1.5, ..OptimizeSettings::default()
     };
     let mut optimizer = MultiLoadProjectedOptimizer::new(
-        field.clone(), &cases, settings, aggregate, fixed, projection,
+        geometry, &cases, settings, aggregate, fixed, projection,
         MultiLoadProjectedSettings { max_candidates, max_solves, ..MultiLoadProjectedSettings::default() },
     )?;
     if let Some(limit) = stress_limit {
@@ -190,13 +199,23 @@ pub(super) fn run(args: &[String]) -> Result<u8, Box<dyn Error>> {
             None => optimizer.with_sampled_stress_limit(limit)?,
         };
     }
-    run_optimizer(output, optimizer, &field, checkpoint_options, None)
+    run_optimizer_with_regions(output, optimizer, &field, checkpoint_options, None, authored.as_ref())
 }
 
 fn run_optimizer(
+    output: &Path, optimizer: MultiLoadProjectedOptimizer, field: &GridSdf,
+    checkpoint_options: checkpoint::Options,
+    refinement: Option<&refinement::Handoff>,
+) -> Result<u8, Box<dyn Error>> {
+    // Restart/refinement already carry fixed geometry. Never re-author a mask.
+    run_optimizer_with_regions(output, optimizer, field, checkpoint_options, refinement, None)
+}
+
+fn run_optimizer_with_regions(
     output: &Path, mut optimizer: MultiLoadProjectedOptimizer, field: &GridSdf,
     checkpoint_options: checkpoint::Options,
     refinement: Option<&refinement::Handoff>,
+    authored: Option<&design_regions::Authoring>,
 ) -> Result<u8, Box<dyn Error>> {
     let settings = optimizer.settings();
     let level = settings.level;
@@ -215,6 +234,10 @@ fn run_optimizer(
         return Err(format!("checkpoint exceeds this executable's grid/update/candidate bounds; recovery_solves_started={}", checkpoint_options.recovery_solves).into());
     }
     std::fs::create_dir(output)?;
+    let design_regions_summary = match authored {
+        Some(regions) => format!(",\"design_regions\":{}", regions.export(output)?),
+        None => String::new(),
+    };
     let refinement_summary = if let Some(handoff) = refinement {
         let json = handoff.json();
         let mut file = writer(&output.join("refinement.json"))?;
@@ -305,7 +328,7 @@ fn run_optimizer(
         None => (schema, String::new()),
     };
     let summary = format!(
-        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary}{refinement_summary}{restoration_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
+        "{{\"schema\":\"{schema}\",\"model\":\"normalized_unit_square_plane_strain\",\"authority\":\"estimated\",\"status\":\"{status}\",\"aggregate\":\"{aggregate_name}\",\"level\":{level},\"requested_updates\":{iterations},\"accepted_updates\":{},\"load_cases\":{},\"area_target\":{volfrac:.17e},\"area_tolerance\":{:.17e},\"candidate_budget\":{max_candidates},\"max_solves\":{max_solves},\"solves_started\":{},\"baseline\":{},\"final\":{}{stress_summary}{checkpoint_summary}{refinement_summary}{restoration_summary}{design_regions_summary},\"refusal\":{failure_json},\"claims\":{{\"physical_validation\":false,\"kkt_convergence\":false,\"global_optimum\":false,\"continuum_volume_certificate\":false,\"three_dimensional\":false}}}}",
         optimizer.next_iteration(), cases.len(), projection.tolerance, optimizer.solves_started(),
         state_json(optimizer.baseline()), state_json(&optimizer.current()),
     );
