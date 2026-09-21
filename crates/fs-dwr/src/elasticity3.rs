@@ -15,6 +15,7 @@ use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::octree3::Octant3;
 
+pub mod reaction;
 pub mod response;
 use response::EquilibriumLoad3;
 
