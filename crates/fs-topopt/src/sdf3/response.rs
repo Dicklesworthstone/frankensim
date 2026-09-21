@@ -4,7 +4,9 @@
 //! One adjoint per load case solves K z = dJ/du. Its cell-scale derivative is
 //! z^T db_g/ds - z^T dK/ds u, followed by the ORIGINAL SIMP/projection/filter
 //! pullback. Neither differentiating CG nor treating b_g as fixed is correct.
-//! These are numerical discrete responses, not reaction/actuator work or bounds.
+//! Optional embedded reaction observations also add their DIRECT material
+//! derivative before the same adjoint/filter pullback. Their numerical traction
+//! is not continuum-certified force, actuator energy or a shape derivative.
 use super::*;
 use crate::SolveWork;
 use fs_cutfem::elastic3::ElasticityError3;
@@ -12,6 +14,8 @@ use std::ops::ControlFlow;
 
 mod design;
 mod projected;
+mod reaction;
+pub use reaction::ReactionTarget3;
 pub mod adaptive;
 pub mod refinement;
 pub use design::{ResponseDesignIteration3, ResponseDesignOptions3, ResponseDesignStudy3};
@@ -81,7 +85,12 @@ pub struct ResponseEvaluation3 {
     pub gradient: Vec<f64>,
     pub volume_fraction: f64,
     pub volume_gradient: Vec<f64>,
+    /// Displacement observations in the original per-case target order.
     pub responses: Vec<Vec<f64>>,
+    /// Embedded reaction observations, separately ordered for each case.
+    /// Empty rows for legacy displacement-only evaluations. Existing response
+    /// refinement refuses nonempty rows until reaction-aware goals are provided.
+    pub reaction_responses: Vec<Vec<f64>>,
     pub displacements: Vec<Vec<f64>>,
     pub adjoints: Vec<Vec<f64>>,
     /// f^T u, separate from both the fitting objective and (f+b_g)^T u.
@@ -103,24 +112,42 @@ fn dot(a: &[f64], b: &[f64]) -> f64 { a.iter().zip(b).map(|(a,b)| a*b).sum() }
 
 pub(super) fn admit<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, cases: &[ResponseCase3<'_>],
     options: ResponseOptions3) -> Result<(), ResponseError3> {
+    admit_family(study, cases, None, options)
+}
+fn admit_family<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, cases: &[ResponseCase3<'_>],
+    reactions: Option<&[&[ReactionTarget3<'_>]]>, options: ResponseOptions3) -> Result<(), ResponseError3> {
     let invalid = ResponseError3::Invalid;
+    if reactions.is_some_and(|r| r.len() != cases.len()) {
+        return Err(invalid("one reaction target slice per experiment required"));
+    }
     if cases.is_empty() || cases.len() > options.max_cases || !options.volume_weight.is_finite() || options.volume_weight < 0.0 {
         return Err(invalid("invalid response family, weight or case budget"));
     }
     let n = study.operator.n(); let mut count = 0usize; let mut positive = options.volume_weight > 0.0;
-    for case in cases {
-        count = count.checked_add(case.targets.len()).filter(|v| *v <= options.max_observations)
+    for (index, case) in cases.iter().enumerate() {
+        let reaction_targets = reactions.map_or(&[][..], |r| r[index]);
+        count = count.checked_add(case.targets.len()).and_then(|n| n.checked_add(reaction_targets.len()))
+            .filter(|v| *v <= options.max_observations)
             .ok_or(invalid("observation budget exhausted"))?;
-        if case.force.len() != n || case.force.iter().any(|x| !x.is_finite()) || case.targets.is_empty() {
+        if case.force.len() != n || case.force.iter().any(|x| !x.is_finite())
+            || (case.targets.is_empty() && reaction_targets.is_empty()) {
             return Err(invalid("invalid external load or empty observation family"));
         }
-        if case.prescribed.is_some() && study.operator.adaptive().embedded_dirichlet_penalty().is_none() {
+        if (case.prescribed.is_some() || !reaction_targets.is_empty())
+            && study.operator.adaptive().embedded_dirichlet_penalty().is_none() {
             return Err(invalid("prescribed motion requires embedded Dirichlet support"));
         }
         for target in case.targets {
             if target.q.len() != n || target.q.iter().any(|x| !x.is_finite()) || !target.target.is_finite()
                 || !target.scale.is_finite() || target.scale <= 0.0 || !target.weight.is_finite() || target.weight < 0.0 {
                 return Err(invalid("invalid observation shape, target, scale or weight"));
+            }
+            positive |= target.weight > 0.0;
+        }
+        for target in reaction_targets {
+            if !target.target.is_finite() || !target.scale.is_finite() || target.scale <= 0.0
+                || !target.weight.is_finite() || target.weight < 0.0 {
+                return Err(invalid("invalid reaction target, scale or weight"));
             }
             positive |= target.weight > 0.0;
         }
@@ -143,8 +170,27 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// with density. Geometry/support/load rebuilding across grids is explicit.
     pub fn evaluate_responses(&mut self, rho: &[f64], cases: &[ResponseCase3<'_>], options: ResponseOptions3,
         control: &mut SolveControl<'_>) -> Result<ResponseEvaluation3, ResponseError3> {
+        self.evaluate_response_family(rho, cases, None, options, control)
+    }
+
+    /// Fit displacement AND numerical embedded-force/moment responses. Supply
+    /// one reaction slice per case; empty displacement slices admit reaction-only
+    /// cases. All observations share that case's primal and aggregate adjoint.
+    /// Include the reaction's direct material derivative as well as its state
+    /// derivative; treating its state derivative as a fixed q is incorrect.
+    /// Pure mode/g laws and prescribed targets remain unchanged during fitting.
+    /// The same state-restoration and work accounting contract applies.
+    pub fn evaluate_responses_with_reactions(&mut self, rho: &[f64], cases: &[ResponseCase3<'_>],
+        reactions: &[&[ReactionTarget3<'_>]], options: ResponseOptions3, control: &mut SolveControl<'_>)
+        -> Result<ResponseEvaluation3, ResponseError3> {
+        self.evaluate_response_family(rho, cases, Some(reactions), options, control)
+    }
+
+    fn evaluate_response_family(&mut self, rho: &[f64], cases: &[ResponseCase3<'_>],
+        reactions: Option<&[&[ReactionTarget3<'_>]]>, options: ResponseOptions3, control: &mut SolveControl<'_>)
+        -> Result<ResponseEvaluation3, ResponseError3> {
         control.checkpoint("sdf3-response-start")?;
-        admit(self, cases, options)?;
+        admit_family(self, cases, reactions, options)?;
         if rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) {
             return Err(ResponseError3::Invalid("one raw density in [0,1] per cell required"));
         }
@@ -157,11 +203,12 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let mut objective = 0.0;
             let mut local = vec![0.0; self.cells()];
             let mut responses = Vec::with_capacity(cases.len());
+            let mut reaction_responses = Vec::with_capacity(cases.len());
             let mut displacements = Vec::with_capacity(cases.len());
             let mut adjoints = Vec::with_capacity(cases.len());
             let mut external_work = Vec::with_capacity(cases.len());
             let mut augmented_rhs_work = Vec::with_capacity(cases.len());
-            for case in cases {
+            for (index, case) in cases.iter().enumerate() {
                 control.checkpoint("sdf3-response-case")?;
                 let external: Vec<_> = case.force.iter().enumerate().map(|(i,&v)| if op.fixed()[i/3] { 0.0 } else { v }).collect();
                 let mut rhs = external.clone();
@@ -184,6 +231,24 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                         if !op.fixed()[i/3] { *b = finite(*b+coefficient*q)?; }
                     }
                 }
+                let reaction_targets = reactions.map_or(&[][..], |r| r[index]);
+                let mut measured_reactions = Vec::with_capacity(reaction_targets.len());
+                for target in reaction_targets {
+                    control.checkpoint("sdf3-response-reaction")?;
+                    let value = op.embedded_reaction(&u, case.prescribed, target.mode, || poll(control))?;
+                    measured_reactions.push(value.value);
+                    if target.weight == 0.0 { continue; }
+                    let error = finite((value.value-target.target)/target.scale)?;
+                    objective = finite(objective+0.5*target.weight*error*error)?;
+                    let coefficient = finite(target.weight*error/target.scale)?;
+                    for (b, q) in adjoint_rhs.iter_mut().zip(&value.displacement_gradient) {
+                        *b = finite(*b+coefficient*q)?;
+                    }
+                    for (s, direct) in local.iter_mut().zip(&value.scale_gradient) {
+                        *s = finite(*s+coefficient*direct)?;
+                    }
+                }
+                reaction_responses.push(measured_reactions);
                 let z = checked_solve_preconditioned(&self.operator, &prepared, &adjoint_rhs, 1e-11, "sdf3-response-adjoint", control)?;
                 let stiffness = op.scale_bilinear_forms(&z, &u, || poll(control))?;
                 let lifting = match case.prescribed {
@@ -207,7 +272,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             for (g,v) in gradient.iter_mut().zip(&volume_gradient) { *g = finite(*g+options.volume_weight*v)?; }
             control.checkpoint("sdf3-response-publish")?;
             Ok(ResponseEvaluation3 { rho: rho.to_vec(), projected_rho: design.projected, scales: design.scales,
-                objective, gradient, volume_fraction: design.volume, volume_gradient, responses,
+                objective, gradient, volume_fraction: design.volume, volume_gradient, responses, reaction_responses,
                 displacements, adjoints, external_work, augmented_rhs_work, work: control.work() })
         })();
         self.operator.set_scales(&previous).expect("previous admitted scales remain valid");

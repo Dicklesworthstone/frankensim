@@ -30,3 +30,21 @@ jobs:
           name: topology-test-output
           path: topology-*.log
           retention-days: 3
+  reaction-response:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[reaction-check]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test embedded reaction physics
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cutfem --test embedded_reaction3
+      - name: Test force and displacement response fitting
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-topopt --features cutfem-marquee --test reaction_response_sdf3 --test response_sdf3 --test projected_response_sdf3

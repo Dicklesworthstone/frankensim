@@ -28,11 +28,13 @@ pub struct ProjectedResponseIteration3 {
     /// Accepted PHR steps can be infeasible for the nonlinear volume constraint.
     pub constraint_violation: f64,
 }
+#[allow(clippy::too_many_arguments)]
 fn sample<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &[ResponseCase3<'_>],
+    reactions: Option<&[&[ReactionTarget3<'_>]]>,
     rho: &[f64], options: ProjectedResponseOptions3, last: &mut Option<ResponseEvaluation3>,
     control: &mut SolveControl<'_>) -> Result<Option<ProjectedAlSample>,ResponseError3> {
     control.checkpoint("response-projected-evaluate")?;
-    let result = study.evaluate_responses(rho,cases,options.response,control)?;
+    let result = study.evaluate_response_family(rho,cases,reactions,options.response,control)?;
     let sample = ProjectedAlSample { objective: result.objective/options.objective_scale,
         gradient: result.gradient.iter().map(|g|g/options.objective_scale).collect(),
         constraint: result.volume_fraction-options.volume_cap, constraint_gradient: result.volume_gradient.clone() };
@@ -57,11 +59,27 @@ fn row(e: &ResponseEvaluation3, iteration: usize, cap: f64) -> ProjectedResponse
 /// volume feasibility is assessed separately. This is not general sparse SQP.
 pub struct ProjectedResponseStudy3<'a,'callback,O: AdaptiveSdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>],
+    reactions: Option<&'a [&'a [ReactionTarget3<'a>]]>,
     control: &'a mut SolveControl<'callback>, options: ProjectedResponseOptions3,
     state: ProjectedAlState, accepted: ResponseEvaluation3, history: Vec<ProjectedResponseIteration3>,
 }
 impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callback,O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>], rho: &[f64],
+        options: ProjectedResponseOptions3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self,ProjectedAlError<ResponseError3>> {
+        Self::new_impl(study, cases, None, rho, options, control)
+    }
+    /// Use the SAME projected optimizer for mixed displacement/reaction targets.
+    /// Reaction laws and targets are held fixed with the experiment family;
+    /// partial force derivatives enter every trial's original aggregate adjoint.
+    pub fn new_with_reactions(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>],
+        reactions: &'a [&'a [ReactionTarget3<'a>]], rho: &[f64],
+        options: ProjectedResponseOptions3, control: &'a mut SolveControl<'callback>)
+        -> Result<Self,ProjectedAlError<ResponseError3>> {
+        Self::new_impl(study, cases, Some(reactions), rho, options, control)
+    }
+    fn new_impl(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseCase3<'a>],
+        reactions: Option<&'a [&'a [ReactionTarget3<'a>]]>, rho: &[f64],
         options: ProjectedResponseOptions3, control: &'a mut SolveControl<'callback>)
         -> Result<Self,ProjectedAlError<ResponseError3>> {
         let n = study.cells(); options.optimizer.validate(n)?;
@@ -71,21 +89,21 @@ impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callbac
             || rho.iter().any(|r|!r.is_finite() || *r<options.density_floor || *r>1.0) {
             return Err(ProjectedAlError::Invalid("invalid projected response policy or starting design"));
         }
-        admit(study,cases,options.response).map_err(ProjectedAlError::Evaluation)?;
+        admit_family(study,cases,reactions,options.response).map_err(ProjectedAlError::Evaluation)?;
         let mut last = None;
         let state = {
             // Callbacks are synchronous and never overlap. Each RefCell borrow
             // ends before the optimizer invokes its next poll or evaluation.
             let ledger = RefCell::new(&mut *control);
             ProjectedAlState::try_new(rho,&vec![options.density_floor;n],&vec![1.0;n],options.optimizer,
-                &mut |x| sample(study,cases,x,options,&mut last,&mut **ledger.borrow_mut()),
+                &mut |x| sample(study,cases,reactions,x,options,&mut last,&mut **ledger.borrow_mut()),
                 |_| if ledger.borrow_mut().checkpoint("response-projected-control").is_ok() {ControlFlow::Continue(())} else {ControlFlow::Break(())})?
         };
         control.checkpoint("response-projected-initialize").map_err(|e|ProjectedAlError::Evaluation(e.into()))?;
         let accepted = last.expect("accepted initial sample has complete physical evidence");
         study.operator.set_scales(&accepted.scales).expect("evaluated scales are admitted");
         let history = vec![row(&accepted,0,options.volume_cap)];
-        Ok(Self { study,cases,control,options,state,accepted,history })
+        Ok(Self { study,cases,reactions,control,options,state,accepted,history })
     }
     #[must_use] pub fn accepted(&self) -> &ResponseEvaluation3 { &self.accepted }
     #[must_use] pub fn study(&self) -> &CutDensityStudy3<O> { self.study }
@@ -106,8 +124,9 @@ impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callbac
             let result = {
                 let ledger = RefCell::new(&mut *self.control);
                 let study = &mut *self.study; let cases = self.cases; let options = self.options;
+                let reactions = self.reactions;
                 self.state.try_run(remaining.min(1),
-                    &mut |x| sample(study,cases,x,options,&mut last,&mut **ledger.borrow_mut()),
+                    &mut |x| sample(study,cases,reactions,x,options,&mut last,&mut **ledger.borrow_mut()),
                     |_| if ledger.borrow_mut().checkpoint("response-projected-control").is_ok() {ControlFlow::Continue(())} else {ControlFlow::Break(())})
             };
             if self.state.work().iterations > before {

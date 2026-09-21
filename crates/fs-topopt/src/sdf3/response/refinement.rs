@@ -130,6 +130,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: ResponseRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ResponseRefinement3, GoalRefinementError3> {
         control.checkpoint("response-goal-start")?;
+        if accepted.reaction_responses.iter().any(|r| !r.is_empty()) {
+            return Err(GoalRefinementError3::Invalid("reaction targets require a reaction-aware refinement goal"));
+        }
         let mut count=0usize;
         if cases.is_empty() || cases.len()>options.response.max_cases
             || cases.len()!=accepted.displacements.len() || cases.len()!=accepted.responses.len()
