@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 #[path = "projected/checkpoint.rs"]
 mod checkpoint;
+#[path = "projected/input.rs"]
+mod input;
 
 fn field(path: &Path, phi: &GridSdf) -> Result<(), Box<dyn Error>> {
     let mut output = writer(path)?;
@@ -72,9 +74,10 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
     if args.first().is_some_and(|arg| arg == "--resume") {
         return checkpoint::resume(&args[1..], started);
     }
-    let (args, checkpoint_options) = checkpoint::options(args)?;
+    let (args, input_options) = input::options(args)?;
+    let (args, checkpoint_options) = checkpoint::options(&args)?;
     if args.len() < 2 || args.len() > 8 {
-        return Err("usage: fs-marquee-elasticity-stress --projected OUTPUT_DIR MAX_SAMPLED_VON_MISES [LEVEL=3] [ITERATIONS=30] [VOLFRAC=0.6] [MAX_CANDIDATES=8] [ABS_STRESS_TOL=0] [WALL_SECONDS=300] [--checkpoint] [--pause-after N]".into());
+        return Err("usage: fs-marquee-elasticity-stress --projected OUTPUT_DIR MAX_SAMPLED_VON_MISES [LEVEL=3] [ITERATIONS=30] [VOLFRAC=0.6] [MAX_CANDIDATES=8] [ABS_STRESS_TOL=0] [WALL_SECONDS=300] [--checkpoint] [--pause-after N] [--initial-field FIELD.csv] [--load F] [--load-band HALF_WIDTH] [--youngs E] [--poisson NU]".into());
     }
     let output_dir = Path::new(&args[0]);
     if output_dir.try_exists()? {
@@ -97,22 +100,23 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
     }
     let executable = if checkpoint_options.enabled { Some(checkpoint::executable()?) } else { None };
     let n = 1usize << level;
-    let geometry = GridSdf::from_fn(n, &|_, y| (y - 0.5).abs() - 0.35);
+    let mut settings = OptimizeSettings {
+        level, iterations, volfrac, move_cells: 0.1,
+        nucleation_period: 0, ..OptimizeSettings::default()
+    };
+    let (geometry, fixture) = input_options.prepare(&mut settings)?;
+    input::require_load_support(&geometry, fixture)?;
     // Preserve both support and load traces during projection. In particular,
     // disappearing loaded-edge material cannot masquerade as reduced compliance.
     let fixed: Vec<_> = geometry.nodes().iter().copied().enumerate()
         .filter(|(index, _)| index % (n + 1) == 0 || index % (n + 1) == n).collect();
-    let settings = OptimizeSettings {
-        level, iterations, volfrac, move_cells: 0.1,
-        nucleation_period: 0, ..OptimizeSettings::default()
-    };
     let projection = VolumeProjectionSettings {
         target: volfrac, tolerance: 1e-4, max_shift: 2.0, max_evaluations: 64,
     };
     let controls = ProjectedSettings { max_candidates, ..ProjectedSettings::default() };
     let policy = checkpoint::Policy { fixed: fixed.clone(), projection, controls };
     let area_optimizer = match ProjectedOptimizer::new_controlled(&geometry,
-        Cantilever { load: 1.0, band: 0.125 }, settings, fixed, projection, controls,
+        fixture, settings, fixed, projection, controls,
         |_| poll_wall(started, wall_seconds),
     )? {
         ControlFlow::Continue(optimizer) => optimizer,
@@ -124,10 +128,25 @@ fn run_at(args: &[String], started: Instant) -> Result<u8, Box<dyn Error>> {
         ControlFlow::Continue(optimizer) => optimizer,
         ControlFlow::Break(()) => return Ok(stopped_before_study("baseline stress admission")),
     };
-    run_optimizer(output_dir, optimizer, policy, checkpoint_options, executable, started, wall_seconds, false)
+    run_optimizer_with_input(output_dir, optimizer, policy, checkpoint_options, executable,
+        started, wall_seconds, false, Some(&geometry))
 }
 
 fn run_optimizer(
+    output_dir: &Path,
+    optimizer: ProjectedStressOptimizer,
+    policy: checkpoint::Policy,
+    options: checkpoint::Options,
+    executable: Option<String>,
+    started: Instant,
+    wall_seconds: u64,
+    resumed: bool,
+) -> Result<u8, Box<dyn Error>> {
+    run_optimizer_with_input(output_dir, optimizer, policy, options, executable,
+        started, wall_seconds, resumed, None)
+}
+
+fn run_optimizer_with_input(
     output_dir: &Path,
     mut optimizer: ProjectedStressOptimizer,
     policy: checkpoint::Policy,
@@ -136,6 +155,7 @@ fn run_optimizer(
     started: Instant,
     wall_seconds: u64,
     resumed: bool,
+    source: Option<&GridSdf>,
 ) -> Result<u8, Box<dyn Error>> {
     if poll_wall(started, wall_seconds).is_break() {
         return Ok(stopped_before_study("study publication"));
@@ -144,8 +164,10 @@ fn run_optimizer(
     let baseline = optimizer.baseline().clone();
     let start_iteration = optimizer.checkpoint().next_iteration();
     let settings = optimizer.checkpoint().settings();
+    let fixture = optimizer.checkpoint().fixture();
     let limit = optimizer.limit();
     std::fs::create_dir(output_dir)?;
+    if let Some(source) = source { field(&output_dir.join("input-level-set.csv"), source)?; }
     field(&output_dir.join("baseline-level-set.csv"), optimizer.checkpoint().geometry())?;
     let mut last_checkpoint = None;
     if let Some(executable) = executable.as_deref() {
@@ -217,6 +239,7 @@ fn run_optimizer(
         (baseline.compliance - current.compliance) / baseline.compliance
     } else { 0.0 };
     let checkpoint = last_checkpoint.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let input_field = if source.is_some() { "\"input-level-set.csv\"" } else { "null" };
     let summary = format!(concat!(
         "{{\"schema\":\"fs-marquee-projected-stress-v2\",",
         "\"model\":\"normalized_unit_square_plane_strain_cantilever\",\"authority\":\"estimated\",",
@@ -228,12 +251,15 @@ fn run_optimizer(
         "\"resumed\":{},\"start_iteration\":{},\"segment_accepted_updates\":{},",
         "\"baseline_scope\":\"current_segment\",\"checkpoint\":{},",
         "\"fixed_boundaries\":[\"left\",\"right\"],",
+        "\"material\":{{\"youngs\":{:.17e},\"poisson\":{:.17e}}},",
+        "\"load\":{{\"traction_y\":{:.17e},\"band_half_width\":{:.17e}}},\"initial_field\":{},",
         "\"claims\":{{\"converged\":false,\"global_optimum\":false,\"physical_validation\":false,",
         "\"stress_adjoint_kkt\":false,\"continuous_max_stress\":false,\"certified_continuum_volume\":false}}}}"
     ), status, settings.level, settings.iterations, optimizer.checkpoint().next_iteration(), candidate_count,
         policy.controls.max_candidates, wall_seconds, settings.volfrac, policy.projection.tolerance,
         limit.max_von_mises, limit.absolute_tolerance, stress_json(&baseline), stress_json(current), reduction,
         resumed, start_iteration, optimizer.checkpoint().next_iteration() - start_iteration, checkpoint,
+        settings.youngs, settings.poisson, -fixture.load, fixture.band, input_field,
     );
     let mut completion = writer(&output_dir.join("summary.json"))?;
     writeln!(completion, "{summary}")?;

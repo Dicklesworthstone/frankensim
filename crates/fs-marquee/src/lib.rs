@@ -15,6 +15,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "marquee")]
 pub mod study;
 
+/// Import the exact normalized lattice used by the elasticity exporters.
+pub mod level_set_csv;
+
 /// Current availability of the marquee lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarqueeStatus {
