@@ -12,9 +12,11 @@ mod felt;
 mod engine;
 mod microphone;
 mod audio;
+mod hammer_materials;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
+    [--hammers materials.fsh]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -34,11 +36,17 @@ to A4=440 Hz by default to compensate rounded source values; --raw-tensions
 preserves the published table. --concert-pitch tunes first partials by changing
 physical tension, not oscillator frequencies. This is not a stretch-tuning fit.
 An explicit --scale always supplies the geometry/masses; absent --concert-pitch,
-its tensions are preserved even with a preset. Preset hammer voicing still applies.
+its tensions are preserved even with a preset. Preset hammer voicing still applies
+unless --hammers supplies a complete per-key WoolFelt/Prony material file.
+--hammers requires --render and a card for every key in the supplied scale, not
+only the struck keys. Missing, duplicate or invalid cards refuse without fallback.
+These cards change physical contact forces and relaxation, not an output EQ.
+The preset shank and the scale's hammer mass/patch geometry remain unchanged.
+See HAMMERS.md for the SI format; importing values does not certify measurements.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
 Thickness taper, material constants and key assignment include explicit estimates.
-Per-key WoolFelt loading envelopes are source-derived; crush/unloading parameters,
-felt patch geometry and Prony time constants are still estimates, not coupon fits.
+Default per-key WoolFelt loading envelopes are source-derived; crush/unloading
+parameters, felt patch geometry and Prony time constants remain estimates.
 --note performs a single-key study; otherwise the demo also plays a chord of
 available keys. --velocity overrides the three demo hammer launch speeds.
 Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
@@ -66,6 +74,7 @@ applies only to that diagnostic, not to physical microphone pressure.";
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
+    hammers: Option<String>,
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
@@ -77,7 +86,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, concert_pitch: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, concert_pitch: None, raw_tensions: false,
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, diagnostic_volume: false,
@@ -103,6 +112,7 @@ impl Options {
                 "--board" => options.board = Some(value.clone()),
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
                 "--preset" => options.preset = Some(value.clone()),
+                "--hammers" => options.hammers = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
@@ -145,6 +155,9 @@ impl Options {
         if options.preset.as_deref().is_some_and(|p| p != "steinway-d") {
             return Err("unknown piano preset; available: steinway-d".into());
         }
+        if options.hammers.is_some() && options.render.is_none() {
+            return Err("--hammers requires --render; material input is not an export-only option".into());
+        }
         if !(4..=24).contains(&options.mesh_divisions)
             || (options.preset.is_none() && (seen.contains("--mesh-divisions")
                 || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
@@ -173,7 +186,7 @@ impl Options {
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
-            options.board_geometry.as_ref(), options.performance.as_ref()];
+            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
@@ -212,10 +225,24 @@ fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry:
 }
 fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options) -> Result<engine::Instrument, String> {
+    let text = options.hammers.as_ref().map(|path| std::fs::read_to_string(path)
+        .map_err(|e| format!("{path}: {e}"))).transpose()?;
+    prepare_instrument_with_hammers(scale, modes, options, text.as_deref())
+}
+fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
+    let imported = text.map(|text| hammer_materials::read(text,
+        &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
     if options.preset.is_some() {
-        let materials = scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
+        let materials = match imported {
+            Some(materials) => materials,
+            None => scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?,
+        };
         engine::Instrument::new_with_course_shanks(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, engine::ShankGeometry::published())
+    } else if let Some(materials) = imported {
+        engine::Instrument::new_with_course_felts(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials)
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }
@@ -348,8 +375,12 @@ fn run() -> Result<(), String> {
     study_key(&scale, options.note)?;
     println!("String scale: {scale_source}; {tuning_source}.");
     println!("Soundboard: {board_source}.");
-    if options.preset.is_some() {
+    if let Some(path) = &options.hammers {
+        println!("Hammer materials supplied by {path}; no automatic coupon-fit or calibration claim. Scale mass/patch geometry unchanged.");
+    } else if options.preset.is_some() {
         println!("Per-key source-derived hammer loading envelopes; estimated unloading/crush and tangent-scaled Prony relaxation.");
+    }
+    if options.preset.is_some() {
         println!("Published shank geometry -> rigid rotation + bending; reciprocal jack port and 1.5 mm let-off. Linearized action fragment; damping/backcheck estimated.");
     }
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
@@ -513,5 +544,24 @@ mod render_tests {
         for sample in 0..2400 {score.dispatch(sample,&mut piano).unwrap();piano.step().unwrap();}
         assert!(piano.accounting.shank_loss_j>0.0);assert!(piano.accounting.felt_loss_j>0.0);
         assert!((piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j()).abs()<1e-7);
+    }
+    #[test]
+    fn supplied_hammers_compose_with_presets_and_protect_the_input_file() {
+        let o = options(&["--preset", "steinway-d", "--hammers", "felt.fsh", "--render", "d.wav"]).unwrap();
+        assert_eq!(o.hammers.as_deref(), Some("felt.fsh"));
+        assert!(options(&["--hammers", "felt.fsh"]).is_err());
+        assert!(options(&["--hammers", "felt.fsh", "--render", "felt.fsh"]).is_err());
+        let course = selected_scale(None, &o).unwrap()[48];
+        let text = "frankensim-hammer-materials-v1\nfelt,69,400000,0.2,2.5,3.2,0.25,0.8,2500000\n";
+        let mut piano = prepare_instrument_with_hammers(vec![course], &board::demonstration(),
+            &o, Some(text)).unwrap();
+        // An imported elastic card must not resurrect the preset Prony tails,
+        // while the preset's geometry-derived jack/shank remains available.
+        piano.jack_on(69, 30.0, 0.1).unwrap();
+        for _ in 0..1500 { assert!(piano.step().unwrap().is_finite()); }
+        assert_eq!(piano.accounting.felt_relaxation_loss_j, 0.0);
+        assert!(piano.accounting.shank_loss_j > 0.0);
+        assert!(prepare_instrument_with_hammers(vec![course], &board::demonstration(),
+            &o, Some("invalid material")).is_err());
     }
 }
