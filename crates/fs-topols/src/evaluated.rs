@@ -19,6 +19,9 @@ const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
 const SOLVER_TOL: f64 = 1e-12;
 const SOLVER_MAX_ITERS: usize = 60_000;
 
+pub(crate) mod controlled;
+pub use controlled::{DesignEvaluationStage, evaluate_compliance_design_controlled};
+
 /// One authoritative evaluation of the geometry actually returned to the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct EvaluatedFinalState {

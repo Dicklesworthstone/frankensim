@@ -13,11 +13,19 @@ use crate::{
 };
 use fs_cutfem::quad::cut_cell_rules;
 use fs_cutfem::{
-    BoundaryTraction, CutElasticity, CutElasticitySolution, CutFemError, CutSdf,
+    BoundaryTraction, CutElasticity, CutFemError, CutSdf,
     CutStabilizationScaling, DesignBoxEdge, EdgeBand, MAX_PLANE_STRAIN_STIFFNESS_RATIO,
     Quadtree,
 };
 use fs_material::IsotropicElastic;
+use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::ops::ControlFlow;
+
+type NodalField = BTreeMap<fs_cutfem::NodeKey, [f64; 2]>;
+
+mod controlled;
+pub use controlled::evaluate_sampled_stress_controlled;
 
 const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
 const SOLVER_TOL: f64 = 1e-12;
@@ -183,7 +191,7 @@ fn validate(
 
 fn strain_at(
     grid: &Quadtree,
-    solution: &CutElasticitySolution,
+    nodal: &NodalField,
     point: [f64; 2],
 ) -> Option<[f64; 3]> {
     let level = grid.max_level();
@@ -195,7 +203,6 @@ fn strain_at(
     let cell = (level, ci, cj);
     let (lo, hi) = grid.rect(cell);
     let corners = grid.corner_nodes(cell);
-    let nodal = solution.nodal();
     let mut values = [[0.0; 2]; 4];
     for (index, corner) in corners.iter().enumerate() {
         values[index] = *nodal.get(corner)?;
@@ -246,7 +253,7 @@ fn full_cell_points(lo: [f64; 2], hi: [f64; 2]) -> [[f64; 2]; 5] {
 
 fn observe_stress(
     grid: &Quadtree,
-    solution: &CutElasticitySolution,
+    nodal: &NodalField,
     lambda: f64,
     mu: f64,
     point: [f64; 2],
@@ -254,7 +261,7 @@ fn observe_stress(
     max_location: &mut [f64; 2],
     sample_count: &mut usize,
 ) -> Result<(), CutFemError> {
-    if let Some(strain) = strain_at(grid, solution, point) {
+    if let Some(strain) = strain_at(grid, nodal, point) {
         let stress = von_mises_plane_strain(lambda, mu, strain);
         if !stress.is_finite() || stress < 0.0 {
             return Err(invalid("sampled plane-strain von Mises stress is invalid"));
@@ -312,45 +319,13 @@ pub fn evaluate_sampled_stress(
         return Err(invalid("stress evaluation produced invalid compliance or material area"));
     }
 
-    let mut sampled_max = 0.0_f64;
-    let mut max_location = [0.0, 0.0];
-    let mut sample_count = 0usize;
-    for cell in grid.leaves() {
-        let (lo, hi) = grid.rect(cell);
-        let enclosure = phi.enclose(lo, hi);
-        if enclosure.lo() > 0.0 {
-            continue;
-        }
-        if enclosure.hi() < 0.0 {
-            for point in full_cell_points(lo, hi) {
-                observe_stress(
-                    &grid, &solution, lambda, mu, point,
-                    &mut sampled_max, &mut max_location, &mut sample_count,
-                )?;
-            }
-        } else {
-            let rules = cut_cell_rules(phi, lo, hi, 2);
-            for &(point, weight) in &rules.bulk {
-                if weight > 0.0 {
-                    observe_stress(
-                        &grid, &solution, lambda, mu, point,
-                        &mut sampled_max, &mut max_location, &mut sample_count,
-                    )?;
-                }
-            }
-            for &(point, weight, _) in &rules.iface {
-                if weight > 0.0 {
-                    observe_stress(
-                        &grid, &solution, lambda, mu, point,
-                        &mut sampled_max, &mut max_location, &mut sample_count,
-                    )?;
-                }
-            }
-        }
-    }
-    if sample_count == 0 {
-        return Err(invalid("stress evaluation found no material stress samples"));
-    }
+    let (sampled_max, max_location, sample_count) = match controlled::sample(
+        phi, &grid, solution.nodal(), lambda, mu,
+        &mut |_| ControlFlow::<Infallible>::Continue(()),
+    )? {
+        ControlFlow::Continue(samples) => samples,
+        ControlFlow::Break(never) => match never {},
+    };
     Ok(SampledStressEvaluation {
         compliance,
         volume,
