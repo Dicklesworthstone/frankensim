@@ -7,6 +7,7 @@
 use crate::{PhsError, PortHamiltonian, NEWTON_MAX, NEWTON_TOL, discrete_gradient_into_unchecked};
 use fs_la::LuWorkspace;
 mod structure;
+mod analytic;
 use structure::FlowPattern;
 
 /// Scalar ledger from a prepared step; state and port output use caller buffers.
@@ -65,7 +66,8 @@ impl std::error::Error for PreparedStepError {}
 /// [`crate::Storage`] callbacks not allocating. Storage must be read-only during
 /// a trial; material history belongs at the caller's accepted-step boundary.
 ///
-/// This remains a dense central-difference Newton solve, not a hard-real-time
+/// Newton uses central differences by default or explicit analytic tangents,
+/// with the same dense LU. Neither is a hard-real-time
 /// performance certificate. The LU traversal is unblocked and may differ from
 /// [`crate::step`] by floating-point roundoff. Both paths use the same Gonzalez
 /// kernel. Exact nonzero J-R dependency rows are retained across Newton probes;
@@ -201,7 +203,55 @@ impl StepWorkspace {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn step_into_controlled<F: FnMut() -> bool>(
         &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
-        x_next: &mut [f64], y: &mut [f64], mut cancelled: F,
+        x_next: &mut [f64], y: &mut [f64], cancelled: F,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.step_with_hessian(sys, x0, u, dt, x_next, y, None, cancelled)
+    }
+
+    /// Solve the same Gonzalez equation using the caller's exact storage Hessian
+    /// action instead of finite-difference residual probes. No heap allocation is
+    /// added. The action must fill `out` with `H''(x) * direction` for THIS system,
+    /// including every contact, internal state and frozen material history.
+    /// Return false for an unsupported action. Missing/nonfinite actions refuse;
+    /// there is no silent fallback. Piecewise laws use their branch tangent.
+    /// The dense LU and all original equation/energy acceptance limits remain.
+    ///
+    /// # Errors
+    /// The original step refusals plus an unsupported/nonfinite Hessian action.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_into_analytic(
+        &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
+        x_next: &mut [f64], y: &mut [f64],
+        hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool,
+    ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_into_analytic_controlled(sys, x0, u, dt, x_next, y, hessian, || false)
+            .map_err(|error| match error {
+                PreparedStepError::Solver(error) => error,
+                PreparedStepError::Cancelled => dimensions("unexpected cancellation"),
+            })
+    }
+
+    /// Analytic Newton with the same cooperative polling and transactional output
+    /// contract as `step_into_controlled`. Callbacks must be read-only and must
+    /// not allocate for allocation-free execution. Neither this action nor LU is
+    /// preemptible; this is not a hard-real-time qualification.
+    ///
+    /// # Errors
+    /// Same refusals as `step_into_analytic`, plus caller cancellation.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn step_into_analytic_controlled<F: FnMut() -> bool>(
+        &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
+        x_next: &mut [f64], y: &mut [f64],
+        hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool, cancelled: F,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.step_with_hessian(sys, x0, u, dt, x_next, y, Some(hessian), cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::type_complexity)]
+    fn step_with_hessian<F: FnMut() -> bool>(
+        &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
+        x_next: &mut [f64], y: &mut [f64],
+        hessian: Option<&dyn Fn(&[f64], &[f64], &mut [f64]) -> bool>, mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
         let mut poll = || {
             if cancelled() { Err(PreparedStepError::Cancelled) } else { Ok(()) }
@@ -260,19 +310,23 @@ impl StepWorkspace {
                 }
                 return Err(PhsError::NewtonStalled { residual: best_norm }.into());
             }
-            for col in 0..n {
-                poll()?;
-                let h = 1.0e-6 * (scale + self.x[col].abs());
-                if !h.is_finite() || h <= 0.0 { return Err(dimensions("invalid finite-difference increment").into()); }
-                self.trial.copy_from_slice(&self.x);
-                self.trial[col] += h;
-                residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
-                    &mut self.midpoint, &mut self.effort, &mut self.plus)?;
-                self.trial[col] = self.x[col] - h;
-                residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
-                    &mut self.midpoint, &mut self.effort, &mut self.minus)?;
-                for row in 0..n {
-                    self.jacobian[row * n + col] = (self.plus[row] - self.minus[row]) / (2.0 * h);
+            if let Some(action) = hessian {
+                self.analytic_jacobian_into(sys, x0, dt, action, &mut poll)?;
+            } else {
+                for col in 0..n {
+                    poll()?;
+                    let h = 1.0e-6 * (scale + self.x[col].abs());
+                    if !h.is_finite() || h <= 0.0 { return Err(dimensions("invalid finite-difference increment").into()); }
+                    self.trial.copy_from_slice(&self.x);
+                    self.trial[col] += h;
+                    residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
+                        &mut self.midpoint, &mut self.effort, &mut self.plus)?;
+                    self.trial[col] = self.x[col] - h;
+                    residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
+                        &mut self.midpoint, &mut self.effort, &mut self.minus)?;
+                    for row in 0..n {
+                        self.jacobian[row * n + col] = (self.plus[row] - self.minus[row]) / (2.0 * h);
+                    }
                 }
             }
             poll()?;
