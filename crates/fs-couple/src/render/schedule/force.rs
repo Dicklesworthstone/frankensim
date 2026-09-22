@@ -247,3 +247,6 @@ pub mod coupled;
 
 /// Prescribed sample-timed momentum inputs over the existing modal renderer.
 pub mod impulse;
+
+/// Finite mixed performances retaining independent parts' state and schedules.
+pub mod ensemble;
