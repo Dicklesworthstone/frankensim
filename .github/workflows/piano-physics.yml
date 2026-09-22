@@ -36,15 +36,26 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
+      # Keep a failed bootstrap RED. Its known legacy batch-file checkout
+      # mismatch must not hide independent native test results after all
+      # siblings have been materialized. Missing dependencies still fail Cargo.
+      - name: Test reinforced crowned-shell mechanics
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-plate --lib shell::stiffened -- --test-threads=1
       - name: Test OBJ physical-region preservation
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-io obj::tests -- --test-threads=1
       - name: Test mesh import and source-piano playback
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1
       - name: Test the piano implementation
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
       - name: Render a physical-model smoke note
+        if: ${{ !cancelled() }}
         run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: piano-smoke
           path: piano-smoke.wav

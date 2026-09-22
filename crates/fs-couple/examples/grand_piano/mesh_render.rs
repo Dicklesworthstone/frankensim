@@ -2,6 +2,7 @@
 //! strings, per-key wool/Prony cards, shanks, bridge coupling and air observer.
 //! This is an offline composition, not another piano solver or PCM encoder.
 use super::{audio::AudioStream, board_geometry::{BoardGeometry, PreparedBoard},
+    crowned_board::{self, CrownedBoard},
     engine::{Instrument, ShankGeometry}, geometry::Course, performance::{self, Performance},
     steinway_scale};
 
@@ -18,7 +19,9 @@ pub fn frames(seconds: &str) -> Result<usize,String> {
 }
 fn prepare(text:&str, scale:Vec<Course>) -> Result<(Instrument,PreparedBoard),String> {
     let keys:Vec<_> = scale.iter().map(|c|c.midi).collect();
-    let board=BoardGeometry::read(text)?.prepare(&keys,BOARD_BAND_HZ)?;
+    let board=if crowned_board::is_crowned(text) {
+        CrownedBoard::read(text)?.prepare(&keys,BOARD_BAND_HZ)?
+    } else {BoardGeometry::read(text)?.prepare(&keys,BOARD_BAND_HZ)?};
     let materials=scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
     let piano=Instrument::new_with_course_shanks(scale,&board.modes,RATE,4,24,true,
         materials,ShankGeometry::published())?;
@@ -42,8 +45,8 @@ fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize
     let report=format!("{} frames at {} Hz; peak {:.9e} Pa, {} clips at 2 Pa PCM full scale; no normalization.\n\
         Panel/ribs/bridges: {:.9} m^2, {:.9} kg; {} modes through {} Hz.\n\
         Input {:.12e} J; stored {:.12e} J; component loss {:.12e} J; closure {:.12e} J.\n\
-        Source: {}. Flat board, source/estimated materials, raw source string tensions; no measured digital-twin claim.\n\
-        Receiver {:?} m, infinite-baffle Rayleigh pressure; no room, lid scattering or radiation backreaction.",
+        Structure: {}. Source/estimated materials, raw source string tensions; no measured digital-twin claim.\n\
+        Receiver {:?} m, infinite-baffle Rayleigh pressure; crown uses projected signed normal volume velocity; no room, lid scattering or radiation backreaction.",
         count,RATE,peak_pa,clips,board.area_m2,board.mass_kg,board.modes.len(),BOARD_BAND_HZ,
         piano.accounting.input_work_j,piano.energy_j(),losses,
         piano.accounting.input_work_j-piano.energy_j()-losses,board.provenance,MICROPHONE_M);
@@ -53,6 +56,8 @@ fn encode(piano:Instrument, board:&PreparedBoard, score:Performance, count:usize
 /// All 88 source courses remain in the coupled system, including silent keys.
 /// MIDI is a gesture schedule only; its pitch numbers do not retune strings.
 /// Default MIDI mapping: channel 1, velocity 127 -> 4.5 m/s, switch sustain.
+/// Native header selects the flat plate or actual crowned-shell structural
+/// model. Both share the SAME reciprocal string bank, felt, shank and PCM path.
 pub fn render(text:&str, count:usize, midi:Option<&str>) -> Result<Rendered,String> {
     if !(2_400..=2_880_000).contains(&count) { return Err("render frame budget exceeded".into()); }
     let scale=steinway_scale::courses()?;
@@ -109,5 +114,23 @@ mod tests {
         assert!(a.peak_pa.is_finite() && a.peak_pa>0.0);
         assert_eq!(&a.wav[..4],b"RIFF"); assert_eq!(a.wav,b.wav); assert_eq!(a.report,b.report);
         assert!(prepare(&imported.fsb,steinway_scale::courses().unwrap()).is_err());
+    }
+    #[test]
+    fn supplied_crown_changes_source_piano_pressure_through_the_structural_modes() {
+        let source=panel().replace("support,simply_supported","support,clamped");
+        let run=|height:f64| {
+            let board=crowned_board::elevate(&source,&[0.,0.,0.,0.,height],"regression crown").unwrap();
+            let mut scale=steinway_scale::courses().unwrap();scale.retain(|c|c.midi==69);
+            let (piano,prepared)=prepare(&board,scale).unwrap();
+            let score=Performance::read("sample,event,key,value\n0,note_on,69,2\n1024,note_off,69,0\n",&[69],2400).unwrap();
+            encode(piano,&prepared,score,2400).unwrap()
+        };
+        let flat=run(0.);let curved=run(0.015);let repeated=run(0.015);
+        assert!(curved.peak_pa.is_finite() && curved.peak_pa>0.);
+        assert_ne!(flat.wav,curved.wav);
+        assert_eq!(curved.wav,repeated.wav);
+        assert!(curved.report.contains("3-D CST/DKT crowned shell"));
+        assert!(curved.report.contains("no downbearing equilibrium"));
+        assert_eq!(curved.report,repeated.report);
     }
 }

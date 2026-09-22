@@ -6,6 +6,10 @@ use fs_io::obj::{ObjDocument, read_obj_document};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+/// Same region/material admission, with reference heights retained for shells.
+#[path = "crowned_import.rs"]
+pub mod crowned;
+
 pub const HEADER: &str = "frankensim-obj-board-v1";
 pub const MAX_OBJ_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SPEC_BYTES: usize = 8 * 1024 * 1024;

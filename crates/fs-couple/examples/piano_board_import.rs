@@ -1,8 +1,8 @@
-//! Editable OBJ geometry + physical sections -> the real grand_piano plate path.
+//! Editable OBJ geometry + physical sections -> the real grand_piano plate/shell path.
 //!
 //! cargo run -p fs-couple --example piano_board_import -- inspect piano.obj
 //! cargo run -p fs-couple --example piano_board_import -- import piano.obj board.fspi board.fsb
-//! cargo run -p fs-couple --example grand_piano -- --board-geometry board.fsb --scale strings.csv --render piano.wav
+//! cargo run -p fs-couple --example piano_board_import -- import-crowned piano.obj board.fspi board.fss
 //!
 //! Offline utility: no new physical solver and no triangle mesh in audio.
 #![allow(dead_code)] // Shared piano modules also expose runtime-only operations.
@@ -10,6 +10,7 @@
 #[path = "grand_piano/linear.rs"] mod linear;
 #[path = "grand_piano/board.rs"] mod board;
 #[path = "grand_piano/board_geometry.rs"] mod board_geometry;
+#[path = "grand_piano/crowned_board.rs"] mod crowned_board;
 #[path = "grand_piano/steinway_d.rs"] mod steinway_d;
 #[path = "grand_piano/steinway_scale.rs"] mod steinway_scale;
 #[path = "grand_piano/performance.rs"] mod performance;
@@ -24,24 +25,32 @@ use std::io::{Read, Write};
 
 const USAGE: &str = "piano_board_import inspect INPUT.obj
 piano_board_import import INPUT.obj MATERIALS.fspi OUTPUT.fsb
+piano_board_import import-crowned INPUT.obj MATERIALS.fspi OUTPUT.fss
 piano_board_import export INPUT.fsb OUTPUT.obj OUTPUT.fspi
-piano_board_import render-steinway INPUT.fsb OUTPUT.wav SECONDS [PERFORMANCE.mid]
+piano_board_import render-steinway INPUT.fsb|INPUT.fss OUTPUT.wav SECONDS [PERFORMANCE.mid]
 
 inspect reports the actual object/group/material labels without guessing parts.
 import selects a flat midsurface, maps every triangle to supplied orthotropic
 sections, remaps explicit rib/support vertices and locates each bridge station.
-export creates an editable, material-labelled midsurface from an existing native
+import-crowned retains the selected OBJ's source heights as a 3-D CST/DKT shell.
+It requires clamped supports, zero prestress and a shallow graph within 50 mm
+of the declared reference plane. Rectangular beam sections are reconstructed
+from their supplied area and bending inertia; actual offsets retain coupling.
+This is initial crown geometry, NOT a solved downbearing/prestress equilibrium.
+export creates an editable, material-labelled midsurface from a FLAT native
 board, including all its sections, ribs, supports and physical bridge positions.
-render-steinway combines an imported board with source Model D strings, felt
-cards and shanks, then the existing 48 kHz physical-pressure/PCM path. Optional
-MIDI uses channel 1 and velocity 127 -> 4.5 m/s; otherwise strike key 69 at 2 m/s.
-Raw source tensions are preserved. Retention: 400 Hz board, 24 string partials.
-The native grand_piano --board-geometry path remains available for custom cards.
+render-steinway accepts either native board type with source Model D strings,
+felt cards and shanks, then the existing 48 kHz physical-pressure/PCM path.
+Optional MIDI uses channel 1 and velocity 127 -> 4.5 m/s; otherwise strike key
+69 at 2 m/s. Raw source tensions are preserved. Retention: 400 Hz board, 24
+string partials. Crowned radiation projects signed normal volume velocity to
+the flat baffle; this is NOT full 3-D radiation or room/lid scattering.
+The native grand_piano --board-geometry path remains flat-only for custom cards.
 
-Units, frame, flatness tolerance, support choice and physical material constants
-must be explicit. Solid case/crowned meshes do not become flat plate models.
-Visual MTL values are never elastic constants. No download or MTL file is opened.
-Outputs must be fresh paths. See grand_piano/MESH_IMPORT.md for the SI format.";
+Units, frame, support choice and physical material constants must be explicit.
+Solid cabinet meshes do not become soundboard midsurfaces. Visual MTL values
+are never elastic constants. No download or MTL file is opened.
+Outputs must be fresh paths. See grand_piano/MESH_IMPORT.md and CROWNED_BOARD.md.";
 
 fn read_bounded(path: &str, cap: usize) -> Result<String, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
@@ -77,13 +86,20 @@ fn run(args:&[String])->Result<(),String> {
             println!("MTL references (not opened): {:?}",doc.material_libraries);
             Ok(())
         }
-        [command,obj,spec,output] if command == "import" => {
-            let imported=mesh_import::import(&read_bounded(obj,mesh_import::MAX_OBJ_BYTES)?,
-                &read_bounded(spec,mesh_import::MAX_SPEC_BYTES)?)?;
+        [command,obj,spec,output] if command == "import" || command == "import-crowned" => {
+            let obj=read_bounded(obj,mesh_import::MAX_OBJ_BYTES)?;
+            let spec=read_bounded(spec,mesh_import::MAX_SPEC_BYTES)?;
+            let crowned=command=="import-crowned";
+            let imported=if crowned {mesh_import::crowned::import(&obj,&spec)?}
+                else {mesh_import::import(&obj,&spec)?};
             write_output(create_output(output)?,&imported.fsb,output)?;
-            println!("Imported {} selected vertices, {} triangles; maximum plane projection {:.9e} m",
-                imported.source_vertices.len(),imported.triangles,imported.max_projection_m);
-            println!("Written {output}; admitted by the existing piano plate reader. Not a global intersection, measured-geometry or acoustic-fidelity certificate.");
+            println!("Imported {} selected vertices, {} triangles; {} {:.9e} m",
+                imported.source_vertices.len(),imported.triangles,
+                if crowned {"retained maximum |crown height|"} else {"maximum plane projection"},
+                imported.max_projection_m);
+            println!("Written {output}; {}. Not a global intersection, measured-geometry or acoustic-fidelity certificate.",
+                if crowned {"3-D shell with supplied crown, orthotropy and eccentric reinforcement"}
+                else {"admitted by the existing piano plate reader"});
             Ok(())
         }
         [command,input,obj,spec] if command == "export" => {
@@ -131,6 +147,7 @@ mod cli_tests {
     #[test]
     fn invalid_commands_refuse_and_help_needs_no_files() {
         assert!(run(&["import".into(),"missing.obj".into()]).is_err());
+        assert!(run(&["import-crowned".into(),"missing.obj".into()]).is_err());
         assert!(run(&["--help".into()]).is_ok());
         assert!(run(&["render-steinway".into(),"missing.fsb".into(),"out.wav".into(),"NaN".into()]).is_err());
         assert!(run(&["export".into(),"x.fsb".into(),"same".into(),"same".into()]).is_err());
