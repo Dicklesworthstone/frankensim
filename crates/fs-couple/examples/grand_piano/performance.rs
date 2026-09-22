@@ -7,6 +7,9 @@
 
 use super::engine::Instrument;
 
+#[path = "midi.rs"]
+pub mod midi;
+
 pub const HEADER: &str = "sample,event,key,value";
 const MAX_EVENTS: usize = 1_000_000;
 
@@ -31,6 +34,32 @@ pub struct Performance {
 }
 
 impl Performance {
+    /// Cold admission for a decoded input format. Keep source order at equal
+    /// timestamps; never sort pedal/key transitions or repair invalid controls.
+    pub(super) fn from_events(events: Vec<Event>, keys: &[u8], frames: u64) -> Result<Self, String> {
+        if frames == 0 || events.len() > MAX_EVENTS {
+            return Err("decoded performance exceeds its event/duration budget".into());
+        }
+        let mut previous = 0;
+        for (index, event) in events.iter().enumerate() {
+            let admitted = match event.control {
+                Control::NoteOn { key, velocity_m_s } => keys.contains(&key)
+                    && velocity_m_s.is_finite() && velocity_m_s > 0.0 && velocity_m_s <= 8.0,
+                Control::JackOn { key, peak_n, duration_s } => keys.contains(&key)
+                    && peak_n.is_finite() && peak_n > 0.0 && peak_n <= 200.0
+                    && duration_s.is_finite() && (0.001..=0.2).contains(&duration_s),
+                Control::NoteOff { key } => keys.contains(&key),
+                Control::Sustain(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+                Control::Sostenuto(_) | Control::UnaCorda(_) => true,
+            };
+            if !admitted || event.sample < previous || event.sample >= frames {
+                return Err(format!("decoded performance event {index} has an invalid time, key or physical control"));
+            }
+            previous = event.sample;
+        }
+        Ok(Self { events, cursor: 0 })
+    }
+
     pub fn read(text: &str, keys: &[u8], frames: u64) -> Result<Self, String> {
         let mut events = Vec::new();
         let mut header = false;
@@ -138,6 +167,21 @@ impl Performance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_controls_are_validated_without_reordering_same_time_edges() {
+        let events = vec![Event { sample: 4, control: Control::NoteOn { key: 69, velocity_m_s: 2.0 } },
+            Event { sample: 4, control: Control::Sostenuto(true) }];
+        assert_eq!(Performance::from_events(events.clone(), &[69], 10).unwrap().events, events);
+        assert!(Performance::from_events(events.clone(), &[60], 10).is_err());
+        assert!(Performance::from_events(events, &[69], 4).is_err());
+        for control in [Control::NoteOn { key: 69, velocity_m_s: f64::NAN }, Control::Sustain(1.1),
+            Control::JackOn { key: 69, peak_n: 201.0, duration_s: 0.01 }] {
+            assert!(Performance::from_events(vec![Event { sample: 0, control }], &[69], 10).is_err());
+        }
+        assert!(Performance::from_events(vec![Event { sample: 2, control: Control::Sustain(1.0) },
+            Event { sample: 1, control: Control::Sustain(0.0) }], &[69], 10).is_err());
+    }
 
     #[test]
     fn same_sample_controls_preserve_input_order() {
