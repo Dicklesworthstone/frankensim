@@ -10,10 +10,7 @@
   "trajectory_bit_semantics_version": 1,
   "trajectory_golden_hash": "0xe185_4f98_a25e_3663",
   "pareto_golden_hash": "0x301b_04df_db91_3965",
-  "tests_passed": [
-    "ascent_battery::ascent_golden_hash",
-    "pareto_battery::pareto_golden_hash"
-  ],
+  "tests_passed": ["ascent_battery::ascent_golden_hash", "pareto_battery::pareto_golden_hash"],
   "execution_lane": "darwin-arm64-native",
   "verdict": "PASS",
   "timestamp": "2026-08-24T07:33:23Z"

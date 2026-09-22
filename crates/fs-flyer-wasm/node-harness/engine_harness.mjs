@@ -9,6 +9,7 @@
 //   node node-harness/engine_harness.mjs <PKG_DIR>/fs_flyer_wasm.js
 
 import { createRequire } from "node:module";
+
 const require = createRequire(import.meta.url);
 
 const pkgPath = process.argv[2];
@@ -33,24 +34,37 @@ function check(name, cond, detail) {
 
 // --- refusal codes before any init -----------------------------------------
 const stepBefore = JSON.parse(wasm.flyer_engine_step(false, 0.0, 0.0));
-check("engine-not-initialized:step", stepBefore.refusal?.code === "engine-not-initialized", stepBefore);
+check(
+  "engine-not-initialized:step",
+  stepBefore.refusal?.code === "engine-not-initialized",
+  stepBefore,
+);
 const digestBefore = JSON.parse(wasm.flyer_engine_digest());
-check("engine-not-initialized:digest", digestBefore.refusal?.code === "engine-not-initialized", digestBefore);
+check(
+  "engine-not-initialized:digest",
+  digestBefore.refusal?.code === "engine-not-initialized",
+  digestBefore,
+);
 
 // --- mode-invalid + scenario-invalid (cap AND cap+1) ------------------------
 const badMode = JSON.parse(wasm.flyer_engine_init(1n, 1.294, 11.0, 3, 0, 18.3, 40n, false, false));
 check("mode-invalid", badMode.refusal?.code === "mode-invalid", badMode);
 const capOk = JSON.parse(wasm.flyer_engine_init(1n, 1.294, 20.0, 0, 0, 18.3, 2n, false, false));
 check("headwind-at-cap-admits", !!capOk.ok, capOk);
-const capPlus = JSON.parse(wasm.flyer_engine_init(1n, 1.294, 20.000000000000004, 0, 0, 18.3, 40n, false, false));
+const capPlus = JSON.parse(
+  wasm.flyer_engine_init(1n, 1.294, 20.000000000000004, 0, 0, 18.3, 40n, false, false),
+);
 check("scenario-invalid", capPlus.refusal?.code === "scenario-invalid", capPlus);
 
 // --- real Dec-17 init: identity fields --------------------------------------
 const init = JSON.parse(wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 40n, false, false));
 check(
   "init-identity",
-  !!init.ok && typeof init.ok.run_intent_id === "string" && typeof init.ok.tick0_digest === "string" && init.ok.trim_v_mps > 5.0,
-  init
+  !!init.ok &&
+    typeof init.ok.run_intent_id === "string" &&
+    typeof init.ok.tick0_digest === "string" &&
+    init.ok.trim_v_mps > 5.0,
+  init,
 );
 
 // --- stepping: on-rail, in-band terminal, run-ended -------------------------
@@ -63,7 +77,9 @@ const digest = JSON.parse(wasm.flyer_engine_digest());
 check("digest", typeof digest.ok?.digest === "string" && digest.ok.digest.length === 64, digest);
 
 // --- human mode: control-input-missing (absent AND non-finite) -------------
-const humanInit = JSON.parse(wasm.flyer_engine_init(7n, 1.294, 11.0, 2, 0, 18.3, 40n, false, false));
+const humanInit = JSON.parse(
+  wasm.flyer_engine_init(7n, 1.294, 11.0, 2, 0, 18.3, 40n, false, false),
+);
 check("human-init", !!humanInit.ok, humanInit);
 const noInput = JSON.parse(wasm.flyer_engine_step(false, 0.0, 0.0));
 check("control-input-missing:absent", noInput.refusal?.code === "control-input-missing", noInput);
@@ -73,16 +89,29 @@ const withInput = JSON.parse(wasm.flyer_engine_step(true, 25.0, 0.01));
 check("human-steps", withInput.ok?.phase === "on-rail", withInput);
 
 // --- assist visibility (E5.3c) ----------------------------------------------
-const assistInit = JSON.parse(wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 5n, true, false));
+const assistInit = JSON.parse(
+  wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 5n, true, false),
+);
 check("assist-init", !!assistInit.ok, assistInit);
 const assistStep = JSON.parse(wasm.flyer_engine_step(false, 0.0, 0.0));
-check("assist-visible", assistStep.ok?.assist_active === true && typeof assistStep.ok?.assist_dc_rad === "number", assistStep);
+check(
+  "assist-visible",
+  assistStep.ok?.assist_active === true && typeof assistStep.ok?.assist_dc_rad === "number",
+  assistStep,
+);
 
 // --- catapult intent binding (E5.4) -----------------------------------------
 const catInit = JSON.parse(wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 5n, false, true));
 check("catapult-init", !!catInit.ok, catInit);
-const plainInit = JSON.parse(wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 5n, false, false));
-check("catapult-binds-intent", catInit.ok?.run_intent_id !== plainInit.ok?.run_intent_id && catInit.ok?.tick0_digest === plainInit.ok?.tick0_digest, {});
+const plainInit = JSON.parse(
+  wasm.flyer_engine_init(1903n, 1.294, 11.0, 0, 0, 18.3, 5n, false, false),
+);
+check(
+  "catapult-binds-intent",
+  catInit.ok?.run_intent_id !== plainInit.ok?.run_intent_id &&
+    catInit.ok?.tick0_digest === plainInit.ok?.tick0_digest,
+  {},
+);
 
 // --- determinism across re-init ---------------------------------------------
 function transcript() {
