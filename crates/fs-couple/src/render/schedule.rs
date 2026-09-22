@@ -759,3 +759,6 @@ mod pressure_gesture_tests {
 
 /// Physical actuator histories projected through mass-normalized modal ports.
 pub mod force;
+
+/// File-driven finite reed/duct pressure performances.
+pub mod reed;
