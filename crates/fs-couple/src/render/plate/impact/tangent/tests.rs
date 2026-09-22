@@ -53,7 +53,7 @@ fn check_tangent(s:&ImpactSystem,x:&[f64]) {
         assert!(s.hessian_vector(x,&d,&mut hd));
         let mut plus=x.to_vec();plus[col]+=h;let mut minus=x.to_vec();minus[col]-=h;
         let mut gp=vec![0.0;n];let mut gm=gp.clone();
-        s.system.storage.gradient(&plus,&mut gp);s.system.storage.gradient(&minus,&mut gm);
+        s.contact.gradient(&plus,&mut gp);s.contact.gradient(&minus,&mut gm);
         for row in 0..n {
             matrix[row*n+col]=hd[row];let fd=(gp[row]-gm[row])/(2.0*h);
             assert!((fd-hd[row]).abs()<1e-5*fd.abs().max(hd[row].abs()).max(1.0),
