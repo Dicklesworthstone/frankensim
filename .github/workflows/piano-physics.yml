@@ -54,6 +54,9 @@ jobs:
       - name: Test the piano implementation
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
+      - name: Test finite-body piano acoustics
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-couple --example piano_exterior -- --test-threads=1
       - name: Render a physical-model smoke note
         if: ${{ !cancelled() }}
         run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
