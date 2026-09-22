@@ -8,15 +8,19 @@
 //! No reduced modal basis is used to find static equilibrium: in-plane response
 //! must not disappear merely because its modes lie above the audible band.
 //!
-//! Dead Cartesian forces/moments, fixed supports, moderate rotations. Beam
-//! bending/axial laws and offsets remain linear in their reference frames.
-//! No follower loads, beam buckling, glue creep, manufacturing residual stress,
-//! large-rotation bending, or continuation through an unstable equilibrium.
+//! Dead forces and optional conservative anchored tethers, fixed supports,
+//! moderate rotations. Beam bending/axial laws and offsets remain linear in
+//! their reference frames. No nonconservative follower loads, beam buckling,
+//! glue creep, manufacturing stress, large-rotation bending or unstable branch.
 use super::{FacetGeometry, ShellMesh, ShellModel, ShellSupport};
 use super::stiffened::{ShellBeam, assemble_stiffened_shell};
 use crate::PlateSection;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 use std::cell::Cell;
+
+/// Direction-updating tensile connections at existing shell point ports.
+pub mod tethers;
+use tethers::{PreparedTether, ShellTether, TetherResponse};
 
 /// Explicit cold work and moderate-deformation admission limits.
 #[derive(Clone, Copy, Debug)]
@@ -45,7 +49,8 @@ impl Default for PreloadOptions {
 /// Stable incremental pencil and the reference-to-equilibrium displacement.
 #[derive(Debug)]
 pub struct PreloadedShell {
-    /// K is the consistent tangent at equilibrium; M retains reference mass.
+    /// Consistent equilibrium tangent INCLUDING any massless tethers; reference M.
+    /// Do not add these same tethers again in a downstream dynamic model.
     pub model: ShellModel,
     /// Full nodal u,v,w [m], theta_x,y,z [rad], including zero fixed coordinates.
     pub displacement: Vec<f64>,
@@ -53,8 +58,10 @@ pub struct PreloadedShell {
     pub residual_force_n: f64,
     /// Length used only to scale rotations/moments in solver norms [m].
     pub norm_length_m: f64,
-    /// Internal stored energy, excluding external dead-load potential [J].
+    /// Shell/beam stored energy, excluding external/tether potential [J].
     pub stored_energy_j: f64,
+    /// Final forces, tensions, lengths and potential changes in input order.
+    pub tether_responses: Vec<TetherResponse>,
     /// Accepted Newton attempts across all increments.
     pub iterations: usize,
     /// Actual cold residual/Jacobian evaluations.
@@ -137,10 +144,10 @@ impl Element {
 /// rotations by the reference span [m]; residuals are reference-K-inverse force
 /// imbalance in those same coordinates. Final admission separately checks forces.
 /// Invalid trials/evaluation-budget exhaustion return NaNs for solver rejection.
-/// Constructed only inside `equilibrate_stiffened_shell`.
 pub struct PreloadProblem<'a> {
     model: &'a ShellModel,
     elements: Vec<Element>,
+    tethers: Vec<PreparedTether>,
     base: LdltFactor,
     scale: Vec<f64>,
     load: Vec<f64>,
@@ -177,13 +184,20 @@ impl PreloadProblem<'_> {
         }
         (energy.is_finite() && force.iter().all(|v|v.is_finite())).then_some(energy)
     }
+    fn applied_load(&self,u:&[f64])->Result<Vec<f64>,String> {
+        let mut load=self.load.clone();
+        for tether in &self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
+        for p in &mut load {*p*=self.fraction;}
+        if load.iter().any(|v|!v.is_finite()) {return Err("nonfinite combined shell load".into());}
+        Ok(load)
+    }
     fn check_balance(&self,u:&[f64])->Result<f64,String> {
         let mut force=vec![0.;self.model.free];
         self.force_energy(u,&mut force).ok_or("equilibrium exceeds finite/moderate-deformation limits")?;
-        let residual:Vec<_>=force.iter().zip(&self.load).zip(&self.scale)
-            .map(|((f,p),s)|(f-self.fraction*p)/s).collect();
-        let load_norm=norm(&self.load.iter().zip(&self.scale)
-            .map(|(p,s)|self.fraction*p/s).collect::<Vec<_>>());
+        let load=self.applied_load(u)?;
+        let residual:Vec<_>=force.iter().zip(&load).zip(&self.scale)
+            .map(|((f,p),s)|(f-p)/s).collect();
+        let load_norm=norm(&load.iter().zip(&self.scale).map(|(p,s)|p/s).collect::<Vec<_>>());
         let residual=norm(&residual);
         if !residual.is_finite() || residual>1e-8+self.options.relative_force_tolerance*load_norm {
             return Err(format!("shell preload failed physical force balance: {residual} N for {load_norm} N load"));
@@ -204,18 +218,20 @@ impl PreloadProblem<'_> {
                 if let (Some(a),Some(b))=(element.dofs[i],element.dofs[j]) {k.push(a,b,c.tangent[9*i+j]);}
             }}
         }
+        for tether in &self.tethers {tether.add_tangent(u,&mut k,self.fraction)?;}
         Ok(k.assemble())
     }
 }
 impl PreloadProblem<'_> {
     /// Number of unconstrained coordinates.
     pub fn dimension(&self)->usize {self.model.free}
-    /// Overwrite the preconditioned dead-load residual.
+    /// Overwrite the preconditioned shell minus current applied-load residual.
     pub fn residual(&self,x:&[f64],out:&mut[f64]) {
         if !self.reserve() || x.len()!=self.model.free || out.len()!=self.model.free {out.fill(f64::NAN);return;}
         let u=self.physical(x);
         if self.force_energy(&u,out).is_none() {out.fill(f64::NAN);return;}
-        for (f,load) in out.iter_mut().zip(&self.load) {*f-=self.fraction*load;}
+        let Ok(load)=self.applied_load(&u) else {out.fill(f64::NAN);return;};
+        for (f,load) in out.iter_mut().zip(load) {*f-=load;}
         let value=self.base.solve(out);
         for ((out,v),scale) in out.iter_mut().zip(value).zip(&self.scale) {*out=v*scale;}
     }
@@ -232,6 +248,9 @@ impl PreloadProblem<'_> {
             for i in 0..9 {if let Some(a)=element.dofs[i] {
                 for j in 0..9 {if let Some(b)=element.dofs[j] {out[a]+=c.tangent[9*i+j]*v[b];}}
             }}
+        }
+        for tether in &self.tethers {
+            if tether.add_action(&u,&v,out,self.fraction).is_err() {out.fill(f64::NAN);return;}
         }
         let value=self.base.solve(out);
         for ((out,v),scale) in out.iter_mut().zip(value).zip(&self.scale) {*out=v*scale;}
@@ -251,18 +270,35 @@ fn positive_factor(k:&Csr)->Result<LdltFactor,String> {
 /// a fictitious displacement. Inputs and caller-owned geometry never mutate.
 ///
 /// This is an incremental small-vibration model about a solved dead-load
-/// equilibrium, not a time-domain nonlinear shell or a follower-string model.
-/// `solve` returns coordinates and iteration count; a claimed convergence is
-/// NOT trusted without force balance, deformation admission and stable inertia.
+/// equilibrium. `solve` returns coordinates and iteration count; a claimed
+/// convergence is NOT trusted without force balance, deformation admission
+/// and stable inertia.
 /// # Errors
 /// Invalid geometry/budgets, missing supports, excessive deformation, exhausted
 /// Newton/Krylov work, unresolved force balance or nonpositive tangent inertia.
-#[allow(clippy::too_many_arguments)] // Geometry, cards, supports, loads, budget and injected owner.
+#[allow(clippy::too_many_arguments)]
 pub fn equilibrate_stiffened_shell(mesh:&ShellMesh,sections:&[PlateSection],
     boundary:&[usize],support:ShellSupport,beams:&[ShellBeam],loads:&[f64],options:PreloadOptions,
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
     ->Result<PreloadedShell,String> {
+    equilibrate_tethered_shell(mesh,sections,boundary,support,beams,loads,&[],options,solve)
+}
+
+/// As [`equilibrate_stiffened_shell`], with optional direction-updating tensile
+/// connections. The continuation fraction scales their whole potential, so
+/// residual, analytic Jacobian and accepted stability tests describe ONE system.
+/// Final K includes the connections' material AND geometric stiffness. They
+/// add no mass. At most 4096 connections are admitted in this cold solve.
+/// # Errors
+/// The dead-load refusals plus invalid point ports, anchors or tensile laws.
+#[allow(clippy::too_many_arguments)]
+pub fn equilibrate_tethered_shell(mesh:&ShellMesh,sections:&[PlateSection],
+    boundary:&[usize],support:ShellSupport,beams:&[ShellBeam],loads:&[f64],tethers:&[ShellTether],
+    options:PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
+    ->Result<PreloadedShell,String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
+        || tethers.len()>4096
         || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty()
         || !(1..=64).contains(&options.load_steps) || !(1..=128).contains(&options.max_iterations)
         || options.max_evaluations==0 || options.max_evaluations>100_000
@@ -286,7 +322,8 @@ pub fn equilibrate_stiffened_shell(mesh:&ShellMesh,sections:&[PlateSection],
     }}
     let elements=sections.iter().enumerate().map(|(e,s)|Element::new(mesh,&model,s,e))
         .collect::<Result<Vec<_>,_>>()?;
-    let mut problem=PreloadProblem {model:&model,elements,base,scale,load,fraction:0.,options,evaluations:Cell::new(0)};
+    let tethers=tethers.iter().map(|t|PreparedTether::new(t,mesh,&model)).collect::<Result<Vec<_>,_>>()?;
+    let mut problem=PreloadProblem {model:&model,elements,tethers,base,scale,load,fraction:0.,options,evaluations:Cell::new(0)};
     let mut x=vec![0.;model.free];let mut iterations=0;let mut final_k=None;
     for step in 1..=options.load_steps {
         problem.fraction=step as f64/options.load_steps as f64;
@@ -304,10 +341,11 @@ pub fn equilibrate_stiffened_shell(mesh:&ShellMesh,sections:&[PlateSection],
     let residual_force_n=problem.check_balance(&u)?;
     let k=final_k.ok_or("no completed preload increment")?;
     let evaluations=problem.evaluations.get();
+    let tether_responses=problem.tethers.iter().map(|t|t.response(&u)).collect::<Result<Vec<_>,_>>()?;
     let displacement=model.dof_map.iter().map(|i|i.map_or(0.,|i|u[i])).collect();
     drop(problem);
     Ok(PreloadedShell {model:ShellModel {k,..model},displacement,residual_force_n,
-        norm_length_m:length,stored_energy_j:energy,iterations,evaluations})
+        norm_length_m:length,stored_energy_j:energy,tether_responses,iterations,evaluations})
 }
 
 #[cfg(test)]
@@ -323,7 +361,7 @@ mod tests {
             if p.check_balance(&u).is_ok() {return Ok((x,iteration));}
             let mut force=vec![0.;p.dimension()];
             p.force_energy(&u,&mut force).ok_or("test trial refused")?;
-            for (f,load) in force.iter_mut().zip(&p.load) {*f-=p.fraction*load;}
+            for (f,load) in force.iter_mut().zip(p.applied_load(&u)?) {*f-=load;}
             let factor=positive_factor(&p.tangent(&u)?)?;let delta=factor.solve(&force);
             for ((x,d),s) in x.iter_mut().zip(delta).zip(&p.scale) {*x-=d*s;}
         }
@@ -367,6 +405,7 @@ mod tests {
             &vec![0.;6*mesh.nodes.len()],PreloadOptions::default(),&mut reference_newton).unwrap();
         assert_eq!(mesh,original);assert!(loaded.displacement.iter().all(|u|*u==0.));
         assert_eq!(loaded.residual_force_n,0.);assert_eq!(loaded.iterations,0);
+        assert!(loaded.tether_responses.is_empty());
         for i in 0..base.free {
             assert_eq!(loaded.model.k.row(i),base.k.row(i));assert_eq!(loaded.model.m.row(i),base.m.row(i));
         }
@@ -394,5 +433,36 @@ mod tests {
         let mut bad=load.clone();bad[26]=f64::NAN;assert!(solve(&bad,PreloadOptions::default()).is_err());
         assert!(solve(&load,PreloadOptions {load_steps:0,..PreloadOptions::default()}).is_err());
         bad[26]=-1e8;assert!(solve(&bad,PreloadOptions {max_evaluations:64,..PreloadOptions::default()}).is_err());
+    }
+    #[test]
+    fn coupled_tethers_change_equilibrium_tension_and_the_actual_tangent() {
+        let (mesh,sections,fixed)=fixture(0.);
+        let connections:Vec<_>=[-0.25,0.75].into_iter().map(|x|ShellTether {
+            nodes:mesh.tris[0],weights:[0.,0.,1.],arm_m:[0.;3],anchor_m:[x,0.25,-0.04],
+            reference_tension_n:100.,axial_stiffness_n_per_m:20_000.,
+        }).collect();
+        let load=vec![0.;54];
+        let coupled=equilibrate_tethered_shell(&mesh,&sections,&fixed,ShellSupport::Clamped,&[],
+            &load,&connections,PreloadOptions::default(),&mut reference_newton).unwrap();
+        assert!(coupled.displacement[26]<0.);assert!(coupled.residual_force_n<1e-6);
+        assert_eq!(coupled.tether_responses.len(),2);
+        for response in &coupled.tether_responses {
+            assert!(response.tension_n>0. && response.tension_n<100.);
+            assert!(response.length_change_m<0.);
+        }
+        // Freeze the converged loads, not the unloaded-direction loads. This
+        // recovers the SAME structural equilibrium but not the tether tangent.
+        let mut frozen=load;
+        for response in &coupled.tether_responses {
+            for c in 0..3 {frozen[24+c]+=response.force_n[c];}
+        }
+        let bare=equilibrate_stiffened_shell(&mesh,&sections,&fixed,ShellSupport::Clamped,&[],
+            &frozen,PreloadOptions::default(),&mut reference_newton).unwrap();
+        for (a,b) in bare.displacement.iter().zip(&coupled.displacement) {assert!((a-b).abs()<1e-9);}
+        let z=coupled.model.dof_map[26].unwrap();
+        assert!(coupled.model.k.get(z,z)>bare.model.k.get(z,z));
+        let mut bad=connections;bad[0].anchor_m=mesh.nodes[4];
+        assert!(equilibrate_tethered_shell(&mesh,&sections,&fixed,ShellSupport::Clamped,&[],
+            &vec![0.;54],&bad,PreloadOptions::default(),&mut reference_newton).is_err());
     }
 }
