@@ -21,6 +21,8 @@ use crate::modal_acoustic_time::ModalAcousticState;
 pub mod audio;
 /// Reciprocal interior acoustic modes in the existing nonlinear execution.
 pub mod cavity;
+/// Physical, spatially localized viscous attachments.
+pub mod damping;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
@@ -209,6 +211,14 @@ impl ImpactSystem {
     /// a simultaneous dissipative port, not insertion in the elastic potential.
     pub fn new(bodies:Vec<ImpactBody>,contacts:Vec<Obstacle>,pads:Vec<FeltPad>,volumes:Vec<VolumeSpring>,
         config:ImpactConfig)->Result<Self,ImpactError> {
+        Self::new_with_dampers(bodies,contacts,pads,volumes,Vec::new(),config)
+    }
+    /// Compose the same storage/contact/felt laws with localized viscous ports.
+    /// Their full reciprocal resistance enters the existing implicit solve and
+    /// its dissipation ledger. No modal diagonalization or output fade is used.
+    pub fn new_with_dampers(bodies:Vec<ImpactBody>,contacts:Vec<Obstacle>,pads:Vec<FeltPad>,
+        volumes:Vec<VolumeSpring>,dampers:Vec<damping::ViscousDamper>,
+        config:ImpactConfig)->Result<Self,ImpactError> {
         let modes=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.potential.count()))
             .ok_or_else(||invalid("mode count overflow"))?;
         if modes==0 || modes>MAX_IMPACT_MODES || contacts.len()>32 || pads.len()>16 || volumes.len()>8
@@ -218,6 +228,7 @@ impl ImpactSystem {
             || config.energy_relative_tolerance>=1.0 || !(config.dt_s*config.max_steps as f64).is_finite() {
             return Err(invalid("impact needs bounded nonempty modes and finite positive time/energy/work limits"));
         }
+        damping::validate(&dampers,modes)?;
         let mut x=vec![0.0;2*modes];let mut damping=Vec::with_capacity(modes);let mut potentials=Vec::new();
         let mut offset=0;let mut membranes=Vec::new();
         for (body_index,body) in bodies.into_iter().enumerate() {
@@ -257,6 +268,7 @@ impl ImpactSystem {
         for i in 0..modes {j[(2*i)*dim+2*i+1]=1.0;j[(2*i+1)*dim+2*i]=-1.0;
             r[(2*i+1)*dim+2*i+1]=damping[i];g[(2*i+1)*modes+i]=1.0;}
         for pad in &retained {for (i,b) in pad.spec.creep.iter().enumerate() {let index=2*modes+pad.creep_start+i;r[index*dim+index]=b.stiffness_n_m/b.viscosity_n_s_m;}}
+        damping::add_resistance(&dampers,modes,dim,&mut r)?;
         let histories=Rc::new(RefCell::new(histories));
         let storage=MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)};
         let storage=ContactStorage::new(Box::new(storage),modes,admitted).map_err(|e|ImpactError::Owner(e.to_string()))?;

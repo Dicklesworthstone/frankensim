@@ -16,7 +16,7 @@
 /// Geometry-derived tensioned filaments with reciprocal distributed contact.
 pub mod wire;
 
-use super::{BodyPotential, ImpactBody, ImpactError, VolumeSpring};
+use super::{BodyPotential, ImpactBody, ImpactError, VolumeSpring, damping::{self, ViscousDamper}};
 use crate::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -176,6 +176,16 @@ impl LinearImpactSystem {
         bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volumes: Vec<VolumeConnection>,
         config: LinearImpactConfig, gate: &CancelGate,
     ) -> Result<Self, ImpactError> {
+        Self::new_with_dampers(bodies, contacts, volumes, Vec::new(), config, gate)
+    }
+
+    /// Compile spatial drag into the existing simultaneous bilateral port solve.
+    /// Free coordinates may use these explicit ports; unsupported diagonal free
+    /// drag is still refused. A port spans at most two original body components.
+    pub fn new_with_dampers(
+        bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volumes: Vec<VolumeConnection>,
+        dampers: Vec<ViscousDamper>, config: LinearImpactConfig, gate: &CancelGate,
+    ) -> Result<Self, ImpactError> {
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         let counts: Vec<_> = bodies.iter().map(|b| b.potential.count()).collect();
         let count = counts.iter().try_fold(0usize, |n, &m| n.checked_add(m))
@@ -187,6 +197,11 @@ impl LinearImpactSystem {
             || volumes.len() > config.coupling.max_connections || contacts.len() > 32
         {
             return Err(invalid("linear impact needs bounded bodies, ports, positive clock/force and exact step budget"));
+        }
+        damping::validate(&dampers, count)?;
+        let active_dampers = dampers.iter().filter(|d| d.damping_n_s_m != 0.0).count();
+        if volumes.len().checked_add(active_dampers).is_none_or(|n| n > config.coupling.max_connections) {
+            return Err(invalid("volumes and viscous ports exceed the existing connection budget"));
         }
         let point_count = contacts.iter().try_fold(0usize, |n, c| n.checked_add(c.n_points()))
             .ok_or_else(|| invalid("linear impact contact count overflow"))?;
@@ -223,7 +238,7 @@ impl LinearImpactSystem {
             model.restore_states(&body.initial).map_err(|e| ImpactError::Owner(e.to_string()))?;
             models.push(model);
         }
-        let mut links = Vec::with_capacity(volumes.len());
+        let mut links = Vec::with_capacity(volumes.len()+active_dampers);
         for volume in volumes {
             let v = volume.spring;
             let area = volume.reference_area_m2;
@@ -243,6 +258,12 @@ impl LinearImpactSystem {
             let (left, right) = attachments(&column, &counts)?;
             links.push(ModalConnection { left, right, stiffness_n_m: stiffness,
                 damping_n_s_m: 0.0, rest_extension_m: 0.0 });
+        }
+        for damper in dampers {
+            if damper.damping_n_s_m == 0.0 { continue; }
+            let (left, right) = attachments(&damper.weights, &counts)?;
+            links.push(ModalConnection { left, right, stiffness_n_m: 0.0,
+                damping_n_s_m: damper.damping_n_s_m, rest_extension_m: 0.0 });
         }
         let network = CoupledModalSystem::new(models, links, config.coupling, gate).map_err(owner)?;
         let mut points = Vec::with_capacity(point_count);
