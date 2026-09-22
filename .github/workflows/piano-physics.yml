@@ -42,6 +42,9 @@ jobs:
       - name: Test reinforced crowned-shell mechanics
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-plate --lib shell::stiffened -- --test-threads=1
+      - name: Test nonlinear shell equilibrium and preload
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-plate --lib shell::preload -- --test-threads=1
       - name: Test OBJ physical-region preservation
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-io obj::tests -- --test-threads=1

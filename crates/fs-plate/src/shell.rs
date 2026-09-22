@@ -17,6 +17,8 @@ pub mod reduction;
 pub mod head;
 /// Bonded 3-D beam reinforcement with reciprocal eccentric stiffness and mass.
 pub mod stiffened;
+/// Static dead loading and vibrations about the resulting stable equilibrium.
+pub mod preload;
 
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
