@@ -17,7 +17,7 @@ mod hammer_materials;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
-    [--hammers materials.fsh]
+    [--hammers materials.fsh] [--dampers estimated | pads.fspd]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -46,6 +46,11 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
+--dampers selects finite-footprint viscous pads instead of the default point
+damper. 'estimated' declares approximate spans and drag; a file must cover
+every scale key with a pad or explicit free row. It requires --render and
+uses existing MIDI/CSV key, sustain and sostenuto controls. See DAMPERS.md.
+This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
 Thickness taper, material constants and key assignment include explicit estimates.
 Default per-key WoolFelt loading envelopes are source-derived; crush/unloading
@@ -84,7 +89,7 @@ applies only to that diagnostic, not to physical microphone pressure.";
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
-    hammers: Option<String>,
+    hammers: Option<String>, dampers: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
@@ -97,7 +102,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, hammers: None, concert_pitch: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, dampers: None, concert_pitch: None, raw_tensions: false,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -126,6 +131,7 @@ impl Options {
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
                 "--preset" => options.preset = Some(value.clone()),
                 "--hammers" => options.hammers = Some(value.clone()),
+                "--dampers" => options.dampers = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
@@ -178,6 +184,9 @@ impl Options {
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
         }
+        if options.dampers.as_ref().is_some_and(|s| s.trim().is_empty() || options.render.is_none()) {
+            return Err("--dampers requires --render and either estimated or a nonempty specification path".into());
+        }
         if !(4..=24).contains(&options.mesh_divisions)
             || (options.preset.is_none() && (seen.contains("--mesh-divisions")
                 || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
@@ -218,7 +227,8 @@ impl Options {
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
-            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.midi.as_ref()];
+            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.midi.as_ref(),
+            options.dampers.as_ref().filter(|s| s.as_str() != "estimated")];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
@@ -257,9 +267,16 @@ fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry:
 }
 fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options) -> Result<engine::Instrument, String> {
+    let dampers = match options.dampers.as_deref() {
+        None => None,
+        Some("estimated") => Some(linear::dampers::Specification::estimated(&scale)?),
+        Some(path) => Some(linear::dampers::Specification::load(path, &scale)?),
+    };
     let text = options.hammers.as_ref().map(|path| std::fs::read_to_string(path)
         .map_err(|e| format!("{path}: {e}"))).transpose()?;
-    prepare_instrument_with_hammers(scale, modes, options, text.as_deref())
+    let mut piano = prepare_instrument_with_hammers(scale, modes, options, text.as_deref())?;
+    if let Some(spec) = &dampers { piano.configure_dampers(spec)?; }
+    Ok(piano)
 }
 fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
@@ -333,6 +350,10 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     }};
     let piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
+    if let Some((strings,cells)) = piano.damper_resolution() {
+        println!("Spatial viscous dampers: {} speaking-string pads, {} quadrature stations; source {}. No measured pad/action or real-time claim; see DAMPERS.md.",
+            strings, cells, options.dampers.as_deref().unwrap_or("supplied"));
+    }
     let surface = if options.diagnostic_volume { None } else { surface };
     let mut stream = audio::AudioStream::new(piano, score, surface,
         options.microphone.unwrap_or([0.675, 1.0, 1.0]),
@@ -365,6 +386,10 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
     println!("Felt loss {:.9} J, including {:.9} J time-dependent relaxation; shank damping {:.9} J.",
         piano.accounting.felt_loss_j, piano.accounting.felt_relaxation_loss_j, piano.accounting.shank_loss_j);
+    if piano.damper_resolution().is_some() {
+        println!("Spatial damper loss {:.9} J, already included in component losses; no output-envelope damping.",
+            piano.accounting.damper_loss_j);
+    }
     Ok(())
 }
 
@@ -452,6 +477,21 @@ mod render_tests {
         Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
     }
     #[test]
+    fn damper_selection_composes_with_physical_and_midi_inputs_and_protects_its_source() {
+        let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
+            "--dampers", "pads.fspd", "--hammers", "felt.fsh"]).unwrap();
+        assert_eq!(o.dampers.as_deref(), Some("pads.fspd"));
+        assert!(options(&["--render", "piano.wav", "--dampers", "estimated"]).is_ok());
+        assert_eq!(options(&[]).unwrap().dampers, None);
+        for args in [vec!["--dampers"], vec!["--dampers", "estimated"],
+            vec!["--render", "piano.wav", "--dampers", ""],
+            vec!["--render", "pads.fspd", "--dampers", "pads.fspd"],
+            vec!["--render", "piano.wav", "--dampers", "pads.fspd", "--dump-scale", "pads.fspd"],
+            vec!["--render", "piano.wav", "--dampers", "estimated", "--dampers", "other.fspd"]] {
+            assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
     fn midi_options_compose_with_physical_inputs_without_overwriting_the_score() {
         let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
             "--midi-channel", "16", "--midi-velocity-max-m-s", "2", "--midi-half-pedal",
@@ -479,10 +519,13 @@ mod render_tests {
         // End-of-track at tick 12 releases sustain at sample 600, not PCM.
         let bytes = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x10\
             \0\xb0\x40\x7f\0\x90\x45\x7f\x04\x90\x45\0\x08\xff\x2f\0";
-        let mut o = options(&["--preset", "steinway-d"]).unwrap(); o.modes = 12;
+        let mut o = options(&["--preset", "steinway-d", "--render", "piano.wav"]).unwrap(); o.modes = 12;
+        for spatial in [false,true] {
+        o.dampers = spatial.then(|| "estimated".to_owned());
         let course = selected_scale(None, &o).unwrap()[48];
         let mut a = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();
         let mut b = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();
+        assert_eq!(a.damper_resolution().is_some(), spatial);
         let decoded = midi::read(bytes, &[69], 48_000, 1500,
             midi::Mapping { maximum_velocity_m_s: 2.0, ..midi::Mapping::default() }).unwrap();
         assert_eq!(decoded.report.end_releases, 1);
@@ -496,6 +539,8 @@ mod render_tests {
         assert!(a.accounting.felt_loss_j > 0.0);
         assert_eq!(a.accounting.input_work_j.to_bits(), b.accounting.input_work_j.to_bits());
         assert!((a.accounting.input_work_j - a.energy_j() - a.accounting.dissipated_j()).abs() < 1e-7);
+        assert!(a.accounting.damper_loss_j > 0.0);
+        }
     }
     #[test]
     fn rendering_and_both_physical_imports_are_composable() {
