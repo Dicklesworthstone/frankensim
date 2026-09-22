@@ -78,10 +78,10 @@ fn supplied_segmented_bore_and_moist_air_owner_control_the_actual_trajectory() {
         Segment::Cylinder { radius: 0.0022, length: 0.2 },
         Segment::ToneHole { hole_radius: 0.0005, chimney_height: 0.001,
             bore_radius: 0.0022, state: HoleState::Vent(0.5) },
-        Segment::Cone { inlet_radius: 0.0022, outlet_radius: 0.0023, length: 0.3 },
+        Segment::Cone { inlet_radius: 0.0022, outlet_radius: 0.00225, length: 0.3 },
     ] };
     let input = INPUT.replace("segments 1\ncylinder 0.0022 0.5",
-        "segments 3\ncylinder 0.0022 0.2\nhole 0.0005 0.001 0.0022 0.5\ncone 0.0022 0.0023 0.3")
+        "segments 3\ncylinder 0.0022 0.2\nhole 0.0005 0.001 0.0022 0.5\ncone 0.0022 0.00225 0.3")
         .replace("ambient 293.15", "ambient 303.15");
     let source = ReedPerformance::from_bytes(input.as_bytes(), 37).unwrap();
     assert_eq!(source.info().segments, 3); assert_eq!(source.info().tone_holes, 1);
@@ -109,8 +109,12 @@ fn complete_window_and_callback_admission_precede_pressure_changes() {
 
 #[test]
 fn rate_conversion_cancellation_and_retry_retain_the_finite_physical_window() {
-    let input = INPUT.replace("audio 48000 4801", "audio 96000 9602");
-    let pressure = reference(96_000, 9602, &geometry(), 293.15, 0.0, 0.0);
+    // The unflanged fit has ka <= 1 over the ENTIRE DFT band. Supply a
+    // physically narrower bore at 96 kHz; never relax that owner's limit.
+    let input = INPUT.replace("audio 48000 4801", "audio 96000 9602")
+        .replace("cylinder 0.0022", "cylinder 0.0011");
+    let duct = Duct { segments: vec![Segment::Cylinder { radius: 0.0011, length: 0.5 }] };
+    let pressure = reference(96_000, 9602, &duct, 293.15, 0.0, 0.0);
     let mut filter = Decimator::new(2, 1).unwrap();
     let expected: Vec<f64> = pressure.chunks_exact(2).map(|block| {
         let value = filter.preview(block).unwrap()[0]; filter.commit(); value

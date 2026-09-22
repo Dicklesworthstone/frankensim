@@ -99,3 +99,44 @@ ramps, release, callback partitions, massive mechanics, static hole/cone geometr
 a changed gas state, finite-window refusal and decimated cancellation/resume.
 These are implementation regressions, not measured-instrument validation or a
 real-time throughput claim.
+
+## WAV and ensemble commands
+
+Run the supplied phrase on its declared 48 kHz clock:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- \
+  wind crates/fs-couple/examples/reed-duct.performance /tmp/reed-phrase.wav \
+  --block 37
+```
+
+For a supplied higher-rate performance, add `--decimate`. The high-rate source
+must already satisfy the existing full-band radiation/realization domain. For
+example, doubling the mechanics rate of the supplied 2.2 mm-radius unflanged
+bore without changing the physical source violates the low-`ka` load limit.
+The regression's 96 kHz source explicitly supplies a 1.1 mm-radius bore instead;
+no geometry is changed automatically. Noninteger rate ratios and incomplete
+output intervals refuse. The declared window includes filter startup delay;
+no truncated tail is normalized, padded or flushed after that window.
+
+The same source can enter the existing file-driven ensemble:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- \
+  ensemble /tmp/reed-and-plate.wav --full-scale-pa 20000 \
+  --reed crates/fs-couple/examples/reed-duct.performance \
+  --plate crates/fs-couple/examples/plate-mesh.performance --block 37
+```
+
+This command is a scalar-pressure composition example, not a claim that the
+reed bore and plate exterior are one calibrated microphone. Source observation
+compatibility remains the caller's responsibility. `--reed`, `--bow`, `--modal`
+and `--plate` may be combined in explicit summation order. Every part must have
+the same physical duration; the ensemble's scale is applied only after mixing.
+The source's own PCM scale is recorded but is never used as a hidden gain.
+The reed observation limitation is included in the part's provenance.
+
+`wind` preserves the source scale; `ensemble` requires a separate explicit scale.
+Both use the existing incremental PCM16 writer, clip counts and content hash.
+Input/model/clock refusal precedes output creation, and existing WAV/sidecar
+files are never overwritten. The old `music_render reed` fixture is unchanged.

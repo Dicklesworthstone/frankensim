@@ -33,6 +33,10 @@
 //! explicit decimation and pure pressure delays align them at one output clock.
 //! See `examples/ENSEMBLE_PERFORMANCES.md` for timing and observer assumptions.
 //!
+//! `music_render wind INPUT.performance OUT.wav [--block N] [--decimate]`
+//! renders authored reed primitives, segmented ducts and pressure phrases.
+//! See `examples/REED_PERFORMANCES.md`; the legacy `reed` fixture is unchanged.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. A new command interrupts
@@ -67,6 +71,8 @@
 //! content hash is the replay check). Sample rate is pinned at 48 kHz to
 //! keep the ecosystem coherent (fs-psycho refuses other rates).
 
+#[path = "music_render/wind_input.rs"]
+mod wind_input;
 #[path = "music_render/modal_input.rs"]
 mod modal_input;
 #[path = "music_render/plate_input.rs"]
@@ -330,6 +336,10 @@ fn string_context(block: usize) -> RenderContext {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "wind") {
+        wind_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "ensemble") {
         ensemble_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;

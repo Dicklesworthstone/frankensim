@@ -7,6 +7,7 @@ use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
 use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA};
 use fs_couple::render::schedule::{ScheduledRenderer, force::file::ModalPerformance};
+use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA, MAX_REED_PERFORMANCE_BYTES};
 use super::{RATE, create_outputs, json_string, stream_output};
 
 // These aggregate limits supplement, never replace, each source loader's caps.
@@ -18,10 +19,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate, Bow }
+enum Kind { Modal, Plate, Bow, Reed }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -41,11 +42,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" | "--bow" => {
+            "--modal" | "--plate" | "--bow" | "--reed" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, _ => Kind::Bow },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, _ => Kind::Reed },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -66,7 +67,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -90,18 +91,27 @@ struct SourceInfo {
     modes: usize,
     controls: usize,
 }
-fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), String> {
+// Preserve finite wrappers for producers whose raw scheduler has no horizon.
+type DynamicEnsemble = PressureEnsemble<Box<dyn PressureRenderer>>;
+fn boxed(renderer: ScheduledRenderer, mut info: SourceInfo) -> (Box<dyn PressureRenderer>, SourceInfo) {
+    info.controls += renderer.pending_controls().len();
+    (Box::new(renderer), info)
+}
+fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, SourceInfo), String> {
     let file = std::fs::File::open(&input.path).map_err(|e| format!("input {}: {e}", input.path.display()))?;
-    let max_bytes = if input.kind == Kind::Bow { MAX_BOWED_PERFORMANCE_BYTES } else { MAX_PART_BYTES };
+    let max_bytes = match input.kind {
+        Kind::Bow => MAX_BOWED_PERFORMANCE_BYTES, Kind::Reed => MAX_REED_PERFORMANCE_BYTES,
+        _ => MAX_PART_BYTES,
+    };
     let mut bytes = Vec::new();
     file.take((max_bytes + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("input {}: {e}", input.path.display()))?;
     if bytes.len() > max_bytes { return Err(format!("ensemble source exceeds its {max_bytes}-byte input budget")); }
-    let (renderer, mut info) = match input.kind {
+    let result = match input.kind {
         Kind::Modal => {
             let p = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
             let i = p.info();
-            (p.into_renderer(), SourceInfo {
+            boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
                 components: i.voices, modes: i.modes, controls: 0,
@@ -110,7 +120,7 @@ fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), 
         Kind::Bow => {
             let p = BowedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
             let i = p.info();
-            (p.into_renderer(), SourceInfo {
+            boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
                 components: 1, modes: i.string_modes + 1, controls: i.compiled_controls,
@@ -119,18 +129,26 @@ fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), 
         Kind::Plate => {
             let p = PlatePerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
             let i = p.info();
-            (p.into_renderer(), SourceInfo {
+            boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
                 components: 1, modes: i.retained_modes, controls: 0,
             })
         }
+        Kind::Reed => {
+            let p = ReedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let i = p.info();
+            (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
+                kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                components: 1, modes: 0, controls: i.compiled_controls,
+            })
+        }
     };
-    info.controls += renderer.pending_controls().len();
-    Ok((renderer, info))
+    Ok(result)
 }
 
-fn prepare(options: &Options) -> Result<(PressureEnsemble, Vec<SourceInfo>, u64), String> {
+fn prepare(options: &Options) -> Result<(DynamicEnsemble, Vec<SourceInfo>, u64), String> {
     let mut parts = Vec::new();
     let mut sources = Vec::new();
     let mut horizon = None;
@@ -186,11 +204,14 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
     )?;
     let parts: Vec<_> = sources.iter().zip(renderer.part_info()).map(|(source, aligned)| {
         let o = aligned.observation;
+        let scope = if source.kind == Kind::Reed {
+            ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
+        } else { "" };
         format!("{{\"kind\":\"{}\",\"schema\":\"{}\",\"blake3\":\"{}\",\
             \"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"ratio\":{},\
             \"filter\":\"{}\",\"filter_delay_output_samples\":{},\"alignment_delay_samples\":{},\
             \"first_output_source_index\":{},\"source_full_scale_pa\":{:e},\"source_pcm_scale_applied\":false,\
-            \"components\":{},\"modes\":{},\"compiled_controls\":{}}}",
+            \"components\":{},\"modes\":{},\"compiled_controls\":{}{scope}}}",
             source.kind.label(), source.schema, source.hash.to_hex(), source.rate, source.samples,
             o.ratio, o.filter_profile, o.delay_output_samples, aligned.alignment_delay_samples,
             o.first_output_source_index, source.source_full_scale_pa, source.components, source.modes, source.controls)
