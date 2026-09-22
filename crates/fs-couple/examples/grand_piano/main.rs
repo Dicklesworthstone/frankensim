@@ -8,6 +8,7 @@ mod board_geometry;
 mod steinway_d;
 mod steinway_scale;
 mod performance;
+use performance::midi;
 mod felt;
 mod engine;
 mod microphone;
@@ -20,6 +21,8 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
+    [--midi performance.mid] [--midi-channel 1..16]
+    [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--microphone x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
@@ -61,6 +64,13 @@ the physical jack station, with 7/100 ms pulses and 1.5 mm let-off. For example:
 48000,jack_legato,69,30
 Use note_off events to release keys before repeating them. Shank damping and
 the backcheck remain estimates; jack timing is resolved at the mechanical rate.
+--midi replaces the demo/--performance with a format-0/1 Standard MIDI File.
+It selects channel 1 by default. Velocity 127 maps to 4.5 m/s by default;
+--midi-velocity-max-m-s explicitly changes this linear, uncalibrated hammer
+launch mapping, not audio gain. CC64/66/67 drive the existing three pedals;
+--midi-half-pedal opts into CC64/127 travel instead of the default switch.
+The complete score must fit --duration, leaving room for acoustic ringdown.
+Unsupported physical controls refuse or are reported as ignored; see MIDI.md.
 Geometric boards default to a spatial Rayleigh half-space pressure microphone
 at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
 This assumes an infinite baffle, with no lid/room scattering or air backreaction.
@@ -75,6 +85,7 @@ struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     hammers: Option<String>,
+    midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
@@ -87,6 +98,7 @@ impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, concert_pitch: None, raw_tensions: false,
+            midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, diagnostic_volume: false,
@@ -104,6 +116,7 @@ impl Options {
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
             if flag == "--diagnostic-volume" { options.diagnostic_volume = true; continue; }
             if flag == "--raw-tensions" { options.raw_tensions = true; continue; }
+            if flag == "--midi-half-pedal" { options.midi_mapping.continuous_sustain = true; continue; }
             let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
             match flag.as_str() {
@@ -118,6 +131,13 @@ impl Options {
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
                 "--dump-obj" => options.dump_obj = Some(value.clone()),
                 "--performance" => options.performance = Some(value.clone()),
+                "--midi" => options.midi = Some(value.clone()),
+                "--midi-channel" => {
+                    options.midi_mapping.channel = value.parse::<u8>().map_err(|_| invalid())?
+                        .checked_sub(1).ok_or_else(invalid)?;
+                }
+                "--midi-velocity-max-m-s" => options.midi_mapping.maximum_velocity_m_s =
+                    value.parse().map_err(|_| invalid())?,
                 "--microphone" => {
                     let values = value.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>,_>>()
                         .map_err(|_| invalid())?;
@@ -175,6 +195,18 @@ impl Options {
             && (options.render.is_none() || options.note.is_some() || options.velocity.is_some()) {
             return Err("--performance requires --render and replaces --note/--velocity demo controls".into());
         }
+        if options.midi.is_some() && (options.render.is_none() || options.performance.is_some()
+            || options.note.is_some() || options.velocity.is_some()) {
+            return Err("--midi requires --render and excludes --performance/--note/--velocity".into());
+        }
+        let mapping = options.midi_mapping;
+        if mapping.channel > 15 || !mapping.maximum_velocity_m_s.is_finite()
+            || mapping.maximum_velocity_m_s <= 0.0 || mapping.maximum_velocity_m_s > 8.0
+            || mapping.maximum_velocity_m_s / 127.0 == 0.0
+            || (options.midi.is_none() && ["--midi-channel", "--midi-velocity-max-m-s", "--midi-half-pedal"]
+                .iter().any(|flag| seen.contains(flag))) {
+            return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
+        }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
         if options.microphone.is_some_and(|p| p.iter().any(|x|!x.is_finite()) || p[2] < 0.05)
             || (options.microphone.is_some() && (!geometric || options.render.is_none()
@@ -186,7 +218,7 @@ impl Options {
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
-            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref()];
+            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.midi.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
@@ -281,13 +313,24 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
-    let score = match &options.performance {
+    let score = if let Some(path) = &options.midi {
+        let parsed = midi::load(path, &keys, rate, u64::from(count), options.midi_mapping)?;
+        let report = &parsed.report;
+        println!("MIDI: {} tracks, channel {}, {} hammer launches, end sample {}, {} end releases; {} other-channel messages, {} unsupported channel messages and {} SysEx events ignored.",
+            report.tracks, options.midi_mapping.channel + 1, report.selected_note_ons,
+            report.end_sample, report.end_releases, report.other_channel_messages,
+            report.ignored_channel_messages, report.ignored_sysex_events);
+        println!("Uncalibrated MIDI mapping: velocity 127 -> {} m/s, linear hammer launch; sustain mapping {}. No output gain, sample bank or pitch-wheel substitution.",
+            options.midi_mapping.maximum_velocity_m_s,
+            if options.midi_mapping.continuous_sustain { "CC64/127 travel" } else { "switch at 64" });
+        performance::Performance::from_events(parsed.events, &keys, u64::from(count))?
+    } else { match &options.performance {
         Some(path) => performance::Performance::read(
             &std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
             &keys, u64::from(count))?,
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
-    };
+    }};
     let piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
     let surface = if options.diagnostic_volume { None } else { surface };
@@ -407,6 +450,52 @@ mod render_tests {
     use super::*;
     fn options(args: &[&str]) -> Result<Options, String> {
         Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+    #[test]
+    fn midi_options_compose_with_physical_inputs_without_overwriting_the_score() {
+        let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
+            "--midi-channel", "16", "--midi-velocity-max-m-s", "2", "--midi-half-pedal",
+            "--hammers", "felt.fsh"]).unwrap();
+        assert_eq!(o.midi.as_deref(), Some("score.mid"));
+        assert_eq!(o.midi_mapping.channel, 15);
+        assert_eq!(o.midi_mapping.maximum_velocity_m_s, 2.0);
+        assert!(o.midi_mapping.continuous_sustain);
+        for args in [vec!["--midi", "score.mid"], vec!["--midi-channel", "1"],
+            vec!["--midi-half-pedal"], vec!["--midi-velocity-max-m-s", "2"],
+            vec!["--midi", "score.mid", "--render", "score.mid"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--performance", "p.csv"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--note", "69"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--velocity", "2"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--midi-channel", "0"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--midi-channel", "17"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--midi-velocity-max-m-s", "NaN"],
+            vec!["--midi", "score.mid", "--render", "p.wav", "--midi-velocity-max-m-s", "9"]] {
+            assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
+    fn midi_and_si_csv_drive_identical_preset_contact_pedals_and_energy() {
+        // PPQN 480, default tempo: four ticks -> sample 200 at 48 kHz.
+        // End-of-track at tick 12 releases sustain at sample 600, not PCM.
+        let bytes = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk\0\0\0\x10\
+            \0\xb0\x40\x7f\0\x90\x45\x7f\x04\x90\x45\0\x08\xff\x2f\0";
+        let mut o = options(&["--preset", "steinway-d"]).unwrap(); o.modes = 12;
+        let course = selected_scale(None, &o).unwrap()[48];
+        let mut a = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();
+        let mut b = prepare_instrument(vec![course], &board::demonstration(), &o).unwrap();
+        let decoded = midi::read(bytes, &[69], 48_000, 1500,
+            midi::Mapping { maximum_velocity_m_s: 2.0, ..midi::Mapping::default() }).unwrap();
+        assert_eq!(decoded.report.end_releases, 1);
+        let mut imported = performance::Performance::from_events(decoded.events, &[69], 1500).unwrap();
+        let mut csv = performance::Performance::read("sample,event,key,value\n0,sustain,0,1\n\
+            0,note_on,69,2\n200,note_off,69,0\n600,sustain,0,0\n", &[69], 1500).unwrap();
+        for sample in 0..1500 {
+            imported.dispatch(sample, &mut a).unwrap(); csv.dispatch(sample, &mut b).unwrap();
+            assert_eq!(a.step().unwrap().to_bits(), b.step().unwrap().to_bits());
+        }
+        assert!(a.accounting.felt_loss_j > 0.0);
+        assert_eq!(a.accounting.input_work_j.to_bits(), b.accounting.input_work_j.to_bits());
+        assert!((a.accounting.input_work_j - a.energy_j() - a.accounting.dissipated_j()).abs() < 1e-7);
     }
     #[test]
     fn rendering_and_both_physical_imports_are_composable() {
