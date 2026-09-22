@@ -37,6 +37,7 @@ use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, c
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bowed_string::runtime::schedule::{BowedScheduleError, ScheduledBowedRenderer};
 use crate::driving_point::characteristic_line;
 use crate::modal_acoustic_time::{
     ModalAcousticTimeError, ModalAcousticTimeModel, ModalAcousticWorkspace,
@@ -472,6 +473,8 @@ pub enum RenderError {
     Voice(AcousticRealizeError),
     /// The modal voice refused mid-block; the context is poisoned.
     Modal(ModalAcousticTimeError),
+    /// A retained bow performance refused; its incomplete callback is discarded.
+    Bowed(BowedScheduleError),
     /// A two-way coupled modal network refused its complete sample transaction.
     Coupled(ModalCouplingError),
     /// A control named a voice that does not exist or cannot accept it.
@@ -505,6 +508,7 @@ impl core::fmt::Display for RenderError {
             ),
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
+            Self::Bowed(e) => write!(f, "bowed voice refusal: {e}"),
             Self::Coupled(e) => write!(f, "coupled modal voice refusal: {e}"),
             Self::Control { what } => write!(f, "control refusal: {what}"),
             Self::UnknownVoice { index } => {
@@ -519,6 +523,10 @@ impl core::fmt::Display for RenderError {
 /// One voice slot: the admitted performance images this context can host.
 #[allow(clippy::large_enum_variant)] // a handful of voice slots; boxing would ripple the API
 pub enum RenderVoice {
+    /// A physical bow performance and its compact-body pressure observer.
+    /// Bow controls remain owned by the existing sample-clock scheduler; outer
+    /// callbacks and other voices' event splits never reset the string or body.
+    BowedString(Box<ScheduledBowedRenderer>),
     /// Reed on a characteristic line (wind-reed filling).
     ReedBore(ReedBoreVoice),
     /// Exact-ZOH modal string (string filling).
@@ -587,6 +595,16 @@ impl RenderContext {
         &self.controls_applied
     }
 
+    /// Inspect a hosted bow's state, pending inputs and finite horizon without
+    /// allowing its clock to advance behind the shared renderer.
+    #[must_use]
+    pub fn bowed_performance(&self, index: usize) -> Option<&ScheduledBowedRenderer> {
+        match self.voices.get(index) {
+            Some(RenderVoice::BowedString(bow)) => Some(bow.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Check an entire control batch without changing inputs, state or logs.
     ///
     /// # Errors
@@ -595,6 +613,15 @@ impl RenderContext {
     pub fn validate_controls(&self, deltas: &[ControlDelta]) -> Result<(), RenderError> {
         if self.poisoned {
             return Err(RenderError::Poisoned);
+        }
+        for voice in &self.voices {
+            if let RenderVoice::BowedString(bow) = voice {
+                if !bow.state().has_radiation() {
+                    return Err(RenderError::Control {
+                        what: "a mixed bowed voice requires a physical pressure observer",
+                    });
+                }
+            }
         }
         // Validate everything first: control application is transactional.
         for delta in deltas {
@@ -634,9 +661,9 @@ impl RenderContext {
                                 what: "use a physical footprint force for a compact plate voice",
                             });
                         }
-                        Some(RenderVoice::ReedBore(_)) => {
+                        Some(RenderVoice::BowedString(_) | RenderVoice::ReedBore(_)) => {
                             return Err(RenderError::Control {
-                                what: "a reed voice has no retained modal-force input",
+                                what: "this voice has no retained modal-force input",
                             });
                         }
                         None => return Err(RenderError::UnknownVoice { index: *voice }),
@@ -650,6 +677,9 @@ impl RenderContext {
                     }
                     match self.voices.get(*voice) {
                         Some(RenderVoice::ReedBore(_)) => {}
+                        Some(RenderVoice::BowedString(_)) => return Err(RenderError::Control {
+                            what: "a bowed string has physical bow controls, not blowing pressure",
+                        }),
                         Some(RenderVoice::CoupledModal(_) | RenderVoice::ContactModal(_) | RenderVoice::MultiContactModal(_)) => return Err(RenderError::Control {
                             what: "a coupled modal network has no blowing pressure",
                         }),
@@ -730,6 +760,9 @@ impl RenderContext {
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
+                RenderVoice::BowedString(bow) => {
+                    bow.pressure_block(scratch).map_err(RenderError::Bowed)
+                }
                 RenderVoice::MultiContactModal(network) => network.step_block(scratch),
                 RenderVoice::ContactModal(network) => network.step_block(scratch),
                 RenderVoice::CoupledModal(network) => network.step_block(scratch),
@@ -774,6 +807,22 @@ impl RenderContext {
             return Err(RenderError::Sizing {
                 what: "render sample or block clock would overflow",
             });
+        }
+        // Admit every bow's complete callback before another voice advances or
+        // output is cleared. A horizon/capacity refusal is not a physics failure.
+        for voice in &self.voices {
+            if let RenderVoice::BowedString(bow) = voice {
+                if !bow.state().has_radiation() {
+                    return Err(RenderError::Control {
+                        what: "a mixed bowed voice requires a physical pressure observer",
+                    });
+                }
+                if len > bow.state().max_block_len() || samples > bow.remaining_samples() {
+                    return Err(RenderError::Sizing {
+                        what: "callback exceeds a bowed voice's capacity or performance horizon",
+                    });
+                }
+            }
         }
         Ok(())
     }

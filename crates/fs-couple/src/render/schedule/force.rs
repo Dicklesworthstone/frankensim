@@ -105,6 +105,7 @@ impl ScheduledRenderer {
         let expected = f64::from(sample_rate_hz).recip().to_bits();
         for voice in &self.context.voices {
             let period = match voice {
+                RenderVoice::BowedString(bow) => f64::from(bow.state().sample_rate_hz()).recip(),
                 RenderVoice::MultiContactModal(network) => network.sample_period_s(),
                 RenderVoice::ContactModal(network) => network.sample_period_s(),
                 RenderVoice::CoupledModal(network) => network.sample_period_s(),
