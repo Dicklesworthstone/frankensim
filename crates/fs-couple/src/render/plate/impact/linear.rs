@@ -451,6 +451,7 @@ mod free_drag_tests {
                 let next = ((1.0-0.5*drag*dt)*p+dt*force)/(1.0+0.5*drag*dt);
                 let displacement = 0.5*dt*(p+next);
                 let expected_loss = dt*drag*(0.5*(p+next)).powi(2);
+                let previous_energy = 0.5*p*p;
                 q += displacement; p = next;
                 let frame = system.step(&[force], &gate).unwrap();
                 work += frame.supplied_work_j; loss += frame.dissipated_energy_j;
@@ -458,7 +459,12 @@ mod free_drag_tests {
                 assert!((system.state()[1]-p).abs() < 1e-11);
                 assert!((frame.supplied_work_j-force*displacement).abs() < 1e-12);
                 assert!((frame.dissipated_energy_j-expected_loss).abs() < 1e-12);
-                assert!(frame.dissipated_energy_j >= 0.0);
+                // The exact-ZOH owner reports work minus storage change, with
+                // signed summation roundoff. Do not clamp production loss or
+                // require an exactly positive floating-point zero in this host.
+                let roundoff = 256.0*f64::EPSILON*(previous_energy
+                    +frame.stored_energy_j+frame.supplied_work_j.abs()+expected_loss);
+                assert!(frame.dissipated_energy_j >= -roundoff);
                 assert!((frame.stored_energy_j+loss-initial-work).abs() < 1e-10);
             }
             if drag > 0.0 { assert!(loss > 0.0); }

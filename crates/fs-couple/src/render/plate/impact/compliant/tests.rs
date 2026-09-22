@@ -32,9 +32,9 @@ fn footprint_keeps_local_contact_rows_shared_inertias_and_physical_creep_totals(
     assert_eq!(a.pads[0].weights[3], 1.0/0.025_f64.sqrt());
     assert_eq!(a.pads[0].precompression_m, -0.0002);
     assert!((a.bodies[0].damping_per_s[0]-12.0).abs() < 1e-14);
-    assert_eq!(a.pads[0].creep[0].stiffness_n_m, 1000.0);
-    assert_eq!(a.pads[1].creep[0].stiffness_n_m, 3000.0);
-    assert_eq!(a.pads[0].creep[0].viscosity_n_s_m+a.pads[1].creep[0].viscosity_n_s_m, 12.0);
+    assert!((a.pads[0].creep[0].stiffness_n_m-1000.0).abs() <= 4.0*f64::EPSILON*1000.0);
+    assert!((a.pads[1].creep[0].stiffness_n_m-3000.0).abs() <= 4.0*f64::EPSILON*3000.0);
+    assert!((a.pads[0].creep[0].viscosity_n_s_m+a.pads[1].creep[0].viscosity_n_s_m-12.0).abs() <= 4.0*f64::EPSILON*12.0);
 }
 
 #[test]

@@ -114,7 +114,8 @@ fn rescaled_pressure_basis_keeps_the_same_prepared_motion_and_pressure() {
 fn many_distinct_wire_coordinates_contact_and_cavity_share_one_transaction() {
     let air = basis(); let gate = CancelGate::new_clock_free(); let n = 82;
     let mut c = vec![0.0; n*2]; c[..4].copy_from_slice(&[-0.03, -0.02, 0.03, -0.02]);
-    assert!(CavityCoupling::new(&air, n, &c, &[0.0; 2]).is_err());
+    assert_eq!(CavityCoupling::new(&air, n, &c, &[0.0; 2]).unwrap().total_modes(), n+1);
+    assert!(CavityCoupling::new_with_mode_budget(&air, n, &c, &[0.0; 2], 64).is_err());
     let build = || {
         let mut bodies = vec![body(800.0, 0.0, 0.1), body(900.0, 0.0, 0.0)];
         for i in 0..80 { bodies.push(body(600.0+i as f64, 0.0, 0.0)); }
@@ -165,7 +166,12 @@ fn broader_prepared_budget_never_weakens_reference_or_loss_admission() {
     let cfg = ImpactConfig { dt_s: 2e-6, max_steps: 10, maximum_energy_j: 20.0,
         energy_absolute_tolerance_j: 1e-10, energy_relative_tolerance: 1e-7,
         maximum_generalized_force: 10_000.0 };
-    assert!(large.clone().build(parts(), vec![], vec![], cfg, &gate).is_err());
+    assert_eq!(large.clone().build(parts(), vec![], vec![], cfg, &gate).unwrap().0.state().len(), 162);
+    let n = super::super::super::MAX_IMPACT_MODES;
+    let overflow = CavityCoupling::new_with_mode_budget(&air, n, &vec![0.0; 2*n],
+        &[0.0; 2], n+1).unwrap();
+    assert!(overflow.build((0..n).map(|_| body(800.0, 0.0, 0.0)).collect(),
+        vec![], vec![], cfg, &gate).is_err());
     let mut small = config(500_000); small.coupling.max_modes = 64;
     assert!(large.clone().build_linear(parts(), vec![], 0.1, small, &gate).is_err());
     gate.request();
@@ -234,7 +240,7 @@ fn necks_preserve_the_callers_large_state_budget_and_all_original_coordinates() 
     let reference = ImpactConfig { dt_s: 2e-6, max_steps: 64, maximum_energy_j: 20.0,
         energy_absolute_tolerance_j: 1e-10, energy_relative_tolerance: 1e-7,
         maximum_generalized_force: 10_000.0 };
-    assert!(expanded.clone().build(parts(),vec![],vec![],reference,&gate).is_err());
+    assert_eq!(expanded.clone().build(parts(),vec![],vec![],reference,&gate).unwrap().0.state().len(),2*(n+2));
     let mut starved = config(500_000); starved.coupling.max_connections = 3;
     assert!(expanded.clone().build_linear(parts(),vec![],0.1,starved,&gate).is_err());
     let (mut s, probe) = expanded.build_linear(parts(),vec![],0.1,config(500_000),&gate).unwrap();

@@ -93,8 +93,8 @@ fn nonlinear_snare_keeps_cavity_two_player_ports_refinement_and_exact_retry() {
         let mut e=build(wires(),true,true,false);let second=e.second_stick.unwrap();
         e.system=e.system.into_analytic_nonlinear().unwrap().with_impact_substeps(
             ImpactSubstepConfig {max_depth:4,max_attempts:31}).unwrap();
-        let inputs=vec![mechanics::drive::Input {program:mechanics::drive::Program::parse("0,0.02\n0.000512,0.02").unwrap(),coordinate:0,tip_weight:e.stick_weight},
-            mechanics::drive::Input {program:mechanics::drive::Program::parse("0,-0.01\n0.000512,-0.01").unwrap(),coordinate:second.coordinate,tip_weight:second.weight}];
+        let inputs=vec![mechanics::drive::Input {program:mechanics::drive::Program::parse("0,0\n0.000002,0.02\n0.0005,0.02\n0.000512,0").unwrap(),coordinate:0,tip_weight:e.stick_weight},
+            mechanics::drive::Input {program:mechanics::drive::Program::parse("0,0\n0.000002,-0.01\n0.0005,-0.01\n0.000512,0").unwrap(),coordinate:second.coordinate,tip_weight:second.weight}];
         e.system=e.system.with_stick_drives(inputs,2e-6,256,e.force.len()).unwrap();e
     };
     let mut e=prepare();let mut clean=prepare();let initial=energy(&e.system);
