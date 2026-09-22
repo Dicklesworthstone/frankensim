@@ -105,6 +105,7 @@ impl ScheduledRenderer {
         let expected = f64::from(sample_rate_hz).recip().to_bits();
         for voice in &self.context.voices {
             let period = match voice {
+                RenderVoice::FrictionModal(network) => network.sample_period_s(),
                 RenderVoice::BowedString(bow) => f64::from(bow.state().sample_rate_hz()).recip(),
                 RenderVoice::MultiContactModal(network) => network.sample_period_s(),
                 RenderVoice::ContactModal(network) => network.sample_period_s(),
@@ -248,5 +249,5 @@ pub mod coupled;
 /// Prescribed sample-timed momentum inputs over the existing modal renderer.
 pub mod impulse;
 
-/// Finite mixed performances retaining independent parts' state and schedules.
+/// Join retained scheduled parts into a bounded mixed pressure performance.
 pub mod ensemble;

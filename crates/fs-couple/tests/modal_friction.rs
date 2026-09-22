@@ -219,3 +219,137 @@ fn malformed_law_or_attachment_is_refused_before_any_sample() {
         assert!(FrictionModalSystem::new(network(false, 0.0), port, config(), &CancelGate::new()).is_err());
     }
 }
+
+use fs_couple::render::{ControlDelta, GatedRenderOutcome, RenderContext, RenderError, RenderVoice};
+use fs_couple::render::schedule::ScheduledRenderer;
+use fs_couple::render::schedule::force::coupled::render::friction::{FrictionGestureConfig, FrictionModalVoice};
+use fs_couple::render::schedule::force::ensemble::{EnsembleConfig, EnsembleRenderer};
+use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+
+fn bow_source() -> GestureSchedule {
+    let value = |v, n| GestureValue::Bow { velocity_m_per_s: v, normal_force_n: n, station: 0.11 };
+    GestureSchedule::try_new(700, vec![GestureTrack {
+        id: "bow".into(), target: GestureTarget::BowStroke { string: 0 }, initial: value(0.3, 1.0),
+        events: vec![
+            GestureEvent { time_s: 0.0, transition_s: 5.0/700.0, value: value(-0.3, 0.5) },
+            GestureEvent { time_s: 3.0/700.0, transition_s: 3.0/700.0, value: value(0.25, 1.0) },
+            GestureEvent { time_s: 7.0/700.0, transition_s: 0.0, value: value(0.0, 0.0) },
+            GestureEvent { time_s: 9.0/700.0, transition_s: 0.0, value: value(-0.3, 1.0) },
+            GestureEvent { time_s: 12.0/700.0, transition_s: 0.0, value: value(0.0, 0.0) },
+        ],
+    }]).unwrap()
+}
+fn gesture_config() -> FrictionGestureConfig {
+    FrictionGestureConfig { sample_rate_hz: 48000, samples: 1024, max_block: 1024,
+        max_work: 10000, max_events: 128, station_fraction: 0.11 }
+}
+fn performance() -> ScheduledRenderer {
+    ScheduledRenderer::from_friction_gesture(system(true), vec![0.02, -0.03],
+        &bow_source(), "bow", gesture_config()).unwrap()
+}
+
+#[test]
+fn typed_bow_performance_matches_direct_two_way_physics_at_every_sample() {
+    let source = bow_source();
+    let decoded = GestureSchedule::from_canonical_bytes(&source.to_canonical_bytes()).unwrap();
+    let mut direct = system(true);
+    for _ in 0..19 { direct.step(&[0.02, -0.03], drive(0.3, 1.0)).unwrap(); }
+    let initial_energy = direct.total_energy_j().unwrap().to_bits();
+    let mut expected = Vec::new();
+    for sample in 0..1024_u64 {
+        let GestureValue::Bow { velocity_m_per_s, normal_force_n, .. } =
+            source.sample_value("bow", sample*700/48000).unwrap() else { panic!("bow") };
+        expected.push(direct.step(&[0.02, -0.03], drive(velocity_m_per_s, normal_force_n))
+            .unwrap().observer_pressure_pa.to_bits());
+    }
+    for src in [&source, &decoded] {
+        for partition in [1, 37, 256, 1024] {
+            let mut physical = system(true);
+            for _ in 0..19 { physical.step(&[0.02, -0.03], drive(0.3, 1.0)).unwrap(); }
+            let mut render = ScheduledRenderer::from_friction_gesture(physical, vec![0.02, -0.03],
+                src, "bow", gesture_config()).unwrap();
+            let retained = render.context().friction_voice(0).unwrap().system();
+            assert_eq!(retained.samples_rendered(), 19);
+            assert_eq!(retained.total_energy_j().unwrap().to_bits(), initial_energy);
+            let mut out = [0.0; 1024];
+            for block in out.chunks_mut(partition) { render.block(block).unwrap(); }
+            assert_eq!(out.map(f64::to_bits).as_slice(), expected);
+            let retained = render.context().friction_voice(0).unwrap().system();
+            assert_eq!(states(retained), states(&direct));
+            assert_eq!(retained.samples_rendered(), 1043);
+            assert_eq!(retained.last_frame(), direct.last_frame());
+        }
+    }
+}
+
+#[test]
+fn shared_cancellation_preserves_unconsumed_friction_controls_and_resumes_exactly() {
+    let mut render = performance();
+    let mut actual = [0.0; 1024];
+    render.block(&mut actual[..69]).unwrap();
+    assert_eq!(render.pending_controls()[0].sample, 69);
+    let pending = render.pending_controls().to_vec();
+    let state = states(render.context().friction_voice(0).unwrap().system());
+    let gate = CancelGate::new(); gate.request();
+    let mut sentinel = [12345.0; 37];
+    assert_eq!(render.render_under_gate(&gate, &mut sentinel, 37, 1).unwrap(),
+        GatedRenderOutcome::Cancelled { blocks: 0 });
+    assert_eq!(sentinel, [12345.0; 37]);
+    assert_eq!(render.pending_controls(), pending);
+    assert_eq!(states(render.context().friction_voice(0).unwrap().system()), state);
+    for block in actual[69..].chunks_mut(37) { render.block(block).unwrap(); }
+    let mut expected = [0.0; 1024]; performance().block(&mut expected).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn ensemble_join_reindexes_friction_controls_without_restarting_either_network() {
+    let part = |prefix: usize| {
+        let mut renderer = performance(); renderer.block(&mut vec![0.0; prefix]).unwrap(); renderer
+    };
+    let mut a = part(37); let mut b = part(69);
+    let mut left = [0.0; 128]; let mut right = [0.0; 128];
+    a.block(&mut left).unwrap(); b.block(&mut right).unwrap();
+    let expected: Vec<u64> = left.iter().zip(right).map(|(a,b)| (a+b).to_bits()).collect();
+    let mut ensemble = EnsembleRenderer::from_parts(vec![part(37), part(69)], EnsembleConfig {
+        sample_rate_hz: 48000, max_block: 1024, samples: 128, max_voices: 2, max_events: 256,
+    }).unwrap();
+    let mut out = [0.0; 128];
+    for block in out.chunks_mut(23) { ensemble.block(block).unwrap(); }
+    assert_eq!(out.map(f64::to_bits).as_slice(), expected);
+    assert_eq!(ensemble.renderer().context().friction_voice(0).unwrap().system().samples_rendered(), 165);
+    assert_eq!(ensemble.renderer().context().friction_voice(1).unwrap().system().samples_rendered(), 197);
+}
+
+#[test]
+fn gesture_binding_refuses_wrong_clocks_moving_ports_and_exhausted_budgets() {
+    let source = bow_source();
+    let base = gesture_config();
+    for cfg in [FrictionGestureConfig { sample_rate_hz: 44100, ..base },
+        FrictionGestureConfig { max_events: 0, ..base }, FrictionGestureConfig { max_work: 1, ..base },
+        FrictionGestureConfig { station_fraction: 0.2, ..base }, FrictionGestureConfig { max_block: 0, ..base }] {
+        assert!(ScheduledRenderer::from_friction_gesture(system(true), vec![0.0; 2], &source, "bow", cfg).is_err());
+    }
+    assert!(ScheduledRenderer::from_friction_gesture(system(true), vec![0.0; 2], &source, "missing", base).is_err());
+    let mut track = source.tracks()[0].clone();
+    track.events.push(GestureEvent { time_s: 1.0, transition_s: 0.0,
+        value: GestureValue::Bow { velocity_m_per_s: 0.3, normal_force_n: 1.0, station: 0.2 } });
+    let moving = GestureSchedule::try_new(700, vec![track]).unwrap();
+    assert!(ScheduledRenderer::from_friction_gesture(system(true), vec![0.0; 2], &moving, "bow", base).is_err());
+}
+
+#[test]
+fn mixed_control_batch_admission_cannot_partially_change_friction_inputs() {
+    let make = || RenderContext::new(vec![RenderVoice::FrictionModal(Box::new(
+        FrictionModalVoice::new(system(true), vec![0.02, -0.03], drive(0.3, 1.0)).unwrap(),
+    ))], 128);
+    let mut context = make();
+    assert!(context.apply_controls(&[
+        ControlDelta::SetModalForce { voice: 0, mode: 0, force_n_per_sqrt_kg: 100.0 },
+        ControlDelta::SetFrictionDrive { voice: 0, speed_m_s: 0.3, normal_force_n: -1.0 },
+    ]).is_err());
+    assert!(context.control_log().is_empty());
+    let mut actual = [0.0; 128]; let mut expected = [0.0; 128];
+    context.block(&mut actual).unwrap(); make().block(&mut expected).unwrap();
+    assert_eq!(actual, expected);
+}

@@ -35,6 +35,8 @@ pub mod plate;
 pub use plate::{CompactPlateVoice, PlateVoiceConfig};
 use schedule::force::coupled::{ModalCouplingError, render::{CoupledModalVoice, contact::ContactModalVoice}};
 use schedule::force::coupled::render::contact::multiple::MultiContactModalVoice;
+use schedule::force::coupled::render::friction::FrictionModalVoice;
+use schedule::force::coupled::contact::friction::{FrictionDrive, ModalFrictionError};
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bowed_string::runtime::schedule::{BowedScheduleError, ScheduledBowedRenderer};
@@ -425,6 +427,15 @@ impl ModalStringVoice {
 /// their track beads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlDelta {
+    /// Held physical tangential speed and compressive load on a friction port.
+    SetFrictionDrive {
+        /// Friction-network voice slot.
+        voice: usize,
+        /// Signed surface speed [m/s].
+        speed_m_s: f64,
+        /// Nonnegative prescribed normal load [N]; zero releases the port.
+        normal_force_n: f64,
+    },
     /// Total signed force [N] on a plate reduction's declared footprint.
     SetPlateForce {
         /// Plate voice slot.
@@ -467,6 +478,8 @@ pub struct ControlRecord {
 /// Typed refusal from the render context.
 #[derive(Debug)]
 pub enum RenderError {
+    /// The implicit friction/network owner refused its physical sample.
+    Friction(ModalFrictionError),
     /// A previous voice refusal left partial state; construct a new context.
     Poisoned,
     /// A voice refused mid-block; the context is poisoned.
@@ -502,6 +515,7 @@ pub enum RenderError {
 impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Friction(e) => write!(f, "friction voice refusal: {e}"),
             Self::Poisoned => write!(
                 f,
                 "render context has partial state after a voice refusal; construct a new context"
@@ -523,6 +537,8 @@ impl core::fmt::Display for RenderError {
 /// One voice slot: the admitted performance images this context can host.
 #[allow(clippy::large_enum_variant)] // a handful of voice slots; boxing would ripple the API
 pub enum RenderVoice {
+    /// Two-way mechanical network with an implicit driven friction port.
+    FrictionModal(Box<FrictionModalVoice>),
     /// A physical bow performance and its compact-body pressure observer.
     /// Bow controls remain owned by the existing sample-clock scheduler; outer
     /// callbacks and other voices' event splits never reset the string or body.
@@ -605,6 +621,15 @@ impl RenderContext {
         }
     }
 
+    /// Inspect the accepted friction mechanics without bypassing the shared clock.
+    #[must_use]
+    pub fn friction_voice(&self, index: usize) -> Option<&FrictionModalVoice> {
+        match self.voices.get(index) {
+            Some(RenderVoice::FrictionModal(voice)) => Some(voice),
+            _ => None,
+        }
+    }
+
     /// Check an entire control batch without changing inputs, state or logs.
     ///
     /// # Errors
@@ -626,6 +651,15 @@ impl RenderContext {
         // Validate everything first: control application is transactional.
         for delta in deltas {
             match delta {
+                ControlDelta::SetFrictionDrive { voice, speed_m_s, normal_force_n } => {
+                    match self.voices.get(*voice) {
+                        Some(RenderVoice::FrictionModal(network)) => network.validate_drive(FrictionDrive {
+                            speed_m_s: *speed_m_s, normal_force_n: *normal_force_n,
+                        })?,
+                        Some(_) => return Err(RenderError::Control { what: "friction controls require a friction-network voice" }),
+                        None => return Err(RenderError::UnknownVoice { index: *voice }),
+                    }
+                }
                 ControlDelta::SetPlateForce { voice, force_n } => {
                     match self.voices.get(*voice) {
                         Some(RenderVoice::CompactPlate(plate)) => plate.validate_force(*force_n)?,
@@ -646,6 +680,7 @@ impl RenderContext {
                         });
                     }
                     match self.voices.get(*voice) {
+                        Some(RenderVoice::FrictionModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::MultiContactModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::ContactModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
                         Some(RenderVoice::CoupledModal(network)) => network.validate_force(*mode, *force_n_per_sqrt_kg)?,
@@ -680,7 +715,7 @@ impl RenderContext {
                         Some(RenderVoice::BowedString(_)) => return Err(RenderError::Control {
                             what: "a bowed string has physical bow controls, not blowing pressure",
                         }),
-                        Some(RenderVoice::CoupledModal(_) | RenderVoice::ContactModal(_) | RenderVoice::MultiContactModal(_)) => return Err(RenderError::Control {
+                        Some(RenderVoice::FrictionModal(_) | RenderVoice::CoupledModal(_) | RenderVoice::ContactModal(_) | RenderVoice::MultiContactModal(_)) => return Err(RenderError::Control {
                             what: "a coupled modal network has no blowing pressure",
                         }),
                         Some(RenderVoice::CompactPlate(_)) => {
@@ -712,6 +747,13 @@ impl RenderContext {
         self.validate_controls(deltas)?;
         for delta in deltas {
             match delta {
+                ControlDelta::SetFrictionDrive { voice, speed_m_s, normal_force_n } => {
+                    if let Some(RenderVoice::FrictionModal(network)) = self.voices.get_mut(*voice) {
+                        network.set_drive_admitted(FrictionDrive {
+                            speed_m_s: *speed_m_s, normal_force_n: *normal_force_n,
+                        });
+                    }
+                }
                 ControlDelta::SetPlateForce { voice, force_n } => {
                     if let Some(RenderVoice::CompactPlate(plate)) = self.voices.get_mut(*voice) {
                         plate.set_force_admitted(*force_n);
@@ -723,6 +765,7 @@ impl RenderContext {
                     force_n_per_sqrt_kg,
                 } => {
                     match self.voices.get_mut(*voice) {
+                        Some(RenderVoice::FrictionModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
                         Some(RenderVoice::ModalString(string)) => string.held_force[*mode] = *force_n_per_sqrt_kg,
                         Some(RenderVoice::MultiContactModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
                         Some(RenderVoice::ContactModal(network)) => network.set_force_admitted(*mode, *force_n_per_sqrt_kg),
@@ -760,6 +803,7 @@ impl RenderContext {
         for voice in &mut self.voices {
             let scratch = &mut self.scratch[..out.len()];
             let result = match voice {
+                RenderVoice::FrictionModal(network) => network.step_block(scratch),
                 RenderVoice::BowedString(bow) => {
                     bow.pressure_block(scratch).map_err(RenderError::Bowed)
                 }

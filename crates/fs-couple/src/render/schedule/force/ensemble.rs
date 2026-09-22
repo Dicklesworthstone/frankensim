@@ -117,7 +117,8 @@ impl EnsembleRenderer {
                     .ok_or_else(|| control("ensemble contains a pending event before its source clock"))?;
                 let mut delta = event.delta;
                 let slot = match &mut delta {
-                    ControlDelta::SetModalForce { voice, .. }
+                    ControlDelta::SetFrictionDrive { voice, .. }
+                    | ControlDelta::SetModalForce { voice, .. }
                     | ControlDelta::SetPlateForce { voice, .. }
                     | ControlDelta::SetBlowingPressure { voice, .. } => voice,
                 };
@@ -210,4 +211,3 @@ pub enum EnsembleRenderOutcome {
     Cancelled { /// Written prefix length.
         samples: usize },
 }
-

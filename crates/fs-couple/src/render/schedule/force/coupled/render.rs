@@ -126,3 +126,6 @@ impl ScheduledRenderer {
 fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
 /// Scheduled normal contact on top of the existing coupled network.
 pub mod contact;
+
+/// Physical friction controls and typed fixed-station bow performance binding.
+pub mod friction;
