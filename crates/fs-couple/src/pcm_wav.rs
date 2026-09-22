@@ -38,6 +38,32 @@ pub fn encode_pcm16_wav(
     sample_rate_hz: u32,
     full_scale_pa: f64,
 ) -> Result<(Vec<u8>, usize), WavError> {
+    encode_pcm16_wav_interleaved(pressure_pa, sample_rate_hz, 1, full_scale_pa)
+}
+
+/// Encode frame-interleaved mono or stereo pressure without changing channel gain.
+///
+/// Stereo input is `[left_0, right_0, left_1, right_1, ...]`; the sample rate
+/// is the frame rate of EACH channel, not the number of scalar values per second.
+/// Both channels use the same explicit pressure full-scale and the original
+/// PCM quantizer. The returned clip count counts scalar channel samples.
+/// There is no downmix, panning, normalization, or implicit channel padding.
+///
+/// # Errors
+/// Refuses channel counts other than 1 or 2, empty/incomplete frames, invalid
+/// pressure/rate/full-scale, and RIFF or byte-rate overflow before allocation.
+/// More than two channels require a separately specified extensible WAV layout.
+pub fn encode_pcm16_wav_interleaved(
+    pressure_pa: &[f64],
+    sample_rate_hz: u32,
+    channels: u16,
+    full_scale_pa: f64,
+) -> Result<(Vec<u8>, usize), WavError> {
+    if !matches!(channels, 1 | 2) || pressure_pa.len() % usize::from(channels) != 0 {
+        return Err(WavError::InvalidInput {
+            what: "PCM16 requires complete mono or left/right stereo frames",
+        });
+    }
     if pressure_pa.is_empty() {
         return Err(WavError::InvalidInput {
             what: "pressure history is empty",
@@ -57,44 +83,37 @@ pub fn encode_pcm16_wav(
     let data_bytes = n.checked_mul(2).ok_or(WavError::InvalidInput {
         what: "WAV data length overflow",
     })?;
-    let mut out = Vec::with_capacity(44 + data_bytes);
+    let data_length = u32::try_from(data_bytes).map_err(|_| WavError::InvalidInput {
+        what: "WAV payload exceeds u32",
+    })?;
+    let riff_length = data_length.checked_add(36).ok_or(WavError::InvalidInput {
+        what: "WAV payload exceeds u32",
+    })?;
+    let block_align = channels * 2;
+    let byte_rate = sample_rate_hz.checked_mul(u32::from(block_align))
+        .ok_or(WavError::InvalidInput { what: "WAV byte rate overflows u32" })?;
+    let capacity = data_bytes.checked_add(44).ok_or(WavError::InvalidInput {
+        what: "WAV data length overflow",
+    })?;
+    if pressure_pa.iter().any(|p| !p.is_finite()) {
+        return Err(WavError::InvalidInput { what: "pressure sample is not finite" });
+    }
+    let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(b"RIFF");
-    write_u32_le(
-        &mut out,
-        u32::try_from(36 + data_bytes).map_err(|_| WavError::InvalidInput {
-            what: "WAV payload exceeds u32",
-        })?,
-    );
+    write_u32_le(&mut out, riff_length);
     out.extend_from_slice(b"WAVE");
     out.extend_from_slice(b"fmt ");
     write_u32_le(&mut out, 16);
     write_u16_le(&mut out, 1);
-    write_u16_le(&mut out, 1);
+    write_u16_le(&mut out, channels);
     write_u32_le(&mut out, sample_rate_hz);
-    write_u32_le(
-        &mut out,
-        sample_rate_hz
-            .checked_mul(2)
-            .ok_or(WavError::InvalidInput {
-                what: "WAV byte rate overflows u32",
-            })?,
-    );
-    write_u16_le(&mut out, 2);
+    write_u32_le(&mut out, byte_rate);
+    write_u16_le(&mut out, block_align);
     write_u16_le(&mut out, 16);
     out.extend_from_slice(b"data");
-    write_u32_le(
-        &mut out,
-        u32::try_from(data_bytes).map_err(|_| WavError::InvalidInput {
-            what: "WAV payload exceeds u32",
-        })?,
-    );
+    write_u32_le(&mut out, data_length);
     let mut clips = 0usize;
     for &p in pressure_pa {
-        if !p.is_finite() {
-            return Err(WavError::InvalidInput {
-                what: "pressure sample is not finite",
-            });
-        }
         let scaled = p / full_scale_pa * f64::from(i16::MAX);
         let quantized = if scaled >= f64::from(i16::MAX) {
             clips += 1;
@@ -132,3 +151,6 @@ pub mod stream;
 pub mod decimate;
 /// Output-clock adapters over the existing scheduled mechanics.
 pub mod observation;
+
+#[cfg(test)]
+mod stereo_tests;

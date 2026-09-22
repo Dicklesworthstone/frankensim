@@ -22,7 +22,7 @@ impl std::fmt::Display for BlockError {
 impl std::error::Error for BlockError {}
 
 pub struct AudioStream {
-    instrument: Instrument, microphone: Option<Microphone>, score: Performance,
+    instrument: Instrument, microphone: Option<Microphone>, right_microphone: Option<Microphone>, score: Performance,
     board_trace: Vec<f64>, diagnostic_gain: f64, sample: u64, failed: bool,
 }
 impl AudioStream {
@@ -36,7 +36,21 @@ impl AudioStream {
         let microphone=surface.map(|surface|Microphone::new_multirate(surface,&instrument.bank,
             instrument.sample_rate(),position_m,medium)).transpose()?;
         let board_trace=vec![0.0;instrument.board_trace_len()];
-        Ok(Self{instrument,microphone,score,board_trace,diagnostic_gain,sample:0,failed:false})
+        Ok(Self{instrument,microphone,right_microphone:None,score,board_trace,diagnostic_gain,sample:0,failed:false})
+    }
+    /// Two physical Rayleigh receivers of ONE instrument and ONE control clock.
+    /// The complete substep trace is computed once, then observed independently
+    /// at each position. Construction is cold; no synthetic stereo gain is used.
+    pub fn new_stereo(instrument:Instrument, score:Performance, surface:&[SurfaceSample],
+        positions_m:[[f64;3];2], medium:Medium)->Result<Self,String> {
+        let mut stream=Self::new(instrument,score,Some(surface),positions_m[0],medium,1.0)?;
+        stream.right_microphone=Some(Microphone::new_multirate(surface,&stream.instrument.bank,
+            stream.instrument.sample_rate(),positions_m[1],medium)?);
+        Ok(stream)
+    }
+    pub fn channels(&self)->usize {if self.right_microphone.is_some() {2}else{1}}
+    pub fn stereo_microphones(&self)->Option<[&Microphone;2]> {
+        Some([self.microphone.as_ref()?,self.right_microphone.as_ref()?])
     }
     pub fn instrument(&self)->&Instrument {&self.instrument}
     /// Host gesture updates may be applied between blocks. Scheduled gestures
@@ -45,7 +59,7 @@ impl AudioStream {
     pub fn microphone(&self)->Option<&Microphone> {self.microphone.as_ref()}
     pub fn sample_position(&self)->u64 {self.sample}
 
-    fn next_sample(&mut self)->Result<f64,String> {
+    fn next_frame(&mut self)->Result<[f64;2],String> {
         self.score.dispatch(self.sample,&mut self.instrument)?;
         let volume=if self.microphone.is_some() {
             self.instrument.step_with_board_trace(&mut self.board_trace)
@@ -54,9 +68,13 @@ impl AudioStream {
             Some(mic)=>mic.step_trace(&self.board_trace)?,
             None=>self.diagnostic_gain*volume,
         };
-        if !pressure.is_finite() {return Err("audio observer overflow".into());}
+        let right=match &mut self.right_microphone {
+            Some(mic)=>mic.step_trace(&self.board_trace)?,
+            None=>0.0,
+        };
+        if !pressure.is_finite() || !right.is_finite() {return Err("audio observer overflow".into());}
         self.sample+=1;
-        Ok(pressure)
+        Ok([pressure,right])
     }
 
     /// Arbitrary block sizes, including zero. Controls and histories never reset
@@ -66,16 +84,39 @@ impl AudioStream {
     /// can follow an accepted mechanics step, so resuming would misalign clocks.
     pub fn render_block(&mut self, output:&mut[f64])->Result<(),BlockError> {
         if output.is_empty() {return Ok(());}
-        if self.failed || self.sample.checked_add(output.len() as u64).is_none() {
+        if self.channels()!=1 {
+            output.fill(0.0);
+            return Err(BlockError{completed_frames:0,sample:self.sample,
+                message:"stereo stream needs render_interleaved_block; implicit downmix is refused".into()});
+        }
+        self.render_interleaved_block(output)
+    }
+
+    /// Frame-interleaved output: L,R,L,R for stereo, unchanged samples for mono.
+    /// A partial frame refuses BEFORE events/mechanics, without faulting the
+    /// stream. An execution failure publishes no part of the failed frame and
+    /// latches the stream, including when the second receiver failed after the
+    /// first advanced. completed_frames and sample are always FRAME counts.
+    /// Successful stepping allocates nothing in this host.
+    pub fn render_interleaved_block(&mut self, output:&mut[f64])->Result<(),BlockError> {
+        if output.is_empty() {return Ok(());}
+        let channels=self.channels();
+        if output.len()%channels!=0 {
+            output.fill(0.0);
+            return Err(BlockError{completed_frames:0,sample:self.sample,
+                message:"audio buffer ends inside a channel frame".into()});
+        }
+        let frames=output.len()/channels;
+        if self.failed || self.sample.checked_add(frames as u64).is_none() {
             output.fill(0.0);self.failed=true;
             return Err(BlockError{completed_frames:0,sample:self.sample,
                 message:"stream is faulted or its sample clock would overflow".into()});
         }
-        for i in 0..output.len() {
-            match self.next_sample() {
-                Ok(value)=>output[i]=value,
+        for i in 0..frames {
+            match self.next_frame() {
+                Ok(values)=>output[i*channels..(i+1)*channels].copy_from_slice(&values[..channels]),
                 Err(message)=>{
-                    output[i..].fill(0.0);self.failed=true;
+                    output[i*channels..].fill(0.0);self.failed=true;
                     return Err(BlockError{completed_frames:i,sample:self.sample,message});
                 }
             }
@@ -132,3 +173,7 @@ mod tests {
         assert_eq!(trace,a.board_trace.as_ptr());
     }
 }
+
+#[cfg(test)]
+#[path = "stereo_tests.rs"]
+mod stereo_tests;
