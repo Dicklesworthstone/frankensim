@@ -1,0 +1,145 @@
+//! One source, one mechanical/decimation clock, one or two physical receivers.
+//! BEM boundary solves are shared; receiver response, fitting, delays and filter
+//! histories remain independent. Mono uses this same path with one receiver.
+use super::*;
+use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
+
+/// Same comma-separated SI position syntax as grand_piano. Remove only this
+/// option, transactionally: bad/duplicate input leaves all arguments unchanged.
+pub fn option(args:&mut Vec<String>)->Result<Option<[f64;3]>,Error> {
+    let mut matches=args.iter().enumerate().filter(|(_,a)|a.as_str()=="--microphone-right");
+    let Some((index,_))=matches.next() else {return Ok(None);};
+    if matches.next().is_some() {return Err("--microphone-right may be supplied only once".into());}
+    let text=args.get(index+1).ok_or("--microphone-right needs x_m,y_m,z_m")?;
+    let values=text.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>,_>>()?;
+    if values.len()!=3 || values.iter().any(|x|!x.is_finite()) {
+        return Err("--microphone-right needs three finite comma-separated metre coordinates".into());
+    }
+    let position=[values[0],values[1],values[2]];
+    args.drain(index..index+2);
+    Ok(Some(position))
+}
+pub fn admit_command(right:Option<[f64;3]>,command:&str)->Result<(),Error> {
+    if right.is_some() && !matches!(command,"splash-mic"|"drum-mic"|"drum-stretch-mic"|
+        "drum-modal-mic"|"snare-mic"|"snare-off-mic") {
+        return Err("--microphone-right requires a finite-point -mic command; no implicit CSV/far-field conversion".into());
+    }
+    Ok(())
+}
+
+fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Error> {
+    let count=boundary.weights.len();let panels=boundary.triangles.len();
+    if !(1..=2).contains(&receivers.len()) || count==0 || count>MAX_INPUTS
+        || count!=boundary.state_modes.len() || panels==0 || panels>MAX_PANELS
+        || boundary.weights.iter().any(|b|b.len()!=panels || b.iter().any(|v|!v.is_finite())) {
+        return Err("exterior radiation exceeds its receiver/shape/work contract".into());
+    }
+    let radius=boundary.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt())
+        .fold(0.0_f64,f64::max);
+    let medium=Medium::air();let dt=1.0/f64::from(OUTPUT_RATE);
+    // Admit EVERY receiver before any boundary solve or mechanical step.
+    let mut baked=Vec::with_capacity(receivers.len());
+    for &receiver in receivers {
+        let range_m=receiver.position().iter().map(|x|x*x).sum::<f64>().sqrt();
+        let (propagation_delay_s,pressure_gain)=receiver.propagation(radius,medium,dt)?;
+        baked.push(Bake {filters:Vec::with_capacity(count),range_m,medium,propagation_delay_s,pressure_gain});
+    }
+    let surface=SpherePanels::from_triangles(boundary.triangles.clone())?;
+    let omega:Vec<_>=(0..41).map(|i|2.0*std::f64::consts::PI*(40.0+40.0*i as f64)).collect();
+    let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
+    let mut ppw=f64::INFINITY;let mut condition=0.0_f64;
+    for &w in &omega {
+        let k=w/medium.sound_speed;
+        let fields=acceleration_fields(&boundary.weights,w);
+        let formulation=if k*radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
+        let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
+        // Geometry, factorization and all source-mode solves are independent of
+        // the observation point. Do not repeat them per microphone.
+        let solutions=solve_radiation_batch(&surface,k,medium,&field_refs,formulation)?;
+        for (input,solution) in solutions.iter().enumerate() {
+            if solution.radiated_power_roundoff_interval.1<0.0 {
+                return Err("BEM reports negative radiation power beyond roundoff; refine the acoustic solve".into());
+            }
+            ppw=ppw.min(solution.panels_per_wavelength);condition=condition.max(solution.condition_lower_bound);
+            for (channel,&receiver) in receivers.iter().enumerate() {
+                values[channel][input].push(receiver_response(&surface,solution,medium,receiver,
+                    radius,baked[channel].propagation_delay_s)?);
+            }
+        }
+    }
+    for (channel,bake) in baked.iter_mut().enumerate() {
+        let mut maximum=0.0_f64;let mut rms=0.0_f64;
+        for row in &values[channel] {
+            let (filter,m,r)=fit_observer(&omega,row,dt,8)?;
+            maximum=maximum.max(m);rms=rms.max(r);bake.filters.push(filter);
+        }
+        eprintln!("receiver {channel} BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, held_out=20, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
+        eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={}, pressure_gain={}",
+            receivers[channel],bake.propagation_delay_s,bake.pressure_gain);
+    }
+    Ok(baked)
+}
+
+fn admit_render(experiment:&Experiment,frames:usize,full_scale_pa:f64)->Result<(),Error> {
+    let boundary=experiment.acoustics.as_ref().ok_or("missing acoustic boundary")?;
+    if frames==0 || frames>480000 || !full_scale_pa.is_finite() || full_scale_pa<=0.0
+        || boundary.state_modes.is_empty() || boundary.state_modes.len()>MAX_INPUTS
+        || boundary.state_modes.iter().any(|&k|k>=experiment.force.len()
+            || k>=experiment.system.state().len()/2) {
+        return Err("pressure export requires bounded frames, finite positive full-scale and valid state addresses".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn render_receivers(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,
+    receivers:&[Receiver])->Result<Vec<u8>,Error> {
+    admit_render(experiment,frames,full_scale_pa)?;
+    let baked=bake_receivers(experiment.acoustics.as_ref().unwrap(),receivers)?;
+    render_baked(experiment,frames,full_scale_pa,&baked)
+}
+
+// Private so callers cannot replace geometry/BEM admission with an authored
+// transfer. Tests can isolate frame plumbing with explicitly labeled fixtures.
+fn render_baked(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,baked:&[Bake])->Result<Vec<u8>,Error> {
+    admit_render(experiment,frames,full_scale_pa)?;
+    let boundary=experiment.acoustics.as_ref().unwrap();
+    let count=boundary.state_modes.len();let channels=baked.len();
+    if !(1..=2).contains(&channels) || baked.iter().any(|b|b.filters.len()!=count
+        || b.filters.iter().any(|f|f.t_s.to_bits()!=(1.0/f64::from(OUTPUT_RATE)).to_bits())) {
+        return Err("receiver bank must retain the full source basis and output clock".into());
+    }
+    let mut observers=baked.iter().map(Bake::runtime).collect::<Result<Vec<_>,_>>()?;
+    let mut decimator=Decimator::new(SUBSTEPS,count)?;
+    let mut block=vec![0.0;SUBSTEPS*count];
+    let x=experiment.system.state();
+    let mut previous:Vec<f64>=boundary.state_modes.iter().map(|&k|x[2*k+1]).collect();
+    let mut pressure=Vec::with_capacity(frames*channels);let gate=CancelGate::new_clock_free();
+    for _ in 0..frames {
+        for frame in block.chunks_exact_mut(count) {
+            experiment.system.step(&experiment.force,&gate)?;
+            let x=experiment.system.state();
+            for ((sample,previous),&k) in frame.iter_mut().zip(&mut previous).zip(&boundary.state_modes) {
+                let velocity=x[2*k+1];*sample=(velocity-*previous)/MECHANICAL_DT;*previous=velocity;
+            }
+        }
+        // ONE complete mechanics block and decimator state for every receiver.
+        // Neither observation can advance contact, a force program or gas time.
+        let acceleration=decimator.preview(&block)?;
+        let mut frame=[0.0;2];
+        for (value,observer) in frame.iter_mut().zip(&mut observers) {*value=observer.step(acceleration)?;}
+        decimator.commit();pressure.extend_from_slice(&frame[..channels]);
+    }
+    // This offline front door publishes nothing on any mechanics/observer/PCM
+    // error. Accepted mechanics may have advanced: discard on failure, no retry.
+    let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,OUTPUT_RATE,channels as u16,full_scale_pa)?;
+    let peak=pressure.iter().map(|p|p.abs()).fold(0.0_f64,f64::max);
+    eprintln!("pressure WAV: frames={frames}, channels={channels}, rate_hz={OUTPUT_RATE}, full_scale_pa={full_scale_pa}, clips={clips}, peak_pa={peak}, decimator_delay_frames={}; no channel normalization; acceleration is step-average tagged at step end",decimator.delay_output_frames());
+    for (channel,bake) in baked.iter().enumerate() {
+        eprintln!("receiver {channel} observer_flight_s={}",bake.range_m/bake.medium.sound_speed);
+    }
+    Ok(wav)
+}
+
+#[cfg(test)]
+#[path = "stereo_tests.rs"]
+mod tests;

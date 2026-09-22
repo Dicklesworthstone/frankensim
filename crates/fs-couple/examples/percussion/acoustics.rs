@@ -14,7 +14,7 @@
 use super::{Error, Experiment};
 use fs_bem::helmholtz::{Formulation, Medium, RadiationSolution, exterior_pressure_at_points, far_field, solve_radiation_batch};
 use fs_bem::panel3d::SpherePanels;
-use fs_couple::pcm_wav::{decimate::Decimator, encode_pcm16_wav};
+use fs_couple::pcm_wav::decimate::Decimator;
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
 use fs_plate::{ModePair, shell::head::TensionedDisk};
@@ -235,45 +235,9 @@ fn receiver_response(surface:&SpherePanels,solution:&RadiationSolution,medium:Me
             exterior_pressure_at_points(surface,solution,medium,&[position])?[0],omega,-propagation_delay_s),
     })
 }
-fn bake(boundary:&Boundary,receiver:Receiver)->Result<Bake,Error> {
-    let count=boundary.weights.len(); let panels=boundary.triangles.len();
-    if count==0 || count>MAX_INPUTS || count!=boundary.state_modes.len() || panels==0 || panels>MAX_PANELS
-        || boundary.weights.iter().any(|b|b.len()!=panels || b.iter().any(|v|!v.is_finite())) {
-        return Err("exterior radiation exceeds its shape/work contract".into());
-    }
-    let position=receiver.position();
-    let range_m=position.iter().map(|x|x*x).sum::<f64>().sqrt();
-    let radius=boundary.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt()).fold(0.0_f64,f64::max);
-    let medium=Medium::air();
-    let (propagation_delay_s,pressure_gain)=receiver.propagation(radius,medium,1.0/f64::from(OUTPUT_RATE))?;
-    let surface=SpherePanels::from_triangles(boundary.triangles.clone())?;
-    let omega:Vec<_>=(0..41).map(|i|2.0*std::f64::consts::PI*(40.0+40.0*i as f64)).collect();
-    let mut values=vec![Vec::with_capacity(omega.len());count];
-    let mut ppw=f64::INFINITY; let mut condition=0.0_f64;
-    for &w in &omega {
-        let k=w/medium.sound_speed;
-        let fields=acceleration_fields(&boundary.weights,w);
-        let formulation=if k*radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
-        let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
-        let solutions=solve_radiation_batch(&surface,k,medium,&field_refs,formulation)?;
-        for (row,solution) in values.iter_mut().zip(&solutions) {
-            // A materially negative power result is not repaired into audible data.
-            if solution.radiated_power_roundoff_interval.1<0.0 {
-                return Err("BEM reports negative radiation power beyond roundoff; refine the acoustic solve".into());
-            }
-            ppw=ppw.min(solution.panels_per_wavelength); condition=condition.max(solution.condition_lower_bound);
-            row.push(receiver_response(&surface,solution,medium,receiver,radius,propagation_delay_s)?);
-        }
-    }
-    let mut filters=Vec::with_capacity(count); let mut maximum=0.0_f64; let mut rms=0.0_f64;
-    for row in &values {
-        let (filter,m,r)=fit_observer(&omega,row,1.0/f64::from(OUTPUT_RATE),8)?;
-        maximum=maximum.max(m); rms=rms.max(r); filters.push(filter);
-    }
-    eprintln!("fixed receiver BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, held_out=20, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
-    eprintln!("receiver={receiver:?}; one causal filter per modal acceleration; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={propagation_delay_s}, pressure_gain={pressure_gain}");
-    Ok(Bake{filters,range_m,medium,propagation_delay_s,pressure_gain})
-}
+/// Shared one/two-receiver preparation and rendering over the same source.
+#[path = "stereo.rs"]
+pub mod stereo;
 
 struct Observer<'a> { filters:Vec<DiscreteStateSpaceRuntime<'a>>, delay:DelayedFilter, pressure_gain:f64 }
 impl Bake {
@@ -304,37 +268,7 @@ impl Observer<'_> {
 /// observed samples. Mechanics still uses the allocating implicit fs-phs owner.
 /// No native wall-clock or callback allocation bound is asserted.
 pub fn render(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,receiver:Receiver)->Result<Vec<u8>,Error> {
-    let boundary=experiment.acoustics.as_ref().ok_or("missing acoustic boundary")?;
-    if frames==0 || frames>480000 || !full_scale_pa.is_finite() || full_scale_pa<=0.0
-        || boundary.state_modes.iter().any(|&k|k>=experiment.force.len()) {
-        return Err("pressure export requires bounded frames, finite positive full-scale and valid state addresses".into());
-    }
-    let baked=bake(boundary,receiver)?;
-    let mut observer=baked.runtime()?;
-    let count=boundary.state_modes.len();
-    let mut decimator=Decimator::new(SUBSTEPS,count)?;
-    let mut block=vec![0.0;SUBSTEPS*count];
-    let x=experiment.system.state();
-    let mut previous:Vec<f64>=boundary.state_modes.iter().map(|&k|x[2*k+1]).collect();
-    let mut pressure=Vec::with_capacity(frames); let gate=CancelGate::new_clock_free();
-    for _ in 0..frames {
-        for frame in block.chunks_exact_mut(count) {
-            experiment.system.step(&experiment.force,&gate)?;
-            let x=experiment.system.state();
-            for ((sample,previous),&k) in frame.iter_mut().zip(&mut previous).zip(&boundary.state_modes) {
-                let velocity=x[2*k+1]; *sample=(velocity-*previous)/MECHANICAL_DT; *previous=velocity;
-            }
-        }
-        // Interval-average mechanical accelerations, not a hand-authored force
-        // pulse. Filter only this observation before its lower-rate transfer;
-        // the nonlinear contact, felt, membrane and energy state are untouched.
-        let acceleration=decimator.preview(&block)?;
-        let p=observer.step(acceleration)?; decimator.commit(); pressure.push(p);
-    }
-    let (wav,clips)=encode_pcm16_wav(&pressure,OUTPUT_RATE,full_scale_pa)?;
-    let peak=pressure.iter().map(|p|p.abs()).fold(0.0_f64,f64::max);
-    eprintln!("pressure WAV: frames={frames}, rate_hz={OUTPUT_RATE}, full_scale_pa={full_scale_pa}, clips={clips}, peak_pa={peak}, observer_flight_s={}, decimator_delay_frames={}; no peak normalization; acceleration is a step-average tagged at step end",baked.range_m/baked.medium.sound_speed,decimator.delay_output_frames());
-    Ok(wav)
+    stereo::render_receivers(experiment,frames,full_scale_pa,&[receiver])
 }
 
 #[cfg(test)]
