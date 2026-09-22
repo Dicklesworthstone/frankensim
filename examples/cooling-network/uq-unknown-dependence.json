@@ -4,15 +4,15 @@
   "samples": 4,
   "wall_seconds": 60,
   "temperature_limit_k": 303,
-  "correlation": {"kind": "unknown"},
+  "correlation": { "kind": "unknown" },
   "parameters": [
     {
-      "target": {"kind": "air-density"},
-      "distribution": {"kind": "uniform", "lo": 1.15, "hi": 1.25}
+      "target": { "kind": "air-density" },
+      "distribution": { "kind": "uniform", "lo": 1.15, "hi": 1.25 }
     },
     {
-      "target": {"kind": "component-power", "component": "chip"},
-      "distribution": {"kind": "uniform", "lo": 0.8, "hi": 1.2}
+      "target": { "kind": "component-power", "component": "chip" },
+      "distribution": { "kind": "uniform", "lo": 0.8, "hi": 1.2 }
     }
   ]
 }

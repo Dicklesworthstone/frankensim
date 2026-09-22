@@ -3,21 +3,21 @@
   "seed": "79",
   "samples": 8,
   "wall_seconds": 300,
-  "qoi": {"kind": "transient-sampled-peak"},
+  "qoi": { "kind": "transient-sampled-peak" },
   "temperature_limit_k": 307,
-  "correlation": {"kind": "independent"},
+  "correlation": { "kind": "independent" },
   "parameters": [
     {
-      "target": {"kind": "interval-power-scale", "interval": 0},
-      "distribution": {"kind": "uniform", "lo": 0.9, "hi": 1.1}
+      "target": { "kind": "interval-power-scale", "interval": 0 },
+      "distribution": { "kind": "uniform", "lo": 0.9, "hi": 1.1 }
     },
     {
-      "target": {"kind": "interval-fan-speed-ratio", "interval": 1},
-      "distribution": {"kind": "uniform", "lo": 1.35, "hi": 1.65}
+      "target": { "kind": "interval-fan-speed-ratio", "interval": 1 },
+      "distribution": { "kind": "uniform", "lo": 1.35, "hi": 1.65 }
     },
     {
-      "target": {"kind": "initial-temperature"},
-      "distribution": {"kind": "uniform", "lo": 299, "hi": 301}
+      "target": { "kind": "initial-temperature" },
+      "distribution": { "kind": "uniform", "lo": 299, "hi": 301 }
     }
   ]
 }

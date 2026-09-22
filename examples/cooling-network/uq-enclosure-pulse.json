@@ -1,11 +1,15 @@
 {
-  "schema":"frankensim.cooling-network-uq.v1",
-  "seed":"73","samples":16,"wall_seconds":600,
-  "qoi":{"kind":"transient-sampled-peak"},
-  "temperature_limit_k":316,
-  "correlation":{"kind":"independent"},
-  "parameters":[{
-    "target":{"kind":"radiation-emissivity","surface":"emitter"},
-    "distribution":{"kind":"uniform","lo":0.2,"hi":0.8}
-  }]
+  "schema": "frankensim.cooling-network-uq.v1",
+  "seed": "73",
+  "samples": 16,
+  "wall_seconds": 600,
+  "qoi": { "kind": "transient-sampled-peak" },
+  "temperature_limit_k": 316,
+  "correlation": { "kind": "independent" },
+  "parameters": [
+    {
+      "target": { "kind": "radiation-emissivity", "surface": "emitter" },
+      "distribution": { "kind": "uniform", "lo": 0.2, "hi": 0.8 }
+    }
+  ]
 }

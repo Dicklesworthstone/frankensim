@@ -1,45 +1,183 @@
 {
-  "schema":"frankensim.cooling-network.v1","units":"SI","seed":"41",
-  "budgets":{"graph_sweeps":4096,"coupling_iterations":200,"linear_iterations":20000,"derivative_iterations":400,"wall_seconds":120},
-  "tolerances":{"flow_m3_s":1e-12,"heat_w":1e-7,"temperature_k":1e-8,"linear_relative":1e-12,"relaxation":1},
-  "air":{"density_kg_m3":1.2,"specific_heat_j_kg_k":1007},
-  "hydraulics":{
-    "node_count":3,
-    "fan":{"name":"illustrative-bank","source":"Illustrative curve, not measured hardware","source_id":"enclosure-pulse-v1","inlet":0,"outlet":2,"temperature_k":300,"count":1,"arrangement":"series","speed_ratio":1,"min_speed_ratio":0.5,"max_speed_ratio":2,"min_flow_m3_s":1e-5,"pressure_tolerance_rel":0.05,"points":[{"flow_m3_s":0,"static_pressure_pa":40},{"flow_m3_s":0.008,"static_pressure_pa":0}],"max_iterations":160,"flow_tolerance_m3_s":1e-11,"pressure_tolerance_pa":1e-6},
-    "branches":[
-      {"name":"heated-stream","from":0,"to":1,"resistance_pa_s2_m6":1111111.111111111,"source":"Illustrative","regions":["emitter"]},
-      {"name":"fresh-bypass","from":0,"to":1,"resistance_pa_s2_m6":10000000,"source":"Illustrative","regions":[]},
-      {"name":"mixed-stream","from":1,"to":2,"resistance_pa_s2_m6":625000,"source":"Illustrative","regions":["receiver"]}
+  "schema": "frankensim.cooling-network.v1",
+  "units": "SI",
+  "seed": "41",
+  "budgets": {
+    "graph_sweeps": 4096,
+    "coupling_iterations": 200,
+    "linear_iterations": 20000,
+    "derivative_iterations": 400,
+    "wall_seconds": 120
+  },
+  "tolerances": {
+    "flow_m3_s": 1e-12,
+    "heat_w": 1e-7,
+    "temperature_k": 1e-8,
+    "linear_relative": 1e-12,
+    "relaxation": 1
+  },
+  "air": { "density_kg_m3": 1.2, "specific_heat_j_kg_k": 1007 },
+  "hydraulics": {
+    "node_count": 3,
+    "fan": {
+      "name": "illustrative-bank",
+      "source": "Illustrative curve, not measured hardware",
+      "source_id": "enclosure-pulse-v1",
+      "inlet": 0,
+      "outlet": 2,
+      "temperature_k": 300,
+      "count": 1,
+      "arrangement": "series",
+      "speed_ratio": 1,
+      "min_speed_ratio": 0.5,
+      "max_speed_ratio": 2,
+      "min_flow_m3_s": 1e-5,
+      "pressure_tolerance_rel": 0.05,
+      "points": [
+        { "flow_m3_s": 0, "static_pressure_pa": 40 },
+        { "flow_m3_s": 0.008, "static_pressure_pa": 0 }
+      ],
+      "max_iterations": 160,
+      "flow_tolerance_m3_s": 1e-11,
+      "pressure_tolerance_pa": 1e-6
+    },
+    "branches": [
+      {
+        "name": "heated-stream",
+        "from": 0,
+        "to": 1,
+        "resistance_pa_s2_m6": 1111111.111111111,
+        "source": "Illustrative",
+        "regions": ["emitter"]
+      },
+      {
+        "name": "fresh-bypass",
+        "from": 0,
+        "to": 1,
+        "resistance_pa_s2_m6": 10000000,
+        "source": "Illustrative",
+        "regions": []
+      },
+      {
+        "name": "mixed-stream",
+        "from": 1,
+        "to": 2,
+        "resistance_pa_s2_m6": 625000,
+        "source": "Illustrative",
+        "regions": ["receiver"]
+      }
     ]
   },
-  "solid":{
-    "vertices_m":[[0,0,0],[0.02,0,0],[0,0.1,0],[0.02,0.1,0],[0,0,0.1],[0.02,0,0.1],[0,0.1,0.1],[0.02,0.1,0.1],[0.03,0,0],[0.05,0,0],[0.03,0.1,0],[0.05,0.1,0],[0.03,0,0.1],[0.05,0,0.1],[0.03,0.1,0.1],[0.05,0.1,0.1]],
-    "tetrahedra":[[0,1,3,7],[0,1,5,7],[0,2,3,7],[0,2,6,7],[0,4,5,7],[0,4,6,7],[8,9,11,15],[8,9,13,15],[8,10,11,15],[8,10,14,15],[8,12,13,15],[8,12,14,15]],
-    "materials":[
-      {"name":"emitter-solid","conductivity_curve":{"temperature_k":[250,450],"conductivity_w_m_k":[0.5,4.5]},"source":"Illustrative k(T), not measured material"},
-      {"name":"receiver-solid","conductivity_curve":{"temperature_k":[250,450],"conductivity_w_m_k":[0.5,4.5]},"source":"Illustrative k(T), not measured material"}
+  "solid": {
+    "vertices_m": [
+      [0, 0, 0],
+      [0.02, 0, 0],
+      [0, 0.1, 0],
+      [0.02, 0.1, 0],
+      [0, 0, 0.1],
+      [0.02, 0, 0.1],
+      [0, 0.1, 0.1],
+      [0.02, 0.1, 0.1],
+      [0.03, 0, 0],
+      [0.05, 0, 0],
+      [0.03, 0.1, 0],
+      [0.05, 0.1, 0],
+      [0.03, 0, 0.1],
+      [0.05, 0, 0.1],
+      [0.03, 0.1, 0.1],
+      [0.05, 0.1, 0.1]
     ],
-    "element_materials":["emitter-solid","emitter-solid","emitter-solid","emitter-solid","emitter-solid","emitter-solid","receiver-solid","receiver-solid","receiver-solid","receiver-solid","receiver-solid","receiver-solid"],
-    "component_power":{"total_w":5,"relative_tolerance":1e-12,"components":[{"name":"heater","watts":5,"vertices":[0,1,2,3,4,5,6,7]}]},
-    "adiabatic_remainder":true,
-    "surfaces":[{"name":"emitter","faces":[[1,3,7],[1,5,7]],"htc_w_m2_k":10},{"name":"receiver","faces":[[8,10,14],[8,12,14]],"htc_w_m2_k":25}]
+    "tetrahedra": [
+      [0, 1, 3, 7],
+      [0, 1, 5, 7],
+      [0, 2, 3, 7],
+      [0, 2, 6, 7],
+      [0, 4, 5, 7],
+      [0, 4, 6, 7],
+      [8, 9, 11, 15],
+      [8, 9, 13, 15],
+      [8, 10, 11, 15],
+      [8, 10, 14, 15],
+      [8, 12, 13, 15],
+      [8, 12, 14, 15]
+    ],
+    "materials": [
+      {
+        "name": "emitter-solid",
+        "conductivity_curve": { "temperature_k": [250, 450], "conductivity_w_m_k": [0.5, 4.5] },
+        "source": "Illustrative k(T), not measured material"
+      },
+      {
+        "name": "receiver-solid",
+        "conductivity_curve": { "temperature_k": [250, 450], "conductivity_w_m_k": [0.5, 4.5] },
+        "source": "Illustrative k(T), not measured material"
+      }
+    ],
+    "element_materials": [
+      "emitter-solid",
+      "emitter-solid",
+      "emitter-solid",
+      "emitter-solid",
+      "emitter-solid",
+      "emitter-solid",
+      "receiver-solid",
+      "receiver-solid",
+      "receiver-solid",
+      "receiver-solid",
+      "receiver-solid",
+      "receiver-solid"
+    ],
+    "component_power": {
+      "total_w": 5,
+      "relative_tolerance": 1e-12,
+      "components": [{ "name": "heater", "watts": 5, "vertices": [0, 1, 2, 3, 4, 5, 6, 7] }]
+    },
+    "adiabatic_remainder": true,
+    "surfaces": [
+      { "name": "emitter", "faces": [[1, 3, 7], [1, 5, 7]], "htc_w_m2_k": 10 },
+      { "name": "receiver", "faces": [[8, 10, 14], [8, 12, 14]], "htc_w_m2_k": 25 }
+    ]
   },
-  "objective":{"max_solid_temperature":true,"gradient":false},
-  "radiation":{
-    "max_iterations":200,"temperature_tolerance_k":1e-9,"relaxation":0.25,
-    "enclosure":{
-      "surfaces":[{"surface":"emitter","emissivity":0.8,"source":"Illustrative finish, not measured"},{"surface":"receiver","emissivity":0.6,"source":"Illustrative finish, not measured"}],
-      "view_factors":[[0,1],[1,0]],"row_sum_tolerance":1e-12,"reciprocity_relative_tolerance":1e-12,
-      "evidence":{"kind":"analytic","geometry":"ideal infinite parallel plates; finite P1 traces represent equal-area samples, not a finite-plate visibility calculation"}
+  "objective": { "max_solid_temperature": true, "gradient": false },
+  "radiation": {
+    "max_iterations": 200,
+    "temperature_tolerance_k": 1e-9,
+    "relaxation": 0.25,
+    "enclosure": {
+      "surfaces": [
+        { "surface": "emitter", "emissivity": 0.8, "source": "Illustrative finish, not measured" },
+        { "surface": "receiver", "emissivity": 0.6, "source": "Illustrative finish, not measured" }
+      ],
+      "view_factors": [[0, 1], [1, 0]],
+      "row_sum_tolerance": 1e-12,
+      "reciprocity_relative_tolerance": 1e-12,
+      "evidence": {
+        "kind": "analytic",
+        "geometry": "ideal infinite parallel plates; finite P1 traces represent equal-area samples, not a finite-plate visibility calculation"
+      }
     }
   },
-  "transient":{
-    "initial_temperature_k":300,
-    "element_heat_capacities_j_m3_k":[20000,20000,20000,20000,20000,20000,10000,10000,10000,10000,10000,10000],
-    "max_step_s":2,"max_steps":128,"temperature_limit_k":316,
-    "intervals":[{"duration_s":10,"power_scale":1,"fan_speed_ratio":1},{"duration_s":20,"power_scale":0,"fan_speed_ratio":1.5}],
-    "repeat":{"cycles":2,"max_total_steps":256},
-    "nonlinear":{"max_iterations":32,"residual_rtol":1e-10,"residual_atol_j":1e-10,"armijo_c":1e-4,"shrink":0.5,"max_backtracks":24},
-    "adjoint":{"qoi":"sampled-peak","max_checkpoint_bytes":1048576,"component_power":true}
+  "transient": {
+    "initial_temperature_k": 300,
+    "element_heat_capacities_j_m3_k": [
+      20000, 20000, 20000, 20000, 20000, 20000, 10000, 10000, 10000, 10000, 10000, 10000
+    ],
+    "max_step_s": 2,
+    "max_steps": 128,
+    "temperature_limit_k": 316,
+    "intervals": [
+      { "duration_s": 10, "power_scale": 1, "fan_speed_ratio": 1 },
+      { "duration_s": 20, "power_scale": 0, "fan_speed_ratio": 1.5 }
+    ],
+    "repeat": { "cycles": 2, "max_total_steps": 256 },
+    "nonlinear": {
+      "max_iterations": 32,
+      "residual_rtol": 1e-10,
+      "residual_atol_j": 1e-10,
+      "armijo_c": 1e-4,
+      "shrink": 0.5,
+      "max_backtracks": 24
+    },
+    "adjoint": { "qoi": "sampled-peak", "max_checkpoint_bytes": 1048576, "component_power": true }
   }
 }

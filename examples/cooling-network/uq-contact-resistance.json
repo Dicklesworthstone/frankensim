@@ -3,13 +3,13 @@
   "seed": "73",
   "samples": 8,
   "wall_seconds": 300,
-  "qoi": {"kind": "transient-sampled-peak"},
+  "qoi": { "kind": "transient-sampled-peak" },
   "temperature_limit_k": 306.15,
-  "correlation": {"kind": "independent"},
+  "correlation": { "kind": "independent" },
   "parameters": [
     {
-      "target": {"kind": "contact-resistance", "contact": "bondline"},
-      "distribution": {"kind": "uniform", "lo": 0.005, "hi": 0.02}
+      "target": { "kind": "contact-resistance", "contact": "bondline" },
+      "distribution": { "kind": "uniform", "lo": 0.005, "hi": 0.02 }
     }
   ]
 }

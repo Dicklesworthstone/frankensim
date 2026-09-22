@@ -8,8 +8,8 @@
   "max_total_steps": 5000,
   "wall_seconds": 900,
   "priority": [
-    {"component": "standby", "interval": 0, "min_power_w": 0, "max_power_w": 3},
-    {"component": "memory", "interval": 0, "min_power_w": 0, "max_power_w": 10},
-    {"component": "chip", "interval": 0, "min_power_w": 0, "max_power_w": 24}
+    { "component": "standby", "interval": 0, "min_power_w": 0, "max_power_w": 3 },
+    { "component": "memory", "interval": 0, "min_power_w": 0, "max_power_w": 10 },
+    { "component": "chip", "interval": 0, "min_power_w": 0, "max_power_w": 24 }
   ]
 }

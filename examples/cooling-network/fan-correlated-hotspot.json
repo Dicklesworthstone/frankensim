@@ -11,8 +11,8 @@
   },
   "tolerances": {
     "flow_m3_s": 1e-12,
-    "heat_w": 1e-07,
-    "temperature_k": 1e-08,
+    "heat_w": 1e-7,
+    "temperature_k": 1e-8,
     "linear_relative": 1e-12,
     "relaxation": 1.0
   },
@@ -34,7 +34,7 @@
       "speed_ratio": 1,
       "min_speed_ratio": 0.5,
       "max_speed_ratio": 2.0,
-      "min_flow_m3_s": 1e-05,
+      "min_flow_m3_s": 1e-5,
       "pressure_tolerance_rel": 0.05,
       "points": [
         {
@@ -48,7 +48,7 @@
       ],
       "max_iterations": 160,
       "flow_tolerance_m3_s": 1e-11,
-      "pressure_tolerance_pa": 1e-06
+      "pressure_tolerance_pa": 1e-6
     },
     "branches": [
       {
@@ -57,9 +57,7 @@
         "to": 1,
         "resistance_pa_s2_m6": 1111111.111111111,
         "source": "Illustrative resistance",
-        "regions": [
-          "first-face"
-        ]
+        "regions": ["first-face"]
       },
       {
         "name": "fresh-bypass",
@@ -75,148 +73,38 @@
         "to": 2,
         "resistance_pa_s2_m6": 625000,
         "source": "Illustrative resistance",
-        "regions": [
-          "last-face"
-        ]
+        "regions": ["last-face"]
       }
     ]
   },
   "solid": {
     "vertices_m": [
-      [
-        0,
-        0,
-        0
-      ],
-      [
-        0.025,
-        0,
-        0
-      ],
-      [
-        0.05,
-        0,
-        0
-      ],
-      [
-        0,
-        0.1,
-        0
-      ],
-      [
-        0.025,
-        0.1,
-        0
-      ],
-      [
-        0.05,
-        0.1,
-        0
-      ],
-      [
-        0,
-        0,
-        0.1
-      ],
-      [
-        0.025,
-        0,
-        0.1
-      ],
-      [
-        0.05,
-        0,
-        0.1
-      ],
-      [
-        0,
-        0.1,
-        0.1
-      ],
-      [
-        0.025,
-        0.1,
-        0.1
-      ],
-      [
-        0.05,
-        0.1,
-        0.1
-      ]
+      [0, 0, 0],
+      [0.025, 0, 0],
+      [0.05, 0, 0],
+      [0, 0.1, 0],
+      [0.025, 0.1, 0],
+      [0.05, 0.1, 0],
+      [0, 0, 0.1],
+      [0.025, 0, 0.1],
+      [0.05, 0, 0.1],
+      [0, 0.1, 0.1],
+      [0.025, 0.1, 0.1],
+      [0.05, 0.1, 0.1]
     ],
     "tetrahedra": [
-      [
-        0,
-        1,
-        4,
-        10
-      ],
-      [
-        0,
-        1,
-        7,
-        10
-      ],
-      [
-        0,
-        3,
-        4,
-        10
-      ],
-      [
-        0,
-        3,
-        9,
-        10
-      ],
-      [
-        0,
-        6,
-        7,
-        10
-      ],
-      [
-        0,
-        6,
-        9,
-        10
-      ],
-      [
-        1,
-        2,
-        5,
-        11
-      ],
-      [
-        1,
-        2,
-        8,
-        11
-      ],
-      [
-        1,
-        4,
-        5,
-        11
-      ],
-      [
-        1,
-        4,
-        10,
-        11
-      ],
-      [
-        1,
-        7,
-        8,
-        11
-      ],
-      [
-        1,
-        7,
-        10,
-        11
-      ]
+      [0, 1, 4, 10],
+      [0, 1, 7, 10],
+      [0, 3, 4, 10],
+      [0, 3, 9, 10],
+      [0, 6, 7, 10],
+      [0, 6, 9, 10],
+      [1, 2, 5, 11],
+      [1, 2, 8, 11],
+      [1, 4, 5, 11],
+      [1, 4, 10, 11],
+      [1, 7, 8, 11],
+      [1, 7, 10, 11]
     ],
     "materials": [
       {
@@ -251,9 +139,7 @@
         {
           "name": "chip",
           "watts": 1,
-          "vertices": [
-            4
-          ]
+          "vertices": [4]
         }
       ]
     },
@@ -261,48 +147,26 @@
     "surfaces": [
       {
         "name": "first-face",
-        "faces": [
-          [
-            0,
-            3,
-            9
-          ],
-          [
-            0,
-            6,
-            9
-          ]
-        ],
+        "faces": [[0, 3, 9], [0, 6, 9]],
         "convection": {
           "card": "convection.circular-duct-hausen-developing",
           "hydraulic_diameter_m": 0.005,
           "flow_area_m2": 0.001,
           "channel_length_m": 0.06,
-          "dynamic_viscosity_pa_s": 1.846e-05,
+          "dynamic_viscosity_pa_s": 1.846e-5,
           "thermal_conductivity_w_m_k": 0.0263,
           "source": "Illustrative frozen air properties and channel geometry"
         }
       },
       {
         "name": "last-face",
-        "faces": [
-          [
-            2,
-            5,
-            11
-          ],
-          [
-            2,
-            8,
-            11
-          ]
-        ],
+        "faces": [[2, 5, 11], [2, 8, 11]],
         "convection": {
           "card": "convection.circular-duct-hausen-developing",
           "hydraulic_diameter_m": 0.005,
           "flow_area_m2": 0.0014,
           "channel_length_m": 0.06,
-          "dynamic_viscosity_pa_s": 1.846e-05,
+          "dynamic_viscosity_pa_s": 1.846e-5,
           "thermal_conductivity_w_m_k": 0.0263,
           "source": "Illustrative frozen air properties and channel geometry"
         }
