@@ -8,6 +8,8 @@ use crate::{PhsError, PortHamiltonian, NEWTON_MAX, NEWTON_TOL, discrete_gradient
 use fs_la::LuWorkspace;
 mod structure;
 mod analytic;
+mod dissipation;
+use dissipation::Dissipation;
 use structure::FlowPattern;
 
 /// Scalar ledger from a prepared step; state and port output use caller buffers.
@@ -15,7 +17,8 @@ use structure::FlowPattern;
 pub struct PreparedStepRecord {
     /// Actual change in Hamiltonian [J].
     pub delta_h: f64,
-    /// `dt * dg^T R dg` [J].
+    /// `dt * (dg^T R dg + dg^T D(midpoint,dg))` [J].
+    /// The additional nonlinear port is zero on the original stepping APIs.
     pub dissipated: f64,
     /// `dt * u^T G^T dg` [J].
     pub supplied: f64,
@@ -84,6 +87,8 @@ pub struct StepWorkspace {
     trial: Vec<f64>,
     midpoint: Vec<f64>,
     effort: Vec<f64>,
+    nonlinear_loss: Vec<f64>,
+    nonlinear_effort: Vec<f64>,
     residual: Vec<f64>,
     plus: Vec<f64>,
     minus: Vec<f64>,
@@ -115,16 +120,19 @@ fn zeroed(len: usize) -> Result<Vec<f64>, PhsError> {
 
 #[allow(clippy::too_many_arguments)] // one residual with explicitly borrowed scratch
 fn residual_into(sys: &PortHamiltonian, x0: &[f64], x: &[f64], gu: &[f64],
-    dt: f64, pattern: &FlowPattern, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64]) -> Result<f64, PhsError>
+    dt: f64, pattern: &FlowPattern, midpoint: &mut [f64], effort: &mut [f64], out: &mut [f64],
+    dissipation: Option<Dissipation<'_>>, nonlinear_loss: &mut [f64]) -> Result<f64, PhsError>
 {
     norm(x)?;
     discrete_gradient_into_unchecked(sys.storage.as_ref(), x0, x, midpoint, effort);
     norm(effort)?;
+    if let Some(port) = dissipation { port.evaluate(midpoint, effort, nonlinear_loss)?; }
     for (row, value) in out.iter_mut().enumerate() {
         let mut flow = 0.0;
         for &col in pattern.row(row) {
             flow += (sys.j[row * sys.n + col] - sys.r[row * sys.n + col]) * effort[col];
         }
+        if dissipation.is_some() { flow -= nonlinear_loss[row]; }
         *value = x[row] - x0[row] - dt * (flow + gu[row]);
     }
     norm(out)
@@ -148,6 +156,7 @@ impl StepWorkspace {
             n, m, max_iterations: NEWTON_MAX,
             x: zeroed(n)?, best: zeroed(n)?, trial: zeroed(n)?,
             midpoint: zeroed(n)?, effort: zeroed(n)?, residual: zeroed(n)?,
+            nonlinear_loss: zeroed(n)?, nonlinear_effort: zeroed(n)?,
             plus: zeroed(n)?, minus: zeroed(n)?, forcing: zeroed(n)?,
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
             lu: LuWorkspace::new(n).map_err(|_| dimensions("prepared LU capacity"))?,
@@ -205,7 +214,7 @@ impl StepWorkspace {
         &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
         x_next: &mut [f64], y: &mut [f64], cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
-        self.step_with_hessian(sys, x0, u, dt, x_next, y, None, cancelled)
+        self.step_with_hessian(sys, x0, u, dt, x_next, y, None, None, cancelled)
     }
 
     /// Solve the same Gonzalez equation using the caller's exact storage Hessian
@@ -244,19 +253,23 @@ impl StepWorkspace {
         x_next: &mut [f64], y: &mut [f64],
         hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool, cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
-        self.step_with_hessian(sys, x0, u, dt, x_next, y, Some(hessian), cancelled)
+        self.step_with_hessian(sys, x0, u, dt, x_next, y, Some(hessian), None, cancelled)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::type_complexity)]
     fn step_with_hessian<F: FnMut() -> bool>(
         &mut self, sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64,
         x_next: &mut [f64], y: &mut [f64],
-        hessian: Option<&dyn Fn(&[f64], &[f64], &mut [f64]) -> bool>, mut cancelled: F,
+        hessian: Option<&dyn Fn(&[f64], &[f64], &mut [f64]) -> bool>,
+        dissipation: Option<Dissipation<'_>>, mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
         let mut poll = || {
             if cancelled() { Err(PreparedStepError::Cancelled) } else { Ok(()) }
         };
         poll()?;
+        if hessian.is_some() && dissipation.is_some_and(|d| d.tangent.is_none()) {
+            return Err(dimensions("analytic nonlinear dissipation requires its exact tangent").into());
+        }
         let n = self.n;
         if sys.n != n || sys.m != self.m || x0.len() != n || x_next.len() != n
             || u.len() != self.m || y.len() != self.m
@@ -290,7 +303,8 @@ impl StepWorkspace {
         loop {
             poll()?;
             let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
-                &mut self.midpoint, &mut self.effort, &mut self.residual)?;
+                &mut self.midpoint, &mut self.effort, &mut self.residual,
+                dissipation, &mut self.nonlinear_loss)?;
             if iterations == 0 { initial_norm = rnorm; }
             let improved = rnorm < best_norm;
             if improved { self.best.copy_from_slice(&self.x); best_norm = rnorm; }
@@ -311,7 +325,7 @@ impl StepWorkspace {
                 return Err(PhsError::NewtonStalled { residual: best_norm }.into());
             }
             if let Some(action) = hessian {
-                self.analytic_jacobian_into(sys, x0, dt, action, &mut poll)?;
+                self.analytic_jacobian_into(sys, x0, dt, action, dissipation, &mut poll)?;
             } else {
                 for col in 0..n {
                     poll()?;
@@ -320,10 +334,12 @@ impl StepWorkspace {
                     self.trial.copy_from_slice(&self.x);
                     self.trial[col] += h;
                     residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
-                        &mut self.midpoint, &mut self.effort, &mut self.plus)?;
+                        &mut self.midpoint, &mut self.effort, &mut self.plus,
+                        dissipation, &mut self.nonlinear_loss)?;
                     self.trial[col] = self.x[col] - h;
                     residual_into(sys, x0, &self.trial, &self.forcing, dt, &self.flow,
-                        &mut self.midpoint, &mut self.effort, &mut self.minus)?;
+                        &mut self.midpoint, &mut self.effort, &mut self.minus,
+                        dissipation, &mut self.nonlinear_loss)?;
                     for row in 0..n {
                         self.jacobian[row * n + col] = (self.plus[row] - self.minus[row]) / (2.0 * h);
                     }
@@ -339,12 +355,16 @@ impl StepWorkspace {
         // Re-evaluate at the accepted candidate: FD probes and best-iterate
         // restoration must never leave a stale effort in the energy ledger.
         let solver_residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
-            &mut self.midpoint, &mut self.effort, &mut self.residual)?;
+            &mut self.midpoint, &mut self.effort, &mut self.residual,
+                dissipation, &mut self.nonlinear_loss)?;
         let mut dissipated = 0.0;
         for row in 0..n {
             let mut value = 0.0;
             for col in 0..n { value += sys.r[row * n + col] * self.effort[col]; }
             dissipated += self.effort[row] * value;
+        }
+        if dissipation.is_some() {
+            dissipated += dissipation::power(&self.effort, &self.nonlinear_loss)?;
         }
         dissipated *= dt;
         self.output.fill(0.0);

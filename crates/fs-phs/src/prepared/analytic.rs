@@ -3,12 +3,14 @@
 //! candidate outputs are untouched. The Jacobian is generally nonsymmetric.
 use super::{StepWorkspace, PreparedStepError, dimensions, norm};
 use crate::PortHamiltonian;
+use super::dissipation::Dissipation;
 
 impl StepWorkspace {
     #[allow(clippy::type_complexity)]
     pub(super) fn analytic_jacobian_into<F>(
         &mut self, sys: &PortHamiltonian, x0: &[f64], dt: f64,
-        hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool, poll: &mut F,
+        hessian: &dyn Fn(&[f64], &[f64], &mut [f64]) -> bool,
+        dissipation: Option<Dissipation<'_>>, poll: &mut F,
     ) -> Result<(), PreparedStepError>
     where F: FnMut() -> Result<(), PreparedStepError> {
         let n = self.n;
@@ -33,6 +35,12 @@ impl StepWorkspace {
             (sys.hamiltonian(&self.x) - sys.hamiltonian(x0) - mid_dot) / length2
         } else { 0.0 };
         norm(&[length2, alpha])?;
+        if dissipation.is_some() {
+            // A nonlinear port is conjugate to the COMPLETE Gonzalez effort,
+            // not just grad H at the midpoint. Keep the latter for d(alpha).
+            for i in 0..n { self.nonlinear_effort[i] = self.effort[i] + alpha*self.delta[i]; }
+            norm(&self.nonlinear_effort)?;
+        }
         self.trial.fill(0.0);
         for col in 0..n {
             poll()?;
@@ -54,11 +62,19 @@ impl StepWorkspace {
                     + if row == col { alpha } else { 0.0 };
             }
             norm(&self.plus)?;
+            if let Some(port) = dissipation {
+                self.trial[col] = 0.5; // d(midpoint)/d(x1_col)
+                let result = port.directional(&self.midpoint, &self.nonlinear_effort,
+                    &self.trial, &self.plus, &mut self.nonlinear_loss);
+                self.trial[col] = 0.0;
+                result?;
+            }
             for row in 0..n {
                 let mut flow = 0.0;
                 for &k in self.flow.row(row) {
                     flow += (sys.j[row*n+k] - sys.r[row*n+k]) * self.plus[k];
                 }
+                if dissipation.is_some() { flow -= self.nonlinear_loss[row]; }
                 self.jacobian[row*n+col] = (if row == col { 1.0 } else { 0.0 }) - dt*flow;
             }
         }

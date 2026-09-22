@@ -35,7 +35,7 @@ fn analytic_jacobian_differentiates_the_gonzalez_correction_not_just_midpoint() 
     let sys = system(Box::new(Quartic));
     let a = [0.25,0.4,-0.13,0.1]; let b = [0.29,0.31,-0.07,0.22]; let dt = 0.03;
     let mut work = StepWorkspace::new(&sys).unwrap();work.flow.refresh(&sys).unwrap();
-    work.x.copy_from_slice(&b);work.analytic_jacobian_into(&sys,&a,dt,&|x,d,o|Quartic.hessian_vector(x,d,o),&mut ||Ok(())).unwrap();
+    work.x.copy_from_slice(&b);work.analytic_jacobian_into(&sys,&a,dt,&|x,d,o|Quartic.hessian_vector(x,d,o),None,&mut ||Ok(())).unwrap();
     let mut differs_from_midpoint = false;
     for col in 0..4 {
         let mut hi=b;let mut lo=b;let h=1e-6;hi[col]+=h;lo[col]-=h;
@@ -55,7 +55,7 @@ fn analytic_jacobian_differentiates_the_gonzalez_correction_not_just_midpoint() 
     }
     assert!(differs_from_midpoint);
     // At exactly zero increment the owner's roundoff guard uses half H''.
-    work.x.copy_from_slice(&a);work.analytic_jacobian_into(&sys,&a,dt,&|x,d,o|Quartic.hessian_vector(x,d,o),&mut ||Ok(())).unwrap();
+    work.x.copy_from_slice(&a);work.analytic_jacobian_into(&sys,&a,dt,&|x,d,o|Quartic.hessian_vector(x,d,o),None,&mut ||Ok(())).unwrap();
     for col in 0..4 {
         let mut e=[0.0;4];e[col]=1.0;let mut hv=[0.0;4];Quartic.hessian_vector(&a,&e,&mut hv);
         for row in 0..4 {
