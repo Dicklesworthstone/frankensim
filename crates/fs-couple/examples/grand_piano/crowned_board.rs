@@ -1,7 +1,8 @@
 //! Measured/authored crowned midsurface -> existing stiffened CST/DKT shell
 //! -> mass-normalized piano bridge ports. No fitted frequencies or new stepper.
 //!
-//! Crown is the supplied REFERENCE shape, not a solved downbearing equilibrium.
+//! Crown is the supplied REFERENCE shape. Explicit downbearing rows solve a
+//! nonlinear static equilibrium before computing small-vibration modes.
 //! The board is a shallow graph above the XY chart, with clamped rim. Ribs and
 //! bridges retain their existing E,G,A,Iy,J,e,rho; Iz follows the explicitly
 //! declared rectangular section reconstruction from A and Iy. Perfect bonds.
@@ -18,6 +19,9 @@ use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_plate::{PlateSection, ShellMesh, ShellModel, ShellSupport};
 use fs_plate::shell::stiffened::{BeamSection, ShellBeam, assemble_stiffened_shell};
 use std::{collections::{BTreeMap, BTreeSet}, f64::consts::TAU, fmt::Write};
+
+#[path = "downbearing.rs"]
+mod downbearing;
 
 pub const HEADER: &str = "frankensim-crowned-board-si-v1";
 const SHAPE: &str = "beam-section,rectangular-from-area-inertia";
@@ -73,6 +77,7 @@ struct Site {key:u8, tri:usize, weights:[f64;3], arm:[f64;3]}
 pub struct CrownedBoard {
     mesh:ShellMesh, sections:Vec<PlateSection>, beams:Vec<ShellBeam>, fixed:Vec<usize>,
     sites:Vec<Site>, damping:f64, source:String,
+    preload:Option<downbearing::Specification>,
     pub max_height_m:f64,
     pub area_m2:f64,
     pub mass_kg:f64,
@@ -82,14 +87,18 @@ impl CrownedBoard {
     /// beam declaration, and optional bridge_arm,key,dx,dy,dz [m]. An arm moves
     /// the vertical force port from the panel midsurface to its bearing point.
     /// No arm means the original midsurface port, NOT an inferred bridge top.
-    /// Clamped supports and zero prestress only; unsupported preload refuses.
+    /// Clamped supports and zero authored membrane pretension only. Optional
+    /// downbearing rows require an unloaded reference and complete course loads;
+    /// the full-coordinate static solve precedes tangent-modal analysis.
     pub fn read(text:&str)->Result<Self,String> {
         if text.len()>MAX_BYTES || !is_crowned(text) {return Err(format!("expected bounded {HEADER}"));}
+        let preload=downbearing::Specification::read(text)?;
         let mut flat=String::from("frankensim-board-geometry-si-v1\n");
         let mut nodes=Vec::new();let mut arms=BTreeMap::new();let mut shape=false;
         for row in meaningful(text).skip(1) {
             let f:Vec<_>=row.split(',').map(str::trim).collect();
             match f[0] {
+                "downbearing" | "downbearing-source" | "preload-reference" => {},
                 "node" => {
                     if f.len()!=5 || nodes.len()>=20_000 || index(f[1])?!=nodes.len() {
                         return Err("crowned node rows must be contiguous bounded x,y,z coordinates".into());
@@ -128,7 +137,7 @@ impl CrownedBoard {
                 }
                 "fixed"=>fixed.push(index(f[1])?),
                 "support" if f[1]!="clamped"=>return Err("crowned shells require explicit clamped supports; plate simply-supported is not a shell pin".into()),
-                "pretension" if number(f[1])?!=0.=>return Err("crown is not downbearing equilibrium; nonzero prestress is not implemented on this path".into()),
+                "pretension" if number(f[1])?!=0.=>return Err("authored membrane pretension is not downbearing; supply explicit bridge loads instead".into()),
                 "damping"=>damping=number(f[1])?,
                 "source"=>source=f[1..].join(","),
                 "stiffener"=>{
@@ -145,6 +154,7 @@ impl CrownedBoard {
             }
         }
         if !arms.is_empty() {return Err("bridge arm has no matching bridge station".into());}
+        if let Some(spec)=&preload {spec.check_sites(&sites)?;}
         let mesh=ShellMesh::new(nodes,triangles).map_err(|e|e.to_string())?;
         let mut normals=vec![[0.;3];mesh.nodes.len()];let mut sections=Vec::new();
         let mut area_m2=0.;let mut mass_kg=0.;
@@ -183,7 +193,7 @@ impl CrownedBoard {
         }
         if !mass_kg.is_finite() || mass_kg<=0. {return Err("crowned board mass overflow".into());}
         let max_height_m=mesh.nodes.iter().map(|p|p[2].abs()).fold(0.,f64::max);
-        Ok(Self {mesh,sections,beams,fixed,sites,damping,source,max_height_m,area_m2,mass_kg})
+        Ok(Self {mesh,sections,beams,fixed,sites,damping,source,preload,max_height_m,area_m2,mass_kg})
     }
     pub fn prepare(&self,keys:&[u8],upper_hz:f64)->Result<PreparedBoard,String> {
         if !upper_hz.is_finite() || upper_hz<=0. || upper_hz>80_000. || keys.is_empty() {
@@ -195,8 +205,7 @@ impl CrownedBoard {
                 return Err(format!("missing or duplicated crowned bridge key {key}"));
             }
         }
-        let model=assemble_stiffened_shell(&self.mesh,&self.sections,&self.fixed,ShellSupport::Clamped,&self.beams)
-            .map_err(|e|e.to_string())?;
+        let (model,acoustic_mesh,equilibrium)=downbearing::prepare(self)?;
         let report=fs_plate::modes_shell(&model,(0.,(TAU*upper_hz).powi(2)),&fs_plate::SliceOptions::default())
             .map_err(|e|e.to_string())?;
         if report.below_low!=0 || report.modes.is_empty() || report.modes.len()>MAX_BOARD_MODES {
@@ -230,12 +239,14 @@ impl CrownedBoard {
             intervals.push((pair.interval.0.sqrt()/TAU,pair.interval.1.sqrt()/TAU));
         }
         let mut surface=Vec::with_capacity(self.mesh.tris.len()*3);
-        for (element,tri) in self.mesh.tris.iter().enumerate() {
-            let g=self.mesh.facet(element).map_err(|e|e.to_string())?;
+        let mut surface_area=0.;
+        for (element,tri) in acoustic_mesh.tris.iter().enumerate() {
+            let g=acoustic_mesh.facet(element).map_err(|e|e.to_string())?;
+            surface_area+=g.area_m2;
             let n=g.frame[2];let projected=g.area_m2*n[2]/3.;
             for weights in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
-                let position=[(0..3).map(|i|weights[i]*self.mesh.nodes[tri[i]][0]).sum(),
-                    (0..3).map(|i|weights[i]*self.mesh.nodes[tri[i]][1]).sum(),0.];
+                let position=[(0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][0]).sum(),
+                    (0..3).map(|i|weights[i]*acoustic_mesh.nodes[tri[i]][1]).sum(),0.];
                 let shape:Vec<f64>=report.modes.iter().map(|pair|(0..3).map(|i|
                     weights[i]*dot(n,nodal(&model,&pair.phi,tri[i],0))/n[2]).sum()).collect();
                 if shape.iter().any(|x|!x.is_finite()) {return Err("crowned radiation projection overflow".into());}
@@ -243,8 +254,8 @@ impl CrownedBoard {
                 surface.push(SurfaceSample {position_m:position,area_m2:projected,mode_shape:shape});
             }
         }
-        Ok(PreparedBoard {modes,surface,area_m2:self.area_m2,mass_kg:self.mass_kg,
-            provenance:format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; max |z|={} m; projected flat-baffle radiation; no downbearing equilibrium",self.source,self.beams.len(),self.max_height_m),
+        Ok(PreparedBoard {modes,surface,area_m2:surface_area,mass_kg:self.mass_kg,
+            provenance:format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium),
             frequency_intervals_hz:intervals,free_dofs:model.free})
     }
 }
