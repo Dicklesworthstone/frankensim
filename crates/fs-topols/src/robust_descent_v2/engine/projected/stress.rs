@@ -30,6 +30,10 @@ pub(super) fn require_feasible(
 }
 
 impl MultiLoadProjectedOptimizer {
+    /// Accepted augmented-Lagrange search state, not a stress KKT multiplier.
+    #[must_use]
+    pub const fn search_multiplier(&self) -> f64 { self.ell }
+
     /// Install a fixed sampled plane-strain von Mises constraint on a newly
     /// created optimizer, before candidate solves or updates. Reuses every cached baseline
     /// displacement; no extra PDE solves are charged or hidden from the budget.

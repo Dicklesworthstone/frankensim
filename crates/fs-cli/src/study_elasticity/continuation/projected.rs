@@ -12,6 +12,9 @@ use fs_topols::design_regions::{DesignRegion, DesignRegionStage};
 #[path = "projected/regions.rs"]
 mod regions;
 
+#[path = "projected/multi_load.rs"]
+mod multi_load;
+
 pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a deterministic sampled von Mises limit. Improvement is measured against the separately projected, stress-feasible study baseline under identical loads. Every accepted state is independently re-solved and durably retained. CG and cell-sampling boundaries are cancellable; assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
 
 #[derive(Debug, Clone)]
@@ -20,6 +23,7 @@ pub(crate) struct Controls {
     search: ProjectedSettings,
     stress: SampledStressLimit,
     regions: Vec<DesignRegion>,
+    family: Option<multi_load::LoadFamily>,
 }
 
 pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Controls>> {
@@ -45,6 +49,7 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
         stress: SampledStressLimit::new(real("sampled-stress-limit-pa")?, real("stress-tolerance-pa")?)
             .map_err(|error| malformed(&error.to_string()))?,
         regions: regions::parse_regions(fields)?,
+        family: multi_load::parse(fields)?,
     };
     let a = controls.area;
     let s = controls.search;
@@ -72,11 +77,16 @@ impl Controls {
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
         let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
         let _ = writeln!(out, "    :sampled-stress-limit-pa {}", canonical_float(self.stress.max_von_mises));
-        if self.regions.is_empty() {
+        if self.regions.is_empty() && self.family.is_none() {
             let _ = writeln!(out, "    :stress-tolerance-pa {})", canonical_float(self.stress.absolute_tolerance));
         } else {
             let _ = writeln!(out, "    :stress-tolerance-pa {}", canonical_float(self.stress.absolute_tolerance));
-            regions::canonical(&self.regions, out);
+            if let Some(family) = &self.family { family.canonical(out); }
+            if self.regions.is_empty() {
+                let _ = writeln!(out, "  )");
+            } else {
+                regions::canonical(&self.regions, out);
+            }
         }
     }
 }
@@ -121,6 +131,7 @@ pub(super) struct ConstraintEvidence {
     accepted: Vec<SampledStressEvaluation>,
     attempts: Vec<usize>,
     refusals: Vec<String>,
+    family: Option<multi_load::History>,
 }
 
 impl ConstraintEvidence {
@@ -136,6 +147,9 @@ impl ConstraintEvidence {
         if !self.policy.regions.is_empty() {
             let _ = write!(html, "<p>{} protected material/void regions are imposed on every intersected cell through its corner nodes. Coverage may extend by less than one cell per side. The phi margin is a field-value margin, not a certified physical clearance or wall thickness.</p>", self.policy.regions.len());
         }
+        if let (Some(family), Some(history)) = (&self.policy.family, &self.family) {
+            html.push_str(&family.html(history));
+        }
         html
     }
 
@@ -147,13 +161,15 @@ impl ConstraintEvidence {
             "\"area_target_m2\":{:.17e},\"area_tolerance_m2\":{:.17e},",
             "\"stress_limit_pa\":{:.17e},\"stress_tolerance_pa\":{:.17e},",
             "\"baseline\":{},\"accepted\":[{}],\"candidate_counts\":[{}],",
-            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}{}}}"),
+            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}{}{}}}"),
             self.policy.area.target, self.policy.area.tolerance,
             self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
             stress_json(&self.baseline), self.accepted.iter().map(stress_json).collect::<Vec<_>>().join(","),
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction,
-            regions::json_field(&self.policy.regions))
+            regions::json_field(&self.policy.regions),
+            self.family.as_ref().zip(self.policy.family.as_ref())
+                .map_or_else(String::new, |(history, family)| history.json_field(family)))
     }
 
     fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
@@ -198,7 +214,8 @@ impl ConstraintEvidence {
         }
         let refusals = refused.iter().map(|v| v.as_str().map(str::to_string)
             .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
-        Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals })
+        let family = multi_load::History::read(value, &baseline, &accepted, policy)?;
+        Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, family })
     }
 }
 
@@ -219,6 +236,9 @@ fn constraints_stop(status: &'static str, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
+    if spec.projected.as_ref().is_some_and(|policy| policy.family.is_some()) {
+        return multi_load::drive(spec, ledger, cap, gate, prior);
+    }
     drive_observed(spec, ledger, cap, gate, prior, |_| {})
 }
 
@@ -321,7 +341,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         let state = match state { ControlFlow::Continue(state) => state,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)) };
         evidence.projected = Some(ConstraintEvidence { policy: policy.clone(), baseline: state.current().clone(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new() });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), family: None });
         state
     };
     let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
