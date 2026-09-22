@@ -120,7 +120,14 @@ fn malformed_geometry_material_and_hidden_budget_expansion_refuse() {
     assert!(MovingPads::new(1,&good,&[]).is_err());
     assert!(MovingPads::new(1,&good,&[j.clone(),j.clone()]).is_err());
     assert!(MovingPads::new(1,&vec![good[0].clone();5],&[j.clone()]).is_err());
-    assert!(MovingPads::new(64,&[site(vec![1.0;64],0.0004)],&[j.clone()]).is_err());
+    // Use the mechanical owner's current ceiling: a concurrent snare change
+    // enlarged it. Adding a jaw must still consume one of those coordinates.
+    assert!(MovingPads::new(MAX_IMPACT_MODES,
+        &[site(vec![1.0;MAX_IMPACT_MODES],0.0004)],&[j.clone()]).is_err());
+    let at_limit=MovingPads::new(MAX_IMPACT_MODES-1,
+        &[site(vec![1.0;MAX_IMPACT_MODES-1],0.0004)],&[j.clone()]).unwrap();
+    assert_eq!(at_limit.ports[0].coordinate,MAX_IMPACT_MODES-1);
+    assert_eq!(at_limit.pads[0].weights.len(),MAX_IMPACT_MODES);
     for row in [vec![0.0],vec![f64::NAN],vec![1.0,2.0]] {
         assert!(MovingPads::new(1,&[site(row,0.0004)],&[j.clone()]).is_err());
     }
