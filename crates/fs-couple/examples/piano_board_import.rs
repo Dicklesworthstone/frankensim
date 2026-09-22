@@ -19,18 +19,24 @@
 #[path = "grand_piano/audio.rs"] mod audio;
 #[path = "grand_piano/hammer_materials.rs"] mod hammer_materials;
 #[path = "grand_piano/mesh_import.rs"] mod mesh_import;
+#[path = "grand_piano/mesh_render.rs"] mod mesh_render;
 use std::io::{Read, Write};
 
 const USAGE: &str = "piano_board_import inspect INPUT.obj
 piano_board_import import INPUT.obj MATERIALS.fspi OUTPUT.fsb
 piano_board_import export INPUT.fsb OUTPUT.obj OUTPUT.fspi
+piano_board_import render-steinway INPUT.fsb OUTPUT.wav SECONDS [PERFORMANCE.mid]
 
 inspect reports the actual object/group/material labels without guessing parts.
 import selects a flat midsurface, maps every triangle to supplied orthotropic
 sections, remaps explicit rib/support vertices and locates each bridge station.
 export creates an editable, material-labelled midsurface from an existing native
 board, including all its sections, ribs, supports and physical bridge positions.
-The native grand_piano --board-geometry path assembles and radiates the result.
+render-steinway combines an imported board with source Model D strings, felt
+cards and shanks, then the existing 48 kHz physical-pressure/PCM path. Optional
+MIDI uses channel 1 and velocity 127 -> 4.5 m/s; otherwise strike key 69 at 2 m/s.
+Raw source tensions are preserved. Retention: 400 Hz board, 24 string partials.
+The native grand_piano --board-geometry path remains available for custom cards.
 
 Units, frame, flatness tolerance, support choice and physical material constants
 must be explicit. Solid case/crowned meshes do not become flat plate models.
@@ -91,8 +97,27 @@ fn run(args:&[String])->Result<(),String> {
             println!("Written {obj} and {spec}; editable physical midsurface and section/beam/bridge sidecar.");
             Ok(())
         }
+        [command,input,output,seconds] if command == "render-steinway" => {
+            render_file(input,output,seconds,None)
+        }
+        [command,input,output,seconds,midi] if command == "render-steinway" => {
+            render_file(input,output,seconds,Some(midi))
+        }
         _ => Err(USAGE.into()),
     }
+}
+fn render_file(input:&str, output:&str, seconds:&str, midi:Option<&str>)->Result<(),String> {
+    let count=mesh_render::frames(seconds)?;
+    if std::path::Path::new(output).exists() {
+        return Err(format!("{output}: render output must be a fresh path"));
+    }
+    let text=read_bounded(input,mesh_import::MAX_SPEC_BYTES)?;
+    let rendered=mesh_render::render(&text,count,midi)?;
+    // Race-safe no-clobber creation after successful preparation and rendering.
+    let mut file=create_output(output)?;
+    file.write_all(&rendered.wav).and_then(|()|file.sync_all()).map_err(|e|format!("{output}: {e}"))?;
+    println!("{}",rendered.report);
+    Ok(())
 }
 fn main() {
     if let Err(error)=run(&std::env::args().skip(1).collect::<Vec<_>>()) {
@@ -107,6 +132,7 @@ mod cli_tests {
     fn invalid_commands_refuse_and_help_needs_no_files() {
         assert!(run(&["import".into(),"missing.obj".into()]).is_err());
         assert!(run(&["--help".into()]).is_ok());
+        assert!(run(&["render-steinway".into(),"missing.fsb".into(),"out.wav".into(),"NaN".into()]).is_err());
         assert!(run(&["export".into(),"x.fsb".into(),"same".into(),"same".into()]).is_err());
     }
     #[test]

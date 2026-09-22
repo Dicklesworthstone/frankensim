@@ -19,14 +19,31 @@ cargo run --release -p fs-couple --example piano_board_import -- \
   inspect model-d.obj
 cargo run --release -p fs-couple --example piano_board_import -- \
   import model-d.obj model-d.fspi imported.fsb
-cargo run --release -p fs-couple --example grand_piano -- \
-  --board-geometry imported.fsb --scale strings.csv --render piano.wav
+cargo run --release -p fs-couple --example piano_board_import -- \
+  render-steinway imported.fsb piano.wav 6
 ```
 
-The last command requires a supplied string scale. For a source-derived Model D
-scale, the existing `grand_piano --preset steinway-d --dump-scale strings.csv`
-command exports one. Explicit `--hammers` cards can be supplied to the render;
-selecting an imported board alone does not implicitly enable preset voicing.
+`render-steinway` combines the imported board with all 88 source-derived Model D
+courses, per-key wool/Prony hammer cards and published shank geometry. Silent
+keys remain in the coupled resonator. It preserves the source string tensions
+rather than substituting MIDI frequencies or applying automatic retuning. The
+default demonstration strikes key 69 at 2 m/s; append a Standard MIDI File path
+after the duration to use the existing MIDI gesture importer (channel 1,
+velocity 127 -> 4.5 m/s, switch sustain; an explicit uncalibrated mapping).
+
+This offline path retains 24 partials per string, board modes through 400 Hz,
+and four mechanics substeps per 48 kHz frame. Its receiver is at
+[0.675, 1.0, 1.0] metres in the imported board chart. It uses the existing
+infinite-baffle physical-pressure observer and PCM encoder at 2 Pa full scale,
+without normalization; clipping and the mechanics energy balance are reported.
+These defaults are not a full-audible-band or measured-SPL claim. Every one of
+the 88 bridge stations must be present; missing stations refuse.
+
+For other string/hammer cards, sample rates, modal budgets and microphone
+positions, use `grand_piano --board-geometry imported.fsb --scale strings.csv
+--hammers felt.fsh --render piano.wav`. The existing `grand_piano --preset
+steinway-d --dump-scale strings.csv` command exports the source-derived scale.
+Selecting a board in that general CLI alone does not enable preset voicing.
 
 The exported OBJ is the **physical midsurface**, not a full cabinet rendering.
 Every distinct native element section gets a `section_N` material assignment;
@@ -113,8 +130,8 @@ quality, **not general triangle intersections or specimen accuracy**.
   its source comments enumerate approximations. Export/import preserves those
   estimates and does not promote them to a measured digital twin.
 
-The realistic-geometry route is now executable once an admitted mesh and
-physical cards are supplied. Full cabinet/lid scattering, crown/downbearing,
+This implementation connects admitted meshes and physical cards to the
+existing modal preparation and pressure-rendering components. Full cabinet/lid scattering, crown/downbearing,
 measured felt coupons, measured soundboard FRFs and human listening validation
 are separate requirements; this adapter does not claim them.
 
@@ -124,10 +141,18 @@ are separate requirements; this adapter does not claim them.
 cargo test -p fs-io obj::tests
 cargo test -p fs-couple --example piano_board_import mesh_import::tests
 cargo test -p fs-couple --example piano_board_import cli_tests
+cargo test -p fs-couple --example piano_board_import mesh_render::tests
 ```
 
 The tests exercise actual plate admission and modal mass, multi-material mass,
 rigid-frame/unit covariance, geometry/material refusal, remapped stiffeners,
-all 88 source-derived Model D bridge stations, and output overwrite protection.
+all 88 source-derived Model D bridge stations, output overwrite protection,
+and an imported-panel -> source felt/shank -> physical-pressure -> WAV chain.
 They were authored but not executed in the editing environment (no Rust
 compiler/Cargo available); no test-pass or acoustic-validation claim is made.
+
+The added example-only `fs-io` dependency needs a Cargo.lock refresh. The current
+editing environment could not run Cargo to regenerate it; an ordinary Cargo
+invocation updates the local path-dependency edge, whereas `--locked` refuses
+until that refresh is performed. No external package version is intentionally
+changed by the new dependency.

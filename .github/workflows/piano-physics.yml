@@ -36,6 +36,10 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
           fi
+      - name: Test OBJ physical-region preservation
+        run: cargo test --release -p fs-io obj::tests -- --test-threads=1
+      - name: Test mesh import and source-piano playback
+        run: cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1
       - name: Test the piano implementation
         run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
       - name: Render a physical-model smoke note
