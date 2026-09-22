@@ -96,7 +96,7 @@ fn rescaled_pressure_basis_keeps_the_same_prepared_motion_and_pressure() {
     for row in &mut scaled.interface { for value in row { *value *= 3.0; } }
     let gate = CancelGate::new_clock_free();
     let build = |air: &CavityModes, overlap: &[f64]| {
-        CavityCoupling::new(air, 2, overlap, &[0.0; 2]).unwrap()
+        CavityCoupling::new(air, 2, overlap, &[0.0, 30.0]).unwrap()
             .build_linear(vec![body(800.0, 1e-5, 0.02), body(900.0, 0.0, 0.0)],
                 vec![], 0.1, config(500_000), &gate).unwrap()
     };
@@ -155,8 +155,11 @@ fn broader_prepared_budget_never_weakens_reference_or_loss_admission() {
         assert!(CavityCoupling::new_with_mode_budget(&air, 2, &[0.1; 4], &[0.0; 2], maximum).is_err());
     }
     let lossy = CavityCoupling::new(&air, 1, &[0.1; 2], &[0.0, 5.0]).unwrap();
+    let mut starved = config(500_000); starved.coupling.max_connections = 2;
+    assert!(lossy.clone().build_linear(vec![body(800.0, 0.0, 0.0)], vec![], 0.1,
+        starved, &gate).is_err(), "two springs leave no port for acoustic drag");
     assert!(lossy.build_linear(vec![body(800.0, 0.0, 0.0)], vec![], 0.1,
-        config(500_000), &gate).is_err());
+        config(500_000), &gate).is_ok());
     let large = CavityCoupling::new_with_mode_budget(&air, 80, &vec![0.0; 160], &[0.0; 2], 256).unwrap();
     let parts = || (0..80).map(|_| body(800.0, 0.0, 0.0)).collect();
     let cfg = ImpactConfig { dt_s: 2e-6, max_steps: 10, maximum_energy_j: 20.0,
@@ -168,4 +171,81 @@ fn broader_prepared_budget_never_weakens_reference_or_loss_admission() {
     gate.request();
     assert!(matches!(large.build_linear(parts(), vec![], 0.1, config(500_000), &gate),
         Err(ImpactError::Cancelled)));
+}
+
+fn neck(averages: Vec<f64>) -> super::super::neck::CavityNeck {
+    super::super::neck::CavityNeck {
+        area_m2: core::f64::consts::PI*0.005_f64.powi(2), effective_length_m: 0.012,
+        resistance_pa_s_m3: 5000.0, pressure_shape_averages: averages,
+        initial_volume_m3: 1e-7, initial_flow_m3_s: 0.0,
+    }
+}
+
+#[test]
+fn resistive_neck_has_physical_helmholtz_decay_and_exact_flow_loss() {
+    let mut air = basis(); air.omegas.truncate(1); air.lambdas.truncate(1); air.interface.truncate(1);
+    let opening = neck(vec![1.0]);
+    let inertance = air.rho0*opening.effective_length_m/opening.area_m2;
+    let omega2 = air.c0.powi(2)*opening.area_m2/(air.lambdas[0]*opening.effective_length_m);
+    let beta = opening.resistance_pa_s_m3/(2.0*inertance);
+    let wd = (omega2-beta*beta).sqrt(); let time = 0.005;
+    let exact_volume = opening.initial_volume_m3*(-beta*time).exp()
+        *((wd*time).cos()+beta/wd*(wd*time).sin());
+    let exact_flow = -opening.initial_volume_m3*(-beta*time).exp()*omega2/wd*(wd*time).sin();
+    let run = |rate: u32| {
+        let gate = CancelGate::new_clock_free();
+        // Fixed-wall gas limit: the spectator structural mode is disconnected.
+        let compiled = CavityCoupling::new(&air, 1, &[0.0], &[0.0]).unwrap()
+            .with_necks(vec![opening.clone()], &gate).unwrap();
+        let (mut s, probe) = compiled.build_linear(vec![body(800.0,0.0,0.0)], vec![],
+            0.1, config(rate), &gate).unwrap();
+        let initial = s.frame().stored_energy_j; let mut loss = 0.0;
+        for _ in 0..rate/200 {
+            let old_flow = probe.neck_observation(s.state(),0).unwrap().volume_flow_m3_s;
+            let f = s.step(&[0.0;2], &gate).unwrap();
+            let n = probe.neck_observation(s.state(),0).unwrap();
+            let mean_flow = 0.5*(old_flow+n.volume_flow_m3_s);
+            let expected_loss = opening.resistance_pa_s_m3*mean_flow*mean_flow/f64::from(rate);
+            assert!((f.dissipated_energy_j-expected_loss).abs() < 1e-15);
+            loss += f.dissipated_energy_j;
+            assert!((f.stored_energy_j+loss-initial).abs() < 1e-13);
+            assert!((n.driving_pressure_pa+air.rho0*air.c0.powi(2)/air.lambdas[0]*n.displaced_volume_m3).abs() < 1e-10);
+            assert_eq!(&s.state()[..2], &[0.0;2]);
+        }
+        assert!(loss > 0.0 && s.frame().stored_energy_j < initial);
+        let n = probe.neck_observation(s.state(),0).unwrap();
+        (n.displaced_volume_m3-exact_volume).abs()*omega2.sqrt()+(n.volume_flow_m3_s-exact_flow).abs()
+    };
+    let coarse = run(20_000); let fine = run(40_000);
+    assert!(coarse > 1e-12 && fine < 0.3*coarse, "{coarse:e} -> {fine:e}");
+}
+
+#[test]
+fn necks_preserve_the_callers_large_state_budget_and_all_original_coordinates() {
+    let gate = CancelGate::new_clock_free(); let air = basis(); let n = 130;
+    let mut overlap = vec![0.0;2*n]; overlap[..2].copy_from_slice(&[0.03,0.02]);
+    let original = CavityCoupling::new_with_mode_budget(&air,n,&overlap,&[0.0,30.0],n+2).unwrap();
+    let opening = neck(vec![1.0,0.2]);
+    let expanded = original.with_necks(vec![opening.clone()],&gate).unwrap();
+    assert_eq!(expanded.structural_modes(), n); assert_eq!(expanded.total_modes(), n+2);
+    assert!(expanded.clone().with_necks(vec![opening],&gate).is_err());
+    assert_eq!(expanded.clone().with_necks(vec![],&gate).unwrap().total_modes(),n+2);
+    let parts = || (0..n).map(|i| body(800.0+i as f64,if i==0 {1e-5}else{0.0},0.0)).collect();
+    let reference = ImpactConfig { dt_s: 2e-6, max_steps: 64, maximum_energy_j: 20.0,
+        energy_absolute_tolerance_j: 1e-10, energy_relative_tolerance: 1e-7,
+        maximum_generalized_force: 10_000.0 };
+    assert!(expanded.clone().build(parts(),vec![],vec![],reference,&gate).is_err());
+    let mut starved = config(500_000); starved.coupling.max_connections = 3;
+    assert!(expanded.clone().build_linear(parts(),vec![],0.1,starved,&gate).is_err());
+    let (mut s, probe) = expanded.build_linear(parts(),vec![],0.1,config(500_000),&gate).unwrap();
+    assert_eq!(s.mode_count(),n+2); assert_eq!(s.state()[0],1e-5);
+    assert!(s.state()[2..2*n].iter().all(|v| *v==0.0));
+    assert_eq!(probe.neck_observation(s.state(),0).unwrap().coordinate,n+1);
+    let initial = s.frame().stored_energy_j; let mut loss = 0.0;
+    for _ in 0..64 {
+        let f = s.step(&vec![0.0;n+2],&gate).unwrap(); loss += f.dissipated_energy_j;
+        assert!((f.stored_energy_j+loss-initial).abs() < 1e-10);
+    }
+    assert!(loss > 0.0);
+    assert!(probe.neck_observation(s.state(),0).unwrap().volume_flow_m3_s.abs() > 1e-10);
 }

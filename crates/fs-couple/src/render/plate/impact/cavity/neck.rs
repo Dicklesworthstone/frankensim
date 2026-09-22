@@ -12,7 +12,7 @@
 //! Reference: UNSW Musical Acoustics, https://phys.unsw.edu.au/jw/Helmholtz.html.
 //! This is a linear compact-neck chart, NOT a distributed duct, turbulent jet,
 //! frequency-dependent thermoviscous impedance or exterior radiation solver.
-use super::{CavityCoupling,ImpactError,MAX_IMPACT_MODES,ModalAcousticState,invalid};
+use super::{CavityCoupling,ImpactError,ModalAcousticState,invalid};
 use fs_exec::CancelGate;
 
 /// Physical opening and its averaged pressure-basis values, in cavity order.
@@ -67,7 +67,8 @@ impl CavityCoupling {
     /// Append at most eight compact necks before `build`, preserving all prior
     /// solid and acoustic addresses. Contacts, pads and external solid forcing
     /// do not act on the appended gas coordinates. Calls may append more necks;
-    /// the combined count/state budget still applies. A cancelled or invalid
+    /// the combined count and original `new_with_mode_budget` ceiling still
+    /// apply, including on repeated additions. A cancelled or invalid
     /// construction returns no partially compiled model.
     ///
     /// The retained pressure modes and each fixed-wall neck frequency must obey
@@ -76,7 +77,8 @@ impl CavityCoupling {
     /// Reservoir pressure is zero gauge; no silent pressure-source work is added.
     pub fn with_necks(mut self,necks:Vec<CavityNeck>,gate:&CancelGate)->Result<Self,ImpactError> {
         if gate.is_requested() {return Err(ImpactError::Cancelled);}
-        if necks.len()>8-self.necks.len() || necks.len()>MAX_IMPACT_MODES-self.total {
+        if necks.len()>8-self.necks.len()
+            || self.total.checked_add(necks.len()).is_none_or(|n| n>self.maximum_modes) {
             return Err(invalid("cavity openings exceed neck or total state budget"));
         }
         let total=self.total+necks.len();

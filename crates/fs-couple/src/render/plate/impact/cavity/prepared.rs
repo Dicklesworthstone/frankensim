@@ -23,11 +23,12 @@ impl CavityCoupling {
     /// as its state/energy budget. The original modal, port and contact limits
     /// are also enforced. Initial body states and contact loss are unchanged.
     ///
-    /// This image deliberately refuses nonlinear body potentials, felt pads
-    /// (not accepted by this signature), and nonzero acoustic/neck momentum drag.
-    /// The existing free-coordinate ZOH owner has no drag law; none is dropped
-    /// or replaced by an arbitrary small resonance. Use the nonlinear reference
-    /// image for those cases. A finite-step port solve needs time refinement;
+    /// Acoustic/neck momentum drag is retained through the linear impact
+    /// owner's simultaneous grounded viscous links, consuming one connection
+    /// per nonzero drag in addition to the cavity springs and any solid ports.
+    /// No loss is substituted onto the heads, counted twice, or omitted.
+    /// Nonlinear body potentials and felt pads (absent from this signature)
+    /// still require the reference image. Finite-step ports need refinement;
     /// it is not the exact full coupled exponential or a real-time certificate.
     pub fn build_linear(self, bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
         reference_area_m2: f64, config: LinearImpactConfig, gate: &CancelGate)
@@ -46,10 +47,6 @@ impl CavityCoupling {
         if config.sample_rate_hz == 0 || self.total > config.coupling.max_modes
             || !reference_area_m2.is_finite() || reference_area_m2 <= 0.0 {
             return Err(invalid("prepared cavity needs a positive clock/area and sufficient modal budget"));
-        }
-        if self.damping.iter().any(|d| *d != 0.0)
-            || self.necks.iter().any(|n| n.drag_per_s != 0.0) {
-            return Err(invalid("prepared cavity cannot discard acoustic or neck momentum drag"));
         }
         let dt_s = f64::from(config.sample_rate_hz).recip();
         let (parts, contacts, _) = self.extend_parts(bodies, contacts, Vec::new(), dt_s, gate)?;

@@ -38,6 +38,9 @@ pub struct CavityCoupling {
     springs: Vec<VolumeSpring>,
     dynamic: Vec<Option<usize>>,
     total: usize,
+    // Retain the caller's admission across later neck additions. A prepared
+    // wire bank may exceed 64 modes; the reference builder still refuses it.
+    maximum_modes: usize,
     medium: crate::vibroacoustic::AcousticMedium,
     necks: Vec<neck::CompiledNeck>,
 }
@@ -102,7 +105,7 @@ impl CavityCoupling {
             springs.push(VolumeSpring { bulk_modulus_pa:bulk, volume_m3:cavity.lambdas[j], areas });
         }
         Ok(Self { structural, omegas:cavity.omegas.clone(), damping:damping_per_s.to_vec(),
-            springs, dynamic, total,
+            springs, dynamic, total, maximum_modes,
             medium: crate::vibroacoustic::AcousticMedium {rho0:cavity.rho0,c0:cavity.c0},
             necks:Vec::new() })
     }
