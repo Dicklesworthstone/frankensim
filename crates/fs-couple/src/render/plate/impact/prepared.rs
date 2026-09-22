@@ -132,7 +132,17 @@ impl PreparedImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before = inner.stored_energy_j();
-        let ledger = if self.analytic_newton {
+        let ledger = if inner.contact_loss {
+            let action=|x:&[f64],d:&[f64],out:&mut[f64]|inner.hessian_vector(x,d,out);
+            let tangent=|x:&[f64],e:&[f64],dx:&[f64],de:&[f64],out:&mut[f64]|
+                inner.contact.dissipative_flow_tangent_into(x,e,dx,de,out);
+            self.workspace.step_into_dissipative_controlled(
+                &inner.system,&inner.x,external,inner.config.dt_s,&mut self.candidate,&mut self.output,
+                &|x,e,out|inner.contact.dissipative_flow_into(x,e,out),
+                if self.analytic_newton {Some(&action)}else{None},
+                if self.analytic_newton {Some(&tangent)}else{None},||gate.is_requested(),
+            )
+        } else if self.analytic_newton {
             self.workspace.step_into_analytic_controlled(
                 &inner.system, &inner.x, external, inner.config.dt_s,
                 &mut self.candidate, &mut self.output,

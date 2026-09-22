@@ -28,6 +28,7 @@
 //! deferred until packs carrying contact-law parameters exist.
 
 mod tangent;
+mod loss;
 use fs_math::det;
 use fs_phs::Storage;
 
@@ -318,19 +319,7 @@ impl Obstacle {
             for (k, v) in velocities.iter().enumerate().take(n_modes) {
                 pdot += self.collocation[i * n_modes + k] * v;
             }
-            let elastic = self.weights[i] * self.stiffness * det::pow(p, self.alpha);
-            // Form the dimensionless Hunt--Crossley factor first. Computing
-            // `elastic * chi * pdot` left-to-right can overflow at admitted
-            // finite scales even when `chi * pdot` and the final force are
-            // both finite. Preserve NaN propagation while clamping only the
-            // over-fast unloading branch.
-            let loss_factor = self.internal_loss * pdot;
-            let loss_factor = if loss_factor < -1.0 {
-                -1.0
-            } else {
-                loss_factor
-            };
-            let f = elastic * loss_factor;
+            let f = self.loss_force_at(i, p, pdot);
             for (k, slot) in forces.iter_mut().enumerate().take(n_modes) {
                 *slot -= f * self.collocation[i * n_modes + k];
             }

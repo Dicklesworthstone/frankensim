@@ -36,8 +36,9 @@ pub mod felt;
 pub mod striker;
 use felt::FeltPad;
 
-/// Bounded stack scratch for this reference host, not a cymbal adequacy claim.
-pub const MAX_IMPACT_MODES:usize=64;
+/// Bounded scratch for joint nonlinear films and distributed wire banks.
+/// This is a work ceiling, not a physical bandwidth or real-time claim.
+pub const MAX_IMPACT_MODES:usize=256;
 /// Mechanical potential in a caller-declared mass-normalized basis.
 #[derive(Debug,Clone)]
 pub enum BodyPotential {
@@ -205,7 +206,7 @@ impl Storage for MechanicalStorage {
 pub struct ImpactSystem {
     system:PortHamiltonian,x:Vec<f64>,pads:Vec<Pad>,histories:Rc<RefCell<Vec<WoolFeltState>>>,
     modes:usize,config:ImpactConfig,sample:u64,
-    mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,
+    mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,contact_loss:bool,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
 }
@@ -213,8 +214,8 @@ impl ImpactSystem {
     /// Compose real body storage, elastic contacts, felt patches and fluid volume.
     /// Initial precompression/conditioning are declared initial energy. A loaded
     /// static equilibrium is NOT silently manufactured by this constructor.
-    /// Contact-internal damping is explicitly refused here; Hunt-Crossley needs
-    /// a simultaneous dissipative port, not insertion in the elastic potential.
+    /// Hunt-Crossley loss enters the same implicit equation through the existing
+    /// contact owner's passive port, never as elastic storage or lagged forcing.
     pub fn new(bodies:Vec<ImpactBody>,contacts:Vec<Obstacle>,pads:Vec<FeltPad>,volumes:Vec<VolumeSpring>,
         config:ImpactConfig)->Result<Self,ImpactError> {
         Self::new_with_dampers(bodies,contacts,pads,volumes,Vec::new(),config)
@@ -251,13 +252,16 @@ impl ImpactSystem {
             }
             damping.extend(body.damping_per_s);offset+=n;potentials.push(body.potential);
         }
-        let mut admitted=Vec::with_capacity(contacts.len());
+        let mut admitted=Vec::with_capacity(contacts.len());let mut contact_loss=false;
         for ob in contacts {
-            if ob.internal_loss()!=0.0 || ob.provenance().trim().is_empty() || ob.n_points()>4096 {
-                return Err(invalid("impact contacts require explicit elastic provenance; nonzero internal loss is not silently ignored"));
+            if ob.provenance().trim().is_empty() || ob.n_points()>4096 {
+                return Err(invalid("impact contacts require explicit provenance and bounded collocation"));
             }
-            admitted.push(Obstacle::new(ob.collocation().to_vec(),ob.n_points(),modes,ob.gaps().to_vec(),
-                ob.weights().to_vec(),ob.stiffness(),ob.alpha(),ob.provenance().to_string()).map_err(|e|ImpactError::Owner(e.to_string()))?);
+            let checked=Obstacle::new(ob.collocation().to_vec(),ob.n_points(),modes,ob.gaps().to_vec(),
+                ob.weights().to_vec(),ob.stiffness(),ob.alpha(),ob.provenance().to_string())
+                .and_then(|checked|checked.with_internal_loss(ob.internal_loss()))
+                .map_err(|e|ImpactError::Owner(e.to_string()))?;
+            contact_loss|=checked.internal_loss()>0.0;admitted.push(checked);
         }
         for v in &volumes {if ![v.bulk_modulus_pa,v.volume_m3].iter().all(|x|x.is_finite() && *x>0.0)
             || !(v.bulk_modulus_pa/v.volume_m3).is_finite() || v.areas.len()!=modes || v.areas.iter().any(|a|!a.is_finite()) {
@@ -283,7 +287,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,mechanical,contact})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,mechanical,contact,contact_loss})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -311,7 +315,8 @@ impl ImpactSystem {
         Some((strain,p.spec.force(strain,&self.histories.borrow()[pad])))
     }
     /// Advance one held-force sample through the existing discrete-gradient
-    /// solve. Cancellation is checked before and after it, not inside its Newton.
+    /// solve. Loss-free reference execution checks cancellation before and after
+    /// Newton; the implicit contact-loss path also polls inside its workspace.
     /// All physical state and felt histories remain unchanged on refusal.
     pub fn step(&mut self,external:&[f64],gate:&CancelGate)->Result<ImpactFrame,ImpactError> {
         if gate.is_requested() {return Err(ImpactError::Cancelled);}
@@ -320,6 +325,19 @@ impl ImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before=self.stored_energy_j();
+        if self.contact_loss {
+            // Reference execution owns temporary scratch; prepare() retains it.
+            // Both use the SAME equation, port law, and physical acceptance gate.
+            let mut workspace=fs_phs::StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
+            let mut candidate=vec![0.0;self.x.len()];let mut output=vec![0.0;self.modes];
+            let ledger=workspace.step_into_dissipative_controlled(&self.system,&self.x,external,
+                self.config.dt_s,&mut candidate,&mut output,
+                &|x,e,out|self.contact.dissipative_flow_into(x,e,out),None,None,||gate.is_requested())
+                .map_err(|e|match e {fs_phs::PreparedStepError::Cancelled=>ImpactError::Cancelled,
+                    fs_phs::PreparedStepError::Solver(e)=>ImpactError::PreparedSolve(e)})?;
+            let mut histories=self.histories.borrow().clone();
+            return self.accept_step(&mut candidate,&mut histories,before,ledger,gate);
+        }
         let mut record=fs_phs::step(&self.system,&self.x,external,self.config.dt_s).map_err(|e|ImpactError::Owner(e.to_string()))?;
         if record.x.iter().chain(&record.y).any(|v|!v.is_finite()) {return Err(invalid("impact solve left finite state"));}
         let ledger=fs_phs::PreparedStepRecord {delta_h:record.delta_h,dissipated:record.dissipated,
@@ -328,3 +346,6 @@ impl ImpactSystem {
         self.accept_step(&mut record.x,&mut histories,before,ledger,gate)
     }
 }
+
+#[cfg(test)]
+mod contact_loss_tests;
