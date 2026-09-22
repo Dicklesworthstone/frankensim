@@ -5,10 +5,13 @@ to the existing Helmholtz boundary-element solver. Unlike the ordinary Rayleigh
 observer, this calculation has no infinite baffle: supply both sides and edges
 of the soundboard and any rigid cabinet/lid surfaces that should scatter sound.
 A lid is part of the same boundary solve, not a second sound source or an EQ.
+`piano_exterior render` then connects those transfers to the actual played piano.
 
 ```sh
 cargo run --release -p fs-couple --example piano_exterior -- \
   response settled.fss strings.csv acoustic-body.obj acoustic.fspe response.csv
+cargo run --release -p fs-couple --example piano_exterior -- \
+  render settled.fss strings.csv acoustic-body.obj acoustic.fspe piano.wav 6 score.mid
 ```
 
 `steinway-d` may replace the scale CSV to select all 88 raw source Model D
@@ -55,7 +58,9 @@ as the string-bridge mechanics. Facet-normal projection must lie in a real
 structural triangle and within the declared skin offset, at every acoustic
 corner and three quadrature points. Through-thickness rotation contributes
 `theta cross arm`. The crowned path retains all Cartesian motion and the
-actual equilibrium geometry, not the flattened Rayleigh field.
+actual equilibrium geometry, not the flattened Rayleigh field. The acoustic
+OBJ itself must describe the intended equilibrium skin: the offset allowance
+is not permission to invent thickness or silently deform a supplied asset.
 
 ## Geometry and numerical admission
 
@@ -86,17 +91,59 @@ The CSV contains receiver-major/input transfer values at each frequency:
 pressure [Pa] per unit generalized modal acceleration [m sqrt(kg)/s^2], with
 `exp(-i omega t)` phasors. The boundary input is `v_n = i shape / omega` for
 unit acceleration. All receiver responses share one boundary factorization
-and modal batch at a frequency. This is a frequency-domain transfer, not yet
-a real-time callback or a measured instrument response.
+and modal batch at a frequency.
+
+## Render through the supplied geometry
+
+The optional MIDI filename selects the existing channel-1 importer, default
+velocity 127 -> 4.5 m/s, and the existing sustain controls. Without MIDI the
+example strikes key 69 at 2 m/s. MIDI supplies gestures, never material data,
+string frequencies or missing courses. Duration must be 0.05..60 seconds.
+
+The render wrapper retains 24 partials at most per string, four mechanical
+substeps per 48 kHz sample, source wool/Prony felt and the existing shank image.
+The complete board mode set through `board-band-hz` is required. This is a
+bounded offline rendering image, not a full-band Steinway fidelity claim.
+
+Before any mechanical step, the existing fs-vfit owner fits one stable proper
+transfer per loaded-board mode and receiver. Only even-index frequency values
+are supplied as fit samples; odd values check the realized digital transfer.
+The adapter removes the guaranteed flight phase, conjugates the negative-time
+BEM convention and Tustin-warps the fit frequencies. It restores physical Pa
+scaling before rendering. A sampled row's peak magnitude normalizes only its
+error metric; it never normalizes the output audio.
+
+Held-out peak-normalized error must be <=0.15 at every odd frequency, and RMS
+must be <=0.05 for each mode/receiver. Failed, unstable, improper or nonfinite
+fits refuse instead of relaxing these bounds. These are sampled transfer-fit
+checks after ideal flight-phase removal, NOT whole-band or spatial convergence
+certificates. Fractional propagation and the decimator have their own numerical
+approximation/latency; their errors are not folded into the fit residual.
+
+Every accepted mechanical substep's loaded-board velocity contributes to the
+acceleration trace. One existing causal decimator processes the entire trace;
+both receivers then consume that same output. Each receiver has its own filter
+histories and existing fractional delay line. No second piano, per-channel gain,
+control clock, future-sample padding or latency compensation is added. Pressure
+is encoded through the existing PCM16 owner with explicit `full-scale-pa` and
+counted clipping; there is no peak normalization.
+
+The report prints the acoustic band, resolution, fit error, propagation and
+filter delays, peak pressure, clipping, and the unchanged mechanical energy
+accounting. An error creates no candidate WAV before successful preparation and
+rendering. An OS write failure can still leave a partial newly created file;
+outputs are never overwritten and no filesystem transaction is claimed.
 
 ## Physical boundaries and assets
 
 This is one-way linear exterior acoustics on fixed geometry about the supplied
 structural equilibrium. Radiation pressure does not feed back into mechanics.
 The selected rigid cabinet/lid does not flex or absorb; no room, air absorption,
-string-direct radiation, nonlinear air or above-band accuracy is claimed. Mesh
-resolution and the structural/modal truncation need independent convergence
-and measurement comparisons before a realism claim.
+string-direct radiation, nonlinear air or above-band accuracy is claimed. A
+hammer attack contains energy outside a narrow fitted band; a stable fit there
+does not validate the complete rendered attack. Mesh resolution and the
+structural/modal truncation need independent convergence and measurement
+comparisons before a realism claim.
 
 A public asset lead is seavenois's CC0 Steinway D274 on BlendSwap:
 https://blendswap.com/blend/7279 . The author describes it as simplified; its
