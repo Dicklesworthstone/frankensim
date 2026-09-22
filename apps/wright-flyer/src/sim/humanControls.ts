@@ -4,8 +4,8 @@
 // physical units, plus the ApplyNextEligibleTickAndFlag hold law and
 // the latency-decomposition record. No DOM, no Worker: headless-tested.
 
-import { quantizeControl, type AppliedEvent } from "../transport/inputClock.ts";
 import type { PilotCommand } from "../input.ts";
+import { type AppliedEvent, quantizeControl } from "../transport/inputClock.ts";
 
 /** Engine lever-force cap [N] (mirror of simloop's ±220 clamp — the
  * command maps to the pilot's PUSH/PULL on the canard lever, and full

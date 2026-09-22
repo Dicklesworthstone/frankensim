@@ -140,11 +140,7 @@ export class TracerService {
       const a = pair.samplerA(p);
       const b = pair.samplerB(p);
       if (a === null || b === null) return null;
-      return [
-        a[0] * (1 - s) + b[0] * s,
-        a[1] * (1 - s) + b[1] * s,
-        a[2] * (1 - s) + b[2] * s,
-      ];
+      return [a[0] * (1 - s) + b[0] * s, a[1] * (1 - s) + b[1] * s, a[2] * (1 - s) + b[2] * s];
     };
     let advanced = 0;
     for (const t of this.tracers) {

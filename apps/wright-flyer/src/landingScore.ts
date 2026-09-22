@@ -8,7 +8,7 @@
 // Repro: node --test test/landingScore.test.ts
 
 import { P_W_MPS } from "./sim/protocol.ts";
-import { recordingPayloadWords, type FlightRecording } from "./sim/replay.ts";
+import { type FlightRecording, recordingPayloadWords } from "./sim/replay.ts";
 
 /** Vertical speed [m/s, negative = descending] at the FINAL recorded
  * frame (ground contact is terminal: ended:ground-contact). Null when

@@ -58,9 +58,7 @@ test("stream: rail, liftoff tick exact, undulations counted, ground contact", ()
   // Two q sign flips = ONE undulation (captioned on the even flip).
   cs.feed(snap({ tick: 700, phase: "airborne", qRadS: -0.4 }));
   cs.feed(snap({ tick: 800, phase: "airborne", qRadS: 0.4 }));
-  cs.feed(
-    snap({ tick: 1450, phase: "ended:ground-contact", ended: true, xM: 46.7 }),
-  );
+  cs.feed(snap({ tick: 1450, phase: "ended:ground-contact", ended: true, xM: 46.7 }));
   const all = cs.all();
   assert.equal(all.length, 4, JSON.stringify(all));
   assert.equal(all[0]!.atTick, 10, "rail caption at first feed");

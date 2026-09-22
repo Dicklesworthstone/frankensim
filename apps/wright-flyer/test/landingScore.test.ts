@@ -4,13 +4,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PAYLOAD_F64S, PAYLOAD_F64S_V1, P_W_MPS } from "../src/sim/protocol.ts";
-import {
-  RECORDING_SCHEMA,
-  RECORDING_SCHEMA_V1,
-  type FlightRecording,
-} from "../src/sim/replay.ts";
 import { scoreTouchdown, touchdownVerticalSpeed } from "../src/landingScore.ts";
+import { P_W_MPS, PAYLOAD_F64S, PAYLOAD_F64S_V1 } from "../src/sim/protocol.ts";
+import { type FlightRecording, RECORDING_SCHEMA, RECORDING_SCHEMA_V1 } from "../src/sim/replay.ts";
 
 function recWith(
   terminalPhase: string,

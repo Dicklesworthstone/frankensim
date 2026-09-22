@@ -45,8 +45,8 @@ export class TickScheduler {
    * input-trace replays measure the wrong domain).
    */
   pump(nowMs: number, runTick: (tick: number) => boolean, nowFn: () => number): number {
-    let backlog = Math.floor((nowMs - this.nextDueMs) / this.tickMs) +
-      (nowMs >= this.nextDueMs ? 1 : 0);
+    let backlog =
+      Math.floor((nowMs - this.nextDueMs) / this.tickMs) + (nowMs >= this.nextDueMs ? 1 : 0);
     if (backlog < 0) {
       backlog = 0;
     }

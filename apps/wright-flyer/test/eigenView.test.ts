@@ -12,17 +12,17 @@ import { test } from "node:test";
 
 import {
   FOUR_STATE_LABELS,
+  groupModeFamilies,
   MAX_CARD_METRICS,
   MAX_POLAR_POINTS,
   MAX_POLES,
-  RIGID_SHARE_FLOOR,
-  groupModeFamilies,
+  type PolarPoint,
+  type PublishedLabeledPole,
   polarDiff,
+  RIGID_SHARE_FLOOR,
   teachingProjection,
   validateCard,
   validatePolar,
-  type PolarPoint,
-  type PublishedLabeledPole,
 } from "../src/eigenView.ts";
 
 function jlog(kase: string, payload: string): void {
@@ -31,7 +31,11 @@ function jlog(kase: string, payload: string): void {
 
 const ENGINE_LABELS = ["u", "w", "q", "theta", "dc", "dc_rate", "omega_rotor"] as const;
 
-function pole(re: number, im: number, family: PublishedLabeledPole["family"]): PublishedLabeledPole {
+function pole(
+  re: number,
+  im: number,
+  family: PublishedLabeledPole["family"],
+): PublishedLabeledPole {
   return { re, im, family, attributionShift: 0.1 };
 }
 

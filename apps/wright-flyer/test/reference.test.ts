@@ -21,7 +21,11 @@ interface RefValue {
 const load = (name: string): unknown =>
   JSON.parse(readFileSync(new URL(`../../../data/wright-flyer/${name}`, import.meta.url), "utf8"));
 
-const doc = load("flyer-reference.json") as { schema: string; values: Record<string, RefValue>; no_claims: string };
+const doc = load("flyer-reference.json") as {
+  schema: string;
+  values: Record<string, RefValue>;
+  no_claims: string;
+};
 const dossier = load("source-dossier-v1.json") as { records: { id: string }[] };
 const dossierIds = new Set(dossier.records.map((r) => r.id));
 
@@ -45,7 +49,10 @@ test("every value carries status, sources, convention, and a real dossier link",
     assert.ok(v.sources.length >= 1, `${id}: no sources`);
     assert.ok(v.convention.length > 0, `${id}: no convention label`);
     assert.ok(v.original.length > 0, `${id}: no original-units record`);
-    assert.ok(dossierIds.has(v.dossier_record), `${id}: dossier record ${v.dossier_record} not in source-dossier-v1`);
+    assert.ok(
+      dossierIds.has(v.dossier_record),
+      `${id}: dossier record ${v.dossier_record} not in source-dossier-v1`,
+    );
     console.log(JSON.stringify({ suite: "wf-reference", case: "value", id, status: v.status }));
   }
   assert.ok(Object.keys(doc.values).length >= 30, "expected the full §3 sweep");

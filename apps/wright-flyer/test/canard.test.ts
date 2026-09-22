@@ -41,7 +41,10 @@ test("wide-priors law: every not-published parameter has a wide prior with a bas
     }
   };
   walk(doc, "root");
-  assert.ok(notPublished.length >= 6, `expected the known unpublished set, got ${notPublished.length}`);
+  assert.ok(
+    notPublished.length >= 6,
+    `expected the known unpublished set, got ${notPublished.length}`,
+  );
   // The priors block must be non-degenerate per-item: lo < hi strictly, with
   // a substantive basis. A point guess (lo === hi) is the forbidden pattern.
   const priors = doc.unknown_priors.priors;
@@ -50,7 +53,9 @@ test("wide-priors law: every not-published parameter has a wide prior with a bas
     assert.ok(Number.isFinite(p.lo) && Number.isFinite(p.hi), `${p.parameter}: finite bounds`);
     assert.ok(p.lo < p.hi, `${p.parameter}: prior must be WIDE (lo < hi), not a point guess`);
     assert.ok(p.basis.length > 20, `${p.parameter}: basis must be substantive`);
-    console.log(JSON.stringify({ suite: "wf-canard", case: "prior", p: p.parameter, lo: p.lo, hi: p.hi }));
+    console.log(
+      JSON.stringify({ suite: "wf-canard", case: "prior", p: p.parameter, lo: p.lo, hi: p.hi }),
+    );
   }
 });
 
@@ -70,7 +75,10 @@ test("cross-artifact consistency with flyer-reference", () => {
   // a different aircraft in both.
   assert.equal(doc.travel_stops.surface_deflection_1903.status, "absent-by-verification");
   assert.equal(reference.values.canard_travel_deg.status, "absent-by-verification");
-  assert.equal(doc.travel_stops.surface_deflection_1903.value_deg, reference.values.canard_travel_deg.value);
+  assert.equal(
+    doc.travel_stops.surface_deflection_1903.value_deg,
+    reference.values.canard_travel_deg.value,
+  );
   // Slaving + warp limits match the reference record.
   assert.equal(doc.hip_cradle.rudder_slaving.value, reference.values.rudder_warp_slaving.value);
   assert.match(reference.values.rudder_warp_slaving.original, /8\.5/);
@@ -85,7 +93,8 @@ test("cross-artifact consistency with flyer-reference", () => {
 
 test("arithmetic: static margin and inertia ordering", () => {
   const mi = doc.mass_inertia;
-  const margin = mi.cg_neutral_point.neutral_point_pct_chord - mi.cg_neutral_point.cg_pct_chord_aft_of_wing_le;
+  const margin =
+    mi.cg_neutral_point.neutral_point_pct_chord - mi.cg_neutral_point.cg_pct_chord_aft_of_wing_le;
   assert.ok(Math.abs(margin - mi.cg_neutral_point.static_margin_pct) < 0.11, `margin ${margin}`);
   assert.ok(margin < 0, "the Flyer is statically unstable — margin must be negative");
   const { Ixx, Iyy, Izz } = mi.aircraft_inertia_slugft2;

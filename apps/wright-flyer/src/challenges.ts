@@ -2,7 +2,7 @@
 // travel through the same query-to-scenario path as every free launch;
 // no challenge-only tuning or hidden scenario object exists.
 
-import { menuQuery, scenarioFromQuery, type MenuSelection } from "./menu.ts";
+import { type MenuSelection, menuQuery, scenarioFromQuery } from "./menu.ts";
 import type { ScenarioInit } from "./sim/protocol.ts";
 
 export type ChallengeId =
@@ -40,7 +40,8 @@ export const CHALLENGE_PRESETS: readonly ChallengePreset[] = [
   {
     id: "huffman-catapult",
     title: "HUFFMAN CATAPULT",
-    description: "Load the 1904-05 catapult preset; its current model envelope may refuse honestly.",
+    description:
+      "Load the 1904-05 catapult preset; its current model envelope may refuse honestly.",
     selection: { mode: "fixed", site: "huffman", assist: false },
   },
 ];

@@ -92,7 +92,11 @@ function asRefusal(value: unknown): RefusalEnvelope | null {
     return null;
   }
   const r = value as Record<string, unknown>;
-  if (typeof r.code !== "string" || typeof r.message !== "string" || !Array.isArray(r.ranked_repairs)) {
+  if (
+    typeof r.code !== "string" ||
+    typeof r.message !== "string" ||
+    !Array.isArray(r.ranked_repairs)
+  ) {
     return null;
   }
   return {

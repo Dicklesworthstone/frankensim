@@ -55,7 +55,11 @@ test("per-flight seeds differ, stay deterministic, and keep the base case", () =
   for (const s of seeds) {
     assert.ok(s !== 1903n, "missions never reuse the default seed");
   }
-  assert.deepEqual(seeds, DEC17_FLIGHTS.map((f) => flightSeed(f.id)), "deterministic");
+  assert.deepEqual(
+    seeds,
+    DEC17_FLIGHTS.map((f) => flightSeed(f.id)),
+    "deterministic",
+  );
 });
 
 test("outcome wording obeys the honesty law in all three regions", () => {
@@ -81,5 +85,8 @@ test("outcome wording obeys the honesty law in all three regions", () => {
   // narrow surveyed tolerance band.
   const f1 = flightByIndex(1)!;
   assert.match(missionOutcome(f1, 33.0, 12.0).lines[2]!, /historical band: 30\.5–36\.6 m/);
-  assert.match(missionOutcome(f4, 260.0, 59.0).lines[2]!, /historical band: 258\.8–260\.6 m \(surveyed\)/);
+  assert.match(
+    missionOutcome(f4, 260.0, 59.0).lines[2]!,
+    /historical band: 258\.8–260\.6 m \(surveyed\)/,
+  );
 });

@@ -12,9 +12,7 @@ export interface OverlayRefusal {
   readonly rankedRepairs: readonly string[];
 }
 
-export type OverlayResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; refusal: OverlayRefusal };
+export type OverlayResult<T> = { ok: true; value: T } | { ok: false; refusal: OverlayRefusal };
 
 function refuse<T>(code: string, message: string, repair: string): OverlayResult<T> {
   return { ok: false, refusal: { code, message, rankedRepairs: [repair] } };
@@ -44,8 +42,14 @@ export interface ForceOverlay {
   /** per-strip arrows: position xyz + vector xyz, VERBATIM. */
   readonly stripPositions: Float64Array;
   readonly stripVectors: Float64Array;
-  readonly thrust: { at: readonly [number, number, number]; vec: readonly [number, number, number] };
-  readonly weight: { at: readonly [number, number, number]; vec: readonly [number, number, number] };
+  readonly thrust: {
+    at: readonly [number, number, number];
+    vec: readonly [number, number, number];
+  };
+  readonly weight: {
+    at: readonly [number, number, number];
+    vec: readonly [number, number, number];
+  };
   /** the net gnomon: the STATE's net, verbatim. */
   readonly net: readonly [number, number, number];
 }
@@ -62,10 +66,7 @@ export function buildForceOverlay(state: StripLoadsState): OverlayResult<ForceOv
       "the sim plane publishes at most 256 strips",
     );
   }
-  if (
-    state.positions.length !== 3 * state.nStrips ||
-    state.forces.length !== 3 * state.nStrips
-  ) {
+  if (state.positions.length !== 3 * state.nStrips || state.forces.length !== 3 * state.nStrips) {
     return refuse(
       "strip-arrays-mismatched",
       `${state.positions.length}/${state.forces.length} for ${state.nStrips} strips`,

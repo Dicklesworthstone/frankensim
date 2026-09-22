@@ -11,12 +11,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_ATTRIBUTION_RESIDUAL,
-  MAX_EVENTS,
-  MAX_LAG_TICKS,
   abAnnotation,
   attributionView,
   estimateDelayTicks,
+  MAX_ATTRIBUTION_RESIDUAL,
+  MAX_EVENTS,
+  MAX_LAG_TICKS,
   poleIndicator,
   validateEvents,
 } from "../src/porpoisesView.ts";

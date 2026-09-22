@@ -165,7 +165,11 @@ export function curatedLessons(): Lesson[] {
       title: "Fixed stick, free stick",
       declaredClaims: stabilityClaims,
       steps: [
-        { title: "Hold the canard", overlays: ["eigenmodes"], voicedClaims: [stabilityClaims[0] ?? ""] },
+        {
+          title: "Hold the canard",
+          overlays: ["eigenmodes"],
+          voicedClaims: [stabilityClaims[0] ?? ""],
+        },
         {
           title: "Let go",
           overlays: ["eigenmodes", "perception"],

@@ -12,12 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_CHART_SAMPLES,
-  MAX_STRIPS,
   buildForceOverlay,
   buildProbeChart,
   firstChartDivergence,
   firstOverlayDivergence,
+  MAX_CHART_SAMPLES,
+  MAX_STRIPS,
   type StripLoadsState,
 } from "../src/forceOverlay.ts";
 

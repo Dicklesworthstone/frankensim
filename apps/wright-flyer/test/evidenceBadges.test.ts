@@ -8,11 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  MAX_BADGES,
-  buildEvidenceBadges,
-  type ReceiptRow,
-} from "../src/evidenceBadges.ts";
+import { buildEvidenceBadges, MAX_BADGES, type ReceiptRow } from "../src/evidenceBadges.ts";
 
 function jlog(kase: string, payload: string): void {
   console.log(`{"suite":"wf-app-evidencebadges","case":"${kase}",${payload}}`);
@@ -34,7 +30,11 @@ test("real receipts render evidenced badges verbatim", () => {
   const r = buildEvidenceBadges([
     row({}),
     row({ caseId: "V-10", verdict: "reported-only", receiptDigest: DIGEST }),
-    row({ caseId: "H-02c", verdict: "compatibility-check-cannot-promote", receiptDigest: undefined }),
+    row({
+      caseId: "H-02c",
+      verdict: "compatibility-check-cannot-promote",
+      receiptDigest: undefined,
+    }),
   ]);
   assert.ok(r.ok);
   if (!r.ok) return;

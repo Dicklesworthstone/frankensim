@@ -3,39 +3,39 @@
 // meter. The sim/field workers (E5.*) and real scenes (E2.*) land later.
 
 import { describeCapabilities, probeCapabilities } from "./capability";
+import { CHALLENGE_PRESETS, challengeQuery } from "./challenges.ts";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
-import { SimClient } from "./sim/simClient.ts";
-import { MODE_FIXED, MODE_HISTORICAL } from "./sim/protocol.ts";
-import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
-import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
-import { QosGovernor } from "./qos.ts";
-import { MODE_HUMAN } from "./sim/protocol.ts";
-import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
 import {
-  NEUTRAL,
   cradleFromPointer,
   decayCradle,
   keysFrom,
+  NEUTRAL,
+  type PilotCommand,
   sampleGamepad,
   stepCommand,
-  type PilotCommand,
 } from "./input.ts";
+import { createInstrumentsPanel, type InstrumentSample } from "./instruments.ts";
+import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "./journey.ts";
+import { scoreTouchdown } from "./landingScore.ts";
 import {
+  assistAvailable,
   DEFAULT_SELECTION,
   FLIGHT_CHIPS,
   KEY_LINES,
+  type MenuSelection,
   MODE_CARDS,
-  assistAvailable,
   menuQuery,
   scenarioFromQuery,
-  type MenuSelection,
 } from "./menu.ts";
 import { flightByIndex, missionOutcome } from "./missions/flights.ts";
-import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "./journey.ts";
 import { exportInstantPhoto, togglePhotoMode } from "./photoMode.ts";
-import { scoreTouchdown } from "./landingScore.ts";
-import { createInstrumentsPanel, type InstrumentSample } from "./instruments.ts";
-import { CHALLENGE_PRESETS, challengeQuery } from "./challenges.ts";
+import { QosGovernor } from "./qos.ts";
+import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
+import { MODE_FIXED, MODE_HISTORICAL, MODE_HUMAN } from "./sim/protocol.ts";
+import { type FlightRecording, recordedToScenario, replayVerdict } from "./sim/replay.ts";
+import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
+import { SimClient } from "./sim/simClient.ts";
+
 /** Landing menu overlay (game front door). The scripted demo keeps
  * running behind it as the attract mode; every button just navigates
  * to the URL params the app already honors. */
@@ -72,7 +72,9 @@ function buildMenu(container: HTMLElement): void {
         ?.classList.toggle("selected", selectedQuery === challengeQuery(preset));
     }
     siteBtn.textContent =
-      sel.site === "kdh" ? "SITE: KILL DEVIL HILLS 1903" : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
+      sel.site === "kdh"
+        ? "SITE: KILL DEVIL HILLS 1903"
+        : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
     go.textContent = `LAUNCH ${sel.site === "huffman" ? "BY CATAPULT" : "INTO THE HEADWIND"} →`;
   };
   for (const c of MODE_CARDS) {
@@ -293,7 +295,12 @@ function main(): void {
         capabilityText.textContent = `sim ${stage} refusal: ${refusal.code} — ${refusal.message}`;
         capabilityText.className = "warn";
         console.warn(
-          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-refusal", at: stage, ...refusal }),
+          JSON.stringify({
+            suite: "wright-flyer-app",
+            stage: "sim-refusal",
+            at: stage,
+            ...refusal,
+          }),
         );
       },
       onTerminal(info): void {
@@ -352,7 +359,8 @@ function main(): void {
           slot.textContent = "";
           const link = document.createElement("a");
           link.href = nextUrl ?? "?demo=1";
-          link.textContent = nextUrl !== null ? `${stage.prompt}  CONTINUE →` : `${stage.prompt}  FINISH`;
+          link.textContent =
+            nextUrl !== null ? `${stage.prompt}  CONTINUE →` : `${stage.prompt}  FINISH`;
           slot.appendChild(link);
         }
       },
@@ -376,8 +384,15 @@ function main(): void {
   let lastSentMs = 0;
   const heldKeys = new Set<string>();
   const CONTROL_KEY: Record<string, true> = {
-    ArrowUp: true, ArrowDown: true, ArrowLeft: true, ArrowRight: true,
-    KeyW: true, KeyA: true, KeyS: true, KeyD: true, Space: true,
+    ArrowUp: true,
+    ArrowDown: true,
+    ArrowLeft: true,
+    ArrowRight: true,
+    KeyW: true,
+    KeyA: true,
+    KeyS: true,
+    KeyD: true,
+    Space: true,
   };
   let cradleActive = false;
   let cradleCmd: PilotCommand | null = null; // non-null = the cradle owns the pump
@@ -517,9 +532,7 @@ function main(): void {
       renderer.dispose();
       renderer = createFlyerSceneRenderer(app, simClient);
       resize();
-      console.info(
-        JSON.stringify({ suite: "wright-flyer-app", stage: "fresh-relaunch" }),
-      );
+      console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "fresh-relaunch" }));
     });
   }
   // Landing menu: front door when neither a sim run nor the explicit
@@ -568,7 +581,6 @@ function main(): void {
     },
   });
 
-
   // FPS meter over a 1-second window (presentation-plane measurement only;
   // sim-tick metrics are E0.8's separate contract).
   let frames = 0;
@@ -600,7 +612,9 @@ function main(): void {
       );
     }
     if (q.refusal !== undefined) {
-      console.warn(JSON.stringify({ suite: "wright-flyer-app", stage: "qos-refusal", ...q.refusal }));
+      console.warn(
+        JSON.stringify({ suite: "wright-flyer-app", stage: "qos-refusal", ...q.refusal }),
+      );
       capabilityText.textContent = `${q.refusal.code}: ${q.refusal.message}`;
       capabilityText.className = "warn";
     }

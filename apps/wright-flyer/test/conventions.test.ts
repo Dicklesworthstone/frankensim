@@ -77,7 +77,12 @@ test("cross-artifact closure: geometry sibling frozen; reference labels resolve"
   assert.ok(geom.aspect_ratio.AR_plane && geom.aspect_ratio.AR_system, "AR pair frozen in sibling");
   // flyer-reference convention labels must cite the frozen artifacts where
   // they lean on them (per-value oracle, not totals).
-  for (const id of ["wingspan_m", "aspect_ratio_plane", "aspect_ratio_system", "wing_area_both_m2"]) {
+  for (const id of [
+    "wingspan_m",
+    "aspect_ratio_plane",
+    "aspect_ratio_system",
+    "wing_area_both_m2",
+  ]) {
     assert.match(
       reference.values[id].convention,
       /geometry-conventions-v1/,
@@ -85,7 +90,11 @@ test("cross-artifact closure: geometry sibling frozen; reference labels resolve"
     );
   }
   assert.match(reference.values.wind_dec17_mps.convention, /WindReference/);
-  assert.match(frame.control_signs.rudder_dr, /2\.5/, "slaving ratio consistent with flyer-reference");
+  assert.match(
+    frame.control_signs.rudder_dr,
+    /2\.5/,
+    "slaving ratio consistent with flyer-reference",
+  );
 });
 
 test("re-expression rule names its required fields and the not-yet-ingested tables", () => {

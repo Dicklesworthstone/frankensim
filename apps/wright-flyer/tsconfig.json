@@ -8,13 +8,9 @@
     "noImplicitOverride": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": [
-      "vite/client"
-    ],
+    "types": ["vite/client"],
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   },
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }

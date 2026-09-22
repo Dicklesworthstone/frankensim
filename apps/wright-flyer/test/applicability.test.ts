@@ -12,12 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_AXES,
-  MAX_SUBSYSTEMS,
+  type ApplicabilityDomain,
   composeBadge,
   intersectDomains,
+  MAX_AXES,
+  MAX_SUBSYSTEMS,
   standingAt,
-  type ApplicabilityDomain,
 } from "../src/applicability.ts";
 import type { EvidenceBadge } from "../src/evidenceBadges.ts";
 
@@ -195,9 +195,7 @@ test("caps at cap AND cap+1 and axis-set mismatch refuses", () => {
     { subsystem: "b", axes: [{ name: "y", lo: 0, hi: 1 }] },
   ]);
   assert.ok(!mismatched.ok && mismatched.refusal.code === "applicability-axes-mismatched");
-  const malformed = intersectDomains([
-    { subsystem: "a", axes: [{ name: "x", lo: 2, hi: 1 }] },
-  ]);
+  const malformed = intersectDomains([{ subsystem: "a", axes: [{ name: "x", lo: 2, hi: 1 }] }]);
   assert.ok(!malformed.ok && malformed.refusal.code === "applicability-axes-invalid");
   jlog("caps", `"subsystems":${MAX_SUBSYSTEMS},"axes":${MAX_AXES}`);
 });

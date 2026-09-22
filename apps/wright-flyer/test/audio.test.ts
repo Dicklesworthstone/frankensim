@@ -56,7 +56,10 @@ test("twinPropBpfHz generates partially-coherent left/right BPF with bounded bea
     Math.abs(twin.beatHz - (twin.bpfRightHz - twin.bpfLeftHz)) < 1e-6,
     "beat frequency equals difference between right and left",
   );
-  assert.ok(twin.beatHz > 0.2 && twin.beatHz < 1.0, `beat frequency ${twin.beatHz} Hz in expected acoustic envelope`);
+  assert.ok(
+    twin.beatHz > 0.2 && twin.beatHz < 1.0,
+    `beat frequency ${twin.beatHz} Hz in expected acoustic envelope`,
+  );
 
   // At zero speed, twin returns zero frequencies
   const zeroTwin = twinPropBpfHz(0, 2);
@@ -127,18 +130,58 @@ test("scripted flight fixture tracks parameters across flight stages", () => {
 
   // 5-stage scripted flight profile
   const flightStages: FrameState[] = [
-    { timeS: 0.0, propOmega: trimOmega * 0.95, airspeed: 8.0, groundSpeed: 0.0, onRail: true, alphaDeg: 0 },
-    { timeS: 2.5, propOmega: trimOmega * 1.0, airspeed: 10.5, groundSpeed: 3.5, onRail: true, alphaDeg: 2 },
-    { timeS: 5.0, propOmega: trimOmega * 1.0, airspeed: 14.0, groundSpeed: 6.0, onRail: false, alphaDeg: 5 },
-    { timeS: 8.0, propOmega: trimOmega * 0.98, airspeed: 15.0, groundSpeed: 7.0, onRail: false, alphaDeg: 12 },
-    { timeS: 12.0, propOmega: trimOmega * 0.7, airspeed: 9.0, groundSpeed: 1.0, onRail: false, alphaDeg: 1 },
+    {
+      timeS: 0.0,
+      propOmega: trimOmega * 0.95,
+      airspeed: 8.0,
+      groundSpeed: 0.0,
+      onRail: true,
+      alphaDeg: 0,
+    },
+    {
+      timeS: 2.5,
+      propOmega: trimOmega * 1.0,
+      airspeed: 10.5,
+      groundSpeed: 3.5,
+      onRail: true,
+      alphaDeg: 2,
+    },
+    {
+      timeS: 5.0,
+      propOmega: trimOmega * 1.0,
+      airspeed: 14.0,
+      groundSpeed: 6.0,
+      onRail: false,
+      alphaDeg: 5,
+    },
+    {
+      timeS: 8.0,
+      propOmega: trimOmega * 0.98,
+      airspeed: 15.0,
+      groundSpeed: 7.0,
+      onRail: false,
+      alphaDeg: 12,
+    },
+    {
+      timeS: 12.0,
+      propOmega: trimOmega * 0.7,
+      airspeed: 9.0,
+      groundSpeed: 1.0,
+      onRail: false,
+      alphaDeg: 1,
+    },
   ];
 
   for (const frame of flightStages) {
     const engF = engineFreqHz(frame.propOmega);
     const bpf = propBpfHz(frame.propOmega, 2);
     const twin = twinPropBpfHz(frame.propOmega, 2);
-    const mix = mixLevels(rpm01FromOmega(frame.propOmega), frame.airspeed, frame.onRail, frame.groundSpeed);
+    const mix = mixLevels(
+      rpm01FromOmega(frame.propOmega),
+      frame.airspeed,
+      frame.onRail,
+      frame.groundSpeed,
+    );
     const wireNoise = airframeNoiseGain(frame.airspeed, frame.alphaDeg);
 
     assert.ok(engF >= 8 && engF <= 40, `engine freq ${engF} valid at t=${frame.timeS}`);

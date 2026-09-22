@@ -109,7 +109,8 @@ export function missionOutcome(
   if (downrangeM >= f.lowM && downrangeM <= f.highM) {
     verdict = "WITHIN the historical band";
   } else if (downrangeM < f.lowM) {
-    verdict = "SHORT of the historical band — the drawn conditions and your inputs differ from the day";
+    verdict =
+      "SHORT of the historical band — the drawn conditions and your inputs differ from the day";
   } else {
     verdict = "BEYOND the historical band — a modeled outcome, not a record claim";
   }

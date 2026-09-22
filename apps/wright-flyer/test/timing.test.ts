@@ -7,14 +7,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  InputScheduler,
   estimateClockOffsetMs,
+  InputScheduler,
   quantizeControl,
 } from "../src/transport/inputClock.ts";
-import { TickScheduler, percentile } from "../src/transport/schedule.ts";
+import { percentile, TickScheduler } from "../src/transport/schedule.ts";
 
-const jlog = (obj: object): void =>
-  console.log(JSON.stringify({ suite: "wf-timing", ...obj }));
+const jlog = (obj: object): void => console.log(JSON.stringify({ suite: "wf-timing", ...obj }));
 
 test("clock sync recovers a known offset via the min-RTT midpoint", () => {
   // Remote clock = local + 250 ms. Asymmetric noise on most samples; one

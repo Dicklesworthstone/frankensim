@@ -12,16 +12,22 @@ test("percentileOf: nearest-rank on sorted input, empty-safe", () => {
 
 test("bench: runs warmup+samples, reports per-op scaling and positive rates", () => {
   let calls = 0;
-  const r = bench("probe", 100, () => {
-    calls += 1;
-    let acc = 0;
-    for (let i = 0; i < 1000; i += 1) {
-      acc += Math.sqrt(i);
-    }
-    if (acc < 0) {
-      throw new Error("unreachable");
-    }
-  }, 20, 5);
+  const r = bench(
+    "probe",
+    100,
+    () => {
+      calls += 1;
+      let acc = 0;
+      for (let i = 0; i < 1000; i += 1) {
+        acc += Math.sqrt(i);
+      }
+      if (acc < 0) {
+        throw new Error("unreachable");
+      }
+    },
+    20,
+    5,
+  );
   assert.equal(calls, 25, "warmup runs are executed then discarded");
   assert.equal(r.samples, 20);
   assert.equal(r.batchSize, 100);

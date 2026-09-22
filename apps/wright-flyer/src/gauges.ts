@@ -26,26 +26,16 @@ export interface GaugeSpec {
  * the stop, they never wrap or extrapolate). */
 export function needleDeg(value: number, spec: GaugeSpec): number {
   if (!(spec.max > spec.min) || !(spec.sweepDeg > 0)) {
-    throw new RangeError(
-      `malformed gauge spec: [${spec.min}, ${spec.max}] sweep ${spec.sweepDeg}`,
-    );
+    throw new RangeError(`malformed gauge spec: [${spec.min}, ${spec.max}] sweep ${spec.sweepDeg}`);
   }
-  const v = Number.isNaN(value)
-    ? spec.min
-    : Math.min(spec.max, Math.max(spec.min, value));
-  return (
-    spec.startDeg + ((v - spec.min) / (spec.max - spec.min)) * spec.sweepDeg
-  );
+  const v = Number.isNaN(value) ? spec.min : Math.min(spec.max, Math.max(spec.min, value));
+  return spec.startDeg + ((v - spec.min) / (spec.max - spec.min)) * spec.sweepDeg;
 }
 
 /** True when the value sits inside the dial's danger arc (closed at
  * both ends: AT the redline is IN the redline). */
 export function inRedline(value: number, spec: GaugeSpec): boolean {
-  return (
-    spec.redline !== null &&
-    value >= spec.redline[0] &&
-    value <= spec.redline[1]
-  );
+  return spec.redline !== null && value >= spec.redline[0] && value <= spec.redline[1];
 }
 
 /** Major tick positions: `count` evenly spaced values from min to max
@@ -242,8 +232,7 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
 
 /** Build the two control-position indicators for one frame. */
 export function leverSetFrom(input: HudDialInputs): readonly LeverView[] {
-  const pin = (v: number): number =>
-    Math.min(1, Math.max(-1, Number.isNaN(v) ? 0 : v));
+  const pin = (v: number): number => Math.min(1, Math.max(-1, Number.isNaN(v) ? 0 : v));
   const canard = pin(input.dcRad / CANARD_STOP_RAD);
   const warp = pin(input.warpRad / WARP_STOP_RAD);
   return [

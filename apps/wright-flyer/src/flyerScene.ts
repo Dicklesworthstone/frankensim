@@ -3,58 +3,52 @@
 // seam so main.ts swaps one factory call.
 
 import * as THREE from "three";
+import huffmanGrid from "../../../data/wright-flyer/terrain/huffman-prairie-17x17-v1.json";
+import kdhGrid from "../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json";
+import { applyPose, driveScripted, scriptedState } from "./airframe/applyPose.ts";
 import { buildWrightFlyerAirframe } from "./airframe/parametricAirframe.ts";
-import { driveScripted } from "./airframe/applyPose.ts";
+import { computePose } from "./airframe/pose.ts";
 import { FlightAudio } from "./audio.ts";
-import { createProneBrother } from "./figure3d.ts";
-import {
-  bigHillDetail,
-  buildTerrainArrays,
-  duneDetail,
-  heightAt,
-} from "./terrainMesh.ts";
 import {
   BASE_FOV_DEG,
   type CameraPreset,
   type CameraState,
-  PRESET_KEYS,
   cameraFor,
   easeCameraToward,
+  PRESET_KEYS,
   speedFov,
 } from "./camera.ts";
-import { NEUTRAL, keysFrom, stepCommand } from "./input.ts";
+import { flashPulse, glanceBlend, releaseKick } from "./ceremony.ts";
+import { orvilleReachableX } from "./dressing.ts";
+import {
+  buildDressing,
+  buildTakeoffDolly,
+  SUN_COLOR,
+  SUN_DIRECTION,
+  sandTileMaterial,
+} from "./dressing3d.ts";
+import { createProneBrother } from "./figure3d.ts";
+import { IDLE_INPUTS, phaseDisplay } from "./gauges.ts";
+import type { HeroModel } from "./heroModel.ts";
+import { loadHeroAirframe } from "./heroModel.ts";
 import { hudLines } from "./hud.ts";
-import { computePose } from "./airframe/pose.ts";
-import { applyPose, scriptedState } from "./airframe/applyPose.ts";
-import kdhGrid from "../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json";
-import huffmanGrid from "../../../data/wright-flyer/terrain/huffman-prairie-17x17-v1.json";
+import { createHudDials, createPhaseBanner } from "./hudDials.ts";
+import { keysFrom, NEUTRAL, stepCommand } from "./input.ts";
+import { createPostChain } from "./postfx.ts";
 import type { FlyerRenderer } from "./renderer.ts";
+import { CaptionStream, formatCaption } from "./sim/captions.ts";
+import { type FlightRecording, ghostAt } from "./sim/replay.ts";
 import type { SimClient } from "./sim/simClient.ts";
 import {
   advanceProp,
   controlStateFrom,
   hudInputsFrom,
   phaseBanner,
-  worldTransformFrom,
   type SimDriveState,
+  worldTransformFrom,
 } from "./sim/snapshotView.ts";
-import { ghostAt, type FlightRecording } from "./sim/replay.ts";
-import { CaptionStream, formatCaption } from "./sim/captions.ts";
-import { IDLE_INPUTS, phaseDisplay } from "./gauges.ts";
-import { createHudDials, createPhaseBanner } from "./hudDials.ts";
-import { orvilleReachableX } from "./dressing.ts";
-import {
-  SUN_COLOR,
-  SUN_DIRECTION,
-  buildDressing,
-  buildTakeoffDolly,
-  sandTileMaterial,
-} from "./dressing3d.ts";
-import { createPostChain } from "./postfx.ts";
-import { flashPulse, glanceBlend, releaseKick } from "./ceremony.ts";
-import { loadHeroAirframe } from "./heroModel.ts";
-import type { HeroModel } from "./heroModel.ts";
 import { fogColorHex } from "./sky/atmosphere.ts";
+import { bigHillDetail, buildTerrainArrays, duneDetail, heightAt } from "./terrainMesh.ts";
 
 // ONE soundscape for the whole app — module-level singleton so scene
 // rebuilds (R replay) never stack AudioContexts or event listeners.
@@ -69,7 +63,6 @@ const onFirstGesture = (): void => {
 window.addEventListener("pointerdown", onFirstGesture);
 window.addEventListener("keydown", onFirstGesture);
 window.addEventListener("wf-flash", () => AUDIO.shutter());
-
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
@@ -267,16 +260,17 @@ export function createFlyerSceneRenderer(
     "position:fixed;left:12px;bottom:12px;font:12px/1.7 monospace;color:#f0e4c8;" +
     "background:rgba(32,22,12,.78);border:1px solid #8a6a38;padding:10px 12px;" +
     "border-radius:6px;white-space:pre;z-index:6";
-  helpCard.textContent = simClient !== undefined
-    ? "CONTROLS\n" +
-      "S or ↓   pull — nose UP\n" +
-      "W or ↑   push — nose DOWN\n" +
-      "A/D ←/→  wing warp (bank)\n" +
-      "Space    recenter controls\n" +
-      "V        camera: behind ↔ pilot's eyes\n" +
-      "N fresh run · I instruments · 1-6 cameras\n" +
-      "M sound · H hide this · T telemetry"
-    : "1-6 cameras · I instruments · M sound · H hide";
+  helpCard.textContent =
+    simClient !== undefined
+      ? "CONTROLS\n" +
+        "S or ↓   pull — nose UP\n" +
+        "W or ↑   push — nose DOWN\n" +
+        "A/D ←/→  wing warp (bank)\n" +
+        "Space    recenter controls\n" +
+        "V        camera: behind ↔ pilot's eyes\n" +
+        "N fresh run · I instruments · 1-6 cameras\n" +
+        "M sound · H hide this · T telemetry"
+      : "1-6 cameras · I instruments · M sound · H hide";
   container.appendChild(helpCard);
   // Daniels' flash ALSO punches the onboard view (the bulb goes off a
   // few metres from the pilot's face): a white overlay driven by the
@@ -356,7 +350,10 @@ export function createFlyerSceneRenderer(
   container.appendChild(binocOverlay);
 
   const updateCamButtons = (): void => {
-    for (const [k, b] of Object.entries(camButtons) as [CameraPreset, HTMLButtonElement | undefined][]) {
+    for (const [k, b] of Object.entries(camButtons) as [
+      CameraPreset,
+      HTMLButtonElement | undefined,
+    ][]) {
       if (!b) {
         continue;
       }
@@ -411,7 +408,20 @@ export function createFlyerSceneRenderer(
       setPreset(PRESET_KEYS[e.code]!);
       return;
     }
-    if (isDown) manual = manual || ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "Space"].includes(e.code);
+    if (isDown)
+      manual =
+        manual ||
+        [
+          "ArrowUp",
+          "ArrowDown",
+          "ArrowLeft",
+          "ArrowRight",
+          "KeyW",
+          "KeyA",
+          "KeyS",
+          "KeyD",
+          "Space",
+        ].includes(e.code);
     if (isDown) down.add(e.code);
     else down.delete(e.code);
   };
@@ -478,11 +488,7 @@ export function createFlyerSceneRenderer(
             // Nose-frame mapping: local +z -> world +x. Real sim
             // roll/heading ride with pitch; no warp-derived fake bank.
             ghostFrame.group.rotation.order = "YXZ";
-            ghostFrame.group.rotation.set(
-              gw.rollRad,
-              -Math.PI / 2 - gw.headingRad,
-              gw.pitchRad,
-            );
+            ghostFrame.group.rotation.set(gw.rollRad, -Math.PI / 2 - gw.headingRad, gw.pitchRad);
           }
         }
         drive = advanceProp(drive, snap, dtS);
@@ -493,11 +499,7 @@ export function createFlyerSceneRenderer(
         // Nose-frame mapping: local +z -> world +x. Real sim
         // roll/heading ride with pitch; no warp-derived fake bank.
         airframe.group.rotation.order = "YXZ";
-        airframe.group.rotation.set(
-          world.rollRad,
-          -Math.PI / 2 - world.headingRad,
-          world.pitchRad,
-        );
+        airframe.group.rotation.set(world.rollRad, -Math.PI / 2 - world.headingRad, world.pitchRad);
         // Cockpit feel (T3.4): the pilot's lever mirrors live canard.
         // Pitch stick tilts fore/aft: rotate about the LATERAL x axis;
         // Rx(+) carries the stick top toward +z (fore), so pull (+dcRad,
@@ -519,18 +521,13 @@ export function createFlyerSceneRenderer(
         // kick fires at release, the flashcard replays Daniels' bulb.
         const onRailNow = snap.phase === "on-rail";
         railRunElapsedS = onRailNow ? (railRunElapsedS ?? 0) + dtS : null;
-        const sinceReleaseS =
-          orvilleReleaseT === null ? null : hudIn.elapsedS - orvilleReleaseT;
+        const sinceReleaseS = orvilleReleaseT === null ? null : hudIn.elapsedS - orvilleReleaseT;
         const glance = glanceBlend(railRunElapsedS, sinceReleaseS);
         const cam = cameraFor(
           preset,
           elapsedS,
           launch,
-          [
-            world.position[0],
-            world.position[1] + 1.2,
-            world.position[2],
-          ],
+          [world.position[0], world.position[1] + 1.2, world.position[2]],
           {
             pitchRad: world.pitchRad,
             gust01,
@@ -559,7 +556,10 @@ export function createFlyerSceneRenderer(
         camera.position.set(camState.pos[0], camState.pos[1], camState.pos[2]);
         camera.lookAt(camState.look[0], camState.look[1], camState.look[2]);
         // Release impulse (onboard only): FOV punch + decaying shake.
-        let fov = speedFov(preset === "binoculars" ? 24 : BASE_FOV_DEG, Math.hypot(snap.uMps, snap.wMps));
+        let fov = speedFov(
+          preset === "binoculars" ? 24 : BASE_FOV_DEG,
+          Math.hypot(snap.uMps, snap.wMps),
+        );
         if (preset === "onboard") {
           const kick = releaseKick(sinceReleaseS);
           fov += kick.fovKickDeg;
@@ -586,7 +586,9 @@ export function createFlyerSceneRenderer(
         });
         lines.push(`phase ${hudIn.phase}  h ${snap.hM.toFixed(1)} m  x ${snap.xM.toFixed(1)} m`);
         if (snap.assistActive) {
-          lines.push("ASSIST ACTIVE (bounded authority 0.3 of canard stop — model aid, not history)");
+          lines.push(
+            "ASSIST ACTIVE (bounded authority 0.3 of canard stop — model aid, not history)",
+          );
         }
         const banner = phaseBanner(snap, simClient?.envelopeRefusalCode());
         if (banner !== null) {
@@ -665,8 +667,7 @@ export function createFlyerSceneRenderer(
         const lookDx = camState.look[0] - camState.pos[0];
         const lookDz = camState.look[2] - camState.pos[2];
         const lookLen = Math.hypot(lookDx, lookDz);
-        const surfFacing01 =
-          lookLen > 1e-6 ? Math.max(0, lookDx / lookLen) : 0;
+        const surfFacing01 = lookLen > 1e-6 ? Math.max(0, lookDx / lookLen) : 0;
         AUDIO.update({
           propOmegaRadS: snap.omegaPropRadS,
           airspeedMps: Math.hypot(snap.uMps, snap.wMps),
@@ -695,7 +696,9 @@ export function createFlyerSceneRenderer(
       }
       airframe.group.rotation.z = 0.02 * Math.sin(elapsedS * 0.8); // idle sway
       const ac: [number, number, number] = [
-        airframe.group.position.x, airframe.group.position.y, airframe.group.position.z,
+        airframe.group.position.x,
+        airframe.group.position.y,
+        airframe.group.position.z,
       ];
       const cam = cameraFor(preset, elapsedS, launch, ac);
       camState = easeCameraToward(camState, cam, dtS);

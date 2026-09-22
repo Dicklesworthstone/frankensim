@@ -54,8 +54,7 @@ export function poleIndicator(pole: PublishedPole): ViewResult<PoleIndicator> {
     value: {
       pole,
       timeToDoubleS: pole.reSigmaPerS > 0 ? Math.LN2 / pole.reSigmaPerS : null,
-      periodS:
-        pole.imOmegaRadPerS !== 0 ? (2 * Math.PI) / Math.abs(pole.imOmegaRadPerS) : null,
+      periodS: pole.imOmegaRadPerS !== 0 ? (2 * Math.PI) / Math.abs(pole.imOmegaRadPerS) : null,
     },
   };
 }
@@ -149,9 +148,7 @@ export const MAX_ATTRIBUTION_RESIDUAL = 0.05;
  * share; it displays the residual and refuses only when the shares
  * cannot describe a loop at all.
  */
-export function attributionView(
-  shares: readonly AttributionShare[],
-): ViewResult<AttributionView> {
+export function attributionView(shares: readonly AttributionShare[]): ViewResult<AttributionView> {
   if (shares.length === 0) {
     return refuse("attribution-empty", "no shares", "the sim plane publishes the loop split");
   }

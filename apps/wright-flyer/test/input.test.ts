@@ -5,21 +5,25 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { computePose } from "../src/airframe/pose.ts";
+import { hudLines } from "../src/hud.ts";
 import {
   CRADLE_FULL_TRAVEL_PX,
-  GAMEPAD_DEADZONE,
-  NEUTRAL,
   cradleFromPointer,
   decayCradle,
+  GAMEPAD_DEADZONE,
   keysFrom,
+  NEUTRAL,
   sampleGamepad,
   stepCommand,
 } from "../src/input.ts";
-import { hudLines } from "../src/hud.ts";
-import { computePose } from "../src/airframe/pose.ts";
 
 const K = {
-  canardUp: false, canardDown: false, warpLeft: false, warpRight: false, recenter: false,
+  canardUp: false,
+  canardDown: false,
+  warpLeft: false,
+  warpRight: false,
+  recenter: false,
 };
 
 test("slew is deterministic and every command sits on the 1/4096 grid", () => {
@@ -60,14 +64,29 @@ test("key bindings map both arrow and WASD, pull = nose up", () => {
 });
 
 test("HUD renders the period triad and surfaces the rig flags", () => {
-  const pose = computePose({ canardDeg: 31, warpDeg: 0, rudderDeg: 0, coupled: true, propAngleRad: 0 });
-  const lines = hudLines({ airspeedMps: 13.86, elapsedS: 12, engineRpm: 1025, camera: "chase", pose });
+  const pose = computePose({
+    canardDeg: 31,
+    warpDeg: 0,
+    rudderDeg: 0,
+    coupled: true,
+    propAngleRad: 0,
+  });
+  const lines = hudLines({
+    airspeedMps: 13.86,
+    elapsedS: 12,
+    engineRpm: 1025,
+    camera: "chase",
+    pose,
+  });
   assert.match(lines[0]!, /31\.0 mph/);
   assert.match(lines[1]!, /12\.0 s/);
   assert.match(lines[2]!, /1025 rpm/);
   assert.ok(lines.includes("CONTROL AT STOP"), "the clamp flag must surface");
   const clean = hudLines({
-    airspeedMps: 0, elapsedS: 0, engineRpm: 0, camera: "arrival",
+    airspeedMps: 0,
+    elapsedS: 0,
+    engineRpm: 0,
+    camera: "arrival",
     pose: computePose({ canardDeg: 0, warpDeg: 0, rudderDeg: 0, coupled: true, propAngleRad: 0 }),
   });
   assert.equal(clean.length, 4, "no flags when clean");
@@ -146,7 +165,10 @@ test("gamepad radial deadzone kills drift but preserves direction", () => {
     connected: true,
     axes: [GAMEPAD_DEADZONE + 0.01, GAMEPAD_DEADZONE + 0.01],
   });
-  assert.ok(d !== null && d.warp > 0 && Math.abs(d.warp - d.canard) < 1e-9, "diagonal stays diagonal");
+  assert.ok(
+    d !== null && d.warp > 0 && Math.abs(d.warp - d.canard) < 1e-9,
+    "diagonal stays diagonal",
+  );
   // Full deflection is exactly full travel on the grid; stick back pulls.
   const full = sampleGamepad({ connected: true, axes: [0, 1] });
   assert.ok(full !== null && full.canard === 1 && full.warp === 0);

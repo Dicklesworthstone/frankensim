@@ -111,7 +111,6 @@ export function mixLevels(
   };
 }
 
-
 /** The flight soundscape. All node churn is lazy; `update` only sets
  * AudioParams (no allocations on the frame path). */
 /** Master bus level. The original 0.85 was near full scale — with a
@@ -231,7 +230,7 @@ export class FlightAudio {
     pFilter.frequency.value = 180;
     pGain.connect(pFilter);
     pFilter.connect(master);
-    
+
     const propL = ctx.createOscillator();
     propL.type = "sine";
     propL.frequency.value = 12;
@@ -285,7 +284,11 @@ export class FlightAudio {
     if (this.engineSub !== null) {
       this.engineSub.frequency.setTargetAtTime(engFreq / 2, t, 0.06);
     }
-    if (this.propBeatingGain !== null && this.propBeatingOscL !== null && this.propBeatingOscR !== null) {
+    if (
+      this.propBeatingGain !== null &&
+      this.propBeatingOscL !== null &&
+      this.propBeatingOscR !== null
+    ) {
       this.propBeatingGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.28, t, 0.08);
       this.propBeatingOscL.frequency.setTargetAtTime(Math.max(4, twinBpf.bpfLeftHz), t, 0.06);
       this.propBeatingOscR.frequency.setTargetAtTime(Math.max(4, twinBpf.bpfRightHz), t, 0.06);
@@ -362,7 +365,7 @@ export class FlightAudio {
     const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.6), ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i += 1) {
-      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 1.5);
+      d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 1.5;
     }
     const src = ctx.createBufferSource();
     src.buffer = buf;
@@ -431,11 +434,7 @@ export class FlightAudio {
   setSurfEnabled(on: boolean): void {
     this.surfWanted = on;
     if (this.surfGain !== null && this.ctx !== null) {
-      this.surfGain.gain.setTargetAtTime(
-        on ? 0.05 : 0,
-        this.ctx.currentTime,
-        0.4,
-      );
+      this.surfGain.gain.setTargetAtTime(on ? 0.05 : 0, this.ctx.currentTime, 0.4);
     }
   }
 

@@ -19,7 +19,7 @@ import {
   P_X_M,
   PHASE_CODES,
 } from "./protocol.ts";
-import { recordingPayloadWords, type FlightRecording } from "./replay.ts";
+import { type FlightRecording, recordingPayloadWords } from "./replay.ts";
 
 export interface FlightKpis {
   /** Snapshot count the KPIs were computed over (transparency). */

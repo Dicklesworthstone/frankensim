@@ -6,16 +6,15 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
+import { keysFrom } from "../src/input.ts";
+import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "../src/journey.ts";
 import {
+  assistAvailable,
   DEFAULT_SELECTION,
   KEY_LINES,
   MODE_CARDS,
-  assistAvailable,
   menuQuery,
 } from "../src/menu.ts";
-import { keysFrom } from "../src/input.ts";
-import { journeyNextUrl, journeyStage, JOURNEY_STAGES } from "../src/journey.ts";
 
 function jlog(kase: string, payload: string): void {
   console.log(`{"suite":"wf-app-menu","case":"${kase}",${payload}}`);
@@ -32,7 +31,10 @@ test("selection to query, exact strings", () => {
     "?sim=1&mode=human&site=huffman",
     "Huffman pins assist off (protocol.ts), so the URL drops it",
   );
-  assert.equal(menuQuery({ mode: "historical", site: "kdh", assist: false }), "?sim=1&mode=historical");
+  assert.equal(
+    menuQuery({ mode: "historical", site: "kdh", assist: false }),
+    "?sim=1&mode=historical",
+  );
   assert.equal(menuQuery({ mode: "fixed", site: "kdh", assist: false }), "?sim=1");
   assert.equal(menuQuery({ mode: "fixed", site: "huffman", assist: false }), "?sim=1&site=huffman");
   jlog("exact-queries", `"count":5`);
@@ -95,8 +97,14 @@ test("key card mirrors input.ts bindings (the ONLY binding authority)", () => {
 });
 
 test("flight param emits only for valid missions at Kill Devil Hills", () => {
-  assert.equal(menuQuery({ mode: "human", site: "kdh", assist: false, flight: 4 }), "?sim=1&mode=human&flight=4");
-  assert.equal(menuQuery({ mode: "human", site: "kdh", assist: true, flight: 1 }), "?sim=1&mode=human&assist=1&flight=1");
+  assert.equal(
+    menuQuery({ mode: "human", site: "kdh", assist: false, flight: 4 }),
+    "?sim=1&mode=human&flight=4",
+  );
+  assert.equal(
+    menuQuery({ mode: "human", site: "kdh", assist: true, flight: 1 }),
+    "?sim=1&mode=human&assist=1&flight=1",
+  );
   // Huffman drops the mission (the URL never claims what will not run).
   assert.equal(
     menuQuery({ mode: "historical", site: "huffman", assist: false, flight: 2 }),
@@ -125,7 +133,11 @@ test("journey stages chain watch -> assist -> authentic -> porpoises with honest
     assert.ok(!/will (fly|reach|travel)/i.test(s.caption), `no promises in stage ${s.index}`);
     for (const other of JOURNEY_STAGES) {
       if (other.index === s.index + 1) {
-        assert.equal(journeyNextUrl(s.index), other.url, `stage ${s.index} chains to ${other.index}`);
+        assert.equal(
+          journeyNextUrl(s.index),
+          other.url,
+          `stage ${s.index} chains to ${other.index}`,
+        );
       }
     }
   }

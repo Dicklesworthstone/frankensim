@@ -10,14 +10,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_CUES,
-  MAX_STEPS,
   advanceLesson,
   curatedLessons,
+  type Lesson,
+  MAX_CUES,
+  MAX_STEPS,
   perceptionView,
   startLesson,
   validateLesson,
-  type Lesson,
 } from "../src/lessons.ts";
 
 function jlog(kase: string, payload: string): void {

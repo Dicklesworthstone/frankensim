@@ -11,14 +11,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  type DesignPoint,
+  exportCsv,
   MAX_AXIS_POINTS,
   MAX_DESIGN_POINTS,
   MAX_ENSEMBLE,
-  exportCsv,
   makeSweepEngine,
   makeSweepGrid,
   runSpecId,
-  type DesignPoint,
 } from "../src/sweeps.ts";
 
 function jlog(kase: string, payload: string): void {
@@ -48,9 +48,7 @@ test("CRN: every member uses the SAME seed at every design point", () => {
   assert.equal(e.records.length, 6 * 3);
   // The seed matrix: rows (members) constant across points.
   for (const member of [0, 1, 2]) {
-    const seeds = new Set(
-      e.records.filter((r) => r.member === member).map((r) => r.seed),
-    );
+    const seeds = new Set(e.records.filter((r) => r.member === member).map((r) => r.seed));
     assert.equal(seeds.size, 1, `member ${member} must ride ONE realization`);
   }
   // And distinct members ride distinct realizations.
@@ -119,18 +117,23 @@ test("V-14: a closed QoS gate dispatches NOTHING (sweeps cannot add deadline mis
   };
   // Gate closed: no unit runs, ever.
   for (let i = 0; i < 100; i += 1) {
-    assert.equal(e.step(() => false, runner), false);
+    assert.equal(
+      e.step(() => false, runner),
+      false,
+    );
   }
   assert.equal(calls, 0, "closed gate = ZERO sweep work");
   assert.equal(e.progress().completed, 0);
   // Gate reopens: the sweep resumes exactly where it paused.
   let budget = 2;
   const throttled = () => budget > 0;
-  while (e.step(throttled, () => {
-    calls += 1;
-    budget -= 1;
-    return 0;
-  })) {
+  while (
+    e.step(throttled, () => {
+      calls += 1;
+      budget -= 1;
+      return 0;
+    })
+  ) {
     /* drain until throttle */
   }
   assert.equal(calls, 2, "throttled gate admits exactly its headroom");

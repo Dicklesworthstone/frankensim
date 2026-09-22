@@ -6,35 +6,35 @@
 
 import * as THREE from "three";
 import {
-  DEFAULT_HEADWIND_MPS,
   campLayout,
+  DEFAULT_HEADWIND_MPS,
   emberAt,
   exhaustPuff,
+  type FlybyPath,
   flagPoint,
+  flybyFleet,
+  flybyPose,
+  type GullPath,
   gullAttitude,
   gullFleet,
   gullPose,
+  hash01,
   landingDust,
   lcg,
   orvillePose,
-  hash01,
   propwashPuff,
   railTies,
   scrubField,
   smokePuff,
   streamerPoint,
-  flybyFleet,
-  flybyPose,
-  type FlybyPath,
-  type GullPath,
 } from "./dressing.ts";
-import { createBrotherFigure } from "./figure3d.ts";
 import { strideFreqHz } from "./figure.ts";
+import { createBrotherFigure } from "./figure3d.ts";
 import {
-  SKY_DOME_FRAG_GLSL,
-  SKY_DOME_VERT_GLSL,
   groundHazeColor,
   horizonColor,
+  SKY_DOME_FRAG_GLSL,
+  SKY_DOME_VERT_GLSL,
   sunDiscColor,
   zenithColor,
 } from "./sky/atmosphere.ts";
@@ -45,9 +45,7 @@ import {
  * never disagree. December 17, ~10:35 a.m. solar time, Kill Devil
  * Hills (~36°N): sun low in the SOUTH-EAST, elevation ≈ 28°. Scene
  * frame: x east, z south, y up — SE means POSITIVE x and z. */
-export const SUN_DIRECTION: readonly [number, number, number] = [
-  0.438, 0.468, 0.767,
-];
+export const SUN_DIRECTION: readonly [number, number, number] = [0.438, 0.468, 0.767];
 /** Warm low-winter-sun tint for lights and glints. */
 export const SUN_COLOR = 0xffe3bd;
 
@@ -138,7 +136,14 @@ function sandMaps(): {
       hctx.lineWidth = st.width * 1.6;
       hctx.beginPath();
       hctx.moveTo(0, st.y * size);
-      hctx.bezierCurveTo(size * 0.3, st.y * size + st.c1y, size * 0.7, st.y * size + st.c2y, size, st.y * size);
+      hctx.bezierCurveTo(
+        size * 0.3,
+        st.y * size + st.c1y,
+        size * 0.7,
+        st.y * size + st.c2y,
+        size,
+        st.y * size,
+      );
       hctx.stroke();
     }
     for (const sp of specks) {
@@ -175,7 +180,7 @@ function sandMaps(): {
       const o = (y * size + x) * 4;
       nImg.data[o] = Math.round((nx * 0.5 + 0.5) * 255);
       nImg.data[o + 1] = Math.round((ny * 0.5 + 0.5) * 255);
-      nImg.data[o + 2] = Math.round((nz / len * 0.5 + 0.5) * 255);
+      nImg.data[o + 2] = Math.round(((nz / len) * 0.5 + 0.5) * 255);
       nImg.data[o + 3] = 255;
       // Roughness: crests slightly rougher/brighter than troughs.
       const h = at(x, y);
@@ -201,7 +206,14 @@ function sandMaps(): {
       actx.lineWidth = st.width;
       actx.beginPath();
       actx.moveTo(0, st.y * size);
-      actx.bezierCurveTo(size * 0.3, st.y * size + st.c1y, size * 0.7, st.y * size + st.c2y, size, st.y * size);
+      actx.bezierCurveTo(
+        size * 0.3,
+        st.y * size + st.c1y,
+        size * 0.7,
+        st.y * size + st.c2y,
+        size,
+        st.y * size,
+      );
       actx.stroke();
     }
     for (const sp of specks) {
@@ -218,7 +230,11 @@ function sandMaps(): {
 
 /** Apply tiling parameters consistently to a whole sand map set. */
 function tileSand(
-  maps: { map: THREE.CanvasTexture; normalMap: THREE.CanvasTexture; roughnessMap: THREE.CanvasTexture },
+  maps: {
+    map: THREE.CanvasTexture;
+    normalMap: THREE.CanvasTexture;
+    roughnessMap: THREE.CanvasTexture;
+  },
   repeat: number,
 ): void {
   for (const tex of [maps.map, maps.normalMap, maps.roughnessMap]) {
@@ -243,7 +259,12 @@ function plankTexture(): THREE.CanvasTexture {
       // Grain streaks per plank.
       for (let g = 0; g < 5; g += 1) {
         ctx.fillStyle = `rgba(60,44,26,${0.08 + rand() * 0.14})`;
-        ctx.fillRect(rand() * s, i * plank + rand() * (plank - 4), 20 + rand() * 90, 1 + rand() * 2);
+        ctx.fillRect(
+          rand() * s,
+          i * plank + rand() * (plank - 4),
+          20 + rand() * 90,
+          1 + rand() * 2,
+        );
       }
       // Nail heads at the plank ends.
       ctx.fillStyle = "rgba(40,36,30,0.7)";
@@ -377,9 +398,39 @@ export function buildClouds(baseY: number): THREE.Group {
     driftSpan: number;
     opacity: number;
   }[] = [
-    { n: 6, style: "cirrus", yMin: 330, ySpan: 110, wMin: 420, wSpan: 380, driftMin: 2.6, driftSpan: 1.4, opacity: 0.5 },
-    { n: 7, style: "cumulus", yMin: 210, ySpan: 90, wMin: 240, wSpan: 300, driftMin: 1.8, driftSpan: 1.0, opacity: 0.9 },
-    { n: 5, style: "cumulus", yMin: 140, ySpan: 50, wMin: 120, wSpan: 140, driftMin: 1.2, driftSpan: 0.6, opacity: 0.75 },
+    {
+      n: 6,
+      style: "cirrus",
+      yMin: 330,
+      ySpan: 110,
+      wMin: 420,
+      wSpan: 380,
+      driftMin: 2.6,
+      driftSpan: 1.4,
+      opacity: 0.5,
+    },
+    {
+      n: 7,
+      style: "cumulus",
+      yMin: 210,
+      ySpan: 90,
+      wMin: 240,
+      wSpan: 300,
+      driftMin: 1.8,
+      driftSpan: 1.0,
+      opacity: 0.9,
+    },
+    {
+      n: 5,
+      style: "cumulus",
+      yMin: 140,
+      ySpan: 50,
+      wMin: 120,
+      wSpan: 140,
+      driftMin: 1.2,
+      driftSpan: 0.6,
+      opacity: 0.75,
+    },
   ];
   let seed = 200;
   for (const L of layers) {
@@ -427,7 +478,9 @@ function waterNormalTexture(): THREE.CanvasTexture {
     const sx = tx * tx * (3 - 2 * tx);
     const sy = ty * ty * (3 - 2 * ty);
     const g = (a: number, b: number): number =>
-      gridVals[((b % lattice) + lattice) % lattice * lattice + (((a % lattice) + lattice) % lattice)]!;
+      gridVals[
+        (((b % lattice) + lattice) % lattice) * lattice + (((a % lattice) + lattice) % lattice)
+      ]!;
     const a = g(ix, iy);
     const b = g(ix + 1, iy);
     const c = g(ix, iy + 1);
@@ -443,9 +496,7 @@ function waterNormalTexture(): THREE.CanvasTexture {
     for (let x = 0; x < size; x++) {
       const u = x / size;
       const v = y / size;
-      const h =
-        sample(u, v, 1, 0) * 0.65 +
-        sample(u * 2.7, v * 2.7, 1, 31.7) * 0.35;
+      const h = sample(u, v, 1, 0) * 0.65 + sample(u * 2.7, v * 2.7, 1, 31.7) * 0.35;
       const o = (y * size + x) * 4;
       const b = Math.round(h * 255);
       img.data[o] = b;
@@ -472,9 +523,9 @@ function waterNormalTexture(): THREE.CanvasTexture {
       const nz = 1;
       const len = Math.hypot(nx, ny, nz);
       const o = (y * size + x) * 4;
-      nImg.data[o] = Math.round((nx / len * 0.5 + 0.5) * 255);
-      nImg.data[o + 1] = Math.round((ny / len * 0.5 + 0.5) * 255);
-      nImg.data[o + 2] = Math.round(255 * (nz / len * 0.5 + 0.5));
+      nImg.data[o] = Math.round(((nx / len) * 0.5 + 0.5) * 255);
+      nImg.data[o + 1] = Math.round(((ny / len) * 0.5 + 0.5) * 255);
+      nImg.data[o + 2] = Math.round(255 * ((nz / len) * 0.5 + 0.5));
       nImg.data[o + 3] = 255;
     }
   }
@@ -775,7 +826,10 @@ function buildWorkbench(): THREE.Group {
   // 4. Spruce wood shavings curled on the bench
   const SHAVING = new THREE.MeshStandardMaterial({ color: 0xd9c59a, roughness: 0.9 });
   for (let i = 0; i < 4; i += 1) {
-    const curl = new THREE.Mesh(new THREE.TorusGeometry(0.025, 0.008, 4, 8, Math.PI * 1.5), SHAVING);
+    const curl = new THREE.Mesh(
+      new THREE.TorusGeometry(0.025, 0.008, 4, 8, Math.PI * 1.5),
+      SHAVING,
+    );
     curl.rotation.set(Math.PI / 2, i * 0.8, 0);
     curl.position.set(-0.05 + i * 0.06, 0.89, 0.08 + (i % 2) * 0.04);
     g.add(curl);
@@ -1166,13 +1220,27 @@ function makeSpritePool(n: number, tex: THREE.CanvasTexture, baseScale: number):
  * pines seated on the sampled terrain, tufts and bushes swaying with
  * SWAY_TIME (presentation-only vertex bend). */
 function buildVegetation(
-  scrub: readonly { x: number; z: number; rotY: number; scale: number; kind: "tuft" | "bush" | "pine" }[],
+  scrub: readonly {
+    x: number;
+    z: number;
+    rotY: number;
+    scale: number;
+    kind: "tuft" | "bush" | "pine";
+  }[],
   groundY: (xRel: number, zRel: number) => number,
 ): THREE.Group {
   const group = new THREE.Group();
   const grassMat = new THREE.MeshStandardMaterial({ color: 0x96854f, roughness: 1 });
-  const bushMat = new THREE.MeshStandardMaterial({ color: 0x5f6136, roughness: 1, flatShading: true });
-  const pineMat = new THREE.MeshStandardMaterial({ color: 0x39543a, roughness: 1, flatShading: true });
+  const bushMat = new THREE.MeshStandardMaterial({
+    color: 0x5f6136,
+    roughness: 1,
+    flatShading: true,
+  });
+  const pineMat = new THREE.MeshStandardMaterial({
+    color: 0x39543a,
+    roughness: 1,
+    flatShading: true,
+  });
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4c3a24, roughness: 1 });
   const addSway = (mat: THREE.MeshStandardMaterial): void => {
     mat.onBeforeCompile = (shader) => {
@@ -1279,11 +1347,17 @@ function buildScatter(
   // floor stays pristine for rail/figures), inside ~420 m.
   for (let n = 0; n < counts.shells + counts.pebbles; n += 1) {
     const a = hash01(n * 2 + 1) * Math.PI * 2;
-    const r = 62 + Math.pow(hash01(n * 2 + 2), 0.7) * 358;
+    const r = 62 + hash01(n * 2 + 2) ** 0.7 * 358;
     const x = Math.cos(a) * r;
     const z = Math.sin(a) * r;
     pos.set(x, groundY(x, z) - 0.01, z);
-    q.setFromEuler(eu.set(hash01(n * 3 + 5) * 0.5 - 0.25, hash01(n * 3 + 6) * Math.PI * 2, hash01(n * 3 + 7) * 0.5 - 0.25));
+    q.setFromEuler(
+      eu.set(
+        hash01(n * 3 + 5) * 0.5 - 0.25,
+        hash01(n * 3 + 6) * Math.PI * 2,
+        hash01(n * 3 + 7) * 0.5 - 0.25,
+      ),
+    );
     const s = 0.6 + hash01(n * 5 + 9) * 0.9;
     one.set(s, s, s);
     m.compose(pos, q, one);
@@ -1301,7 +1375,12 @@ function buildScatter(
 
 /** A downwind ribbon: `segs` spans × 2 columns of vertices whose
  * positions the animate loop rewrites from the pure math each frame. */
-function buildRibbon(segs: number, halfWidthM: number, color: number, opacity: number): {
+function buildRibbon(
+  segs: number,
+  halfWidthM: number,
+  color: number,
+  opacity: number,
+): {
   mesh: THREE.Mesh;
   write: (pts: readonly { x: number; y: number; z: number }[]) => void;
 } {
@@ -1611,7 +1690,10 @@ export function buildDressing(
   const smokeTex = softDotTexture("rgba(122,116,106,0.5)", "rgba(122,116,106,0)");
   const emberTex = softDotTexture("rgba(255,176,64,0.95)", "rgba(255,84,10,0)");
   let veg: THREE.Group | null = null;
-  const streamers = new Map<number, { mesh: THREE.Mesh; write: (pts: readonly { x: number; y: number; z: number }[]) => void }>();
+  const streamers = new Map<
+    number,
+    { mesh: THREE.Mesh; write: (pts: readonly { x: number; y: number; z: number }[]) => void }
+  >();
   const STREAMER_SEGS = 10;
   let flagpole: Flagpole | null = null;
   const smoke = makeSpritePool(14, smokeTex, 1.25);
@@ -1928,11 +2010,7 @@ export function buildDressing(
         orville.releaseT,
         orville.landedX ?? null,
       );
-      return [
-        launch[0] + pose.x,
-        launch[1] + groundY(pose.x, pose.z) + 1.5,
-        launch[2] + pose.z,
-      ];
+      return [launch[0] + pose.x, launch[1] + groundY(pose.x, pose.z) + 1.5, launch[2] + pose.z];
     },
     setParticleLevel(level): void {
       // Secondary plumes go first, everything airborne at Critical.

@@ -6,19 +6,15 @@
 // Emits one JSONL row per 10 s window: publication counts, read outcomes,
 // drop counters, tick-lateness percentiles. Run: node test/soak.ts [minutes]
 
-import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import {
-  SeqlockWriter,
-  seqlockBytes,
-  type SeqlockLayout,
-} from "../src/transport/seqlock.ts";
-import {
+  type LeasedRingLayout,
   LeasedRingReader,
   LeasedRingWriter,
   leasedRingBytes,
-  type LeasedRingLayout,
 } from "../src/transport/leasedRing.ts";
+import { type SeqlockLayout, SeqlockWriter, seqlockBytes } from "../src/transport/seqlock.ts";
 
 const minutes = Number(process.argv[2] ?? "10");
 const TICK_MS = 1000 / 120;
@@ -124,7 +120,9 @@ const pump = (): void => {
   if (now - windowStart >= 10_000) {
     lateness.sort((a, b) => a - b);
     const pct = (q: number): number =>
-      lateness.length ? lateness[Math.min(lateness.length - 1, Math.floor(q * lateness.length))]! : 0;
+      lateness.length
+        ? lateness[Math.min(lateness.length - 1, Math.floor(q * lateness.length))]!
+        : 0;
     jlog({
       window_s: 10,
       tick,
@@ -142,15 +140,16 @@ const pump = (): void => {
     setTimeout(pump, 1);
   } else {
     readerWorker.postMessage("stop");
-    readerWorker.once("message", (r: { reads: number; ok: number; torn: number; inconsistent: number }) => {
-      jlog({ event: "soak-complete", minutes, finalTick: tick, reader: r, reanchors });
-      const verdict =
-        r.inconsistent === 0 && reanchors >= 1 && published > 0
-          ? "SOAK-PASS"
-          : "SOAK-FAIL";
-      jlog({ verdict, inconsistentReads: r.inconsistent, reanchorsObserved: reanchors });
-      void readerWorker.terminate().then(() => process.exit(verdict === "SOAK-PASS" ? 0 : 1));
-    });
+    readerWorker.once(
+      "message",
+      (r: { reads: number; ok: number; torn: number; inconsistent: number }) => {
+        jlog({ event: "soak-complete", minutes, finalTick: tick, reader: r, reanchors });
+        const verdict =
+          r.inconsistent === 0 && reanchors >= 1 && published > 0 ? "SOAK-PASS" : "SOAK-FAIL";
+        jlog({ verdict, inconsistentReads: r.inconsistent, reanchorsObserved: reanchors });
+        void readerWorker.terminate().then(() => process.exit(verdict === "SOAK-PASS" ? 0 : 1));
+      },
+    );
   }
 };
 jlog({ event: "soak-start", minutes, tickHz: 120, maxCatchupTicks: MAX_CATCHUP_TICKS });

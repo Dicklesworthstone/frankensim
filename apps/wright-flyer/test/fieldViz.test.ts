@@ -12,19 +12,19 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  bindProbes,
+  buildGlyphInstances,
+  divergenceOverlay,
+  type FieldArrays,
   GRAD_NORM_FLOOR,
+  integrateStreamlines,
+  legendConfig,
   MAX_GLYPHS,
   MAX_PROBES,
   MAX_SEEDS,
   MAX_STEPS,
   WAKE_FADE_PRESENTATION_ONLY,
-  bindProbes,
-  buildGlyphInstances,
-  divergenceOverlay,
-  integrateStreamlines,
-  legendConfig,
   wakeAgeFade,
-  type FieldArrays,
 } from "../src/fieldViz.ts";
 
 function jlog(kase: string, payload: string): void {
@@ -81,7 +81,12 @@ test("glyph filtering: invalid and core points excluded per item", () => {
   if (r.ok) {
     assert.equal(r.value.count, 4);
     // Positions of kept glyphs are exactly points 0,2,4,5 (x = index).
-    const xs = [r.value.positions[0], r.value.positions[3], r.value.positions[6], r.value.positions[9]];
+    const xs = [
+      r.value.positions[0],
+      r.value.positions[3],
+      r.value.positions[6],
+      r.value.positions[9],
+    ];
     assert.deepEqual(xs, [0, 2, 4, 5]);
     // Directions are unit vectors of u.
     const mag = Math.hypot(8, 0, 0.5);
@@ -209,7 +214,10 @@ test("legend honesty: 'total flow' never with a supported force-coupled omission
 
 test("probe binding: nearest point, deterministic tie-break, cap", () => {
   const f = makeField(10);
-  const r = bindProbes(f, [[4.4, 0, 0], [0, 0, 0]]);
+  const r = bindProbes(f, [
+    [4.4, 0, 0],
+    [0, 0, 0],
+  ]);
   assert.ok(r.ok);
   if (r.ok) {
     assert.equal(r.value[0].pointIndex, 4);

@@ -2,8 +2,8 @@
 // Fresh browser per boot: worker/wasm state must be cold for the
 // determinism claim to mean anything.
 import { accessSync } from "node:fs";
-import { JsonlCapture } from "./lib.mjs";
 import puppeteer from "puppeteer-core";
+import { JsonlCapture } from "./lib.mjs";
 
 const CHROME_CANDIDATES = [
   process.env.WF_CHROME_BIN,
@@ -104,36 +104,43 @@ export async function bootOnce({
           if (refusals.length > 0) {
             throw new BootRefusal("SIM_REFUSAL", JSON.stringify(refusals));
           }
-          throw new BootRefusal("RUN_TIMEOUT", `bench suite did not complete within ${timeoutMs}ms`);
+          throw new BootRefusal(
+            "RUN_TIMEOUT",
+            `bench suite did not complete within ${timeoutMs}ms`,
+          );
         }
         await new Promise((r) => setTimeout(r, 500));
       }
     } else {
-    // Terminal OR refusal, whichever comes first. The card is the app's own
-    // end-of-run signal; the JSONL line is cross-checked by extractReceipts.
-    await Promise.race([
-      page.waitForFunction(
-        () => {
-          const el = document.getElementById("wf-results-card");
-          return el !== null && el.style.display !== "none" && (el.textContent ?? "").length > 0;
-        },
-        { timeout: timeoutMs, polling: 250 },
-      ),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`)), timeoutMs),
-      ),
-    ]).catch((error) => {
-      const refusals = capture.lines().filter((r) => r.stage === "sim-refusal");
-      if (refusals.length > 0) {
-        throw new BootRefusal("SIM_REFUSAL", JSON.stringify(refusals));
-      }
-      if (!(error instanceof BootRefusal)) {
-        // The waitForFunction arm rejects with a bare puppeteer
-        // TimeoutError at the same deadline; keep the refusal typed.
-        throw new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`);
-      }
-      throw error;
-    });
+      // Terminal OR refusal, whichever comes first. The card is the app's own
+      // end-of-run signal; the JSONL line is cross-checked by extractReceipts.
+      await Promise.race([
+        page.waitForFunction(
+          () => {
+            const el = document.getElementById("wf-results-card");
+            return el !== null && el.style.display !== "none" && (el.textContent ?? "").length > 0;
+          },
+          { timeout: timeoutMs, polling: 250 },
+        ),
+        new Promise((_, reject) =>
+          setTimeout(
+            () =>
+              reject(new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`)),
+            timeoutMs,
+          ),
+        ),
+      ]).catch((error) => {
+        const refusals = capture.lines().filter((r) => r.stage === "sim-refusal");
+        if (refusals.length > 0) {
+          throw new BootRefusal("SIM_REFUSAL", JSON.stringify(refusals));
+        }
+        if (!(error instanceof BootRefusal)) {
+          // The waitForFunction arm rejects with a bare puppeteer
+          // TimeoutError at the same deadline; keep the refusal typed.
+          throw new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`);
+        }
+        throw error;
+      });
     }
     return { lines: capture.lines(), captureRefusals: capture.refusals() };
   } finally {

@@ -7,15 +7,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  BASE_FOV_DEG,
-  easeCameraToward,
-  speedFov,
-  type CameraState,
-} from "../src/camera.ts";
+import { BASE_FOV_DEG, type CameraState, easeCameraToward, speedFov } from "../src/camera.ts";
 
 const start: CameraState = { pos: [0, 0, 0], look: [10, 0, 0], fovDeg: BASE_FOV_DEG };
-const target = { pos: [20, 10, 6] as [number, number, number], look: [30, 5, 0] as [number, number, number] };
+const target = {
+  pos: [20, 10, 6] as [number, number, number],
+  look: [30, 5, 0] as [number, number, number],
+};
 
 test("easing approaches monotonically and converges at the target", () => {
   let s = start;
@@ -42,10 +40,7 @@ test("hostile dt never throws; huge dt effectively snaps to target", () => {
   const negative = easeCameraToward(start, target, -5); // clock jitter
   assert.deepEqual(negative.pos, start.pos, "dt<0 holds position");
   const nan = easeCameraToward(start, target, Number.NaN);
-  assert.ok(
-    Math.abs(nan.pos[0]! - target.pos[0]!) < 0.2,
-    "NaN dt recovers instead of crashing",
-  );
+  assert.ok(Math.abs(nan.pos[0]! - target.pos[0]!) < 0.2, "NaN dt recovers instead of crashing");
 });
 
 test("frame-rate independence: two 30fps steps equal one 60fps step pair", () => {
@@ -55,9 +50,7 @@ test("frame-rate independence: two 30fps steps equal one 60fps step pair", () =>
   let s = start;
   s = easeCameraToward(s, target, 1 / 30);
   s = easeCameraToward(s, target, 1 / 30);
-  const err =
-    Math.abs(single.pos[0]! - s.pos[0]!) /
-    Math.max(1, Math.abs(target.pos[0]!));
+  const err = Math.abs(single.pos[0]! - s.pos[0]!) / Math.max(1, Math.abs(target.pos[0]!));
   assert.ok(err < 0.05, `frame-rate gap ${err.toFixed(4)}`);
 });
 

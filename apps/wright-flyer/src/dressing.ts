@@ -84,9 +84,7 @@ export function gullPose(
   // Beat-vs-soar: a slow square-ish cycle decides, the flap is a sine.
   const cycle = Math.sin(0.17 * t + g.phase * 3);
   const soaring = cycle < g.glide * 2 - 1;
-  const flapRad = soaring
-    ? 0.28
-    : 0.65 * Math.sin(2 * Math.PI * g.flapHz * t + g.phase);
+  const flapRad = soaring ? 0.28 : 0.65 * Math.sin(2 * Math.PI * g.flapHz * t + g.phase);
   return { x, y, z, headingRad, flapRad };
 }
 
@@ -284,18 +282,12 @@ export function hash01(n: number): number {
  * the climb rate of the bob term (nose down on descent, up on climb,
  * capped ±20°). Roll sign follows ω's sign — verify visually against
  * the turn direction in the scene battery screenshot. */
-export function gullAttitude(
-  g: GullPath,
-  t: number,
-): { rollRad: number; pitchRad: number } {
+export function gullAttitude(g: GullPath, t: number): { rollRad: number; pitchRad: number } {
   const speed = Math.abs(g.omega) * g.radius;
   const bank = Math.atan((speed * Math.abs(g.omega)) / 9.81);
   const rollRad = Math.min(1.0, bank) * Math.sign(g.omega);
   const climbMps = g.bob * 0.31 * Math.cos(0.31 * t + g.phase * 2);
-  const pitchRad = Math.max(
-    -0.35,
-    Math.min(0.35, -Math.atan2(climbMps, Math.max(speed, 0.5))),
-  );
+  const pitchRad = Math.max(-0.35, Math.min(0.35, -Math.atan2(climbMps, Math.max(speed, 0.5))));
   return { rollRad, pitchRad };
 }
 
@@ -363,8 +355,8 @@ export function flybyPose(
   p: FlybyPath,
   t: number,
 ): { x: number; y: number; z: number; headingRad: number; flapRad: number } | null {
-  const track = (((p.speedMps * t + p.offsetM) % (2 * p.halfSpanM)) + 2 * p.halfSpanM) %
-    (2 * p.halfSpanM);
+  const track =
+    (((p.speedMps * t + p.offsetM) % (2 * p.halfSpanM)) + 2 * p.halfSpanM) % (2 * p.halfSpanM);
   const s = track - p.halfSpanM;
   if (Math.abs(s) > p.halfSpanM - 8) {
     return null;
@@ -489,10 +481,8 @@ export function scrubField(
   }
   const rand = lcg(seed ^ 0x9e3779b9);
   const out: ScrubPlacement[] = [];
-  const inRailCorridor = (x: number, z: number): boolean =>
-    Math.abs(z) < 10 && x > -8 && x < 42;
-  const inCampClearing = (x: number, z: number): boolean =>
-    x > -48 && x < -8 && z > -27 && z < -3;
+  const inRailCorridor = (x: number, z: number): boolean => Math.abs(z) < 10 && x > -8 && x < 42;
+  const inCampClearing = (x: number, z: number): boolean => x > -48 && x < -8 && z > -27 && z < -3;
   let guard = 0;
   while (out.length < total && guard < total * 40) {
     guard += 1;
@@ -561,7 +551,7 @@ export function flagPoint(
   return {
     x: -s * (0.9 + windMps * 0.05),
     y: -droop + 0.06 * wave * s,
-    z: 0.10 * s * wave,
+    z: 0.1 * s * wave,
   };
 }
 
@@ -577,7 +567,7 @@ export function smokePuff(
   const lifeS = 5.5 + hash01(i * 71 + 5) * 3.5;
   const u = FRACT(t / lifeS + hash01(i * 73 + 9));
   const rise = 0.5 + u * (5.5 + hash01(i * 79 + 2) * 2.5);
-  const bend = (rise * rise) / 40 * (0.5 + windMps / 12);
+  const bend = ((rise * rise) / 40) * (0.5 + windMps / 12);
   const sway = 0.3 * Math.sin(u * 7 + hash01(i * 83 + 4) * 6.28) * u;
   const fade = u < 0.12 ? u / 0.12 : 1 - (u - 0.12) / 0.88;
   return {

@@ -1,18 +1,19 @@
 // Unit battery for e2e/lib.mjs (bead frankensim-xsz8b).
 // Run: node --test test/e2eLib.test.mjs
-import test from "node:test";
+
 import assert from "node:assert/strict";
+import test from "node:test";
 import {
+  compareRuns,
+  countActuatedSamples,
+  countLatencySamples,
+  digestLooksReal,
+  extractQosStates,
+  extractReceipts,
   JsonlCapture,
   LOG_CAP,
   RefusalCodes,
   redactRecord,
-  extractReceipts,
-  extractQosStates,
-  countLatencySamples,
-  countActuatedSamples,
-  compareRuns,
-  digestLooksReal,
 } from "../e2e/lib.mjs";
 
 function line(obj) {
@@ -63,15 +64,28 @@ test("redaction strips secret-looking keys at any depth", () => {
   assert.equal(redacted.listNote, "authorization"); // value text is not a key
 });
 
-const GOOD_READY = { suite: "wright-flyer-app", stage: "sim-ready", tick0Digest: HEX64, runIntentId: "r1" };
-const GOOD_TERMINAL = { suite: "wright-flyer-app", stage: "sim-terminal", phase: "ended:envelope-exceeded", tick: 1390, digest: "cd".repeat(32) };
+const GOOD_READY = {
+  suite: "wright-flyer-app",
+  stage: "sim-ready",
+  tick0Digest: HEX64,
+  runIntentId: "r1",
+};
+const GOOD_TERMINAL = {
+  suite: "wright-flyer-app",
+  stage: "sim-terminal",
+  phase: "ended:envelope-exceeded",
+  tick: 1390,
+  digest: "cd".repeat(32),
+};
 
 test("extractReceipts accepts an ordered healthy boot", () => {
-  const receipts = extractReceipts([
-    line({ stage: "capability-probe", crossOriginIsolated: true }),
-    line(GOOD_READY),
-    line(GOOD_TERMINAL),
-  ].map((l) => JSON.parse(l)));
+  const receipts = extractReceipts(
+    [
+      line({ stage: "capability-probe", crossOriginIsolated: true }),
+      line(GOOD_READY),
+      line(GOOD_TERMINAL),
+    ].map((l) => JSON.parse(l)),
+  );
   assert.equal(receipts.ok, true);
   assert.equal(receipts.tick0Digest, HEX64);
   assert.equal(receipts.finalDigest, GOOD_TERMINAL.digest);
@@ -79,13 +93,18 @@ test("extractReceipts accepts an ordered healthy boot", () => {
 });
 
 test("extractReceipts refuses missing sim-ready with typed MISSING_STAGE + MISSING_DIGEST", () => {
-  const receipts = extractReceipts([
-    line({ stage: "capability-probe" }),
-    line(GOOD_TERMINAL),
-  ].map((l) => JSON.parse(l)));
+  const receipts = extractReceipts(
+    [line({ stage: "capability-probe" }), line(GOOD_TERMINAL)].map((l) => JSON.parse(l)),
+  );
   assert.equal(receipts.ok, false);
-  assert.ok(receipts.errors.some((e) => e.code === RefusalCodes.MISSING_STAGE && e.stage === "sim-ready"));
-  assert.ok(receipts.errors.some((e) => e.code === RefusalCodes.MISSING_DIGEST && e.field === "tick0Digest"));
+  assert.ok(
+    receipts.errors.some((e) => e.code === RefusalCodes.MISSING_STAGE && e.stage === "sim-ready"),
+  );
+  assert.ok(
+    receipts.errors.some(
+      (e) => e.code === RefusalCodes.MISSING_DIGEST && e.field === "tick0Digest",
+    ),
+  );
 });
 
 test("extractQosStates returns ordered governor states only", () => {

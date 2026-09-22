@@ -35,9 +35,7 @@ test("the file is a structurally valid glTF-2 binary with draco required", () =>
     "draco must be declared required (the loader contract)",
   );
   assert.equal(gltf.meshes?.length, 1);
-  console.log(
-    JSON.stringify({ suite: "wf-asset", case: "structure", meshes: gltf.meshes.length }),
-  );
+  console.log(JSON.stringify({ suite: "wf-asset", case: "structure", meshes: gltf.meshes.length }));
 });
 
 test("STL companion matches its record and is a valid binary STL", () => {

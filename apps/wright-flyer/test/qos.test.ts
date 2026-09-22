@@ -13,8 +13,8 @@ import {
   PROFILES,
   QOS_V1,
   QosGovernor,
-  validatePresentationProfile,
   type QosSpec,
+  validatePresentationProfile,
 } from "../src/qos.ts";
 
 const SPEC: QosSpec = {
@@ -123,10 +123,7 @@ test("tier immutability: a physics knob in a profile REFUSES", () => {
     () => validatePresentationProfile({ pixelRatioCap: 1, simTickHz: 60 }),
     /physics-tier immutability/,
   );
-  assert.throws(
-    () => validatePresentationProfile({ couplingCap: 4 }),
-    /physics-tier immutability/,
-  );
+  assert.throws(() => validatePresentationProfile({ couplingCap: 4 }), /physics-tier immutability/);
   // Every shipped profile passes, is frozen, and Normal carries no badge.
   for (const [state, profile] of Object.entries(PROFILES)) {
     assert.doesNotThrow(() =>

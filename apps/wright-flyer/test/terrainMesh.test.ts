@@ -10,9 +10,9 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   arrivalCamera,
-  bigHillDetail,
   BIG_HILL_CENTER_M,
   BIG_HILL_PEAK_M,
+  bigHillDetail,
   buildTerrainArrays,
   duneDetail,
   heightAt,
@@ -21,10 +21,16 @@ import {
 } from "../src/terrainMesh.ts";
 
 const grid = JSON.parse(
-  readFileSync(new URL("../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json", import.meta.url),
+    "utf8",
+  ),
 ) as TerrainGridJson & { rows_south_to_north: number[][] };
 const prov = JSON.parse(
-  readFileSync(new URL("../../../data/wright-flyer/terrain/terrain-provenance-v1.json", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../../../data/wright-flyer/terrain/terrain-provenance-v1.json", import.meta.url),
+    "utf8",
+  ),
 );
 
 test("heightAt is exact at every node (third-implementation agreement)", () => {
@@ -36,8 +42,11 @@ test("heightAt is exact at every node (third-implementation agreement)", () => {
   // Midpoint = 4-node mean (bilinear identity).
   const mid = heightAt(grid, 62.5, 62.5);
   const mean =
-    (grid.rows_south_to_north[0]![0]! + grid.rows_south_to_north[0]![1]! +
-     grid.rows_south_to_north[1]![0]! + grid.rows_south_to_north[1]![1]!) / 4;
+    (grid.rows_south_to_north[0]![0]! +
+      grid.rows_south_to_north[0]![1]! +
+      grid.rows_south_to_north[1]![0]! +
+      grid.rows_south_to_north[1]![1]!) /
+    4;
   assert.ok(Math.abs(mid - mean) < 1e-12);
 });
 
@@ -116,7 +125,7 @@ test("LOD terrain keeps survey corners and packs vertices near launch", () => {
   let best = Infinity;
   for (let v = 0; v < nv * nv; v++) {
     const dx = positions[v * 3]! - 0;
-    const dz = positions[v * 3 + 2]! - (-625);
+    const dz = positions[v * 3 + 2]! - -625;
     best = Math.min(best, Math.hypot(dx, dz));
   }
   assert.ok(best < 8, `inner ring too coarse near launch: ${best.toFixed(2)} m`);
@@ -127,7 +136,11 @@ test("LOD terrain keeps survey corners and packs vertices near launch", () => {
 test("dune relief keeps the launch/camp corridor at survey height", () => {
   // The whole rail run, camp, and landing flat: exactly zero detail.
   for (const [x, z] of [
-    [0, 0], [18.3, 0], [-40, -13], [-26, -21], [30, 12],
+    [0, 0],
+    [18.3, 0],
+    [-40, -13],
+    [-26, -21],
+    [30, 12],
   ] as const) {
     assert.equal(duneDetail(x, z), 0, `corridor (${x},${z})`);
     assert.equal(bigHillDetail(x, z), 0, `far from Big Hill (${x},${z})`);

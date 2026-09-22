@@ -37,7 +37,7 @@ test("derived air state re-computed from the recorded measurements", () => {
   // The cold-day density must exceed standard sea level by ~5-7%.
   assert.ok(rho / 1.225 > 1.04 && rho / 1.225 < 1.08, "density advantage band");
   // Sutherland viscosity at T.
-  const mu = (1.458e-6 * Math.pow(t_k, 1.5)) / (t_k + 110.4);
+  const mu = (1.458e-6 * t_k ** 1.5) / (t_k + 110.4);
   assert.ok(Math.abs(mu - doc.derived_air_state.mu_kg_m_s.value) / mu < 0.005, `mu ${mu}`);
   assert.ok(Math.abs(mu / rho - doc.derived_air_state.nu_m2_s.value) / (mu / rho) < 0.01);
   // Reynolds band from flyer-reference chord and the stated speed range.
@@ -51,7 +51,12 @@ test("derived air state re-computed from the recorded measurements", () => {
 test("every WindReference record carries the frozen schema with priors for nulls", () => {
   assert.ok(doc.wind_reference_records.length >= 2, "both 1903 instruments");
   for (const rec of doc.wind_reference_records) {
-    for (const field of ["instrument", "height_m_or_null", "averaging_interval_s_or_null", "provenance"]) {
+    for (const field of [
+      "instrument",
+      "height_m_or_null",
+      "averaging_interval_s_or_null",
+      "provenance",
+    ]) {
       assert.ok(field in rec, `record missing ${field}`);
     }
     if (rec.height_m_or_null === null) {
@@ -71,7 +76,10 @@ test("negative findings and attributions are recorded honestly", () => {
   assert.match(doc.dec17_1903_records.wind.bureau_ledger.finding, /No Record/);
   assert.match(doc.dec17_1903_records.temperature.ice_on_puddles.note, /1913/);
   assert.equal(doc.dec17_1903_records.station_metadata.anemometer.status, "not-published");
-  assert.match(doc.derived_air_state.reynolds_flight.literature_note, /order-of-magnitude convention/);
+  assert.match(
+    doc.derived_air_state.reynolds_flight.literature_note,
+    /order-of-magnitude convention/,
+  );
 });
 
 test("ensemble pre-registration: wide distributions, no gust trace anywhere", () => {

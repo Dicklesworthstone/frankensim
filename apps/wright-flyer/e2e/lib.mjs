@@ -162,9 +162,7 @@ export function digestLooksReal(digest) {
 
 /** Ordered QoS governor states seen in one boot (stage:"qos" lines). */
 export function extractQosStates(lines) {
-  return lines
-    .filter((r) => r?.stage === "qos" && typeof r.state === "string")
-    .map((r) => r.state);
+  return lines.filter((r) => r?.stage === "qos" && typeof r.state === "string").map((r) => r.state);
 }
 
 /**
@@ -173,9 +171,8 @@ export function extractQosStates(lines) {
  * not merely sent. This is the human-input efficacy receipt.
  */
 export function countLatencySamples(lines) {
-  return lines.filter(
-    (r) => r?.suite === "wf-input-latency" && typeof r.applied_tick === "number",
-  ).length;
+  return lines.filter((r) => r?.suite === "wf-input-latency" && typeof r.applied_tick === "number")
+    .length;
 }
 
 /**

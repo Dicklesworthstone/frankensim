@@ -8,11 +8,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CANARD_TRAVEL_DEG,
+  computePose,
   REFERENCE_DIMS,
   RUDDER_SLAVING,
   SCHEMATIC_PREVIEW_FRACTION,
   WARP_LIMIT_DEG,
-  computePose,
 } from "../src/airframe/pose.ts";
 
 const base = {
@@ -25,9 +25,9 @@ const base = {
 
 test("slaved rudder follows the flown 2.5 ratio; uncoupled uses the command", () => {
   const p = computePose({ ...base, warpDeg: 4 });
-  assert.ok(Math.abs(p.rudderRad - ((RUDDER_SLAVING * 4 * Math.PI) / 180)) < 1e-12);
+  assert.ok(Math.abs(p.rudderRad - (RUDDER_SLAVING * 4 * Math.PI) / 180) < 1e-12);
   const free = computePose({ ...base, coupled: false, warpDeg: 4, rudderDeg: -3 });
-  assert.ok(Math.abs(free.rudderRad - ((-3 * Math.PI) / 180)) < 1e-12);
+  assert.ok(Math.abs(free.rudderRad - (-3 * Math.PI) / 180) < 1e-12);
   assert.equal(p.clamped, false);
   console.log(JSON.stringify({ suite: "wf-pose", case: "slaving", rudderRad: p.rudderRad }));
 });
@@ -57,7 +57,10 @@ test("schematic-preview flags at the ±25% boundary and one step past", () => {
     span_m: REFERENCE_DIMS.span_m * (1 + SCHEMATIC_PREVIEW_FRACTION),
   };
   assert.equal(computePose(base, atBoundary).schematicPreview, false, "AT the cap: not flagged");
-  const past = { ...REFERENCE_DIMS, span_m: REFERENCE_DIMS.span_m * (1 + SCHEMATIC_PREVIEW_FRACTION) * (1 + 1e-9) };
+  const past = {
+    ...REFERENCE_DIMS,
+    span_m: REFERENCE_DIMS.span_m * (1 + SCHEMATIC_PREVIEW_FRACTION) * (1 + 1e-9),
+  };
   assert.equal(computePose(base, past).schematicPreview, true, "past the cap: flagged");
   const shrunk = { ...REFERENCE_DIMS, rudder_area_m2: REFERENCE_DIMS.rudder_area_m2 * 0.7 };
   assert.equal(computePose(base, shrunk).schematicPreview, true, "shrink flags too");

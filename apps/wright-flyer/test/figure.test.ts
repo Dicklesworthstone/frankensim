@@ -9,13 +9,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  armAimAngles,
   BINOCULAR_POSE,
+  figureSpec,
   GAIT_MAX_MPS,
+  gaitPose,
   KNEE_FLEX_MAX_RAD,
   PRONE_POSE,
-  armAimAngles,
-  figureSpec,
-  gaitPose,
   strideFreqHz,
 } from "../src/figure.ts";
 

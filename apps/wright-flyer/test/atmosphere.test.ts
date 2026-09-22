@@ -8,19 +8,18 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
+import type { RGB } from "../src/sky/atmosphere.ts";
 import {
-  SKY_DOME_FRAG_GLSL,
-  SKY_DOME_VERT_GLSL,
-  SUN_ELEVATION_DEG,
   aerialPerspective,
   fogColorHex,
   groundHazeColor,
   horizonColor,
+  SKY_DOME_FRAG_GLSL,
+  SKY_DOME_VERT_GLSL,
+  SUN_ELEVATION_DEG,
   sunDiscColor,
   zenithColor,
 } from "../src/sky/atmosphere.ts";
-import type { RGB } from "../src/sky/atmosphere.ts";
 
 function jlog(kase: string, payload: string): void {
   console.log(`{"suite":"wf-app-atmosphere","case":"${kase}",${payload}}`);
@@ -50,7 +49,11 @@ test("every exported function refuses a non-finite or non-normalized sunDir", ()
   const fns = [zenithColor, horizonColor, groundHazeColor, sunDiscColor, fogColorHex];
   for (const bad of bads) {
     for (const f of fns) {
-      assert.throws(() => f(bad as RGB), RangeError, `${f.name} must refuse ${JSON.stringify(bad)}`);
+      assert.throws(
+        () => f(bad as RGB),
+        RangeError,
+        `${f.name} must refuse ${JSON.stringify(bad)}`,
+      );
     }
     assert.throws(() => aerialPerspective(bad as RGB, 100), RangeError);
   }
@@ -141,9 +144,11 @@ const DISC_EDGE_DELTA = 0.00006;
 const WELL_OFF_AXIS_COS = Math.cos((5 * Math.PI) / 180);
 
 test("Mie glow is strongest along the sun direction and decays off-axis", () => {
-  const glowAt = (mu: number): number => Math.pow(Math.max(mu, 0), MIE_N);
+  const glowAt = (mu: number): number => Math.max(mu, 0) ** MIE_N;
   // strictly approaching the sun: mu rises to exactly 1 on-axis
-  const mus = [180, 120, 90, 45, 10, 5, 2, 1, 0].map((offDeg) => Math.cos((offDeg * Math.PI) / 180));
+  const mus = [180, 120, 90, 45, 10, 5, 2, 1, 0].map((offDeg) =>
+    Math.cos((offDeg * Math.PI) / 180),
+  );
   let prev = -1;
   for (const mu of mus) {
     const g = glowAt(mu);
@@ -154,10 +159,7 @@ test("Mie glow is strongest along the sun direction and decays off-axis", () => 
   assert.equal(glowAt(1), 1, "glow saturates along sunDir");
   // substring sync check: the shader really applies uGlowStrength this way
   assert.match(SKY_DOME_FRAG_GLSL, /float mu = dot\(dir, uSunDirection\)/);
-  assert.match(
-    SKY_DOME_FRAG_GLSL,
-    /pow\(max\(mu, 0\.0\), MIE_N\) \* uGlowStrength/,
-  );
+  assert.match(SKY_DOME_FRAG_GLSL, /pow\(max\(mu, 0\.0\), MIE_N\) \* uGlowStrength/);
 });
 
 test("disc term is zero away from the sun and ~1 at the core", () => {
@@ -174,10 +176,7 @@ test("disc term is zero away from the sun and ~1 at the core", () => {
   const limbLo = discCos - DISC_EDGE_DELTA / 2;
   const mid = discAt(limbLo, discCos);
   assert.ok(mid > 0 && mid < 1, `limb midpoint inside (0,1): ${mid}`);
-  assert.match(
-    SKY_DOME_FRAG_GLSL,
-    /smoothstep\(uDiscCos - DISC_EDGE_DELTA, uDiscCos, mu\)/,
-  );
+  assert.match(SKY_DOME_FRAG_GLSL, /smoothstep\(uDiscCos - DISC_EDGE_DELTA, uDiscCos, mu\)/);
 });
 
 test("GLSL chunks carry the contracted uniforms, varyings, and structure", () => {
@@ -192,9 +191,12 @@ test("GLSL chunks carry the contracted uniforms, varyings, and structure", () =>
     "vWorldPos", // consumes the vertex stage's varying
   ];
   for (const name of fragRequired) {
-    assert.ok(SKY_DOME_FRAG_GLSL.includes(`uniform vec3 ${name}`) ||
-      SKY_DOME_FRAG_GLSL.includes(`uniform float ${name}`) ||
-      SKY_DOME_FRAG_GLSL.includes(name), `frag missing ${name}`);
+    assert.ok(
+      SKY_DOME_FRAG_GLSL.includes(`uniform vec3 ${name}`) ||
+        SKY_DOME_FRAG_GLSL.includes(`uniform float ${name}`) ||
+        SKY_DOME_FRAG_GLSL.includes(name),
+      `frag missing ${name}`,
+    );
   }
   assert.ok(SKY_DOME_VERT_GLSL.includes("varying vec3 vWorldPos"), "vert passes world varying");
   // gradient shape: mix(horizon, zenith, pow(max(dir.y, 0), K))
@@ -204,5 +206,8 @@ test("GLSL chunks carry the contracted uniforms, varyings, and structure", () =>
   // premultiplied-linear output, no tonemapping in-shader
   assert.match(SKY_DOME_FRAG_GLSL, /vec4\(col, 1\.0\)/);
   assert.ok(!SKY_DOME_FRAG_GLSL.toLowerCase().includes("tonemap"), "tone mapping stays downstream");
-  jlog("glsl-integrity", `"fragBytes":${SKY_DOME_FRAG_GLSL.length},"vertBytes":${SKY_DOME_VERT_GLSL.length}`);
+  jlog(
+    "glsl-integrity",
+    `"fragBytes":${SKY_DOME_FRAG_GLSL.length},"vertBytes":${SKY_DOME_VERT_GLSL.length}`,
+  );
 });

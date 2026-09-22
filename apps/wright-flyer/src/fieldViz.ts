@@ -187,9 +187,8 @@ export function integrateStreamlines(
         ended = "left-domain";
         break;
       }
-      const at = (
-        q: [number, number, number],
-      ): readonly [number, number, number] | null => sampler(q);
+      const at = (q: [number, number, number]): readonly [number, number, number] | null =>
+        sampler(q);
       const mid1: [number, number, number] = [
         p[0] + 0.5 * stepS * k1[0],
         p[1] + 0.5 * stepS * k1[1],

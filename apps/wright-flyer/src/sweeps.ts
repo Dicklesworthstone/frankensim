@@ -40,10 +40,7 @@ export interface DesignPoint {
 }
 
 /** Build the (1-D or 2-D) design grid, row-major, deterministic. */
-export function makeSweepGrid(
-  axis1: SweepAxis,
-  axis2?: SweepAxis,
-): SweepResult<DesignPoint[]> {
+export function makeSweepGrid(axis1: SweepAxis, axis2?: SweepAxis): SweepResult<DesignPoint[]> {
   for (const axis of axis2 === undefined ? [axis1] : [axis1, axis2]) {
     if (axis.values.length === 0 || axis.values.length > MAX_AXIS_POINTS) {
       return refuse(
@@ -53,7 +50,11 @@ export function makeSweepGrid(
       );
     }
     if (axis.values.some((v) => !Number.isFinite(v)) || axis.name.trim() === "") {
-      return refuse("sweep-axis-invalid", `${axis.name}: non-finite or unnamed`, "finite named axes");
+      return refuse(
+        "sweep-axis-invalid",
+        `${axis.name}: non-finite or unnamed`,
+        "finite named axes",
+      );
     }
   }
   const total = axis1.values.length * (axis2?.values.length ?? 1);

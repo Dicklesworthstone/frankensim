@@ -100,7 +100,7 @@ export class CaptionStream {
               ? `Final plunge left the certified aero envelope at ${(s.tick / 120).toFixed(1)} s — the run ends with a receipt, not a guess.`
               : s.phase === "ended:damage-model-unavailable"
                 ? "A swept-feature strike ended the physical run — cinematic continuation is presentation only."
-              : "Tick budget reached — still flying.";
+                : "Tick budget reached — still flying.";
       this.captions.push({
         atTick: s.tick,
         label: s.phase === "ended:envelope-exceeded" ? "Verified" : "Estimated",

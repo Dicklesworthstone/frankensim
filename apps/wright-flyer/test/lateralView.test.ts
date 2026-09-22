@@ -11,9 +11,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_WINDOW,
   admitLinkagePair,
   adverseYawVerdict,
+  MAX_WINDOW,
   spiralIndicator,
   validateDecomposition,
   type YawDecomposition,
@@ -81,7 +81,9 @@ test("1901-mode adverse yaw REPRODUCED on the decoupled fixture; coupled twin is
   // Loaded twist is reported distinct from the command (aeroelastic
   // loss visible).
   const rows = decoupledRows(4);
-  assert.ok(Math.abs((rows[1]?.loadedTwistRad ?? 0) / (rows[1]?.warpCommandRad ?? 1) - 0.62) < 1e-12);
+  assert.ok(
+    Math.abs((rows[1]?.loadedTwistRad ?? 0) / (rows[1]?.warpCommandRad ?? 1) - 0.62) < 1e-12,
+  );
   jlog("adverse-yaw", `"decoupled_adverse":true,"coupled_net_proverse":true`);
 });
 
@@ -92,7 +94,12 @@ test("broken decompositions refuse, never patched", () => {
   assert.ok(!v.ok && v.refusal.code === "lateral-decomposition-broken");
   assert.ok(!v.ok && v.refusal.message.includes("tick 5"), "first divergence localized");
   // Non-vacuity: a window with no commanded ticks refuses.
-  const idle = rows.map((r) => ({ ...r, warpCommandRad: 0, inducedDragYawNm: 0, netYawNm: r.profileYawNm }));
+  const idle = rows.map((r) => ({
+    ...r,
+    warpCommandRad: 0,
+    inducedDragYawNm: 0,
+    netYawNm: r.profileYawNm,
+  }));
   const nv = adverseYawVerdict(idle);
   assert.ok(!nv.ok && nv.refusal.code === "lateral-no-commanded-ticks");
   jlog("broken-split", `"code":"lateral-decomposition-broken"`);

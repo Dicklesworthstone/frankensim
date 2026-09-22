@@ -3,9 +3,9 @@
 // Leaf b will add a headerless static server for the degraded row.
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import net from "node:net";
 
 export class ServeRefusal extends Error {
   constructor(code, message) {
@@ -50,7 +50,15 @@ export async function startVitePreview({ timeoutMs = 30000 } = {}) {
   const port = await freePort();
   const child = spawn(
     process.execPath,
-    [path.join(appRoot, "node_modules", "vite", "bin", "vite.js"), "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    [
+      path.join(appRoot, "node_modules", "vite", "bin", "vite.js"),
+      "preview",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--strictPort",
+    ],
     { cwd: appRoot, stdio: ["ignore", "pipe", "pipe"] },
   );
   let stderrTail = "";
@@ -106,7 +114,7 @@ export async function startStaticDist({ timeoutMs = 15000 } = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       const urlPath = decodeURIComponent(new URL(req.url, "http://x").pathname);
-      let rel = urlPath === "/" ? "index.html" : urlPath.replace(/^\/+/, "");
+      const rel = urlPath === "/" ? "index.html" : urlPath.replace(/^\/+/, "");
       let filePath = path.normalize(path.join(distRoot, rel));
       if (!filePath.startsWith(distRoot + path.sep) && filePath !== distRoot) {
         res.writeHead(403).end("forbidden");

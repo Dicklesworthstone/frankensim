@@ -66,9 +66,7 @@ export class TransferablePool {
     this.metrics.outstanding -= 1;
     if (this.free.length < this.capacity) {
       this.free.push(
-        buffer.byteLength === this.bytesPerBuffer
-          ? buffer
-          : new ArrayBuffer(this.bytesPerBuffer),
+        buffer.byteLength === this.bytesPerBuffer ? buffer : new ArrayBuffer(this.bytesPerBuffer),
       );
     }
   }

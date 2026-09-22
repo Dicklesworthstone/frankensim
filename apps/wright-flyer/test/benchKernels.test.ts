@@ -3,9 +3,9 @@
 // Pins the cross-host contract: fixed kernel order, sane percentile
 // fields, typed NO-DATA coverage, and node/SAB availability semantics.
 
-import test from "node:test";
 import assert from "node:assert/strict";
-import { runBenchSuite, standingNoData, KERNEL_NAMES } from "../src/bench/kernels.ts";
+import test from "node:test";
+import { KERNEL_NAMES, runBenchSuite, standingNoData } from "../src/bench/kernels.ts";
 
 const SAB_AVAILABLE = typeof SharedArrayBuffer !== "undefined";
 
@@ -21,7 +21,9 @@ function assertSaneRow(row) {
 
 test("suite returns the fixed kernel order for this context", () => {
   const { rows } = runBenchSuite();
-  const expected = SAB_AVAILABLE ? [...KERNEL_NAMES] : KERNEL_NAMES.filter((n) => n !== "seqlock-publish-256f64");
+  const expected = SAB_AVAILABLE
+    ? [...KERNEL_NAMES]
+    : KERNEL_NAMES.filter((n) => n !== "seqlock-publish-256f64");
   assert.deepEqual(
     rows.map((r) => r.name),
     expected,
@@ -46,7 +48,10 @@ test("standing NO-DATA rows are always present; seqlock/GPU NO-DATA typed in hea
   if (!SAB_AVAILABLE) {
     assert.ok(names.has("seqlock-publish-256f64"), "fallback origin must type its seqlock gap");
   } else {
-    assert.ok(!names.has("seqlock-publish-256f64"), "measured kernel must not double-report as NO-DATA");
+    assert.ok(
+      !names.has("seqlock-publish-256f64"),
+      "measured kernel must not double-report as NO-DATA",
+    );
   }
   if (typeof WebGL2RenderingContext === "undefined") {
     assert.ok(names.has("float32-gpu-upload"), "headless context must type its GPU upload gap");

@@ -7,8 +7,8 @@ import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
-import { makeArtifactDir } from "./serve.mjs";
 import { resolveChromeBin } from "./boot.mjs";
+import { makeArtifactDir } from "./serve.mjs";
 
 const appRoot = path.resolve(import.meta.dirname, "..");
 const artifactDir = makeArtifactDir("wf-photo-e2e-");

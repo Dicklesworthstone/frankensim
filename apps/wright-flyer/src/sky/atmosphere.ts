@@ -47,7 +47,7 @@ const OPTICAL_DEPTH_RGB: readonly [number, number, number] = [0.1, 0.16, 0.3];
  * twice the vertical column, which is what makes a low sun warm. */
 function airmass(elevDeg: number): number {
   const s = Math.sin(elevDeg * DEG_RAD);
-  return 1 / (s + 0.15 * Math.pow(elevDeg + 3.885, -1.253));
+  return 1 / (s + 0.15 * (elevDeg + 3.885) ** -1.253);
 }
 
 /** Fraction of DIRECT sunlight surviving the path to the observer at
@@ -82,7 +82,9 @@ function checkSunDir(sunDir: RGB): void {
     sunDir.length !== 3 ||
     !sunDir.every((c) => typeof c === "number" && Number.isFinite(c))
   ) {
-    throw new RangeError(`sun direction must be a finite [x, y, z] triple, got ${JSON.stringify(sunDir)}`);
+    throw new RangeError(
+      `sun direction must be a finite [x, y, z] triple, got ${JSON.stringify(sunDir)}`,
+    );
   }
   const len = Math.hypot(sunDir[0], sunDir[1], sunDir[2]);
   if (Math.abs(len - 1) > 1e-3) {
@@ -193,11 +195,7 @@ function fogLinear(sunDir: RGB): RGB {
   const h = horizonColor(sunDir);
   const g = groundHazeColor(sunDir);
   const gW = 0.35;
-  return [
-    h[0] * (1 - gW) + g[0] * gW,
-    h[1] * (1 - gW) + g[1] * gW,
-    h[2] * (1 - gW) + g[2] * gW,
-  ];
+  return [h[0] * (1 - gW) + g[0] * gW, h[1] * (1 - gW) + g[1] * gW, h[2] * (1 - gW) + g[2] * gW];
 }
 
 /** sRGB hex for THREE.Fog / scene.background. Encodes fogLinear()
@@ -206,10 +204,7 @@ function fogLinear(sunDir: RGB): RGB {
 export function fogColorHex(sunDir: RGB): number {
   checkSunDir(sunDir);
   const enc = (c: number): number =>
-    Math.round(
-      255 *
-        (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055),
-    );
+    Math.round(255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055));
   const f = fogLinear(sunDir);
   return (enc(clamp01(f[0])) << 16) | (enc(clamp01(f[1])) << 8) | enc(clamp01(f[2]));
 }

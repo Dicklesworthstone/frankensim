@@ -138,10 +138,8 @@ export class QosGovernor {
     const s = this.spec;
     let changed = false;
     // Escalation pressure (one level at a time; dwell-gated).
-    const escalateThreshold =
-      this.state === "normal" ? s.enterConstrainedMs : s.enterCriticalMs;
-    const deescalateThreshold =
-      this.state === "critical" ? s.exitCriticalMs : s.exitConstrainedMs;
+    const escalateThreshold = this.state === "normal" ? s.enterConstrainedMs : s.enterCriticalMs;
+    const deescalateThreshold = this.state === "critical" ? s.exitCriticalMs : s.exitConstrainedMs;
     if (this.state !== "critical" && frameMs > escalateThreshold) {
       this.escalateStreak += 1;
       this.deescalateStreak = 0;

@@ -27,7 +27,12 @@ const doc = JSON.parse(
     new URL("../../../data/wright-flyer/source-dossier-v1.json", import.meta.url),
     "utf8",
   ),
-) as { schema: string; attribution_correction: string; records: DossierRecord[]; no_claims: string };
+) as {
+  schema: string;
+  attribution_correction: string;
+  records: DossierRecord[];
+  no_claims: string;
+};
 
 const byId = new Map(doc.records.map((r) => [r.id, r]));
 const get = (id: string): DossierRecord => {
@@ -53,7 +58,12 @@ test("every record carries the complete lineage preimage (per-item, not totals)"
     assert.ok(r.derivation_steps.length > 0, `${r.id}: no derivation steps`);
     assert.ok(r.forbidden_claims.length > 0, `${r.id}: every source has a claim boundary`);
     console.log(
-      JSON.stringify({ suite: "wf-dossier", case: "lineage", id: r.id, group: r.independence_group }),
+      JSON.stringify({
+        suite: "wf-dossier",
+        case: "lineage",
+        id: r.id,
+        group: r.independence_group,
+      }),
     );
   }
 });
@@ -121,6 +131,9 @@ test("the attribution correction is present and repoints prop data", () => {
   assert.match(doc.attribution_correction, /2004-0211/);
   assert.match(doc.attribution_correction, /a2-props-bentend/);
   const props = get("a2-props-bentend");
-  assert.ok(props.citations.some((c) => c.includes("2.2944")), "JoA prop citation");
+  assert.ok(
+    props.citations.some((c) => c.includes("2.2944")),
+    "JoA prop citation",
+  );
   assert.ok(doc.no_claims.length > 40);
 });

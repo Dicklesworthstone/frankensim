@@ -9,30 +9,20 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
-
-import {
-  cardLines,
-  computeKpis,
-  kpiRecomputeDivergence,
-  type FlightKpis,
-} from "../src/sim/resultsCard.ts";
-import {
-  FlightRecorder,
-  RECORDING_SCHEMA_V1,
-  type FlightRecording,
-} from "../src/sim/replay.ts";
-import {
-  MODE_FIXED,
-  PAYLOAD_F64S,
-  PAYLOAD_F64S_V1,
-  dec17Scenario,
-} from "../src/sim/protocol.ts";
 import {
   fillPayload,
   parseDigestEnvelope,
   parseInitEnvelope,
   parseStepEnvelope,
 } from "../src/sim/engineFacade.ts";
+import { dec17Scenario, MODE_FIXED, PAYLOAD_F64S, PAYLOAD_F64S_V1 } from "../src/sim/protocol.ts";
+import { FlightRecorder, type FlightRecording, RECORDING_SCHEMA_V1 } from "../src/sim/replay.ts";
+import {
+  cardLines,
+  computeKpis,
+  type FlightKpis,
+  kpiRecomputeDivergence,
+} from "../src/sim/resultsCard.ts";
 
 function frame(fields: Partial<Record<number, number>>): Float64Array {
   const p = new Float64Array(PAYLOAD_F64S);

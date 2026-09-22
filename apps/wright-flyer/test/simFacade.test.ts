@@ -19,6 +19,8 @@ import {
   parseStepEnvelope,
 } from "../src/sim/engineFacade.ts";
 import {
+  dec17Scenario,
+  type MainToWorker,
   MODE_FIXED,
   P_ASSIST,
   P_DC_RAD,
@@ -39,9 +41,9 @@ import {
   PAYLOAD_LAYOUT_V2,
   PHASE_CODES,
   payloadLayoutHash,
+  type WorkerToMain,
 } from "../src/sim/protocol.ts";
 import { SimClient } from "../src/sim/simClient.ts";
-import { dec17Scenario, type MainToWorker, type WorkerToMain } from "../src/sim/protocol.ts";
 
 const jlog = (payload: Record<string, unknown>): void => {
   console.info(JSON.stringify({ suite: "wf-e52a-facade", ...payload }));
@@ -157,11 +159,13 @@ test("checkpoint envelope decodes only bounded lowercase hex bytes", () => {
   }
   assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0"}}').kind, "malformed");
   assert.equal(
-    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"A".repeat(32)}","checkpoint_hex":"00"}}`).kind,
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"A".repeat(32)}","checkpoint_hex":"00"}}`)
+      .kind,
     "malformed",
   );
   assert.equal(
-    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"00FF"}}`).kind,
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"00FF"}}`)
+      .kind,
     "malformed",
   );
   const refusal = parseCheckpointEnvelope(
@@ -383,9 +387,10 @@ test("checkpoint replies bind the request and active run across reinit races", (
   assert.deepEqual(refusals, []);
 
   worker.emit({ kind: "checkpoint", requestId: 2, runIntentId: runB, bytes: new Uint8Array([3]) });
-  assert.deepEqual(checkpoints.map(({ requestId, runIntentId, bytes }) => [requestId, runIntentId, [...bytes]]), [
-    [2, runB, [3]],
-  ]);
+  assert.deepEqual(
+    checkpoints.map(({ requestId, runIntentId, bytes }) => [requestId, runIntentId, [...bytes]]),
+    [[2, runB, [3]]],
+  );
   client.dispose();
 });
 
@@ -395,7 +400,11 @@ test("checkpoint replies bind the request and active run across reinit races", (
 const pkgPath = process.env.WF_PKG;
 if (pkgPath === undefined) {
   // Loud, structured, and impossible to mistake for coverage.
-  jlog({ case: "live-engine", skipped: true, reason: "WF_PKG unset — parser-vs-engine agreement NOT verified in this run" });
+  jlog({
+    case: "live-engine",
+    skipped: true,
+    reason: "WF_PKG unset — parser-vs-engine agreement NOT verified in this run",
+  });
 } else {
   const require = createRequire(import.meta.url);
   const wasm = require(pkgPath);
@@ -426,7 +435,10 @@ if (pkgPath === undefined) {
     assert.ok(last !== null && last.kind === "ok" && last.ended, "max-ticks terminal parsed");
     const digest = parseDigestEnvelope(wasm.flyer_engine_digest());
     assert.equal(typeof digest, "string", "real digest parses");
-    jlog({ case: "live-lifecycle", digest: typeof digest === "string" ? digest.slice(0, 16) : "?" });
+    jlog({
+      case: "live-lifecycle",
+      digest: typeof digest === "string" ? digest.slice(0, 16) : "?",
+    });
   });
 
   test("LIVE: real refusal envelopes parse as refusals with stable codes", () => {
@@ -435,7 +447,9 @@ if (pkgPath === undefined) {
     if (past.kind === "refusal") {
       assert.equal(past.refusal.code, "run-ended");
     }
-    const bad = parseInitEnvelope(wasm.flyer_engine_init(1n, 1.294, 11.0, 3, 0, 18.3, 24n, false, false));
+    const bad = parseInitEnvelope(
+      wasm.flyer_engine_init(1n, 1.294, 11.0, 3, 0, 18.3, 24n, false, false),
+    );
     assert.equal(bad.kind, "refusal");
     if (bad.kind === "refusal") {
       assert.equal(bad.refusal.code, "mode-invalid");

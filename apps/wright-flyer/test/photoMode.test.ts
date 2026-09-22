@@ -7,14 +7,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  PHOTO_FILTER,
-  PHOTO_MAX_PIXELS,
   admitPhotoSize,
   applyPhotoGrain,
   exportInstantPhoto,
+  PHOTO_FILTER,
+  PHOTO_MAX_PIXELS,
+  type PhotoUrlApi,
   photoFilename,
   photoGrainSeed,
-  type PhotoUrlApi,
 } from "../src/photoMode.ts";
 
 function fakeSource(width: number, height: number): HTMLCanvasElement {
@@ -113,7 +113,12 @@ test("size admission accepts the 4K cap and refuses cap+1 before allocation", ()
   if (!over.ok) {
     assert.equal(over.refusal.code, "photo-pixel-budget-exceeded");
   }
-  for (const [width, height] of [[0, 10], [10, 0], [1.5, 2], [Number.NaN, 2]]) {
+  for (const [width, height] of [
+    [0, 10],
+    [10, 0],
+    [1.5, 2],
+    [Number.NaN, 2],
+  ]) {
     const empty = admitPhotoSize(width, height);
     assert.equal(empty.ok, false);
     if (!empty.ok) {

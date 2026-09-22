@@ -4,8 +4,7 @@
 // assigns transforms — it must stay too simple to hide a bug.
 
 import type { FlyerAirframe } from "./parametricAirframe.ts";
-import type { FlyerPose } from "./pose.ts";
-import type { ControlState } from "./pose.ts";
+import type { ControlState, FlyerPose } from "./pose.ts";
 import { computePose } from "./pose.ts";
 
 export function applyPose(a: FlyerAirframe, p: FlyerPose): void {

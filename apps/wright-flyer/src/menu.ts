@@ -5,11 +5,11 @@
 
 import { flightByIndex, flightSeed } from "./missions/flights.ts";
 import {
+  dec17Scenario,
+  huffmanScenario,
   MODE_FIXED,
   MODE_HISTORICAL,
   MODE_HUMAN,
-  dec17Scenario,
-  huffmanScenario,
   type ScenarioInit,
 } from "./sim/protocol.ts";
 

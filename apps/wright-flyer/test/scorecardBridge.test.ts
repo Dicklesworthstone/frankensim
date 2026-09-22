@@ -11,11 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  MAX_ROWS,
-  bridgeScorecard,
-  type WfScorecardRow,
-} from "../src/scorecardBridge.ts";
+import { bridgeScorecard, MAX_ROWS, type WfScorecardRow } from "../src/scorecardBridge.ts";
 
 function jlog(kase: string, payload: string): void {
   console.log(`{"suite":"wf-app-scorecardbridge","case":"${kase}",${payload}}`);

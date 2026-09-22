@@ -14,19 +14,20 @@
 // input-latency samples carrying applied_tick; cross-boot digest identity
 // is NOT asserted there because control admission is device-time-derived.
 // Exit: 0 pass · 3 RUN_DIVERGENT · 4 FALSIFIER/NEGATIVE failed · 5 setup refusal.
-import path from "node:path";
+
 import { writeFile } from "node:fs/promises";
-import { startVitePreview, startStaticDist, makeArtifactDir } from "./serve.mjs";
-import { bootOnce, resolveChromeBin, BootRefusal } from "./boot.mjs";
+import path from "node:path";
+import { BootRefusal, bootOnce, resolveChromeBin } from "./boot.mjs";
 import {
   compareRuns,
-  countLatencySamples,
   countActuatedSamples,
+  countLatencySamples,
   digestLooksReal,
   extractQosStates,
   extractReceipts,
   RefusalCodes,
 } from "./lib.mjs";
+import { makeArtifactDir, startStaticDist, startVitePreview } from "./serve.mjs";
 
 const argv = process.argv.slice(2);
 const falsifierMode = argv.includes("--falsifier");
@@ -34,24 +35,43 @@ const rowArg = argv.find((a) => a.startsWith("--row="))?.slice(6) ?? "both";
 const negFlag = argv.find((a) => a.startsWith("--negative"));
 // Bare --negative runs BOTH gate negatives; --negative=human|qos narrows it.
 const negativeGates =
-  negFlag === undefined ? null : (negFlag.split("=")[1] ?? "both") === "both" ? ["human", "qos"] : [negFlag.split("=")[1]];
+  negFlag === undefined
+    ? null
+    : (negFlag.split("=")[1] ?? "both") === "both"
+      ? ["human", "qos"]
+      : [negFlag.split("=")[1]];
 if (
   !["sab", "fallback", "human", "qos", "both", "all"].includes(rowArg) ||
   (negFlag !== undefined && ![undefined, "human", "qos", "both"].includes(negFlag.split("=")[1]))
 ) {
-  console.error(JSON.stringify({ suite: "wf-e2e", verdict: "REFUSED", code: "BAD_ROW", row: rowArg, negative: negFlag ?? null }));
+  console.error(
+    JSON.stringify({
+      suite: "wf-e2e",
+      verdict: "REFUSED",
+      code: "BAD_ROW",
+      row: rowArg,
+      negative: negFlag ?? null,
+    }),
+  );
   process.exit(5);
 }
 
 function fail(code, payload, exitCode = 3) {
   console.error(JSON.stringify({ suite: "wf-e2e", verdict: "FAIL", code, ...payload }));
-  console.error(`repro: cd apps/wright-flyer && node e2e/run.mjs${falsifierMode ? " --falsifier" : ` --row=${rowArg}`}`);
+  console.error(
+    `repro: cd apps/wright-flyer && node e2e/run.mjs${falsifierMode ? " --falsifier" : ` --row=${rowArg}`}`,
+  );
   process.exit(exitCode);
 }
 
 if (!resolveChromeBin()) {
   console.error(
-    JSON.stringify({ suite: "wf-e2e", verdict: "REFUSED", code: "CHROME_NOT_FOUND", hint: "set WF_CHROME_BIN" }),
+    JSON.stringify({
+      suite: "wf-e2e",
+      verdict: "REFUSED",
+      code: "CHROME_NOT_FOUND",
+      hint: "set WF_CHROME_BIN",
+    }),
   );
   process.exit(5);
 }
@@ -102,7 +122,10 @@ async function runRow(kind, artifactDir) {
       fail("TRANSPORT_MISDECLARED", { row: kind, expected: "crossOriginIsolated=true" });
     }
     if (kind === "fallback" && receiptsA.capabilityProbe?.crossOriginIsolated === true) {
-      fail("TRANSPORT_MISDECLARED", { row: kind, expected: "crossOriginIsolated=false (headers leaked?)" });
+      fail("TRANSPORT_MISDECLARED", {
+        row: kind,
+        expected: "crossOriginIsolated=false (headers leaked?)",
+      });
     }
     if (kind === "human") {
       // Input-path EFFICACY: injected keydowns must drive a NON-neutral
@@ -112,7 +135,8 @@ async function runRow(kind, artifactDir) {
       if (samples < 1) {
         fail("INPUT_PATH_SILENT", {
           row: kind,
-          detail: "no non-neutral control admitted at an engine tick — injected keys never actuated",
+          detail:
+            "no non-neutral control admitted at an engine tick — injected keys never actuated",
         });
       }
       return {
@@ -185,13 +209,21 @@ async function runNegativeGate(gate, artifactDir) {
     if (gate === "human") {
       const samples = countActuatedSamples(a.lines);
       if (samples !== 0) {
-        fail("NEGATIVE_FAILED", { gate, detail: `${samples} actuated samples without injected keys` }, 4);
+        fail(
+          "NEGATIVE_FAILED",
+          { gate, detail: `${samples} actuated samples without injected keys` },
+          4,
+        );
       }
       return { gate, verdict: "NEGATIVE-OK", refuses: "INPUT_PATH_SILENT" };
     }
     const states = extractQosStates(a.lines);
     if (states.includes("constrained")) {
-      fail("NEGATIVE_FAILED", { gate, statesSeen: states, detail: "constrained observed with no CDP throttling" }, 4);
+      fail(
+        "NEGATIVE_FAILED",
+        { gate, statesSeen: states, detail: "constrained observed with no CDP throttling" },
+        4,
+      );
     }
     return { gate, verdict: "NEGATIVE-OK", refuses: "QOS_NOT_OBSERVED", qosStates: states };
   } finally {
@@ -201,20 +233,29 @@ async function runNegativeGate(gate, artifactDir) {
 
 const artifactDir = makeArtifactDir();
 try {
-  await writeFile(path.join(artifactDir, "mode.json"), JSON.stringify({ falsifierMode, rowArg, negativeGates }) + "\n");
+  await writeFile(
+    path.join(artifactDir, "mode.json"),
+    JSON.stringify({ falsifierMode, rowArg, negativeGates }) + "\n",
+  );
 } catch {}
 
 try {
-  const rows = negativeGates ?? (falsifierMode
-    ? ["sab"]
-    : rowArg === "both"
-      ? ["sab", "fallback"]
-      : rowArg === "all"
-        ? ["sab", "fallback", "human", "qos"]
-        : [rowArg]);
+  const rows =
+    negativeGates ??
+    (falsifierMode
+      ? ["sab"]
+      : rowArg === "both"
+        ? ["sab", "fallback"]
+        : rowArg === "all"
+          ? ["sab", "fallback", "human", "qos"]
+          : [rowArg]);
   const summaries = [];
   for (const row of rows) {
-    summaries.push(negativeGates === null ? await runRow(row, artifactDir) : await runNegativeGate(row, artifactDir));
+    summaries.push(
+      negativeGates === null
+        ? await runRow(row, artifactDir)
+        : await runNegativeGate(row, artifactDir),
+    );
   }
   console.log(
     JSON.stringify({

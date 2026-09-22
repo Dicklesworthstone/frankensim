@@ -52,10 +52,7 @@ export const RELEASE_DECAY_S = 0.5;
  * starts the instant Orville lets go instead of holding. Both inputs
  * null (never boarded) -> 0. Pure; replays identical.
  */
-export function glanceBlend(
-  elapsedOnRailS: number | null,
-  sinceReleaseS: number | null,
-): number {
+export function glanceBlend(elapsedOnRailS: number | null, sinceReleaseS: number | null): number {
   requireAge("elapsedOnRailS", elapsedOnRailS);
   requireAge("sinceReleaseS", sinceReleaseS);
   let w = 0;

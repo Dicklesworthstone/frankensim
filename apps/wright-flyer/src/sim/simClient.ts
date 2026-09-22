@@ -5,18 +5,18 @@
 // interpolated snapshot per frame. Decision logic lives in
 // snapshotView.ts (pure, tested); this file is browser glue.
 
+import { type ClockSyncSample, estimateClockOffsetMs } from "../transport/inputClock.ts";
+import { SeqlockReader, seqlockBytes } from "../transport/seqlock.ts";
 import {
+  type MainToWorker,
   PAYLOAD_F64S,
   payloadLayoutHash,
-  type MainToWorker,
   type RefusalEnvelope,
   type ScenarioInit,
   type WorkerToMain,
 } from "./protocol.ts";
-import { SeqlockReader, seqlockBytes } from "../transport/seqlock.ts";
-import { decodeSnapshot, interpolateSnapshots, type SimSnapshot } from "./snapshotView.ts";
 import { FlightRecorder, type FlightRecording } from "./replay.ts";
-import { estimateClockOffsetMs, type ClockSyncSample } from "../transport/inputClock.ts";
+import { decodeSnapshot, interpolateSnapshots, type SimSnapshot } from "./snapshotView.ts";
 
 const RING_SLOTS = 4;
 const SIM_TICK_S = 1 / 120;

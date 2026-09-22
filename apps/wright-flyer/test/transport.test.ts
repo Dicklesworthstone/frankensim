@@ -8,25 +8,24 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import {
+  type LeasedRingLayout,
+  LeasedRingReader,
+  LeasedRingWriter,
+  leasedRingBytes,
+  SLOT_LEASED,
+} from "../src/transport/leasedRing.ts";
+import { TransferablePool } from "../src/transport/pool.ts";
+import {
+  type SeqlockLayout,
   SeqlockReader,
   SeqlockWriter,
   seqlockBytes,
-  type SeqlockLayout,
 } from "../src/transport/seqlock.ts";
-import {
-  LeasedRingReader,
-  LeasedRingWriter,
-  SLOT_LEASED,
-  leasedRingBytes,
-  type LeasedRingLayout,
-} from "../src/transport/leasedRing.ts";
-import { TransferablePool } from "../src/transport/pool.ts";
 
-const jlog = (obj: object): void =>
-  console.log(JSON.stringify({ suite: "wf-transport", ...obj }));
+const jlog = (obj: object): void => console.log(JSON.stringify({ suite: "wf-transport", ...obj }));
 
 // A payload pattern where every word equals tick*3+k lets a reader prove a
 // copy is internally consistent — any interleaving of two writes breaks it.
@@ -116,14 +115,30 @@ test("seqlock: header identity rejects stale/foreign rings before payload (ABA t
   assert.equal(good.read(out), 5);
   // Restart twin: a reader expecting the NEXT epoch must reject the intact,
   // fully published, internally consistent old ring.
-  const afterRestart = new SeqlockReader(sab, layout, { runEpoch: 2, layoutHash: 42, anchorPrefix: 9 });
+  const afterRestart = new SeqlockReader(sab, layout, {
+    runEpoch: 2,
+    layoutHash: 42,
+    anchorPrefix: 9,
+  });
   assert.equal(afterRestart.read(out), "run-epoch");
   // Layout / anchor / size mismatches likewise reject before payload.
-  const wrongHash = new SeqlockReader(sab, layout, { runEpoch: 1, layoutHash: 43, anchorPrefix: 9 });
+  const wrongHash = new SeqlockReader(sab, layout, {
+    runEpoch: 1,
+    layoutHash: 43,
+    anchorPrefix: 9,
+  });
   assert.equal(wrongHash.read(out), "layout-hash");
-  const wrongAnchor = new SeqlockReader(sab, layout, { runEpoch: 1, layoutHash: 42, anchorPrefix: 8 });
+  const wrongAnchor = new SeqlockReader(sab, layout, {
+    runEpoch: 1,
+    layoutHash: 42,
+    anchorPrefix: 8,
+  });
   assert.equal(wrongAnchor.read(out), "anchor-prefix");
-  const wrongSize = new SeqlockReader(sab, { slots: 3, payloadF64s: 16 }, { runEpoch: 1, layoutHash: 42, anchorPrefix: 9 });
+  const wrongSize = new SeqlockReader(
+    sab,
+    { slots: 3, payloadF64s: 16 },
+    { runEpoch: 1, layoutHash: 42, anchorPrefix: 9 },
+  );
   assert.equal(wrongSize.read(new Float64Array(16)), "payload-size");
   jlog({ case: "seqlock-aba-twin", verdict: "all stale identities rejected" });
 });
@@ -145,7 +160,10 @@ test("leased ring: writer never blocks, drops count, leases stay immutable", () 
   // …then keep publishing: slot A is LEASED, slot(latest=3) is protected,
   // so the writer reclaims the superseded published slot (tick 2) and, once
   // options run out, DROPS rather than blocking or touching the lease.
-  assert.ok(writer.publish(4, (p) => fillPattern(p, 4)), "reclaims superseded slot");
+  assert.ok(
+    writer.publish(4, (p) => fillPattern(p, 4)),
+    "reclaims superseded slot",
+  );
   const leaseB = reader.lease(); // leases latest (tick 4)
   assert.ok(leaseB && leaseB.tick === 4);
   const dropped = writer.publish(5, (p) => fillPattern(p, 5));
@@ -159,7 +177,11 @@ test("leased ring: writer never blocks, drops count, leases stay immutable", () 
   assert.ok(patternConsistent(leaseA!.payload));
   reader.release(leaseA!);
   reader.release(leaseB!);
-  jlog({ case: "leased-ring", drops: writer.dropCount(), verdict: "never-blocks + immutability hold" });
+  jlog({
+    case: "leased-ring",
+    drops: writer.dropCount(),
+    verdict: "never-blocks + immutability hold",
+  });
 });
 
 test("leased ring: epoch mismatch refuses leases after restart", () => {

@@ -8,17 +8,16 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
+import { NEUTRAL, stepCommand } from "../src/input.ts";
 import {
   ControlHold,
   LatencyLedger,
+  latencyLine,
   MAX_LEVER_FORCE_N,
   MAX_WARP_RAD,
-  latencyLine,
   toPhysical,
 } from "../src/sim/humanControls.ts";
 import { quantizeControl } from "../src/transport/inputClock.ts";
-import { NEUTRAL, stepCommand } from "../src/input.ts";
 
 test("toPhysical: exact scale at full command; quantization is the identity grid", () => {
   const full = toPhysical({ canard: 1, warp: -1, mode: "keyboard-rate" });

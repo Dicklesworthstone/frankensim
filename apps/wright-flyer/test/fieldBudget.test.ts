@@ -8,11 +8,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  MAX_GLYPHS,
   buildGlyphInstances,
   divergenceOverlay,
-  integrateStreamlines,
   type FieldArrays,
+  integrateStreamlines,
+  MAX_GLYPHS,
 } from "../src/fieldViz.ts";
 import { QosGovernor, type QosSpec } from "../src/qos.ts";
 

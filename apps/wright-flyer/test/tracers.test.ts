@@ -14,8 +14,8 @@ import { integrateStreamlines } from "../src/fieldViz.ts";
 import {
   MAX_POINTS_PER_TRACER,
   MAX_TRACERS,
-  TracerService,
   type SnapshotPair,
+  TracerService,
 } from "../src/tracers.ts";
 
 function jlog(kase: string, payload: string): void {
@@ -26,8 +26,7 @@ const DT = 1 / 120;
 
 /** Unsteady fixture: u = (1, k·t, 0) — the classic distinctness flow. */
 function unsteadyPair(tick: number): SnapshotPair {
-  const u = (t: number) => (_p: readonly [number, number, number]) =>
-    [1, 0.4 * t, 0] as const;
+  const u = (t: number) => (_p: readonly [number, number, number]) => [1, 0.4 * t, 0] as const;
   return {
     tickA: tick,
     tickB: tick + 1,
@@ -81,7 +80,7 @@ test("10-minute soak holds the retention cap", () => {
   const points = s.retainedPoints();
   assert.ok(
     points <= 8 * (MAX_POINTS_PER_TRACER + 1),
-    `soak retained ${points} points beyond the cap`
+    `soak retained ${points} points beyond the cap`,
   );
   assert.ok(points > 8 * 32, "thinning must still RETAIN a usable trail");
   jlog("soak", `"ticks":72000,"retained_points":${points}`);

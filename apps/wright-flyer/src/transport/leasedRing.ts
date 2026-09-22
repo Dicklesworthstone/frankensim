@@ -25,8 +25,7 @@ export interface LeasedRingLayout {
 }
 
 export function leasedRingBytes(layout: LeasedRingLayout): number {
-  const controlBytesAligned =
-    Math.ceil((4 * (CONTROL_I32S + 2 * layout.slots)) / 8) * 8;
+  const controlBytesAligned = Math.ceil((4 * (CONTROL_I32S + 2 * layout.slots)) / 8) * 8;
   return controlBytesAligned + 8 * layout.slots * layout.payloadF64s;
 }
 
@@ -72,10 +71,7 @@ export class LeasedRingWriter {
   publish(tick: number, fill: (payload: Float64Array) => void): boolean {
     let slot = -1;
     for (let s = 0; s < this.layout.slots; s += 1) {
-      if (
-        Atomics.compareExchange(this.i32, stateIndex(s), SLOT_FREE, SLOT_WRITING) ===
-        SLOT_FREE
-      ) {
+      if (Atomics.compareExchange(this.i32, stateIndex(s), SLOT_FREE, SLOT_WRITING) === SLOT_FREE) {
         slot = s;
         break;
       }
@@ -88,12 +84,8 @@ export class LeasedRingWriter {
           continue;
         }
         if (
-          Atomics.compareExchange(
-            this.i32,
-            stateIndex(s),
-            SLOT_PUBLISHED,
-            SLOT_WRITING,
-          ) === SLOT_PUBLISHED
+          Atomics.compareExchange(this.i32, stateIndex(s), SLOT_PUBLISHED, SLOT_WRITING) ===
+          SLOT_PUBLISHED
         ) {
           slot = s;
           break;
@@ -147,12 +139,8 @@ export class LeasedRingReader {
         return null;
       }
       if (
-        Atomics.compareExchange(
-          this.i32,
-          stateIndex(slot),
-          SLOT_PUBLISHED,
-          SLOT_LEASED,
-        ) === SLOT_PUBLISHED
+        Atomics.compareExchange(this.i32, stateIndex(slot), SLOT_PUBLISHED, SLOT_LEASED) ===
+        SLOT_PUBLISHED
       ) {
         const base = payloadOffsetF64(this.layout, slot);
         return {

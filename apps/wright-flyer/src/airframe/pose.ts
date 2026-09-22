@@ -65,7 +65,12 @@ function clampReport(value: number, limit: number): [number, boolean] {
  * design dims drives the schematic-preview flag. */
 export function computePose(
   c: ControlState,
-  dims: { span_m: number; chord_m: number; canard_area_m2: number; rudder_area_m2: number } = REFERENCE_DIMS,
+  dims: {
+    span_m: number;
+    chord_m: number;
+    canard_area_m2: number;
+    rudder_area_m2: number;
+  } = REFERENCE_DIMS,
 ): FlyerPose {
   for (const [k, v] of Object.entries(c)) {
     if (typeof v === "number" && !Number.isFinite(v)) {

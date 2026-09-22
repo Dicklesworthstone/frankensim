@@ -177,10 +177,16 @@ export function standingAt(
       );
     }
     if (x < a.lo) {
-      return { ok: true, value: { inside: false, axis: a.name, bound: "lo", limitedBy: a.loLimitedBy } };
+      return {
+        ok: true,
+        value: { inside: false, axis: a.name, bound: "lo", limitedBy: a.loLimitedBy },
+      };
     }
     if (x > a.hi) {
-      return { ok: true, value: { inside: false, axis: a.name, bound: "hi", limitedBy: a.hiLimitedBy } };
+      return {
+        ok: true,
+        value: { inside: false, axis: a.name, bound: "hi", limitedBy: a.hiLimitedBy },
+      };
     }
   }
   return { ok: true, value: { inside: true } };

@@ -17,7 +17,10 @@ const dossier = load("source-dossier-v1.json");
 
 test("artifact structure: schema, dossier link, convention block, no_claims", () => {
   assert.equal(doc.schema, "org.frankensim.wright-flyer.prop-geometry.v1");
-  assert.ok(dossier.records.some((r: any) => r.id === doc.dossier_record), "dossier link resolves");
+  assert.ok(
+    dossier.records.some((r: any) => r.id === doc.dossier_record),
+    "dossier link resolves",
+  );
   assert.equal(doc.convention_block.axes_id, "frd-body-v1");
   assert.ok(doc.no_claims.length > 40);
   for (const key of ["CT", "CP", "J", "eta"]) {
@@ -65,9 +68,7 @@ test("1911 station table is physically consistent per-row", () => {
   const maxP = Math.max(...pitches);
   const minP = Math.min(...pitches);
   assert.ok((maxP - minP) / maxP < 0.25, `pitch spread ${(maxP - minP) / maxP} too wide`);
-  console.log(
-    JSON.stringify({ suite: "wf-prop", case: "stations", pitch_in_range: [minP, maxP] }),
-  );
+  console.log(JSON.stringify({ suite: "wf-prop", case: "stations", pitch_in_range: [minP, maxP] }));
 });
 
 test("static anchors: pair-to-per-prop arithmetic and repro agreement band", () => {
@@ -101,12 +102,18 @@ test("1911 eta curve: monotone to the peak, peak 0.87 at J=1.15, then falls", ()
 
 test("J arithmetic re-derived against flyer-reference values", () => {
   const D = doc.overall_geometry.diameter_m.value;
-  assert.ok(Math.abs(D - reference.values.prop_diameter_m.value) / D < 0.005, "diameter consistent");
+  assert.ok(
+    Math.abs(D - reference.values.prop_diameter_m.value) / D < 0.005,
+    "diameter consistent",
+  );
   const n350 = 350 / 60;
   const jRail = reference.values.wind_dec17_mps.value / (n350 * D);
   assert.ok(Math.abs(jRail - doc.operating_points.J_rail_dec17.value) < 0.005, `J_rail ${jRail}`);
   const jLift = reference.values.airspeed_dec17_mps.value / (n350 * D);
-  assert.ok(Math.abs(jLift - doc.operating_points.J_liftoff_dec17.value) < 0.005, `J_lift ${jLift}`);
+  assert.ok(
+    Math.abs(jLift - doc.operating_points.J_liftoff_dec17.value) < 0.005,
+    `J_lift ${jLift}`,
+  );
   const jDesign = reference.values.wind_dec17_mps.value / ((330 / 60) * D);
   assert.ok(Math.abs(jDesign - doc.operating_points.J_design_wilbur.value) < 0.005);
   // The plan's rail band 0.7-0.8 must contain J_rail.

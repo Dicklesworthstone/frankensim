@@ -4,12 +4,12 @@
 // period aesthetic, walnut panel, red danger arcs.
 
 import {
-  IDLE_INPUTS,
   type DialView,
+  dialSetFrom,
   type GaugeSpec,
   type HudDialInputs,
+  IDLE_INPUTS,
   type LeverView,
-  dialSetFrom,
   leverSetFrom,
   tickMarks,
 } from "./gauges.ts";

@@ -8,17 +8,17 @@
 // 1905-crop.jpg", both tagged Public domain (pre-1928 publication).
 
 import * as THREE from "three";
+import orvilleFaceUrl from "./assets/orville-face.jpg";
+import wilburFaceUrl from "./assets/wilbur-face.jpg";
 import {
-  BINOCULAR_POSE,
-  PRONE_POSE,
   armAimAngles,
-  figureSpec,
-  gaitPose,
+  BINOCULAR_POSE,
   type Brother,
   type FigureSpec,
+  figureSpec,
+  gaitPose,
+  PRONE_POSE,
 } from "./figure.ts";
-import wilburFaceUrl from "./assets/wilbur-face.jpg";
-import orvilleFaceUrl from "./assets/orville-face.jpg";
 
 const SUIT = new THREE.MeshStandardMaterial({ color: 0x2b2a31, roughness: 0.92 });
 const SUIT_DARK = new THREE.MeshStandardMaterial({ color: 0x1f1e24, roughness: 0.95 });
@@ -61,7 +61,6 @@ function headMaterial(brother: Brother): THREE.MeshStandardMaterial {
   return mat;
 }
 
-
 /** Every figure mesh casts AND receives in the scene's shadow map
  * (the sun's shadow pass is presentation-owned by flyerScene): a
  * figure that casts nothing reads as floating, and one that receives
@@ -75,12 +74,7 @@ function castAll(root: THREE.Object3D): void {
   });
 }
 
-function taperedLimb(
-  topR: number,
-  botR: number,
-  len: number,
-  mat: THREE.Material,
-): THREE.Mesh {
+function taperedLimb(topR: number, botR: number, len: number, mat: THREE.Material): THREE.Mesh {
   const geo = new THREE.CylinderGeometry(topR, botR, len, 10);
   geo.translate(0, -len / 2, 0); // pivot at the TOP joint
   return new THREE.Mesh(geo, mat);
@@ -127,8 +121,16 @@ export interface BrotherFigure {
   aimLeftArm(target: readonly [number, number, number] | null): void;
 }
 
-const LEATHER = new THREE.MeshStandardMaterial({ color: 0x1c1712, roughness: 0.75, metalness: 0.1 });
-const BRASS_MAT = new THREE.MeshStandardMaterial({ color: 0xbf9b40, roughness: 0.35, metalness: 0.8 });
+const LEATHER = new THREE.MeshStandardMaterial({
+  color: 0x1c1712,
+  roughness: 0.75,
+  metalness: 0.1,
+});
+const BRASS_MAT = new THREE.MeshStandardMaterial({
+  color: 0xbf9b40,
+  roughness: 0.35,
+  metalness: 0.8,
+});
 
 export function createBrotherFigure(brother: Brother): BrotherFigure {
   const s = figureSpec(brother);
@@ -139,10 +141,7 @@ export function createBrotherFigure(brother: Brother): BrotherFigure {
 
   // Torso: tailored 1903 sack suit jacket with lapels and waist flare
   const torsoLen = s.torsoLenM;
-  const torso = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.165 * g, torsoLen * 0.72, 6, 12),
-    SUIT,
-  );
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.165 * g, torsoLen * 0.72, 6, 12), SUIT);
   torso.scale.set(1.3, 1, 0.82);
   torso.position.y = s.hipHeightM + torsoLen * 0.52;
   body.add(torso);
@@ -308,11 +307,7 @@ export function createBrotherFigure(brother: Brother): BrotherFigure {
       } else {
         if (leftAim !== null) {
           const [tx, ty, tz] = leftAim;
-          const aim = armAimAngles(
-            tx,
-            ty - armLShoulderY,
-            tz - (-s.shoulderWidthM / 2.15),
-          );
+          const aim = armAimAngles(tx, ty - armLShoulderY, tz - -s.shoulderWidthM / 2.15);
           armL.root.rotation.order = "YZX";
           armL.root.rotation.set(0, aim.yawRad, aim.pitchRad);
           armL.mid.rotation.z = 0.1;
@@ -363,11 +358,14 @@ export function createProneBrother(brother: Brother): ProneFigure {
 
   // Fluttering coat tails on the lower back/hips
   const tailGeo = new THREE.PlaneGeometry(0.22, 0.18, 2, 2);
-  const coatTail = new THREE.Mesh(tailGeo, new THREE.MeshStandardMaterial({
-    color: 0x2b2a31,
-    roughness: 0.95,
-    side: THREE.DoubleSide,
-  }));
+  const coatTail = new THREE.Mesh(
+    tailGeo,
+    new THREE.MeshStandardMaterial({
+      color: 0x2b2a31,
+      roughness: 0.95,
+      side: THREE.DoubleSide,
+    }),
+  );
   coatTail.rotation.set(-Math.PI / 2 + 0.2, 0, Math.PI / 2);
   coatTail.position.set(-0.24, 0.15, 0);
   hipPivot.add(coatTail);
@@ -380,7 +378,10 @@ export function createProneBrother(brother: Brother): ProneFigure {
   const headG = new THREE.Group();
   headG.position.set(s.torsoLenM * 0.5 + 0.1, 0.16, 0);
   headG.rotation.z = PRONE_POSE.headPitchRad;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(s.headRadiusM, 18, 14), headMaterial(brother));
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(s.headRadiusM, 18, 14),
+    headMaterial(brother),
+  );
   head.scale.set(0.92, 1.06, 0.88);
   headG.add(head);
   const cap = new THREE.Mesh(

@@ -4,14 +4,14 @@
 //
 // E0.6b note: the kernel bodies moved to src/bench/kernels.ts so the SAME
 // suite runs inside a real browser (?bench=1 via e2e/bench.mjs). This CLI
-import { runBenchSuite, KERNEL_NAMES } from "../src/bench/kernels.ts";
-import type { NoDataRow } from "../src/bench/kernels.ts";
+
 import { writeFileSync } from "node:fs";
 import { cpus } from "node:os";
 import type { BenchResult } from "../src/bench/harness.ts";
+import type { NoDataRow } from "../src/bench/kernels.ts";
+import { KERNEL_NAMES, runBenchSuite } from "../src/bench/kernels.ts";
 
-const jlog = (obj: object): void =>
-  console.log(JSON.stringify({ suite: "wf-bench", ...obj }));
+const jlog = (obj: object): void => console.log(JSON.stringify({ suite: "wf-bench", ...obj }));
 
 const { rows: results, noData } = runBenchSuite();
 

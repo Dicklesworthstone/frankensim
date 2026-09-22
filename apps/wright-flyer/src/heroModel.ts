@@ -58,11 +58,7 @@ export function loadHeroAirframe(): Promise<HeroModel | null> {
       // The scan's span axis is X in Smithsonian convention; verify by
       // picking the LARGEST extent (robust to re-exports).
       const spanAxis =
-        rawSize.x >= rawSize.y && rawSize.x >= rawSize.z
-          ? "x"
-          : rawSize.y >= rawSize.z
-            ? "y"
-            : "z";
+        rawSize.x >= rawSize.y && rawSize.x >= rawSize.z ? "x" : rawSize.y >= rawSize.z ? "y" : "z";
       const scale = DOSSIER_SPAN_M / rawSize[spanAxis];
       root.scale.setScalar(scale);
       if (spanAxis === "x") {

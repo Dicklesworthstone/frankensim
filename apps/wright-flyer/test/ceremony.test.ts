@@ -11,14 +11,14 @@ import { test } from "node:test";
 import {
   FLASH_ATTACK_S,
   FLASH_DECAY_S,
+  flashPulse,
+  glanceBlend,
   KICK_FOV_PEAK_DEG,
   KICK_SHAKE_PEAK_M,
   KICK_T_S,
   NOMINAL_RAIL_RUN_S,
   RAMP_S,
   RELEASE_DECAY_S,
-  flashPulse,
-  glanceBlend,
   releaseKick,
   wingtipGlanceBlend,
 } from "../src/ceremony.ts";
@@ -44,16 +44,8 @@ test("negative or non-finite times are refused (RangeError)", () => {
     assert.throws(() => glanceBlend(null, bad), RangeError, `sinceReleaseS=${bad}`);
     assert.throws(() => releaseKick(bad), RangeError, `sinceReleaseS=${bad}`);
     assert.throws(() => flashPulse(bad), RangeError, `sinceFlashS=${bad}`);
-    assert.throws(
-      () => wingtipGlanceBlend(bad, true, 0.5),
-      RangeError,
-      `nowS=${bad}`,
-    );
-    assert.throws(
-      () => wingtipGlanceBlend(1, true, bad),
-      RangeError,
-      `releaseImminentT=${bad}`,
-    );
+    assert.throws(() => wingtipGlanceBlend(bad, true, 0.5), RangeError, `nowS=${bad}`);
+    assert.throws(() => wingtipGlanceBlend(1, true, bad), RangeError, `releaseImminentT=${bad}`);
   }
   jlog("domain-refusals", `"cases":6`);
 });

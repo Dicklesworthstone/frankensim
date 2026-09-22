@@ -13,15 +13,15 @@ import { test } from "node:test";
 import {
   ANEMOMETER_SPEC,
   CANARD_STOP_RAD,
-  IDLE_INPUTS,
-  INCLINOMETER_SPEC,
-  REV_COUNTER_SPEC,
   clockText,
   dialSetFrom,
+  IDLE_INPUTS,
+  INCLINOMETER_SPEC,
   inRedline,
   leverSetFrom,
   needleDeg,
   phaseDisplay,
+  REV_COUNTER_SPEC,
   tickMarks,
 } from "../src/gauges.ts";
 
@@ -59,12 +59,8 @@ test("value->angle is monotone and linear at the midpoint", () => {
 });
 
 test("malformed specs refuse", () => {
-  assert.throws(() =>
-    needleDeg(1, { min: 5, max: 5, startDeg: 0, sweepDeg: 90, redline: null }),
-  );
-  assert.throws(() =>
-    needleDeg(1, { min: 0, max: 1, startDeg: 0, sweepDeg: 0, redline: null }),
-  );
+  assert.throws(() => needleDeg(1, { min: 5, max: 5, startDeg: 0, sweepDeg: 90, redline: null }));
+  assert.throws(() => needleDeg(1, { min: 0, max: 1, startDeg: 0, sweepDeg: 0, redline: null }));
   assert.throws(() => tickMarks(ANEMOMETER_SPEC, 1));
   jlog("refusals", `"count":3`);
 });

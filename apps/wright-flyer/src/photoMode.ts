@@ -61,7 +61,9 @@ function refused(
 export function admitPhotoSize(
   width: number,
   height: number,
-): { readonly ok: true; readonly pixels: number } | { readonly ok: false; readonly refusal: PhotoExportRefusal } {
+):
+  | { readonly ok: true; readonly pixels: number }
+  | { readonly ok: false; readonly refusal: PhotoExportRefusal } {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
     return refused(
       "photo-canvas-empty",

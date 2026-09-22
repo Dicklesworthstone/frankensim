@@ -42,7 +42,7 @@
 //    materially cheaper (composer disabled, one straight draw).
 
 import type { Camera, Scene } from "three";
-import { Vector2, WebGLRenderer } from "three";
+import { Vector2, type WebGLRenderer } from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
@@ -120,11 +120,7 @@ const BLOOM_STRENGTH = 0.32;
 const BLOOM_RADIUS = 0.55;
 const BLOOM_THRESHOLD = 0.85;
 
-export function createPostChain(
-  renderer: WebGLRenderer,
-  scene: Scene,
-  camera: Camera,
-): PostChain {
+export function createPostChain(renderer: WebGLRenderer, scene: Scene, camera: Camera): PostChain {
   const composer = new EffectComposer(renderer);
 
   const renderPass = new RenderPass(scene, camera);

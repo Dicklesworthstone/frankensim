@@ -87,11 +87,7 @@ const DUNE_DEFAULTS: Required<DuneDetailOptions> = {
  * across them) plus one broad swell octave; masked to ZERO inside the
  * launch/camp flat so rails, props, and figures sit exactly where the
  * survey says. Pure: same (x, z) -> same sand, every run. */
-export function duneDetail(
-  xRel: number,
-  zRel: number,
-  opts: DuneDetailOptions = {},
-): number {
+export function duneDetail(xRel: number, zRel: number, opts: DuneDetailOptions = {}): number {
   if (!Number.isFinite(xRel) || !Number.isFinite(zRel)) {
     throw new RangeError(`dune coords must be finite, got ${xRel}, ${zRel}`);
   }
@@ -169,8 +165,7 @@ export function duneShade(
   // from the east, so crests run roughly NNE-SSW), phase-warped by the
   // local relief so the stripes flow over the forms instead of
   // slicing through them. Presentation-only tint, ±4%.
-  const ripple =
-    Math.sin((x * 0.82 + z * 0.57) * 1.9 + detailAt(x, z) * 0.9) * 0.04;
+  const ripple = Math.sin((x * 0.82 + z * 0.57) * 1.9 + detailAt(x, z) * 0.9) * 0.04;
   return Math.max(0.75, Math.min(1.3, 1.0 + sunDot * 0.4 + crest + ripple));
 }
 /** Two-ring LOD (T1.1): `warpAxis` maps the vertex-index fraction
@@ -183,9 +178,9 @@ export function warpAxis(u: number, lf: number, gamma = 2.2): number {
   const l = Math.min(0.85, Math.max(0.15, lf));
   const uu = Math.min(1, Math.max(0, u));
   if (uu <= l) {
-    return l === 0 ? 0 : l * Math.pow(uu / l, gamma);
+    return l === 0 ? 0 : l * (uu / l) ** gamma;
   }
-  return l + (1 - l) * (1 - Math.pow((1 - uu) / (1 - l), gamma));
+  return l + (1 - l) * (1 - ((1 - uu) / (1 - l)) ** gamma);
 }
 
 /** Dense vertex grid over the tile: positions are three.js
@@ -270,8 +265,12 @@ export function buildTerrainArrays(
       const b = a + 1;
       const c = a + nv;
       const d = c + 1;
-      indices[t++] = a; indices[t++] = c; indices[t++] = b;
-      indices[t++] = b; indices[t++] = c; indices[t++] = d;
+      indices[t++] = a;
+      indices[t++] = c;
+      indices[t++] = b;
+      indices[t++] = b;
+      indices[t++] = c;
+      indices[t++] = d;
     }
   }
   return { positions, colors, uvs, indices, launch };

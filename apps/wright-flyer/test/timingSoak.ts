@@ -8,7 +8,7 @@
 
 import { Worker } from "node:worker_threads";
 import { InputScheduler } from "../src/transport/inputClock.ts";
-import { TickScheduler, percentile } from "../src/transport/schedule.ts";
+import { percentile, TickScheduler } from "../src/transport/schedule.ts";
 
 const minutes = Number(process.argv[2] ?? "10");
 const TICK_MS = 1000 / 120;
@@ -55,7 +55,7 @@ function simWork(): void {
   // ~0.2 ms of synthetic arithmetic standing in for Tier-A physics.
   let acc = 0;
   for (let i = 0; i < 4000; i += 1) {
-    acc += Math.sqrt(i + acc % 7);
+    acc += Math.sqrt(i + (acc % 7));
   }
   if (acc === -1) {
     console.log("never");
@@ -108,8 +108,7 @@ const pump = (): void => {
       maxBacklogBurst: 4,
     });
     const contractHolds =
-      inputSched.appliedTrace().length === acq.length &&
-      tickSched.currentTick() > 0;
+      inputSched.appliedTrace().length === acq.length && tickSched.currentTick() > 0;
     jlog({ verdict: contractHolds ? "CONTRACT-PASS" : "CONTRACT-FAIL" });
     process.exit(contractHolds ? 0 : 1);
   }

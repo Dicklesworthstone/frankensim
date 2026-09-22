@@ -21,18 +21,26 @@
 // load, not a second device. Other devices stay NO-DATA (rows carry the
 // standing no_data entries from the kernel module).
 
-import path from "node:path";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { startVitePreview, startStaticDist } from "./serve.mjs";
-import { bootOnce, resolveChromeBin, BootRefusal } from "./boot.mjs";
+import path from "node:path";
+import { BootRefusal, bootOnce, resolveChromeBin } from "./boot.mjs";
+import { startStaticDist, startVitePreview } from "./serve.mjs";
 
 const argv = process.argv.slice(2);
 const outIdx = argv.indexOf("--out");
 const outPath =
   outIdx >= 0 && argv[outIdx + 1]
     ? argv[outIdx + 1]
-    : path.join(import.meta.dirname, "..", "..", "..", "data", "wright-flyer", "perf-baseline-browser-chrome-dev-host.json");
+    : path.join(
+        import.meta.dirname,
+        "..",
+        "..",
+        "..",
+        "data",
+        "wright-flyer",
+        "perf-baseline-browser-chrome-dev-host.json",
+      );
 
 function fail(code, payload, exitCode = 5) {
   console.error(JSON.stringify({ suite: "wf-bench-matrix", verdict: "FAIL", code, ...payload }));
@@ -111,7 +119,11 @@ async function runVariant(variant) {
       const colds = per.filter((r) => r.temperature === "cold").length;
       const warms = per.filter((r) => r.temperature === "warm").length;
       if (colds !== 1 || warms !== REPEATS - 1) {
-        fail("BENCH_INCOMPLETE", { variant, kernel: name, colds, warms, warmExpected: REPEATS - 1 }, 4);
+        fail(
+          "BENCH_INCOMPLETE",
+          { variant, kernel: name, colds, warms, warmExpected: REPEATS - 1 },
+          4,
+        );
       }
       for (const r of per) {
         // Non-isolated origins get COARSENED timers: sub-quantum kernels
@@ -126,7 +138,11 @@ async function runVariant(variant) {
             r.p95_us <= r.p99_us
           )
         ) {
-          fail("BENCH_INCOMPLETE", { variant, kernel: name, row: r, detail: "non-monotone percentiles" }, 4);
+          fail(
+            "BENCH_INCOMPLETE",
+            { variant, kernel: name, row: r, detail: "non-monotone percentiles" },
+            4,
+          );
         }
         if (r.p50_us === 0 || r.p95_us === 0 || r.p99_us === 0 || r.opsPerSec === null) {
           r.quantization_floor = true;
@@ -164,7 +180,11 @@ for (const variant of VARIANTS) {
     allNoData.push(...noData);
   } catch (error) {
     if (error instanceof BootRefusal) {
-      fail(error.code, { variant: variant.isolation + "/" + variant.contention, message: error.message }, 4);
+      fail(
+        error.code,
+        { variant: variant.isolation + "/" + variant.contention, message: error.message },
+        4,
+      );
     }
     throw error;
   }

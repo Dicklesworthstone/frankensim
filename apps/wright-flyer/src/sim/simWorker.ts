@@ -9,6 +9,8 @@
 // src/wasm-pkg/ (gitignored, derived artifact — the Rust crate is the
 // source of truth).
 
+import { TickScheduler } from "../transport/schedule.ts";
+import { SeqlockWriter } from "../transport/seqlock.ts";
 import {
   fillPayload,
   parseCheckpointEnvelope,
@@ -16,17 +18,15 @@ import {
   parseInitEnvelope,
   parseStepEnvelope,
 } from "./engineFacade.ts";
+import { ControlHold } from "./humanControls.ts";
 import {
+  type MainToWorker,
   MODE_HUMAN,
   PAYLOAD_F64S,
   payloadLayoutHash,
-  type MainToWorker,
   type RefusalEnvelope,
   type WorkerToMain,
 } from "./protocol.ts";
-import { SeqlockWriter } from "../transport/seqlock.ts";
-import { TickScheduler } from "../transport/schedule.ts";
-import { ControlHold } from "./humanControls.ts";
 
 const TICK_MS = 1000 / 120;
 
@@ -273,7 +273,12 @@ function checkpoint(msg: Extract<MainToWorker, { kind: "checkpoint" }>): void {
   }
   const result = parseCheckpointEnvelope(engine.flyer_engine_checkpoint());
   if (result.kind === "refusal") {
-    post({ kind: "checkpoint-refusal", requestId: msg.requestId, runIntentId: msg.runIntentId, refusal: result.refusal });
+    post({
+      kind: "checkpoint-refusal",
+      requestId: msg.requestId,
+      runIntentId: msg.runIntentId,
+      refusal: result.refusal,
+    });
     return;
   }
   if (result.kind === "malformed") {
@@ -303,7 +308,12 @@ function checkpoint(msg: Extract<MainToWorker, { kind: "checkpoint" }>): void {
     return;
   }
   post(
-    { kind: "checkpoint", requestId: msg.requestId, runIntentId: result.runIntentId, bytes: result.bytes },
+    {
+      kind: "checkpoint",
+      requestId: msg.requestId,
+      runIntentId: result.runIntentId,
+      bytes: result.bytes,
+    },
     [result.bytes.buffer],
   );
 }
@@ -323,10 +333,7 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       if (runIntentId === null || currentInitGeneration === null) {
         break;
       }
-      if (
-        msg.runIntentId !== runIntentId ||
-        msg.initGeneration !== currentInitGeneration
-      ) {
+      if (msg.runIntentId !== runIntentId || msg.initGeneration !== currentInitGeneration) {
         break;
       }
       const currentTick = scheduler?.currentTick() ?? 0;
@@ -347,10 +354,7 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       break;
     }
     case "ping":
-      if (
-        msg.runIntentId !== activeRunIntentId ||
-        msg.initGeneration !== activeInitGeneration
-      ) {
+      if (msg.runIntentId !== activeRunIntentId || msg.initGeneration !== activeInitGeneration) {
         break;
       }
       post({

@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-
+import { PAYLOAD_F64S, PAYLOAD_F64S_V1, PHASE_CODES } from "../src/sim/protocol.ts";
 import {
   advanceProp,
   controlStateFrom,
@@ -15,10 +15,9 @@ import {
   hudInputsFrom,
   interpolateSnapshots,
   phaseBanner,
-  worldTransformFrom,
   type SimSnapshot,
+  worldTransformFrom,
 } from "../src/sim/snapshotView.ts";
-import { PAYLOAD_F64S, PAYLOAD_F64S_V1, PHASE_CODES } from "../src/sim/protocol.ts";
 
 function payloadOf(fields: Partial<Record<number, number>>): Float64Array {
   const p = new Float64Array(PAYLOAD_F64S);

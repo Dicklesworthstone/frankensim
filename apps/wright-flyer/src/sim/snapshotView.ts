@@ -139,7 +139,10 @@ export function advanceProp(state: SimDriveState, snap: SimSnapshot, dtS: number
 }
 
 /** The rig control-state for computePose (physics → visual, 1:1 units). */
-export function controlStateFrom(snap: SimSnapshot, drive: SimDriveState): {
+export function controlStateFrom(
+  snap: SimSnapshot,
+  drive: SimDriveState,
+): {
   canardDeg: number;
   warpDeg: number;
   rudderDeg: number;

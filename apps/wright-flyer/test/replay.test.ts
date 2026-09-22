@@ -10,30 +10,24 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
-
-import {
-  FlightRecorder,
-  RECORDING_SCHEMA,
-  RECORDING_SCHEMA_V1,
-  ghostAt,
-  parseRecording,
-  recordedToScenario,
-  replayVerdict,
-  scenarioToRecorded,
-  type FlightRecording,
-} from "../src/sim/replay.ts";
-import {
-  MODE_FIXED,
-  PAYLOAD_F64S,
-  PAYLOAD_F64S_V1,
-  dec17Scenario,
-} from "../src/sim/protocol.ts";
 import {
   fillPayload,
   parseDigestEnvelope,
   parseInitEnvelope,
   parseStepEnvelope,
 } from "../src/sim/engineFacade.ts";
+import { dec17Scenario, MODE_FIXED, PAYLOAD_F64S, PAYLOAD_F64S_V1 } from "../src/sim/protocol.ts";
+import {
+  FlightRecorder,
+  type FlightRecording,
+  ghostAt,
+  parseRecording,
+  RECORDING_SCHEMA,
+  RECORDING_SCHEMA_V1,
+  recordedToScenario,
+  replayVerdict,
+  scenarioToRecorded,
+} from "../src/sim/replay.ts";
 
 const jlog = (payload: Record<string, unknown>): void => {
   console.info(JSON.stringify({ suite: "wf-e52c-replay", ...payload }));
@@ -147,7 +141,11 @@ test("verdict discriminates", () => {
 // ---------------------------------------------------------------------------
 const pkgPath = process.env.WF_PKG;
 if (pkgPath === undefined) {
-  jlog({ case: "live-replay", skipped: true, reason: "WF_PKG unset — record→replay identity NOT verified in this run" });
+  jlog({
+    case: "live-replay",
+    skipped: true,
+    reason: "WF_PKG unset — record→replay identity NOT verified in this run",
+  });
 } else {
   const require = createRequire(import.meta.url);
   const wasm = require(pkgPath);
