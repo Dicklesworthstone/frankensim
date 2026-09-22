@@ -21,6 +21,8 @@ use crate::modal_acoustic_time::ModalAcousticState;
 pub mod audio;
 /// Reciprocal interior acoustic modes in the existing nonlinear execution.
 pub mod cavity;
+/// Finite-mass, compression-only pads and opposed compliant jaws.
+pub mod compliant;
 /// Physical, spatially localized viscous attachments.
 pub mod damping;
 /// Prepared modal/contact image for explicitly linear bodies.
