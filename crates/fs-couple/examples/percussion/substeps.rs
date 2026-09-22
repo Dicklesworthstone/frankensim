@@ -36,4 +36,5 @@ impl Mechanics {
 }
 
 #[cfg(test)]
+#[path = "substeps/tests.rs"]
 mod tests;

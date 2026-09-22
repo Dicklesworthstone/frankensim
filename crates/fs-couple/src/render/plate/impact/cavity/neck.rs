@@ -35,6 +35,8 @@ pub struct CavityNeck {
 
 #[derive(Debug,Clone)]
 pub(super) struct CompiledNeck {
+    pub area_m2:f64,
+    pub effective_length_m:f64,
     pub coordinate:usize,
     pub volume_weight:f64,
     pub drag_per_s:f64,
@@ -42,6 +44,20 @@ pub(super) struct CompiledNeck {
     pub initial:ModalAcousticState,
     pub fixed_wall_omega:f64,
     pub averages:Vec<f64>,
+}
+
+/// Read-only observation port of an admitted compact neck. This does not load
+/// the neck with exterior pressure or add another end correction/inertia.
+#[derive(Debug,Clone,Copy,PartialEq)]
+pub struct NeckRadiationPort {
+    /// Original coordinate index, not an output channel.
+    pub coordinate:usize,
+    /// Nominal throat area [m^2].
+    pub area_m2:f64,
+    /// Declared acoustic length [m], including the caller's end corrections.
+    pub effective_length_m:f64,
+    /// Outward volume/flow per q/p: 1/sqrt(rho*ell_eff/S) [m^2/sqrt(kg)].
+    pub volume_weight_m2_per_sqrt_kg:f64,
 }
 
 /// Physical quantities reconstructed from one accepted state, without stepping.
@@ -119,7 +135,8 @@ impl CavityCoupling {
             if !compactness.is_finite() || compactness>0.3 {
                 return Err(invalid("neck is outside the declared compact acoustic chart; use a distributed duct"));
             }
-            additions.push(CompiledNeck {coordinate:self.total+index,volume_weight:weight,
+            additions.push(CompiledNeck {area_m2:neck.area_m2,effective_length_m:neck.effective_length_m,
+                coordinate:self.total+index,volume_weight:weight,
                 drag_per_s:drag,resistance:neck.resistance_pa_s_m3,initial,
                 fixed_wall_omega:stiffness.sqrt(),averages:neck.pressure_shape_averages});
             columns.push(column);
@@ -131,6 +148,16 @@ impl CavityCoupling {
         self.total=total;self.necks.extend(additions);
         if gate.is_requested() {return Err(ImpactError::Cancelled);}
         Ok(self)
+    }
+
+    /// Recover the exact physical port used by this mechanical neck. A pressure
+    /// observer must project through this weight rather than interpreting the
+    /// mass-normalized coordinate as a physical volume or surface velocity.
+    pub fn neck_radiation_port(&self,index:usize)->Result<NeckRadiationPort,ImpactError> {
+        let neck=self.necks.get(index).ok_or_else(||invalid("unknown cavity neck"))?;
+        Ok(NeckRadiationPort {coordinate:neck.coordinate,area_m2:neck.area_m2,
+            effective_length_m:neck.effective_length_m,
+            volume_weight_m2_per_sqrt_kg:neck.volume_weight})
     }
 
     /// Number of explicit compact openings; zero retains the sealed model.

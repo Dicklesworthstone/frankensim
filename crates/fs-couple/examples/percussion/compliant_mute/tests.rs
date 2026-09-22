@@ -101,7 +101,7 @@ fn opposed_jaws_and_two_sticks_react_on_one_shell_without_shifting_stand_or_radi
     assert_eq!(observation.first_pad,6);assert_eq!(e.force.len(),start+2);
     assert_eq!(e.system.state().len(),2*e.force.len()+6+4); // six stand and four independent pad memories
     assert!(e.observer_a[start..].iter().all(|v|*v==0.0));
-    assert!(e.acoustics.as_ref().unwrap().state_modes.iter().all(|i|*i<start-1));
+    assert!(e.acoustics.as_ref().unwrap().state_modes().iter().all(|i|*i<start-1));
     let Mechanics::Reference(initial)=&e.system else {unreachable!()};
     let energy=initial.stored_energy_j();
     for i in 0..6 {assert!(initial.felt_history(i).is_some());}
@@ -138,7 +138,7 @@ fn exterior_head_pad_keeps_cavity_pressure_and_private_material_coordinates_reci
     assert_eq!(jaw.coordinate,e.second_stick.unwrap().coordinate+1);
     assert_eq!(air.coupling.structural_modes(),jaw.coordinate+1);
     assert_eq!(e.system.state().len(),2*air.coupling.total_modes()+2);
-    assert!(e.acoustics.as_ref().unwrap().state_modes.iter().all(|i|*i<jaw.coordinate));
+    assert!(e.acoustics.as_ref().unwrap().state_modes().iter().all(|i|*i<jaw.coordinate));
     assert_eq!(e.pressure.as_ref().unwrap().areas[jaw.coordinate],0.0);
     let mut displaced=e.system.state().to_vec();displaced[2*jaw.coordinate]+=0.001/jaw.inverse_sqrt_mass;
     assert_eq!(air.uniform_pressure(&displaced).unwrap(),0.0,"jaw must not directly compress cavity gas");

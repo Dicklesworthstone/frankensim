@@ -31,6 +31,10 @@ const MAX_INPUTS: usize = 63;
 const MAX_RELATIVE_ERROR: f64 = 0.15;
 const MAX_RMS_ERROR: f64 = 0.05;
 
+/// Explicit prescribed-neck-flow source on the same closed exterior mesh.
+#[path = "aperture.rs"]
+pub mod aperture;
+
 /// A stationary point in the boundary's geometry frame, measured in metres.
 #[derive(Debug, Clone, Copy)]
 pub enum Receiver {
@@ -68,6 +72,9 @@ pub struct Boundary {
     state_modes: Vec<usize>,
 }
 impl Boundary {
+    /// Mechanical coordinate addresses observed by this boundary; never output channels.
+    pub(super) fn state_modes(&self) -> &[usize] { &self.state_modes }
+
     pub fn shell(surface: &ShellRadiationSurface, first_mode: usize) -> Result<Self, Error> {
         let count = surface.normal_velocity_weights().len();
         let end=first_mode.checked_add(count).ok_or("shell acoustic mode address overflow")?;
