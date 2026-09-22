@@ -5,7 +5,7 @@
 //! The backcheck/rest stop is idealized, not a full grand-action reconstruction.
 use fs_material::{Uniaxial, WoolFelt};
 use fs_material::visco::GeneralizedMaxwell;
-use super::{felt,geometry::Course,linear::{Bank,BoardMode}};
+use super::{felt,geometry::Course,linear::{Bank,BoardMode,dampers}};
 #[path = "felt_relaxation.rs"]
 mod relaxation;
 #[path = "hammer_shank.rs"]
@@ -63,8 +63,10 @@ pub struct Instrument {
     courses:Vec<Course>,laws:Vec<WoolFelt>,hammers:Vec<Hammer>,contacts:Vec<Contact>,
     hammer_models:Vec<shank::Prepared>,
     creep:Vec<relaxation::Prepared>,
+    spatial_dampers:Option<dampers::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
-    /// Explicitly authored upper damper break; not a verified Steinway D value.
+    /// Point-image controls only. A spatial specification owns its pad/free
+    /// break and individual drag values instead. Neither is verified Model D data.
     pub last_damped_midi:u8,
     pub damper_drag_ns_m:f64,
     pub accounting:Accounting,
@@ -149,13 +151,25 @@ impl Instrument {
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,spatial_dampers:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
     }
 
     pub fn sample_rate(&self)->u32{self.output_rate}
+    /// Cold preparation in the existing loaded basis. Publish only on complete
+    /// admission; configuring a viscous law neither stores energy nor resets
+    /// ongoing string, board, hammer or felt history. This is not a hot control.
+    pub fn configure_dampers(&mut self,spec:&dampers::Specification)->Result<(),String>{
+        let prepared=dampers::Prepared::new(spec,&self.courses,&self.bank)?;
+        self.spatial_dampers=Some(prepared);Ok(())
+    }
+    /// None is the original point image; Some counts actual retained string
+    /// pads and quadrature stations, including a valid all-free specification.
+    pub fn damper_resolution(&self)->Option<(usize,usize)>{
+        self.spatial_dampers.as_ref().map(|d|(d.string_count(),d.cell_count()))
+    }
     pub fn set_sustain(&mut self,value:f64)->Result<(),Error>{
         if !value.is_finite()||!(0.0..=1.0).contains(&value){return Err(Error::InvalidControl);}
         self.sustain=value;Ok(())
@@ -239,6 +253,11 @@ impl Instrument {
     }
 
     fn damp(&mut self,dt:f64)->Result<f64,Error>{
+        if let Some(dampers)=&self.spatial_dampers {
+            let hammers=&self.hammers;
+            return dampers.apply(&mut self.bank.v,dt,self.sustain,
+                |ci|hammers[ci].held||hammers[ci].latched).map_err(Error::Contact);
+        }
         if !self.damper_drag_ns_m.is_finite()||self.damper_drag_ns_m<0.0{return Err(Error::InvalidControl);}
         let mut loss=0.0;
         for si in 0..self.bank.strings.len(){
@@ -414,6 +433,10 @@ impl Instrument {
         Ok(average/self.substeps as f64)
     }
 }
+
+#[cfg(test)]
+#[path = "damper_engine_tests.rs"]
+mod damper_tests;
 
 #[cfg(test)]
 mod tests {
