@@ -24,8 +24,10 @@ limit are not a calibrated material or a safety recommendation. The model is
 still the native 1 m × 1 m, left-clamped, downward right-loaded plane-strain
 plate with interior circular holes and the existing unit-thickness convention.
 Change the complete explicit source to declare another admitted study. This
-mode does not add arbitrary boundary conditions, 3-D physics, external geometry
-imports or stress-feasibility restoration to native `.fsim`.
+mode does not add arbitrary boundary conditions, 3-D physics or external geometry
+imports. The explicit load-family stress-restoration option is described in
+`MULTI_LOAD_STUDY.md`; without that option, initialization remains strictly
+stress-feasible as described below.
 The separate marquee commands retain their own broader geometry input features.
 
 ## Explicit policy

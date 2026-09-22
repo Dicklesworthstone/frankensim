@@ -131,3 +131,88 @@ fn invalid_native_load_families_refuse_before_creating_persistent_state() {
         assert!(!db.exists());
     }
 }
+
+const RESTORATION: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/marquee/bracket-stress-restoration-2d.fsim"));
+
+#[test]
+fn primary_only_restoration_exports_an_infeasible_result_without_inventing_progress() {
+    let dir = scratch("restoration-infeasible-export");
+    let input = source(&dir, &RESTORATION.replace(":max-solves 256", ":max-solves 1")
+        .replace(":sampled-stress-limit-pa 1.0", ":sampled-stress-limit-pa 0.000000000001"));
+    let db = dir.join("study.db");
+    let out = document(&command("study").arg(&input).arg(&db).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(out.str_field("status"), Some("budget-exhausted"));
+    let info = constraints(&out);
+    assert_eq!(info.str_field("baseline_scope"), Some("area_feasible_study_start"));
+    assert_eq!(info.get("relative_reduction"), Some(&J::Null));
+    let phase = info.get("stress_restoration").unwrap();
+    assert_eq!(phase.get("stress_feasible"), Some(&J::Bool(false)));
+    assert_eq!(phase.get("feasible_baseline"), Some(&J::Null));
+    assert_eq!(phase.f64_field("restoration_updates"), Some(0.0));
+    assert!(phase.f64_field("remaining_excess_pa").unwrap() > 0.0);
+    assert_eq!(family(&out).get("cases").and_then(J::as_array).unwrap().len(), 1);
+    assert_eq!(family(&out).f64_field("solves_started"), Some(1.0));
+    let exported = document(&command("report").arg(run_id(&out)).arg(&db).output().unwrap(), fs_cli::exit::SUCCESS);
+    assert_eq!(exported.str_field("study_status"), Some("budget-exhausted"));
+    let report_bytes = fs::read(dir.join(format!("{}.json", run_id(&out)))).unwrap();
+    assert_eq!(report_bytes, retained(&db, &out, "report_json"));
+    let report = J::parse(std::str::from_utf8(&report_bytes).unwrap()).unwrap();
+    assert_eq!(report.get("constraints"), Some(info));
+    let html = fs::read_to_string(dir.join(format!("{}.html", run_id(&out)))).unwrap();
+    assert!(html.contains("Stress remains infeasible"));
+    assert!(html.contains("Area-feasible input compliance"));
+    fs::rename(&input, dir.join("original-restoration-input.fsim")).unwrap();
+    let again = document(&command("study").arg("--resume").arg(run_id(&out)).arg(&db)
+        .output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(again, out, "an infeasible exhausted terminal cannot restart its allowance");
+}
+
+#[test]
+fn restorative_native_commands_preserve_repair_history_and_checkpoint_across_chunks() {
+    let dir = scratch("restoration-chunks");
+    // Deliberately impossible engineering limit: this exercises honest partial
+    // repair and stopping, not a claimed feasible optimum or successful example.
+    let text = RESTORATION.replace(":max-iterations 8", ":max-iterations 2")
+        .replace(":steps 8", ":steps 2")
+        .replace(":stress-restoration-reduction 0.01", ":stress-restoration-reduction 0.0")
+        .replace(":sampled-stress-limit-pa 1.0", ":sampled-stress-limit-pa 0.000000000001");
+    let input = source(&dir, &text);
+    let chunks = dir.join("chunks.db");
+    let whole = dir.join("whole.db");
+    let read = |output: Output| {
+        let code = output.status.code().unwrap();
+        assert!(code == i32::from(fs_cli::exit::BUDGET) || code == i32::from(fs_cli::exit::REFUSED),
+            "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let result = document(&output, u8::try_from(code).unwrap());
+        assert!(matches!(result.str_field("status"), Some("budget-exhausted" | "no-feasible-descent")));
+        assert_eq!(constraints(&result).path(&["stress_restoration", "stress_feasible"]), Some(&J::Bool(false)));
+        assert_eq!(constraints(&result).get("relative_reduction"), Some(&J::Null));
+        result
+    };
+    let first = read(command("study").arg(&input).arg(&chunks).args(["--budget", "1"]).output().unwrap());
+    assert!(family(&first).f64_field("solves_started").unwrap() > 1.0, "must attempt actual restoration physics");
+    let previous = retained(&chunks, &first, "design");
+    let full = read(command("study").arg(&input).arg(&whole).output().unwrap());
+    fs::rename(&input, dir.join("original-input-retained.fsim")).unwrap();
+    let resumed = read(command("study").arg("--resume").arg(run_id(&first)).arg(&chunks).output().unwrap());
+    assert_eq!(resumed.str_field("status"), full.str_field("status"));
+    for key in ["design", "iterations"] {
+        assert_eq!(retained(&chunks, &resumed, key), retained(&whole, &full, key));
+    }
+    for key in ["baseline", "accepted", "candidate_counts", "terminal_refusals", "stress_restoration"] {
+        assert_eq!(constraints(&resumed).get(key), constraints(&full).get(key), "{key}");
+    }
+    for key in ["checkpoint_hex", "solves_started", "accepted_cases"] {
+        assert_eq!(family(&resumed).get(key), family(&full).get(key), "{key}");
+    }
+    let mut previous_stress = constraints(&full).get("baseline").unwrap().f64_field("sampled_von_mises_pa").unwrap();
+    for state in constraints(&full).get("accepted").and_then(J::as_array).unwrap() {
+        let stress = state.f64_field("sampled_von_mises_pa").unwrap();
+        assert!(stress < previous_stress);
+        previous_stress = stress;
+    }
+    let expected_recovery = if first.str_field("status") == Some("no-feasible-descent") { 0.0 } else { 2.0 };
+    assert_eq!(family(&resumed).f64_field("recovery_solves_used"), Some(expected_recovery));
+    assert_eq!(retained(&chunks, &first, "design"), previous);
+}
