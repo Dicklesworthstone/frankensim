@@ -1,0 +1,11 @@
+# Reproduces the existing ESTIMATED 20-strand reference. Not manufacturer data.
+# SI throughout. Effective coil tension, bending, loss and contact are estimates.
+frankensim-snare-spec-v1
+bank,20,8,12,0.30,0.04
+coil,0.00015,0.00055,0.00085,7800
+mechanics,0.7,0.000001,4
+contact,0.00002,0.003,500000000,1.5,0.05
+# To select geometric tension modulation, replace this row with, for example,
+# stretching,100,0.2
+# 100 N is only an illustrative effective E*A, NOT identified coil rigidity.
+stretching,off

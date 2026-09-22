@@ -1,4 +1,4 @@
-//! Select physical head stretching explicitly; never erase the supplied wires.
+//! Select physical nonlinearity explicitly; never erase supplied head or wire laws.
 use super::Error;
 
 pub fn option(args:&mut Vec<String>)->Result<bool,Error> {
@@ -20,16 +20,16 @@ pub fn admit_prepared_command(prepared:bool,stretching:bool,command:&str)->Resul
     if prepared && !(matches!(command,"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic")
         || stretching && snare(command)) {
-        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare with --head-stretching; no silent conversion of linear modal mechanics".into());
+        return Err("nonlinear preparation requires splash, drum, drum-stretch, or snare with head or supplied wire stretching; no silent conversion of linear modal mechanics".into());
     }
     Ok(())
 }
 pub fn admit_image(linear_prepared:bool,wires:bool,stretching:bool)->Result<(),Error> {
     if stretching && linear_prepared {
-        return Err("stretching heads require nonlinear mechanics, not the linear modal image".into());
+        return Err("stretching heads or wires require nonlinear mechanics, not the linear modal image".into());
     }
     if wires && !linear_prepared && !stretching {
-        return Err("linear-head snare keeps its original prepared modal image; select stretching explicitly".into());
+        return Err("a fully linear snare keeps its original prepared modal image; select head or wire stretching explicitly".into());
     }
     Ok(())
 }

@@ -3,6 +3,8 @@
 //! Custom Pro. All detailed coil, installation and constitutive values below
 //! are editable estimates, not a reverse-engineered or calibrated product.
 use super::Error;
+use fs_couple::render::plate::impact::string::StringStretching;
+pub mod spec;
 use fs_couple::modal_acoustic_time::ModalAcousticState;
 use fs_couple::render::plate::impact::ImpactBody;
 use fs_couple::render::plate::impact::linear::wire::{HelicalWire, LineContact, WireSpan, film_shapes};
@@ -25,6 +27,8 @@ pub struct SnareSet {
     pub contact_stiffness_per_length: f64,
     pub contact_exponent: f64,
     pub contact_internal_loss_s_m: f64,
+    /// Explicit effective E*A and slope limit; no coil-geometry inference.
+    pub stretching: Option<StringStretching>,
 }
 impl SnareSet {
     pub fn reference(disengaged: bool) -> Self {
@@ -34,7 +38,7 @@ impl SnareSet {
                 pitch_m: 0.00085, density_kg_m3: 7800.0 },
             tension_per_strand_n: 0.7, bending_per_strand_n_m2: 1e-6, damping_per_s: 4.0,
             clearance_m: if disengaged {0.003} else {0.00002},
-            contact_stiffness_per_length: 5e8, contact_exponent: 1.5, contact_internal_loss_s_m: 0.05 }
+            contact_stiffness_per_length: 5e8, contact_exponent: 1.5, contact_internal_loss_s_m: 0.05, stretching: None }
     }
     pub fn mode_count(self) -> Result<usize, Error> {
         if !(1..=24).contains(&self.strands) || !(1..=16).contains(&self.modes_per_strand)
@@ -42,6 +46,7 @@ impl SnareSet {
             || !self.width_m.is_finite() || self.width_m < 0.0
             || !self.length_m.is_finite() || self.length_m <= 0.0
         { return Err("snare reference requires 1..24 strands, 1..16 modes and explicit bounded contact sampling".into()); }
+        if let Some(law)=self.stretching {law.validate()?;}
         Ok(self.strands*self.modes_per_strand)
     }
     /// Every strand is its own body, every station has its own force, and all
@@ -66,17 +71,36 @@ impl SnareSet {
                 damping_per_s: vec![self.damping_per_s;self.modes_per_strand] };
             let line = LineContact::uniform(wire.length_m(), self.contact_cells, self.clearance_m,
                 self.contact_stiffness_per_length, self.contact_exponent, self.contact_internal_loss_s_m,
-                format!("estimated homogenized steel-coil snare strand {strand}; per-metre law, not measured commercial contact"))?;
+                format!("declared homogenized steel-coil snare strand {strand}; per-metre law, not measured commercial contact"))?;
             let positions = wire.positions(&line)?;
             let shapes = film_shapes(film, modes, &positions)?;
             let start = first_wire+strand*self.modes_per_strand;
             contacts.push(wire.contact(&line, &shapes, receiver.clone(),
                 start..start+self.modes_per_strand, total_modes)?);
-            bodies.push(wire.body(vec![ModalAcousticState::default();self.modes_per_strand])?);
+            let initial=vec![ModalAcousticState::default();self.modes_per_strand];
+            bodies.push(match self.stretching {
+                Some(law)=>wire.stretching_body(initial,law)?,
+                None=>wire.body(initial)?,
+            });
         }
-        eprintln!("snare reference: strands={}, modal_coordinates={}, contact_points={}, line_mass_kg_m={}, total_wire_mass_kg={}, clearance_m={}; coil/tension/loss are estimates; no direct wire radiation", self.strands, extra,
+        eprintln!("snare bank: strands={}, modal_coordinates={}, contact_points={}, line_mass_kg_m={}, total_wire_mass_kg={}, clearance_m={}; declared coil/tension/loss, no measured-status inference; no direct wire radiation", self.strands, extra,
             self.strands*self.contact_cells, mu, mu*self.length_m*self.strands as f64, self.clearance_m);
+        if let Some(law)=self.stretching {
+            eprintln!("wire stretching: effective axial rigidity per strand={} N, slope bound={}; existing Kirchhoff-Carrier law, fixed ends, no inferred coil constitutive data",law.axial_rigidity_n,law.maximum_slope);
+        }
         Ok((bodies,contacts))
+    }
+}
+
+/// Inspect a strand by original body index through the selected execution image.
+/// Acoustic and driven wrappers do not acquire their own wire state or clocks.
+pub fn observe(system:&super::Mechanics,body:usize) -> Option<fs_couple::render::plate::impact::string::StringObservation> {
+    use super::Mechanics;
+    match system {
+        Mechanics::Reference(s)=>s.string_observation(body), Mechanics::Prepared(_)=>None,
+        Mechanics::Nonlinear(s)=>s.string_observation(body),
+        Mechanics::Substepped(s)=>s.string_observation(body),
+        Mechanics::Driven {inner,..}=>observe(inner,body),
     }
 }
 
