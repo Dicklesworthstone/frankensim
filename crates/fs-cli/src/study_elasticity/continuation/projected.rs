@@ -14,8 +14,9 @@ mod regions;
 
 #[path = "projected/multi_load.rs"]
 mod multi_load;
+use multi_load::restoration;
 
-pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a deterministic sampled von Mises limit. Improvement is measured against the separately projected, stress-feasible study baseline under identical loads. Every accepted state is independently re-solved and durably retained. CG and cell-sampling boundaries are cancellable; assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
+pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a declared deterministic sampled von Mises limit. Explicit restoration may retain overstressed designs only while reducing measured worst stress excess; these are not stress-feasible results. Compliance improvement starts at the first stress-feasible design under identical loads. Every accepted state is independently re-solved and durably retained. Candidate CG and stress-cell boundaries are cancellable; the load-family report states startup/recovery limitations. Assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, stress-adjoint/KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
 
 #[derive(Debug, Clone)]
 pub(crate) struct Controls {
@@ -110,7 +111,8 @@ fn read_stress(value: &JsonValue, policy: &Controls) -> Result<SampledStressEval
         || state.max_location.iter().any(|v| !(0.0..=1.0).contains(v))
         || (state.volume - policy.area.target).abs() > policy.area.tolerance
         || state.sampled_max_von_mises < 0.0
-        || state.sampled_max_von_mises > policy.stress.admitted_max()
+        || (restoration::reduction(policy).is_none()
+            && state.sampled_max_von_mises > policy.stress.admitted_max())
     { return Err(malformed("retained projected stress state violates the declared constraints")); }
     Ok(state)
 }
@@ -140,10 +142,14 @@ impl ConstraintEvidence {
     }
 
     pub(super) fn html(&self) -> String {
-        let mut html = format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Sampled stress limit: {:.8e} Pa + {:.8e} Pa allowance. Feasible baseline compliance: {:.8e} J. Current sampled maximum: {:.8e} Pa. Stress is sample-scoped, not a continuous-domain bound.</p>",
+        let baseline_label = if restoration::reduction(&self.policy).is_some() {
+            "Area-feasible input compliance"
+        } else { "Feasible baseline compliance" };
+        let mut html = format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Sampled stress limit: {:.8e} Pa + {:.8e} Pa allowance. {baseline_label}: {:.8e} J. Current sampled maximum: {:.8e} Pa. Stress is sample-scoped, not a continuous-domain bound.</p>",
             self.policy.area.target, self.policy.area.tolerance,
             self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
             self.baseline.compliance, self.current().sampled_max_von_mises);
+        html.push_str(&restoration::html(&self.baseline, &self.accepted, &self.policy));
         if !self.policy.regions.is_empty() {
             let _ = write!(html, "<p>{} protected material/void regions are imposed on every intersected cell through its corner nodes. Coverage may extend by less than one cell per side. The phi margin is a field-value margin, not a certified physical clearance or wall thickness.</p>", self.policy.regions.len());
         }
@@ -154,14 +160,13 @@ impl ConstraintEvidence {
     }
 
     pub(super) fn json(&self) -> String {
-        let reduction = if self.baseline.compliance > 0.0 {
-            (self.baseline.compliance - self.current().compliance) / self.baseline.compliance
-        } else { 0.0 };
-        format!(concat!("{{\"mode\":\"projected-stress-v1\",\"baseline_scope\":\"feasible_study_start\",",
+        let reduction = restoration::relative_reduction(&self.baseline, &self.accepted, &self.policy);
+        format!(concat!("{{\"mode\":\"projected-stress-v1\",\"baseline_scope\":{},",
             "\"area_target_m2\":{:.17e},\"area_tolerance_m2\":{:.17e},",
             "\"stress_limit_pa\":{:.17e},\"stress_tolerance_pa\":{:.17e},",
             "\"baseline\":{},\"accepted\":[{}],\"candidate_counts\":[{}],",
-            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}{}{}}}"),
+            "\"terminal_refusals\":[{}],\"relative_reduction\":{}{}{}{}}}"),
+            quoted(restoration::baseline_scope(&self.policy)),
             self.policy.area.target, self.policy.area.tolerance,
             self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
             stress_json(&self.baseline), self.accepted.iter().map(stress_json).collect::<Vec<_>>().join(","),
@@ -169,12 +174,13 @@ impl ConstraintEvidence {
             self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction,
             regions::json_field(&self.policy.regions),
             self.family.as_ref().zip(self.policy.family.as_ref())
-                .map_or_else(String::new, |(history, family)| history.json_field(family)))
+                .map_or_else(String::new, |(history, family)| history.json_field(family)),
+            restoration::json_field(&self.baseline, &self.accepted, &self.policy))
     }
 
     fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
         if value.str_field("mode") != Some("projected-stress-v1")
-            || value.str_field("baseline_scope") != Some("feasible_study_start")
+            || value.str_field("baseline_scope") != Some(restoration::baseline_scope(policy))
         { return Err(malformed("missing projected-stress baseline identity")); }
         regions::check_retained(value, &policy.regions)?;
         for (key, expected) in [("area_target_m2", policy.area.target),
@@ -197,7 +203,6 @@ impl ConstraintEvidence {
         { return Err(malformed("constraint history lengths disagree with the accepted trajectory")); }
         let mut accepted = Vec::with_capacity(accepted_values.len());
         let mut counts = Vec::with_capacity(attempts.len());
-        let mut previous = baseline.compliance;
         for (i, (state, count)) in accepted_values.iter().zip(attempts).enumerate() {
             let state = read_stress(state, policy)?;
             let count: usize = count.number_raw().and_then(|v| v.parse().ok())
@@ -206,15 +211,15 @@ impl ConstraintEvidence {
                 || state.snapshot != report.snapshots[i]
                 || state.compliance.to_bits() != report.compliance[i].to_bits()
                 || state.volume.to_bits() != report.volume[i].to_bits()
-                || !(state.compliance < previous * (1.0 - policy.search.min_relative_improvement))
             { return Err(malformed("accepted constraint history does not match the decreasing trajectory")); }
-            previous = state.compliance;
+            restoration::transition(accepted.last().unwrap_or(&baseline), &state, policy)?;
             accepted.push(state);
             counts.push(count);
         }
         let refusals = refused.iter().map(|v| v.as_str().map(str::to_string)
             .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
         let family = multi_load::History::read(value, &baseline, &accepted, policy)?;
+        restoration::check_retained(value, &baseline, &accepted, policy)?;
         Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, family })
     }
 }

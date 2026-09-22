@@ -9,7 +9,12 @@ fn retain(spec: &ElasticitySpec, ledger: &Ledger, owner: &MultiLoadProjectedOpti
     report: &OptimizeReport, status: &'static str, wall: f64, predecessor: Option<ContentHash>,
     evidence: &mut Evidence) -> Result<Outcome>
 {
-    evidence.projected.as_mut().expect("constrained history").family.as_mut()
+    let retained = evidence.projected.as_mut().expect("constrained history");
+    if restoration::updates(&retained.baseline, &retained.accepted, &retained.policy)
+        != owner.restoration_updates()
+        || (owner.is_restoring_stress() && status == "completed")
+    { return Err(malformed("restoration progress cannot be published as feasible completion")); }
+    retained.family.as_mut()
         .expect("independent load history").capture(owner);
     persist(spec, ledger, owner.geometry(), report, status, wall, predecessor, evidence)
 }
@@ -48,6 +53,10 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
         let mut retained = ConstraintEvidence::read(binding.get("constraints")
             .ok_or_else(|| malformed("missing multi-load constraints"))?, &report, policy)?;
         if retained.current().snapshot != snapshot(&phi) { return Err(malformed("multi-load field and stress differ")); }
+        let expected_repairs = restoration::updates(&retained.baseline, &retained.accepted, policy);
+        if old.value.str_field("status") == Some("completed") && !restoration::feasible(retained.current(), policy) {
+            return Err(malformed("completed multi-load receipt is not stress feasible"));
+        }
         let history = retained.family.as_mut().ok_or_else(|| malformed("missing multi-load checkpoint"))?;
         if cases_json(&history.cases) != cases_json(&cases) {
             return Err(malformed("retained primary or additional load differs from the native source"));
@@ -64,7 +73,8 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
         // These are sealed, read-only terminals. Do not rerun physics or consume
         // recovery work merely to return an already completed/exhausted receipt.
         if status == "completed" || status == "no-feasible-descent"
-            || (status == "budget-exhausted" && family.max_solves - history.solves < cases.len())
+            || (status == "budget-exhausted"
+                && (family.max_solves - history.solves < cases.len() || report.rows.len() == spec.steps))
         { return last.ok_or_else(|| malformed("missing terminal receipt")); }
         if let Some(status) = stopped(gate, start, consumed, spec) {
             return Err(constraints_stop(status, last.as_ref()));
@@ -100,6 +110,7 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
             let restored_cases = case_states(stress);
             let expected_cases = history.accepted.last().unwrap_or(&history.baseline);
             if restored.next_iteration() != report.rows.len() || restored.solves_started() != history.solves
+                || restored.restoration_updates() != expected_repairs
                 || restored.geometry().nodes().iter().zip(phi.nodes()).any(|(a, b)| a.to_bits() != b.to_bits())
                 || restored.geometry().n() != phi.n()
                 || states_json(&restored_cases) != states_json(expected_cases)
@@ -136,7 +147,10 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
         if let Some(status) = stopped(gate, start, 0.0, spec) { return Err(constraints_stop(status, None)); }
         let owner = MultiLoadProjectedOptimizer::new(prepared.geometry, &cases, settings(spec, spec.steps),
             family.aggregate, prepared.fixed_nodes, policy.area, family.controls(policy))
-            .and_then(|owner| owner.with_sampled_stress_limit(policy.stress))
+            .and_then(|owner| match family.restoration_reduction {
+                Some(reduction) => owner.with_stress_restoration(policy.stress, reduction),
+                None => owner.with_sampled_stress_limit(policy.stress),
+            })
             .map_err(|error| malformed(&error.to_string()))?;
         let baseline = case_states(owner.baseline_stress().ok_or_else(|| malformed("missing baseline family stress"))?);
         let combined = summary(&baseline, &cases, family.aggregate)?;
@@ -164,7 +178,9 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
     loop {
         let status = stopped(gate, start, consumed, spec).or_else(||
             (owner.next_iteration() == target).then_some(
-                if owner.next_iteration() == spec.steps { "completed" } else { "budget-exhausted" }));
+                if owner.next_iteration() == spec.steps && !owner.is_restoring_stress() {
+                    "completed"
+                } else { "budget-exhausted" }));
         if let Some(status) = status {
             return retain(spec, ledger, &owner, &report, status, consumed + start.elapsed().as_secs_f64(),
                 predecessor, &mut evidence).map_err(|error| retained_error(error, last.as_ref()));
@@ -186,7 +202,9 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
             MultiLoadProjectedProgress::Accepted(step) => {
                 let measurements = case_states(owner.current_stress().ok_or_else(|| malformed("accepted family has no stress"))?);
                 let current = summary(&measurements, owner.load_cases(), family.aggregate)?;
-                if step.restoration || step.iteration != report.rows.len() || step.state.snapshot != current.snapshot
+                let repairing = restoration::transition(retained.current(), &current, policy)
+                    .map_err(|error| retained_error(error, last.as_ref()))?;
+                if step.restoration != repairing || step.iteration != report.rows.len() || step.state.snapshot != current.snapshot
                     || step.state.objective.to_bits() != current.compliance.to_bits()
                     || step.state.volume.to_bits() != current.volume.to_bits()
                 { return Err(retained_error(malformed("accepted multi-load metrics disagree"), last.as_ref())); }

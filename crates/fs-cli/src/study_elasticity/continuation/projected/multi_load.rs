@@ -13,11 +13,15 @@ use fs_topols::robust_descent::{
 mod driver;
 pub(super) use driver::drive;
 
+#[path = "multi_load/restoration.rs"]
+pub(super) mod restoration;
+
 #[derive(Debug, Clone)]
 pub(super) struct LoadFamily {
     aggregate: RobustAggregate,
     max_solves: usize,
     max_recovery_solves: usize,
+    restoration_reduction: Option<f64>,
     additional: Vec<RobustLoadCase>,
 }
 
@@ -43,10 +47,17 @@ pub(super) fn parse(fields: &[Node]) -> Result<Option<LoadFamily>> {
     };
     let max_solves = integer_node(field(fields, "max-solves")?, "max-solves")?;
     let max_recovery_solves = integer_node(field(fields, "max-recovery-solves")?, "max-recovery-solves")?;
+    let restoration_reduction = fields.windows(2).find(|pair|
+        matches!(&pair[0].kind, NodeKind::Keyword(key) if key == "stress-restoration-reduction"))
+        .map(|pair| node_number(&pair[1], "stress-restoration-reduction")).transpose()?;
+    if restoration_reduction.is_some_and(|value| !(0.0..1.0).contains(&value)) {
+        return Err(malformed("stress-restoration-reduction must be finite and lie in [0,1)"));
+    }
     let additional = list(field(fields, "additional")?, "additional loads")?;
-    if !(1..=15).contains(&additional.len()) || !(1..=100_000).contains(&max_solves)
+    if additional.len() > 15 || (additional.is_empty() && restoration_reduction.is_none())
+        || !(1..=100_000).contains(&max_solves)
         || max_solves < additional.len() + 1 || max_recovery_solves > 100_000
-    { return Err(malformed("load-family requires 1..=15 additional cases, a complete baseline allowance within 100000 solves, and 0..=100000 recovery solves")); }
+    { return Err(malformed("load-family requires 1..=15 additional cases (zero only with explicit restoration), a complete baseline allowance within 100000 solves, and 0..=100000 recovery solves")); }
     let additional = additional.iter().map(|node| {
         let fields = list(node, "load case")?;
         if !fields.first().is_some_and(|node|
@@ -58,12 +69,17 @@ pub(super) fn parse(fields: &[Node]) -> Result<Option<LoadFamily>> {
         RobustLoadCase::new(DesignBoxEdge::Right, band[0], band[1], traction, weight)
             .map_err(|error| malformed(&error.to_string()))
     }).collect::<Result<Vec<_>>>()?;
-    Ok(Some(LoadFamily { aggregate, max_solves, max_recovery_solves, additional }))
+    Ok(Some(LoadFamily { aggregate, max_solves, max_recovery_solves, restoration_reduction, additional }))
 }
 
 impl LoadFamily {
     pub(super) fn html(&self, history: &History) -> String {
-        format!("<p>{} independent right-edge operating conditions, including the primary scenario with weight one. Compliance columns report the {} objective; weights are not probabilities and forces are never summed. Every case, including zero-weight cases, must meet the unweighted sampled stress limit. Study case solves: {}/{}. Lifetime recovery case solves: {}/{}. Candidate CG and stress sampling are cancellable; baseline construction and two-family checkpoint recovery currently remain synchronous.</p>",
+        let admission = if self.restoration_reduction.is_some() {
+            "Every case, including zero-weight cases, contributes to measured worst stress excess during restoration and must meet the unweighted stress limit before compliance descent."
+        } else {
+            "Every case, including zero-weight cases, must meet the unweighted sampled stress limit."
+        };
+        format!("<p>{} independent right-edge operating conditions, including the primary scenario with weight one. Compliance columns report the {} objective; weights are not probabilities and forces are never summed. {admission} Study case solves: {}/{}. Lifetime recovery case solves: {}/{}. Candidate CG and stress sampling are cancellable; baseline construction and two-family checkpoint recovery currently remain synchronous.</p>",
             history.cases.len(), aggregate_name(self.aggregate), history.solves, self.max_solves,
             history.recovery_solves, self.max_recovery_solves)
     }
@@ -73,6 +89,9 @@ impl LoadFamily {
         let _ = writeln!(out, "      :aggregate {}", aggregate_name(self.aggregate));
         let _ = writeln!(out, "      :max-solves {}", self.max_solves);
         let _ = writeln!(out, "      :max-recovery-solves {}", self.max_recovery_solves);
+        if let Some(reduction) = self.restoration_reduction {
+            let _ = writeln!(out, "      :stress-restoration-reduction {}", canonical_float(reduction));
+        }
         let _ = writeln!(out, "      :additional (");
         for case in &self.additional {
             let [a, b] = case.interval();
@@ -276,7 +295,7 @@ fn bind(owner: &MultiLoadProjectedOptimizer, spec: &ElasticitySpec, policy: &Con
     if a.level != b.level || a.iterations != b.iterations || a.nucleation_period != b.nucleation_period
         || x.max_candidates != y.max_candidates || x.max_solves != y.max_solves
         || p.max_evaluations != q.max_evaluations || owner.aggregate() != family.aggregate
-        || owner.stress_restoration_reduction().is_some()
+        || owner.stress_restoration_reduction().map(f64::to_bits) != family.restoration_reduction.map(f64::to_bits)
         || floats_a.into_iter().zip(floats_b).any(|(a, b)| a.to_bits() != b.to_bits())
         || cases_json(owner.load_cases()) != cases_json(&family.cases(spec)?)
         || owner.fixed_nodes().len() != fixed.len()
