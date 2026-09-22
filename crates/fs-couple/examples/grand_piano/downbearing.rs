@@ -1,6 +1,6 @@
 //! Declared per-course static downbearing -> the existing full shell operator.
-//! Loads are dead vertical forces at the SAME barycentric bridge/arm ports as
-//! the dynamics. Positive input means downward N, total over the whole course.
+//! Loads are dead Cartesian forces at the SAME barycentric bridge/arm ports as
+//! the dynamics. Downbearing shorthand is positive downward N per whole course.
 //! The supplied crown must explicitly be an UNLOADED reference. A measured
 //! already-loaded shape must not receive the same downbearing a second time.
 use super::{CrownedBoard, Site, ShellMesh, ShellModel, ShellSupport,
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 pub(super) struct Specification {
     source: String,
-    forces: BTreeMap<u8,f64>,
+    forces: BTreeMap<u8,[f64;3]>,
 }
 impl Specification {
     pub(super) fn read(text:&str)->Result<Option<Self>,String> {
@@ -33,13 +33,17 @@ impl Specification {
                     }
                     source=Some(f[1..].join(","));
                 }
-                "downbearing"=>{
-                    if f.len()!=3 {return Err("expected downbearing,key,total_downward_force_n".into());}
-                    let key:u8=f[1].parse().map_err(|_|"invalid downbearing key")?;
-                    let force=number(f[2])?;
-                    if !(21..=108).contains(&key) || !(0.0..=10_000.0).contains(&force)
-                        || forces.insert(key,force).is_some() {
-                        return Err("downbearing key must be unique, force finite in [0,10000] N per course".into());
+                "downbearing" | "bridge-load"=>{
+                    let vector=f[0]=="bridge-load";
+                    if f.len()!=(if vector {5}else{3}) {
+                        return Err("expected downbearing,key,down_n or bridge-load,key,fx_n,fy_n,fz_n".into());
+                    }
+                    let key:u8=f[1].parse().map_err(|_|"invalid bridge load key")?;
+                    let force=if vector {[number(f[2])?,number(f[3])?,number(f[4])?]}
+                        else {[0.,0.,-number(f[2])?]};
+                    if !(21..=108).contains(&key) || force.iter().any(|f|f.abs()>10_000.)
+                        || (!vector && force[2]>0.) || forces.insert(key,force).is_some() {
+                        return Err("bridge load key must be unique; finite component bounds are +/-10000 N; downbearing shorthand must be nonnegative".into());
                     }
                 }
                 _=>{}
@@ -57,11 +61,11 @@ impl Specification {
         }
         Ok(())
     }
-    fn loads(&self,board:&CrownedBoard)->Result<Vec<f64>,String> {
+    pub(super) fn loads(&self,board:&CrownedBoard)->Result<Vec<f64>,String> {
         self.check_sites(&board.sites)?;
         let mut loads=vec![0.;6*board.mesh.nodes.len()];
         for site in &board.sites {
-            let force=[0.,0.,-self.forces[&site.key]];
+            let force=self.forces[&site.key];
             let moment=cross(site.arm,force);
             for (a,&node) in board.mesh.tris[site.tri].iter().enumerate() {for c in 0..3 {
                 loads[6*node+c]+=site.weights[a]*force[c];
@@ -125,8 +129,8 @@ pub(super) fn prepare(board:&CrownedBoard)->Result<(ShellModel,ShellMesh,String)
             return Err("loaded board is not an upward shallow acoustic graph".into());
         }
     }
-    let summary=format!("nonlinear dead-load downbearing equilibrium: source [{}], total {} N, maximum translation {} m, physical residual {} N (moment norm length {} m), {} Newton iterations / {} evaluations, stored static energy {} J; reference mass and linear beams; no follower loads or beam buckling",
-        spec.source,spec.forces.values().sum::<f64>(),maximum_displacement,report.residual_force_n,
+    let summary=format!("nonlinear dead-load downbearing equilibrium: source [{}], net bridge force {:?} N, maximum translation {} m, physical residual {} N (moment norm length {} m), {} Newton iterations / {} evaluations, stored static energy {} J; reference mass and linear beams; no follower loads or beam buckling",
+        spec.source,(0..3).map(|c|spec.forces.values().map(|f|f[c]).sum::<f64>()).collect::<Vec<_>>(),maximum_displacement,report.residual_force_n,
         report.norm_length_m,report.iterations,report.evaluations,report.stored_energy_j);
     Ok((report.model,mesh,summary))
 }

@@ -61,5 +61,7 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: piano-smoke
-          path: piano-smoke.wav
+          path: |
+            piano-smoke.wav
+            Cargo.lock
           retention-days: 7

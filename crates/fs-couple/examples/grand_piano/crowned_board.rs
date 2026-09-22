@@ -22,6 +22,8 @@ use std::{collections::{BTreeMap, BTreeSet}, f64::consts::TAU, fmt::Write};
 
 #[path = "downbearing.rs"]
 mod downbearing;
+#[path = "bearing_geometry.rs"]
+pub mod bearing_geometry;
 
 pub const HEADER: &str = "frankensim-crowned-board-si-v1";
 const SHAPE: &str = "beam-section,rectangular-from-area-inertia";
@@ -98,7 +100,7 @@ impl CrownedBoard {
         for row in meaningful(text).skip(1) {
             let f:Vec<_>=row.split(',').map(str::trim).collect();
             match f[0] {
-                "downbearing" | "downbearing-source" | "preload-reference" => {},
+                "downbearing" | "bridge-load" | "downbearing-source" | "preload-reference" => {},
                 "node" => {
                     if f.len()!=5 || nodes.len()>=20_000 || index(f[1])?!=nodes.len() {
                         return Err("crowned node rows must be contiguous bounded x,y,z coordinates".into());
