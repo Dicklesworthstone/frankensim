@@ -12,17 +12,17 @@
   "makespan_hours": 1176,
   "path_is_unique": true,
   "critical_path": [
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr.1.1", "latency_hours": 180},
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr.1.3", "latency_hours": 96},
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr.1.2", "latency_hours": 240},
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr.6", "latency_hours": 456},
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr.5", "latency_hours": 180},
-    {"id": "frankensim-semantic-bead-template-hygiene-961yr", "latency_hours": 24}
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr.1.1", "latency_hours": 180 },
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr.1.3", "latency_hours": 96 },
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr.1.2", "latency_hours": 240 },
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr.6", "latency_hours": 456 },
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr.5", "latency_hours": 180 },
+    { "id": "frankensim-semantic-bead-template-hygiene-961yr", "latency_hours": 24 }
   ],
   "spine_positions": {
-    "frankensim-extreal-program-f85xj.6.10": {"slack_hours": 1106, "on_critical_path": false},
-    "frankensim-extreal-program-f85xj.6.9": {"slack_hours": 1101, "on_critical_path": false},
-    "frankensim-s93ej": {"slack_hours": 1152, "on_critical_path": false}
+    "frankensim-extreal-program-f85xj.6.10": { "slack_hours": 1106, "on_critical_path": false },
+    "frankensim-extreal-program-f85xj.6.9": { "slack_hours": 1101, "on_critical_path": false },
+    "frankensim-s93ej": { "slack_hours": 1152, "on_critical_path": false }
   },
   "slack_hours": {
     "frankensim-16dip": 662,
@@ -878,16 +878,56 @@
   "bv_comparison": {
     "status": "measured",
     "bv_top10": [
-      {"id": "frankensim-epic-foundations-huq.24.1", "bv_score": 0.37026585664471157, "slack_hours": 561},
-      {"id": "frankensim-leapfrog-2026-program-i94v.7.2.6", "bv_score": 0.2834268374144275, "slack_hours": null},
-      {"id": "frankensim-leapfrog-2026-program-i94v.7.2.10", "bv_score": 0.2728303493833304, "slack_hours": null},
-      {"id": "frankensim-semantic-bead-template-hygiene-961yr.1.2", "bv_score": 0.2712136611881906, "slack_hours": 0},
-      {"id": "frankensim-leapfrog-2026-program-i94v.7.4.5", "bv_score": 0.27106124191858394, "slack_hours": null},
-      {"id": "frankensim-epic-foundations-huq.24.4", "bv_score": 0.26411580987292194, "slack_hours": 381},
-      {"id": "frankensim-leapfrog-2026-program-i94v.7.3.5", "bv_score": 0.25543996382710765, "slack_hours": null},
-      {"id": "frankensim-epic-foundations-huq.24.1.1", "bv_score": 0.2528611834408813, "slack_hours": 467},
-      {"id": "frankensim-ext-ledger-package-migration-h61n", "bv_score": 0.24857664378399294, "slack_hours": 819},
-      {"id": "frankensim-epic-foundations-huq.24.5", "bv_score": 0.24506049533253765, "slack_hours": 568}
+      {
+        "id": "frankensim-epic-foundations-huq.24.1",
+        "bv_score": 0.37026585664471157,
+        "slack_hours": 561
+      },
+      {
+        "id": "frankensim-leapfrog-2026-program-i94v.7.2.6",
+        "bv_score": 0.2834268374144275,
+        "slack_hours": null
+      },
+      {
+        "id": "frankensim-leapfrog-2026-program-i94v.7.2.10",
+        "bv_score": 0.2728303493833304,
+        "slack_hours": null
+      },
+      {
+        "id": "frankensim-semantic-bead-template-hygiene-961yr.1.2",
+        "bv_score": 0.2712136611881906,
+        "slack_hours": 0
+      },
+      {
+        "id": "frankensim-leapfrog-2026-program-i94v.7.4.5",
+        "bv_score": 0.27106124191858394,
+        "slack_hours": null
+      },
+      {
+        "id": "frankensim-epic-foundations-huq.24.4",
+        "bv_score": 0.26411580987292194,
+        "slack_hours": 381
+      },
+      {
+        "id": "frankensim-leapfrog-2026-program-i94v.7.3.5",
+        "bv_score": 0.25543996382710765,
+        "slack_hours": null
+      },
+      {
+        "id": "frankensim-epic-foundations-huq.24.1.1",
+        "bv_score": 0.2528611834408813,
+        "slack_hours": 467
+      },
+      {
+        "id": "frankensim-ext-ledger-package-migration-h61n",
+        "bv_score": 0.24857664378399294,
+        "slack_hours": 819
+      },
+      {
+        "id": "frankensim-epic-foundations-huq.24.5",
+        "bv_score": 0.24506049533253765,
+        "slack_hours": 568
+      }
     ]
   },
   "no_claim": "weights are bead estimates with a recorded 480-minute default for unestimated beads; the makespan is a schedule bound over ESTIMATES, not a promise. slack 0 means on the critical path under those weights. bv's centrality ranking is retained beside slack where bv was runnable; disagreement between the two is the finding, not an error"

@@ -46,15 +46,11 @@
     {
       "ac_bytes": 222094,
       "ac_sha256": "3f40775875da6e6e28ed76396c3f19333977eaa412cf43edea144634e6e8884c",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": false,
       "description_sha256": "ed078f90b9cf19d6c52a67a5d0734339bfd99c70851959af506cad5b452213bd",
       "id": "frankensim-epic-foundations-huq.24.1.1.1",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [],
       "status": "blocked",
       "supersession_language": true,
@@ -63,15 +59,11 @@
     {
       "ac_bytes": 47026,
       "ac_sha256": "aa1153df7f8ef68ff12bf5a47665c6fdf0809fd8613a65ea2e63f47f0709706e",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "4e835e4491a0756c330ff78a47bdba125712e6d2d8d610e342b3dc84a0d13941",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.1",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_1_v1",
         "evaluate_24_1_1_1_1_cell_v1",
@@ -84,15 +76,11 @@
     {
       "ac_bytes": 22031,
       "ac_sha256": "9de1d70a26ab6f0e295dd7e769ed3885893c76bdb2a234eca44789c821f340e7",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "c2283546d553801db60b033f46f40dfc19ab3e7d7a834e5e2b047b5a7e9d5d4a",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.2",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_2_v1",
         "evaluate_24_1_1_1_2_cell_v1",
@@ -105,15 +93,11 @@
     {
       "ac_bytes": 26113,
       "ac_sha256": "0766b0b26c1ddd4ef4e74decf61b79d686ac497c4c34fa073d2873a6666c1258",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "9d4bad3c5697defb13ba8c8d01a220aa933c095c21c0d8e097a0b7c38702d376",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.3",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_3_v1",
         "evaluate_24_1_1_1_3_cell_v1",
@@ -126,15 +110,11 @@
     {
       "ac_bytes": 23938,
       "ac_sha256": "630af72c1704b2fbfeba924a760ab5f83cabb7bbb12434be8de5bd6719edda64",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "ecabce1f05c552410580e2d557fb19eea97d6d69121c9513c494d9b6c7b0fb34",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.4",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_4_v1",
         "evaluate_24_1_1_1_4_cell_v1",
@@ -147,15 +127,11 @@
     {
       "ac_bytes": 26674,
       "ac_sha256": "abc8153494a568c1e10fa9c5aaab0c5aa2222a1e7803ae25f327abc496817d65",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "08ac504790b8f451d6d6b1aca150339164a40533f11aab415cd441ca21783cb8",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.5",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_5_v1",
         "evaluate_24_1_1_1_5_cell_v1",
@@ -168,15 +144,11 @@
     {
       "ac_bytes": 25018,
       "ac_sha256": "4019bf48d391df39c0b8e193007fe8243ec440c97f23e3c183433d5543a71a4a",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "b57ea44a98fc18d70796eb1eede7024f61be639a21cfd71ba72c30183a535d5f",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.6",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "declare_24_1_1_1_6_v1",
         "evaluate_24_1_1_1_6_cell_v1",
@@ -189,15 +161,11 @@
     {
       "ac_bytes": 32643,
       "ac_sha256": "f02f87b96fbdd942ed9fef612e450217f3aefec6ea2e278a521fe3fb2ab1527b",
-      "charter_dates": [
-        "2026-07-30"
-      ],
+      "charter_dates": ["2026-07-30"],
       "defers_to_canonical_ac": true,
       "description_sha256": "384deffeba45a56641bceb3a5d236f92daf7ff02f9953c318855569cb893756b",
       "id": "frankensim-epic-foundations-huq.24.1.1.1.7",
-      "owned_ac_fragments": [
-        "AC58"
-      ],
+      "owned_ac_fragments": ["AC58"],
       "owned_symbols": [
         "crates/fs-evidence-runner/tests/runner_v2_base_work_packages.rs",
         "runner_v2/work_packages/execution.rs",

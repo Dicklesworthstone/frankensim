@@ -5,10 +5,7 @@
   "program_id_prefix": "frankensim-extreal-program-f85xj",
   "purpose": "Checked projection from product capabilities to implementing Beads work; dependency edges and status remain authoritative only in Beads.",
   "no_claim": "Membership identifies work relevant to a capability, not proof that the work is complete or that the capability deserves a maturity promotion.",
-  "linked_gates": [
-    "frankensim-ty23",
-    "frankensim-v6dn"
-  ],
+  "linked_gates": ["frankensim-ty23", "frankensim-v6dn"],
   "off_path_policy_bead": "frankensim-extreal-program-f85xj.16.3",
   "capability_bindings": [
     {
@@ -210,11 +207,6 @@
     "health": 63,
     "total_actionable": 68,
     "total_blocked": 61,
-    "documented_shape": [
-      "summary",
-      "tracks",
-      "status",
-      "data_hash"
-    ]
+    "documented_shape": ["summary", "tracks", "status", "data_hash"]
   }
 }

@@ -12,24 +12,24 @@
     "head_sha": "51acb4b0ce10ea5145237643593b68fde23e8744"
   },
   "stages": [
-    {"stage": "import-verify", "capability": null, "status": "executed"},
-    {"stage": "assign", "capability": null, "status": "executed"},
-    {"stage": "material-resolve", "capability": null, "status": "executed"},
-    {"stage": "flow-network", "capability": null, "status": "executed"},
-    {"stage": "conduction", "capability": "thermal.conduction-solve", "status": "executed"},
-    {"stage": "qoi", "capability": null, "status": "executed"},
-    {"stage": "report", "capability": null, "status": "executed"}
+    { "stage": "import-verify", "capability": null, "status": "executed" },
+    { "stage": "assign", "capability": null, "status": "executed" },
+    { "stage": "material-resolve", "capability": null, "status": "executed" },
+    { "stage": "flow-network", "capability": null, "status": "executed" },
+    { "stage": "conduction", "capability": "thermal.conduction-solve", "status": "executed" },
+    { "stage": "qoi", "capability": null, "status": "executed" },
+    { "stage": "report", "capability": null, "status": "executed" }
   ],
   "summary": {
-  "schema": "frankensim.ci.solve-e2e-summary.v1",
-  "profile": "full",
-  "through": "report",
-  "checks": 66,
-  "failures": 0,
-  "stages_executing": 7,
-  "stages_total": 7,
-  "first_gap": "none",
-  "first_gap_owner": "",
-  "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
-}
+    "schema": "frankensim.ci.solve-e2e-summary.v1",
+    "profile": "full",
+    "through": "report",
+    "checks": 66,
+    "failures": 0,
+    "stages_executing": 7,
+    "stages_total": 7,
+    "first_gap": "none",
+    "first_gap_owner": "",
+    "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
+  }
 }

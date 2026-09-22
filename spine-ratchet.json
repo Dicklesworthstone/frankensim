@@ -3,7 +3,15 @@
   "bead": "frankensim-o5et9",
   "high_water_stages_executing": 7,
   "stages_total": 7,
-  "executing_prefix": ["import-verify", "assign", "material-resolve", "flow-network", "conduction", "qoi", "report"],
+  "executing_prefix": [
+    "import-verify",
+    "assign",
+    "material-resolve",
+    "flow-network",
+    "conduction",
+    "qoi",
+    "report"
+  ],
   "first_gap": null,
   "first_gap_owner": null,
   "no_claim": "counts the executing stage PREFIX declared in fs-cli source; it does not prove those stages are correct, only that the product still admits them"

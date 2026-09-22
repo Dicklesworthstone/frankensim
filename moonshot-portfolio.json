@@ -5,11 +5,7 @@
   "issue_authority": ".beads/issues.jsonl",
   "critical_path_graph": "vertical-capability-graph.json",
   "captured_at": "2026-08-24",
-  "moonshot_labels": [
-    "ambition:M",
-    "ambition-m",
-    "moonshot*"
-  ],
+  "moonshot_labels": ["ambition:M", "ambition-m", "moonshot*"],
   "active_status": "in_progress",
   "status_quo_cap": 5,
   "cap_rule": "The cap starts at the captured active count. A completion shrinks available WIP; a new moonshot is admitted only by displacing one active lane with a completed, falsified, or shelved-with-state disposition.",

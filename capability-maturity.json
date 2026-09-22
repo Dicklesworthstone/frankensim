@@ -19,9 +19,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-evidence"
-      ],
+      "crates": ["fs-evidence"],
       "evidence": [
         {
           "kind": "contract",
@@ -44,11 +42,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-package",
-        "fs-checker",
-        "fs-crosswalk"
-      ],
+      "crates": ["fs-package", "fs-checker", "fs-crosswalk"],
       "evidence": [
         {
           "kind": "contract",
@@ -75,9 +69,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-geom"
-      ],
+      "crates": ["fs-geom"],
       "evidence": [
         {
           "kind": "contract",
@@ -100,11 +92,7 @@
       "level": "L1",
       "owner": "jemanuel",
       "last_review": "2026-07-23",
-      "crates": [
-        "fs-io",
-        "fs-cli",
-        "fs-project"
-      ],
+      "crates": ["fs-io", "fs-cli", "fs-project"],
       "evidence": [
         {
           "kind": "contract",
@@ -135,9 +123,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-topo"
-      ],
+      "crates": ["fs-topo"],
       "evidence": [
         {
           "kind": "contract",
@@ -160,9 +146,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-sparse"
-      ],
+      "crates": ["fs-sparse"],
       "evidence": [
         {
           "kind": "contract",
@@ -185,9 +169,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-ivl"
-      ],
+      "crates": ["fs-ivl"],
       "evidence": [
         {
           "kind": "contract",
@@ -210,9 +192,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-solver"
-      ],
+      "crates": ["fs-solver"],
       "evidence": [
         {
           "kind": "contract",
@@ -235,9 +215,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-adjoint"
-      ],
+      "crates": ["fs-adjoint"],
       "evidence": [
         {
           "kind": "contract",
@@ -260,9 +238,7 @@
       "level": "L2",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-thrust-e2e"
-      ],
+      "crates": ["fs-thrust-e2e"],
       "evidence": [
         {
           "kind": "contract",
@@ -285,9 +261,7 @@
       "level": "L2",
       "owner": "FrostyOx",
       "last_review": "2026-07-22",
-      "crates": [
-        "xtask"
-      ],
+      "crates": ["xtask"],
       "evidence": [
         {
           "kind": "doc",
@@ -318,9 +292,7 @@
       "level": "L2",
       "owner": "FrostyOx",
       "last_review": "2026-08-25",
-      "crates": [
-        "xtask"
-      ],
+      "crates": ["xtask"],
       "evidence": [
         {
           "kind": "doc",
@@ -339,11 +311,7 @@
       "level": "L3",
       "owner": "jemanuel",
       "last_review": "2026-09-02",
-      "crates": [
-        "fs-conduction",
-        "fs-feec",
-        "fs-solid"
-      ],
+      "crates": ["fs-conduction", "fs-feec", "fs-solid"],
       "evidence": [
         {
           "kind": "contract",
@@ -391,9 +359,7 @@
       "level": "L1",
       "owner": "jemanuel",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-ledger"
-      ],
+      "crates": ["fs-ledger"],
       "evidence": [
         {
           "kind": "contract",
@@ -408,9 +374,7 @@
       "level": "L1",
       "owner": "CyanBarn",
       "last_review": "2026-07-22",
-      "crates": [
-        "fs-wasm"
-      ],
+      "crates": ["fs-wasm"],
       "evidence": [
         {
           "kind": "contract",

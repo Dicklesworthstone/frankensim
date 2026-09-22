@@ -14,12 +14,18 @@
           "layer": "L1",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "present"},
-            {"to": "ft-autograd", "kind": "normal", "target": null, "state": "present"},
-            {"to": "ft-core", "kind": "normal", "target": null, "state": "present"}
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "present" },
+            { "to": "ft-autograd", "kind": "normal", "target": null, "state": "present" },
+            { "to": "ft-core", "kind": "normal", "target": null, "state": "present" }
           ],
-          "forbidden_dependencies": ["fs-motion", "fs-scenario", "fs-contact", "fs-time", "fs-adjoint"]
+          "forbidden_dependencies": [
+            "fs-motion",
+            "fs-scenario",
+            "fs-contact",
+            "fs-time",
+            "fs-adjoint"
+          ]
         },
         {
           "name": "fs-spectral",
@@ -27,12 +33,19 @@
           "layer": "L1",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-blake3", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-blake3", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "proposed" }
           ],
-          "forbidden_dependencies": ["fs-motion", "fs-geom", "fs-scenario", "fs-contact", "fs-solid", "fs-mbd"]
+          "forbidden_dependencies": [
+            "fs-motion",
+            "fs-geom",
+            "fs-scenario",
+            "fs-contact",
+            "fs-solid",
+            "fs-mbd"
+          ]
         },
         {
           "name": "fs-matdb",
@@ -40,9 +53,9 @@
           "layer": "L1",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-blake3", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-blake3", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-material", "fs-tribo", "fs-contact", "fs-gas"]
         },
@@ -52,14 +65,14 @@
           "layer": "L1",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-couple", "fs-material", "fs-thermal", "fs-gas", "fs-flux"]
         },
@@ -69,14 +82,14 @@
           "layer": "L2",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-ga", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-geom", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-query", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-ga", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-geom", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-query", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-scenario"]
         },
@@ -86,9 +99,23 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-iface", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-iface", "kind": "normal", "target": null, "state": "proposed" }
           ],
-          "forbidden_dependencies": ["fs-contact", "fs-mbd", "fs-machine", "fs-em", "fs-circuit", "fs-power", "fs-control", "fs-thermal", "fs-gas", "fs-tribo", "fs-acoustics", "fs-solid", "fs-flux"]
+          "forbidden_dependencies": [
+            "fs-contact",
+            "fs-mbd",
+            "fs-machine",
+            "fs-em",
+            "fs-circuit",
+            "fs-power",
+            "fs-control",
+            "fs-thermal",
+            "fs-gas",
+            "fs-tribo",
+            "fs-acoustics",
+            "fs-solid",
+            "fs-flux"
+          ]
         },
         {
           "name": "fs-solver",
@@ -96,12 +123,12 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-feec", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-sparse", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-tilelang", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-feec", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-sparse", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-tilelang", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-ascent", "fs-opt"]
         },
@@ -111,13 +138,13 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-blake3", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-cheb", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-ga", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-rand", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-blake3", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-cheb", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-ga", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-rand", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": []
         },
@@ -127,11 +154,11 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-ad", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-ad", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": []
         },
@@ -141,16 +168,16 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-ga", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-query", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-ga", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-query", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": []
         },
@@ -160,14 +187,14 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-contact"]
         },
@@ -177,18 +204,18 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-query", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-tribo", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-iface", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-query", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-tribo", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-iface", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-solid", "fs-mbd", "fs-machine"]
         },
@@ -198,18 +225,18 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-kinematics", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-contact", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ga", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-query", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-kinematics", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-contact", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ga", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-query", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-solid", "fs-machine"]
         },
@@ -219,19 +246,29 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-kinematics", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-mbd", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-contact", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-tribo", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-symmetry", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-kinematics", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-mbd", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-contact", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-tribo", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-symmetry", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
-          "forbidden_dependencies": ["fs-em", "fs-circuit", "fs-power", "fs-control", "fs-thermal", "fs-gas", "fs-acoustics", "fs-solid", "fs-flux"]
+          "forbidden_dependencies": [
+            "fs-em",
+            "fs-circuit",
+            "fs-power",
+            "fs-control",
+            "fs-thermal",
+            "fs-gas",
+            "fs-acoustics",
+            "fs-solid",
+            "fs-flux"
+          ]
         },
         {
           "name": "fs-circuit",
@@ -239,12 +276,12 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-em"]
         },
@@ -254,14 +291,14 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-circuit", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-circuit", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-thermal", "fs-control"]
         },
@@ -271,13 +308,13 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-power", "fs-em"]
         },
@@ -287,18 +324,18 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-feec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-query", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-xform", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-feec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-query", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-xform", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-power", "fs-em", "fs-gas"]
         },
@@ -308,16 +345,16 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-thermochem", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-thermochem", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-flux"]
         },
@@ -327,14 +364,14 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-cutfem", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-scenario", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-sparse", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-contact", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-cutfem", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-scenario", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-sparse", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-contact", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-mbd"]
         },
@@ -344,11 +381,11 @@
           "layer": "L3",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-solid", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-sparse", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-gas", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-solid", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-sparse", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-gas", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": []
         },
@@ -358,20 +395,20 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-feec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-cutfem", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-time", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-symmetry", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-iface", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-feec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-cutfem", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-time", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-symmetry", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-iface", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": ["fs-circuit", "fs-power"]
         },
@@ -381,20 +418,20 @@
           "layer": "L3",
           "presence": "proposed",
           "dependencies": [
-            {"to": "fs-feec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-flux", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-motion", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-bem", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-iface", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-obs", "kind": "normal", "target": null, "state": "proposed"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "proposed"}
+            { "to": "fs-feec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-flux", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-spectral", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-motion", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-bem", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-matdb", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-iface", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-obs", "kind": "normal", "target": null, "state": "proposed" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "proposed" }
           ],
           "forbidden_dependencies": []
         }
@@ -443,70 +480,85 @@
           "layer": "L6",
           "presence": "required",
           "dependencies": [
-            {"to": "fs-sparse", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-cheb", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-rand", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-math", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-ivl", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-ad", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-fft", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-la", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-ga", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-geom", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-feec", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-flux", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-cutfem", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-solver", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-bo", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-xform", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-dfo", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-symmetry", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-solid", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-rep-mesh", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-evidence", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-sos", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-robust", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-tropical", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-voi", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-spectral", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-couple", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-rep-neural", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-viz", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-shapeprog", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-archive", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-fab", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-assimilate", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-toleralloc", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-lattice", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-truss", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-eproc", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-lbm", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-ornith", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-vessel", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-frame", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-bem", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-vpm", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-race", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-render", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-scenario", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-uq", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-material", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-alloc", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-exec", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-qty", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-robustopt-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-metamat-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-flutter-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-schedule-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-truss-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-oed-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-neuroshape-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-grammar-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-adaptbo-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "fs-flowcert-e2e", "kind": "normal", "target": null, "state": "present"},
-            {"to": "wasm-bindgen", "kind": "normal", "target": "cfg(target_arch = \"wasm32\")", "state": "present"},
-            {"to": "asupersync", "kind": "normal", "target": "cfg(target_arch = \"wasm32\")", "state": "present"},
-            {"to": "getrandom", "kind": "normal", "target": "cfg(target_arch = \"wasm32\")", "state": "present"}
+            { "to": "fs-sparse", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-cheb", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-rand", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-math", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-ivl", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-ad", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-fft", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-la", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-ga", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-geom", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-feec", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-flux", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-cutfem", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-solver", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-bo", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-xform", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-dfo", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-symmetry", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-solid", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-rep-mesh", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-evidence", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-sos", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-robust", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-tropical", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-voi", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-spectral", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-couple", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-rep-neural", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-viz", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-shapeprog", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-archive", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-fab", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-assimilate", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-toleralloc", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-lattice", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-truss", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-eproc", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-lbm", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-ornith", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-vessel", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-frame", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-bem", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-vpm", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-race", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-render", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-scenario", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-uq", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-material", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-alloc", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-exec", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-qty", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-robustopt-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-metamat-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-flutter-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-schedule-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-truss-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-oed-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-neuroshape-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-grammar-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-adaptbo-e2e", "kind": "normal", "target": null, "state": "present" },
+            { "to": "fs-flowcert-e2e", "kind": "normal", "target": null, "state": "present" },
+            {
+              "to": "wasm-bindgen",
+              "kind": "normal",
+              "target": "cfg(target_arch = \"wasm32\")",
+              "state": "present"
+            },
+            {
+              "to": "asupersync",
+              "kind": "normal",
+              "target": "cfg(target_arch = \"wasm32\")",
+              "state": "present"
+            },
+            {
+              "to": "getrandom",
+              "kind": "normal",
+              "target": "cfg(target_arch = \"wasm32\")",
+              "state": "present"
+            }
           ],
           "forbidden_dependencies": []
         }
@@ -516,15 +568,87 @@
     }
   ],
   "unique_types": [
-    {"name": "PortSchema", "owner": "fs-couple", "state": "proposed", "scan_crates": ["fs-couple", "fs-contact", "fs-mbd", "fs-machine", "fs-em", "fs-circuit", "fs-power", "fs-control", "fs-thermal", "fs-gas", "fs-tribo", "fs-acoustics"]},
-    {"name": "ConstitutiveGraph", "owner": "fs-material", "state": "proposed", "scan_crates": ["fs-material", "fs-matdb", "fs-thermochem", "fs-tribo", "fs-thermal", "fs-gas", "fs-em", "fs-power"]},
-    {"name": "LawId", "owner": "fs-matdb", "state": "proposed", "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]},
-    {"name": "LawVersion", "owner": "fs-matdb", "state": "proposed", "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]},
-    {"name": "StateSchemaVersion", "owner": "fs-matdb", "state": "proposed", "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]},
-    {"name": "MotorPath", "owner": "fs-motion", "state": "proposed", "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]},
-    {"name": "ChartAtTime", "owner": "fs-motion", "state": "proposed", "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]},
-    {"name": "SpacetimeChart", "owner": "fs-motion", "state": "proposed", "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]},
-    {"name": "GeometricMoments", "owner": "fs-query", "state": "present", "scan_crates": ["fs-query", "fs-motion", "fs-contact", "fs-mbd"]},
-    {"name": "TriComplex2", "owner": "fs-rep-mesh", "state": "proposed", "scan_crates": ["fs-rep-mesh", "fs-feec"]}
+    {
+      "name": "PortSchema",
+      "owner": "fs-couple",
+      "state": "proposed",
+      "scan_crates": [
+        "fs-couple",
+        "fs-contact",
+        "fs-mbd",
+        "fs-machine",
+        "fs-em",
+        "fs-circuit",
+        "fs-power",
+        "fs-control",
+        "fs-thermal",
+        "fs-gas",
+        "fs-tribo",
+        "fs-acoustics"
+      ]
+    },
+    {
+      "name": "ConstitutiveGraph",
+      "owner": "fs-material",
+      "state": "proposed",
+      "scan_crates": [
+        "fs-material",
+        "fs-matdb",
+        "fs-thermochem",
+        "fs-tribo",
+        "fs-thermal",
+        "fs-gas",
+        "fs-em",
+        "fs-power"
+      ]
+    },
+    {
+      "name": "LawId",
+      "owner": "fs-matdb",
+      "state": "proposed",
+      "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]
+    },
+    {
+      "name": "LawVersion",
+      "owner": "fs-matdb",
+      "state": "proposed",
+      "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]
+    },
+    {
+      "name": "StateSchemaVersion",
+      "owner": "fs-matdb",
+      "state": "proposed",
+      "scan_crates": ["fs-matdb", "fs-material", "fs-thermochem", "fs-tribo", "fs-gas"]
+    },
+    {
+      "name": "MotorPath",
+      "owner": "fs-motion",
+      "state": "proposed",
+      "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]
+    },
+    {
+      "name": "ChartAtTime",
+      "owner": "fs-motion",
+      "state": "proposed",
+      "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]
+    },
+    {
+      "name": "SpacetimeChart",
+      "owner": "fs-motion",
+      "state": "proposed",
+      "scan_crates": ["fs-motion", "fs-scenario", "fs-kinematics", "fs-mbd"]
+    },
+    {
+      "name": "GeometricMoments",
+      "owner": "fs-query",
+      "state": "present",
+      "scan_crates": ["fs-query", "fs-motion", "fs-contact", "fs-mbd"]
+    },
+    {
+      "name": "TriComplex2",
+      "owner": "fs-rep-mesh",
+      "state": "proposed",
+      "scan_crates": ["fs-rep-mesh", "fs-feec"]
+    }
   ]
 }

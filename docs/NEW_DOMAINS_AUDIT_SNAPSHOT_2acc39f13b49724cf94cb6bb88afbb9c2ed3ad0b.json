@@ -14,10 +14,7 @@
   "audited_at": "2026-07-14T02:41:33Z",
   "charter": {
     "path": "COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md",
-    "sections": [
-      "1.1",
-      "1.2"
-    ],
+    "sections": ["1.1", "1.2"],
     "supersedes_commit": "51e50ff89e3ef8cf7eb405b8dfd0f463cf50a0cd"
   },
   "method": {
@@ -286,9 +283,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-query/src"
-          ],
+          "scope_paths": ["crates/fs-query/src"],
           "pattern": "pub (fn|struct|trait) .*(minkowski_sum|penetration_depth)",
           "command": "git grep -E -n 'pub (fn|struct|trait) .*(minkowski_sum|penetration_depth)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-query/src",
           "result": "absent",
@@ -408,9 +403,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-time/src"
-          ],
+          "scope_paths": ["crates/fs-time/src"],
           "pattern": "pub (struct|enum|trait|fn) [A-Za-z0-9_]*(SE3|Motor)|pub fn [A-Za-z0-9_]*event",
           "command": "git grep -E -n 'pub (struct|enum|trait|fn) [A-Za-z0-9_]*(SE3|Motor)|pub fn [A-Za-z0-9_]*event' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-time/src",
           "result": "absent",
@@ -544,9 +537,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-qty/src"
-          ],
+          "scope_paths": ["crates/fs-qty/src"],
           "pattern": "pub (struct|type).*(Mole|AmountOfSubstance)|const MOL",
           "command": "git grep -E -n 'pub (struct|type).*(Mole|AmountOfSubstance)|const MOL' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-qty/src",
           "result": "absent from implemented dimensions and public types",
@@ -591,9 +582,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-spectral/src"
-          ],
+          "scope_paths": ["crates/fs-spectral/src"],
           "pattern": "pub .*(Lanczos|LOBPCG)|struct .*(Lanczos|Lobpcg)",
           "command": "git grep -E -n 'pub .*(Lanczos|LOBPCG)|struct .*(Lanczos|Lobpcg)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-spectral/src",
           "result": "absent",
@@ -645,9 +634,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-topols/src"
-          ],
+          "scope_paths": ["crates/fs-topols/src"],
           "pattern": "pub .*(EquationOfState|SpeciesTransport|ReactiveFlow|EulerFlux)",
           "command": "git grep -E -n 'pub .*(EquationOfState|SpeciesTransport|ReactiveFlow|EulerFlux)' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-topols/src",
           "result": "absent",
@@ -699,10 +686,7 @@
         {
           "engine": "git grep -E -n",
           "commit_sha": "2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b",
-          "scope_paths": [
-            "crates/fs-rep-mesh",
-            "crates/fs-feec"
-          ],
+          "scope_paths": ["crates/fs-rep-mesh", "crates/fs-feec"],
           "pattern": "TriComplex2",
           "command": "git grep -E -n 'TriComplex2' 2acc39f13b49724cf94cb6bb88afbb9c2ed3ad0b -- crates/fs-rep-mesh crates/fs-feec",
           "result": "absent",

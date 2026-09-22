@@ -49,18 +49,14 @@
         {
           "capability": "wasm.browser-flagships",
           "level": "L1",
-          "crates": [
-            "fs-wasm"
-          ],
+          "crates": ["fs-wasm"],
           "workflow_consumer": false,
           "disposition": "REPAIR-OR-QUARANTINE"
         },
         {
           "capability": "geometry.topology-certificates",
           "level": "L2",
-          "crates": [
-            "fs-topo"
-          ],
+          "crates": ["fs-topo"],
           "workflow_consumer": false,
           "disposition": "KEEP",
           "note": "Sweep independently corroborates the registry boundary \"Not L3 -- no e2e lane exercises it\"."
@@ -341,18 +337,14 @@
         {
           "capability": "wasm.browser-flagships",
           "level": "L1",
-          "crates": [
-            "fs-wasm"
-          ],
+          "crates": ["fs-wasm"],
           "workflow_consumer": false,
           "disposition": "REPAIR-OR-QUARANTINE"
         },
         {
           "capability": "geometry.topology-certificates",
           "level": "L2",
-          "crates": [
-            "fs-topo"
-          ],
+          "crates": ["fs-topo"],
           "workflow_consumer": false,
           "disposition": "KEEP",
           "note": "The current dependency closure still independently corroborates the registry boundary that no e2e lane exercises this capability."

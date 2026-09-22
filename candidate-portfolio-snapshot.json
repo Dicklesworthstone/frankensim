@@ -196,9 +196,7 @@
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.10",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.5"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.5"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.11",
@@ -219,16 +217,12 @@
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.13",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.2"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.2"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.14.1",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.11"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.11"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.14.2",
@@ -277,23 +271,17 @@
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.6",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.5"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.5"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.7",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.5"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.5"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.8",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.6.5"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.6.5"]
       },
       {
         "issue_id": "frankensim-extreal-program-f85xj.6.9",
@@ -307,33 +295,22 @@
       {
         "issue_id": "frankensim-s2l9v.1",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.5.10"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.5.10"]
       },
       {
         "issue_id": "frankensim-s2l9v.2",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-extreal-program-f85xj.8.3",
-          "frankensim-s2l9v.1"
-        ]
+        "open_hard_blockers": ["frankensim-extreal-program-f85xj.8.3", "frankensim-s2l9v.1"]
       },
       {
         "issue_id": "frankensim-s2l9v.3",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-s2l9v.1",
-          "frankensim-s93ej"
-        ]
+        "open_hard_blockers": ["frankensim-s2l9v.1", "frankensim-s93ej"]
       },
       {
         "issue_id": "frankensim-s2l9v.4",
         "status": "open",
-        "open_hard_blockers": [
-          "frankensim-s2l9v.2",
-          "frankensim-s2l9v.3"
-        ]
+        "open_hard_blockers": ["frankensim-s2l9v.2", "frankensim-s2l9v.3"]
       },
       {
         "issue_id": "frankensim-s93ej.1",
