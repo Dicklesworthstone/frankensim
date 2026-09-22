@@ -134,12 +134,22 @@ impl CavityCoupling {
         pads: Vec<FeltPad>, config: ImpactConfig, gate: &CancelGate)
         -> Result<(ImpactSystem, Self), ImpactError>
     {
+        self.build_with_dampers(bodies, contacts, pads, Vec::new(), config, gate)
+    }
+
+    /// Attach spatial viscous loss only to the original structural coordinates.
+    /// The complete resistance participates in the same implicit cavity solve.
+    pub fn build_with_dampers(self, bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
+        pads: Vec<FeltPad>, dampers: Vec<super::damping::ViscousDamper>,
+        config: ImpactConfig, gate: &CancelGate) -> Result<(ImpactSystem, Self), ImpactError>
+    {
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         if self.total > MAX_IMPACT_MODES {
             return Err(invalid("distributed cavity exceeds the nonlinear reference mode budget"));
         }
         let (bodies, contacts, pads) = self.extend_parts(bodies, contacts, pads, config.dt_s, gate)?;
-        let system = ImpactSystem::new(bodies, contacts, pads, self.springs.clone(), config)?;
+        let dampers = super::damping::extend(dampers, self.structural, self.total)?;
+        let system = ImpactSystem::new_with_dampers(bodies, contacts, pads, self.springs.clone(), dampers, config)?;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         Ok((system, self))
     }

@@ -1,4 +1,5 @@
 //! Distributed enclosed air from the same drum dimensions and actual head modes.
+use fs_couple::render::plate::impact::damping::ViscousDamper;
 use super::{Error,ImpactBody,ImpactSystem,ModePair,Obstacle,TensionedDisk,config};
 use fs_couple::render::plate::impact::cavity::{CavityCoupling,
     cylinder::{CylinderSpec,CylindricalCavity,SidewallAperture},neck::CavityNeck};
@@ -125,6 +126,12 @@ fn interface(films:&[TensionedDisk],modes:&[Vec<ModePair>],air:&CylindricalCavit
 pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
     ->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,steps,dt_s,neck)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
+    ->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     // Both head ranges remain the original prefix. Include every appended
     // striker before allocating cavity inertia; its coupling row stays zero.
@@ -132,7 +139,7 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
         .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
         fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,&gate)?;
-    let (system,coupling)=coupling.build(bodies,contacts,vec![],config(steps,dt_s),&gate)?;
+    let (system,coupling)=coupling.build_with_dampers(bodies,contacts,vec![],dampers,config(steps,dt_s),&gate)?;
     Ok((system,InteriorPressure {coupling,first,second}))
 }
 
@@ -143,12 +150,18 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
 pub fn build_prepared(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,radius:f64,depth:f64,configuration:LinearImpactConfig)
     ->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    build_prepared_with_dampers(films,modes,bodies,contacts,Vec::new(),radius,depth,configuration)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn build_prepared_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig)
+    ->Result<(LinearImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("prepared cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
         configuration.coupling.max_modes,None,&gate)?;
-    let (system,coupling)=coupling.build_linear(bodies,contacts,
+    let (system,coupling)=coupling.build_linear_with_dampers(bodies,contacts,dampers,
         core::f64::consts::PI*radius*radius,configuration,&gate)?;
     eprintln!("mechanical image: prepared modal heads/wires plus simultaneous distributed-air/contact reactions; no wire homogenization or direct gas audio; real-time performance unqualified");
     Ok((system,InteriorPressure {coupling,first,second}))

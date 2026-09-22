@@ -123,8 +123,15 @@ impl Mechanics {
     fn with_configuration(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
         reference_area_m2: f64, configuration: LinearImpactConfig) -> Result<Self, Error>
     {
-        let system = LinearImpactSystem::new(bodies, contacts,
-            vec![VolumeConnection { spring: volume, reference_area_m2 }], configuration,
+        Self::prepared_with_dampers(bodies,contacts,volume,reference_area_m2,Vec::new(),configuration)
+    }
+    /// Compile localized physical loss together with volume/contact reactions.
+    pub fn prepared_with_dampers(bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>, volume: VolumeSpring,
+        reference_area_m2: f64, dampers: Vec<fs_couple::render::plate::impact::damping::ViscousDamper>,
+        configuration: LinearImpactConfig) -> Result<Self, Error>
+    {
+        let system = LinearImpactSystem::new_with_dampers(bodies, contacts,
+            vec![VolumeConnection { spring: volume, reference_area_m2 }], dampers, configuration,
             &CancelGate::new_clock_free())?;
         eprintln!("mechanical image: prepared exact-ZOH bodies plus simultaneous volume/contact reactions; unchanged physical cards; native real-time performance is unqualified");
         Ok(Self::Prepared(system))

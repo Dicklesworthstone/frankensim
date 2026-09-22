@@ -24,6 +24,7 @@ mod playing;
 mod specimen;
 mod drum_spec;
 mod sticks;
+mod muffling;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -68,6 +69,10 @@ fn splash_with_stroke(steps:u64,dt_s:f64,audio:bool,stroke:Stroke)->Result<Exper
     splash_with_specimen(steps,dt_s,audio,stroke,None)
 }
 fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>)->Result<Experiment,Error> {
+    splash_with_mufflers(steps,dt_s,audio,stroke,supplied,&[])
+}
+fn splash_with_mufflers(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler])->Result<Experiment,Error> {
+    muffling::admit_command(mufflers,"splash")?;
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
     let shell=specimen.build()?;
     let model=shell.assemble(&[],ShellSupport::Free)?;
@@ -130,8 +135,9 @@ fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
     eprintln!("shell input={}, mass_kg={},modes={},facets={},max_edge_m={},band_hz={lower}..{upper}; stand felt, stick and contact remain estimated; no calibration or full-band claim",
         if imported {"supplied profile"}else{"estimated splash"},shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
+    let dampers=muffling::shell_ports(mufflers,&reduction,&shell.mesh.nodes,&shell.mesh.tris)?;
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
-    let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
+    let system=ImpactSystem::new_with_dampers(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],dampers,config(steps,dt_s))?;
     let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
     Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,second_stick:None,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
 }
@@ -154,6 +160,11 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
 }
 #[allow(clippy::too_many_arguments)]
 fn drum_with_sticks(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>)->Result<Experiment,Error> {
+    drum_with_mufflers(steps,dt_s,audio,prepared,snares,stretching,stroke,distributed_cavity,neck,supplied,second,&[])
+}
+#[allow(clippy::too_many_arguments)]
+fn drum_with_mufflers(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler])->Result<Experiment,Error> {
+    muffling::admit_command(mufflers,"drum")?;
     if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
     if neck.is_some() && prepared {return Err("prepared drum/snare cavity does not admit neck momentum drag; use the nonlinear drum image".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
@@ -229,24 +240,22 @@ fn drum_with_sticks(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     // Both images consume the identical geometric reduction, strike port,
     // constitutive contact, loss coefficients and air volume. Only the discrete
     // realization changes. Neither path modifies the microphone/BEM boundary.
+    let dampers=muffling::head_ports(mufflers,&films,&mode_sets,n)?;
     let mut air=None;
     let system=if distributed_cavity {
         if prepared {
             let configuration=mechanics::coupled_config(steps,dt_s,snares.is_some())?;
-            let (system,probe)=cavity::build_prepared(&films,&mode_sets,bodies,contacts,radius,depth,configuration)?;
+            let (system,probe)=cavity::build_prepared_with_dampers(&films,&mode_sets,bodies,contacts,dampers,radius,depth,configuration)?;
             air=Some(probe);Mechanics::Prepared(system)
         } else {
-            let (system,probe)=cavity::build(&films,&mode_sets,bodies,contacts,radius,depth,steps,dt_s,neck)?;
+            let (system,probe)=cavity::build_with_dampers(&films,&mode_sets,bodies,contacts,dampers,radius,depth,steps,dt_s,neck)?;
             air=Some(probe);Mechanics::Reference(system)
         }
     }else if prepared {
-        if snares.is_some() {
-            Mechanics::prepared_snares(bodies,contacts,volume.clone(),pi*radius*radius,steps,dt_s)?
-        } else {
-            Mechanics::prepared(bodies,contacts,volume.clone(),pi*radius*radius,steps,dt_s)?
-        }
+        Mechanics::prepared_with_dampers(bodies,contacts,volume.clone(),pi*radius*radius,dampers,
+            mechanics::coupled_config(steps,dt_s,snares.is_some())?)
     }else{
-        Mechanics::Reference(ImpactSystem::new(bodies,contacts,vec![],vec![volume.clone()],config(steps,dt_s))?)
+        Mechanics::Reference(ImpactSystem::new_with_dampers(bodies,contacts,vec![],vec![volume.clone()],dampers,config(steps,dt_s))?)
     };
     // Acoustic inertia never receives an external strike or a direct solid-radiation projection.
     let count=air.as_ref().map_or(n,|a|a.coupling.total_modes());
@@ -267,6 +276,7 @@ fn run()->Result<(),Error> {
     let shell_path=specimen::option(&mut raw_args)?;
     let drum_path=drum_spec::option(&mut raw_args)?;
     let second=sticks::option(&mut raw_args)?;
+    let mufflers=muffling::options(&mut raw_args)?;
     let playing_force=mechanics::drive::option(&mut raw_args)?;
     let second_force=mechanics::drive::second_option(&mut raw_args)?;
     if second_force.is_some() && second.is_none() {
@@ -284,6 +294,10 @@ fn run()->Result<(),Error> {
     specimen::admit_command(shell_path.as_deref(),&args[0])?;
     drum_spec::admit_command(drum_path.as_deref(),&args[0])?;
     sticks::admit_command(second.is_some(),&args[0])?;
+    muffling::admit_command(&mufflers,&args[0])?;
+    for spec in &mufflers {
+        eprintln!("fixed viscous muffler: {:?}, xy_m={:?}, resistance_Ns_m={}; mechanical attachment, not a measured finger/gel or a timed choke",spec.surface,spec.position_m,spec.resistance_n_s_m);
+    }
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -303,12 +317,12 @@ fn run()->Result<(),Error> {
     let supplied_shell=shell_path.as_deref().map(specimen::Specimen::load).transpose()?;
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let mut experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_specimen(steps,dt_s,audio,stroke,supplied_shell)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_sticks(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second)?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_sticks(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_sticks(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,None,supplied_drum,second)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_sticks(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,distributed_cavity,None,supplied_drum,second)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_sticks(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,distributed_cavity,None,supplied_drum,second)?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_mufflers(steps,dt_s,audio,stroke,supplied_shell,&mufflers)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_mufflers(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_mufflers(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_mufflers(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,None,supplied_drum,second,&mufflers)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_mufflers(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,distributed_cavity,None,supplied_drum,second,&mufflers)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_mufflers(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,distributed_cavity,None,supplied_drum,second,&mufflers)?,
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {

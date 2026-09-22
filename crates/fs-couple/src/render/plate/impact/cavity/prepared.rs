@@ -33,6 +33,15 @@ impl CavityCoupling {
         reference_area_m2: f64, config: LinearImpactConfig, gate: &CancelGate)
         -> Result<(LinearImpactSystem, Self), ImpactError>
     {
+        self.build_linear_with_dampers(bodies, contacts, Vec::new(), reference_area_m2, config, gate)
+    }
+
+    /// Preserve solid viscous ports while appending acoustic inertia. Original
+    /// mode rows gain exact gas zeros before the shared bilateral/contact solve.
+    pub fn build_linear_with_dampers(self, bodies: Vec<ImpactBody>, contacts: Vec<Obstacle>,
+        dampers: Vec<super::super::damping::ViscousDamper>, reference_area_m2: f64,
+        config: LinearImpactConfig, gate: &CancelGate) -> Result<(LinearImpactSystem, Self), ImpactError>
+    {
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         if config.sample_rate_hz == 0 || self.total > config.coupling.max_modes
             || !reference_area_m2.is_finite() || reference_area_m2 <= 0.0 {
@@ -64,7 +73,8 @@ impl CavityCoupling {
             initial, damping_per_s: damping };
         let volumes = self.springs.iter().cloned().map(|spring|
             VolumeConnection { spring, reference_area_m2 }).collect();
-        let system = LinearImpactSystem::new(vec![body], contacts, volumes, config, gate)?;
+        let dampers = super::super::damping::extend(dampers, self.structural, self.total)?;
+        let system = LinearImpactSystem::new_with_dampers(vec![body], contacts, volumes, dampers, config, gate)?;
         if gate.is_requested() { return Err(ImpactError::Cancelled); }
         Ok((system, self))
     }
