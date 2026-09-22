@@ -9,6 +9,10 @@ use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
+#[path = "analytic.rs"]
+mod analytic;
+pub use analytic::option as analytic_option;
+
 #[path = "drive.rs"]
 pub mod drive;
 

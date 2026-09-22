@@ -285,7 +285,8 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 }
 fn run()->Result<(),Error> {
     let mut raw_args=std::env::args().skip(1).collect();
-    let prepared_nonlinear=mechanics::prepared_option(&mut raw_args)?;
+    let analytic_newton=mechanics::analytic_option(&mut raw_args)?;
+    let prepared_nonlinear=mechanics::prepared_option(&mut raw_args)? || analytic_newton;
     let distributed_cavity=cavity::option(&mut raw_args)?;
     let neck=cavity::neck_option(&mut raw_args)?;
     let cavity_drag=cavity::drag_option(&mut raw_args)?;
@@ -300,10 +301,10 @@ fn run()->Result<(),Error> {
     }
     let driven=playing_force.is_some() || second_force.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to all drum/snare commands; --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --analytic-newton selects its analytic storage tangents (see ANALYTIC.md); --cavity-modes adds distributed enclosed air to all drum/snare commands; --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
         "drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic") {
-        return Err("--prepared-nonlinear applies only to splash, drum and drum-stretch; no silent conversion of modal/snare mechanics".into());
+        return Err("--prepared-nonlinear/--analytic-newton applies only to splash, drum and drum-stretch; no silent conversion of modal/snare mechanics".into());
     }
     cavity::admit_command(distributed_cavity,&args[0])?;
     cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
@@ -344,8 +345,9 @@ fn run()->Result<(),Error> {
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {
-        experiment.system=experiment.system.into_prepared_nonlinear()?;
-        eprintln!("mechanical image: prepared nonlinear Gonzalez; unchanged geometry, materials, felt history and clocks; real-time performance unqualified");
+        experiment.system=if analytic_newton {experiment.system.into_analytic_nonlinear()?}
+            else {experiment.system.into_prepared_nonlinear()?};
+        eprintln!("mechanical image: prepared nonlinear Gonzalez; analytic_newton={analytic_newton}; unchanged geometry, materials, felt history and clocks; real-time performance unqualified");
     }
     let mut inputs=Vec::with_capacity(2);
     if let Some(program)=playing_force {
