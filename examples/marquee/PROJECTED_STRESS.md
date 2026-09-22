@@ -25,7 +25,7 @@ still the native 1 m × 1 m, left-clamped, downward right-loaded plane-strain
 plate with interior circular holes and the existing unit-thickness convention.
 Change the complete explicit source to declare another admitted study. This
 mode does not add arbitrary boundary conditions, 3-D physics, external geometry
-imports, material/void masks, or stress-feasibility restoration to native `.fsim`.
+imports or stress-feasibility restoration to native `.fsim`.
 The separate marquee commands retain their own broader geometry input features.
 
 ## Explicit policy
@@ -46,6 +46,48 @@ A candidate must decrease compliance relative to the current feasible design
 and satisfy both constraints. The reported reduction is against the ORIGINAL
 feasible study baseline, never the overfilled input or a freshly reset resume
 baseline. All stress claims cover only the deterministic sampled set.
+
+## Protected material and empty regions
+
+`bracket-protected-regions-2d.fsim` adds material that optimization may not
+remove and empty regions that it may not fill. Run it with the same native
+commands, for example:
+
+```sh
+cargo run --release -p fs-cli -- --json study \
+  examples/marquee/bracket-protected-regions-2d.fsim ./regions.db --budget 1
+```
+
+The optional final optimizer field, after `:stress-tolerance-pa`, is:
+
+```lisp
+    :design-regions (
+      (region :phase material :lower (0.125 0.125) :upper (0.25 0.25) :phi-margin 0.01)
+      (region :phase void :lower (0.3 0.4) :upper (0.32 0.42) :phi-margin 0.01)
+    ))
+```
+
+The final `))` closes this list and the optimizer. Declare 1..=64 rectangles
+with ordered bounds in the unit-square coordinate system. `phi-margin` must
+be finite and positive. It is a **field-value margin**, not a certified
+distance, wall thickness, or machinability requirement.
+
+The existing region implementation prescribes every corner of every cell
+intersecting a rectangle's interior. Thus the entire bilinear cell, not just
+its centre, retains the requested sign; coverage may extend by less than one
+cell per side. Opposite phases sharing a required node refuse even when their
+rectangles do not overlap geometrically. Same-phase overlaps impose the stronger
+margin. Neither policy may change the existing support/load boundary traces.
+
+Regions are imposed before area projection and the independent baseline solves.
+The resulting baseline must still satisfy the declared area and stress limits;
+regions do not relax either gate. Fixed node bits survive every accepted update.
+The source and constraint reports retain the declarations, and resume rebuilds
+their original prescriptions from the saved source before admitting the saved
+geometry. It never derives new prescriptions from the optimized field or repairs
+a violating endpoint silently. Resume needs no original input file. A cancelled
+region preparation/reconstruction returns no partial field and leaves the prior
+receipt available. All existing source files without this field remain valid.
 
 ## Retention, continuation and stopping
 

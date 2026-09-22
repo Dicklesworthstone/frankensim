@@ -102,3 +102,67 @@ fn projected_public_stall_is_exportable_but_is_never_a_completed_optimization() 
         .output().unwrap(), fs_cli::exit::REFUSED);
     assert_eq!(again, result, "stalled terminal must not silently enlarge its candidate search");
 }
+
+#[test]
+fn native_region_example_keeps_exact_prescriptions_after_source_independent_disk_resume() {
+    use fs_topols::design_regions::{DesignPhase, DesignRegion, prepare_design_regions};
+    use fs_topols::GridSdf;
+    const AUTHORED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/marquee/bracket-protected-regions-2d.fsim"));
+    let initial = GridSdf::from_fn(8, &|x, y| {
+        [0.35, 0.65].iter().map(|&cx| 0.12 - (x - cx).hypot(y - 0.5)).fold(-1.0, f64::max)
+    });
+    let boundary: Vec<_> = initial.nodes().iter().copied().enumerate()
+        .filter(|(i, _)| i % 9 == 0 || i % 9 == 8).collect();
+    let prescribed = prepare_design_regions(&initial, &boundary, &[
+        DesignRegion::new(DesignPhase::Material, [0.125, 0.125], [0.25, 0.25], 0.01).unwrap(),
+        DesignRegion::new(DesignPhase::Void, [0.3, 0.4], [0.32, 0.42], 0.01).unwrap(),
+    ]).unwrap();
+    assert!(prescribed.changed_nodes > 0);
+    assert_eq!(prescribed.fixed_nodes.len(), 26);
+    let check_geometry = |db: &Path, result: &J| {
+        let bytes = retained(db, result, "design");
+        let design = J::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(design.f64_field("n"), Some(8.0));
+        let bits = design.get("phi_bits").and_then(J::as_array).unwrap();
+        assert_eq!(bits.len(), 81);
+        for &(i, expected) in &prescribed.fixed_nodes {
+            let actual = u64::from_str_radix(bits[i].as_str().unwrap(), 16).unwrap();
+            assert_eq!(actual, expected.to_bits(), "protected node {i}");
+        }
+        assert_eq!(constraints(result).get("design_regions").and_then(J::as_array).unwrap().len(), 2);
+    };
+    let dir = scratch("native-regions");
+    let input = source(&dir, AUTHORED);
+    let db = dir.join("regions.db");
+    let whole_db = dir.join("whole.db");
+    let first = document(&command("study").arg(&input).arg(&db)
+        .args(["--budget", "1"]).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(updates(&first), 1.0, "the authored example must accept an actual update");
+    check_geometry(&db, &first);
+    let original_design = retained(&db, &first, "design");
+    let whole_output = command("study").arg(&input).arg(&whole_db).output().unwrap();
+    let code = u8::try_from(whole_output.status.code().unwrap()).unwrap();
+    assert!(code == fs_cli::exit::SUCCESS || code == fs_cli::exit::REFUSED,
+        "{}", String::from_utf8_lossy(&whole_output.stderr));
+    let whole = document(&whole_output, code);
+    assert!(matches!(whole.str_field("status"), Some("completed" | "no-feasible-descent")));
+    // Keep the test input, but prove recovery no longer depends on its path.
+    fs::rename(&input, dir.join("original-input.fsim")).unwrap();
+    let resumed = document(&command("study").arg("--resume").arg(run_id(&first)).arg(&db)
+        .output().unwrap(), code);
+    check_geometry(&db, &resumed);
+    assert_eq!(constraints(&whole), constraints(&resumed));
+    for key in ["design", "iterations"] {
+        assert_eq!(retained(&whole_db, &whole, key), retained(&db, &resumed, key));
+    }
+    assert_eq!(retained(&db, &first, "design"), original_design);
+    let report = document(&command("report").arg(run_id(&resumed)).arg(&db)
+        .output().unwrap(), fs_cli::exit::SUCCESS);
+    assert_eq!(report.str_field("study_status"), resumed.str_field("status"));
+    let summary = J::parse(&fs::read_to_string(dir.join(format!("{}.json", run_id(&resumed)))).unwrap()).unwrap();
+    assert_eq!(summary.get("constraints"), Some(constraints(&resumed)));
+    let html = fs::read_to_string(dir.join(format!("{}.html", run_id(&resumed)))).unwrap();
+    assert!(html.contains("protected material/void regions"));
+    assert!(html.contains("not a certified physical clearance"));
+}
