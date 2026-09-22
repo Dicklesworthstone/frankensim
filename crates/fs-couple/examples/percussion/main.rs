@@ -23,6 +23,7 @@ mod mechanics;
 mod playing;
 mod specimen;
 mod drum_spec;
+mod sticks;
 use playing::Stroke;
 use mechanics::Mechanics;
 
@@ -59,7 +60,7 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     Ok(Obstacle::new(weights,1,n,vec![0.0],vec![1.0],stiffness,1.5,
         "estimated isotropic Hertz tip: E_eff=0.8GPa, R=3mm; not identified hickory-shell contact".into())?)
 }
-struct Experiment {system:Mechanics,force:Vec<f64>,stick_weight:f64,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>}
+struct Experiment {system:Mechanics,force:Vec<f64>,stick_weight:f64,second_stick:Option<sticks::Port>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     splash_with_stroke(steps,dt_s,audio,Stroke::default())
 }
@@ -132,7 +133,7 @@ fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
     let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
     let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
-    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
+    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,second_stick:None,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -149,6 +150,13 @@ fn drum_with_air(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare
 }
 #[allow(clippy::too_many_arguments)]
 fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>)->Result<Experiment,Error> {
+    drum_with_sticks(steps,dt_s,audio,prepared,snares,stretching,stroke,distributed_cavity,neck,supplied,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn drum_with_sticks(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>)->Result<Experiment,Error> {
+    if second.is_some() && distributed_cavity && !prepared {
+        return Err("two-stick distributed air currently requires the prepared linear drum/snare image".into());
+    }
     if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
     if neck.is_some() && prepared {return Err("prepared drum/snare cavity does not admit neck momentum drag; use the nonlinear drum image".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
@@ -168,7 +176,8 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
     eprintln!("drum input={}; clear_radius_m={radius}, depth_m={depth}, outer_radius_m={}, head_window_hz={:?}, radial_intervals={}, azimuths={}, strike_xy_m={position:?}; rigid shell/rim, unchanged declared gas and estimated stick/contact; no specimen certification",
         if imported {"supplied SI specification"}else{"estimated 14x6.5in reference"},
         spec.outer_radius_m,spec.band_hz,spec.radial_intervals,spec.azimuths);
-    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut bodies=vec![stick];let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes;
+    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut bodies=vec![stick];
+    let n=1+mode_sets.iter().map(Vec::len).sum::<usize>()+extra_modes+usize::from(second.is_some());
     let mut contact=vec![0.0;n];contact[0]=stick_weight;let mut area=vec![0.0;n];let mut top=vec![0.0;n];let mut bottom=vec![0.0;n];let mut offset=1;
     for (head,(film,modes)) in films.iter().zip(&mode_sets).enumerate() {
         let point=film.mesh.nodes.iter().enumerate().min_by(|(_,a),(_,b)|
@@ -206,10 +215,17 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
             spec.heads[head].tension_n_m,spec.heads[head].damping_ratio);
     }
     let mut contacts=vec![elastic_contact(contact)?];
+    // Keep BOTH original head ranges fixed. The second striker follows them,
+    // before any wires/air, and has zero direct volume/radiation participation.
+    let head_end=offset;
+    let second_stick=if let Some(stroke)=second {
+        let (body,contact,port)=sticks::build(stroke,&films[0],&mode_sets[0],offset,n)?;
+        bodies.push(body);contacts.push(contact);offset+=1;Some(port)
+    }else{None};
     if let Some(spec)=snares {
         let bottom_start=1+mode_sets[0].len();
         let (wire_bodies,wire_contacts)=spec.assemble(&films[1],&mode_sets[1],
-            bottom_start..offset,offset,n)?;
+            bottom_start..head_end,offset,n)?;
         bodies.extend(wire_bodies);contacts.extend(wire_contacts);
     }
     let volume=VolumeSpring{bulk_modulus_pa:1.2*343.0*343.0,volume_m3:spec.volume_m3(),areas:area};
@@ -238,7 +254,7 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
     // Acoustic inertia never receives an external strike or a direct solid-radiation projection.
     let count=air.as_ref().map_or(n,|a|a.coupling.total_modes());
     top.resize(count,0.0);bottom.resize(count,0.0);
-    Ok(Experiment{system,force:vec![0.0;count],stick_weight,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air})
+    Ok(Experiment{system,force:vec![0.0;count],stick_weight,second_stick,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air})
 }
 // The stored drum areas encode compression, so positive contraction means
 // positive internal pressure. The volume-spring Hamiltonian is unchanged.
@@ -253,6 +269,7 @@ fn run()->Result<(),Error> {
     let neck=cavity::neck_option(&mut raw_args)?;
     let shell_path=specimen::option(&mut raw_args)?;
     let drum_path=drum_spec::option(&mut raw_args)?;
+    let second=sticks::option(&mut raw_args)?;
     let playing_force=mechanics::drive::option(&mut raw_args)?;
     let driven=playing_force.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
@@ -265,6 +282,7 @@ fn run()->Result<(),Error> {
     cavity::admit_neck_command(neck,distributed_cavity,&args[0])?;
     specimen::admit_command(shell_path.as_deref(),&args[0])?;
     drum_spec::admit_command(drum_path.as_deref(),&args[0])?;
+    sticks::admit_command(second.is_some(),&args[0])?;
     let microphone=matches!(args[0].as_str(),"splash-mic"|"drum-mic"|"drum-modal-mic"|"snare-mic"|"snare-off-mic"|"drum-stretch-mic");
     let audio=microphone || matches!(args[0].as_str(),"splash-wav"|"drum-wav"|"drum-modal-wav"|"snare-wav"|"snare-off-wav"|"drum-stretch-wav");
     let stretching=matches!(args[0].as_str(),"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic");
@@ -285,11 +303,11 @@ fn run()->Result<(),Error> {
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let mut experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash_with_specimen(steps,dt_s,audio,stroke,supplied_shell)?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_spec(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum)?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_spec(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_spec(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,None,supplied_drum)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,distributed_cavity,None,supplied_drum)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_spec(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,distributed_cavity,None,supplied_drum)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_sticks(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second)?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_sticks(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second)?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_sticks(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,None,supplied_drum,second)?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_sticks(steps,dt_s,audio,true,Some(snare::SnareSet::reference(false)),false,stroke,distributed_cavity,None,supplied_drum,second)?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_sticks(steps,dt_s,audio,true,Some(snare::SnareSet::reference(true)),false,stroke,distributed_cavity,None,supplied_drum,second)?,
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {
@@ -313,7 +331,8 @@ fn run()->Result<(),Error> {
     let air_columns=if distributed_cavity {",cavity_point_a_pa,cavity_point_b_pa"}else{""};
     let neck_columns=if neck.is_some() {",neck_volume_m3,neck_flow_m3_s,neck_pressure_pa,neck_loss_power_w"}else{""};
     let drive_columns=if driven {",player_work_j"}else{""};
-    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}{neck_columns}{drive_columns}")?;
+    let stick_columns=if second.is_some() {",stick_1_displacement_m,stick_1_velocity_m_s,stick_2_displacement_m,stick_2_velocity_m_s"}else{""};
+    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}{neck_columns}{drive_columns}{stick_columns}")?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
         let displacement=|weights:&[f64]|weights.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
@@ -339,6 +358,10 @@ fn run()->Result<(),Error> {
             }
         }
         if driven {write!(out,",{:.17e}",f.supplied_work_j)?;}
+        if let Some(port)=experiment.second_stick {
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",x[0]*experiment.stick_weight,
+                x[1]*experiment.stick_weight,x[2*port.coordinate]*port.weight,x[2*port.coordinate+1]*port.weight)?;
+        }
         writeln!(out)?;
     }
     out.flush()?;Ok(())
