@@ -35,6 +35,10 @@ const MAX_RMS_ERROR: f64 = 0.05;
 #[path = "aperture.rs"]
 pub mod aperture;
 
+/// Circular mouths on the unrolled cylinder, including across facet seams.
+#[path = "curved_aperture.rs"]
+pub mod curved_aperture;
+
 /// A stationary point in the boundary's geometry frame, measured in metres.
 #[derive(Debug, Clone, Copy)]
 pub enum Receiver {
