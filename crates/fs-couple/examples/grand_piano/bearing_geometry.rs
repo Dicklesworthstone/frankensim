@@ -1,10 +1,13 @@
 //! Supplied string support coordinates + existing tension cards -> dead loads.
 //! This converts geometry, not a note number or a desired frequency, into force.
-//! Force is evaluated at the declared UNLOADED reference and then held during
-//! equilibrium. No follower-load/axial-stretch update or bridge-pin friction.
+//! `apply` evaluates force at the UNLOADED reference. `equilibrium::settle`
+//! instead solves deflected bridge directions at the supplied final tensions.
 use super::{CrownedBoard, meaningful, number, MAX_BYTES};
 use super::super::geometry;
 use std::{collections::{BTreeMap,BTreeSet},fmt::Write};
+
+#[path = "bearing_equilibrium.rs"]
+pub mod equilibrium;
 
 pub const HEADER:&str="frankensim-bearing-points-si-v1";
 pub const MAX_BEARING_BYTES:usize=512*1024;
@@ -80,9 +83,9 @@ pub fn apply(board_text:&str,scale_text:&str,points_text:&str)->Result<String,St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn input(unison:usize)->(String,String,String) {
+    pub(crate) fn input(unison:usize)->(String,String,String) {
         let flat="frankensim-board-geometry-si-v1\nsource,estimated,anchor regression\nsupport,clamped\npretension,0\ndamping,0.01\nnode,0,0,0\nnode,1,1,0\nnode,2,1,1\nnode,3,0,1\nnode,4,0.5,0.5\ntriangle,0,0,1,4,0.008,450,1e10,8e8,0.3,6e8,0.27\ntriangle,1,1,2,4,0.008,450,1e10,8e8,0.3,6e8,0.27\ntriangle,2,2,3,4,0.008,450,1e10,8e8,0.3,6e8,0.27\ntriangle,3,3,0,4,0.008,450,1e10,8e8,0.3,6e8,0.27\nfixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,0,1\n";
         let board=super::super::elevate(flat,&[0.,0.,0.,0.,0.01],"authored reference").unwrap();
         let mut course=geometry::demonstration_scale().unwrap()[48];

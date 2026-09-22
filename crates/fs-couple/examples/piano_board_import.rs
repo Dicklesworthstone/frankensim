@@ -28,6 +28,7 @@ piano_board_import import INPUT.obj MATERIALS.fspi OUTPUT.fsb
 piano_board_import import-crowned INPUT.obj MATERIALS.fspi OUTPUT.fss
 piano_board_import export INPUT.fsb OUTPUT.obj OUTPUT.fspi
 piano_board_import load-strings UNLOADED.fss SCALE.csv BEARINGS.fsbp OUTPUT.fss
+piano_board_import settle-strings UNLOADED.fss SCALE.csv BEARINGS.fsbp OUTPUT.fss
 piano_board_import render-steinway INPUT.fsb|INPUT.fss OUTPUT.wav SECONDS [PERFORMANCE.mid]
 
 inspect reports the actual object/group/material labels without guessing parts.
@@ -42,6 +43,10 @@ per-course Cartesian bridge forces from the supplied scale member tensions
 and 3-D support coordinates; the output solves static equilibrium at render
 preparation. Reference geometry must be explicitly unloaded. Forces are held
 in the reference frame, not updated as follower loads. See DOWNBEARING.md.
+settle-strings instead solves bridge directions on the deflected board at the
+supplied FINAL tuned member tensions, then exports the converged forces on
+the original reference. Playback adds its own string stiffness exactly once.
+Use the SAME scale for playback; see TUNED_EQUILIBRIUM.md for model boundaries.
 export creates an editable, material-labelled midsurface from a FLAT native
 board, including all its sections, ribs, supports and physical bridge positions.
 render-steinway accepts either native board type with source Model D strings,
@@ -108,13 +113,21 @@ fn run(args:&[String])->Result<(),String> {
                 else {"admitted by the existing piano plate reader"});
             Ok(())
         }
-        [command,input,scale,bearings,output] if command == "load-strings" => {
+        [command,input,scale,bearings,output] if command == "load-strings" || command == "settle-strings" => {
             let board=read_bounded(input,mesh_import::MAX_SPEC_BYTES)?;
             let scale=read_bounded(scale,crowned_board::bearing_geometry::MAX_BEARING_BYTES)?;
             let bearings=read_bounded(bearings,crowned_board::bearing_geometry::MAX_BEARING_BYTES)?;
-            let loaded=crowned_board::bearing_geometry::apply(&board,&scale,&bearings)?;
+            let (loaded,summary)=if command=="settle-strings" {
+                let settled=crowned_board::bearing_geometry::equilibrium::settle(&board,&scale,&bearings)?;
+                let summary=format!("direction-consistent tuning equilibrium for {} string spans; physical residual {} N, maximum translation {} m, maximum span change {} m; original reference retained and frozen-load playback equilibrium verified",
+                    settled.spans,settled.residual_force_n,settled.maximum_translation_m,settled.maximum_length_change_m);
+                (settled.geometry,summary)
+            }else{
+                (crowned_board::bearing_geometry::apply(&board,&scale,&bearings)?,
+                    "complete per-course Cartesian dead loads from supplied support geometry and tension cards; static equilibrium is solved during board preparation, not asserted by this export".to_owned())
+            };
             write_output(create_output(output)?,&loaded,output)?;
-            println!("Written {output}: complete per-course Cartesian dead loads from supplied support geometry and tension cards; static equilibrium is solved during board preparation, not asserted by this export.");
+            println!("Written {output}: {summary}.");
             Ok(())
         }
         [command,input,obj,spec] if command == "export" => {
@@ -164,6 +177,7 @@ mod cli_tests {
         assert!(run(&["import".into(),"missing.obj".into()]).is_err());
         assert!(run(&["import-crowned".into(),"missing.obj".into()]).is_err());
         assert!(run(&["load-strings".into(),"missing.fss".into(),"scale.csv".into(),"points.fsbp".into()]).is_err());
+        assert!(run(&["settle-strings".into(),"missing.fss".into(),"scale.csv".into(),"points.fsbp".into()]).is_err());
         assert!(run(&["--help".into()]).is_ok());
         assert!(run(&["render-steinway".into(),"missing.fsb".into(),"out.wav".into(),"NaN".into()]).is_err());
         assert!(run(&["export".into(),"x.fsb".into(),"same".into(),"same".into()]).is_err());
@@ -194,6 +208,30 @@ mod cli_tests {
         assert_eq!(output.lines().filter(|l|l.starts_with("bridge-load,")).count(),88);
         assert!(run(&args).is_err());assert_eq!(std::fs::read_to_string(&paths[3]).unwrap(),output);
         assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(),board);
+        for path in paths {std::fs::remove_file(path).unwrap();}
+        std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn settle_strings_cli_writes_playable_equilibrium_without_overwriting_inputs() {
+        let dir=std::env::temp_dir().join(format!("fs-piano-settle-{}-{}",std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let paths=["unloaded.fss","scale.csv","supports.fsbp","settled.fss"].map(|name|dir.join(name));
+        let names=paths.each_ref().map(|p|p.to_str().unwrap().to_owned());
+        let (board,scale,points)=crowned_board::bearing_geometry::tests::input(1);
+        for (name,text) in names[..3].iter().zip([&board,&scale,&points]) {
+            write_output(create_output(name).unwrap(),text,name).unwrap();
+        }
+        let args=vec!["settle-strings".into(),names[0].clone(),names[1].clone(),names[2].clone(),names[3].clone()];
+        run(&args).unwrap();
+        let output=std::fs::read_to_string(&paths[3]).unwrap();
+        let prepared=crowned_board::CrownedBoard::read(&output).unwrap().prepare(&[69],400.).unwrap();
+        assert!(!prepared.modes.is_empty());
+        assert!(output.contains("Converged bridge directions"));
+        assert!(run(&args).is_err());assert_eq!(std::fs::read_to_string(&paths[3]).unwrap(),output);
+        for (path,original) in paths[..3].iter().zip([&board,&scale,&points]) {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(),original);
+        }
         for path in paths {std::fs::remove_file(path).unwrap();}
         std::fs::remove_dir(dir).unwrap();
     }

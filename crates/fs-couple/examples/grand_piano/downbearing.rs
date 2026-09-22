@@ -88,7 +88,7 @@ impl NonlinearProblem for Owner<'_,'_> {
         self.0.jacobian_apply(x,direction,out);
     }
 }
-fn solve(problem:&PreloadProblem<'_>,x:Vec<f64>,limit:usize)->Result<(Vec<f64>,usize),String> {
+pub(super) fn solve(problem:&PreloadProblem<'_>,x:Vec<f64>,limit:usize)->Result<(Vec<f64>,usize),String> {
     let owner=Owner(problem);
     let config=NewtonKrylovConfig {absolute_tolerance:1e-14,relative_tolerance:1e-11,
         forcing_maximum:0.1,..NewtonKrylovConfig::default()};
