@@ -8,13 +8,12 @@
 //! declared rectangular section reconstruction from A and Iy. Perfect bonds.
 //! Grain directions are projected into each actual facet before assembly.
 //!
-//! Acoustics remains an explicitly PROJECTED flat-baffle approximation:
-//! signed normal displacement * true area is preserved at each quadrature
-//! station but its source position is moved to z=0. Not exterior BEM. This
-//! does not flatten the STRUCTURAL mesh or suppress in-plane shell motion.
+//! The ordinary Rayleigh observer remains a projected flat-baffle approximation.
+//! prepare_with_motion additionally retains the true equilibrium mesh and all
+//! Cartesian translations/rotations for a separately supplied acoustic skin.
 //! See Mamou-Mani et al., JASA 123 (2008), doi:10.1121/1.2836787 for the
 //! distinction between initial crown and a downbearing/prestress calculation.
-use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample};
+use super::board_geometry::{BoardGeometry, PreparedBoard, SurfaceSample, motion::MotionSurface};
 use super::linear::{BoardMode, MAX_BOARD_MODES};
 use fs_plate::{PlateSection, ShellMesh, ShellModel, ShellSupport};
 use fs_plate::shell::stiffened::{BeamSection, ShellBeam, assemble_stiffened_shell};
@@ -198,6 +197,14 @@ impl CrownedBoard {
         Ok(Self {mesh,sections,beams,fixed,sites,damping,source,preload,max_height_m,area_m2,mass_kg})
     }
     pub fn prepare(&self,keys:&[u8],upper_hz:f64)->Result<PreparedBoard,String> {
+        self.prepare_inner(keys,upper_hz,false)
+    }
+    /// Full equilibrium geometry and modal vectors from the same certified
+    /// slice as the bridge ports. Not reconstructed from projected Rayleigh data.
+    pub fn prepare_with_motion(&self,keys:&[u8],upper_hz:f64)->Result<PreparedBoard,String> {
+        self.prepare_inner(keys,upper_hz,true)
+    }
+    fn prepare_inner(&self,keys:&[u8],upper_hz:f64,retain_motion:bool)->Result<PreparedBoard,String> {
         if !upper_hz.is_finite() || upper_hz<=0. || upper_hz>80_000. || keys.is_empty() {
             return Err("invalid crowned soundboard frequency/key budget".into());
         }
@@ -256,7 +263,13 @@ impl CrownedBoard {
                 surface.push(SurfaceSample {position_m:position,area_m2:projected,mode_shape:shape});
             }
         }
-        Ok(PreparedBoard {modes,surface,area_m2:surface_area,mass_kg:self.mass_kg,
+        let motion=if retain_motion {
+            let shapes=report.modes.iter().map(|pair|(0..acoustic_mesh.nodes.len()).map(|node|
+                std::array::from_fn(|c|model.dof_map[6*node+c].map_or(0.,|d|pair.phi[d])))
+                .collect()).collect();
+            Some(MotionSurface::new(acoustic_mesh,shapes)?)
+        } else {None};
+        Ok(PreparedBoard {modes,surface,motion,area_m2:surface_area,mass_kg:self.mass_kg,
             provenance:format!("{}; 3-D CST/DKT crowned shell, {} eccentric rectangular beam segments; reference max |z|={} m; projected flat-baffle radiation; {}",self.source,self.beams.len(),self.max_height_m,equilibrium),
             frequency_intervals_hz:intervals,free_dofs:model.free})
     }
@@ -315,5 +328,25 @@ mod tests {
             good.replace("node,4,0.5,0.5,","node,4,0.5,0.5,NaN"),
             format!("{good}bridge_arm,60,0,0,0.03\n")] {assert!(CrownedBoard::read(&bad).is_err());}
         let board=CrownedBoard::read(&good).unwrap();assert!(board.prepare(&[60],400.).is_err());
+    }
+    #[test]
+    fn full_motion_retains_the_loaded_geometry_and_all_cartesian_coordinates() {
+        let text=format!("{}preload-reference,unloaded\ndownbearing-source,estimated,motion regression\ndownbearing,69,10\n",fixture(0.015));
+        let board=CrownedBoard::read(&text).unwrap();
+        let old=board.prepare(&[69],400.).unwrap();
+        let full=board.prepare_with_motion(&[69],400.).unwrap();
+        assert!(old.motion.is_none());let motion=full.motion.as_ref().unwrap();
+        assert!(motion.mesh.nodes[4][2]<0.015 && motion.mesh.nodes[4][2]>0.);
+        for (a,b) in old.modes.iter().zip(&full.modes) {
+            assert_eq!(a.frequency_hz,b.frequency_hz);assert_eq!(a.bridge,b.bridge);
+        }
+        for (i,mode) in full.modes.iter().enumerate() {
+            let actual=motion.normal_weights(motion.mesh.nodes[4],[0.,0.,1.],0.).unwrap()[i];
+            assert!((actual-mode.bridge[48]).abs()<1e-10);
+        }
+        for shape in &motion.shapes {
+            assert_eq!(shape.len(),motion.mesh.nodes.len());
+            for &node in &board.fixed {assert_eq!(shape[node],[0.;6]);}
+        }
     }
 }

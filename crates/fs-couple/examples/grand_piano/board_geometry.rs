@@ -23,6 +23,9 @@ use fs_plate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
+#[path = "board_motion.rs"]
+pub mod motion;
+
 pub const HEADER: &str = "frankensim-board-geometry-si-v1";
 // Use the SAME retention budget as modal import, bridge mechanics and radiation.
 // Never silently truncate the certified frequency slice to meet this budget.
@@ -62,6 +65,9 @@ pub struct SurfaceSample {
 pub struct PreparedBoard {
     pub surface: Vec<SurfaceSample>,
     pub modes: Vec<BoardMode>,
+    /// Optional full-vector field from the same eigensolve. Ordinary Rayleigh
+    /// preparation does not allocate it. No second modal basis is reconstructed.
+    pub motion: Option<motion::MotionSurface>,
     pub provenance: String,
     pub area_m2: f64,
     /// Panel + stiffener physical mass, INCLUDING fixed boundary nodes.
@@ -236,6 +242,14 @@ impl BoardGeometry {
     /// placed oscillators for missing geometry. All retained modes have SI,
     /// mass-normalized work-conjugate bridge force/displacement projections.
     pub fn prepare(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, false)
+    }
+    /// Retain full-vector nodal motion for a finite acoustic skin. The same
+    /// eigensolve supplies mechanics and acoustics, including repeated modes.
+    pub fn prepare_with_motion(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, true)
+    }
+    fn prepare_inner(&self, keys: &[u8], upper_hz: f64, retain_motion: bool) -> Result<PreparedBoard, String> {
         if !upper_hz.is_finite() || upper_hz <= 0.0 || upper_hz > 80_000.0 {
             return Err("invalid soundboard frequency ceiling".into());
         }
@@ -316,10 +330,20 @@ impl BoardGeometry {
                 surface.push(SurfaceSample { position_m: position, area_m2: area, mode_shape: shape });
             }
         }
+        let motion = if retain_motion {
+            let geometry=fs_plate::ShellMesh::new(mesh.nodes.iter().map(|&(x,y)|[x,y,0.]).collect(),mesh.tris.clone())
+                .map_err(|e|e.to_string())?;
+            let shapes=report.modes.iter().map(|pair| (0..mesh.nodes.len()).map(|node| {
+                let at=|c|model.dof_map[3*node+c].map_or(0.,|i|pair.phi[i]);
+                // DKT coordinates are slopes, NOT physical axial rotations.
+                [0.,0.,at(0),at(2),-at(1),0.]
+            }).collect()).collect();
+            Some(motion::MotionSurface::new(geometry,shapes)?)
+        } else {None};
         let mass = self.mass_kg();
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
         Ok(PreparedBoard {
-            modes, surface, provenance: self.provenance.clone(), area_m2: mesh.total_area(),
+            modes, surface, motion, provenance: self.provenance.clone(), area_m2: mesh.total_area(),
             mass_kg: mass, frequency_intervals_hz: intervals, free_dofs: model.free,
         })
     }
@@ -458,6 +482,21 @@ mod tests {
         for (i,m) in p.modes.iter().enumerate() {
             let volume=p.surface.iter().map(|s|s.area_m2*s.mode_shape[i]).sum::<f64>();
             assert!((volume-m.volume).abs()<1e-12);
+        }
+    }
+    #[test]
+    fn retained_motion_uses_the_same_modal_basis_without_changing_ordinary_preparation() {
+        let g=BoardGeometry::read(&fixture()).unwrap();
+        let old=g.prepare(&[69],300.).unwrap();
+        let full=g.prepare_with_motion(&[69],300.).unwrap();
+        assert!(old.motion.is_none());
+        let motion=full.motion.as_ref().unwrap();
+        for (a,b) in old.modes.iter().zip(&full.modes) {
+            assert_eq!(a.frequency_hz,b.frequency_hz);assert_eq!(a.bridge,b.bridge);
+        }
+        for point in &full.surface {
+            let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
+            for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
         }
     }
 
