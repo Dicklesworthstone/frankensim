@@ -37,6 +37,7 @@ fs-alloc = { path = "../fs-alloc" }
 fs-conduction = { path = "../fs-conduction" }
 fs-contact = { path = "../fs-contact" }
 fs-geom = { path = "../fs-geom" }
+fs-io = { path = "../fs-io" }
 fs-orbit = { path = "../fs-orbit" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }
