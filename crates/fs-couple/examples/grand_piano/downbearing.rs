@@ -149,7 +149,7 @@ mod tests {
         for (i,t) in [[0,1,4],[1,2,4],[2,3,4],[3,0,4]].iter().enumerate() {
             writeln!(f,"triangle,{i},{},{},{},0.008,450,1e10,8e8,0.3,6e8,0.27",t[0],t[1],t[2]).unwrap();
         }
-        f.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,0,1\n");
+        f.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,1\n");
         let mut out=super::super::elevate(&f,&[0.,0.,0.,0.,0.015],"unloaded authored crown").unwrap();
         if let Some(force)=force {writeln!(out,"preload-reference,unloaded\ndownbearing-source,estimated,regression load\ndownbearing,69,{force}").unwrap();}
         out
@@ -164,7 +164,14 @@ mod tests {
         let a=before.prepare(&[69],400.).unwrap();let b=after.prepare(&[69],400.).unwrap();
         assert!((a.modes[0].frequency_hz-b.modes[0].frequency_hz).abs()>0.01);
         assert_eq!(a.mass_kg,b.mass_kg);
-        assert_ne!(a.surface[0].area_m2,b.surface[0].area_m2);
+        // Compression reduces true surface area. The Rayleigh source weights
+        // are XY-PROJECTED areas and must still cover the unit-square baffle:
+        // checking one projected weight for inequality was a roundoff oracle.
+        assert!(a.area_m2-b.area_m2>1e-10);
+        for board in [&a,&b] {
+            let projected:f64=board.surface.iter().map(|p|p.area_m2).sum();
+            assert!((projected-1.).abs()<1e-12);
+        }
         assert!(b.provenance.contains("physical residual"));
     }
     #[test]
