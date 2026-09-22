@@ -27,6 +27,12 @@
 //! from a supplied flat triangle mesh, per-triangle material/thickness sections,
 //! supports and force footprint. See `examples/PLATE_PERFORMANCES.md`.
 //!
+//! `music_render ensemble OUT.wav --full-scale-pa P --modal A.performance
+//! --plate B.performance [--decimate] [--block N]` mixes independent supplied
+//! physical models. Each file keeps its mechanics clock and complete duration;
+//! explicit decimation and pure pressure delays align them at one output clock.
+//! See `examples/ENSEMBLE_PERFORMANCES.md` for timing and observer assumptions.
+//!
 //! `--schedule performance.gesture` loads the existing canonical
 //! `GestureSchedule` format. The reed fixture accepts exactly one explicitly
 //! typed blowing-pressure track, bound to voice zero. A new command interrupts
@@ -67,6 +73,8 @@ mod modal_input;
 mod plate_input;
 #[path = "music_render/stream_output.rs"]
 mod stream_output;
+#[path = "music_render/ensemble_input.rs"]
+mod ensemble_input;
 use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
@@ -322,6 +330,10 @@ fn string_context(block: usize) -> RenderContext {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "ensemble") {
+        ensemble_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "plate") {
         plate_input::run(&args[1..]).unwrap_or_else(|e| fail(&e));
         return;

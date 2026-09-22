@@ -41,6 +41,9 @@ jobs:
       - name: Test nonlinear percussion, material history and mixed playback
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact --test modal_cavity_impact --test cylindrical_cavity --test bowed_ensemble --test ensemble_render --test modal_friction --test pressure_ensemble 2>&1 | tee percussion-mechanics.log
+      - name: Test file-driven physical ensemble rendering
+        if: ${{ !cancelled() }}
+        run: set -o pipefail; cargo test --release -p fs-couple --bin music_render --test music_render_ensemble 2>&1 | tee percussion-ensemble-cli.log
       - name: Test prepared cavity, physical pressure and PCM consumers
         if: ${{ !cancelled() }}
         run: >-

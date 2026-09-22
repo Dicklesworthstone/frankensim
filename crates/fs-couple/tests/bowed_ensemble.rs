@@ -178,3 +178,21 @@ fn rigid_observer_wrong_control_and_mismatched_clock_are_not_silently_mixed() {
     ], 64), vec![], 0).unwrap();
     assert!(wrong_clock.validate_sample_rate(48_000).is_err());
 }
+
+#[test]
+fn decimation_admits_the_whole_finite_bow_window_before_consuming_a_group() {
+    use fs_couple::pcm_wav::observation::DecimatedRenderer;
+    let mut observed = DecimatedRenderer::new(mixed(65, 1024), 48_000, 24_000, 64).unwrap();
+    let mut out = [12345.0; 33];
+    assert!(observed.block(&mut out).is_err()); // 66 mechanics samples, only 65 admitted
+    assert_eq!(out, [12345.0; 33]);
+    assert_eq!(observed.samples_rendered(), 0);
+    assert_eq!(observed.source().samples_rendered(), 0);
+    assert!(observed.source().context().bowed_performance(1).unwrap().applied_controls().is_empty());
+    observed.block(&mut out[..32]).unwrap();
+    assert_eq!(observed.source().samples_rendered(), 64);
+    out[0] = 12345.0;
+    assert!(observed.block(&mut out[..1]).is_err()); // no partial last output group
+    assert_eq!(out[0], 12345.0);
+    assert_eq!(observed.samples_rendered(), 32);
+}
