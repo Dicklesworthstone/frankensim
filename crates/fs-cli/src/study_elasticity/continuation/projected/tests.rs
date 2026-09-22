@@ -25,7 +25,7 @@ fn read(ledger: &Ledger, out: &Outcome, spec: &ElasticitySpec) -> (GridSdf, Opti
     let design = document(&linked(ledger, &receipt, "design", "study-design").unwrap()).unwrap();
     let rows = document(&linked(ledger, &receipt, "iterations", "study-iterations").unwrap()).unwrap();
     let (phi, report) = decode(spec, &receipt, &design, &rows).unwrap();
-    let state = ConstraintEvidence::read(constrained(&receipt), &report, spec.projected.unwrap()).unwrap();
+    let state = ConstraintEvidence::read(constrained(&receipt), &report, spec.projected.as_ref().unwrap()).unwrap();
     (phi, report, state)
 }
 
@@ -139,4 +139,151 @@ fn projected_study_no_descent_retains_refusals_and_never_reports_completion() {
     let rendered = render(out, OutputMode::Json);
     assert_eq!(rendered.exit_code, exit::REFUSED);
     assert!(rendered.stdout.contains("no-feasible-descent"));
+}
+
+const REGIONS: &str = "(region :phase material :lower (0.125 0.125) :upper (0.25 0.25) :phi-margin 0.01)\n      (region :phase void :lower (0.3 0.4) :upper (0.32 0.42) :phi-margin 0.01)";
+
+fn region_source(rectangles: &str) -> String {
+    source().replace(":stress-tolerance-pa 0.0)",
+        &format!(":stress-tolerance-pa 0.0\n    :design-regions (\n      {rectangles}\n    ))"))
+}
+
+fn prepared(spec: &ElasticitySpec) -> fs_topols::design_regions::PreparedDesignRegions {
+    let ControlFlow::Continue(prepared) = regions::prepare(spec,
+        &spec.projected.as_ref().unwrap().regions, |_| ControlFlow::<()>::Continue(())).unwrap()
+    else { panic!("uninterrupted region preparation") };
+    prepared
+}
+
+fn assert_regions(phi: &GridSdf, prescribed: &fs_topols::design_regions::PreparedDesignRegions) {
+    for &(index, expected) in &prescribed.fixed_nodes {
+        assert_eq!(phi.nodes()[index].to_bits(), expected.to_bits(), "fixed node {index}");
+    }
+}
+
+#[test]
+fn g0_native_design_regions_are_explicit_bounded_and_part_of_study_identity() {
+    let declared = parse(&region_source(REGIONS)).unwrap();
+    let again = parse(&declared.canonical).unwrap();
+    assert_eq!(declared.canonical, again.canonical);
+    assert_eq!(declared.id, again.id);
+    assert_ne!(declared.id, spec().id);
+    assert_eq!(declared.projected.as_ref().unwrap().regions.len(), 2);
+    assert!(!spec().canonical.contains("design-regions"));
+    for bad in [
+        REGIONS.replace(":phase void", ":phase unknown"),
+        REGIONS.replace(":lower (0.3 0.4)", ":lower (-0.3 0.4)"),
+        REGIONS.replace(":phi-margin 0.01", ":phi-margin 0.0"),
+        REGIONS.replace(":phi-margin 0.01", ":unknown 0.01"),
+        REGIONS.replace(":phase void", ":phase void :phase void"),
+        REGIONS.replace(":upper (0.32 0.42)", ""),
+        String::new(),
+        vec![REGIONS.lines().next().unwrap(); 65].join("\n"),
+    ] { assert!(parse(&region_source(&bad)).is_err(), "must reject {bad}"); }
+    assert!(parse(&region_source(REGIONS).replace(":constraint-mode projected-stress", "")).is_err());
+}
+
+#[test]
+fn g3_native_protected_regions_survive_accepted_updates_and_exact_ledger_resume() {
+    let spec = parse(&region_source(REGIONS)).unwrap();
+    let prescribed = prepared(&spec);
+    assert!(prescribed.material_nodes > 0 && prescribed.void_nodes > 0);
+    assert!(prescribed.changed_nodes > 0, "fixture must actually author geometry");
+    let ledger = Ledger::open(":memory:").unwrap();
+    let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
+    let (phi, rows, evidence) = read(&ledger, &first, &spec);
+    assert_eq!(rows.rows.len(), 1, "region fixture must accept a genuine update: {}", first.receipt);
+    assert_regions(&phi, &prescribed);
+    assert!(rows.compliance[0] < evidence.baseline.compliance);
+    let oracle = fs_topols::evaluate_sampled_stress(&phi, fixture(&spec), settings(&spec, spec.steps)).unwrap();
+    assert!(same(&oracle, evidence.current()));
+    let before = linked(&ledger, &json(&first), "design", "study-design").unwrap();
+    let loaded = load(&ledger, &first.pointer).unwrap();
+    let resumed = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap();
+    let (phi, _, resumed_evidence) = read(&ledger, &resumed, &spec);
+    assert_regions(&phi, &prescribed);
+    let whole_ledger = Ledger::open(":memory:").unwrap();
+    let whole = drive(&spec, &whole_ledger, None, &gate(), None).unwrap();
+    assert_eq!(whole.status, resumed.status);
+    let (_, _, whole_evidence) = read(&whole_ledger, &whole, &spec);
+    assert_eq!(whole_evidence.json(), resumed_evidence.json());
+    for (key, kind) in [("design", "study-design"), ("iterations", "study-iterations")] {
+        assert_eq!(linked(&ledger, &json(&resumed), key, kind).unwrap(),
+            linked(&whole_ledger, &json(&whole), key, kind).unwrap());
+    }
+    assert_eq!(linked(&ledger, &json(&first), "design", "study-design").unwrap(), before);
+    let summary = document(&linked(&ledger, &json(&resumed), "report_json", "study-report-json").unwrap()).unwrap();
+    assert_eq!(summary.path(&["constraints", "design_regions"]), constrained(&json(&resumed)).get("design_regions"));
+}
+
+#[test]
+fn g0_native_conflicting_regions_refuse_before_any_mechanics() {
+    for rectangles in [
+        "(region :phase void :lower (0.0 0.375) :upper (0.05 0.5) :phi-margin 0.01)".to_string(),
+        format!("{REGIONS}\n{}", REGIONS.lines().next().unwrap().replace(":phase material", ":phase void")),
+    ] {
+        let spec = parse(&region_source(&rectangles)).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let error = drive_observed(&spec, &ledger, None, &gate(), None, |stage| {
+            assert!(matches!(stage, Stage::Regions(_)), "a conflict cannot reach a physics solve");
+        }).unwrap_err();
+        assert!(error.message.contains("conflict"), "{}", error.message);
+        assert!(!ledger.in_transaction());
+    }
+}
+
+#[test]
+fn g4_native_region_cancellation_preserves_the_original_recovery_source() {
+    let spec = parse(&region_source(REGIONS)).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let stop = gate();
+    let error = drive_observed(&spec, &ledger, None, &stop, None, |stage| {
+        if matches!(stage, Stage::Regions(DesignRegionStage::Rasterize { .. })) { stop.request(); }
+        assert!(!matches!(stage, Stage::Setup(_) | Stage::Update(_)));
+    }).unwrap_err();
+    assert_eq!(error.exit, exit::CANCELLED);
+    let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
+    let prior = load(&ledger, &first.pointer).unwrap();
+    let stop = gate();
+    let error = drive_observed(&spec, &ledger, None, &stop, Some(&prior), |stage| {
+        if matches!(stage, Stage::Regions(DesignRegionStage::StageRow(3))) { stop.request(); }
+        assert!(!matches!(stage, Stage::Setup(_) | Stage::Update(_)));
+    }).unwrap_err();
+    assert_eq!(error.exit, exit::CANCELLED);
+    assert!(error.message.contains(&first.pointer));
+    assert_eq!(load(&ledger, &first.pointer).unwrap().bytes, first.receipt);
+    let resumed = drive(&spec, &ledger, None, &gate(), Some(&prior)).unwrap();
+    let (phi, _, _) = read(&ledger, &resumed, &spec);
+    assert_regions(&phi, &prepared(&spec));
+}
+
+#[test]
+fn g0_recovery_rejects_changed_region_evidence_and_same_sign_prescription_drift() {
+    use fs_topols::projected::ProjectedSetupStage;
+    let spec = parse(&region_source(REGIONS)).unwrap();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let first = drive(&spec, &ledger, Some(1), &gate(), None).unwrap();
+    let (mut phi, rows, _) = read(&ledger, &first, &spec);
+    let mut receipt = json(&first);
+    let JsonValue::Object(ref mut fields) = receipt else { panic!("receipt") };
+    let (_, JsonValue::Object(binding)) = fields.iter_mut().find(|(k, _)| k == "continuation").unwrap()
+        else { panic!("binding") };
+    let (_, JsonValue::Object(constraints)) = binding.iter_mut().find(|(k, _)| k == "constraints").unwrap()
+        else { panic!("constraints") };
+    constraints.retain(|(k, _)| k != "design_regions");
+    let policy = spec.projected.as_ref().unwrap();
+    assert!(ConstraintEvidence::read(constrained(&receipt), &rows, policy).is_err());
+    let prescribed = prepared(&spec);
+    let &(index, original) = prescribed.fixed_nodes.iter()
+        .find(|(i, _)| i % (phi.n() + 1) != 0 && i % (phi.n() + 1) != phi.n()).unwrap();
+    phi.nodes_mut()[index] = original * 1.001;
+    let checkpoint = OptimizeCheckpoint::restore(phi, fixture(&spec), settings(&spec, spec.steps),
+        rows.rows.len(), *rows.ell.last().unwrap()).unwrap();
+    let restored = ProjectedStressOptimizer::from_checkpoint_controlled(&checkpoint,
+        prescribed.fixed_nodes, policy.area, policy.search, policy.stress, |stage| {
+            assert!(!matches!(stage, ProjectedStressSetupStage::Area(ProjectedSetupStage::Evaluation(_))
+                | ProjectedStressSetupStage::Stress(_)), "fixed-node drift must refuse before PDE replay");
+            ControlFlow::<()>::Continue(())
+        });
+    assert!(restored.is_err());
 }

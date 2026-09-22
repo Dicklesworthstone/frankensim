@@ -7,14 +7,19 @@ use fs_topols::projected::{ProjectedOptimizer, ProjectedProgress, ProjectedSetti
 use fs_topols::projected_stress::ProjectedStressSetupStage;
 use fs_topols::volume::VolumeProjectionSettings;
 use fs_topols::{ProjectedStressOptimizer, SampledStressEvaluation, SampledStressLimit};
+use fs_topols::design_regions::{DesignRegion, DesignRegionStage};
+
+#[path = "projected/regions.rs"]
+mod regions;
 
 pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a deterministic sampled von Mises limit. Improvement is measured against the separately projected, stress-feasible study baseline under identical loads. Every accepted state is independently re-solved and durably retained. CG and cell-sampling boundaries are cancellable; assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Controls {
     area: VolumeProjectionSettings,
     search: ProjectedSettings,
     stress: SampledStressLimit,
+    regions: Vec<DesignRegion>,
 }
 
 pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Controls>> {
@@ -39,6 +44,7 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
         },
         stress: SampledStressLimit::new(real("sampled-stress-limit-pa")?, real("stress-tolerance-pa")?)
             .map_err(|error| malformed(&error.to_string()))?,
+        regions: regions::parse_regions(fields)?,
     };
     let a = controls.area;
     let s = controls.search;
@@ -66,7 +72,12 @@ impl Controls {
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
         let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
         let _ = writeln!(out, "    :sampled-stress-limit-pa {}", canonical_float(self.stress.max_von_mises));
-        let _ = writeln!(out, "    :stress-tolerance-pa {})", canonical_float(self.stress.absolute_tolerance));
+        if self.regions.is_empty() {
+            let _ = writeln!(out, "    :stress-tolerance-pa {})", canonical_float(self.stress.absolute_tolerance));
+        } else {
+            let _ = writeln!(out, "    :stress-tolerance-pa {}", canonical_float(self.stress.absolute_tolerance));
+            regions::canonical(&self.regions, out);
+        }
     }
 }
 
@@ -75,7 +86,7 @@ fn stress_json(s: &SampledStressEvaluation) -> String {
         s.compliance, s.volume, s.sampled_max_von_mises, s.max_location[0], s.max_location[1], s.sample_count, s.snapshot)
 }
 
-fn read_stress(value: &JsonValue, policy: Controls) -> Result<SampledStressEvaluation> {
+fn read_stress(value: &JsonValue, policy: &Controls) -> Result<SampledStressEvaluation> {
     let real = |key| number(value, key).map(|(number, _)| number);
     let state = SampledStressEvaluation {
         compliance: real("compliance_j")?, volume: real("area_m2")?,
@@ -118,10 +129,14 @@ impl ConstraintEvidence {
     }
 
     pub(super) fn html(&self) -> String {
-        format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Sampled stress limit: {:.8e} Pa + {:.8e} Pa allowance. Feasible baseline compliance: {:.8e} J. Current sampled maximum: {:.8e} Pa. Stress is sample-scoped, not a continuous-domain bound.</p>",
+        let mut html = format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Sampled stress limit: {:.8e} Pa + {:.8e} Pa allowance. Feasible baseline compliance: {:.8e} J. Current sampled maximum: {:.8e} Pa. Stress is sample-scoped, not a continuous-domain bound.</p>",
             self.policy.area.target, self.policy.area.tolerance,
             self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
-            self.baseline.compliance, self.current().sampled_max_von_mises)
+            self.baseline.compliance, self.current().sampled_max_von_mises);
+        if !self.policy.regions.is_empty() {
+            let _ = write!(html, "<p>{} protected material/void regions are imposed on every intersected cell through its corner nodes. Coverage may extend by less than one cell per side. The phi margin is a field-value margin, not a certified physical clearance or wall thickness.</p>", self.policy.regions.len());
+        }
+        html
     }
 
     pub(super) fn json(&self) -> String {
@@ -132,18 +147,20 @@ impl ConstraintEvidence {
             "\"area_target_m2\":{:.17e},\"area_tolerance_m2\":{:.17e},",
             "\"stress_limit_pa\":{:.17e},\"stress_tolerance_pa\":{:.17e},",
             "\"baseline\":{},\"accepted\":[{}],\"candidate_counts\":[{}],",
-            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}}}"),
+            "\"terminal_refusals\":[{}],\"relative_reduction\":{:.17e}{}}}"),
             self.policy.area.target, self.policy.area.tolerance,
             self.policy.stress.max_von_mises, self.policy.stress.absolute_tolerance,
             stress_json(&self.baseline), self.accepted.iter().map(stress_json).collect::<Vec<_>>().join(","),
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
-            self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction)
+            self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction,
+            regions::json_field(&self.policy.regions))
     }
 
-    fn read(value: &JsonValue, report: &OptimizeReport, policy: Controls) -> Result<Self> {
+    fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
         if value.str_field("mode") != Some("projected-stress-v1")
             || value.str_field("baseline_scope") != Some("feasible_study_start")
         { return Err(malformed("missing projected-stress baseline identity")); }
+        regions::check_retained(value, &policy.regions)?;
         for (key, expected) in [("area_target_m2", policy.area.target),
             ("area_tolerance_m2", policy.area.tolerance),
             ("stress_limit_pa", policy.stress.max_von_mises),
@@ -181,12 +198,13 @@ impl ConstraintEvidence {
         }
         let refusals = refused.iter().map(|v| v.as_str().map(str::to_string)
             .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
-        Ok(Self { policy, baseline, accepted, attempts: counts, refusals })
+        Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals })
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Stage {
+    Regions(DesignRegionStage),
     Setup(ProjectedStressSetupStage),
     Update(ProjectedStage),
 }
@@ -207,23 +225,13 @@ pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
 fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(Stage)) -> Result<Outcome> {
     if ledger.in_transaction() { return Err(malformed("constrained study requires its own ledger transaction")); }
-    let policy = spec.projected.ok_or_else(|| malformed("missing projected controls"))?;
+    let policy = spec.projected.as_ref().ok_or_else(|| malformed("missing projected controls"))?;
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
     let mut predecessor = prior.map(|old| old.hash);
     let mut last = None;
     let mut consumed = 0.0;
     let mut report = OptimizeReport::default();
-    let initial = initial_phi(spec);
-    let fixed: Vec<_> = initial.nodes().iter().copied().enumerate()
-        .filter(|(i, _)| i % (initial.n() + 1) == 0 || i % (initial.n() + 1) == initial.n()).collect();
-    // This native domain is a plate with STRICTLY interior circular holes.
-    // Its complete left/right traces must be material. Freezing every trace
-    // node preserves their linear interpolants, so no supported sub-band can
-    // disappear during projection. CutFEM still performs its own cut-edge gate.
-    if fixed.iter().any(|(_, value)| !value.is_finite() || *value >= 0.0) {
-        return Err(malformed("declared plate must retain material on both fixed boundary traces"));
-    }
     let mut state = if let Some(old) = prior {
         if old.value.str_field("study_id") != Some(spec.id.to_hex().as_str()) {
             return Err(malformed("retained study identity changed"));
@@ -250,10 +258,22 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
         consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| malformed("invalid retained wall charge"))?;
+        // Rebuild the ORIGINAL prescriptions. Re-authoring the saved endpoint
+        // would conceal a changed fixed value or silently repair a violation.
+        let prepared = regions::prepare(spec, &policy.regions, |stage| {
+            observe(Stage::Regions(stage));
+            match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
+                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+            }
+        }).map_err(|error| retained_error(error, last.as_ref()))?;
+        let prepared = match prepared {
+            ControlFlow::Continue(prepared) => prepared,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, last.as_ref())),
+        };
         let checkpoint = OptimizeCheckpoint::restore(phi, fixture(spec), settings(spec, spec.steps),
             report.rows.len(), report.ell.last().copied().unwrap_or(spec.ell0))
             .map_err(|error| malformed(&error.to_string()))?;
-        let restored = ProjectedStressOptimizer::from_checkpoint_controlled(&checkpoint, fixed,
+        let restored = ProjectedStressOptimizer::from_checkpoint_controlled(&checkpoint, prepared.fixed_nodes,
             policy.area, policy.search, policy.stress, |stage| {
                 observe(Stage::Setup(stage));
                 match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
@@ -273,8 +293,18 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         }
         restored
     } else {
-        let area = ProjectedOptimizer::new_controlled(&initial, fixture(spec), settings(spec, spec.steps),
-            fixed, policy.area, policy.search, |stage| {
+        let prepared = regions::prepare(spec, &policy.regions, |stage| {
+            observe(Stage::Regions(stage));
+            match stop_status(gate.is_requested(), start.elapsed().as_secs_f64(), spec.wall_s) {
+                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+            }
+        })?;
+        let prepared = match prepared {
+            ControlFlow::Continue(prepared) => prepared,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
+        };
+        let area = ProjectedOptimizer::new_controlled(&prepared.geometry, fixture(spec), settings(spec, spec.steps),
+            prepared.fixed_nodes, policy.area, policy.search, |stage| {
                 observe(Stage::Setup(ProjectedStressSetupStage::Area(stage)));
                 match stop_status(gate.is_requested(), start.elapsed().as_secs_f64(), spec.wall_s) {
                     Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
@@ -290,7 +320,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         }).map_err(|error| malformed(&error.to_string()))?;
         let state = match state { ControlFlow::Continue(state) => state,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)) };
-        evidence.projected = Some(ConstraintEvidence { policy, baseline: state.current().clone(),
+        evidence.projected = Some(ConstraintEvidence { policy: policy.clone(), baseline: state.current().clone(),
             accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new() });
         state
     };
