@@ -18,13 +18,14 @@ The contact object, its contact law, and the plate's mesh, sections, supports,
 force footprint and modal reduction all come from the existing source loaders.
 No new oscillator, collision law, integrator or material-name preset is added.
 
-Repeat `--modal FILE` and `--plate FILE` in the desired summation order. Every
+Repeat `--modal FILE`, `--plate FILE` and `--bow FILE` in the desired summation order. Every
 supported modal performance version retains its existing bilateral, normal
 contact, friction, force-port and preload semantics. Sources are independent:
 this is acoustic superposition, **not mechanical coupling between files**.
 Put components that exchange forces in one existing coupled/contact input.
-There is no new bow/reed assembly-file parser; their programmatic pressure
-producers can use the same library composition API.
+`--bow FILE` loads an authored string, friction/body parameters and one canonical
+bow trajectory; see `BOWED_PERFORMANCES.md`. A reed assembly-file parser remains
+absent; programmatic pressure producers can use the same library composition API.
 
 ## Clocks, latency and duration
 
@@ -71,7 +72,9 @@ and provenance files are never overwritten.
 
 The command admits at most 16 files of 4 MiB each, 128 source components,
 8192 retained modes, 262144 compiled outer controls and 600 output seconds.
-Every individual loader's own stricter budget remains enforced. Reduction and
+Every individual loader's own stricter budget remains enforced (bow files are
+limited to 1 MiB). Bow controls are counted inside their hosted scheduler, not
+misreported as an empty outer schedule. Reduction and
 source-state memory are unchanged; pressure/PCM staging is callback-sized.
 These are workload bounds, not a real-time throughput claim.
 

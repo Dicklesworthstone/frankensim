@@ -2,6 +2,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use fs_blake3::ContentHash;
+use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
 use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA};
@@ -17,10 +18,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate }
+enum Kind { Modal, Plate, Bow }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -40,11 +41,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" => {
+            "--modal" | "--plate" | "--bow" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: if arg == "--modal" { Kind::Modal } else { Kind::Plate },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, _ => Kind::Bow },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -65,7 +66,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -91,10 +92,11 @@ struct SourceInfo {
 }
 fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), String> {
     let file = std::fs::File::open(&input.path).map_err(|e| format!("input {}: {e}", input.path.display()))?;
+    let max_bytes = if input.kind == Kind::Bow { MAX_BOWED_PERFORMANCE_BYTES } else { MAX_PART_BYTES };
     let mut bytes = Vec::new();
-    file.take((MAX_PART_BYTES + 1) as u64).read_to_end(&mut bytes)
+    file.take((max_bytes + 1) as u64).read_to_end(&mut bytes)
         .map_err(|e| format!("input {}: {e}", input.path.display()))?;
-    if bytes.len() > MAX_PART_BYTES { return Err("ensemble source exceeds the 4 MiB input budget".into()); }
+    if bytes.len() > max_bytes { return Err(format!("ensemble source exceeds its {max_bytes}-byte input budget")); }
     let (renderer, mut info) = match input.kind {
         Kind::Modal => {
             let p = ModalPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
@@ -103,6 +105,15 @@ fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), 
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
                 components: i.voices, modes: i.modes, controls: 0,
+            })
+        }
+        Kind::Bow => {
+            let p = BowedPerformance::from_bytes(&bytes, block).map_err(|e| e.to_string())?;
+            let i = p.info();
+            (p.into_renderer(), SourceInfo {
+                kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
+                rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
+                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls,
             })
         }
         Kind::Plate => {
@@ -115,7 +126,7 @@ fn load(input: &Input, block: usize) -> Result<(ScheduledRenderer, SourceInfo), 
             })
         }
     };
-    info.controls = renderer.pending_controls().len();
+    info.controls += renderer.pending_controls().len();
     Ok((renderer, info))
 }
 

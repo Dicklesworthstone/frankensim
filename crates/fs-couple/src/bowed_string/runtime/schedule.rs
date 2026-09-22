@@ -517,3 +517,6 @@ mod tests {
         assert!(matches!(render.into_state().step(), Err(BowedRunError::Poisoned)));
     }
 }
+
+/// File-driven string mechanics and canonical bow tracks for common rendering.
+pub mod file;
