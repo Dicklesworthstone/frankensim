@@ -9,6 +9,9 @@
 use super::decimate::Decimator;
 use crate::render::{RenderError, schedule::ScheduledRenderer};
 
+/// Latency-aligned acoustic superposition of independently clocked mechanics.
+pub mod ensemble;
+
 /// A mono pressure producer on its OUTPUT sample clock.
 ///
 /// Admission methods must not advance any state. A failed physical callback
@@ -27,6 +30,23 @@ pub trait PressureRenderer {
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError>;
 }
 
+// Type erasure is optional and occurs at composition, never per sample. This
+// lets a nonlinear impact observer and a modal/reed renderer share an output
+// without forcing either to adopt the other's physical integration scheme.
+impl<T: PressureRenderer + ?Sized> PressureRenderer for Box<T> {
+    fn samples_rendered(&self) -> u64 { (**self).samples_rendered() }
+    fn max_block_len(&self) -> usize { (**self).max_block_len() }
+    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
+        (**self).validate_sample_rate(rate)
+    }
+    fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        (**self).validate_sample_count(samples)
+    }
+    fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        (**self).block(output)
+    }
+}
+
 impl PressureRenderer for ScheduledRenderer {
     fn samples_rendered(&self) -> u64 { ScheduledRenderer::samples_rendered(self) }
     fn max_block_len(&self) -> usize { self.context().max_block_len() }
@@ -34,17 +54,28 @@ impl PressureRenderer for ScheduledRenderer {
         ScheduledRenderer::validate_sample_rate(self, sample_rate_hz)
     }
     fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
-        self.context().validate_controls(&[])?;
-        // At most one internal segment per sample, as in the original stream
-        // admission. This also covers event boundaries in decimation groups.
-        if self.samples_rendered().checked_add(samples).is_none()
-            || self.context().blocks_rendered().checked_add(samples).is_none() {
-            return Err(sizing("requested render could overflow a renderer clock"));
+        ScheduledRenderer::validate_sample_count(self, samples)
+    }
+    fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        ScheduledRenderer::block(self, output)
+    }
+}
+
+impl PressureRenderer for crate::render::schedule::force::ensemble::EnsembleRenderer {
+    fn samples_rendered(&self) -> u64 { Self::samples_rendered(self) }
+    fn max_block_len(&self) -> usize { self.renderer().context().max_block_len() }
+    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
+        self.renderer().validate_sample_rate(rate)
+    }
+    fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        self.renderer().validate_sample_count(samples)?;
+        if samples > self.remaining_samples() {
+            return Err(sizing("requested pressure window exceeds the finite ensemble horizon"));
         }
         Ok(())
     }
     fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
-        ScheduledRenderer::block(self, output)
+        Self::block(self, output)
     }
 }
 

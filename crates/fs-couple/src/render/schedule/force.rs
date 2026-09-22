@@ -121,6 +121,27 @@ impl ScheduledRenderer {
         Ok(())
     }
 
+    /// Admit a whole future pressure window before a sink writes its prefix.
+    /// This checks retained finite bow horizons as well as the outer clocks;
+    /// converting a high-rate source must not discover a short horizon midway
+    /// through an already-emitted low-rate callback.
+    pub fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        self.context.validate_controls(&[])?;
+        if self.samples_rendered().checked_add(samples).is_none()
+            || self.context.blocks_rendered().checked_add(samples).is_none()
+        {
+            return Err(sizing("requested render could overflow a renderer clock"));
+        }
+        for voice in &self.context.voices {
+            if let RenderVoice::BowedString(bow) = voice {
+                if samples > bow.remaining_samples() {
+                    return Err(sizing("requested pressure window exceeds a bowed performance horizon"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Compile independent physical actuator histories to the existing renderer.
     ///
     /// Validation includes ALL authored events before projection or preload.
