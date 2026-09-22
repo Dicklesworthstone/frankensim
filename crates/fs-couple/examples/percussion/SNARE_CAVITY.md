@@ -21,8 +21,9 @@ applies to sealed prepared cavities. Commands without the option are unchanged.
 Do not add `--prepared-nonlinear` to these commands: they already use the
 prepared modal/contact image. `drum-stretch --cavity-modes --prepared-nonlinear`
 remains the separate nonlinear-head image. Stretching heads combined with the
-full snare bank, necks on the prepared snare, and vented exterior audio still
-refuse. No nonlinear potential or declared loss is silently dropped.
+full snare bank and vented exterior audio still refuse. Prepared snare mechanics
+now admits the same resistive neck as the reference drum, without changing its
+wire/contact model. No nonlinear potential or declared loss is silently dropped.
 
 ## Actual coupling, not a pressure overlay
 
@@ -50,19 +51,68 @@ Neither interior pressure nor an extra wire/gas oscillator is summed into the
 microphone signal. Direct wire radiation, radiation backreaction and room
 scattering remain outside this model.
 
+## Vents and acoustic losses
+
+`--cavity-neck radius_m effective_length_m resistance_Pa_s_m3 azimuth_rad z_m`
+now works with **mechanics CSV** for `drum-modal`, `snare`, and `snare-off`, as
+well as `drum` and `drum-stretch`. It requires `--cavity-modes`. The existing
+finite-aperture pressure averages, compactness guard, gas inertia, initial zero
+neck volume/flow, and explicit nonnegative resistance are retained. Pressure
+includes outward displaced neck volume; loss includes the actual `R*Q^2`
+resistance. The four existing neck CSV columns report volume, flow, pressure
+and endpoint resistive power. Endpoint power is not the step's energy loss.
+
+`--cavity-drag-per-s D` explicitly supplies the same momentum-drag rate [1/s]
+to each retained **nonuniform** cavity coordinate, in either mechanical image.
+It requires `--cavity-modes`, accepts finite `0..=100000`, and defaults to zero.
+The uniform pressure mode remains undamped because it has no inertial state.
+This is a declared constant-rate model, not a measured wall/thermal loss,
+pressure-decay fit, linewidth, or frequency-independent material loss factor.
+Drag removes `D*p_j^2` from each mass-normalized gas momentum; it never applies
+an output envelope or silently changes head/wire damping. A sealed render may
+use it: the existing BEM observer receives the resulting changed head motion.
+
+```sh
+# Illustrative inputs, not measured vent geometry or identified acoustic loss.
+(set -C; cargo run --release -p fs-couple --example percussion -- \
+  snare 20000 --cavity-modes --cavity-drag-per-s 50 \
+  --cavity-neck 0.005 0.012 5000 0.4 0.08 \
+  --strike-speed-m-s 2 --second-stick-position-m -0.05 0.02 \
+  --second-stick-speed-m-s 1.6 --muffler batter 0.07 0.01 0.1 > vented-snare.csv)
+
+# Sealed audio with acoustic momentum loss; no vent is requested.
+(set -C; cargo run --release -p fs-couple --example percussion -- \
+  snare-mic 48000 20 --cavity-modes --cavity-drag-per-s 50 > lossy-snare.wav)
+```
+
+Both stick-force performance files, supplied drum specifications and fixed
+mufflers continue to compose with these controls. All resistance, contact and
+cavity reactions use one accepted mechanical step. **Any vented WAV/microphone
+request still refuses** before geometry: the closed exterior omits aperture
+radiation and cannot honestly represent a vented instrument's sound.
+
 ## Budgets and evidence
 
 The prepared snare keeps its existing limits of 256 total coordinates, 512
 contact points and 50 million contact setup terms. Air coordinates count toward
 that same total; overflow refuses rather than truncating the wire bank. The
-nonlinear reference's 64-mode limit is unchanged. The prepared cavity requires
-zero acoustic momentum drag because its free-coordinate owner does not provide
-that damping law. This example already declared zero acoustic drag; no loss
-coefficient was changed to make the composition work.
+nonlinear reference's 64-mode limit is unchanged. Neck additions preserve the
+caller's original total-coordinate budget even above 64, including across
+repeated additions. No wire coordinate is removed to make room for a vent.
 
-The five library tests cover uniform-volume equivalence, independent coupled
+Prepared commands with a vent or positive acoustic drag declare 32 bilateral
+connections and one million connection-setup terms, enough for eight cavity
+springs, seven gas drags, one vent drag and sixteen solid mufflers. The original
+zero-loss/no-vent commands keep their existing eight-connection envelope.
+Library builders never enlarge caller budgets: every nonzero inertial drag
+consumes one grounded viscous link in addition to springs and supplied ports.
+These links use the existing simultaneous solve, not previous-sample forcing
+or a separate decay stage. This is passive second-order coupling, not the exact
+full damped exponential; strong drag still requires time-refinement checks.
+
+The original library tests cover uniform-volume equivalence, independent coupled
 eigen-dynamics under time refinement, basis-rescaling invariance, many-body
-contact and cancellation/retry, and unchanged loss/budget refusals. Five example
+contact and cancellation/retry, and explicit loss/budget admission. Five original example
 tests cover real 20-strand assembly, changed head motion and spatial pressure,
 prepared/reference onset comparison, supplied-geometry audio construction, and
 command/physics restrictions. The audio-construction test does not execute BEM
@@ -70,6 +120,8 @@ fitting or certify a waveform. Focused native commands are:
 
 ```sh
 cargo test --release -p fs-couple --lib render::plate::impact::cavity::prepared::tests
+cargo test --release -p fs-couple --lib render::plate::impact::linear::free_drag_tests
+cargo test --release -p fs-couple --example percussion cavity::loss_tests -- --test-threads=1
 cargo test --release -p fs-couple --example percussion -- --test-threads=1
 ```
 
@@ -77,3 +129,8 @@ The conservative equations were also evaluated independently in Python: halving
 the test step reduced the trajectory error by about fourfold. That is not a
 native Rust result. Native builds, full-band/modal convergence, specimen
 calibration and real-time deadlines require their own execution and evidence.
+Additional native regressions cover damped Helmholtz flow/loss and refinement,
+132-coordinate vent admission, lossy pressure-basis rescaling, inertial force
+and work scaling, and the actual two-stick/20-strand/muffler/vent composition.
+Native tests and audio exports remain unexecuted in the editing environment;
+independent arithmetic checks are not evidence that the Rust tests passed.

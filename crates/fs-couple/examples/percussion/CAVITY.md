@@ -3,6 +3,8 @@
 `--cavity-modes` enables reciprocal standing-wave air loading on `drum` and
 `drum-stretch`, including their `-wav` and `-mic` forms. It works together with
 `--prepared-nonlinear`. Without it the original compact-volume model is unchanged.
+Prepared `drum-modal` and `snare`/`snare-off` support the same cavity as described
+in `SNARE_CAVITY.md`, including explicit momentum drag and vented mechanics.
 
 ```sh
 (set -C; cargo run --release -p fs-couple --example percussion -- \
@@ -60,14 +62,16 @@ Sealed-cavity exterior audio still uses the original solid-head BEM boundary, pr
 decimation and PCM conversion. Appended gas coordinates have zero external drive
 and zero direct solid-radiation projection. They affect sound by changing head
 motion, not by being summed into a manufactured microphone signal. The existing
-mechanical and audio clocks are unchanged. `drum-modal`, `snare` and cymbal
-commands reject the option rather than silently changing their physical model.
+mechanical and audio clocks are unchanged. Prepared `drum-modal` and `snare`
+commands retain their own solver while consuming the same cavity. Cymbal
+commands still reject this drum-specific option.
 
 ## Vented cavity mechanics
 
 `--cavity-neck radius_m effective_length_m resistance_Pa_s_m3 azimuth_rad z_m`
 adds one explicit sidewall opening to `drum` or `drum-stretch` **CSV** mechanics,
-with `--cavity-modes`. It also works with `--prepared-nonlinear`. Every physical
+with `--cavity-modes`. It also works with `--prepared-nonlinear`, or with the
+prepared `drum-modal`, `snare`, and `snare-off` CSV commands. Every physical
 parameter is required; there is no hidden vent preset or fitted loss constant.
 
 ```sh
@@ -118,8 +122,10 @@ audio is unchanged. Direct vent radiation and its reaction impedance remain
 required for a complete vented-instrument audio path.
 
 The generic `CavityCoupling::with_necks` supports up to eight explicit openings,
-within the existing 64-coordinate mechanical budget, and accepts finite-area
-averages from other geometries. The drum CLI currently exposes one opening.
+within the constructor's retained total-coordinate budget, and accepts finite-area
+averages from other geometries. Reference execution remains capped at 64;
+the prepared snare admits 256 coordinates including all wires, air and necks.
+The drum CLI currently exposes one opening.
 No new runtime dependency or changed instrument/material/pitch preset is added.
 
 Focused Rust tests cover Helmholtz frequency, physical volume/flow and resistance
@@ -136,10 +142,14 @@ geometry can supply the same carrier. `cylinder::CylindricalCavity` supplies a
 parameterized cylindrical basis and point/interface sampling. Head, cavity and
 contact bases must all use the declared ordering and physical units.
 
-The new example declares zero acoustic momentum drag; no fabricated
-thermoviscous or wall-loss coefficients are fitted. The generic adapter accepts
-explicit passive momentum drag but refuses automatic conversion of a nonzero
-frequency-domain hysteretic loss factor. This work does not model external
-radiation reaction, sidewall elasticity, noncompact vents, snare/cavity co-simulation,
+The example defaults to zero acoustic momentum drag. `--cavity-drag-per-s D`
+explicitly applies a finite nonnegative rate to each nonuniform gas momentum;
+the uniform compression mode has no momentum and remains undamped. Both
+reference and prepared execution retain this same physical resistance. See
+`SNARE_CAVITY.md` for units, bounds, port budgets and sealed-audio examples.
+No thermoviscous or wall-loss coefficients are inferred, and the generic
+adapter still refuses automatic conversion of a frequency-domain hysteretic
+loss factor. This work does not model external
+radiation reaction, sidewall elasticity, noncompact vents,
 nonlinear gas compression or a complete timpani kettle. No calibration,
 full-band convergence, native allocation or real-time deadline claim is made.

@@ -52,8 +52,34 @@ pub fn neck_option(args:&mut Vec<String>)->Result<Option<NeckOptions>,Error> {
 }
 
 pub fn admit_neck_command(neck:Option<NeckOptions>,distributed:bool,command:&str)->Result<(),Error> {
-    if neck.is_some() && (!distributed || !matches!(command,"drum"|"drum-stretch")) {
-        return Err("--cavity-neck requires --cavity-modes and drum/drum-stretch CSV; vented exterior radiation is not implemented, so WAV/microphone export is refused".into());
+    if neck.is_some() && (!distributed || !matches!(command,
+        "drum"|"drum-stretch"|"drum-modal"|"snare"|"snare-off")) {
+        return Err("--cavity-neck requires --cavity-modes and drum/snare mechanics CSV; vented exterior radiation is not implemented, so WAV/microphone export is refused".into());
+    }
+    Ok(())
+}
+
+/// Explicit rate on nonuniform acoustic MOMENTA, not damping of pressure or
+/// a fitted linewidth. The uniform compression mode has no momentum to damp.
+pub fn drag_option(args:&mut Vec<String>)->Result<Option<f64>,Error> {
+    let mut positions=args.iter().enumerate().filter(|(_,v)|v.as_str()=="--cavity-drag-per-s");
+    let Some((start,_))=positions.next() else {return Ok(None);};
+    if positions.next().is_some() {return Err("--cavity-drag-per-s may be supplied only once".into());}
+    let drag=args.get(start+1).ok_or("--cavity-drag-per-s needs a finite nonnegative rate [1/s]")?.parse()?;
+    validate_drag(drag)?;
+    args.drain(start..start+2);Ok(Some(drag))
+}
+pub fn validate_drag(drag:f64)->Result<(),Error> {
+    if !drag.is_finite() || !(0.0..=100_000.0).contains(&drag) {
+        return Err("cavity momentum drag must be finite in 0..=100000 per second".into());
+    }
+    Ok(())
+}
+pub fn admit_drag_command(drag:Option<f64>,distributed:bool,command:&str)->Result<(),Error> {
+    if let Some(drag)=drag {
+        validate_drag(drag)?;
+        if !distributed {return Err("--cavity-drag-per-s requires --cavity-modes; no loss is applied to the compact spring".into());}
+        admit_command(true,command)?;
     }
     Ok(())
 }
@@ -132,13 +158,19 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
 pub fn build_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
     ->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_losses(films,modes,bodies,contacts,dampers,radius,depth,steps,dt_s,neck,0.0)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
+    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     // Both head ranges remain the original prefix. Include every appended
     // striker before allocating cavity inertia; its coupling row stays zero.
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,&gate)?;
+        fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,&gate)?;
     let (system,coupling)=coupling.build_with_dampers(bodies,contacts,vec![],dampers,config(steps,dt_s),&gate)?;
     Ok((system,InteriorPressure {coupling,first,second}))
 }
@@ -156,11 +188,19 @@ pub fn build_prepared(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<I
 pub fn build_prepared_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig)
     ->Result<(LinearImpactSystem,InteriorPressure),Error> {
+    build_prepared_with_losses(films,modes,bodies,contacts,dampers,radius,depth,configuration,None,0.0)
+}
+/// The same inputs as the reference: no drag, vent, or muffler is dropped to
+/// select the prepared image. All downstream budgets remain caller-supplied.
+#[allow(clippy::too_many_arguments)]
+pub fn build_prepared_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,configuration:LinearImpactConfig,
+    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(LinearImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
         .ok_or("prepared cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
-        configuration.coupling.max_modes,None,&gate)?;
+        configuration.coupling.max_modes,neck,drag_per_s,&gate)?;
     let (system,coupling)=coupling.build_linear_with_dampers(bodies,contacts,dampers,
         core::f64::consts::PI*radius*radius,configuration,&gate)?;
     eprintln!("mechanical image: prepared modal heads/wires plus simultaneous distributed-air/contact reactions; no wire homogenization or direct gas audio; real-time performance unqualified");
@@ -169,8 +209,9 @@ pub fn build_prepared_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>]
 
 #[allow(clippy::too_many_arguments)]
 fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
-    structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,gate:&CancelGate)
+    structural:usize,maximum_modes:usize,neck:Option<NeckOptions>,drag_per_s:f64,gate:&CancelGate)
     ->Result<InteriorPressure,Error> {
+    validate_drag(drag_per_s)?;
     let heads=1+modes.iter().map(Vec::len).sum::<usize>();
     if structural<heads || structural>maximum_modes || maximum_modes>4096 {
         return Err("cavity needs the original head prefix and a bounded structural layout".into());
@@ -180,10 +221,11 @@ fn compile(films:&[TensionedDisk],modes:&[Vec<ModePair>],radius:f64,depth:f64,
     let mut coupling=vec![0.0;structural*air.modes().len()];
     coupling[..head_coupling.len()].copy_from_slice(&head_coupling);
     let sampled=air.sample(&[[0.0,0.0,0.0]],8)?;
-    eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; explicit zero acoustic drag; rigid cylindrical sidewall, not calibrated losses",
+    eprintln!("distributed cavity: R={radius}m, depth={depth}m; radial_intervals=32, acoustic_hz={:?}; nonuniform momentum drag={drag_per_s}/s, uniform drag=0; rigid cylindrical sidewall, not calibrated losses",
         sampled.omegas.iter().map(|w|w/core::f64::consts::TAU).collect::<Vec<_>>());
+    let damping:Vec<_>=sampled.omegas.iter().map(|w|if *w==0.0 {0.0}else{drag_per_s}).collect();
     let mut compiled=CavityCoupling::new_with_mode_budget(&sampled,structural,&coupling,
-        &vec![0.0;air.modes().len()],maximum_modes)?;
+        &damping,maximum_modes)?;
     if let Some(neck)=neck {
         let averages=air.sidewall_averages(SidewallAperture {radius_m:neck.radius_m,
             azimuth_rad:neck.azimuth_rad,axial_position_m:neck.axial_position_m,
@@ -216,7 +258,11 @@ mod tests {
         let (positional,stroke)=super::super::playing::parse(args).unwrap();
         assert_eq!(positional,["drum-stretch","128"]);assert_eq!(stroke.speed_m_s,4.0);
         assert!(admit_neck_command(Some(neck),true,"drum-stretch").is_ok());
-        for command in ["drum-mic","drum-wav","drum-stretch-mic","drum-stretch-wav","snare","splash"] {
+        for command in ["drum-modal","snare","snare-off"] {
+            assert!(admit_neck_command(Some(neck),true,command).is_ok());
+        }
+        for command in ["drum-mic","drum-wav","drum-stretch-mic","drum-stretch-wav",
+            "snare-mic","snare-off-wav","drum-modal-mic","splash"] {
             assert!(admit_neck_command(Some(neck),true,command).is_err());
         }
         assert!(admit_neck_command(Some(neck),false,"drum").is_err());
@@ -329,3 +375,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cavity_prepared_tests.rs"]
 mod prepared_tests;
+
+#[cfg(test)]
+#[path = "cavity_loss_tests.rs"]
+mod loss_tests;

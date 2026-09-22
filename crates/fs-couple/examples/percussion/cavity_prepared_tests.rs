@@ -115,14 +115,14 @@ fn supplied_snare_off_audio_construction_preserves_head_projections_and_appends_
 }
 
 #[test]
-fn unsupported_stretching_or_vented_snare_is_not_silently_downgraded() {
+fn unsupported_stretching_or_vented_snare_audio_is_not_silently_downgraded() {
     let wires = Some(SnareSet::reference(false)); let stroke = Stroke::default();
     assert!(crate::drum_with_air(1, 2e-6, false, true, wires, true, stroke, true, None).is_err());
     assert!(crate::drum_with_air(1, 2e-6, false, false, wires, false, stroke, true, None).is_err());
     let neck = NeckOptions { radius_m: 0.005, effective_length_m: 0.012,
         resistance_pa_s_m3: 1000.0, azimuth_rad: 0.4, axial_position_m: 0.08 };
-    for command in ["drum-modal", "snare", "snare-off", "snare-wav", "snare-mic"] {
+    for command in ["drum-modal-wav", "snare-off-mic", "snare-wav", "snare-mic"] {
         assert!(admit_neck_command(Some(neck), true, command).is_err());
     }
-    assert!(crate::drum_with_air(1, 2e-6, false, true, wires, false, stroke, true, Some(neck)).is_err());
+    assert!(crate::drum_with_air(1, 2e-6, true, true, wires, false, stroke, true, Some(neck)).is_err());
 }
