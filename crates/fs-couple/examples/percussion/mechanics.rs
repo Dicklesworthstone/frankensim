@@ -9,10 +9,14 @@ use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 
+#[path = "drive.rs"]
+pub mod drive;
+
 pub enum Mechanics {
     Reference(ImpactSystem),
     Prepared(LinearImpactSystem),
     Nonlinear(PreparedImpactSystem),
+    Driven { inner: Box<Mechanics>, drive: drive::StickDrive },
 }
 /// Only the diagnostics shared by both images. In particular, a normal-force
 /// residual is not exposed under the reference solver's different residual unit.
@@ -21,6 +25,7 @@ pub struct Frame {
     pub stored_energy_j: f64,
     pub felt_crush_loss_j: f64,
     pub dissipated_energy_j: f64,
+    pub supplied_work_j: f64,
     pub balance_residual_j: f64,
 }
 fn prepared_config(steps: u64, dt_s: f64) -> Result<LinearImpactConfig, Error> {
@@ -51,7 +56,6 @@ fn prepared_config(steps: u64, dt_s: f64) -> Result<LinearImpactConfig, Error> {
     })
 }
 /// Identical work envelope for compact and distributed-air prepared images.
-/// The larger configuration retains individual snare coordinates and contacts.
 pub(super) fn coupled_config(steps: u64, dt_s: f64, snares: bool) -> Result<LinearImpactConfig, Error> {
     let mut configuration = prepared_config(steps, dt_s)?;
     if snares {
@@ -69,6 +73,19 @@ pub fn prepared_option(args: &mut Vec<String>) -> Result<bool, Error> {
     Ok(count == 1)
 }
 impl Mechanics {
+    /// Attach an external player at the existing stick's work-conjugate port.
+    /// Construction is cold; each accepted tick preserves every physical state.
+    /// The program clock starts at attachment, before the CLI's first step.
+    pub fn with_stick_drive(self, program: drive::Program, dt_s: f64, steps: u64,
+        tip_weight: f64, modes: usize) -> Result<Self, Error>
+    {
+        if matches!(&self, Self::Driven { .. }) || modes > self.state().len() / 2 {
+            return Err("stick drive requires one unnested, dimensionally admitted mechanical image".into());
+        }
+        let drive = drive::StickDrive::new(program, dt_s, steps, tip_weight, modes)?;
+        Ok(Self::Driven { inner: Box::new(self), drive })
+    }
+
     /// Prepare the exact nonlinear model after construction, with no reset,
     /// retiming, modal truncation, or replacement by the linear-contact image.
     pub fn into_prepared_nonlinear(self) -> Result<Self, Error> {
@@ -76,6 +93,9 @@ impl Mechanics {
             Self::Reference(system) => Ok(Self::Nonlinear(system.prepare()?)),
             Self::Nonlinear(system) => Ok(Self::Nonlinear(system)),
             Self::Prepared(_) => Err("--prepared-nonlinear needs splash, drum or drum-stretch; the modal/snare image is a different physical admission".into()),
+            Self::Driven { inner, drive } => Ok(Self::Driven {
+                inner: Box::new((*inner).into_prepared_nonlinear()?), drive,
+            }),
         }
     }
 
@@ -102,10 +122,12 @@ impl Mechanics {
     }
     pub fn membrane_observation(&self,body:usize) -> Option<fs_couple::render::plate::impact::membrane::MembraneObservation> {
         match self { Self::Reference(s)=>s.membrane_observation(body), Self::Prepared(_)=>None,
-            Self::Nonlinear(s)=>s.membrane_observation(body) }
+            Self::Nonlinear(s)=>s.membrane_observation(body),
+            Self::Driven { inner, .. }=>inner.membrane_observation(body) }
     }
     pub fn state(&self) -> &[f64] {
-        match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state(), Self::Nonlinear(s) => s.state() }
+        match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state(), Self::Nonlinear(s) => s.state(),
+            Self::Driven { inner, .. } => inner.state() }
     }
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<Frame, ImpactError> {
         Ok(match self {
@@ -113,19 +135,27 @@ impl Mechanics {
                 let f = s.step(external, gate)?;
                 Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
                     felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
-                    balance_residual_j: f.balance_residual_j }
+                    supplied_work_j: f.supplied_work_j, balance_residual_j: f.balance_residual_j }
             }
             Self::Nonlinear(s) => {
                 let f = s.step(external, gate)?;
                 Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
                     felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
-                    balance_residual_j: f.balance_residual_j }
+                    supplied_work_j: f.supplied_work_j, balance_residual_j: f.balance_residual_j }
             }
             Self::Prepared(s) => {
                 let f = s.step(external, gate)?;
                 Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
                     felt_crush_loss_j: 0.0, dissipated_energy_j: f.dissipated_energy_j,
-                    balance_residual_j: f.balance_residual_j }
+                    supplied_work_j: f.supplied_work_j, balance_residual_j: f.balance_residual_j }
+            }
+            Self::Driven { inner, drive } => {
+                let forces = drive.forces(external)?;
+                let frame = inner.step(forces, gate)?;
+                // Cancellation, contact, energy and work-envelope refusals
+                // leave the playing tick pending, just like the physical tick.
+                drive.accept();
+                frame
             }
         })
     }
@@ -134,6 +164,39 @@ impl Mechanics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn driven_mass(prepared: bool) -> Mechanics {
+        let (body, weight) = ImpactBody::free_mass(0.25, 0.0, 0.0).unwrap();
+        let system = Mechanics::Reference(ImpactSystem::new(vec![body], vec![], vec![],
+            vec![], config(4, 0.001)).unwrap());
+        let system = if prepared { system.into_prepared_nonlinear().unwrap() } else { system };
+        system.with_stick_drive(drive::Program::parse("0,0\n0.001,1\n0.002,0").unwrap(),
+            0.001, 4, weight, 1).unwrap()
+    }
+    #[test]
+    fn physical_force_has_correct_mass_scaling_work_and_retry_for_both_phs_images() {
+        let gate = CancelGate::new_clock_free();
+        for prepared in [false, true] {
+            let mut a = driven_mass(prepared); let mut b = driven_mass(prepared);
+            let before = a.state().to_vec();
+            // Finite but outside the OWNER's force envelope: not just a parser
+            // error. Both staged playing input and mechanical state must retry.
+            assert!(a.step(&[1e7], &gate).is_err());
+            assert_eq!(a.state(), before);
+            let mut work = 0.0;
+            for _ in 0..4 {
+                let f = a.step(&[0.0], &gate).unwrap();
+                b.step(&[0.0], &gate).unwrap();
+                assert_eq!(a.state(), b.state());
+                work += f.supplied_work_j;
+                assert!(f.balance_residual_j.abs() < 1e-10);
+                assert!((work - f.stored_energy_j).abs() < 1e-10);
+            }
+            // Impulse = 0.001 N s; m=0.25 kg; q_dot=sqrt(m)*v=0.002.
+            assert!((a.state()[1] - 0.002).abs() < 1e-10);
+            assert!((work - 2e-6).abs() < 1e-10);
+            assert!(matches!(a.step(&[0.0], &gate), Err(ImpactError::Budget)));
+        }
+    }
     #[test]
     fn prepared_images_keep_both_existing_clocks_without_retiming() {
         for dt in [2e-6, super::super::acoustics::MECHANICAL_DT] {

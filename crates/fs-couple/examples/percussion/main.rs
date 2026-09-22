@@ -59,7 +59,7 @@ fn elastic_contact(weights:Vec<f64>)->Result<Obstacle,Error> {
     Ok(Obstacle::new(weights,1,n,vec![0.0],vec![1.0],stiffness,1.5,
         "estimated isotropic Hertz tip: E_eff=0.8GPa, R=3mm; not identified hickory-shell contact".into())?)
 }
-struct Experiment {system:Mechanics,force:Vec<f64>,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>}
+struct Experiment {system:Mechanics,force:Vec<f64>,stick_weight:f64,observer_a:Vec<f64>,observer_b:Vec<f64>,pressure:Option<VolumeSpring>,acoustics:Option<acoustics::Boundary>,air:Option<cavity::InteriorPressure>}
 fn splash(steps:u64,dt_s:f64,audio:bool)->Result<Experiment,Error> {
     splash_with_stroke(steps,dt_s,audio,Stroke::default())
 }
@@ -132,7 +132,7 @@ fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
     let system=ImpactSystem::new(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],config(steps,dt_s))?;
     let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
-    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
+    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -238,7 +238,7 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
     // Acoustic inertia never receives an external strike or a direct solid-radiation projection.
     let count=air.as_ref().map_or(n,|a|a.coupling.total_modes());
     top.resize(count,0.0);bottom.resize(count,0.0);
-    Ok(Experiment{system,force:vec![0.0;count],observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air})
+    Ok(Experiment{system,force:vec![0.0;count],stick_weight,observer_a:top,observer_b:bottom,pressure:Some(volume),acoustics,air})
 }
 // The stored drum areas encode compression, so positive contraction means
 // positive internal pressure. The volume-spring Hamiltonian is unchanged.
@@ -253,6 +253,8 @@ fn run()->Result<(),Error> {
     let neck=cavity::neck_option(&mut raw_args)?;
     let shell_path=specimen::option(&mut raw_args)?;
     let drum_path=drum_spec::option(&mut raw_args)?;
+    let playing_force=mechanics::drive::option(&mut raw_args)?;
+    let driven=playing_force.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
     if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to all drum/snare commands (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
@@ -294,6 +296,11 @@ fn run()->Result<(),Error> {
         experiment.system=experiment.system.into_prepared_nonlinear()?;
         eprintln!("mechanical image: prepared nonlinear Gonzalez; unchanged geometry, materials, felt history and clocks; real-time performance unqualified");
     }
+    if let Some(program)=playing_force {
+        experiment.system=experiment.system.with_stick_drive(program,dt_s,steps,
+            experiment.stick_weight,experiment.force.len())?;
+        eprintln!("external stick performance: --stick-force-file integrates SI force knots at the mechanical clock; initial launch retained, no state reset; see DRIVE.md");
+    }
     eprintln!("physical stroke: speed_m_s={}, explicit_xy_m={:?}; no output normalization or pitch control",stroke.speed_m_s,stroke.position_m);
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
@@ -305,7 +312,8 @@ fn run()->Result<(),Error> {
     let extra=if stretching {",batter_slope,resonant_slope,head_stretching_energy_j"}else{""};
     let air_columns=if distributed_cavity {",cavity_point_a_pa,cavity_point_b_pa"}else{""};
     let neck_columns=if neck.is_some() {",neck_volume_m3,neck_flow_m3_s,neck_pressure_pa,neck_loss_power_w"}else{""};
-    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}{neck_columns}")?;
+    let drive_columns=if driven {",player_work_j"}else{""};
+    writeln!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{air_columns}{neck_columns}{drive_columns}")?;
     for _ in 0..steps {
         let f=experiment.system.step(&experiment.force,&gate)?;let x=experiment.system.state();
         let displacement=|weights:&[f64]|weights.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
@@ -330,6 +338,7 @@ fn run()->Result<(),Error> {
                     n.volume_flow_m3_s,n.driving_pressure_pa,n.dissipated_power_w)?;
             }
         }
+        if driven {write!(out,",{:.17e}",f.supplied_work_j)?;}
         writeln!(out)?;
     }
     out.flush()?;Ok(())
@@ -339,6 +348,35 @@ fn main(){if let Err(e)=run(){eprintln!("percussion reference refused: {e}");std
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_later_player_force_drives_real_drum_contact_without_resetting_ringdown() {
+        let gate=CancelGate::new_clock_free();
+        for prepared in [false,true] {
+            let mut manual=drum(256,2e-6,false,prepared).unwrap();
+            let mut driven=drum(256,2e-6,false,prepared).unwrap();
+            let initial=driven.system.state().to_vec();
+            let text="0,0\n0.000256,0\n0.000384,2\n0.000512,0";
+            let mut staging=mechanics::drive::StickDrive::new(
+                mechanics::drive::Program::parse(text).unwrap(),2e-6,256,
+                manual.stick_weight,manual.force.len()).unwrap();
+            driven.system=driven.system.with_stick_drive(
+                mechanics::drive::Program::parse(text).unwrap(),2e-6,256,
+                driven.stick_weight,driven.force.len()).unwrap();
+            assert_eq!(driven.system.state(),initial);
+            let mut head_motion=0.0_f64;let mut player_work=0.0_f64;
+            for step in 0..256 {
+                let f=driven.system.step(&driven.force,&gate).unwrap();
+                manual.system.step(staging.forces(&manual.force).unwrap(),&gate).unwrap();
+                staging.accept();
+                assert_eq!(driven.system.state(),manual.system.state());
+                if step<128 {assert_eq!(f.supplied_work_j,0.0);}
+                player_work+=f.supplied_work_j.abs();
+                head_motion=head_motion.max(driven.system.state()[2..].iter().map(|x|x.abs()).fold(0.0_f64,f64::max));
+                assert!(f.balance_residual_j.abs()<1e-7);
+            }
+            assert!(head_motion>0.0 && player_work>0.0);
+        }
+    }
     #[test]
     fn downward_batter_motion_compresses_air_and_bottom_motion_releases_it() {
         let v=VolumeSpring{bulk_modulus_pa:100.0,volume_m3:2.0,areas:vec![0.0,3.0,-3.0]};
