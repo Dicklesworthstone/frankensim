@@ -24,7 +24,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--midi performance.mid] [--midi-channel 1..16]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
-    [--microphone x_m,y_m,z_m] [--diagnostic-volume]
+    [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
     [--dump-scale strings.csv] [--dump-board board.csv]
@@ -88,6 +88,9 @@ The complete score must fit --duration, leaving room for acoustic ringdown.
 Unsupported physical controls refuse or are reported as ignored; see MIDI.md.
 Geometric boards default to a spatial Rayleigh half-space pressure microphone
 at (0.675,1,1) metres in the mesh coordinate system. --microphone moves it.
+--microphone-right adds a second spatial receiver and writes left/right stereo
+from one mechanical performance. The original/default microphone is left;
+no panning, duplicated mono, peak normalization or second physics run. See STEREO.md.
 This assumes an infinite baffle, with no lid/room scattering or air backreaction.
 Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
@@ -104,7 +107,7 @@ struct Options {
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
-    microphone: Option<[f64; 3]>, diagnostic_volume: bool,
+    microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
     dump_scale: Option<String>, dump_board: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, help: bool,
@@ -116,7 +119,7 @@ impl Default for Options {
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
-            microphone: None, diagnostic_volume: false,
+            microphone: None, microphone_right: None, diagnostic_volume: false,
             dump_board: None, note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, help: false }
     }
@@ -154,11 +157,12 @@ impl Options {
                 }
                 "--midi-velocity-max-m-s" => options.midi_mapping.maximum_velocity_m_s =
                     value.parse().map_err(|_| invalid())?,
-                "--microphone" => {
+                "--microphone" | "--microphone-right" => {
                     let values = value.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>,_>>()
                         .map_err(|_| invalid())?;
                     if values.len() != 3 { return Err(invalid()); }
-                    options.microphone = Some([values[0], values[1], values[2]]);
+                    let position=Some([values[0], values[1], values[2]]);
+                    if flag=="--microphone" {options.microphone=position;} else {options.microphone_right=position;}
                 }
                 "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
                 "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
@@ -226,10 +230,11 @@ impl Options {
             return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
-        if options.microphone.is_some_and(|p| p.iter().any(|x|!x.is_finite()) || p[2] < 0.05)
-            || (options.microphone.is_some() && (!geometric || options.render.is_none()
-                || options.diagnostic_volume)) {
-            return Err("--microphone needs a geometric render, finite x,y,z with z>=0.05, and no --diagnostic-volume".into());
+        if [options.microphone,options.microphone_right].iter().flatten()
+            .any(|p| p.iter().any(|x|!x.is_finite()) || p[2]<0.05)
+            || ((options.microphone.is_some() || options.microphone_right.is_some())
+                && (!geometric || options.render.is_none() || options.diagnostic_volume)) {
+            return Err("microphones need a geometric render, finite x,y,z with z>=0.05, and no --diagnostic-volume".into());
         }
         if geometric && !options.diagnostic_volume && seen.contains("--observer-gain") {
             return Err("--observer-gain requires --diagnostic-volume for a geometric board".into());
@@ -373,22 +378,32 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
             strings, cells, options.dampers.as_deref().unwrap_or("supplied"));
     }
     let surface = if options.diagnostic_volume { None } else { surface };
-    let mut stream = audio::AudioStream::new(piano, score, surface,
-        options.microphone.unwrap_or([0.675, 1.0, 1.0]),
-        fs_bem::helmholtz::Medium::air(), options.observer_gain)?;
+    let left=options.microphone.unwrap_or([0.675,1.0,1.0]);
+    let mut stream = match options.microphone_right {
+        Some(right)=>audio::AudioStream::new_stereo(piano,score,
+            surface.ok_or("stereo pressure requires a geometric soundboard surface")?,
+            [left,right],fs_bem::helmholtz::Medium::air())?,
+        None=>audio::AudioStream::new(piano,score,surface,left,
+            fs_bem::helmholtz::Medium::air(),options.observer_gain)?,
+    };
     if let Some(mic) = stream.microphone() {
         println!("Rayleigh pressure microphone at {:?} m; propagation {:?} samples plus {} anti-alias delay samples; {} modal multiplies/output sample.",
             mic.position_m, mic.delay_samples, mic.filter_delay_samples(), mic.multiply_adds_per_sample());
     }
-    let mut pressure = vec![0.0; count as usize];
+    if let Some([_,right])=stream.stereo_microphones() {
+        println!("Right Rayleigh microphone at {:?} m; propagation {:?} samples plus {} anti-alias delay samples. Independent spatial pressure; shared mechanics.",
+            right.position_m,right.delay_samples,right.filter_delay_samples());
+    }
+    let channels=stream.channels();
+    let mut pressure = vec![0.0; count as usize*channels];
     let start = std::time::Instant::now();
-    for block in pressure.chunks_mut(256) {
-        stream.render_block(block).map_err(|e| e.to_string())?;
+    for block in pressure.chunks_mut(256*channels) {
+        stream.render_interleaved_block(block).map_err(|e| e.to_string())?;
     }
     let elapsed = start.elapsed().as_secs_f64();
     let peak = pressure.iter().fold(0.0_f64, |a, p| a.max(p.abs()));
     let seconds = f64::from(count) / f64::from(rate);
-    let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&pressure, rate, 2.0).map_err(|e| e.to_string())?;
+    let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, 2.0).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
     if stream.microphone().is_some() {
         println!("Computed half-space pressure in Pa; PCM full scale 2 Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.");
@@ -398,7 +413,7 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     let piano = stream.instrument();
     println!("{} string modes; {} board modes; {} above-band duplex segments omitted from dynamic retention (static attachment retained).",
         piano.bank.modes.len(), piano.bank.board_count, piano.bank.omitted_duplex_modes);
-    println!("{seconds:.6} s audio rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);
+    println!("{seconds:.6} s, {channels} channel(s) rendered in {elapsed:.6} s; wall/audio ratio {:.4}; peak {peak:.6} Pa-equivalent; {clips} PCM clips.", elapsed / seconds);
     println!("Input {:.9} J; stored {:.9} J; component losses {:.9} J; closure {:.3e} J; worst substep defect {:.3e} J.",
         piano.accounting.input_work_j, piano.energy_j(), piano.accounting.dissipated_j(),
         piano.accounting.input_work_j - piano.energy_j() - piano.accounting.dissipated_j(), piano.accounting.max_balance_error_j);
@@ -511,6 +526,26 @@ mod render_tests {
             vec!["--render", "piano.wav", "--dampers", "pads.fspd", "--dump-scale", "pads.fspd"],
             vec!["--render", "piano.wav", "--dampers", "estimated", "--dampers", "other.fspd"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
+    fn stereo_receiver_is_explicit_physical_input_and_preserves_existing_controls() {
+        let o=options(&["--preset","steinway-d","--render","stereo.wav",
+            "--microphone","0.2,0.8,1","--microphone-right","1.2,0.8,1",
+            "--midi","score.mid","--dampers","estimated"]).unwrap();
+        assert_eq!(o.microphone,Some([0.2,0.8,1.0]));
+        assert_eq!(o.microphone_right,Some([1.2,0.8,1.0]));
+        assert_eq!(o.midi.as_deref(),Some("score.mid"));
+        assert!(options(&["--preset","steinway-d","--render","s.wav",
+            "--microphone-right","1,1,1"]).unwrap().microphone.is_none());
+        for args in [vec!["--microphone-right","1,1,1"],
+            vec!["--render","s.wav","--microphone-right","1,1,1"],
+            vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1,NaN"],
+            vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1,0"],
+            vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1"],
+            vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1,1","--diagnostic-volume"],
+            vec!["--preset","steinway-d","--render","s.wav","--microphone-right","1,1,1","--microphone-right","2,1,1"]] {
+            assert!(options(&args).is_err(),"accepted {args:?}");
         }
     }
     #[test]
