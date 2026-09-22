@@ -101,3 +101,6 @@ fn public_resume_finalizes_a_committed_final_design_without_repeating_an_update(
 
 #[path = "study_checkpoint_cli/projected.rs"]
 mod projected;
+
+#[path = "study_checkpoint_cli/multi_load.rs"]
+mod multi_load;
