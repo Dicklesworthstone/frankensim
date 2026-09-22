@@ -12,6 +12,7 @@
 //! Scope: moderate slopes, linear plane-stress material, quasi-static in-plane
 //! relaxation. In-plane inertia, wrinkling, slackening and film viscoelasticity
 //! are NOT inferred. Mesh/mode convergence and material calibration still matter.
+mod tangent;
 use crate::{ModePair, PlateError, PlateMesh, PlateModel, PlateSection};
 
 /// Explicit cold-work/storage ceilings, independent of instrument names.

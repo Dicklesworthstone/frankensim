@@ -27,6 +27,7 @@ pub mod damping;
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
 pub mod membrane;
+mod tangent;
 mod prepared;
 pub use prepared::PreparedImpactSystem;
 pub mod felt;
@@ -200,6 +201,7 @@ impl Storage for MechanicalStorage {
 pub struct ImpactSystem {
     system:PortHamiltonian,x:Vec<f64>,pads:Vec<Pad>,histories:Rc<RefCell<Vec<WoolFeltState>>>,
     modes:usize,config:ImpactConfig,sample:u64,
+    mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
 }
@@ -270,12 +272,14 @@ impl ImpactSystem {
         for pad in &retained {for (i,b) in pad.spec.creep.iter().enumerate() {let index=2*modes+pad.creep_start+i;r[index*dim+index]=b.stiffness_n_m/b.viscosity_n_s_m;}}
         damping::add_resistance(&dampers,modes,dim,&mut r)?;
         let histories=Rc::new(RefCell::new(histories));
-        let storage=MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)};
-        let storage=ContactStorage::new(Box::new(storage),modes,admitted).map_err(|e|ImpactError::Owner(e.to_string()))?;
-        let system=PortHamiltonian::new(dim,modes,j,r,g,Box::new(storage)).map_err(|e|ImpactError::Owner(e.to_string()))?;
+        let mechanical=Rc::new(MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)});
+        let contact=Rc::new(ContactStorage::new(Box::new(tangent::SharedStorage(Rc::clone(&mechanical))),modes,admitted)
+            .map_err(|e|ImpactError::Owner(e.to_string()))?);
+        let system=PortHamiltonian::new(dim,modes,j,r,g,Box::new(tangent::SharedStorage(Rc::clone(&contact))))
+            .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,mechanical,contact})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]

@@ -13,7 +13,8 @@ use super::audio::ImpactSource;
 ///
 /// Construction allocates; stepping does not allocate in this host or its solver.
 /// The supplied storage callbacks must independently avoid allocation. This is
-/// still dense finite-difference Newton, NOT a measured hard-real-time contract.
+/// dense Newton with finite differences or explicit analytic tangents, NOT a
+/// measured hard-real-time contract.
 /// The model, basis, timestep, contact, Kelvin memory and felt conditioning are
 /// unchanged. Only accepted steps update physical history and the sample counter.
 pub struct PreparedImpactSystem {
@@ -22,6 +23,7 @@ pub struct PreparedImpactSystem {
     candidate: Vec<f64>,
     output: Vec<f64>,
     histories: Vec<WoolFeltState>,
+    analytic_newton: bool,
 }
 
 impl ImpactSystem {
@@ -34,7 +36,19 @@ impl ImpactSystem {
         let candidate = vec![0.0; self.x.len()];
         let output = vec![0.0; self.modes];
         let histories = self.histories.borrow().clone();
-        Ok(PreparedImpactSystem { inner: self, workspace, candidate, output, histories })
+        Ok(PreparedImpactSystem { inner: self, workspace, candidate, output, histories, analytic_newton: false })
+    }
+
+    /// Prepare the same system using analytic storage tangents for Newton.
+    /// Retains the complete Gonzalez energy correction, physical acceptance
+    /// gates, and all current state/history. No difference probes or new solver.
+    ///
+    /// # Errors
+    /// Returns the existing workspace preparation refusal.
+    pub fn prepare_analytic(self) -> Result<PreparedImpactSystem, ImpactError> {
+        let mut prepared=self.prepare()?;
+        prepared.analytic_newton=true;
+        Ok(prepared)
     }
 
     // The reference and prepared images share this exact gate. Constitutive
@@ -81,6 +95,11 @@ impl Deref for PreparedImpactSystem {
 }
 
 impl PreparedImpactSystem {
+    /// Select the analytic or original finite-difference Newton Jacobian without
+    /// resetting physical state, accepted time, or material history. Both solve
+    /// the same equation and use the same physical acceptance gate.
+    pub fn set_analytic_newton(&mut self, enabled: bool) { self.analytic_newton=enabled; }
+
     /// Resume reference execution without resetting motion, memory or time.
     #[must_use]
     pub fn into_reference(self) -> ImpactSystem { self.inner }
@@ -111,10 +130,18 @@ impl PreparedImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before = inner.stored_energy_j();
-        let ledger = self.workspace.step_into_controlled(
-            &inner.system, &inner.x, external, inner.config.dt_s,
-            &mut self.candidate, &mut self.output, || gate.is_requested(),
-        ).map_err(|error| match error {
+        let ledger = if self.analytic_newton {
+            self.workspace.step_into_analytic_controlled(
+                &inner.system, &inner.x, external, inner.config.dt_s,
+                &mut self.candidate, &mut self.output,
+                &|x,d,out|inner.hessian_vector(x,d,out), || gate.is_requested(),
+            )
+        } else {
+            self.workspace.step_into_controlled(
+                &inner.system, &inner.x, external, inner.config.dt_s,
+                &mut self.candidate, &mut self.output, || gate.is_requested(),
+            )
+        }.map_err(|error| match error {
             PreparedStepError::Cancelled => ImpactError::Cancelled,
             PreparedStepError::Solver(error) => ImpactError::PreparedSolve(error),
         })?;

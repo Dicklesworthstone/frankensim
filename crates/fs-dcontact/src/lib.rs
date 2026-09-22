@@ -27,6 +27,7 @@
 //! caller-supplied with a PROVENANCE string — a matdb lookup is
 //! deferred until packs carrying contact-law parameters exist.
 
+mod tangent;
 use fs_math::det;
 use fs_phs::Storage;
 

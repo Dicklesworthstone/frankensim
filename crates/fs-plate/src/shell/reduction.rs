@@ -14,6 +14,7 @@
 //! and no dense fourth-order modal tensor. It is NOT a real-time benchmark or
 //! a claim of adequate truncation: missing in-plane modes require enrichment.
 use super::{ShellMesh, ShellModel, local_bending_stiffness};
+mod tangent;
 use crate::{ModePair, PlateError, PlateSection};
 
 /// Two-sided finite-thickness acoustic boundary and reciprocal modal projection.
