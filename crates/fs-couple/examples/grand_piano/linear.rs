@@ -30,6 +30,10 @@ use fs_material::visco::GeneralizedMaxwell;
 use fs_math::{c64::C64, det};
 use super::geometry::Course;
 
+/// Spatial damper pads in these same mass-normalized moving-bridge coordinates.
+#[path = "dampers.rs"]
+pub mod dampers;
+
 /// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
 /// This is a memory/work ceiling, not a claim that every size is real-time.
 pub const MAX_BOARD_MODES: usize = 128;
@@ -519,15 +523,9 @@ impl Bank {
     /// This is a viscous damper approximation, not a measured wool-pad model.
     /// `drag` is N s/m; damper/rank-one flow removes kinetic energy only.
     pub fn damp_string(&mut self,si:usize,drag:f64,dt:f64)->f64 {
-        let s=&self.strings[si];let n=self.modes.len();
-        let mut norm=0.0;let mut speed=0.0;
-        for k in s.modes.clone(){let g=self.modes[k].damper_shape;norm+=g*g;speed+=g*self.v[k];}
-        for j in 0..self.board_count {let g=s.damper_lift*s.bridge[j];norm+=g*g;speed+=g*self.v[n+j];}
-        if norm==0.0 || drag==0.0 {return 0.0;}
-        let change=det::expm1(-drag*norm*dt)*speed/norm;
-        for k in s.modes.clone(){self.v[k]+=self.modes[k].damper_shape*change;}
-        for j in 0..self.board_count{self.v[n+j]+=s.damper_lift*s.bridge[j]*change;}
-        -change*speed-0.5*change*change*norm
+        let s=&self.strings[si];let modes=&self.modes;
+        dampers::rank_one(&mut self.v,s.modes.clone(),modes.len(),
+            |k|modes[k].damper_shape,&s.bridge,s.damper_lift,drag,dt)
     }
 }
 
