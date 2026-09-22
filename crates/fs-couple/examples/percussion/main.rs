@@ -253,7 +253,7 @@ fn drum_with_mufflers(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<
         }
     }else if prepared {
         Mechanics::prepared_with_dampers(bodies,contacts,volume.clone(),pi*radius*radius,dampers,
-            mechanics::coupled_config(steps,dt_s,snares.is_some())?)
+            mechanics::coupled_config(steps,dt_s,snares.is_some())?)?
     }else{
         Mechanics::Reference(ImpactSystem::new_with_dampers(bodies,contacts,vec![],vec![volume.clone()],dampers,config(steps,dt_s))?)
     };
