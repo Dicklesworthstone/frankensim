@@ -15,6 +15,8 @@ pub mod profile;
 pub mod reduction;
 /// Circular prestressed films through the existing DKT/membrane assembly.
 pub mod head;
+/// Bonded 3-D beam reinforcement with reciprocal eccentric stiffness and mass.
+pub mod stiffened;
 
 /// Relative membrane-spin stabilization; numerical, not a material property.
 pub const DRILLING_ALPHA: f64 = 1e-3;
