@@ -46,7 +46,10 @@ fn membrane()->BodyPotential {
             relative_tolerance:1e-6},0.25).unwrap())
 }
 fn check_tangent(s:&ImpactSystem,x:&[f64]) {
-    let n=x.len();let h=1e-9;
+    check_tangent_at(s,x,1e-9,false);
+}
+fn check_tangent_at(s:&ImpactSystem,x:&[f64],h:f64,cubic_gradient:bool) {
+    let n=x.len();
     let mut matrix=vec![0.0;n*n];
     for col in 0..n {
         let mut d=vec![0.0;n];d[col]=1.0;let mut hd=vec![0.0;n];
@@ -54,8 +57,15 @@ fn check_tangent(s:&ImpactSystem,x:&[f64]) {
         let mut plus=x.to_vec();plus[col]+=h;let mut minus=x.to_vec();minus[col]-=h;
         let mut gp=vec![0.0;n];let mut gm=gp.clone();
         s.contact.gradient(&plus,&mut gp);s.contact.gradient(&minus,&mut gm);
+        let mut gp2=vec![0.0;n];let mut gm2=vec![0.0;n];
+        if cubic_gradient {
+            plus[col]=x[col]+2.0*h;minus[col]=x[col]-2.0*h;
+            s.contact.gradient(&plus,&mut gp2);s.contact.gradient(&minus,&mut gm2);
+        }
         for row in 0..n {
-            matrix[row*n+col]=hd[row];let fd=(gp[row]-gm[row])/(2.0*h);
+            matrix[row*n+col]=hd[row];
+            let fd=if cubic_gradient { (8.0*(gp[row]-gm[row])-(gp2[row]-gm2[row]))/(12.0*h) }
+                else { (gp[row]-gm[row])/(2.0*h) };
             assert!((fd-hd[row]).abs()<1e-5*fd.abs().max(hd[row].abs()).max(1.0),
                 "({row},{col}): {fd:e} != {:e}",hd[row]);
         }
@@ -73,7 +83,12 @@ fn exact_curved_shell_tangent_includes_geometric_and_material_stiffness() {
     let mut cfg=config();cfg.dt_s=1e-9; // Retain every test-pencil mode, no Nyquist bypass.
     let s=ImpactSystem::new(vec![b],vec![],vec![],vec![],cfg).unwrap();
     let x:Vec<_>=(0..2*n).map(|i|if i%2==0 {1e-5*((i+1) as f64).sin()}else{0.03}).collect();
-    check_tangent(&s,&x);
+    // This all-mode shell includes very stiff rotational coordinates. At
+    // h=1e-9 cancellation in large gradient entries obscures small off-diagonal
+    // terms. Shell H is quartic, so this four-point derivative is EXACT on its
+    // cubic gradient in real arithmetic. Increase the probe spacing, not the
+    // agreement tolerance; no contact/felt branch is crossed in this fixture.
+    check_tangent_at(&s,&x,1e-4,true);
     // Tangent really changes with the nonlinear strain, not just frequency.
     let d=vec![1.0;2*n];let mut a=d.clone();let mut zero=d.clone();
     assert!(s.hessian_vector(&x,&d,&mut a));assert!(s.hessian_vector(&vec![0.0;2*n],&d,&mut zero));

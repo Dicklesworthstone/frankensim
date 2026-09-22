@@ -2,7 +2,7 @@
 //! No mesh, material, force, radiation or output code is duplicated here.
 use super::{Error, config};
 use fs_couple::modal_acoustic_time::ModalAcousticTimeBudget;
-use fs_couple::render::plate::impact::{ImpactBody, ImpactError, ImpactSystem, PreparedImpactSystem, VolumeSpring};
+use fs_couple::render::plate::impact::{ImpactBody, ImpactError, ImpactSystem, PreparedImpactSystem, SubsteppedImpactSystem, VolumeSpring};
 use fs_couple::render::plate::impact::linear::{LinearImpactSystem, LinearImpactConfig, VolumeConnection};
 use fs_couple::render::schedule::force::coupled::{ModalCouplingConfig,
     contact::{ModalContactConfig, multiple::MultiContactConfig}};
@@ -13,6 +13,10 @@ use fs_exec::CancelGate;
 mod analytic;
 pub use analytic::option as analytic_option;
 
+#[path = "substeps.rs"]
+mod substeps;
+pub use substeps::option as substeps_option;
+
 #[path = "drive.rs"]
 pub mod drive;
 
@@ -20,6 +24,7 @@ pub enum Mechanics {
     Reference(ImpactSystem),
     Prepared(LinearImpactSystem),
     Nonlinear(PreparedImpactSystem),
+    Substepped(SubsteppedImpactSystem),
     Driven { inner: Box<Mechanics>, drive: drive::StickDrive },
 }
 /// Only the diagnostics shared by both images. In particular, a normal-force
@@ -105,6 +110,7 @@ impl Mechanics {
         match self {
             Self::Reference(system) => Ok(Self::Nonlinear(system.prepare()?)),
             Self::Nonlinear(system) => Ok(Self::Nonlinear(system)),
+            Self::Substepped(system) => Ok(Self::Substepped(system)),
             Self::Prepared(_) => Err("--prepared-nonlinear needs splash, drum or drum-stretch; the modal/snare image is a different physical admission".into()),
             Self::Driven { inner, drive } => Ok(Self::Driven {
                 inner: Box::new((*inner).into_prepared_nonlinear()?), drive,
@@ -143,10 +149,12 @@ impl Mechanics {
     pub fn membrane_observation(&self,body:usize) -> Option<fs_couple::render::plate::impact::membrane::MembraneObservation> {
         match self { Self::Reference(s)=>s.membrane_observation(body), Self::Prepared(_)=>None,
             Self::Nonlinear(s)=>s.membrane_observation(body),
+            Self::Substepped(s)=>s.membrane_observation(body),
             Self::Driven { inner, .. }=>inner.membrane_observation(body) }
     }
     pub fn state(&self) -> &[f64] {
         match self { Self::Reference(s) => s.state(), Self::Prepared(s) => s.state(), Self::Nonlinear(s) => s.state(),
+            Self::Substepped(s) => s.state(),
             Self::Driven { inner, .. } => inner.state() }
     }
     pub fn step(&mut self, external: &[f64], gate: &CancelGate) -> Result<Frame, ImpactError> {
@@ -158,6 +166,12 @@ impl Mechanics {
                     supplied_work_j: f.supplied_work_j, balance_residual_j: f.balance_residual_j }
             }
             Self::Nonlinear(s) => {
+                let f = s.step(external, gate)?;
+                Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
+                    felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
+                    supplied_work_j: f.supplied_work_j, balance_residual_j: f.balance_residual_j }
+            }
+            Self::Substepped(s) => {
                 let f = s.step(external, gate)?;
                 Frame { time_s: f.time_s, stored_energy_j: f.stored_energy_j,
                     felt_crush_loss_j: f.felt_crush_loss_j, dissipated_energy_j: f.dissipated_energy_j,
