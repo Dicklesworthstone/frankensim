@@ -40,7 +40,7 @@ jobs:
         run: set -o pipefail; cargo test --release -p fs-phs --lib --test prepared_step --test phs 2>&1 | tee percussion-phs.log
       - name: Test nonlinear percussion, material history and mixed playback
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact --test modal_cavity_impact --test cylindrical_cavity --test bowed_ensemble --test ensemble_render 2>&1 | tee percussion-mechanics.log
+        run: set -o pipefail; cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact --test modal_cavity_impact --test cylindrical_cavity --test bowed_ensemble --test ensemble_render --test modal_friction 2>&1 | tee percussion-mechanics.log
       - name: Test prepared cavity, physical pressure and PCM consumers
         if: ${{ !cancelled() }}
         run: >-

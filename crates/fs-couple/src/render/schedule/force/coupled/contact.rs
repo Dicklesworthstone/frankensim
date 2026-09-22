@@ -395,3 +395,7 @@ pub(super) fn solve_reaction(
 
 /// Simultaneous normal contacts sharing the same mechanical network.
 pub mod multiple;
+
+
+/// Implicit driven dry friction using this same bilateral network response.
+pub mod friction;
