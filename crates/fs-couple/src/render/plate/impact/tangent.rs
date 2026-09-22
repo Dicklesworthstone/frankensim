@@ -16,6 +16,7 @@ impl BodyPotential {
         match self {
             Self::Shell(s)=>s.hessian_vector(q,d,out),
             Self::Membrane(s)=>s.reduction().hessian_vector(q,d,out),
+            Self::String(s)=>s.hessian_vector(q,d,out),
             Self::Linear(w)=>{for ((o,w),d) in out.iter_mut().zip(w).zip(d) {*o=w*w*d;}}
         }
     }

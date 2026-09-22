@@ -29,6 +29,8 @@ pub mod damping;
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
 pub mod membrane;
+/// Geometric tension modulation of fixed-end filaments, using fs-nlmodal.
+pub mod string;
 mod tangent;
 mod prepared;
 pub use prepared::{PreparedImpactSystem, ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
@@ -46,18 +48,20 @@ pub enum BodyPotential {
     Shell(ShellReduction),
     /// Geometry-owned planar-film stretching, not an authored pitch bend.
     Membrane(membrane::MembranePotential),
+    /// Fixed-end Kirchhoff--Carrier filament with its original EI and modal basis.
+    String(string::StringPotential),
     /// Linear reduced pencil (e.g. tensioned film). Zero frequency is an
     /// explicitly free inertial coordinate, not a low-frequency oscillator.
     Linear(Vec<f64>),
 }
 impl BodyPotential {
-    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::Linear(w)=>w.len()}}
-    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::Linear(w)=>w}}
+    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::String(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
+    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::String(s)=>s.omegas(),Self::Linear(w)=>w}}
     fn potential(&self,q:&[f64])->f64 {match self {
-        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
+        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::String(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
     }}
     fn gradient(&self,q:&[f64],g:&mut[f64]) {match self {
-        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
+        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::String(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
     }}
 }
 /// One body in the concatenated mechanical basis.
@@ -209,6 +213,7 @@ pub struct ImpactSystem {
     mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,contact_loss:bool,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
+    strings:Vec<(usize,usize,string::StringPotential)>,
 }
 impl ImpactSystem {
     /// Compose real body storage, elastic contacts, felt patches and fluid volume.
@@ -237,7 +242,7 @@ impl ImpactSystem {
         }
         damping::validate(&dampers,modes)?;
         let mut x=vec![0.0;2*modes];let mut damping=Vec::with_capacity(modes);let mut potentials=Vec::new();
-        let mut offset=0;let mut membranes=Vec::new();
+        let mut offset=0;let mut membranes=Vec::new();let mut strings=Vec::new();
         for (body_index,body) in bodies.into_iter().enumerate() {
             let n=body.potential.count();
             if n==0 || body.initial.len()!=n || body.damping_per_s.len()!=n
@@ -249,6 +254,10 @@ impl ImpactSystem {
             if let BodyPotential::Membrane(film)=&body.potential {
                 film.observe_interleaved(&x,offset)?;
                 membranes.push((body_index,offset,film.clone()));
+            }
+            if let BodyPotential::String(string)=&body.potential {
+                string.observe_interleaved(&x,offset)?;
+                strings.push((body_index,offset,string.clone()));
             }
             damping.extend(body.damping_per_s);offset+=n;potentials.push(body.potential);
         }
@@ -287,7 +296,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,mechanical,contact,contact_loss})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,mechanical,contact,contact_loss})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -303,6 +312,12 @@ impl ImpactSystem {
     pub fn membrane_observation(&self,body:usize)->Option<membrane::MembraneObservation> {
         let (_,offset,film)=self.membranes.iter().find(|(index,_,_)|*index==body)?;
         film.observe_interleaved(&self.x,*offset).ok()
+    }
+    /// Physical tension/stretching diagnostics in original body order.
+    /// None denotes a body without the explicit nonlinear-string potential.
+    pub fn string_observation(&self,body:usize)->Option<string::StringObservation> {
+        let (_,offset,string)=self.strings.iter().find(|(index,_,_)|*index==body)?;
+        string.observe_interleaved(&self.x,*offset).ok()
     }
     /// Copy one accepted material history, not a new fitted material.
     #[must_use]
