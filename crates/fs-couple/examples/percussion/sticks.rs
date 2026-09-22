@@ -1,9 +1,12 @@
-//! Two independent inertial strikers coupled to the SAME batter-head basis.
-//! The first stick and both head ranges retain their original addresses. The
-//! second stick is appended after the heads, before wires and cavity inertia.
-//! No second drum, resampled impact, direct sound source or stick-stick law.
+//! Two independent inertial strikers coupled to ONE head or curved-shell basis.
+//! Original resonator ranges keep their addresses. The second stick follows
+//! the resonator, before any wires, acoustic inertia or private Kelvin history.
+//! No copied resonator, resampled impact, direct sound source or stick-stick law.
 use super::{Error, ImpactBody, ModePair, Obstacle, Stroke, TensionedDisk};
 use fs_couple::render::plate::impact::linear::wire::film_shapes;
+
+mod shell;
+pub use shell::build as build_shell;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Port {
@@ -48,11 +51,11 @@ pub fn option(args: &mut Vec<String>) -> Result<Option<Stroke>, Error> {
 }
 
 pub fn admit_command(enabled: bool, command: &str) -> Result<(), Error> {
-    if enabled && !matches!(command, "drum"|"drum-wav"|"drum-mic"|
+    if enabled && !matches!(command, "splash"|"splash-wav"|"splash-mic"|"drum"|"drum-wav"|"drum-mic"|
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"|
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"|
         "snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic") {
-        return Err("two sticks require a drum/snare command; cymbal and stick-stick contact are not implemented".into());
+        return Err("two sticks require a splash, drum or snare command; stick-stick collisions are not implemented".into());
     }
     Ok(())
 }
@@ -102,7 +105,8 @@ mod tests {
             "--second-stick-position-m 0 0 --second-stick-position-m 0 0"] {
             assert!(option(&mut args(s)).is_err(), "{s}");
         }
-        assert!(admit_command(true,"splash-wav").is_err());
+        assert!(admit_command(true,"splash-wav").is_ok());
+        assert!(admit_command(true,"unknown").is_err());
         assert!(admit_command(true,"snare-off-mic").is_ok());
     }
 

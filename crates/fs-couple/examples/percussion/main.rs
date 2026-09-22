@@ -72,6 +72,9 @@ fn splash_with_specimen(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
     splash_with_mufflers(steps,dt_s,audio,stroke,supplied,&[])
 }
 fn splash_with_mufflers(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler])->Result<Experiment,Error> {
+    splash_with_sticks(steps,dt_s,audio,stroke,supplied,mufflers,None)
+}
+fn splash_with_sticks(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>)->Result<Experiment,Error> {
     muffling::admit_command(mufflers,"splash")?;
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
     let shell=specimen.build()?;
@@ -113,8 +116,13 @@ fn splash_with_mufflers(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
         None=>(nearest(0.1016*2.0/3.0,0.0),[1.0/3.0;3]),
     };
     let port=reduction.point_port(triangle,barycentric,[0.0,0.0,-1.0])?;
-    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let n=1+modes.len();let mut contact=vec![stick_weight];
-    contact.extend(port.iter().map(|b|-b));
+    // Preserve the original stick/shell prefix. A second striker follows the
+    // SAME shell modes, before the time owner's private Kelvin coordinates.
+    let second_coordinate=1+modes.len();let n=second_coordinate+usize::from(second.is_some());
+    let second=second.map(|stroke|sticks::build_shell(stroke,&reduction,&shell.mesh.nodes,
+        &shell.mesh.tris,second_coordinate,n)).transpose()?;
+    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut contact=vec![stick_weight];
+    contact.extend(port.iter().map(|b|-b));contact.resize(n,0.0);
     let mut pads=Vec::new();
     // Estimated felt annulus: OD30mm/ID13mm,6mm thickness,three loaded patches
     // on each face. NOT published Zildjian dimensions or material coefficients.
@@ -127,6 +135,7 @@ fn splash_with_mufflers(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
             else {(nearest(p[0],p[1]),[1.0/3.0;3])};
         let weights=reduction.point_port(face,bary,[0.0,0.0,1.0])?;
         for sign in [-1.0,1.0] {let mut b=vec![0.0];b.extend(weights.iter().map(|b|sign*b));
+            b.resize(n,0.0); // Neither stick directly compresses the stand felt.
             pads.push(FeltPad{area_m2:area,thickness_m:0.006,precompression_m:0.0003,weights:b,
                 law:WoolFelt::new(30000.0,0.2,2.2,3.0,0.15,0.7)?,prior_maximum_strain:0.05,
                 creep:vec![KelvinBranch{stiffness_n_m:1500.0,viscosity_n_s_m:8.0}]});
@@ -135,11 +144,14 @@ fn splash_with_mufflers(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Opt
     eprintln!("shell input={}, mass_kg={},modes={},facets={},max_edge_m={},band_hz={lower}..{upper}; stand felt, stick and contact remain estimated; no calibration or full-band claim",
         if imported {"supplied profile"}else{"estimated splash"},shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
-    let dampers=muffling::shell_ports(mufflers,&reduction,&shell.mesh.nodes,&shell.mesh.tris)?;
+    let mut dampers=muffling::shell_ports(mufflers,&reduction,&shell.mesh.nodes,&shell.mesh.tris)?;
+    for damper in &mut dampers {damper.weights.resize(n,0.0);}
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
-    let system=ImpactSystem::new_with_dampers(vec![stick,body],vec![elastic_contact(contact)?],pads,vec![],dampers,config(steps,dt_s))?;
-    let mut a=vec![0.0];a.extend(port);let mut b=vec![0.0;n];b[0]=stick_weight;
-    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,second_stick:None,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
+    let mut bodies=vec![stick,body];let mut contacts=vec![elastic_contact(contact)?];
+    let second_stick=second.map(|(body,contact,port)|{bodies.push(body);contacts.push(contact);port});
+    let system=ImpactSystem::new_with_dampers(bodies,contacts,pads,vec![],dampers,config(steps,dt_s))?;
+    let mut a=vec![0.0];a.extend(port);a.resize(n,0.0);let mut b=vec![0.0;n];b[0]=stick_weight;
+    Ok(Experiment{system:Mechanics::Reference(system),force:vec![0.0;n],stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None})
 }
 fn drum(steps:u64,dt_s:f64,audio:bool,prepared:bool)->Result<Experiment,Error> {
     drum_with_wires(steps,dt_s,audio,prepared,None)
@@ -339,7 +351,7 @@ fn run()->Result<(),Error> {
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let mut experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_mufflers(steps,dt_s,audio,stroke,supplied_shell,&mufflers)?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_sticks(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second)?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_cavity_loss(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_cavity_loss(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_cavity_loss(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s)?,
