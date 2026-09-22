@@ -149,7 +149,7 @@ mod tests {
         for (i,t) in [[0,1,4],[1,2,4],[2,3,4],[3,0,4]].iter().enumerate() {
             writeln!(f,"triangle,{i},{},{},{},0.008,450,1e10,8e8,0.3,6e8,0.27",t[0],t[1],t[2]).unwrap();
         }
-        f.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,1\n");
+        f.push_str("fixed,0\nfixed,1\nfixed,2\nfixed,3\nbridge,69,0,0,0,1\n");
         let mut out=super::super::elevate(&f,&[0.,0.,0.,0.,0.015],"unloaded authored crown").unwrap();
         if let Some(force)=force {writeln!(out,"preload-reference,unloaded\ndownbearing-source,estimated,regression load\ndownbearing,69,{force}").unwrap();}
         out
