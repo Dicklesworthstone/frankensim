@@ -79,10 +79,19 @@ impl Mechanics {
     pub fn with_stick_drive(self, program: drive::Program, dt_s: f64, steps: u64,
         tip_weight: f64, modes: usize) -> Result<Self, Error>
     {
+        self.with_stick_drives(vec![drive::Input { program, coordinate: 0, tip_weight }],
+            dt_s, steps, modes)
+    }
+
+    /// All player ports are staged together before ONE joint mechanical step.
+    /// The composition passes physical tip coordinates, not observer channels.
+    pub fn with_stick_drives(self, inputs: Vec<drive::Input>, dt_s: f64, steps: u64,
+        modes: usize) -> Result<Self, Error>
+    {
         if matches!(&self, Self::Driven { .. }) || modes > self.state().len() / 2 {
             return Err("stick drive requires one unnested, dimensionally admitted mechanical image".into());
         }
-        let drive = drive::StickDrive::new(program, dt_s, steps, tip_weight, modes)?;
+        let drive = drive::StickDrive::new_inputs(inputs, dt_s, steps, modes)?;
         Ok(Self::Driven { inner: Box::new(self), drive })
     }
 
@@ -164,6 +173,43 @@ impl Mechanics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_physical_force_ports_preserve_independent_impulses_and_atomic_retry() {
+        let gate = CancelGate::new_clock_free();
+        for prepared in [false,true] {
+            let make = || {
+                let (first,w1) = ImpactBody::free_mass(0.25,0.0,0.0).unwrap();
+                let (middle,_) = ImpactBody::free_mass(1.0,0.0,0.0).unwrap();
+                let (second,w2) = ImpactBody::free_mass(1.0,0.0,0.0).unwrap();
+                let system = Mechanics::Reference(ImpactSystem::new(vec![first,middle,second],
+                    vec![],vec![],vec![],config(4,0.001)).unwrap());
+                let system = if prepared {system.into_prepared_nonlinear().unwrap()}else{system};
+                let inputs = vec![
+                    drive::Input {program:drive::Program::parse("0,0\n0.001,1\n0.002,0").unwrap(),coordinate:0,tip_weight:w1},
+                    drive::Input {program:drive::Program::parse("0,0\n0.002,-1\n0.004,0").unwrap(),coordinate:2,tip_weight:w2},
+                ];
+                system.with_stick_drives(inputs,0.001,4,3).unwrap()
+            };
+            let mut retried = make(); let mut clean = make(); let mut work = 0.0;
+            for tick in 0..4 {
+                if tick==1 {
+                    let before = retried.state().to_vec();
+                    assert!(retried.step(&[0.0,1e7,0.0],&gate).is_err());
+                    assert_eq!(retried.state(),before);
+                }
+                let f = retried.step(&[0.0;3],&gate).unwrap();
+                clean.step(&[0.0;3],&gate).unwrap();
+                assert_eq!(retried.state(),clean.state());
+                assert_eq!(&retried.state()[2..4],&[0.0;2]);
+                work += f.supplied_work_j;
+                assert!((work-f.stored_energy_j).abs()<1e-10);
+            }
+            assert!((retried.state()[1]-0.002).abs()<1e-10);
+            assert!((retried.state()[5]+0.002).abs()<1e-10);
+            assert!((work-4e-6).abs()<1e-10);
+        }
+    }
     fn driven_mass(prepared: bool) -> Mechanics {
         let (body, weight) = ImpactBody::free_mass(0.25, 0.0, 0.0).unwrap();
         let system = Mechanics::Reference(ImpactSystem::new(vec![body], vec![], vec![],

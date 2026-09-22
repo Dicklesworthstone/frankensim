@@ -154,9 +154,6 @@ fn drum_with_spec(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snar
 }
 #[allow(clippy::too_many_arguments)]
 fn drum_with_sticks(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>)->Result<Experiment,Error> {
-    if second.is_some() && distributed_cavity && !prepared {
-        return Err("two-stick distributed air currently requires the prepared linear drum/snare image".into());
-    }
     if neck.is_some() && (!distributed_cavity || audio) {return Err("neck flow needs distributed cavity mechanics; vented exterior radiation is not implemented".into());}
     if neck.is_some() && prepared {return Err("prepared drum/snare cavity does not admit neck momentum drag; use the nonlinear drum image".into());}
     if stretching && (prepared || snares.is_some()) {return Err("stretching heads require the nonlinear reference image; a prepared snare is not silently linearized".into());}
@@ -271,7 +268,11 @@ fn run()->Result<(),Error> {
     let drum_path=drum_spec::option(&mut raw_args)?;
     let second=sticks::option(&mut raw_args)?;
     let playing_force=mechanics::drive::option(&mut raw_args)?;
-    let driven=playing_force.is_some();
+    let second_force=mechanics::drive::second_option(&mut raw_args)?;
+    if second_force.is_some() && second.is_none() {
+        return Err("--second-stick-force-file requires --second-stick-position-m X Y".into());
+    }
+    let driven=playing_force.is_some() || second_force.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
     if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --cavity-modes adds distributed enclosed air to all drum/snare commands (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md)".into());}
     if prepared_nonlinear && !matches!(args[0].as_str(),"splash"|"splash-wav"|"splash-mic"|
@@ -314,10 +315,17 @@ fn run()->Result<(),Error> {
         experiment.system=experiment.system.into_prepared_nonlinear()?;
         eprintln!("mechanical image: prepared nonlinear Gonzalez; unchanged geometry, materials, felt history and clocks; real-time performance unqualified");
     }
+    let mut inputs=Vec::with_capacity(2);
     if let Some(program)=playing_force {
-        experiment.system=experiment.system.with_stick_drive(program,dt_s,steps,
-            experiment.stick_weight,experiment.force.len())?;
-        eprintln!("external stick performance: --stick-force-file integrates SI force knots at the mechanical clock; initial launch retained, no state reset; see DRIVE.md");
+        inputs.push(mechanics::drive::Input {program,coordinate:0,tip_weight:experiment.stick_weight});
+    }
+    if let Some(program)=second_force {
+        let port=experiment.second_stick.ok_or("missing physical second-stick port")?;
+        inputs.push(mechanics::drive::Input {program,coordinate:port.coordinate,tip_weight:port.weight});
+    }
+    if !inputs.is_empty() {
+        eprintln!("external stick performance: {} independent SI force programs, one accepted mechanical clock; initial launches retained, no state reset; see DRIVE.md and STICKS.md",inputs.len());
+        experiment.system=experiment.system.with_stick_drives(inputs,dt_s,steps,experiment.force.len())?;
     }
     eprintln!("physical stroke: speed_m_s={}, explicit_xy_m={:?}; no output normalization or pitch control",stroke.speed_m_s,stroke.position_m);
     let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());

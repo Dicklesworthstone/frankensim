@@ -154,6 +154,91 @@ mod tests {
     }
 
     #[test]
+    fn independent_player_files_drive_shared_contacts_and_retry_together() {
+        use super::super::mechanics::drive::{Input,Program,StickDrive};
+        let make = || drum_with_sticks(256,2e-6,false,true,None,false,primary(),
+            false,None,None,Some(secondary())).unwrap();
+        let mut driven = make(); let mut manual = make();
+        let port = driven.second_stick.unwrap(); let n = driven.force.len();
+        let first = "0,0\n0.000128,0\n0.000256,2\n0.000512,0";
+        let second = "0,0\n0.000096,0\n0.000192,-1\n0.000384,0";
+        let inputs = vec![
+            Input {program:Program::parse(first).unwrap(),coordinate:0,tip_weight:driven.stick_weight},
+            Input {program:Program::parse(second).unwrap(),coordinate:port.coordinate,tip_weight:port.weight},
+        ];
+        let mut first_stage = StickDrive::new(Program::parse(first).unwrap(),2e-6,256,
+            manual.stick_weight,n).unwrap();
+        let mut second_stage = StickDrive::new_inputs(vec![Input {
+            program:Program::parse(second).unwrap(),coordinate:port.coordinate,tip_weight:port.weight,
+        }],2e-6,256,n).unwrap();
+        driven.system = driven.system.with_stick_drives(inputs,2e-6,256,n).unwrap();
+        let gate = CancelGate::new_clock_free(); let mut work = 0.0_f64;
+        for tick in 0..256 {
+            if tick==80 {
+                let before = driven.system.state().to_vec();
+                let mut invalid = vec![0.0;n];invalid[port.coordinate]=1e7;
+                assert!(driven.system.step(&invalid,&gate).is_err());
+                assert_eq!(driven.system.state(),before);
+            }
+            let f = driven.system.step(&driven.force,&gate).unwrap();
+            let first_load = first_stage.forces(&manual.force).unwrap();
+            let both = second_stage.forces(first_load).unwrap();
+            manual.system.step(both,&gate).unwrap();
+            first_stage.accept();second_stage.accept();
+            assert_eq!(driven.system.state(),manual.system.state());
+            assert!(f.balance_residual_j.abs()<1e-7);
+            work += f.supplied_work_j.abs();
+        }
+        assert!(work>0.0);
+        assert!((driven.system.state()[2*port.coordinate+1]*port.weight-secondary().speed_m_s).abs()>1e-8);
+    }
+
+    #[test]
+    fn nonlinear_two_stick_heads_keep_distinct_distributed_air_and_neck_coordinates() {
+        let neck = super::super::cavity::NeckOptions {radius_m:0.005,effective_length_m:0.012,
+            resistance_pa_s_m3:1000.0,azimuth_rad:0.4,axial_position_m:0.08};
+        let mut compact = drum_with_sticks(128,2e-6,false,false,None,true,primary(),
+            false,None,None,Some(secondary())).unwrap();
+        let solid = compact.force.len();
+        let mut distributed = drum_with_sticks(128,2e-6,false,false,None,true,primary(),
+            true,Some(neck),None,Some(secondary())).unwrap();
+        let port = distributed.second_stick.unwrap();
+        let air = distributed.air.as_ref().unwrap();
+        assert_eq!(air.coupling.structural_modes(),solid);
+        assert_eq!(port.coordinate+1,solid);
+        assert_eq!(&distributed.system.state()[..2*solid],compact.system.state());
+        assert!(distributed.observer_a[solid..].iter().all(|v|*v==0.0));
+        assert!(distributed.force[solid..].iter().all(|v|*v==0.0));
+        // Merely moving the external stick must not masquerade as cavity gas
+        // motion. Pressure changes only after its reaction moves a real head.
+        let mut displaced = distributed.system.state().to_vec();
+        displaced[2*port.coordinate] += 0.01/port.weight;
+        assert_eq!(air.uniform_pressure(&displaced).unwrap(),0.0);
+        assert_eq!(air.points(&displaced).unwrap(),(0.0,0.0));
+        compact.system = compact.system.into_prepared_nonlinear().unwrap();
+        distributed.system = distributed.system.into_prepared_nonlinear().unwrap();
+        let gate = CancelGate::new_clock_free();let mut changed = 0.0_f64;
+        let mut nonuniform = 0.0_f64;
+        for _ in 0..128 {
+            compact.system.step(&compact.force,&gate).unwrap();
+            let f = distributed.system.step(&distributed.force,&gate).unwrap();
+            assert!(f.balance_residual_j.abs()<1e-7);
+            for (&a,&b) in compact.system.state().iter().zip(distributed.system.state()) {
+                changed=changed.max((a-b).abs());
+            }
+            let air = distributed.air.as_ref().unwrap();let x = distributed.system.state();
+            let (a,b) = air.points(x).unwrap();nonuniform=nonuniform.max((a-b).abs());
+            let slug = air.coupling.neck_observation(x,0).unwrap();
+            let volume = distributed.pressure.as_ref().unwrap();
+            let expected = super::super::cavity_pressure(volume,x)
+                -volume.bulk_modulus_pa/volume.volume_m3*slug.displaced_volume_m3;
+            assert!((air.uniform_pressure(x).unwrap()-expected).abs()<1e-7*(1.0+expected.abs()));
+        }
+        assert!(changed>1e-12 && nonuniform>1e-5);
+        assert!(distributed.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
+    }
+
+    #[test]
     fn missing_or_outside_second_station_refuses_instead_of_snapping_to_the_head() {
         for p in [None,Some([1.0,0.0]),Some([f64::NAN,0.0])] {
             let second = Stroke { speed_m_s:1.0,position_m:p };

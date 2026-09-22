@@ -126,7 +126,10 @@ pub fn build(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody
     contacts:Vec<Obstacle>,radius:f64,depth:f64,steps:u64,dt_s:f64,neck:Option<NeckOptions>)
     ->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
-    let structural=1+modes.iter().map(Vec::len).sum::<usize>();
+    // Both head ranges remain the original prefix. Include every appended
+    // striker before allocating cavity inertia; its coupling row stays zero.
+    let structural=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.initial.len()))
+        .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
         fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,&gate)?;
     let (system,coupling)=coupling.build(bodies,contacts,vec![],config(steps,dt_s),&gate)?;
