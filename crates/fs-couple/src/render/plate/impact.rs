@@ -29,7 +29,7 @@ pub mod linear;
 pub mod membrane;
 mod tangent;
 mod prepared;
-pub use prepared::PreparedImpactSystem;
+pub use prepared::{PreparedImpactSystem, ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
 pub mod felt;
 pub mod striker;
 use felt::FeltPad;
@@ -139,6 +139,8 @@ pub enum ImpactError {
     PreparedSolve(fs_phs::PhsError),
     /// Gate requested cancellation before publication.
     Cancelled,
+    /// An output tick exhausted its explicit internal nonlinear-solve budget.
+    SubstepBudget { attempted_solves: usize, accepted_substeps: usize, deepest_level: u8 },
     /// Lifetime accepted-step budget is exhausted.
     Budget,
     /// Independent complete-window energy gate failed.

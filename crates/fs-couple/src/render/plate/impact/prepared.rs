@@ -2,6 +2,8 @@
 //!
 //! Preparation changes scratch ownership, not the constitutive model or basis.
 //! Both execution paths finish through the same physical acceptance gate below.
+mod substeps;
+pub use substeps::{ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
 use std::ops::Deref;
 use fs_exec::CancelGate;
 use fs_material::fiber::{Uniaxial, WoolFeltState};
