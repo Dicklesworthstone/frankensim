@@ -39,7 +39,7 @@ pub struct CavityCoupling {
     dynamic: Vec<Option<usize>>,
     total: usize,
     // Retain the caller's admission across later neck additions. A prepared
-    // wire bank may exceed 64 modes; the reference builder still refuses it.
+    // wire bank may use a different ceiling; each builder enforces its own limit.
     maximum_modes: usize,
     medium: crate::vibroacoustic::AcousticMedium,
     necks: Vec<neck::CompiledNeck>,
@@ -57,7 +57,7 @@ impl CavityCoupling {
     }
 
     /// The same cavity storage with an explicit total-coordinate budget.
-    /// Prepared linear bodies may exceed the nonlinear reference's 64 modes;
+    /// Prepared linear bodies may use a separately declared mode ceiling;
     /// this does not enlarge that reference solver's admission. The hard limit
     /// is the existing modal owner's 4096 coordinates. No mode is truncated.
     pub fn new_with_mode_budget(cavity: &CavityModes, structural: usize, coupling: &[f64],

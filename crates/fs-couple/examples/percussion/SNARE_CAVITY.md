@@ -18,12 +18,14 @@ applies to sealed prepared cavities. Commands without the option are unchanged.
   --strike-position-m 0.06 0.01 > snare-cavity.wav)
 ```
 
-Do not add `--prepared-nonlinear` to these commands: they already use the
-prepared modal/contact image. `drum-stretch --cavity-modes --prepared-nonlinear`
-remains the separate nonlinear-head image. Stretching heads combined with the
-full snare bank and vented exterior audio still refuse. Prepared snare mechanics
-now admits the same resistive neck as the reference drum, without changing its
-wire/contact model. No nonlinear potential or declared loss is silently dropped.
+Without `--head-stretching`, these commands retain the prepared linear-head
+modal/contact image and reject `--prepared-nonlinear`. Selecting
+`--head-stretching` explicitly combines both nonlinear heads with the full wire
+bank and its existing contact loss; `--prepared-nonlinear`, `--analytic-newton`
+and `--impact-substeps` then operate on that joint nonlinear system. See
+[NONLINEAR_SNARE.md](NONLINEAR_SNARE.md). Both images admit the same resistive
+neck for mechanics CSV. Vented exterior audio still refuses. No nonlinear
+potential or declared loss is silently dropped.
 
 ## Actual coupling, not a pressure overlay
 
@@ -96,9 +98,10 @@ radiation and cannot honestly represent a vented instrument's sound.
 The prepared snare keeps its existing limits of 256 total coordinates, 512
 contact points and 50 million contact setup terms. Air coordinates count toward
 that same total; overflow refuses rather than truncating the wire bank. The
-nonlinear reference's 64-mode limit is unchanged. Neck additions preserve the
-caller's original total-coordinate budget even above 64, including across
-repeated additions. No wire coordinate is removed to make room for a vent.
+explicit nonlinear-head path also admits up to 256 total coordinates, retaining
+the complete wire bank instead of truncating to the former 64-mode ceiling.
+Neck additions preserve the caller's original total-coordinate budget,
+including across repeated additions. No wire is removed to make room for a vent.
 
 Prepared commands with a vent or positive acoustic drag declare 32 bilateral
 connections and one million connection-setup terms, enough for eight cavity

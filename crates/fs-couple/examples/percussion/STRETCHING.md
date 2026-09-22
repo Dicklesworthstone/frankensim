@@ -62,11 +62,12 @@ Stretching CSV adds batter slope, resonant-head slope and total head stretching
 storage to the old columns. That storage is ALREADY part of total energy; do not
 add it again. The read-only diagnostics are not synthetic audio channels.
 
-Existing `drum`, `drum-modal` and all snare/splash paths keep their previous
-physics unless a playing input is explicitly changed. `drum-stretch` is the
-nonlinear reference, not the linear prepared image. The full 160-coordinate
-snare-wire bundle is not silently reduced to fit the 64-coordinate nonlinear
-host: combining that bundle with stretching awaits a suitable coupled image.
+Existing `drum`, `drum-modal` and snare/splash commands keep their previous
+physics unless a physical option is explicitly changed. `drum-stretch` is the
+nonlinear head image. On snare commands, `--head-stretching` now combines BOTH
+nonlinear heads with all 160 wire coordinates and their existing contact loss
+inside the same implicit solve; no wire is dropped or silently linearized.
+See [NONLINEAR_SNARE.md](NONLINEAR_SNARE.md) for numerical selection and limits.
 
 ## Verification and limits
 
