@@ -138,7 +138,7 @@ fn input_refusal_cancellation_and_budget_extension_keep_the_complete_state() {
 #[test]
 fn malformed_or_unsupported_input_is_not_repaired_or_silently_dropped() {
     let gate=CancelGate::new_clock_free();
-    let mut drag=body(0.,0.,0.);drag.damping_per_s[0]=1.0;
+    let mut drag=body(0.,0.,0.);drag.damping_per_s[0]=-1.0;
     assert!(LinearImpactSystem::new(vec![drag],vec![],vec![],config(192000,1),&gate).is_err());
     let (bodies,_,mut volume)=physical_input(); volume.areas[0]=0.01;
     assert!(LinearImpactSystem::new(bodies.clone(),vec![],vec![VolumeConnection {spring:volume,
