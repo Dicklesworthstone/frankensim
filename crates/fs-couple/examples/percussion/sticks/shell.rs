@@ -9,8 +9,8 @@ pub fn build(stroke: Stroke, reduction: &ShellReduction, nodes: &[[f64;3]],
     triangles: &[[usize;3]], coordinate: usize, total: usize,
 ) -> Result<(ImpactBody, Obstacle, Port), Error> {
     if reduction.mode_count() == 0 || coordinate != 1+reduction.mode_count()
-        || total != coordinate+1 {
-        return Err("second cymbal stick requires the unchanged first-stick/shell prefix and one appended inertia".into());
+        || coordinate >= total {
+        return Err("second cymbal stick requires the unchanged first-stick/shell prefix and an admitted appended coordinate".into());
     }
     let position = stroke.position_m.ok_or("second cymbal stick requires an explicit physical XY station")?;
     let (triangle,bary) = crate::playing::shell_location(nodes,triangles,position)?;

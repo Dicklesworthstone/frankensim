@@ -145,7 +145,8 @@ fn file_option(args: &mut Vec<String>, flag: &str) -> Result<Option<Program>, Er
 }
 
 /// A physical tip port supplied by the instrument composition, never an audio
-/// channel or an inferred modal address. Each stick has its own force program.
+/// channel or an inferred modal address. Each stick or compliant mute jaw has
+/// its own physical force program; the established tip_weight field is 1/sqrt(m).
 pub struct Input {
     pub program: Program,
     pub coordinate: usize,
@@ -169,8 +170,8 @@ impl StickDrive {
     }
 
     pub fn new_inputs(inputs: Vec<Input>, dt_s: f64, steps: u64, modes: usize) -> Result<Self, Error> {
-        if modes == 0 || !(1..=2).contains(&inputs.len()) {
-            return Err("stick drive needs one or two physical inputs and a nonempty force basis".into());
+        if modes == 0 || !(1..=4).contains(&inputs.len()) {
+            return Err("player drive needs one to four distinct physical inputs (two sticks plus two mute jaws) and a nonempty force basis".into());
         }
         for (i, input) in inputs.iter().enumerate() {
             if input.coordinate >= modes || inputs[..i].iter().any(|p| p.coordinate == input.coordinate) {
@@ -239,7 +240,7 @@ mod tests {
         assert!(StickDrive::new_inputs(vec![],0.5,2,3).is_err());
         assert!(StickDrive::new_inputs(vec![input(0),input(0)],0.5,2,3).is_err());
         assert!(StickDrive::new_inputs(vec![input(0),input(3)],0.5,2,3).is_err());
-        assert!(StickDrive::new_inputs(vec![input(0),input(1),input(2)],0.5,2,3).is_err());
+        assert!(StickDrive::new_inputs(vec![input(0),input(1),input(2),input(3),input(4)],0.5,2,5).is_err());
         assert!(StickDrive::new_inputs(vec![input(0),input(2)],0.5,1,3).is_err());
         // A force program for the second hand alone must not invent a first.
         assert!(StickDrive::new_inputs(vec![input(2)],0.5,2,3).is_ok());

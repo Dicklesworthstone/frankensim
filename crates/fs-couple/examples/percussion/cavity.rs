@@ -164,6 +164,15 @@ pub fn build_with_dampers(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:V
 pub fn build_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
     contacts:Vec<Obstacle>,dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
     neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
+    build_with_pads(films,modes,bodies,contacts,Vec::new(),dampers,radius,depth,steps,dt_s,neck,drag_per_s)
+}
+/// Compliant exterior mutes share the nonlinear head/air solve. The cavity
+/// owner extends their physical rows with exact zeros on acoustic inertia.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_pads(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Vec<ImpactBody>,
+    contacts:Vec<Obstacle>,pads:Vec<fs_couple::render::plate::impact::felt::FeltPad>,
+    dampers:Vec<ViscousDamper>,radius:f64,depth:f64,steps:u64,dt_s:f64,
+    neck:Option<NeckOptions>,drag_per_s:f64)->Result<(ImpactSystem,InteriorPressure),Error> {
     let gate=CancelGate::new_clock_free();
     // Both head ranges remain the original prefix. Include every appended
     // striker before allocating cavity inertia; its coupling row stays zero.
@@ -171,7 +180,7 @@ pub fn build_with_losses(films:&[TensionedDisk],modes:&[Vec<ModePair>],bodies:Ve
         .ok_or("cavity body-count overflow")?;
     let InteriorPressure {coupling,first,second}=compile(films,modes,radius,depth,structural,
         fs_couple::render::plate::impact::MAX_IMPACT_MODES,neck,drag_per_s,&gate)?;
-    let (system,coupling)=coupling.build_with_dampers(bodies,contacts,vec![],dampers,config(steps,dt_s),&gate)?;
+    let (system,coupling)=coupling.build_with_dampers(bodies,contacts,pads,dampers,config(steps,dt_s),&gate)?;
     Ok((system,InteriorPressure {coupling,first,second}))
 }
 
