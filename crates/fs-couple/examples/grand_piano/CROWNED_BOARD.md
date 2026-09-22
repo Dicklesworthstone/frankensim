@@ -18,16 +18,40 @@ cargo run --release -p fs-couple --example piano_board_import -- \
   inspect piano.obj
 cargo run --release -p fs-couple --example piano_board_import -- \
   import-crowned piano.obj materials.fspi crowned.fss
-cargo run --release -p fs-couple --example piano_board_import -- \
-  render-steinway crowned.fss piano.wav 6
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --board-geometry crowned.fss --render piano.wav
 ```
 
-Append a MIDI file after `6` to drive the source-derived 88-key strings and
-hammer/shank mechanics with the existing MIDI schedule. Rendering retains all
-88 source courses, including silent strings. A missing bridge station refuses.
-The original `import` and flat-board render path remain unchanged. The separate
-`grand_piano --board-geometry` CLI remains flat-only; use `piano_board_import
-render-steinway` for this crowned format.
+The main `grand_piano` CLI accepts both flat FSB and crowned FSS through
+`--board-geometry`. With `--preset steinway-d`, the supplied file overrides
+**only the board**: source strings, per-key felt and shanks remain enabled.
+It skips generation of the preset board and never falls back to that board
+when supplied geometry fails. Without a preset, existing custom-scale/hammer
+behavior is unchanged. Modal CSV `--board` still excludes a preset.
+
+All existing main-CLI controls compose with the supplied shell: `--midi`,
+`--midi-half-pedal`, `--performance`, `--concert-pitch`, `--raw-tensions`,
+`--scale`, `--hammers`, `--dampers`, `--microphone`, `--board-band-hz`, `--modes`,
+`--sample-rate` and `--substeps`, under their existing admission rules. This
+allows measured/custom hammer and damper cards to be used with actual crown
+geometry rather than being restricted to the convenience renderer defaults.
+For example, with the named geometry and performance files already supplied:
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --board-geometry crowned.fss \
+  --midi performance.mid --midi-half-pedal --concert-pitch 442 \
+  --duration 30 --modes 128 --render performance.wav
+```
+
+The main preset normally adjusts physical string tension to A4=440 Hz (or the
+supplied concert pitch); `--raw-tensions` retains source tensions. The existing
+`piano_board_import render-steinway crowned.fss piano.wav 6 [performance.mid]`
+convenience path also accepts crowns, but preserves raw source tensions and
+its fixed budgets. Both retain all 88 source courses, including silent strings;
+each required bridge station must exist. `--note` alone does not remove other
+strings from the resonator. Mesh-generation and geometry-export controls refuse
+when the main CLI receives a supplied board, avoiding export of the wrong board.
 
 The sidecar must explicitly declare `support,clamped` and `pretension,0`.
 The board coordinate system is the sidecar's orthonormal `frame`; `units` is
@@ -125,22 +149,27 @@ remains fully 3-D. This acoustic source relocation is not an exact exterior
 solution; source heights, finite-rim diffraction, both radiating sides, lid,
 room scattering and air backreaction require a separate acoustic model.
 
-`render-steinway` currently retains board modes through 400 Hz, at most 24
-partials per string, four mechanical substeps and 48 kHz output. It preserves
-raw source string tensions, uses the existing 2 Pa PCM full scale, and reports
-clipping without normalization. These are explicit budget choices, not a
-full-audible-band, calibrated-SPL, real-time or measured-Steinway fidelity claim.
+The convenience `render-steinway` currently retains board modes through 400 Hz,
+at most 24 partials per string, four mechanical substeps and 48 kHz output. The
+main CLI exposes these controls, subject to the shared 128-board-mode and
+512-partial-per-string ceilings and the output band. A larger budget is not
+proof of spatial/time convergence. Both use the existing 2 Pa PCM full scale
+and report clipping without normalization. No full-audible-band, calibrated-SPL,
+real-time or measured-Steinway fidelity claim is made.
 
 ## Focused checks
 
 ```sh
 cargo test --release -p fs-plate --lib shell::stiffened -- --test-threads=1
 cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1
+cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
 ```
 
 The tests cover rigid-motion invariance, analytical eccentric beam energy,
 physical mass, source-frame/unit covariance, actual crown-induced operator and
 mode changes, signed normal volume conservation, preserved Model D ribs and
 88 stations, unsupported-data refusals, and deterministic physical piano WAVs
-that change when the supplied crown changes. Native execution status belongs
-to the test run, not to this description of the authored tests.
+that change when the supplied crown changes. Main-CLI regressions also compose
+tuning, source shanks, custom felt and spatial dampers through persistent audio
+blocks. Native execution status belongs to the test run, not to this description
+of the authored tests.

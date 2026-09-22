@@ -5,6 +5,7 @@ mod geometry;
 mod linear;
 mod board;
 mod board_geometry;
+mod crowned_board;
 mod steinway_d;
 mod steinway_scale;
 mod performance;
@@ -16,7 +17,7 @@ mod audio;
 mod hammer_materials;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
-    [--preset steinway-d | --board board.csv | --board-geometry panel.fsb]
+    [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
     [--hammers materials.fsh] [--dampers estimated | pads.fspd]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
@@ -29,6 +30,11 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
+--board-geometry may replace that board while retaining the preset strings,
+felt cards and shank mechanics. Its native header selects flat FSB or crowned
+3-D shell FSS. An invalid/missing supplied board never falls back to the preset.
+Mesh-generation/export controls cannot accompany a supplied board override.
+The preset cannot be combined with --board modal CSV.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
 published shank geometry reduced to rigid rotation plus one bending coordinate.
@@ -58,9 +64,13 @@ parameters, felt patch geometry and Prony time constants remain estimates.
 --note performs a single-key study; otherwise the demo also plays a chord of
 available keys. --velocity overrides the three demo hammer launch speeds.
 Velocity is POST-ESCAPEMENT hammer velocity, not MIDI velocity or key motion.
-Geometric boards assemble a flat orthotropic plate before rendering. The explicit
-frequency band admits at most 128 modes; --modes admits up to 512 string partials.
-Neither a larger budget nor mesh refinement alone is a convergence or real-time claim.
+Geometric boards assemble a flat orthotropic plate or a supplied crowned shell.
+Crowned structures retain 3-D motion, grain and eccentric ribs/bridges; their
+radiation is a projected flat-baffle approximation, not 3-D exterior BEM.
+Crown is reference geometry, not solved downbearing; see CROWNED_BOARD.md.
+The explicit frequency band admits at most 128 modes; --modes admits up to 512
+string partials. Neither budget nor mesh refinement alone is a convergence or
+real-time claim.
 --performance uses sample,event,key,value CSV instead of the demo and cannot be
 combined with --note or --velocity. note_on values are hammer velocity in m/s.
 With the preset, jack_staccato and jack_legato instead take peak force in N at
@@ -174,9 +184,8 @@ impl Options {
             || (options.raw_tensions && (options.preset.is_none() || options.concert_pitch.is_some())) {
             return Err("concert pitch must be 430..450 Hz; --raw-tensions requires a preset and excludes --concert-pitch".into());
         }
-        if usize::from(options.board.is_some()) + usize::from(options.board_geometry.is_some())
-            + usize::from(options.preset.is_some()) > 1 {
-            return Err("choose a preset, modal board or geometric board, not multiple board sources".into());
+        if options.board.is_some() && (options.board_geometry.is_some() || options.preset.is_some()) {
+            return Err("modal board CSV excludes a preset and geometric board; --board-geometry may override a preset board".into());
         }
         if options.preset.as_deref().is_some_and(|p| p != "steinway-d") {
             return Err("unknown piano preset; available: steinway-d".into());
@@ -188,9 +197,9 @@ impl Options {
             return Err("--dampers requires --render and either estimated or a nonempty specification path".into());
         }
         if !(4..=24).contains(&options.mesh_divisions)
-            || (options.preset.is_none() && (seen.contains("--mesh-divisions")
+            || (!options.uses_preset_board() && (seen.contains("--mesh-divisions")
                 || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
-            return Err("mesh/export controls require --preset steinway-d; divisions must be 4..24".into());
+            return Err("mesh/export controls require --preset steinway-d without a supplied board override; divisions must be 4..24".into());
         }
         if seen.contains("--board-band-hz") && options.board_geometry.is_none() && options.preset.is_none() {
             return Err("--board-band-hz requires --board-geometry or --preset".into());
@@ -244,6 +253,9 @@ impl Options {
     fn tuning_hz(&self) -> Option<f64> {
         self.concert_pitch.or_else(||
             (self.preset.is_some() && self.scale.is_none() && !self.raw_tensions).then_some(440.0))
+    }
+    fn uses_preset_board(&self) -> bool {
+        self.preset.is_some() && self.board_geometry.is_none()
     }
 }
 
@@ -301,6 +313,12 @@ fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<line
         Some(text) => board::read(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>()),
         None => Ok(board::demonstration()),
     }
+}
+fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64)
+    -> Result<board_geometry::PreparedBoard, String> {
+    if crowned_board::is_crowned(text) {
+        crowned_board::CrownedBoard::read(text)?.prepare(keys, band_hz)
+    } else { board_geometry::BoardGeometry::read(text)?.prepare(keys, band_hz) }
 }
 /// Export only the admitted keys. An absent measurement must not become an
 /// apparently measured zero bridge coefficient when the table is re-imported.
@@ -405,7 +423,7 @@ fn run() -> Result<(), String> {
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_hz().map_or_else(|| "input tensions preserved".to_owned(),
         |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"));
-    let preset = options.preset.as_ref().map(|_| steinway_d::build(options.mesh_divisions)).transpose()?;
+    let preset = options.uses_preset_board().then(|| steinway_d::build(options.mesh_divisions)).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { std::fs::write(path, &preset.geometry).map_err(|e| format!("{path}: {e}"))?; }
         if let Some(path) = &options.dump_obj { std::fs::write(path, &preset.obj).map_err(|e| format!("{path}: {e}"))?; }
@@ -416,22 +434,22 @@ fn run() -> Result<(), String> {
         }
     }
     let geometry_text = match (&preset, &options.board_geometry) {
-        (Some(p), _) => Some(p.geometry.clone()),
         (_, Some(path)) => Some(read(path)?),
+        (Some(p), _) => Some(p.geometry.clone()),
         _ => None,
     };
     let (modes, board_source, surface) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
-        let geometry = board_geometry::BoardGeometry::read(text)?;
-        let prepared = geometry.prepare(&scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
+        let prepared = prepare_geometric_board(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz)?;
-        println!("Flat plate {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
+        let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
+        println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
             options.board_band_hz, start.elapsed().as_secs_f64());
         for (i, interval) in prepared.frequency_intervals_hz.iter().enumerate() {
             println!("board mode {i}: [{:.9}, {:.9}] Hz", interval.0, interval.1);
         }
-        (prepared.modes, format!("GEOMETRY-DERIVED FLAT PLATE; {}; crown/rim compliance not modeled", prepared.provenance),
+        (prepared.modes, format!("GEOMETRY-DERIVED {model_name}; {}; rim compliance not modeled", prepared.provenance),
             Some(prepared.surface))
     } else {
         (load_board(board_text.as_deref(), &scale)?, options.board.as_deref()
@@ -469,6 +487,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "crowned_render_tests.rs"]
+mod crowned_render_tests;
 
 #[cfg(test)]
 mod render_tests {
@@ -620,7 +642,7 @@ mod render_tests {
         assert_eq!(o.preset.as_deref(), Some("steinway-d"));
         assert_eq!(o.mesh_divisions, 12);
         for args in [vec!["--preset", "unknown"],vec!["--preset", "steinway-d", "--board", "b.csv"],
-            vec!["--preset", "steinway-d", "--board-geometry", "b.fsb"],vec!["--dump-obj", "d.obj"],
+            vec!["--preset", "steinway-d", "--board-geometry", "b.fsb", "--dump-obj", "d.obj"],vec!["--dump-obj", "d.obj"],
             vec!["--preset", "steinway-d", "--dump-obj", "d.obj", "--render", "d.obj"],
             vec!["--preset", "steinway-d", "--mesh-divisions", "3"]] {assert!(options(&args).is_err());}
     }

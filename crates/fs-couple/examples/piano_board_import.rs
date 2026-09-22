@@ -45,7 +45,8 @@ Optional MIDI uses channel 1 and velocity 127 -> 4.5 m/s; otherwise strike key
 69 at 2 m/s. Raw source tensions are preserved. Retention: 400 Hz board, 24
 string partials. Crowned radiation projects signed normal volume velocity to
 the flat baffle; this is NOT full 3-D radiation or room/lid scattering.
-The native grand_piano --board-geometry path remains flat-only for custom cards.
+For custom materials, tuning, damping and budgets, use grand_piano with
+--preset steinway-d --board-geometry INPUT.fsb|INPUT.fss and its existing flags.
 
 Units, frame, support choice and physical material constants must be explicit.
 Solid cabinet meshes do not become soundboard midsurfaces. Visual MTL values
