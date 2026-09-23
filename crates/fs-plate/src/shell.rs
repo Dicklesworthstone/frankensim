@@ -11,6 +11,8 @@ use fs_sparse::{Coo, Csr};
 
 /// Radially sampled shells, thickness fields and explicit surface indentations.
 pub mod profile;
+/// Explicit non-axisymmetric midsurfaces, nodal thickness and facet materials.
+pub mod survey;
 /// Nonlinear membrane energy projected from the same shell geometry.
 pub mod reduction;
 /// Circular prestressed films through the existing DKT/membrane assembly.

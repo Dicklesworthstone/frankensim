@@ -100,3 +100,6 @@ fn profile_budgets_and_nonpositive_feature_thickness_refuse() {
     let dent=SurfaceIndentation{center_m:[0.0,0.0],radius_m:0.01,height_delta_m:0.0,thickness_delta_m:-0.002};
     assert!(revolve(&s,32,110e9,0.34,8800.0,&[],&[dent],budget()).is_err());
 }
+
+#[path = "percussion_shell/survey.rs"]
+mod survey;
