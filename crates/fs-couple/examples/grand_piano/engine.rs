@@ -13,6 +13,8 @@ mod shank;
 pub use shank::Geometry as ShankGeometry;
 #[path = "radiation.rs"]
 pub mod radiation;
+#[path = "hammer_contact_engine.rs"]
+mod contact_solver;
 
 const CATCH_DISTANCE: f64 = 0.020; // idealized backcheck/rest gap
 const LET_OFF_DISTANCE: f64 = 0.0015; // Chabassier/Durufle JSV 2014 Table 3
@@ -69,6 +71,7 @@ pub struct Instrument {
     creep:Vec<relaxation::Prepared>,
     // Actual per-site areas: unison allocation times longitudinal quadrature.
     contact_areas:Vec<f64>,
+    contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
     radiation:Option<radiation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
@@ -162,6 +165,7 @@ impl Instrument {
                 0.45*f64::from(rate),modes_per_string,damping,spec)?,
             None=>Bank::new(&courses,board,mechanics_rate,0.45*f64::from(rate),modes_per_string,damping)?,
         };
+        let contact_solver=contact_solver::Prepared::new(&bank,&courses)?;
         let nc=bank.contact_strings.len();let dt=1.0/f64::from(mechanics_rate);
         let contact_areas:Vec<f64>=bank.contact_strings.iter().enumerate().map(|(i,&si)| {
             let c=&courses[bank.strings[si].course];
@@ -194,7 +198,7 @@ impl Instrument {
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,spatial_dampers:None,radiation:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_solver,spatial_dampers:None,radiation:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -377,17 +381,7 @@ impl Instrument {
         let mut converged=self.active.is_empty();
         for _ in 0..32 {
             if converged{break;}
-            for index in 0..self.active.len(){
-                let i=self.active[index];let ci=self.bank.strings[self.bank.contact_strings[i]].course;
-                let c=self.courses[ci];let diagonal=self.contact_h[i*nc+i];
-                let material=&self.creep[i];let old=&self.contacts[i];
-                let start=old.overlap-material.deformation(&old.memory);
-                let free=self.gap[i]+diagonal*self.force[i]-material.free_deformation(&old.memory);
-                let next=felt::solve(&self.laws[ci],&old.state,start,free,
-                    diagonal+material.compliance(),c.felt_thickness_m,self.contact_areas[i]).map_err(Error::Contact)?;
-                let change=next-self.force[i];self.force[i]=next;
-                for &j in &self.active{self.gap[j]-=self.contact_h[j*nc+i]*change;}
-            }
+            self.contact_sweep()?;
             converged=true;
             for &i in &self.active {
                 let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
