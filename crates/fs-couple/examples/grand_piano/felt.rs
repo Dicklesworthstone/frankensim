@@ -119,3 +119,7 @@ mod tests {
         assert!(solve(&law, &state, 0.0, 0.1, 1e-10, 0.008, 1e-4).is_err());
     }
 }
+
+/// Simultaneous sites on one physical hammer; uses the same discrete felt law.
+#[path = "hammer_contact.rs"]
+pub mod block;
