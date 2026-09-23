@@ -4,6 +4,9 @@
 //! [`fs_phs::quasistatic_aperture_opening`]. This type is only the
 //! geometry + closing-pressure data a coupling step carries.
 
+/// Geometry/material-derived plate modes driving the same nonlinear slit.
+pub mod plate;
+
 /// Stateful, explicitly parameterized moving-slit junction.
 pub mod dynamic;
 pub(crate) mod moving;
