@@ -25,6 +25,8 @@ pub mod cavity;
 pub mod compliant;
 /// Physical, spatially localized viscous attachments.
 pub mod damping;
+/// Hereditary material loss in the existing shared mechanical time owner.
+pub mod relaxation;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
 /// Statically relaxed geometric stretching of prestressed films.
@@ -215,6 +217,7 @@ pub struct ImpactSystem {
     system:PortHamiltonian,x:Vec<f64>,pads:Vec<Pad>,histories:Rc<RefCell<Vec<WoolFeltState>>>,
     modes:usize,config:ImpactConfig,sample:u64,
     mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,contact_loss:bool,
+    relaxation:Option<relaxation::Memory>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
     strings:Vec<(usize,usize,string::StringPotential)>,
@@ -309,7 +312,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,relaxation:None})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
