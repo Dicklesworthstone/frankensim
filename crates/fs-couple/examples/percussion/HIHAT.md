@@ -127,8 +127,7 @@ cargo test --release -p fs-couple --example percussion hihat -- --test-threads=1
 cargo test --release -p fs-couple --example percussion paired_scene -- --test-threads=1
 ```
 
-The rigid-only time fixture isolates contact/pedal work while retaining actual
-geometric masses and washer histories. Separate construction and virtual-work
-regressions retain elastic modes, different shell materials and both skin
-projections. Authored tests require native execution; no acoustic listening or
+The time fixture retains the complete requested elastic slices, true translation
+masses, and washer histories. Construction and virtual-work regressions also
+exercise different shell materials and both skin projections. Authored tests require native execution; no acoustic listening or
 real-time performance result follows from construction alone.

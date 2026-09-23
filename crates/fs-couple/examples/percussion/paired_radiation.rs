@@ -37,7 +37,7 @@ mod tests {
     fn paired_scene_retains_both_skin_orientations_and_source_flux_without_cross_wiring() {
         use crate::{shell_prepare,specimen};
         use fs_plate::shell::reduction::radiation::RadiationSurfaceBudget;
-        let mut s=specimen::Specimen::reference();s.azimuths=8;s.band_hz=[10.,11.];
+        let mut s=specimen::Specimen::reference();s.azimuths=8;
         let (mesh,r)=shell_prepare::prepare(&s,2e-6).unwrap();
         let skin=r.radiation_surface(&mesh.nodal_thickness_m,
             RadiationSurfaceBudget{max_panels:2048,max_panel_modes:65536}).unwrap();
@@ -57,8 +57,12 @@ mod tests {
             assert!((actual.areas()[i]-actual.areas()[p+i]).abs()<1e-15);
             assert!((actual.normals()[i][2]+actual.normals()[p+i][2]).abs()<1e-12);
         }
-        for row in &b.weights {
-            assert!(row.iter().zip(actual.areas()).map(|(v,a)|v*a).sum::<f64>().abs()<1e-12);
+        for (k,row) in b.weights.iter().enumerate() {
+            let original=skin.normal_velocity_weights()[k % n].iter().zip(skin.areas_m2())
+                .map(|(v,a)|v*a).sum::<f64>();
+            let placed=row.iter().zip(actual.areas()).map(|(v,a)|v*a).sum::<f64>();
+            assert!((placed-original).abs()<1e-12, "placement must retain elastic flux, not zero it");
+            if k % n==0 {assert!(placed.abs()<1e-12,"rigid translation has zero net flux");}
         }
         assert!(Boundary::shell_pair(&skin,1,&skin,1,0.002).is_err());
         assert!(Boundary::shell_pair(&skin,1,&skin,1+n,0.00001).is_err());

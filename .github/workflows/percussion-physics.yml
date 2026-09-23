@@ -34,7 +34,7 @@ jobs:
       # independently. A legacy NumPy .bat EOL check must not hide these results.
       - name: Test curved-shell motion and nonlinear reduction
         if: ${{ !cancelled() }}
-        run: set -o pipefail; cargo test --release -p fs-plate --test shell_reduction --test percussion_shell 2>&1 | tee percussion-shell.log
+        run: set -o pipefail; cargo test --release -p fs-plate --lib --test shell_reduction --test percussion_shell 2>&1 | tee percussion-shell.log
       - name: Test the nonlinear time owner
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-phs --lib --test prepared_step --test phs 2>&1 | tee percussion-phs.log

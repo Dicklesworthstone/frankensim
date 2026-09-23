@@ -3,10 +3,8 @@ use fs_couple::render::plate::impact::ImpactSubstepConfig;
 use fs_phs::Storage;
 
 fn spec()->Spec{Spec::parse(include_str!("estimated-hihat.fshh")).unwrap()}
-fn shell(rigid:bool)->specimen::Specimen {
-    let mut s=specimen::Specimen::reference();s.azimuths=8;
-    if rigid{s.band_hz=[10.,11.];} // Deliberate rigid-only geometry/mass time fixture.
-    s
+fn shell()->specimen::Specimen {
+    let mut s=specimen::Specimen::reference();s.azimuths=8;s
 }
 fn bounds()->ImpactSubstepConfig{ImpactSubstepConfig{max_depth:8,max_attempts:511}}
 fn gap(ob:&Obstacle,x:&[f64],n:usize)->f64{
@@ -31,8 +29,8 @@ fn paired_input_is_complete_and_invalid_physics_has_no_defaults() {
 }
 #[test]
 fn both_actual_shells_keep_mass_skin_and_force_moment_reciprocity() {
-    let s=spec();let a=Shell::new(&shell(false),2e-6).unwrap();
-    let mut material=shell(false);material.density_kg_m3*=1.3;
+    let s=spec();let a=Shell::new(&shell(),2e-6).unwrap();
+    let mut material=shell();material.density_kg_m3*=1.3;
     let b=Shell::new(&material,2e-6).unwrap();
     let hi=1;let lo=hi+a.reduction.mode_count();let n=lo+b.reduction.mode_count()+1;
     let ob=collision(&s,&a,&b,lo,n).unwrap();assert_eq!(ob.n_points(),s.sites.len());
@@ -64,7 +62,7 @@ fn both_actual_shells_keep_mass_skin_and_force_moment_reciprocity() {
 }
 #[test]
 fn paired_scene_and_two_sticks_keep_source_addresses_and_no_phantom_radiation() {
-    let s=spec();let a=shell(false);let b=shell(false);
+    let s=spec();let a=shell();let b=shell();
     let stroke=Stroke{speed_m_s:0.8,position_m:Some([0.06,0.01])};
     let pair=build(&s,&a,&b,stroke,Some(Stroke{speed_m_s:0.,position_m:Some([-0.06,0.01])}),4,2e-6,true).unwrap();
     let e=pair.experiment;let sources=e.acoustics.as_ref().unwrap().state_modes();
@@ -84,9 +82,9 @@ fn paired_scene_and_two_sticks_keep_source_addresses_and_no_phantom_radiation() 
 }
 #[test]
 fn pedal_closes_contacts_and_retracts_with_one_energy_and_force_clock() {
-    let s=spec();let a=shell(true);let b=shell(true);let dt=1e-5;let steps=2400;
+    let s=spec();let a=shell();let b=shell();let dt=1e-5;let steps=2400;
     let pair=build(&s,&a,&b,Stroke{speed_m_s:0.,position_m:None},None,steps,dt,false).unwrap();
-    assert_eq!(pair.upper_modes.len(),1);assert_eq!(pair.lower_modes.len(),1);
+    assert!(pair.upper_modes.len()>1);assert!(pair.lower_modes.len()>1);
     let mut e=pair.experiment;let n=e.force.len();let initial=e.system.state().to_vec();
     e.system=e.system.into_analytic_nonlinear().unwrap().with_impact_substeps(bounds()).unwrap()
         .with_stick_drives(vec![mechanics::drive::Input{program:mechanics::drive::Program::parse(&s.pedal).unwrap(),
