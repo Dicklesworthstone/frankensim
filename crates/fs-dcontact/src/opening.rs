@@ -126,3 +126,6 @@ mod tests {
 
 /// Stationary normal-law partials for implicit equilibrium derivatives.
 pub mod static_response;
+
+mod affine;
+pub use affine::{AffineContactResponse, AffineContactStep};
