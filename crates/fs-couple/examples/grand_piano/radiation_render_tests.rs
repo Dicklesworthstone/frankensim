@@ -82,3 +82,35 @@ fn full_physical_controls_reach_loaded_stereo_without_a_second_mechanical_clock(
     let data=audio.wav.windows(4).position(|w|w==b"data").unwrap()+8;
     for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
 }
+
+#[test]
+fn force_driven_csv_reaches_loaded_stereo_and_matches_direct_owner_controls() {
+    let mut scene=tests::small_source_scene();let mut manual=tests::small_source_scene();
+    let (baked,_,_)=bake(&mut scene,true).unwrap();bake(&mut manual,true).unwrap();
+    let text="sample,event,key,value\n0,sustain,0,0.5\n0,una_corda,0,1\n24,jack_staccato,69,70\n240,sostenuto,0,1\n1200,note_off,69,0\n1440,sostenuto,0,0\n1680,sustain,0,0\n2000,una_corda,0,0\n";
+    let score=playback::Score::csv(text,&[69],4800).unwrap();
+    assert!(score.report.contains("peak N"));
+    let audio=exterior_audio::render(&mut scene.piano,score.performance,4800,&baked,2.).unwrap();
+    for n in 0..4800 {
+        match n {
+            0=>{manual.piano.set_sustain(0.5).unwrap();manual.piano.set_una_corda(true);},
+            24=>manual.piano.jack_on(69,70.,0.007).unwrap(),
+            240=>manual.piano.set_sostenuto(true),
+            1200=>manual.piano.note_off(69).unwrap(),
+            1440=>manual.piano.set_sostenuto(false),
+            1680=>manual.piano.set_sustain(0.).unwrap(),
+            2000=>manual.piano.set_una_corda(false),
+            _=>{},
+        }
+        manual.piano.step().unwrap();
+    }
+    assert_eq!(scene.piano.bank.q,manual.piano.bank.q);assert_eq!(scene.piano.bank.v,manual.piano.bank.v);
+    assert_eq!(scene.piano.radiation_energy_j(),manual.piano.radiation_energy_j());
+    assert_eq!(scene.piano.accounting.input_work_j,manual.piano.accounting.input_work_j);
+    assert!(scene.piano.accounting.input_work_j>0.);assert!(scene.piano.accounting.felt_loss_j>0.);
+    assert!(scene.piano.accounting.shank_loss_j>0.);assert!(scene.piano.accounting.radiation_loss_j>0.);
+    assert!(audio.peak_pa>1e-14);assert!(audio.report.contains("Passive acoustic feedback"));
+    assert!((scene.piano.accounting.input_work_j-scene.piano.energy_j()-scene.piano.accounting.dissipated_j()).abs()<1e-7);
+    let data=audio.wav.windows(4).position(|w|w==b"data").unwrap()+8;
+    for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
+}

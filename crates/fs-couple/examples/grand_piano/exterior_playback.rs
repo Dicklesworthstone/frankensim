@@ -4,19 +4,30 @@
 use super::{engine, geometry::Course, hammer_materials, linear, steinway_scale};
 use super::exterior_geometry::RATE;
 use std::collections::BTreeSet;
+use super::performance::midi;
+#[path = "exterior_score.rs"]
+mod score;
+pub use score::Score;
 
 #[derive(Clone, Debug)]
 pub struct Options {
     pub substeps: usize,
     pub modes: usize,
     pub midi: Option<String>,
+    pub performance: Option<String>,
+    pub midi_mapping: midi::Mapping,
+    pub note: Option<u8>,
+    pub velocity: Option<f64>,
+    pub(super) mapping_explicit: bool,
     pub hammers: Option<String>,
     pub hammer_footprints: Option<String>,
     pub dampers: Option<String>,
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { substeps: 4, modes: 24, midi: None, hammers: None,
+        Self { substeps: 4, modes: 24, midi: None, performance: None,
+            midi_mapping: midi::Mapping::default(), note: None, velocity: None,
+            mapping_explicit: false, hammers: None,
             hammer_footprints: None, dampers: None }
     }
 }
@@ -35,7 +46,13 @@ impl Options {
                 continue;
             }
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate playback option {flag}")); }
-            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers"].contains(&flag.as_str()) {
+            if flag == "--midi-half-pedal" {
+                result.midi_mapping.continuous_sustain = true;
+                result.mapping_explicit = true;
+                continue;
+            }
+            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers",
+                "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
             let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
@@ -47,6 +64,21 @@ impl Options {
                 "--hammers" => result.hammers = Some(value.clone()),
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
                 "--dampers" => result.dampers = Some(value.clone()),
+                "--performance" => result.performance = Some(value.clone()),
+                "--midi" => {
+                    if result.midi.replace(value.clone()).is_some() { return Err("duplicate MIDI score".into()); }
+                }
+                "--midi-channel" => {
+                    result.midi_mapping.channel = value.parse::<u8>().map_err(|_| invalid())?
+                        .checked_sub(1).ok_or_else(invalid)?;
+                    result.mapping_explicit = true;
+                }
+                "--midi-velocity-max-m-s" => {
+                    result.midi_mapping.maximum_velocity_m_s = value.parse().map_err(|_| invalid())?;
+                    result.mapping_explicit = true;
+                }
+                "--note" => result.note = Some(value.parse().map_err(|_| invalid())?),
+                "--velocity" => result.velocity = Some(value.parse().map_err(|_| invalid())?),
                 _ => unreachable!(),
             }
         }
@@ -57,7 +89,8 @@ impl Options {
     /// resolution controls, so material/gesture options cannot be silently ignored.
     pub fn harmonic(args: &[String]) -> Result<Self, String> {
         let options = Self::parse(args)?;
-        if options.midi.is_some() || options.hammers.is_some()
+        if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
+            || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some() {
             return Err("response/admittance accept only --modes and --substeps, not playback controls".into());
         }
@@ -67,6 +100,21 @@ impl Options {
         if !(1..=linear::MAX_STRING_MODES).contains(&self.modes)
             || !(1..=16).contains(&self.substeps) {
             return Err("exterior playback requires --modes 1..512 and --substeps 1..16".into());
+        }
+        if self.midi.is_some() && self.performance.is_some() {
+            return Err("select exactly one MIDI or CSV performance, not both".into());
+        }
+        if (self.midi.is_some() || self.performance.is_some()) && (self.note.is_some() || self.velocity.is_some()) {
+            return Err("--note/--velocity are demonstration controls, not score overrides".into());
+        }
+        if self.mapping_explicit && self.midi.is_none() {
+            return Err("MIDI mapping controls require a MIDI score".into());
+        }
+        if self.midi_mapping.channel >= 16 || !self.midi_mapping.maximum_velocity_m_s.is_finite()
+            || self.midi_mapping.maximum_velocity_m_s <= 0. || self.midi_mapping.maximum_velocity_m_s > 8.
+            || self.note.is_some_and(|k| !(21..=108).contains(&k))
+            || self.velocity.is_some_and(|v| !v.is_finite() || v <= 0. || v > 8.) {
+            return Err("invalid MIDI channel or finite post-escapement velocity/key range".into());
         }
         Ok(())
     }

@@ -32,6 +32,9 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
     [--modes 1..512] [--substeps 1..16]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated|pads.fspd]
+    [--performance events.csv | --midi performance.mid]
+    [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
+    [--note 21..108] [--velocity m/s]
 These playback options apply to both render and render-loaded.
 response and admittance also accept --modes/--substeps after the output path,
 so harmonic comparisons can use the SAME retained string/board system.
@@ -58,7 +61,13 @@ response writes complex pressure per mass-normalized modal acceleration in
 exp(-i omega t) convention. render fits causal fixed-receiver transfers with
 held-out checks, then observes EVERY mechanics substep before PCM encoding.
 It uses one score and physical clock for both receivers, no channel normalization.
-Default gesture: A4 at 2 m/s; optional MIDI uses the existing importer. Output
+Default gesture: A4 or the nearest available key at 2 m/s; --note/--velocity
+select a supplied-key study. --performance plays the existing sample-accurate CSV,
+including jack_staccato/jack_legato force pulses in N and all three pedals.
+--midi (or the legacy positional path) uses the existing importer. Channel,
+velocity-to-hammer mapping and optional continuous CC64 travel are explicit;
+ignored messages and synthetic end releases are reported, never hidden.
+CSV, MIDI and demonstration overrides are mutually exclusive. Output
 is 48 kHz. Defaults retain four mechanics substeps and at most 24 partials per
 string; --modes and --substeps expose the existing larger physical budgets.
 They do not retune strings, widen the admitted output band, or certify accuracy.
@@ -190,23 +199,18 @@ fn run(args:&[String])->Result<(),String> {
             }
             let courses=scale(strings)?;let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
             // Score admission precedes structural/BEM preparation and all writes.
-            let score=frames.map(|n|match options.midi.as_deref() {
-                Some(path)=>{
-                    let midi=performance::midi::load(path,&keys,RATE,n as u64,performance::midi::Mapping::default())?;
-                    performance::Performance::from_events(midi.events,&keys,n as u64)
-                }
-                None=>performance::Performance::demonstration(&keys,RATE,n as u64,Some(69),Some(2.)),
-            }).transpose()?;
+            let score=frames.map(|n|options.score(&keys,n as u64)).transpose()?;
             let controls=playback::Controls::load(&options,&courses)?;
             let geometry=read_bounded(board,8*1024*1024)?;
             let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
             let mut scene=prepare_controlled(&geometry,courses,&obj,spec,&options,controls)?;
             if let (Some(n),Some(score))=(frames,score) {
                 let (baked,samples,load_report)=bake(&mut scene,command=="render-loaded")?;
-                let audio=exterior_audio::render(&mut scene.piano,score,n,&baked,scene.spec.full_scale_pa)?;
+                let score_report=score.report;
+                let audio=exterior_audio::render(&mut scene.piano,score.performance,n,&baked,scene.spec.full_scale_pa)?;
                 publish(output,&audio.wav)?;
                 let physical_report=options.report(&scene.piano);
-                println!("{}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
+                println!("{}\n{score_report}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
                     audio.report,scene.spec.source,scene.board.provenance,scene.spec.band_hz,
                     scene.boundary.surface.areas().len(),scene.boundary.components,samples.minimum_ppw,samples.maximum_condition_lower_bound);
             } else {

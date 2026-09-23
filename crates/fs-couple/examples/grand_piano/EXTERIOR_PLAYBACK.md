@@ -13,7 +13,9 @@ cargo run --release -p fs-couple --example piano_exterior -- \
 
 Each control is optional. Old positional MIDI invocations and the default
 4-substep, 24-partial source-shank image remain available unchanged. Without a
-score the existing A4 demonstration is used. Outputs remain 48 kHz physical-Pa
+score the existing A4 study is used, or the nearest admitted key for a partial
+scale lacking A4. `--note` and `--velocity` explicitly select a supplied-key
+study and post-escapement hammer velocity in m/s. Outputs remain 48 kHz physical-Pa
 PCM, without automatic normalization. The render duration remains 0.05–60 s.
 
 `--modes 1..512` changes the per-string retention ceiling, including unplayed
@@ -57,3 +59,54 @@ unfitted, fully coupled BEM bridge-force experiment are otherwise unchanged.
 More retained partials, contact sites and substeps increase work and memory.
 Nothing here certifies real-time performance, spatial convergence, calibrated
 materials, full keyboard action, or pressure accuracy outside the sampled band.
+
+## Force-driven performances and explicit MIDI mappings
+
+`--performance events.csv` selects the existing `sample,event,key,value` format.
+This reaches the source shank's actual jack-force port, not a velocity alias:
+
+```text
+sample,event,key,value
+0,sustain,0,0.5
+24,jack_staccato,69,70
+240,sostenuto,0,1
+1200,note_off,69,0
+1440,sostenuto,0,0
+1680,sustain,0,0
+```
+
+Sample indices refer to the **48 kHz output clock**, independently of substeps.
+The selected mechanical clock resolves the physical force pulse and let-off.
+`jack_staccato` is a 7 ms pulse and `jack_legato` a 100 ms pulse, with the CSV
+value giving peak newtons at the published jack station. The engine determines
+hammer acceleration, shank bending, felt contact and escapement. `note_on`
+instead retains the post-escapement velocity interface in m/s. `note_off`,
+sustain travel, sostenuto and una-corda use their existing physical owners.
+Equal-sample rows retain file order. This is the existing force-driven action
+fragment, not a complete keyboard/repetition-action reconstruction.
+
+```sh
+cargo run --release -p fs-couple --example piano_exterior -- \
+  render-loaded settled.fss strings.csv body.obj acoustics.fspe force.wav 2 \
+  --performance events.csv --substeps 8 --modes 128
+```
+
+`--midi score.mid` is equivalent to the legacy positional score path. Add
+`--midi-channel 1..16`, `--midi-velocity-max-m-s V` and `--midi-half-pedal`
+to select the existing importer's mappings. Defaults remain channel 1,
+velocity 127 -> 4.5 m/s and switched CC64. The velocity maximum must be in
+(0,8] m/s; it is an explicit uncalibrated hammer-speed mapping, not output gain.
+Continuous CC64 uses travel `value/127`; CC66/67 retain sostenuto/una-corda.
+The report exposes selected note counts, ignored channels/messages, skipped
+SysEx, end sample and synthesized end releases. No pitch-wheel string retuning
+or unsupported controller emulation is inferred.
+
+CSV and MIDI are alternatives; demonstration overrides cannot accompany either.
+MIDI mapping flags without a MIDI score refuse rather than being ignored.
+The entire score is admitted before structural/BEM work: missing files, invalid
+keys/units/times and events outside the render window never produce a partial
+WAV or select a demonstration instead. Gesture admission does not guarantee
+that every trial will satisfy physical contact/energy/rate limits; those remain
+owned by the transactional mechanical runtime. A very slow hammer launched
+below the strings can miss under gravity, and is not forced into contact merely
+to produce audible output.
