@@ -133,3 +133,6 @@ mod closure;
 
 #[path = "plate_aperture/relaxation.rs"]
 mod relaxation;
+
+#[path = "plate_aperture/performance.rs"]
+mod performance;

@@ -4,6 +4,9 @@
 //! [`fs_phs::quasistatic_aperture_opening`]. This type is only the
 //! geometry + closing-pressure data a coupling step carries.
 
+/// Finite pressure phrases on existing coupled valve/tube systems.
+pub mod performance;
+
 /// Geometry/material-derived plate modes driving the same nonlinear slit.
 pub mod plate;
 
