@@ -13,6 +13,10 @@
 use super::{PlateError, ShellReduction, bad, dot};
 use std::collections::BTreeMap;
 
+#[path = "surface.rs"]
+mod surface;
+pub use surface::{ShellFace, ShellSurfacePort};
+
 /// Explicit cold-work ceilings, independent of an acoustic solver's limits.
 #[derive(Debug, Clone, Copy)]
 pub struct RadiationSurfaceBudget {
@@ -70,18 +74,12 @@ impl ShellReduction {
         }
         let mut edges = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
         let mut links = vec![Vec::<(usize, usize)>::new(); nodes];
-        let mut directors = vec![[0.0; 3]; nodes];
-        for (f, tri) in self.triangles.iter().enumerate() {
-            let h = tri.iter().map(|&i| nodal_thickness_m[i] / 3.0).sum::<f64>();
-            let expected = self.section_thicknesses[f];
-            if !h.is_finite() || (h - expected).abs() > 1e-10 * expected {
-                return Err(bad("acoustic skin thickness does not match the mechanical sections"));
-            }
+        let directors = surface::directors(self, nodal_thickness_m)?;
+        for tri in &self.triangles {
             for a in 0..3 {
                 let (i, j, k) = (tri[a], tri[(a+1)%3], tri[(a+2)%3]);
                 edges.entry((i.min(j), i.max(j))).or_default().push((i, j));
                 links[i].push((j, k));
-                for c in 0..3 { directors[i][c] += self.area_normals[f][c]; }
             }
         }
         // An edge may belong to one boundary face or two oppositely wound faces.
@@ -103,13 +101,6 @@ impl ShellReduction {
             || count.checked_mul(modes).is_none_or(|n| n > budget.max_panel_modes)
         {
             return Err(bad("acoustic skin exceeds its panel/projection budget"));
-        }
-        for (i, director) in directors.iter_mut().enumerate() {
-            let norm = dot(*director, *director).sqrt();
-            if !norm.is_finite() || norm <= 0.0 {
-                return Err(bad("acoustic skin has an undefined vertex director"));
-            }
-            for v in director { *v = (*v / norm) * (0.5 * nodal_thickness_m[i]); }
         }
         // (midsurface node, sign of director offset), rather than an independent
         // acoustic mode table: side-wall motion cannot lose its mechanical origin.
@@ -271,6 +262,51 @@ mod tests {
     fn square(h: Vec<f64>) -> ShellReduction {
         fixture(vec![[0.,0.,0.], [1.,0.,0.], [1.,1.,0.], [0.,1.,0.]], vec![[0,1,2], [0,2,3]], h)
     }
+    #[test]
+    fn skin_point_contact_and_acoustic_panel_share_geometry_motion_and_moments() {
+        use super::surface::ShellFace;
+        let h = vec![0.01, 0.02, 0.03, 0.015];
+        let r = fixture(vec![[0.,0.,0.],[1.,0.,0.2],[1.,1.,0.3],[0.,1.,0.1]],
+            vec![[0,1,2],[0,2,3]], h.clone());
+        let skin = r.radiation_surface(&h, budget()).unwrap();
+        for f in 0..2 { for (side, face) in [ShellFace::Positive, ShellFace::Negative].into_iter().enumerate() {
+            let panel = skin.triangles[2*f+side];
+            let area = cross(sub(panel[1],panel[0]), sub(panel[2],panel[0]));
+            let normal = area.map(|x|x/dot(area,area).sqrt());
+            let p = r.surface_point_port(&h,f,[1./3.;3],face,normal).unwrap();
+            for c in 0..3 {
+                assert!((p.position_m[c]-panel.iter().map(|v|v[c]/3.).sum::<f64>()).abs()<1e-14);
+            }
+            for m in 0..2 { assert!((p.weights[m]-skin.weights[m][2*f+side]).abs()<1e-14); }
+            // Independent rigid-motion oracle, INCLUDING the offset lever arm.
+            let qdot = [0.3,-0.7]; let force = 1.9;
+            let velocity = dot(normal,[0.,0.,qdot[0]])
+                + qdot[1]*dot(normal,cross([0.,1.,0.],p.position_m));
+            let modal_work: f64 = qdot.iter().zip(&p.weights).map(|(v,b)|v*b*force).sum();
+            assert!((modal_work-force*velocity).abs()<1e-14);
+        }}
+        let top = r.surface_point_port(&h,0,[0.2,0.3,0.5],ShellFace::Positive,[1.,0.,0.]).unwrap();
+        let mid = r.point_port(0,[0.2,0.3,0.5],[1.,0.,0.]).unwrap();
+        assert!((top.weights[1]-mid[1]).abs()>0.001, "offset moment must survive");
+    }
+
+    #[test]
+    fn skin_point_preserves_source_barycentrics_and_refuses_incompatible_inputs() {
+        use super::surface::ShellFace;
+        let r = square(vec![0.02;4]); let h = [0.02;4];
+        for face in [ShellFace::Positive,ShellFace::Negative] {
+            let p = r.surface_point_port(&h,0,[0.,1.,0.],face,[0.,0.,1.]).unwrap();
+            assert_eq!(p.position_m[0],1.); assert_eq!(p.position_m[1],0.);
+            assert_eq!(p.weights,vec![1.,-1.]);
+        }
+        for bary in [[-0.1,0.5,0.6],[0.,0.,0.],[f64::NAN,0.,1.]] {
+            assert!(r.surface_point_port(&h,0,bary,ShellFace::Positive,[0.,0.,1.]).is_err());
+        }
+        assert!(r.surface_point_port(&h,2,[1.,0.,0.],ShellFace::Positive,[0.,0.,1.]).is_err());
+        assert!(r.surface_point_port(&[0.03;4],0,[1.,0.,0.],ShellFace::Positive,[0.,0.,1.]).is_err());
+        assert!(r.surface_point_port(&h,0,[1.,0.,0.],ShellFace::Positive,[0.,0.,2.]).is_err());
+    }
+
     #[test]
     fn finite_skin_closes_both_faces_and_preserves_opposite_velocities() {
         let s = square(vec![0.02; 4]).radiation_surface(&[0.02; 4], budget()).unwrap();
