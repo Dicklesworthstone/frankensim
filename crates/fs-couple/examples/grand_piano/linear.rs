@@ -36,6 +36,9 @@ pub mod dampers;
 /// Independent physical contact sites on a supplied longitudinal hammer face.
 #[path = "hammer_footprint.rs"]
 pub mod hammer_footprint;
+/// Geometric string extension in the SAME moving-bridge coordinates.
+#[path = "string_stretching.rs"]
+pub mod string_stretching;
 
 /// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
 /// This is a memory/work ceiling, not a claim that every size is real-time.
@@ -196,6 +199,7 @@ pub struct Bank {
     pub free_contact: Vec<f64>,
     pub rate: u32,
     footprints: Option<hammer_footprint::Prepared>,
+    stretching: Option<string_stretching::Prepared>,
     pub omitted_duplex_modes: usize,
     /// Contiguous strings sharing one physical course bridge; prepared cold.
     groups: Vec<std::ops::Range<usize>>,
@@ -378,7 +382,7 @@ impl Bank {
         } }
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
-            free_contact:vec![0.0;nc],rate,footprints:None,omitted_duplex_modes,transition,physical_board_k,
+            free_contact:vec![0.0;nc],rate,footprints:None,stretching:None,omitted_duplex_modes,transition,physical_board_k,
             board_half_damping,damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
             board_volume,board_basis,schur_inverse,contact_response:response,
@@ -424,6 +428,12 @@ impl Bank {
             let v=if k<n {self.v[k]} else {self.damped_board_v[k-n]};
             self.free_q[k]=t.qq*self.q[k]+t.qv*v;
             self.free_v[k]=t.vq*self.q[k]+t.vv*v;
+            if let Some(stretching)=&self.stretching {
+                // Held trial force; updated together with contact before ANY
+                // state publication. The base exact-ZOH map is unchanged.
+                self.free_q[k]+=t.bq*stretching.force[k];
+                self.free_v[k]+=t.bv*stretching.force[k];
+            }
         }
         for j in 0..r { self.board_rhs[j]=self.free_q[n+j]/self.transition[n+j].bq; }
         for group in &self.groups {
@@ -493,7 +503,8 @@ impl Bank {
                     self.next_q[k]=self.free_q[k]+self.transition[k].bq*f;
                     self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
                     reaction+=m.a*0.5*(self.q[k]+self.next_q[k]);
-                    self.last_modal_loss_j+=f*(self.next_q[k]-self.q[k])-0.5*(
+                    let total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+                    self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
                         self.next_v[k].powi(2)-self.v[k].powi(2)
                         +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
                 }
@@ -503,7 +514,8 @@ impl Bank {
         for j in 0..r {
             let k=n+j;let f=self.board_rhs[j];
             self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
-            self.last_modal_loss_j+=f*(self.next_q[k]-self.q[k])-0.5*(
+            let total_f=self.stretching.as_ref().map_or(f,|s|f+s.force[k]);
+            self.last_modal_loss_j+=total_f*(self.next_q[k]-self.q[k])-0.5*(
                 self.next_v[k].powi(2)-self.damped_board_v[j].powi(2)
                 +self.diagonal_omega2[k]*(self.next_q[k].powi(2)-self.q[k].powi(2)));
         }
@@ -527,6 +539,7 @@ impl Bank {
             } }
         }
         for i in 0..r { for j in 0..r {energy+=0.5*q[n+i]*self.physical_board_k[i*r+j]*q[n+j];} }
+        if let Some(s)=&self.stretching {energy+=s.energy(q,&self.strings,&self.modes);}
         energy
     }
 
@@ -601,14 +614,14 @@ mod tests {
         let mut rs=vec![0.0;n];
         for (k,m) in b.modes.iter().enumerate() {
             let g=&b.strings[m.string].bridge;
-            let b0=g.iter().zip(&b.q[n..]).map(|(g,q)|g*q).sum::<f64>();
+            let b0=g.iter().zip(&b.q[n..]).map(|(g,q)| g*q).sum::<f64>();
             rs[k]=fq[k]+0.5*b.transition[k].bq*m.a*b0;
             for j in 0..r {rhs[j]+=0.5*m.a*g[j]*(b.q[k]+rs[k]);}
         }
         let end:Vec<f64>=(0..r).map(|j|(0..r).map(|a|b.schur_inverse[j*r+a]*rhs[a]).sum()).collect();
         let mut q=vec![0.0;n+r];let mut v=vec![0.0;n+r];q[n..].copy_from_slice(&end);
         for (k,m) in b.modes.iter().enumerate() {
-            let b1=b.strings[m.string].bridge.iter().zip(&end).map(|(g,q)|g*q).sum::<f64>();
+            let b1=b.strings[m.string].bridge.iter().zip(&end).map(|(g,q)| g*q).sum::<f64>();
             q[k]=rs[k]+0.5*b.transition[k].bq*m.a*b1;
         }
         let free=(0..forces.len()).map(|c|b.contact_position(c,&q)).collect();
