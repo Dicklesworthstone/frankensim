@@ -18,6 +18,7 @@
 #[path="grand_piano/mesh_render.rs"] mod mesh_render;
 #[path="grand_piano/exterior_geometry.rs"] mod exterior_geometry;
 #[path="grand_piano/exterior_audio.rs"] mod exterior_audio;
+#[path="grand_piano/bridge_response.rs"] mod bridge_response;
 use exterior_geometry::{Boundary,Specification,RATE};
 use std::{fmt::Write as _,io::{Read,Write}};
 
