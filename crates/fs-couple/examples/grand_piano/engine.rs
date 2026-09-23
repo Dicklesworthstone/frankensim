@@ -15,6 +15,8 @@ pub use shank::Geometry as ShankGeometry;
 pub mod radiation;
 #[path = "hammer_contact_engine.rs"]
 mod contact_solver;
+#[path = "string_engine.rs"]
+mod string_mechanics;
 
 const CATCH_DISTANCE: f64 = 0.020; // idealized backcheck/rest gap
 const LET_OFF_DISTANCE: f64 = 0.0015; // Chabassier/Durufle JSV 2014 Table 3
@@ -346,6 +348,7 @@ impl Instrument {
             air.before(&mut self.bank.v[self.bank.modes.len()..])
         } else {0.};
         let mut damper_loss=self.damp(0.5*dt)?;
+        self.bank.begin_string_stretching_step();
         self.bank.predict();self.active.clear();
         self.jack_force.fill(0.0);self.rest_force.fill(0.0);
         for i in 0..self.hammers.len() {
@@ -369,32 +372,7 @@ impl Instrument {
                 } else {h.on_rest=false;}
             }
         }
-        self.force.fill(0.0);
-        for c in 0..nc {
-            let ci=self.bank.strings[self.bank.contact_strings[c]].course;
-            self.gap[c]=self.hammer_free[ci]-self.bank.free_contact[c];
-            if self.hammers[ci].active&&self.contacts[c].enabled {
-                self.active.push(c);self.force[c]=self.contacts[c].force;
-            }
-        }
-        for &i in &self.active {for &j in &self.active{self.gap[i]-=self.contact_h[i*nc+j]*self.force[j];}}
-        let mut converged=self.active.is_empty();
-        for _ in 0..32 {
-            if converged{break;}
-            self.contact_sweep()?;
-            converged=true;
-            for &i in &self.active {
-                let ci=self.bank.strings[self.bank.contact_strings[i]].course;let c=self.courses[ci];
-                let material=&self.creep[i];let old=&self.contacts[i];
-                let start=old.overlap-material.deformation(&old.memory);
-                let end=self.gap[i]-material.free_deformation(&old.memory)-material.compliance()*self.force[i];
-                let expected=felt::average(&self.laws[ci],&old.state,start,end,
-                    c.felt_thickness_m,self.contact_areas[i]).0;
-                if !expected.is_finite()||(self.force[i]-expected).abs()>1e-5+1e-8*expected.abs(){converged=false;}
-            }
-        }
-        if !converged{return Err(Error::NoConvergence);}
-        self.bank.finish(&self.force);
+        self.solve_string_contact_step()?;
         if self.bank.next_q.iter().chain(&self.bank.next_v).any(|x|!x.is_finite()||x.abs()>1e5){return Err(Error::NonFinite);}
         self.hammer_next.copy_from_slice(&self.hammers);
         let mut shank_loss=0.0;let mut jack_work=0.0;
