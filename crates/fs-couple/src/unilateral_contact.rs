@@ -3,6 +3,8 @@
 //! `fs-dcontact` owns the power-law potential. A fretboard, a reed
 //! lay, a snare, and a cable against a stay are fillings.
 
+pub(crate) mod distributed;
+
 use fs_dcontact::{ContactStorage, DContactError, Obstacle, string_collocation};
 use fs_math::det;
 use fs_phs::Storage;

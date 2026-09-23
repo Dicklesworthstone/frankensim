@@ -177,7 +177,11 @@ fn explicit_admission_rejects_hidden_defaults_and_malformed_contact() {
     assert!(DynamicAperture::new(spec(4), state, raw).is_err());
     let nonunit = Obstacle::new(vec![-2.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
         "different coordinate".into()).unwrap();
-    assert!(DynamicAperture::new(spec(4), state, nonunit).is_err());
+    let admitted = DynamicAperture::new(spec(4), state, nonunit).unwrap();
+    assert_eq!(admitted.contact_law().collocation(), [-2.0]);
+    let too_many = Obstacle::new(vec![-1.0;4097],4097,1,vec![0.0;4097],vec![1.0;4097],
+        1e8,2.0,"over-budget quadrature".into()).unwrap();
+    assert!(DynamicAperture::new(spec(4),state,too_many).is_err());
 }
 
 #[test]
@@ -208,3 +212,6 @@ fn accepted_outgoing_waves_drive_a_causal_delayed_characteristic_consumer() {
     assert_eq!(short.iter().map(|p| p.to_bits()).collect::<Vec<_>>(),
         render(16).iter().map(|p| p.to_bits()).collect::<Vec<_>>());
 }
+
+#[path = "dynamic_aperture/distributed.rs"]
+mod distributed;

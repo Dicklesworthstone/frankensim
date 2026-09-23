@@ -127,3 +127,6 @@ fn malformed_geometry_budget_and_cancellation_refuse_without_substitute_modes() 
 
 #[path = "plate_aperture/runtime.rs"]
 mod runtime;
+
+#[path = "plate_aperture/closure.rs"]
+mod closure;

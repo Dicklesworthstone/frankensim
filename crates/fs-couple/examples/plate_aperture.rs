@@ -1,7 +1,8 @@
 //! Geometry/material-driven valve and reciprocal tube, emitting physical CSV.
-//! Usage: plate_aperture [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]
+//! Usage: plate_aperture [--profiled] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]
 //! The numeric sections and lay here are authored estimates, not measured cane.
 use fs_couple::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
+use fs_couple::bernoulli_aperture::plate::closure::PlateClosureSpec;
 use fs_couple::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduction};
 use fs_couple::bernoulli_aperture::tube::{ApertureTube, TubeDrive, UniformTubeSpec};
 use fs_dcontact::Obstacle;
@@ -11,7 +12,9 @@ use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection
 use std::io::Write;
 
 fn run() -> Result<(), String> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let profiled = args.first().is_some_and(|arg| arg == "--profiled");
+    if profiled { args.remove(0); }
     let physical = match args.as_slice() {
         [] => [4e9, 900.0, 0.0003],
         [e, rho, h] => {
@@ -21,7 +24,7 @@ fn run() -> Result<(), String> {
             }
             values
         }
-        _ => return Err("usage: plate_aperture [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]".into()),
+        _ => return Err("usage: plate_aperture [--profiled] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]".into()),
     };
     let section = PlateSection::isotropic(physical[0], 0.3, physical[2], physical[1]).map_err(|e| e.to_string())?;
     let mesh = PlateMesh::rectangle(0.025, 0.01, 6, 2);
@@ -49,17 +52,31 @@ fn run() -> Result<(), String> {
     };
     let z = tube.characteristic_impedance(gas.density).map_err(|e| e.to_string())?;
     let initial = ApertureState { opening_m: plate.options().rest_opening_m, opening_velocity_m_s: 0.0 };
-    let lay = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
-        "authored generalized plate-slit lay; no measured material claim".into())
-        .and_then(|c| c.with_internal_loss(5.0)).map_err(|e| e.to_string())?;
-    let valve = DynamicAperture::from_plate(plate, gas.density, z, dt, 4096, initial, lay)
-        .map_err(|e| e.to_string())?;
+    let valve = if profiled {
+        // Explicit illustrative transverse clearance variation; changing this
+        // profile changes collision and flow in the solved equation, not an
+        // output envelope. K is pressure/penetration^alpha, integrated by area.
+        let closure = PlateClosureSpec {
+            nodal_rest_gap_m: plate.chart().mesh.nodes.iter().map(|p|
+                plate.options().rest_opening_m*(0.05+1.9*p.1/0.01)).collect(),
+            lay_triangles: (0..plate.chart().mesh.tris.len()).collect(),
+            stiffness_pa_per_m_alpha: 1e12, alpha: 2.0, internal_loss_s_per_m: 0.5,
+            provenance: "illustrative asymmetric area-distributed lay, not measured cane".into(),
+            max_penetration_m: 0.0002,
+        };
+        DynamicAperture::from_plate_with_closure(plate,closure,gas.density,z,dt,4096,initial)
+    } else {
+        let lay = Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 1e8, 2.0,
+            "authored generalized plate-slit lay; no measured material claim".into())
+            .and_then(|c| c.with_internal_loss(5.0)).map_err(|e| e.to_string())?;
+        DynamicAperture::from_plate(plate,gas.density,z,dt,4096,initial,lay)
+    }.map_err(|e| e.to_string())?;
     let mut model = ApertureTube::new(valve, tube).map_err(|e| e.to_string())?;
     eprintln!("requested_length_m={}; represented_length_m={}; pressure is internal, not an exterior microphone",
         tube.length_m, model.represented_length_m());
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    writeln!(out, "time_s,midpoint_bore_pressure_pa,opening_m,opening_velocity_m_s,tip_displacement_m,tip_velocity_m_s,max_slope,swept_flow_m3_s,jet_flow_m3_s,total_energy_j,upstream_work_j,loss_j,balance_residual_j")
+    writeln!(out, "time_s,midpoint_bore_pressure_pa,opening_m,opening_velocity_m_s,tip_displacement_m,tip_velocity_m_s,max_slope,swept_flow_m3_s,jet_flow_m3_s,total_energy_j,upstream_work_j,loss_j,balance_residual_j,midpoint_open_area_m2,active_lay_points,max_lay_penetration_m")
         .map_err(|e| e.to_string())?;
     for n in 0..4096 {
         // Fixed physical drive for every material substitution: no compliance-
@@ -69,11 +86,14 @@ fn run() -> Result<(), String> {
         let plate = model.aperture().plate_reduction().expect("retained source");
         let a = frame.aperture;
         let motion = plate.nodal_motion(tip, a.state.opening_m, a.state.opening_velocity_m_s).map_err(|e| e.to_string())?;
-        writeln!(out, "{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
+        let probe = model.aperture().plate_closure().map(|p| p.probe(a.state.opening_m)).transpose()
+            .map_err(|e| e.to_string())?;
+        writeln!(out, "{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e}",
             a.time_s, a.bore_pressure_pa, a.state.opening_m, a.state.opening_velocity_m_s,
             motion.displacement_rotation[0], motion.velocity_rotation_rate[0], plate.max_slope_at(a.state.opening_m),
             a.swept_flow_m3_s, a.jet_flow_m3_s, frame.stored_energy_j, frame.upstream_work_j,
-            frame.dissipated_energy_j, frame.balance_residual_j()).map_err(|e| e.to_string())?;
+            frame.dissipated_energy_j, frame.balance_residual_j(), a.midpoint_opening_m*plate.width_m(),
+            probe.map_or(0,|p| p.active_lay_points),probe.map_or(0.0,|p| p.max_penetration_m)).map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())
 }

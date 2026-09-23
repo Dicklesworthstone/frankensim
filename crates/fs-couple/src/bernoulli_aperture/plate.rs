@@ -13,6 +13,9 @@
 //! approximation limits, not experimental validation. Damping remains an
 //! independent physical input; an elastic card does not imply a loss law.
 
+/// Spatial lay clearances and partially closed slit geometry.
+pub mod closure;
+
 use crate::thin_plate::ResolvedPlateChart;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::{BernoulliAperture, dynamic::DynamicApertureSpec};

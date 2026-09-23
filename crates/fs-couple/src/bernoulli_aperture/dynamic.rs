@@ -12,10 +12,10 @@
 //! owners. A bounded iteration count is not an allocation-free or hard-real-
 //! time claim. Cancellation is observed between complete mechanical steps.
 
-use super::{BernoulliAperture, plate::PlateApertureReduction};
+use super::{BernoulliAperture, plate::{PlateApertureReduction, closure::{PlateClosure, PlateClosureSpec}}};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::reed_bore::{FastSolveStats, ReedSolverMode, reed_pressure_face, reed_structural};
-use crate::unilateral_contact::slit_contact_discrete_coefficients;
+use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_exec::CancelGate;
 use fs_phs::Storage;
@@ -43,7 +43,8 @@ pub struct DynamicApertureSpec {
     pub max_steps: u64,
 }
 
-/// Mechanical state; a negative opening represents penetration of the lay.
+/// Mechanical opening coordinate. It is a local gap only on the uniform-slit
+/// path; a profiled plate derives each physical clearance from this coordinate.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ApertureState {
     /// Opening coordinate [m].
@@ -73,7 +74,8 @@ pub struct ApertureFrame {
     pub time_s: f64,
     /// End-of-step mechanical state.
     pub state: ApertureState,
-    /// Nonnegative midpoint opening actually used in the Bernoulli solve [m].
+    /// Flow-equivalent nonnegative midpoint opening [m]: spatial open area /
+    /// slit width on the profiled path, otherwise the uniform midpoint opening.
     pub midpoint_opening_m: f64,
     /// Outgoing characteristic pressure [Pa].
     pub outgoing_pressure_pa: f64,
@@ -134,6 +136,7 @@ pub struct DynamicAperture {
     contact_storage: ContactStorage,
     // A physical reduction is retained, not flattened into unguarded scalars.
     plate: Option<Box<PlateApertureReduction>>,
+    closure: Option<Box<PlateClosure>>,
     state: ApertureState,
     accepted_steps: u64,
 }
@@ -152,9 +155,12 @@ impl Storage for ZeroStorage {
 }
 
 impl DynamicAperture {
-    /// Admit explicit mechanics, initial state and a unit-opening obstacle.
+    /// Admit explicit mechanics, initial state and a scalar-coordinate obstacle.
     /// The obstacle's gap, weight, K, alpha, chi and provenance are preserved.
-    /// For a no-contact comparison, supply an explicit zero-stiffness obstacle.
+    /// Multiple collocation rows retain their own gaps and local normal speeds;
+    /// unloading is capped pointwise, not after summing the generalized forces.
+    /// At most 4096 points are admitted per scalar solve. For a no-contact
+    /// comparison, supply an explicit zero-stiffness obstacle.
     ///
     /// # Errors
     /// Invalid or nonfinite mechanics, contact shape/law, time/budget or energy.
@@ -179,19 +185,13 @@ impl DynamicAperture {
         {
             return Err(invalid("dynamic aperture requires finite explicit mechanics and a positive step budget"));
         }
-        // Check raw-parts escape values before the generic storage can index
-        // them. Unit opening is a coordinate contract, not a material inference.
-        if lay.n_points() != 1 || lay.collocation() != [-1.0]
-            || lay.gaps().len() != 1 || lay.weights().len() != 1
-            || !lay.gaps()[0].is_finite() || !lay.weights()[0].is_finite()
-            || lay.weights()[0] < 0.0 || !lay.stiffness().is_finite()
-            || lay.stiffness() < 0.0 || !lay.alpha().is_finite() || lay.alpha() < 1.0
-            || !lay.internal_loss().is_finite() || lay.internal_loss() < 0.0
-            || lay.provenance().trim().is_empty()
-        {
-            return Err(invalid("dynamic aperture requires a finite, provenance-labelled unit-opening contact law"));
+        // Scalar collocation may have many geometric contact points. Validate
+        // the complete raw shape before any generic storage indexing.
+        if lay.provenance().trim().is_empty() {
+            return Err(invalid("dynamic aperture contact requires explicit provenance"));
         }
-        slit_contact_discrete_coefficients(&lay, state.opening_m, state.opening_m)
+        ApertureContactStep::new(&lay, state.opening_m)
+            .and_then(|law| law.response(state.opening_m, state.opening_velocity_m_s))
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let contact_storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![lay.clone()])
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
@@ -207,7 +207,7 @@ impl DynamicAperture {
             blowing_pressure_pa: 0.0,
             attack_s: 0.0,
         };
-        let model = Self { spec, reed, lay, contact_storage, plate: None, state, accepted_steps: 0 };
+        let model = Self { spec, reed, lay, contact_storage, plate: None, closure: None, state, accepted_steps: 0 };
         let (stiffness, damping) = reed_structural(reed);
         if !reed_pressure_face(reed).is_finite() || !stiffness.is_finite()
             || !damping.is_finite() || !model.energy_at(state).is_finite()
@@ -243,6 +243,39 @@ impl DynamicAperture {
         let mut model = Self::new(spec, state, lay)?;
         model.plate = Some(Box::new(plate));
         Ok(model)
+    }
+
+    /// Bind nodal lay clearances and spatial slit area to this exact plate.
+    /// Contact areas and local shape rows derive from the supplied triangles;
+    /// geometry enters the SAME implicit pressure/velocity/contact equation.
+    /// Existing uniform-slit constructors remain unchanged when not selected.
+    ///
+    /// # Errors
+    /// Invalid profile/law, initial slope/penetration, gas/load/clock admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_plate_with_closure(
+        plate: PlateApertureReduction, closure: PlateClosureSpec,
+        density_kg_m3: f64, impedance_pa_s_m3: f64, time_step_s: f64,
+        max_steps: u64, state: ApertureState,
+    ) -> Result<Self, AcousticRealizeError> {
+        let closure = plate.compile_closure(closure)?;
+        closure.validate_opening(state.opening_m)?;
+        let lay = closure.contact_law().clone();
+        let mut model = Self::from_plate(plate,density_kg_m3,impedance_pa_s_m3,
+            time_step_s,max_steps,state,lay)?;
+        model.closure = Some(Box::new(closure));
+        Ok(model)
+    }
+
+    /// Spatial gap/contact input retained on the explicitly profiled path.
+    #[must_use]
+    pub fn plate_closure(&self) -> Option<&PlateClosure> { self.closure.as_deref() }
+
+    fn flow_opening(&self, coordinate: f64) -> Result<f64, AcousticRealizeError> {
+        match &self.closure {
+            Some(profile) => Ok(profile.open_area_m2(coordinate)? / self.spec.aperture.width_m),
+            None => Ok(coordinate.max(0.0)),
+        }
     }
 
     /// Original geometry/material reduction, absent on the authored-scalar path.
@@ -317,19 +350,27 @@ impl DynamicAperture {
         }
         let old = self.state;
         let dt = self.spec.time_step_s;
-        let (outgoing, opening, velocity) = crate::reed_bore::step_massive_reed(
-            self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
-            drive.incoming_pressure_pa, drive.upstream_pressure_pa,
-            old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s,
-            Some(&self.lay), ReedSolverMode::Strict, &mut FastSolveStats::default(),
-        )?;
+        let (outgoing, opening, velocity) = if self.closure.is_some() {
+            crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
+                self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
+                old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
+                |opening| self.flow_opening(opening))?
+        } else {
+            crate::reed_bore::step_massive_reed(
+                self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
+                drive.incoming_pressure_pa, drive.upstream_pressure_pa,
+                old.opening_m, old.opening_velocity_m_s, dt, drive.body_flow_m3_s,
+                Some(&self.lay), ReedSolverMode::Strict, &mut FastSolveStats::default(),
+            )?
+        };
         let state = ApertureState { opening_m: opening, opening_velocity_m_s: velocity };
         if let Some(plate) = &self.plate {
             // The admissible one-mode opening interval is convex, so checking
             // the old and new endpoints also covers the midpoint used below.
             plate.validate_opening(opening)?;
         }
-        let midpoint_opening_m = f64::midpoint(old.opening_m, opening).max(0.0);
+        if let Some(closure) = &self.closure { closure.validate_opening(opening)?; }
+        let midpoint_opening_m = self.flow_opening(f64::midpoint(old.opening_m, opening))?;
         let vm = f64::midpoint(old.opening_velocity_m_s, velocity);
         let bore = outgoing + drive.incoming_pressure_pa;
         let dp = drive.upstream_pressure_pa - bore;
@@ -338,10 +379,9 @@ impl DynamicAperture {
         );
         let swept = -reed_pressure_face(self.reed) * vm;
         let wave = (outgoing - drive.incoming_pressure_pa) / self.spec.impedance_pa_s_m3;
-        let (elastic, contact_damping) = slit_contact_discrete_coefficients(
-            &self.lay, old.opening_m, opening,
-        ).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let force = (elastic - contact_damping * vm).max(0.0);
+        let contact = ApertureContactStep::new(&self.lay, old.opening_m)
+            .and_then(|law| law.response(opening, vm))
+            .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let (_, damping) = reed_structural(self.reed);
         let energy = self.energy_at(state);
         let frame = ApertureFrame {
@@ -357,7 +397,7 @@ impl DynamicAperture {
             flow_residual_m3_s: jet + swept + drive.body_flow_m3_s - wave,
             stored_energy_j: energy,
             storage_change_j: energy - self.energy_at(old),
-            dissipated_energy_j: dt * (dp * jet + damping * vm * vm + (elastic - force) * vm),
+            dissipated_energy_j: dt * (dp * jet + damping * vm * vm + contact.dissipated_power),
             pressure_work_j: dt * dp * (wave - drive.body_flow_m3_s),
         };
         if ![frame.time_s, frame.bore_pressure_pa, frame.jet_flow_m3_s,

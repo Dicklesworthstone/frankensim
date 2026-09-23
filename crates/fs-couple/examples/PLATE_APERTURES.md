@@ -128,3 +128,62 @@ The eleven new tests cover mechanical/pressure projection, material and thicknes
 changes, actual two-way tube trajectories, work accounting, physical nodal motion,
 source-receipt retention, slope rejection with exact retry, cancellation and
 budgeted continuation. They do not replace measured-instrument validation.
+
+## Spatial lay and partially closed slit
+
+Add `--profiled` before the three physical arguments to run the same plate and
+5 Pa pressure program with an explicitly asymmetric clearance profile:
+
+```bash
+cargo run --release -p fs-couple --example plate_aperture -- \
+  --profiled 4000000000 900 0.0003 > /tmp/plate-profiled.csv
+```
+
+This selects `DynamicAperture::from_plate_with_closure`. A `PlateClosureSpec`
+contains one signed rest gap per original mesh node, an explicit set of unique
+lay-covered triangle indices, contact pressure coefficient [Pa/m^alpha], exponent,
+Hunt--Crossley coefficient [s/m], provenance and positive penetration allowance.
+Triangle areas supply lumped nodal quadrature [m²]; they are not normalized to
+one or hidden inside a fitted point stiffness. The example uses a linear gap
+from 10 to 390 micrometres across the 10 mm width, all plate triangles, K=1e12
+Pa/m², alpha=2, chi=0.5 s/m and a 200-micrometre penetration allowance. These
+are illustrative authored values, **not measured reed/lay material properties**.
+The unselected legacy generalized-lay example retains its original mechanics.
+
+The retained coordinate y still has rest value H from the plate reduction. At
+node i, the physical gap is g_i + shape_i*(y-H); changing g_i does not move the
+spring rest state or fabricate elastic preload. Negative supplied gaps explicitly
+represent installed interference, whose stored energy is retained. Neither the
+coordinate y nor its positive part is necessarily the physical mean open gap.
+
+Each lay point uses the existing fs-dcontact potential and stable scalar secant,
+with its own normal velocity. Reactions are pulled back through the signed
+plate shape. Non-attractive unloading is applied **locally before summation**;
+one clamp on the total force would be wrong when points move at different speeds.
+The original full contact potential remains in the total energy accounting.
+Pressure force and swept-face flow retain the same geometry-derived area.
+
+At the very same implicit midpoint used by pressure and motion, the Bernoulli
+opening is the integral of max(gap(s),0) along the declared P1 slit edges. A
+partially closed edge contributes its actual positive triangle area, not the
+trapezoid of separately clipped endpoint gaps. Thus one edge can still flow
+while another contacts; a zero or negative coordinate y need not mean every
+slit segment is closed. No replacement Bernoulli law, contact potential or
+stepper is added. The existing root budgets and momentum tolerances are unchanged.
+
+`plate_closure()` exposes the original profile, compiled law, source-node map,
+per-node gaps, open area and contact probe. The CSV adds midpoint open area,
+end-state active lay point count and maximum nodal penetration. These are physical
+state observations, never drivers. Active area is a lumped-quadrature estimate,
+not an exact contact-patch measurement. Initial and candidate states obey both
+the existing slope bound and the supplied penetration allowance before the
+coupled valve/tube/network transaction commits. A failed candidate can be retried
+without resetting wave or mechanical history.
+
+This extends spatial **contact and flow geometry**, not the structural basis:
+there is still one linear plate mode, uniform face pressure, a fixed lay and a
+quasisteady Bernoulli jet. Contact does not re-solve the eigenproblem or add the
+omitted bending modes. Contact quadrature and mode truncation require refinement
+for a claimed physical application. There is no lip-contact field, moving lay,
+wet-cane law, exterior microphone or newly claimed real-time throughput. The
+original scalar/unit-opening path is retained with its existing arithmetic.

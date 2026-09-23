@@ -10,7 +10,7 @@ use super::{
     AcousticRealizeError, BeatingReed, FastSolveStats, Obstacle, ReedSolverMode,
     reed_pressure_face, reed_structural, reed_swept_flow,
 };
-use crate::unilateral_contact::SlitContactStep;
+use crate::unilateral_contact::distributed::ApertureContactStep;
 use crate::bernoulli_aperture::moving::characteristic_pressure as solve_moving_aperture_wave;
 
 #[derive(Clone, Copy)]
@@ -66,6 +66,18 @@ pub(super) fn step(
     u_body: f64,
     lay: &Obstacle,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
+    step_with_opening(reed,rho,zc,p_minus,p_m,y,v,dt,u_body,lay,
+        |opening| Ok(opening.max(0.0)))
+}
+
+// Same nonlinear equation and solver; only the actual midpoint slit geometry
+// differs. A supplied callback returns nonnegative flow-equivalent height.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_with_opening(
+    reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
+    y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
+    flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+) -> Result<(f64, f64, f64), AcousticRealizeError> {
     if ![
         rho,
         zc,
@@ -98,7 +110,7 @@ pub(super) fn step(
             what: "implicit reed contact requires finite admitted mechanics and positive time step",
         });
     }
-    let contact = SlitContactStep::new(lay, y)
+    let contact = ApertureContactStep::new(lay, y)
         .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
     // The held-aperture solve is a predictor only. Even free flight must solve
     // again: changing opening changes jet flow and hence the pressure load.
@@ -128,13 +140,11 @@ pub(super) fn step(
     }
     let evaluate = |velocity: f64| -> Result<Trial, AcousticRealizeError> {
         let next_y = y + dt * velocity;
-        let (elastic, contact_loss) = contact
-            .coefficients(next_y)
-            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
-        let force = (elastic - contact_loss * velocity).max(0.0);
+        let force = contact.response(next_y, velocity)
+            .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?.force;
         // Clamp the MIDPOINT opening, not each endpoint separately. This is
         // the same configuration used by the midpoint spring and velocity.
-        let opening = f64::midpoint(y, next_y).max(0.0);
+        let opening = flow_opening(f64::midpoint(y, next_y))?;
         let outgoing = solve_moving_aperture_wave(
             reed.width_m,
             opening,
