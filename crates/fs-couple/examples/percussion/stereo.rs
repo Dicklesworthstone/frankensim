@@ -10,6 +10,9 @@ mod observer_fit;
 #[path = "radiation_spec.rs"]
 pub mod radiation_spec;
 
+#[path = "radiation_feedback.rs"]
+pub mod feedback;
+
 /// Same comma-separated SI position syntax as grand_piano. Remove only this
 /// option, transactionally: bad/duplicate input leaves all arguments unchanged.
 pub fn option(args:&mut Vec<String>)->Result<Option<[f64;3]>,Error> {
@@ -39,7 +42,15 @@ fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Er
 
 fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
     gate:&CancelGate)->Result<Vec<Bake>,Error> {
+    Ok(bake_scene_with_spec(boundary,receivers,spec,gate,false)?.0)
+}
+
+// The same BEM fields feed both pressure observers and (when selected) the
+// complete force/velocity matrix. One-way callers never construct a load.
+fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
+    gate:&CancelGate,load:bool)->Result<(Vec<Bake>,Option<feedback::Model>),Error> {
     if gate.is_requested() {return Err("radiation preparation cancelled".into());}
+    if load {feedback::admit_boundary(boundary,spec)?;}
     let count=boundary.weights.len();let panels=boundary.triangles.len();
     let (prepared_panels,work)=spec.work(panels,count,receivers.len())?;
     if !(1..=2).contains(&receivers.len()) || count==0 || count>MAX_INPUTS
@@ -61,6 +72,7 @@ fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiat
     let surface=SpherePanels::from_triangles(refined.triangles.clone())?;
     let omega=spec.frequencies()?;
     let mut values=vec![vec![vec![C64::new(0.0,0.0);omega.len()];count];receivers.len()];
+    let mut impedances=if load {vec![vec![C64::ZERO;count*count];omega.len()]}else{Vec::new()};
     eprintln!("radiation preparation: source_panels={panels}, prepared_panels={prepared_panels}, subdivisions={}, dense_work_units={work}, band_hz={:?}; same polyhedral source geometry, no mechanical refinement",spec.subdivisions,spec.band_hz);
     let mut ppw=f64::INFINITY;let mut condition=0.0_f64;
     // One formulation for the entire transfer; stitching different discrete
@@ -92,7 +104,15 @@ fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiat
                     radius,baked[channel].propagation_delay_s)?;
             }
         }
+        if load {impedances[index]=feedback::project(&surface,&refined.weights,&solutions,w)?;}
     }
+    let fitted=if load {
+        if gate.is_requested() {return Err("radiation load fitting cancelled".into());}
+        let f=feedback::fit::fit(&omega,&impedances,count)?;
+        eprintln!("passive radiation fit: ports={}, poles={}, complex_peak/RMS={}/{}, resistance_peak/RMS={}/{}; complete signed matrices, independent held-out samples, no rank truncation",
+            count,f.model.poles.len(),f.peak_error,f.rms_error,f.resistance_peak_error,f.resistance_rms_error);
+        Some(f.model)
+    }else{None};
     for (channel,bake) in baked.iter_mut().enumerate() {
         let mut maximum=0.0_f64;let mut rms=0.0_f64;
         for row in &values[channel] {
@@ -105,10 +125,10 @@ fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiat
         }
         eprintln!("receiver {channel} BEM bake: panels={prepared_panels}, inputs={count}, band_hz={:?}, training={}, order_selection={}, independent_audit={}, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}",
             spec.band_hz,spec.training_intervals+1,spec.training_intervals,2*spec.training_intervals);
-        eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={}, pressure_gain={}",
+        eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed acoustics, passive_feedback={load}; propagation_delay_s={}, pressure_gain={}",
             receivers[channel],bake.propagation_delay_s,bake.pressure_gain);
     }
-    Ok(baked)
+    Ok((baked,fitted))
 }
 
 fn admit_render(experiment:&Experiment,frames:usize,full_scale_pa:f64)->Result<(),Error> {

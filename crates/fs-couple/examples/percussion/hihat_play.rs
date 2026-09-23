@@ -11,12 +11,14 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let prepared=mechanics::prepared_option(&mut args)?||analytic||substeps.is_some();
     let right=acoustics::stereo::option(&mut args)?;
     let radiation=radiation_spec::option(&mut args)?;
+    let feedback=acoustics::stereo::feedback::option(&mut args)?;
     let second=sticks::option(&mut args)?;
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
+    acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
     if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
         ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||second_force.is_some()&&second.is_none() {
@@ -33,7 +35,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
     let pair=build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?;
-    let mut e=pair.experiment;
+    let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
+    let (mut e,loaded)=if feedback {
+        let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
+            &receivers,radiation.unwrap_or_default(),&CancelGate::new_clock_free())?;(e,Some(bake))
+    }else{(pair.experiment,None)};
     if prepared {e.system=if analytic{e.system.into_analytic_nonlinear()?}else{e.system.into_prepared_nonlinear()?};}
     if let Some(b)=substeps{e.system=e.system.with_impact_substeps(b)?;}
     let mut inputs=vec![mechanics::drive::Input{program:mechanics::drive::Program::parse(&spec.pedal)?,
@@ -46,9 +52,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points());
     let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
-        let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
-        let wav=acoustics::stereo::render_receivers_with_spec(&mut e,usize::try_from(count)?,scale,&receivers,
-            radiation.unwrap_or_default(),&gate)?;
+        let wav=match loaded {
+            Some(bake)=>bake.render(&mut e,usize::try_from(count)?,scale,&gate)?,
+            None=>acoustics::stereo::render_receivers_with_spec(&mut e,usize::try_from(count)?,scale,&receivers,
+                radiation.unwrap_or_default(),&gate)?,
+        };
         out.write_all(&wav)?;out.flush()?;return Ok(());
     }
     writeln!(out,"time_s,upper_down_m,lower_down_m,pedal_down_m,pedal_speed_m_s,min_contact_gap_m,active_sites,total_energy_j,loss_j,player_work_j,balance_j")?;
