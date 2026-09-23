@@ -19,10 +19,12 @@
 #[path="grand_piano/exterior_geometry.rs"] mod exterior_geometry;
 #[path="grand_piano/exterior_audio.rs"] mod exterior_audio;
 #[path="grand_piano/bridge_response.rs"] mod bridge_response;
+#[path="grand_piano/exterior_loading.rs"] mod exterior_loading;
 use exterior_geometry::{Boundary,Specification,RATE};
 use std::{fmt::Write as _,io::{Read,Write}};
 
-const USAGE:&str="piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
+const USAGE:&str="piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe DRIVE_KEY OUTPUT.csv
+piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
@@ -34,6 +36,11 @@ physical surface motion are three dimensional, including the loaded crown.
 The scale keyword steinway-d retains all 88 raw source courses and source felt/
 shank mechanics; a CSV preserves its own supplied tensions. Use the SAME scale
 that produced any settled/downbearing board. No missing geometry is inferred.
+admittance solves a unit peak bridge-force experiment with BEM pressure reacting
+on ALL retained string/board coordinates. It writes all bridge mobilities,
+receiver Pa/N and wood/string/radiation power balance, alongside an explicit
+one-way comparison. This harmonic image excludes hammer/key-damper contacts.
+It does NOT add radiation feedback to the time-domain render command.
 response writes complex pressure per mass-normalized modal acceleration in
 exp(-i omega t) convention. render fits causal fixed-receiver transfers with
 held-out checks, then observes EVERY mechanics substep before PCM encoding.
@@ -90,10 +97,37 @@ fn response(scene:&Scene)->Result<String,String> {
     }}
     Ok(csv)
 }
+fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,drive:u8)->Result<String,String> {
+    let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
+    if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
+    let board=if crowned_board::is_crowned(board_text) {
+        crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
+    } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
+    let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*4,0.45*f64::from(RATE),24,true)?;
+    let boundary=Boundary::from_obj(obj,spec,board.motion.as_ref().ok_or("missing harmonic surface motion")?)?
+        .loaded(model.bank())?;
+    let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
+    Ok(format!("# structure: {}\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+        board.provenance,board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
+}
 fn run(args:&[String])->Result<(),String> {
     match args {
         []=>{println!("{USAGE}");Ok(())},
         [help] if help=="--help" || help=="-h"=>{println!("{USAGE}");Ok(())},
+        [command,board,strings,obj,spec,drive,output] if command=="admittance"=>{
+            let drive:u8=drive.parse().map_err(|_|"admittance requires a MIDI bridge key in 21..108")?;
+            if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
+            if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
+            let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
+            let courses=scale(strings)?;
+            if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
+            let board=read_bounded(board,8*1024*1024)?;
+            let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
+            let csv=admittance(&board,&courses,&obj,&spec,drive)?;
+            publish(output,csv.as_bytes())?;
+            println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
+            Ok(())
+        }
         [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render"=>{
             let frames=match command.as_str() {
                 "response" if tail.is_empty()=>None,
@@ -145,8 +179,12 @@ mod tests {
         assert!(run(&["--help".into()]).is_ok());
         assert!(run(&["response".into(),"missing.fss".into()]).is_err());
         assert!(Specification::read("frankensim-piano-exterior-si-v1\n").is_err());
+        for key in ["0","109","NaN"] {
+            let args=["admittance","missing.fss","missing.csv","missing.obj","missing.fspe",key,"unused.csv"].map(str::to_owned);
+            assert!(run(&args).is_err());
+        }
     }
-    fn small_source_scene()->Scene {
+    fn small_source_inputs()->(String,Vec<geometry::Course>,String,Specification) {
         let mut board=String::from("frankensim-board-geometry-si-v1\nsource,estimated,soft-panel acoustic integration NOT Steinway geometry\nsupport,clamped\npretension,0\ndamping,0.01\n");
         for (i,p) in [[0.,0.],[0.1,0.],[0.1,0.1],[0.,0.1],[0.05,0.05]].iter().enumerate() {
             writeln!(board,"node,{i},{},{}",p[0],p[1]).unwrap();
@@ -162,6 +200,10 @@ mod tests {
         let spec=Specification::read(&format!("{spec}receiver-m,0.05,0.05,1\n")).unwrap();
         let obj=exterior_geometry::tests::box_obj("skin",[0.,0.,-0.0015],[0.1,0.1,0.003]);
         let courses=steinway_scale::courses().unwrap().into_iter().filter(|c|c.midi==69).collect();
+        (board,courses,obj,spec)
+    }
+    fn small_source_scene()->Scene {
+        let (board,courses,obj,spec)=small_source_inputs();
         prepare(&board,courses,&obj,spec).unwrap()
     }
     #[test]
@@ -184,4 +226,22 @@ mod tests {
         for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
     }
 
+    #[test]
+    fn supplied_structure_scale_and_body_produce_loaded_bridge_csv() {
+        let (board,courses,obj,spec)=small_source_inputs();
+        let csv=admittance(&board,&courses,&obj,&spec,69).unwrap();
+        let rows:Vec<_>=csv.lines().filter(|l|!l.starts_with('#')).collect();
+        assert_eq!(rows.len(),1+spec.frequencies*(courses.len()+spec.receivers.len()));
+        assert!(rows[0].contains("radiation_w"));
+        let mut changed=false;
+        for line in &rows[1..] {
+            let cells:Vec<_>=line.split(',').collect();assert_eq!(cells.len(),15);
+            let v:Vec<f64>=cells[3..].iter().map(|s|s.parse::<f64>().unwrap()).collect();
+            assert!(v.iter().all(|v|v.is_finite()));
+            if cells[1]=="bridge" && (v[0]-v[2]).hypot(v[1]-v[3])>1e-8*v[2].hypot(v[3]) {changed=true;}
+            assert!(v[7]>=-1e-10); // radiation W: it must not inject mechanical power.
+        }
+        assert!(changed,"fluid reaction must alter mobility, not merely the printed pressure");
+        assert!(admittance(&board,&courses,&obj,&spec,60).is_err());
+    }
 }

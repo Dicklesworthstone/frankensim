@@ -50,13 +50,19 @@ jobs:
         run: cargo test --release -p fs-io obj::tests -- --test-threads=1
       - name: Test mesh import and source-piano playback
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --example piano_board_import -- --test-threads=1 2>&1 | tee piano-import-tests.log
       - name: Test the piano implementation
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --example grand_piano -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --example grand_piano -- --test-threads=1 2>&1 | tee piano-mechanics-tests.log
       - name: Test finite-body piano acoustics
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-couple --example piano_exterior -- --test-threads=1
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-couple --example piano_exterior -- --test-threads=1 2>&1 | tee piano-exterior-tests.log
       - name: Render a physical-model smoke note
         if: ${{ !cancelled() }}
         run: cargo run --release -p fs-couple --example grand_piano -- --note 69 --duration 0.1 --modes 12 --render piano-smoke.wav
@@ -67,4 +73,5 @@ jobs:
           path: |
             piano-smoke.wav
             Cargo.lock
+            piano-*-tests.log
           retention-days: 7
