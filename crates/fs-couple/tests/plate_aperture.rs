@@ -130,3 +130,6 @@ mod runtime;
 
 #[path = "plate_aperture/closure.rs"]
 mod closure;
+
+#[path = "plate_aperture/relaxation.rs"]
+mod relaxation;

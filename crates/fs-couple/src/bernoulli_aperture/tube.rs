@@ -187,11 +187,12 @@ impl ApertureTube {
     /// Input, budget, solver, propagation or combined observation refusal. No
     /// participant advances until all candidate observations are finite.
     pub fn step(&mut self, drive: TubeDrive) -> Result<TubeFrame, AcousticRealizeError> {
-        let aperture = self.aperture.preview_step(ApertureDrive {
+        let trial = self.aperture.preview_step(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,
             incoming_pressure_pa: self.line.incoming_pressure_pa(),
             body_flow_m3_s: drive.body_flow_m3_s,
         })?;
+        let aperture = trial.frame;
         let waveguide = self.line.preview_step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let dt = self.aperture.spec().time_step_s;
@@ -214,7 +215,7 @@ impl ApertureTube {
         // infallible commit. On any error neither participant has changed.
         self.line.step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        self.aperture.accept_frame(aperture);
+        self.aperture.accept_frame(trial);
         Ok(frame)
     }
 

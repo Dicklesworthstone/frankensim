@@ -67,7 +67,7 @@ pub(super) fn step(
     lay: &Obstacle,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     step_with_opening(reed,rho,zc,p_minus,p_m,y,v,dt,u_body,lay,
-        |opening| Ok(opening.max(0.0)))
+        |opening| Ok(opening.max(0.0)), None)
 }
 
 // Same nonlinear equation and solver; only the actual midpoint slit geometry
@@ -77,6 +77,7 @@ pub(crate) fn step_with_opening(
     reed: BeatingReed, rho: f64, zc: f64, p_minus: f64, p_m: f64,
     y: f64, v: f64, dt: f64, u_body: f64, lay: &Obstacle,
     flow_opening: impl Fn(f64) -> Result<f64, AcousticRealizeError>,
+    material_force: Option<&dyn Fn(f64) -> Result<f64, AcousticRealizeError>>,
 ) -> Result<(f64, f64, f64), AcousticRealizeError> {
     if ![
         rho,
@@ -157,8 +158,15 @@ pub(crate) fn step_with_opening(
         let pressure_impulse = half_dt * face * (p_m - (outgoing + p_minus));
         let contact_impulse = half_dt * force;
         let inertial = mass_mid * velocity;
-        let residual = inertial - rhs + pressure_impulse - contact_impulse;
-        let scale = inertial.abs() + rhs.abs() + pressure_impulse.abs() + contact_impulse.abs();
+        let mut residual = inertial - rhs + pressure_impulse - contact_impulse;
+        let mut scale = inertial.abs() + rhs.abs() + pressure_impulse.abs() + contact_impulse.abs();
+        if let Some(restoring) = material_force {
+            // Condensed material force uses this very candidate. No lagged
+            // post-step stress correction and no change to the original path.
+            let impulse = half_dt * restoring(next_y)?;
+            residual += impulse;
+            scale += impulse.abs();
+        }
         let next_v = 2.0 * velocity - v;
         if ![residual, scale, outgoing, next_y, next_v]
             .iter()

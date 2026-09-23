@@ -245,11 +245,12 @@ impl ApertureNetwork {
     /// Input, budget, nonlinear solve, propagation or finite-set refusal. Private
     /// network scratch may change, but accepted waves/state/clock do not.
     pub fn step(&mut self, drive: TubeDrive) -> Result<ApertureNetworkFrame, AcousticRealizeError> {
-        let aperture = self.aperture.preview_step(ApertureDrive {
+        let trial = self.aperture.preview_step(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,
             incoming_pressure_pa: self.network.incoming_pressure_pa(),
             body_flow_m3_s: drive.body_flow_m3_s,
         })?;
+        let aperture = trial.frame;
         let network = self.network.preview_step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let dt = self.aperture.spec().time_step_s;
@@ -270,7 +271,7 @@ impl ApertureNetwork {
         }
         self.network.step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        self.aperture.accept_frame(aperture);
+        self.aperture.accept_frame(trial);
         Ok(frame)
     }
 

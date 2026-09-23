@@ -1,5 +1,5 @@
 //! Geometry/material-driven valve and reciprocal tube, emitting physical CSV.
-//! Usage: plate_aperture [--profiled] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]
+//! Usage: plate_aperture [--profiled] [--relaxation FILE] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]
 //! The numeric sections and lay here are authored estimates, not measured cane.
 use fs_couple::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
 use fs_couple::bernoulli_aperture::plate::closure::PlateClosureSpec;
@@ -10,11 +10,22 @@ use fs_exec::CancelGate;
 use fs_material::gas::GasState;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection, SliceOptions};
 use std::io::Write;
+#[path = "plate_aperture/relaxation_input.rs"]
+mod relaxation_input;
 
 fn run() -> Result<(), String> {
     let mut args: Vec<_> = std::env::args().skip(1).collect();
-    let profiled = args.first().is_some_and(|arg| arg == "--profiled");
-    if profiled { args.remove(0); }
+    let mut profiled = false;
+    let mut relaxation_path = None;
+    while args.first().is_some_and(|a|a.starts_with("--")) {
+        match args.remove(0).as_str() {
+            "--profiled" if !profiled => profiled=true,
+            "--relaxation" if relaxation_path.is_none() && !args.is_empty() => {
+                relaxation_path=Some(args.remove(0));
+            }
+            _=>return Err("unknown/duplicate option or missing --relaxation FILE".into()),
+        }
+    }
     let physical = match args.as_slice() {
         [] => [4e9, 900.0, 0.0003],
         [e, rho, h] => {
@@ -24,7 +35,7 @@ fn run() -> Result<(), String> {
             }
             values
         }
-        _ => return Err("usage: plate_aperture [--profiled] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]".into()),
+        _ => return Err("usage: plate_aperture [--profiled] [--relaxation FILE] [YOUNG_PA DENSITY_KG_M3 THICKNESS_M]".into()),
     };
     let section = PlateSection::isotropic(physical[0], 0.3, physical[2], physical[1]).map_err(|e| e.to_string())?;
     let mesh = PlateMesh::rectangle(0.025, 0.01, 6, 2);
@@ -38,7 +49,10 @@ fn run() -> Result<(), String> {
         assembly: AssemblyOptions { pretension: 0.0, support: EdgeSupport::Clamped },
         eigenvalue_window: (1.0, (core::f64::consts::TAU*450.0).powi(2)), mode_index: 0,
         eigensolver: SliceOptions::default(), max_nodes: 100, max_triangles: 100,
-        slit_edges, rest_opening_m: 0.0002, damping_ratio: 0.02,
+        slit_edges, rest_opening_m: 0.0002,
+        // Selecting a supplied material law replaces the illustrative viscous
+        // damping model; the library refuses to double-count those losses.
+        damping_ratio: if relaxation_path.is_some() {0.0} else {0.02},
         max_slit_mode_variation: 0.25, max_slope: 0.1,
     }, &CancelGate::new()).map_err(|e| e.to_string())?;
     eprintln!("authored single-mode plate; mass_kg={:.17e}; stiffness_n_m={:.17e}; pressure_area_m2={:.17e}; closing_pressure_pa={:.17e}; slit_width_m={:.17e}",
@@ -71,12 +85,17 @@ fn run() -> Result<(), String> {
             .and_then(|c| c.with_internal_loss(5.0)).map_err(|e| e.to_string())?;
         DynamicAperture::from_plate(plate,gas.density,z,dt,4096,initial,lay)
     }.map_err(|e| e.to_string())?;
+    let valve = if let Some(path)=relaxation_path {
+        let (s,initial)=relaxation_input::load(&path,valve.plate_reduction().unwrap().chart().mesh.tris.len())?;
+        eprintln!("supplied Maxwell spectrum selected; separate modal damping is zero");
+        valve.with_plate_relaxation(s,initial).map_err(|e|e.to_string())?
+    } else {valve};
     let mut model = ApertureTube::new(valve, tube).map_err(|e| e.to_string())?;
     eprintln!("requested_length_m={}; represented_length_m={}; pressure is internal, not an exterior microphone",
         tube.length_m, model.represented_length_m());
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    writeln!(out, "time_s,midpoint_bore_pressure_pa,opening_m,opening_velocity_m_s,tip_displacement_m,tip_velocity_m_s,max_slope,swept_flow_m3_s,jet_flow_m3_s,total_energy_j,upstream_work_j,loss_j,balance_residual_j,midpoint_open_area_m2,active_lay_points,max_lay_penetration_m")
+    writeln!(out, "time_s,midpoint_bore_pressure_pa,opening_m,opening_velocity_m_s,tip_displacement_m,tip_velocity_m_s,max_slope,swept_flow_m3_s,jet_flow_m3_s,total_energy_j,upstream_work_j,loss_j,balance_residual_j,midpoint_open_area_m2,active_lay_points,max_lay_penetration_m,material_energy_j,material_step_loss_j")
         .map_err(|e| e.to_string())?;
     for n in 0..4096 {
         // Fixed physical drive for every material substitution: no compliance-
@@ -88,12 +107,12 @@ fn run() -> Result<(), String> {
         let motion = plate.nodal_motion(tip, a.state.opening_m, a.state.opening_velocity_m_s).map_err(|e| e.to_string())?;
         let probe = model.aperture().plate_closure().map(|p| p.probe(a.state.opening_m)).transpose()
             .map_err(|e| e.to_string())?;
-        writeln!(out, "{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e}",
+        writeln!(out, "{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e},{:.17e},{:.17e}",
             a.time_s, a.bore_pressure_pa, a.state.opening_m, a.state.opening_velocity_m_s,
             motion.displacement_rotation[0], motion.velocity_rotation_rate[0], plate.max_slope_at(a.state.opening_m),
             a.swept_flow_m3_s, a.jet_flow_m3_s, frame.stored_energy_j, frame.upstream_work_j,
             frame.dissipated_energy_j, frame.balance_residual_j(), a.midpoint_opening_m*plate.width_m(),
-            probe.map_or(0,|p| p.active_lay_points),probe.map_or(0.0,|p| p.max_penetration_m)).map_err(|e| e.to_string())?;
+            probe.map_or(0,|p| p.active_lay_points),probe.map_or(0.0,|p| p.max_penetration_m), a.relaxation_energy_j, a.relaxation_loss_j).map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())
 }

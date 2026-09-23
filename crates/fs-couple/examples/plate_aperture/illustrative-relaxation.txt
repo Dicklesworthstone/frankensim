@@ -1,0 +1,11 @@
+# Illustrative authored isotropic Maxwell law, not measured cane or polymer data.
+frankensim-plate-relaxation-v1
+equilibrium_pa 4000000000
+poisson_ratio 0.3
+band_hz 0 1000
+max_dt_over_tau 0.1
+max_angular_step 0.1
+initial relaxed
+branches 2
+branch 2000000000 0.001
+branch 1000000000 0.01

@@ -12,6 +12,10 @@
 //! owners. A bounded iteration count is not an allocation-free or hard-real-
 //! time claim. Cancellation is observed between complete mechanical steps.
 
+/// Hereditary bending and accepted material history of the retained plate.
+pub mod relaxation;
+use relaxation::{ApertureRelaxation, MemoryTrial};
+
 use super::{BernoulliAperture, plate::{PlateApertureReduction, closure::{PlateClosure, PlateClosureSpec}}};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::reed_bore::{FastSolveStats, ReedSolverMode, reed_pressure_face, reed_structural};
@@ -98,6 +102,10 @@ pub struct ApertureFrame {
     /// Differential-pressure work on this junction [J]. This excludes any
     /// storage/loss in a downstream bore or an externally driven plate.
     pub pressure_work_j: f64,
+    /// Material arm storage [J], already included in stored_energy_j.
+    pub relaxation_energy_j: f64,
+    /// Material loss in this step [J], already included in dissipated_energy_j.
+    pub relaxation_loss_j: f64,
 }
 
 impl ApertureFrame {
@@ -137,6 +145,7 @@ pub struct DynamicAperture {
     // A physical reduction is retained, not flattened into unguarded scalars.
     plate: Option<Box<PlateApertureReduction>>,
     closure: Option<Box<PlateClosure>>,
+    relaxation: Option<ApertureRelaxation>,
     state: ApertureState,
     accepted_steps: u64,
 }
@@ -207,7 +216,7 @@ impl DynamicAperture {
             blowing_pressure_pa: 0.0,
             attack_s: 0.0,
         };
-        let model = Self { spec, reed, lay, contact_storage, plate: None, closure: None, state, accepted_steps: 0 };
+        let model = Self { spec, reed, lay, contact_storage, plate: None, closure: None, relaxation: None, state, accepted_steps: 0 };
         let (stiffness, damping) = reed_structural(reed);
         if !reed_pressure_face(reed).is_finite() || !stiffness.is_finite()
             || !damping.is_finite() || !model.energy_at(state).is_finite()
@@ -301,9 +310,11 @@ impl DynamicAperture {
     #[must_use]
     pub fn contact_law(&self) -> &Obstacle { &self.lay }
 
-    /// Current mechanical and contact storage [J].
+    /// Current mechanical, contact and retained material storage [J].
     #[must_use]
-    pub fn stored_energy_j(&self) -> f64 { self.energy_at(self.state) }
+    pub fn stored_energy_j(&self) -> f64 {
+        self.energy_at(self.state) + self.relaxation.as_ref().map_or(0.0, |m|m.stored_energy_j())
+    }
 
     fn energy_at(&self, state: ApertureState) -> f64 {
         let displacement = state.opening_m - self.reed.rest_opening_m;
@@ -332,14 +343,15 @@ impl DynamicAperture {
     /// Budget, invalid input, numerical solve or nonfinite observation. Every
     /// failure leaves the old state and accepted-step count unchanged.
     pub fn step(&mut self, drive: ApertureDrive) -> Result<ApertureFrame, AcousticRealizeError> {
-        let frame = self.preview_step(drive)?;
-        self.accept_frame(frame);
+        let trial = self.preview_step(drive)?;
+        let frame = trial.frame;
+        self.accept_frame(trial);
         Ok(frame)
     }
 
     // Sibling coupled runtimes may validate the other participant before
     // publication. Neither preview nor a failed outer observation changes state.
-    pub(super) fn preview_step(&self, drive: ApertureDrive) -> Result<ApertureFrame, AcousticRealizeError> {
+    pub(super) fn preview_step(&self, drive: ApertureDrive) -> Result<ApertureTrial, AcousticRealizeError> {
         if self.accepted_steps >= self.spec.max_steps {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture step budget exhausted" });
         }
@@ -350,11 +362,18 @@ impl DynamicAperture {
         }
         let old = self.state;
         let dt = self.spec.time_step_s;
-        let (outgoing, opening, velocity) = if self.closure.is_some() {
+        let material_force = |opening| {
+            self.relaxation.as_ref().map_or(Ok(0.0), |m|m.restoring_force(
+                old.opening_m-self.spec.aperture.rest_opening_m,
+                opening-self.spec.aperture.rest_opening_m,dt))
+        };
+        let has_memory=self.relaxation.as_ref().is_some_and(|m|!m.branches().is_empty());
+        let (outgoing, opening, velocity) = if self.closure.is_some() || has_memory {
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
-                |opening| self.flow_opening(opening))?
+                |opening| self.flow_opening(opening),
+                if has_memory {Some(&material_force)} else {None})?
         } else {
             crate::reed_bore::step_massive_reed(
                 self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
@@ -383,7 +402,12 @@ impl DynamicAperture {
             .and_then(|law| law.response(opening, vm))
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         let (_, damping) = reed_structural(self.reed);
-        let energy = self.energy_at(state);
+        let memory = self.relaxation.as_ref().map(|m|m.preview(
+            old.opening_m-self.spec.aperture.rest_opening_m,
+            opening-self.spec.aperture.rest_opening_m,dt)).transpose()?;
+        let relaxation_energy_j=memory.as_ref().map_or(0.0,|m|m.energy);
+        let relaxation_loss_j=memory.as_ref().map_or(0.0,|m|m.loss);
+        let energy = self.energy_at(state)+relaxation_energy_j;
         let frame = ApertureFrame {
             step: self.accepted_steps + 1,
             time_s: (self.accepted_steps + 1) as f64 * dt,
@@ -396,9 +420,10 @@ impl DynamicAperture {
             bore_flow_m3_s: wave,
             flow_residual_m3_s: jet + swept + drive.body_flow_m3_s - wave,
             stored_energy_j: energy,
-            storage_change_j: energy - self.energy_at(old),
-            dissipated_energy_j: dt * (dp * jet + damping * vm * vm + contact.dissipated_power),
+            storage_change_j: energy - self.stored_energy_j(),
+            dissipated_energy_j: dt * (dp * jet + damping * vm * vm + contact.dissipated_power) + relaxation_loss_j,
             pressure_work_j: dt * dp * (wave - drive.body_flow_m3_s),
+            relaxation_energy_j, relaxation_loss_j,
         };
         if ![frame.time_s, frame.bore_pressure_pa, frame.jet_flow_m3_s,
             frame.swept_flow_m3_s, frame.bore_flow_m3_s, frame.flow_residual_m3_s,
@@ -407,13 +432,14 @@ impl DynamicAperture {
         {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture observation left the finite set" });
         }
-        Ok(frame)
+        Ok(ApertureTrial {frame,memory})
     }
 
     // Only the parent module's coupled runtimes can publish a checked frame.
-    pub(super) fn accept_frame(&mut self, frame: ApertureFrame) {
-        self.state = frame.state;
-        self.accepted_steps = frame.step;
+    pub(super) fn accept_frame(&mut self, trial: ApertureTrial) {
+        if let (Some(memory),Some(next))=(&mut self.relaxation,trial.memory) {memory.accept(next);}
+        self.state = trial.frame.state;
+        self.accepted_steps = trial.frame.step;
     }
 
     /// Step a caller-sized block with sample-boundary cancellation and resume.
@@ -445,4 +471,11 @@ impl DynamicAperture {
         }
         Ok(ApertureProgress { completed: inputs.len(), terminal: ApertureTerminal::Complete })
     }
+}
+
+// Internal candidate owns every memory value until the coupled system accepts.
+// Public scalar frames stay Copy; no fallible memory update follows wave commit.
+pub(super) struct ApertureTrial {
+    pub(super) frame: ApertureFrame,
+    memory: Option<MemoryTrial>,
 }
