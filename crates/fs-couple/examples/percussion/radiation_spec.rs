@@ -130,4 +130,5 @@ pub fn option(args: &mut Vec<String>) -> Result<Option<Spec>, Error> {
 }
 
 #[cfg(test)]
+#[path = "radiation_spec/tests.rs"]
 mod tests;

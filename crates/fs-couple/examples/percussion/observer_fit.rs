@@ -99,4 +99,5 @@ fn audit(filter: &DiscreteStateSpace, omega: &[f64], values: &[C64], scale: f64)
 }
 
 #[cfg(test)]
+#[path = "observer_fit/tests.rs"]
 mod tests;
