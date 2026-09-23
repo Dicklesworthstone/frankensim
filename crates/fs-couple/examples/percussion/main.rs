@@ -26,6 +26,8 @@ mod vented;
 mod mechanics;
 mod playing;
 mod specimen;
+mod shell_prepare;
+mod hihat;
 mod drum_spec;
 mod sticks;
 mod muffling;
@@ -87,26 +89,8 @@ fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,suppli
     muffling::admit_command(mufflers,"splash")?;
     if let Some(spec)=mute {spec.admit_command("splash")?;}
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
-    let shell=specimen.build()?;
-    let model=shell.assemble(&[],ShellSupport::Free)?;
-    let pi=std::f64::consts::PI;
-    let [lower,upper]=specimen.band_hz;
-    if !dt_s.is_finite() || dt_s<=0.0 || 2.0*pi*upper*dt_s>=0.9*pi {
-        return Err("supplied shell frequency window exceeds the mechanical Nyquist guard".into());
-    }
-    let report=modes_shell(&model,((2.0*pi*lower).powi(2),(2.0*pi*upper).powi(2)),&SliceOptions::default())?;
-    // Keep a true vertical free-translation coordinate for felt mounting.
-    // Other rigid rotations/translations are omitted in this bounded example;
-    // this is NOT a fully rocking 6-DOF cymbal stand model.
-    let mut phi=vec![0.0;model.free];
-    for node in 0..shell.mesh.nodes.len() {if let Some(i)=model.dof_map[6*node+2] {phi[i]=1.0/shell.mass_kg.sqrt();}}
-    let mut defect=vec![0.0;model.free];model.k.spmv(&phi,&mut defect);
-    let residual=defect.iter().enumerate().map(|(i,r)|r*r/model.m.get(i,i)).sum::<f64>().sqrt();
-    let mut modes=vec![ModePair{lambda:0.0,phi,residual,interval:(-residual,residual)}];
-    modes.extend(report.modes);
-    if modes.len()>32 {return Err("splash retains too many modes for this declared reference; narrow the explicit window or increase the host budget".into());}
-    let reduction=ShellReduction::new(&shell.mesh,&shell.sections,&model,&modes,
-        ReductionBudget{max_modes:32,max_facet_modes:20000,relative_tolerance:1e-5})?;
+    let (shell,reduction)=shell_prepare::prepare(&specimen,dt_s)?;
+    let pi=std::f64::consts::PI;let [lower,upper]=specimen.band_hz;
     let acoustics=if audio {
         let surface=reduction.radiation_surface(&shell.nodal_thickness_m,
             fs_plate::shell::reduction::radiation::RadiationSurfaceBudget{max_panels:2048,max_panel_modes:65536})?;
@@ -127,7 +111,7 @@ fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,suppli
     let port=reduction.point_port(triangle,barycentric,[0.0,0.0,-1.0])?;
     // Preserve the original stick/shell prefix. A second striker follows the
     // SAME shell modes, before the time owner's private Kelvin coordinates.
-    let second_coordinate=1+modes.len();let structural=second_coordinate+usize::from(second.is_some());
+    let second_coordinate=1+reduction.mode_count();let structural=second_coordinate+usize::from(second.is_some());
     let attachment=mute.map(|spec|spec.shell(&reduction,&shell.mesh.nodes,&shell.mesh.tris,structural)).transpose()?;
     let n=structural+attachment.as_ref().map_or(0,|a|a.bodies.len());
     let second=second.map(|stroke|sticks::build_shell(stroke,&reduction,&shell.mesh.nodes,
@@ -153,7 +137,7 @@ fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,suppli
         }
     }
     eprintln!("shell input={}, mass_kg={},modes={},facets={},max_edge_m={},band_hz={lower}..{upper}; stand felt, stick and contact remain estimated; no calibration or full-band claim",
-        if imported {specimen.input_label()}else{"estimated splash"},shell.mass_kg,modes.len(),shell.mesh.tris.len(),shell.max_edge_m);
+        if imported {specimen.input_label()}else{"estimated splash"},shell.mass_kg,reduction.mode_count(),shell.mesh.tris.len(),shell.max_edge_m);
     eprintln!("modal frequencies_hz={:?}",reduction.omegas().iter().map(|w|w/(2.0*pi)).collect::<Vec<_>>());
     let mut dampers=muffling::shell_ports(mufflers,&reduction,&shell.mesh.nodes,&shell.mesh.tris)?;
     for damper in &mut dampers {damper.weights.resize(n,0.0);}
@@ -373,6 +357,7 @@ fn cavity_pressure(volume:&VolumeSpring,state:&[f64])->f64 {
 }
 fn run()->Result<(),Error> {
     let mut raw_args:Vec<String>=std::env::args().skip(1).collect();
+    if hihat::is_command(raw_args.first().map(String::as_str)) {return hihat::run(raw_args);}
     if specimen::export_command(&raw_args)? {return Ok(());}
     let head_stretching=nonlinear_snare::option(&mut raw_args)?;
     let mallet_paths=mallets::options(&mut raw_args)?;

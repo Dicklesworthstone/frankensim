@@ -34,6 +34,8 @@ const MAX_RMS_ERROR: f64 = 0.05;
 /// Explicit prescribed-neck-flow source on the same closed exterior mesh.
 #[path = "aperture.rs"]
 pub mod aperture;
+#[path="paired_radiation.rs"]
+mod paired_radiation;
 
 /// Circular mouths on the unrolled cylinder, including across facet seams.
 #[path = "curved_aperture.rs"]
