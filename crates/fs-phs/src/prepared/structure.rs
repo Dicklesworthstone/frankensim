@@ -6,6 +6,9 @@
 use crate::{PhsError, PortHamiltonian};
 use super::dimensions;
 
+#[path = "port_load.rs"]
+mod port_load;
+
 #[derive(Debug)]
 pub(super) struct FlowPattern {
     n: usize,
