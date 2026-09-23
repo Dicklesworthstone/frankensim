@@ -130,10 +130,14 @@ pub fn render(piano:&mut Instrument,mut score:Performance,frames:usize,baked:&Ba
     }
     let (wav,clips)=encode_pcm16_wav_interleaved(&pressure,RATE,channels as u16,full_scale_pa).map_err(|e|e.to_string())?;
     let peak_pa=pressure.iter().fold(0.0_f64,|m,v|m.max(v.abs()));
-    let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; stored {} J; loss {} J; mechanical closure {} J. Finite-body one-way acoustics: no radiation backreaction, flexible lid/cabinet, room or accuracy outside the sampled band.",
+    let coupling=if piano.has_radiation() {
+        "Passive acoustic feedback, second-order substep splitting"
+    } else {"One-way acoustics, no radiation backreaction"};
+    let report=format!("{frames} frames, {channels} receivers, {RATE} Hz, peak {peak_pa:e} Pa; {clips} clips at {full_scale_pa} Pa full scale, no normalization.\nHeld-out transfer max={}, worst modal RMS={}; flight lower bounds {:?} s, decimator delay {} frames.\nInput {} J; combined stored {} J; total loss {} J; combined closure {} J. Acoustic storage {} J and acoustic loss {} J are included once in those totals. {coupling}. No flexible lid/cabinet, room or accuracy outside the sampled band.",
         baked.maximum_error,baked.worst_rms_error,baked.delays_s,decimator.delay_output_frames(),
         piano.accounting.input_work_j,piano.energy_j(),piano.accounting.dissipated_j(),
-        piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j());
+        piano.accounting.input_work_j-piano.energy_j()-piano.accounting.dissipated_j(),
+        piano.radiation_energy_j(),piano.accounting.radiation_loss_j);
     Ok(Rendered {wav,report,peak_pa})
 }
 

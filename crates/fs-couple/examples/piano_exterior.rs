@@ -20,12 +20,14 @@
 #[path="grand_piano/exterior_audio.rs"] mod exterior_audio;
 #[path="grand_piano/bridge_response.rs"] mod bridge_response;
 #[path="grand_piano/exterior_loading.rs"] mod exterior_loading;
+#[path="grand_piano/radiation_fit.rs"] mod radiation_fit;
 use exterior_geometry::{Boundary,Specification,RATE};
 use std::{fmt::Write as _,io::{Read,Write}};
 
 const USAGE:&str="piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe DRIVE_KEY OUTPUT.csv
 piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
+piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
 and edges of a finite soundboard. Label every part as moving or rigid in the
@@ -40,7 +42,11 @@ admittance solves a unit peak bridge-force experiment with BEM pressure reacting
 on ALL retained string/board coordinates. It writes all bridge mobilities,
 receiver Pa/N and wood/string/radiation power balance, alongside an explicit
 one-way comparison. This harmonic image excludes hammer/key-damper contacts.
-It does NOT add radiation feedback to the time-domain render command.
+render-loaded fits a passive full-matrix BEM load and couples acoustic storage
+into every nonlinear hammer/string/board substep. Acoustic loss is separate from
+wood and felt loss. It requires 33..257 odd frequency samples and at most 32
+complete board modes; failed passive fits REFUSE, never fall back to one-way.
+The ordinary render command remains one-way for a controlled comparison.
 response writes complex pressure per mass-normalized modal acceleration in
 exp(-i omega t) convention. render fits causal fixed-receiver transfers with
 held-out checks, then observes EVERY mechanics substep before PCM encoding.
@@ -50,7 +56,8 @@ is 48 kHz with four mechanics substeps and at most 24 partials per string.
 Transfer accuracy is checked only inside the declared sampled band; an attack
 contains out-of-band energy, so this is NOT a full-band realism certificate.
 Outputs must be fresh paths; render duration must be 0.05..60 seconds.
-See grand_piano/EXTERIOR_ACOUSTICS.md for SI rows and approximation boundaries.";
+See grand_piano/EXTERIOR_ACOUSTICS.md for SI rows and RADIATION_FEEDBACK.md
+for the passive-fit, second-order splitting and approximation boundaries.";
 
 fn read_bounded(path:&str,cap:usize)->Result<String,String> {
     let file=std::fs::File::open(path).map_err(|e|format!("{path}: {e}"))?;
@@ -110,6 +117,21 @@ fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specifi
     Ok(format!("# structure: {}\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
         board.provenance,board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
 }
+/// Admit both acoustic realizations before attaching the load or dispatching
+/// any score event. Loaded and one-way output share the original PCM path.
+fn bake(scene:&mut Scene,loaded:bool)->Result<(exterior_audio::Baked,exterior_geometry::Samples,String),String> {
+    let (load,samples)=if loaded {
+        let (fit,samples)=radiation_fit::prepare(&scene.boundary,&scene.spec,scene.piano.bank.rate)?;
+        (Some(fit),samples)
+    } else {(None,scene.boundary.sample(&scene.spec)?)};
+    let baked=exterior_audio::Baked::from_samples(&samples,scene.spec.fit_order)?;
+    let report=if let Some(fit)=load {
+        scene.piano.configure_radiation(&fit.model)?;
+        format!("Passive load: {} acoustic coordinates; complex matrix peak/RMS={:.6}/{:.6}; resistance peak/RMS={:.6}/{:.6}. These sampled bounds do not certify time-step or spatial convergence.",
+            fit.model.poles.len(),fit.peak_error,fit.rms_error,fit.resistance_peak_error,fit.resistance_rms_error)
+    } else {String::from("One-way reference: no acoustic reaction on the mechanics.")};
+    Ok((baked,samples,report))
+}
 fn run(args:&[String])->Result<(),String> {
     match args {
         []=>{println!("{USAGE}");Ok(())},
@@ -128,14 +150,17 @@ fn run(args:&[String])->Result<(),String> {
             println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
             Ok(())
         }
-        [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render"=>{
+        [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render" || command=="render-loaded"=>{
             let frames=match command.as_str() {
                 "response" if tail.is_empty()=>None,
-                "render" if (1..=2).contains(&tail.len())=>Some(mesh_render::frames(&tail[0])?),
+                "render"|"render-loaded" if (1..=2).contains(&tail.len())=>Some(mesh_render::frames(&tail[0])?),
                 _=>return Err(USAGE.into()),
             };
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
+            if command=="render-loaded" && spec.frequencies<33 {
+                return Err("render-loaded requires at least 33 odd-grid frequencies".into());
+            }
             let courses=scale(strings)?;let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
             // Score admission precedes structural/BEM preparation and all writes.
             let score=frames.map(|n|match tail.get(1) {
@@ -149,11 +174,10 @@ fn run(args:&[String])->Result<(),String> {
             let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
             let mut scene=prepare(&geometry,courses,&obj,spec)?;
             if let (Some(n),Some(score))=(frames,score) {
-                let samples=scene.boundary.sample(&scene.spec)?;
-                let baked=exterior_audio::Baked::from_samples(&samples,scene.spec.fit_order)?;
+                let (baked,samples,load_report)=bake(&mut scene,command=="render-loaded")?;
                 let audio=exterior_audio::render(&mut scene.piano,score,n,&baked,scene.spec.full_scale_pa)?;
                 publish(output,&audio.wav)?;
-                println!("{}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
+                println!("{}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
                     audio.report,scene.spec.source,scene.board.provenance,scene.spec.band_hz,
                     scene.boundary.surface.areas().len(),scene.boundary.components,samples.minimum_ppw,samples.maximum_condition_lower_bound);
             } else {
@@ -202,7 +226,7 @@ mod tests {
         let courses=steinway_scale::courses().unwrap().into_iter().filter(|c|c.midi==69).collect();
         (board,courses,obj,spec)
     }
-    fn small_source_scene()->Scene {
+    pub(super) fn small_source_scene()->Scene {
         let (board,courses,obj,spec)=small_source_inputs();
         prepare(&board,courses,&obj,spec).unwrap()
     }
@@ -245,3 +269,7 @@ mod tests {
         assert!(admittance(&board,&courses,&obj,&spec,60).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="grand_piano/radiation_render_tests.rs"]
+mod radiation_render_tests;

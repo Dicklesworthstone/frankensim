@@ -15,7 +15,7 @@ use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
     ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use fs_math::{c64::C64, det};
 
-pub const MAX_AIR_STATES: usize = 512;
+pub const MAX_AIR_STATES: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct Pole {
