@@ -21,6 +21,7 @@
 #[path="grand_piano/bridge_response.rs"] mod bridge_response;
 #[path="grand_piano/exterior_loading.rs"] mod exterior_loading;
 #[path="grand_piano/radiation_fit.rs"] mod radiation_fit;
+#[path="grand_piano/exterior_playback.rs"] mod playback;
 use exterior_geometry::{Boundary,Specification,RATE};
 use std::{fmt::Write as _,io::{Read,Write}};
 
@@ -28,6 +29,12 @@ const USAGE:&str="piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinw
 piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
+    [--modes 1..512] [--substeps 1..16]
+    [--hammers materials.fsh] [--hammer-footprints faces.fshp]
+    [--dampers estimated|pads.fspd]
+These playback options apply to both render and render-loaded.
+response and admittance also accept --modes/--substeps after the output path,
+so harmonic comparisons can use the SAME retained string/board system.
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
 and edges of a finite soundboard. Label every part as moving or rigid in the
@@ -52,7 +59,15 @@ exp(-i omega t) convention. render fits causal fixed-receiver transfers with
 held-out checks, then observes EVERY mechanics substep before PCM encoding.
 It uses one score and physical clock for both receivers, no channel normalization.
 Default gesture: A4 at 2 m/s; optional MIDI uses the existing importer. Output
-is 48 kHz with four mechanics substeps and at most 24 partials per string.
+is 48 kHz. Defaults retain four mechanics substeps and at most 24 partials per
+string; --modes and --substeps expose the existing larger physical budgets.
+They do not retune strings, widen the admitted output band, or certify accuracy.
+--hammers supplies complete per-key WoolFelt/Prony cards. --hammer-footprints
+selects point or finite longitudinal contact sites for every key. --dampers
+selects supplied finite pads or explicit estimates. All use the SAME nonlinear
+engine, actual loaded bridge basis and radiation feedback, not output filters.
+Invalid or missing supplied cards refuse before any structural/BEM preparation.
+See grand_piano/EXTERIOR_PLAYBACK.md for the physical controls.
 Transfer accuracy is checked only inside the declared sampled band; an attack
 contains out-of-band energy, so this is NOT a full-band realism certificate.
 Outputs must be fresh paths; render duration must be 0.05..60 seconds.
@@ -81,13 +96,17 @@ struct Scene {
     spec:Specification,
 }
 fn prepare(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spec:Specification)->Result<Scene,String> {
+    let controls=playback::Controls::from_texts(&courses,None,None,None)?;
+    prepare_controlled(board_text,courses,obj,spec,&playback::Options::default(),controls)
+}
+fn prepare_controlled(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spec:Specification,
+    options:&playback::Options,controls:playback::Controls)->Result<Scene,String> {
+    options.validate()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let board=if crowned_board::is_crowned(board_text) {
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
     } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
-    let materials=courses.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?;
-    let piano=engine::Instrument::new_with_course_shanks(courses,&board.modes,RATE,4,24,true,
-        materials,engine::ShankGeometry::published())?;
+    let piano=controls.instrument(courses,&board.modes,options)?;
     let boundary=Boundary::from_obj(obj,&spec,board.motion.as_ref().ok_or("missing full-vector structural motion")?)?
         .loaded(&piano.bank)?;
     Ok(Scene {piano,board,boundary,spec})
@@ -105,12 +124,18 @@ fn response(scene:&Scene)->Result<String,String> {
     Ok(csv)
 }
 fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,drive:u8)->Result<String,String> {
+    admittance_controlled(board_text,courses,obj,spec,drive,&playback::Options::default())
+}
+fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,
+    drive:u8,options:&playback::Options)->Result<String,String> {
+    options.validate()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
     let board=if crowned_board::is_crowned(board_text) {
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
     } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
-    let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*4,0.45*f64::from(RATE),24,true)?;
+    let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
+        0.45*f64::from(RATE),options.modes,true)?;
     let boundary=Boundary::from_obj(obj,spec,board.motion.as_ref().ok_or("missing harmonic surface motion")?)?
         .loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
@@ -136,7 +161,8 @@ fn run(args:&[String])->Result<(),String> {
     match args {
         []=>{println!("{USAGE}");Ok(())},
         [help] if help=="--help" || help=="-h"=>{println!("{USAGE}");Ok(())},
-        [command,board,strings,obj,spec,drive,output] if command=="admittance"=>{
+        [command,board,strings,obj,spec,drive,output,tail @ ..] if command=="admittance"=>{
+            let options=playback::Options::harmonic(tail)?;
             let drive:u8=drive.parse().map_err(|_|"admittance requires a MIDI bridge key in 21..108")?;
             if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
@@ -145,15 +171,16 @@ fn run(args:&[String])->Result<(),String> {
             if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
             let board=read_bounded(board,8*1024*1024)?;
             let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
-            let csv=admittance(&board,&courses,&obj,&spec,drive)?;
+            let csv=admittance_controlled(&board,&courses,&obj,&spec,drive,&options)?;
             publish(output,csv.as_bytes())?;
             println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
             Ok(())
         }
         [command,board,strings,obj,spec,output,tail @ ..] if command=="response" || command=="render" || command=="render-loaded"=>{
-            let frames=match command.as_str() {
-                "response" if tail.is_empty()=>None,
-                "render"|"render-loaded" if (1..=2).contains(&tail.len())=>Some(mesh_render::frames(&tail[0])?),
+            let (frames,options)=match command.as_str() {
+                "response"=>(None,playback::Options::harmonic(tail)?),
+                "render"|"render-loaded" if !tail.is_empty()=>
+                    (Some(mesh_render::frames(&tail[0])?),playback::Options::parse(&tail[1..])?),
                 _=>return Err(USAGE.into()),
             };
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
@@ -163,21 +190,23 @@ fn run(args:&[String])->Result<(),String> {
             }
             let courses=scale(strings)?;let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
             // Score admission precedes structural/BEM preparation and all writes.
-            let score=frames.map(|n|match tail.get(1) {
+            let score=frames.map(|n|match options.midi.as_deref() {
                 Some(path)=>{
                     let midi=performance::midi::load(path,&keys,RATE,n as u64,performance::midi::Mapping::default())?;
                     performance::Performance::from_events(midi.events,&keys,n as u64)
                 }
                 None=>performance::Performance::demonstration(&keys,RATE,n as u64,Some(69),Some(2.)),
             }).transpose()?;
+            let controls=playback::Controls::load(&options,&courses)?;
             let geometry=read_bounded(board,8*1024*1024)?;
             let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
-            let mut scene=prepare(&geometry,courses,&obj,spec)?;
+            let mut scene=prepare_controlled(&geometry,courses,&obj,spec,&options,controls)?;
             if let (Some(n),Some(score))=(frames,score) {
                 let (baked,samples,load_report)=bake(&mut scene,command=="render-loaded")?;
                 let audio=exterior_audio::render(&mut scene.piano,score,n,&baked,scene.spec.full_scale_pa)?;
                 publish(output,&audio.wav)?;
-                println!("{}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
+                let physical_report=options.report(&scene.piano);
+                println!("{}\n{physical_report}\n{load_report}\nAcoustic source: {}. Structural source: {}.\nBand {:?} Hz; {} panels, {} closed components, minimum panels/wavelength={}, conditioning lower bound={}. Written {output}.",
                     audio.report,scene.spec.source,scene.board.provenance,scene.spec.band_hz,
                     scene.boundary.surface.areas().len(),scene.boundary.components,samples.minimum_ppw,samples.maximum_condition_lower_bound);
             } else {
@@ -208,7 +237,7 @@ mod tests {
             assert!(run(&args).is_err());
         }
     }
-    fn small_source_inputs()->(String,Vec<geometry::Course>,String,Specification) {
+    pub(super) fn small_source_inputs()->(String,Vec<geometry::Course>,String,Specification) {
         let mut board=String::from("frankensim-board-geometry-si-v1\nsource,estimated,soft-panel acoustic integration NOT Steinway geometry\nsupport,clamped\npretension,0\ndamping,0.01\n");
         for (i,p) in [[0.,0.],[0.1,0.],[0.1,0.1],[0.,0.1],[0.05,0.05]].iter().enumerate() {
             writeln!(board,"node,{i},{},{}",p[0],p[1]).unwrap();
@@ -235,8 +264,9 @@ mod tests {
         let mut scene=small_source_scene();let mut manual=small_source_scene();
         let samples=scene.boundary.sample(&scene.spec).unwrap();
         let baked=exterior_audio::Baked::from_samples(&samples,scene.spec.fit_order).unwrap();
-        let score=||performance::Performance::read("sample,event,key,value\n0,note_on,69,0.1\n1200,note_off,69,0\n",&[69],2400).unwrap();
+        let score=||performance::Performance::read("sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
         let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+        assert!(scene.piano.accounting.felt_loss_j>0.,"the source hammer must actually contact the string");
         assert!(audio.peak_pa>1e-14);assert_eq!(&audio.wav[..4],b"RIFF");
         assert_eq!(u16::from_le_bytes([audio.wav[22],audio.wav[23]]),2);
         // No separately advanced left/right piano or observation backreaction.

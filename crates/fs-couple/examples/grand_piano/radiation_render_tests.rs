@@ -20,8 +20,9 @@ fn loaded_bem_playback_changes_mechanics_and_preserves_one_stereo_clock() {
         }
     }
     let score=||performance::Performance::read(
-        "sample,event,key,value\n0,note_on,69,0.1\n1200,note_off,69,0\n",&[69],2400).unwrap();
+        "sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
     let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+    assert!(scene.piano.accounting.felt_loss_j>0.,"the source hammer must actually strike");
     assert!(audio.peak_pa>1e-14);assert!(audio.report.contains("Passive acoustic feedback"));
     assert!(audio.report.contains("Acoustic storage"));assert!(!audio.report.contains("no radiation backreaction"));
     assert_eq!(u16::from_le_bytes([audio.wav[22],audio.wav[23]]),2);
@@ -51,4 +52,33 @@ fn failed_loaded_admission_never_attaches_a_substitute_or_advances_the_piano() {
         assert!(run(&args).is_err());
     }
     assert!(USAGE.contains("render-loaded"));
+}
+
+#[test]
+fn full_physical_controls_reach_loaded_stereo_without_a_second_mechanical_clock() {
+    let options=playback::Options {substeps:8,modes:48,..playback::Options::default()};
+    let make=|| {
+        let (board,courses,obj,spec)=tests::small_source_inputs();
+        let materials="frankensim-hammer-materials-v1\nfelt,69,400000,0.2,2.5,3.2,0.25,0.8,2500000\nbranch,69,2000000,0.0002\n";
+        let faces="frankensim-hammer-footprints-v1\nspan,69,0.008,2\n";
+        let controls=playback::Controls::from_texts(&courses,Some(materials),Some(faces),Some("estimated")).unwrap();
+        prepare_controlled(&board,courses,&obj,spec,&options,controls).unwrap()
+    };
+    let mut scene=make();let mut manual=make();
+    assert_eq!(scene.piano.bank.rate,RATE*8);
+    assert_eq!(scene.piano.bank.contact_strings.len(),6); // two sites on three actual strings
+    assert!(scene.piano.damper_resolution().is_some());
+    let (baked,_,_)=bake(&mut scene,true).unwrap();bake(&mut manual,true).unwrap();
+    let score=||performance::Performance::read(
+        "sample,event,key,value\n0,note_on,69,0.5\n1200,note_off,69,0\n",&[69],2400).unwrap();
+    let audio=exterior_audio::render(&mut scene.piano,score(),2400,&baked,2.).unwrap();
+    let mut events=score();
+    for n in 0..2400 {events.dispatch(n,&mut manual.piano).unwrap();manual.piano.step().unwrap();}
+    assert_eq!(scene.piano.bank.q,manual.piano.bank.q);assert_eq!(scene.piano.bank.v,manual.piano.bank.v);
+    assert_eq!(scene.piano.radiation_energy_j(),manual.piano.radiation_energy_j());
+    assert!(scene.piano.accounting.felt_loss_j>0.);assert!(scene.piano.accounting.damper_loss_j>0.);
+    assert!(scene.piano.accounting.radiation_loss_j>0.);assert!(audio.peak_pa>1e-14);
+    assert!((scene.piano.accounting.input_work_j-scene.piano.energy_j()-scene.piano.accounting.dissipated_j()).abs()<1e-7);
+    let data=audio.wav.windows(4).position(|w|w==b"data").unwrap()+8;
+    for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
 }
