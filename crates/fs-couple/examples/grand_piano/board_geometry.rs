@@ -334,7 +334,7 @@ impl BoardGeometry {
             let geometry=fs_plate::ShellMesh::new(mesh.nodes.iter().map(|&(x,y)|[x,y,0.]).collect(),mesh.tris.clone())
                 .map_err(|e|e.to_string())?;
             let shapes=report.modes.iter().map(|pair| (0..mesh.nodes.len()).map(|node| {
-                let at=|c|model.dof_map[3*node+c].map_or(0.,|i|pair.phi[i]);
+                let at=|c:usize|model.dof_map[3*node+c].map_or(0.,|i|pair.phi[i]);
                 // DKT coordinates are slopes, NOT physical axial rotations.
                 [0.,0.,at(0),at(2),-at(1),0.]
             }).collect()).collect();
