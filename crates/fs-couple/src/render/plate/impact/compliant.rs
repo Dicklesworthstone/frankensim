@@ -9,6 +9,9 @@
 use super::{ImpactBody, ImpactError, MAX_IMPACT_MODES, felt::{FeltPad, KelvinBranch}, invalid};
 use fs_material::fiber::WoolFelt;
 
+/// Finite-area felt excitation at a preallocated striker coordinate.
+pub mod striker;
+
 /// A bounded footprint quadrature, not a continuum convergence certificate.
 pub const MAX_PAD_SITES: usize = 4;
 /// One moving pad or two opposed jaws in a single shared mechanical solve.
