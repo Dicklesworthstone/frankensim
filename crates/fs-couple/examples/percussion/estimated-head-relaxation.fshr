@@ -1,0 +1,10 @@
+frankensim-head-relaxation-v1
+# Illustrative positive relaxation spectrum, NOT identified polyester data.
+# Requires the same equilibrium E and zero separate head damping in the drum file.
+initial,relaxed
+band_hz,20,2000
+head,batter,4000000000
+branch,batter,1000000000,0.001
+branch,batter,200000000,0.01
+head,resonant,4000000000
+branch,resonant,600000000,0.002

@@ -20,6 +20,7 @@ mod acoustics;
 mod cavity;
 mod snare;
 mod nonlinear_snare;
+mod head_relaxation;
 mod vented;
 mod mechanics;
 mod playing;
@@ -204,6 +205,11 @@ fn drum_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:O
 }
 #[allow(clippy::too_many_arguments)]
 fn drum_with_radiation(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler],drag_per_s:f64,mute:Option<&compliant_mute::Spec>,prescribed_vent:bool)->Result<Experiment,Error> {
+    drum_with_material(steps,dt_s,audio,prepared,snares,stretching,stroke,distributed_cavity,neck,
+        supplied,second,mufflers,drag_per_s,mute,prescribed_vent,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn drum_with_material(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<snare::SnareSet>,stretching:bool,stroke:Stroke,distributed_cavity:bool,neck:Option<cavity::NeckOptions>,supplied:Option<drum_spec::Spec>,second:Option<Stroke>,mufflers:&[muffling::Muffler],drag_per_s:f64,mute:Option<&compliant_mute::Spec>,prescribed_vent:bool,relaxation:Option<&head_relaxation::Spec>)->Result<Experiment,Error> {
     if prescribed_vent && (!audio || !distributed_cavity || neck.is_none()) {
         return Err("prescribed vent radiation requires an audio observer and a distributed-cavity neck".into());
     }
@@ -216,12 +222,13 @@ fn drum_with_radiation(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option
     if drag_per_s!=0.0 && !distributed_cavity {return Err("acoustic drag requires distributed cavity inertia".into());}
     if neck.is_some() && (!distributed_cavity || audio && !prescribed_vent) {return Err("vented audio requires explicit --prescribed-vent-radiation; fully coupled radiation loading is not implemented".into());}
     nonlinear_snare::admit_image(prepared,snares.is_some(),
-        stretching || snares.is_some_and(|s|s.stretching.is_some() || s.carrier.is_some()))?;
+        stretching || relaxation.is_some() || snares.is_some_and(|s|s.stretching.is_some() || s.carrier.is_some()))?;
     let extra_modes=match snares {Some(spec)=>spec.mode_count()?,None=>0};
     // One declaration supplies BOTH head pencils, the air volume and the
     // closed exterior. No independently retuned oscillator or stock drum mesh.
     let imported=supplied.is_some();let spec=supplied.unwrap_or_else(drum_spec::Spec::reference);
     spec.admit_clock(dt_s,audio)?;
+    if let Some(material)=relaxation {material.admit(&spec)?;}
     if let Some(wires)=snares {spec.admit_snare(wires)?;}
     let radius=spec.radius_m;let depth=spec.depth_m;let pi=std::f64::consts::PI;
     let (films,mode_sets)=spec.prepare(dt_s,audio)?;
@@ -321,6 +328,11 @@ fn drum_with_radiation(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option
     }else{
         Mechanics::Reference(ImpactSystem::new_with_dampers(bodies,contacts,pads,vec![volume.clone()],dampers,config(steps,dt_s))?)
     };
+    let system=match (system,relaxation) {
+        (Mechanics::Reference(system),Some(material))=>Mechanics::Reference(material.attach(system,&films,&mode_sets,dt_s)?),
+        (system,None)=>system,
+        (_,Some(_))=>return Err("material memory cannot be discarded by the linear-only modal image".into()),
+    };
     // Acoustic inertia never receives an external strike or a direct solid-radiation projection.
     let count=air.as_ref().map_or(n,|a|a.coupling.total_modes());
     top.resize(count,0.0);bottom.resize(count,0.0);
@@ -342,6 +354,7 @@ fn run()->Result<(),Error> {
     let mut raw_args:Vec<String>=std::env::args().skip(1).collect();
     if specimen::export_command(&raw_args)? {return Ok(());}
     let head_stretching=nonlinear_snare::option(&mut raw_args)?;
+    let head_relaxation_path=head_relaxation::option(&mut raw_args)?;
     let prescribed_vent=acoustics::aperture::option(&mut raw_args)?;
     let right_microphone=acoustics::stereo::option(&mut raw_args)?;
     let analytic_newton=mechanics::analytic_option(&mut raw_args)?;
@@ -365,13 +378,16 @@ fn run()->Result<(),Error> {
     }
     let driven=playing_force.is_some() || second_force.is_some() || compliant_mute.is_some() || carrier_path.is_some();
     let (args,stroke)=playing::parse(raw_args)?;
-    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --head-stretching enables both nonlinear heads on snare[-off][-wav|-mic] without dropping wires or loss (see NONLINEAR_SNARE.md); --snare-spec wires.fsn supplies bank geometry, tension, damping, contact and optional wire stretching (see SNARE_SPEC.md); --snare-carrier input.fsc adds force-driven moving supports without resetting the wires (see SNARE_CARRIER.md); --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --analytic-newton selects its analytic storage tangents (see ANALYTIC.md); --impact-substeps DEPTH ATTEMPTS adds bounded hard-impact recovery without changing the output clock (see SUBSTEPS.md); --cavity-modes adds distributed enclosed air to all drum/snare commands; --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md); --microphone-right X,Y,Z adds a physical stereo receiver to -mic commands (see STEREO.md); --compliant-mute file.fsm adds moving felt-pad squeeze/retract mechanics (see COMPLIANT_MUTE.md); --prescribed-vent-radiation adds explicit one-way neck-flow BEM radiation to a vented drum/snare audio command (see VENT_RADIATION.md); --shell-mesh input.fss supplies an explicit 3D shell and thickness/material fields; export-shell-mesh OUTPUT.fss [INPUT.profile] exports a profile before modal preparation (see SHELL_MESH.md)".into());}
+    if args.is_empty() || args.len()>6 {return Err("usage: percussion splash|drum [mechanics_steps]; splash-wav|drum-wav [audio_frames] [full_scale_pa]; splash-mic|drum-mic [audio_frames] [full_scale_pa] [x_m y_m z_m]; prepared drum: drum-modal[-wav|-mic] with the same arguments; see AUDIO.md, PREPARED.md and SNARES.md; snare[-off][-wav|-mic] adds explicit wire coupling; drum-stretch[-wav|-mic] adds geometric stretching; --head-stretching enables both nonlinear heads on snare[-off][-wav|-mic] without dropping wires or loss (see NONLINEAR_SNARE.md); --snare-spec wires.fsn supplies bank geometry, tension, damping, contact and optional wire stretching (see SNARE_SPEC.md); --snare-carrier input.fsc adds force-driven moving supports without resetting the wires (see SNARE_CARRIER.md); --strike-speed-m-s V and --strike-position-m X Y set physical launch inputs; --prepared-nonlinear prepares the unchanged splash/drum/drum-stretch model; --analytic-newton selects its analytic storage tangents (see ANALYTIC.md); --impact-substeps DEPTH ATTEMPTS adds bounded hard-impact recovery without changing the output clock (see SUBSTEPS.md); --cavity-modes adds distributed enclosed air to all drum/snare commands; --cavity-drag-per-s D supplies nonuniform acoustic momentum drag, and --cavity-neck radius_m length_eff_m resistance_Pa_s_m3 azimuth_rad z_m adds a vent to any drum/snare mechanics CSV (see CAVITY.md and SNARE_CAVITY.md); --drum-spec instrument.fsd supplies geometry, independent head materials/tensions/losses and the mesh/window (see DRUM_SPEC.md); --head-relaxation material.fshr supplies hereditary bending with zero separate head damping (see HEAD_RELAXATION.md); --microphone-right X,Y,Z adds a physical stereo receiver to -mic commands (see STEREO.md); --compliant-mute file.fsm adds moving felt-pad squeeze/retract mechanics (see COMPLIANT_MUTE.md); --prescribed-vent-radiation adds explicit one-way neck-flow BEM radiation to a vented drum/snare audio command (see VENT_RADIATION.md); --shell-mesh input.fss supplies an explicit 3D shell and thickness/material fields; export-shell-mesh OUTPUT.fss [INPUT.profile] exports a profile before modal preparation (see SHELL_MESH.md)".into());}
+    head_relaxation::admit_command(head_relaxation_path.is_some(),&args[0])?;
+    let head_relaxation=head_relaxation_path.as_deref().map(head_relaxation::Spec::load).transpose()?;
     let selected_snare=snare::spec::select(snare_path.as_deref(),&args[0])?;
     let (selected_snare,carrier)=snare::carrier::select(carrier_path.as_deref(),selected_snare)?;
     let has_carrier=carrier.is_some();
     let carrier_body=3+usize::from(second.is_some());
     let nonlinear_wires=selected_snare.is_some_and(|s|s.stretching.is_some());
-    let nonlinear_instrument=head_stretching || nonlinear_wires || has_carrier;
+    let nonlinear_instrument=head_stretching || nonlinear_wires || has_carrier
+        || (head_relaxation.is_some() && selected_snare.is_some());
     nonlinear_snare::admit_command(head_stretching,&args[0])?;
     nonlinear_snare::admit_prepared_command(prepared_nonlinear,nonlinear_instrument,&args[0])?;
     if let Some(spec)=&compliant_mute {spec.admit_command(&args[0])?;}
@@ -407,11 +423,11 @@ fn run()->Result<(),Error> {
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let mut experiment=match args[0].as_str(){
         "splash"|"splash-wav"|"splash-mic"=>splash_with_compliant_mute(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref())?,
-        "drum"|"drum-wav"|"drum-mic"=>drum_with_radiation(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent)?,
-        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_radiation(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent)?,
-        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_radiation(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent)?,
-        "snare"|"snare-wav"|"snare-mic"=>drum_with_radiation(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent)?,
-        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_radiation(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent)?,
+        "drum"|"drum-wav"|"drum-mic"=>drum_with_material(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref())?,
+        "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_material(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref())?,
+        "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_material(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref())?,
+        "snare"|"snare-wav"|"snare-mic"=>drum_with_material(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref())?,
+        "snare-off"|"snare-off-wav"|"snare-off-mic"=>drum_with_material(steps,dt_s,audio,!nonlinear_instrument,selected_snare,head_stretching,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref())?,
         _=>return Err("unknown experiment".into()),
     };
     if prepared_nonlinear {
@@ -459,8 +475,9 @@ fn run()->Result<(),Error> {
     let air_columns=if distributed_cavity {",cavity_point_a_pa,cavity_point_b_pa"}else{""};
     let neck_columns=if neck.is_some() {",neck_volume_m3,neck_flow_m3_s,neck_pressure_pa,neck_loss_power_w"}else{""};
     let drive_columns=if driven {",player_work_j"}else{""};
+    let memory_columns=if head_relaxation.is_some() {",head_memory_energy_j,head_relaxation_power_w"}else{""};
     let stick_columns=if second.is_some() {",stick_1_displacement_m,stick_1_velocity_m_s,stick_2_displacement_m,stick_2_velocity_m_s"}else{""};
-    write!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{wire_columns}{carrier_columns}{air_columns}{neck_columns}{drive_columns}{stick_columns}")?;
+    write!(out,"time_s,point_a_displacement_m,point_a_velocity_m_s,point_b_displacement_m,cavity_internal_pa,total_energy_j,felt_crush_j,loss_j,balance_j{extra}{wire_columns}{carrier_columns}{air_columns}{neck_columns}{drive_columns}{stick_columns}{memory_columns}")?;
     if let Some(mute)=&experiment.mute {mute.header(&mut out)?;}
     writeln!(out)?;
     for _ in 0..steps {
@@ -506,6 +523,10 @@ fn run()->Result<(),Error> {
         if let Some(port)=experiment.second_stick {
             write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",x[0]*experiment.stick_weight,
                 x[1]*experiment.stick_weight,x[2*port.coordinate]*port.weight,x[2*port.coordinate+1]*port.weight)?;
+        }
+        if head_relaxation.is_some() {
+            let memory=head_relaxation::observation(&experiment.system);
+            write!(out,",{:.17e},{:.17e}",memory.stored_energy_j,memory.dissipated_power_w)?;
         }
         if let Some(mute)=&experiment.mute {mute.row(&experiment.system,&mut out)?;}
         writeln!(out)?;
