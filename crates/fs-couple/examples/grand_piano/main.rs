@@ -18,7 +18,8 @@ mod hammer_materials;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
-    [--hammers materials.fsh] [--dampers estimated | pads.fspd]
+    [--hammers materials.fsh] [--hammer-footprints faces.fshp]
+    [--dampers estimated | pads.fspd]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -52,6 +53,12 @@ only the struck keys. Missing, duplicate or invalid cards refuse without fallbac
 These cards change physical contact forces and relaxation, not an output EQ.
 The preset shank and the scale's hammer mass/patch geometry remain unchanged.
 See HAMMERS.md for the SI format; importing values does not certify measurements.
+--hammer-footprints supplies point or finite longitudinal span for EVERY key.
+Two or four positive-area contact sites retain separate felt/Prony histories,
+sharing the original hammer inertia and total area. It requires --render and
+works with the preset, supplied materials, MIDI and all existing pedals.
+No default width, output filter or direct hammer radiation is inferred.
+See HAMMER_FOOTPRINTS.md; this is not a resolved 3-D growing contact patch.
 --dampers selects finite-footprint viscous pads instead of the default point
 damper. 'estimated' declares approximate spans and drag; a file must cover
 every scale key with a pad or explicit free row. It requires --render and
@@ -102,7 +109,7 @@ applies only to that diagnostic, not to physical microphone pressure.";
 struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
-    hammers: Option<String>, dampers: Option<String>,
+    hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
@@ -115,7 +122,7 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
-            performance: None, preset: None, hammers: None, dampers: None, concert_pitch: None, raw_tensions: false,
+            performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, raw_tensions: false,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -144,6 +151,7 @@ impl Options {
                 "--board-geometry" => options.board_geometry = Some(value.clone()),
                 "--preset" => options.preset = Some(value.clone()),
                 "--hammers" => options.hammers = Some(value.clone()),
+                "--hammer-footprints" => options.hammer_footprints = Some(value.clone()),
                 "--dampers" => options.dampers = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
@@ -197,6 +205,9 @@ impl Options {
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
         }
+        if options.hammer_footprints.as_ref().is_some_and(|s| s.trim().is_empty() || options.render.is_none()) {
+            return Err("--hammer-footprints requires --render and a complete nonempty specification path".into());
+        }
         if options.dampers.as_ref().is_some_and(|s| s.trim().is_empty() || options.render.is_none()) {
             return Err("--dampers requires --render and either estimated or a nonempty specification path".into());
         }
@@ -241,7 +252,7 @@ impl Options {
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
-            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.midi.as_ref(),
+            options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
             options.dampers.as_ref().filter(|s| s.as_str() != "estimated")];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
@@ -299,16 +310,22 @@ fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear
     options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
     let imported = text.map(|text| hammer_materials::read(text,
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
+    let footprints=options.hammer_footprints.as_deref().map(|path|
+        linear::hammer_footprint::Specification::load(path,&scale)).transpose()?;
     if options.preset.is_some() {
         let materials = match imported {
             Some(materials) => materials,
             None => scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?,
         };
-        engine::Instrument::new_with_course_shanks(scale, modes, options.sample_rate,
-            options.substeps, options.modes, true, materials, engine::ShankGeometry::published())
+        engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials, Some(engine::ShankGeometry::published()),
+            footprints.as_ref())
     } else if let Some(materials) = imported {
-        engine::Instrument::new_with_course_felts(scale, modes, options.sample_rate,
-            options.substeps, options.modes, true, materials)
+        engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
+            options.substeps, options.modes, true, materials, None, footprints.as_ref())
+    } else if let Some(spec)=&footprints {
+        engine::Instrument::new_with_footprints(scale,modes,options.sample_rate,options.substeps,
+            options.modes,true,spec)
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }
@@ -373,6 +390,10 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     }};
     let piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
+    if let Some(path)=&options.hammer_footprints {
+        println!("Hammer contact geometry: {path}; {} independent felt sites, unchanged total course area and hammer mass. No inferred/calibrated face width; see HAMMER_FOOTPRINTS.md.",
+            piano.hammer_contact_count());
+    }
     if let Some((strings,cells)) = piano.damper_resolution() {
         println!("Spatial viscous dampers: {} speaking-string pads, {} quadrature stations; source {}. No measured pad/action or real-time claim; see DAMPERS.md.",
             strings, cells, options.dampers.as_deref().unwrap_or("supplied"));
@@ -502,6 +523,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "hammer_footprint_render_tests.rs"]
+mod footprint_render_tests;
 
 #[cfg(test)]
 #[path = "crowned_render_tests.rs"]
