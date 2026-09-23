@@ -5,6 +5,8 @@
 use super::Error;
 use fs_couple::render::plate::impact::string::StringStretching;
 pub mod spec;
+pub mod carrier;
+use fs_couple::render::plate::impact::supported::{SupportedStrings, TranslatingSupport};
 use fs_couple::modal_acoustic_time::ModalAcousticState;
 use fs_couple::render::plate::impact::ImpactBody;
 use fs_couple::render::plate::impact::linear::wire::{HelicalWire, LineContact, WireSpan, film_shapes};
@@ -29,6 +31,8 @@ pub struct SnareSet {
     pub contact_internal_loss_s_m: f64,
     /// Explicit effective E*A and slope limit; no coil-geometry inference.
     pub stretching: Option<StringStretching>,
+    /// Both ends translate with this finite-mass carrier; no prescribed gap reset.
+    pub carrier: Option<TranslatingSupport>,
 }
 impl SnareSet {
     pub fn reference(disengaged: bool) -> Self {
@@ -38,7 +42,7 @@ impl SnareSet {
                 pitch_m: 0.00085, density_kg_m3: 7800.0 },
             tension_per_strand_n: 0.7, bending_per_strand_n_m2: 1e-6, damping_per_s: 4.0,
             clearance_m: if disengaged {0.003} else {0.00002},
-            contact_stiffness_per_length: 5e8, contact_exponent: 1.5, contact_internal_loss_s_m: 0.05, stretching: None }
+            contact_stiffness_per_length: 5e8, contact_exponent: 1.5, contact_internal_loss_s_m: 0.05, stretching: None, carrier: None }
     }
     pub fn mode_count(self) -> Result<usize, Error> {
         if !(1..=24).contains(&self.strands) || !(1..=16).contains(&self.modes_per_strand)
@@ -47,9 +51,10 @@ impl SnareSet {
             || !self.length_m.is_finite() || self.length_m <= 0.0
         { return Err("snare reference requires 1..24 strands, 1..16 modes and explicit bounded contact sampling".into()); }
         if let Some(law)=self.stretching {law.validate()?;}
-        Ok(self.strands*self.modes_per_strand)
+        if let Some(support)=self.carrier {support.validate()?;}
+        Ok(self.strands*self.modes_per_strand+usize::from(self.carrier.is_some()))
     }
-    /// Every strand is its own body, every station has its own force, and all
+    /// Every strand keeps its relative coordinates, every station its force, and all
     /// of them share the SAME accepted drumhead coordinates in one joint solve.
     pub fn assemble(self, film: &TensionedDisk, modes: &[ModePair], receiver: Range<usize>,
         first_wire: usize, total_modes: usize,
@@ -61,35 +66,51 @@ impl SnareSet {
         let mu = self.coil.linear_density_kg_m()?;
         let mut bodies = Vec::with_capacity(self.strands);
         let mut contacts = Vec::with_capacity(self.strands);
+        // The supported bank has one exact coupled mass normalization. Build
+        // it once; contact rows and internal damping must use that SAME map.
+        let supported=self.carrier.map(|support| {
+            let wires:Vec<_>=(0..self.strands).map(|i|self.wire(i,mu)).collect();
+            SupportedStrings::new(&wires,self.stretching,support)
+        }).transpose()?;
         for strand in 0..self.strands {
-            let y = if self.strands == 1 {0.0} else {
-                self.width_m*(strand as f64/(self.strands-1) as f64-0.5)
-            };
-            let wire = WireSpan { endpoints_m: [[-0.5*self.length_m,y],[0.5*self.length_m,y]],
-                linear_density_kg_m: mu, tension_n: self.tension_per_strand_n,
-                bending_stiffness_n_m2: self.bending_per_strand_n_m2,
-                damping_per_s: vec![self.damping_per_s;self.modes_per_strand] };
+            let wire = self.wire(strand,mu);
             let line = LineContact::uniform(wire.length_m(), self.contact_cells, self.clearance_m,
                 self.contact_stiffness_per_length, self.contact_exponent, self.contact_internal_loss_s_m,
                 format!("declared homogenized steel-coil snare strand {strand}; per-metre law, not measured commercial contact"))?;
             let positions = wire.positions(&line)?;
             let shapes = film_shapes(film, modes, &positions)?;
-            let start = first_wire+strand*self.modes_per_strand;
-            contacts.push(wire.contact(&line, &shapes, receiver.clone(),
-                start..start+self.modes_per_strand, total_modes)?);
-            let initial=vec![ModalAcousticState::default();self.modes_per_strand];
-            bodies.push(match self.stretching {
-                Some(law)=>wire.stretching_body(initial,law)?,
-                None=>wire.body(initial)?,
-            });
+            if let Some(bank)=&supported {
+                contacts.push(bank.contact(strand,&line,&shapes,receiver.clone(),first_wire,total_modes)?);
+            } else {
+                let start = first_wire+strand*self.modes_per_strand;
+                contacts.push(wire.contact(&line, &shapes, receiver.clone(),
+                    start..start+self.modes_per_strand, total_modes)?);
+                let initial=vec![ModalAcousticState::default();self.modes_per_strand];
+                bodies.push(match self.stretching {
+                    Some(law)=>wire.stretching_body(initial,law)?,
+                    None=>wire.body(initial)?,
+                });
+            }
         }
         eprintln!("snare bank: strands={}, modal_coordinates={}, contact_points={}, line_mass_kg_m={}, total_wire_mass_kg={}, clearance_m={}; declared coil/tension/loss, no measured-status inference; no direct wire radiation", self.strands, extra,
             self.strands*self.contact_cells, mu, mu*self.length_m*self.strands as f64, self.clearance_m);
         if let Some(law)=self.stretching {
             eprintln!("wire stretching: effective axial rigidity per strand={} N, slope bound={}; existing Kirchhoff-Carrier law, fixed ends, no inferred coil constitutive data",law.axial_rigidity_n,law.maximum_slope);
         }
+        if let Some(bank)=supported {
+            eprintln!("snare carrier: rail_mass_kg={}, total_carried_mass_kg={}, coupled_coordinates={}; positive force withdraws; no prescribed clearance change",self.carrier.unwrap().mass_kg,bank.total_mass_kg(),bank.mode_count());
+            bodies.push(bank.body());
+        }
         Ok((bodies,contacts))
     }
+    fn wire(self,strand:usize,mu:f64)->WireSpan {
+        let y=if self.strands==1 {0.0}else{self.width_m*(strand as f64/(self.strands-1) as f64-0.5)};
+        WireSpan {endpoints_m:[[-0.5*self.length_m,y],[0.5*self.length_m,y]],
+            linear_density_kg_m:mu,tension_n:self.tension_per_strand_n,
+            bending_stiffness_n_m2:self.bending_per_strand_n_m2,
+            damping_per_s:vec![self.damping_per_s;self.modes_per_strand]}
+    }
+
 }
 
 /// Inspect a strand by original body index through the selected execution image.

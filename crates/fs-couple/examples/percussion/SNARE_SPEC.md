@@ -126,8 +126,9 @@ direct wire radiation channel or synthetic buzz is appended.
 The wire law remains a fixed-end, uniform, one-polarization, moderate-slope
 model with quasi-static averaged axial tension. It does not resolve individual
 coils, torsion, longitudinal inertia, inter-wire friction, plasticity, end-plate
-compliance or time-varying snare throw-off. Input values apply uniformly across
-the bank. Modal/contact resolution and acoustic bandwidth still need convergence
+compliance or a full throw-off linkage. `--snare-carrier` independently adds a
+force-driven finite-mass translating support carrying both wire endpoints; see
+[SNARE_CARRIER.md](SNARE_CARRIER.md). Input values apply uniformly across the bank. Modal/contact resolution and acoustic bandwidth still need convergence
 and specimen validation; nonlinear harmonics can exceed the retained band.
 No calibrated realism, full-band adequacy or real-time deadline is claimed.
 

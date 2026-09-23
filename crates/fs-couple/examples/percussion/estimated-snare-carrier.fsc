@@ -1,0 +1,15 @@
+# ILLUSTRATIVE actuator inputs, not measured snare hardware or hand dynamics.
+# Positive position/force moves the entire rail downward, away from the head.
+frankensim-snare-carrier-v1
+# support,rail_mass_kg,ground_stiffness_N_m,ground_drag_Ns_m,travel_limit_m,wire_slope_limit
+support,0.02,50,0.05,0.005,0.2
+# Explicit initially touching installation, relative to the supplied wire gaps.
+# With the stock +20 um gap, -20 um places the undisturbed wires at the head.
+initial,-0.00002,0
+# Withdraw, then reverse toward the head. Impact times are NOT prescribed.
+force,0,0
+force,0.002,0.05
+force,0.008,0.05
+force,0.012,-0.05
+force,0.018,-0.05
+force,0.02,0

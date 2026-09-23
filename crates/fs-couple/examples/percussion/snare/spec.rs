@@ -60,6 +60,7 @@ impl Specification {
             coil: coil.ok_or("missing snare coil record")?, tension_per_strand_n: tension,
             bending_per_strand_n_m2: bending, damping_per_s: damping, clearance_m: clearance,
             contact_stiffness_per_length: stiffness, contact_exponent: exponent, contact_internal_loss_s_m: loss,
+            carrier: None,
             stretching: stretching.ok_or("missing snare stretching record; declare off or axial rigidity and slope limit")?,
         }, disengaged_clearance_m };
         specification.validate()?;
