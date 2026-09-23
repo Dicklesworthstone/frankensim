@@ -4,6 +4,9 @@
 use super::*;
 use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
 
+#[path = "observer_fit.rs"]
+mod observer_fit;
+
 /// Same comma-separated SI position syntax as grand_piano. Remove only this
 /// option, transactionally: bad/duplicate input leaves all arguments unchanged.
 pub fn option(args:&mut Vec<String>)->Result<Option<[f64;3]>,Error> {
@@ -45,13 +48,17 @@ fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Er
         baked.push(Bake {filters:Vec::with_capacity(count),range_m,medium,propagation_delay_s,pressure_gain});
     }
     let surface=SpherePanels::from_triangles(boundary.triangles.clone())?;
-    let omega:Vec<_>=(0..41).map(|i|2.0*std::f64::consts::PI*(40.0+40.0*i as f64)).collect();
+    let omega:Vec<_>=(0..81).map(|i|2.0*std::f64::consts::PI*(40.0+20.0*i as f64)).collect();
     let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
     let mut ppw=f64::INFINITY;let mut condition=0.0_f64;
+    // One formulation for the entire transfer; stitching different discrete
+    // operators at kR=0.5 creates a numerical jump that a causal fit cannot fix.
+    let formulation=if omega[omega.len()-1]*radius/medium.sound_speed<0.5 {
+        Formulation::PlainCbie
+    }else{Formulation::BurtonMiller};
     for &w in &omega {
         let k=w/medium.sound_speed;
         let fields=acceleration_fields(&boundary.weights,w);
-        let formulation=if k*radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
         // Geometry, factorization and all source-mode solves are independent of
         // the observation point. Do not repeat them per microphone.
@@ -70,10 +77,13 @@ fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Er
     for (channel,bake) in baked.iter_mut().enumerate() {
         let mut maximum=0.0_f64;let mut rms=0.0_f64;
         for row in &values[channel] {
-            let (filter,m,r)=fit_observer(&omega,row,dt,8)?;
-            maximum=maximum.max(m);rms=rms.max(r);bake.filters.push(filter);
+            let (filter,report)=observer_fit::fit(&omega,row,dt,8)?;
+            maximum=maximum.max(report.audit_maximum);rms=rms.max(report.audit_rms);
+            eprintln!("observer fit: selected_order={}, attempts={}, selection_max={}, selection_rms={}, independent_audit_max={}, independent_audit_rms={}",
+                report.order,report.attempts,report.selection_maximum,report.selection_rms,report.audit_maximum,report.audit_rms);
+            bake.filters.push(filter);
         }
-        eprintln!("receiver {channel} BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, held_out=20, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
+        eprintln!("receiver {channel} BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, order_selection=20, independent_audit=40, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
         eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={}, pressure_gain={}",
             receivers[channel],bake.propagation_delay_s,bake.pressure_gain);
     }
