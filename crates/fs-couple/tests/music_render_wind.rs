@@ -130,3 +130,6 @@ fn invalid_wind_sources_clocks_and_overrides_refuse_before_creating_output_files
         assert!(!result.status.success()); assert!(!output.exists());
     }
 }
+
+#[path = "music_render_wind/valve.rs"]
+mod valve;

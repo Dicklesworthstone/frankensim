@@ -5,6 +5,9 @@
 //! in their physical owners. Only pressure assignments are scheduled. The output
 //! is a named INTERNAL pressure trace; it is not an exterior microphone model.
 
+/// Supplied mesh, closure, material memory and canonical pressure sources.
+pub mod file;
+
 use super::dynamic::DynamicAperture;
 use super::network::ApertureNetwork;
 use super::tube::{ApertureTube, TubeDrive};

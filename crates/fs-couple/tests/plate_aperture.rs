@@ -136,3 +136,6 @@ mod relaxation;
 
 #[path = "plate_aperture/performance.rs"]
 mod performance;
+
+#[path = "plate_aperture/file.rs"]
+mod file;

@@ -2,6 +2,8 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use fs_blake3::ContentHash;
+use fs_exec::CancelGate;
+use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_couple::bowed_string::runtime::schedule::file::{BowedPerformance, BOWED_PERFORMANCE_SCHEMA, MAX_BOWED_PERFORMANCE_BYTES};
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::pcm_wav::observation::ensemble::{PressureEnsemble, PressureEnsembleConfig};
@@ -19,10 +21,10 @@ const MAX_CONTROLS: usize = 262_144;
 const MAX_SAMPLES: u64 = 600 * RATE as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Modal, Plate, Bow, Reed }
+enum Kind { Modal, Plate, Bow, Reed, Valve }
 impl Kind {
     fn label(self) -> &'static str {
-        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed" }
+        match self { Self::Modal => "modal", Self::Plate => "plate", Self::Bow => "bow", Self::Reed => "reed", Self::Valve => "valve" }
     }
 }
 struct Input { kind: Kind, path: PathBuf }
@@ -42,11 +44,11 @@ fn options(args: &[String]) -> Result<Options, String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--modal" | "--plate" | "--bow" | "--reed" => {
+            "--modal" | "--plate" | "--bow" | "--reed" | "--valve" => {
                 if inputs.len() == MAX_PARTS { return Err("ensemble exceeds the 16-part budget".into()); }
                 let path = iter.next().filter(|s| !s.starts_with("--"))
                     .ok_or_else(|| format!("{arg} requires a source performance path"))?;
-                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, _ => Kind::Reed },
+                inputs.push(Input { kind: match arg.as_str() { "--modal" => Kind::Modal, "--plate" => Kind::Plate, "--bow" => Kind::Bow, "--reed" => Kind::Reed, _ => Kind::Valve },
                     path: PathBuf::from(path) });
             }
             "--block" => {
@@ -67,7 +69,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             }
             value if value.starts_with('-') => return Err(format!("unsupported ensemble option {value:?}")),
             value => {
-                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed".into()); }
+                if output.is_some() { return Err("ensemble accepts exactly one output path; inputs require --modal/--plate/--bow/--reed/--valve".into()); }
                 output = Some(PathBuf::from(value));
             }
         }
@@ -133,6 +135,15 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
                 components: 1, modes: i.retained_modes, controls: 0,
+            })
+        }
+        Kind::Valve => {
+            let p = PlateValvePerformance::from_bytes(&bytes, block, &CancelGate::new()).map_err(|e|e.to_string())?;
+            let i = p.info();
+            (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
+                kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
+                rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
+                components:1,modes:1,controls:i.compiled_controls,
             })
         }
         Kind::Reed => {
@@ -206,6 +217,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         let o = aligned.observation;
         let scope = if source.kind == Kind::Reed {
             ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
+        } else if source.kind == Kind::Valve {
+            ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\""
         } else { "" };
         format!("{{\"kind\":\"{}\",\"schema\":\"{}\",\"blake3\":\"{}\",\
             \"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"ratio\":{},\
