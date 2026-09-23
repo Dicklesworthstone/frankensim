@@ -33,6 +33,9 @@ use super::geometry::Course;
 /// Spatial damper pads in these same mass-normalized moving-bridge coordinates.
 #[path = "dampers.rs"]
 pub mod dampers;
+/// Independent physical contact sites on a supplied longitudinal hammer face.
+#[path = "hammer_footprint.rs"]
+pub mod hammer_footprint;
 
 /// Prepared reduced-board capacity, shared with geometry/CSV/audio consumers.
 /// This is a memory/work ceiling, not a claim that every size is real-time.
@@ -192,6 +195,7 @@ pub struct Bank {
     pub contact_compliance: Vec<f64>,
     pub free_contact: Vec<f64>,
     pub rate: u32,
+    footprints: Option<hammer_footprint::Prepared>,
     pub omitted_duplex_modes: usize,
     /// Contiguous strings sharing one physical course bridge; prepared cold.
     groups: Vec<std::ops::Range<usize>>,
@@ -374,7 +378,7 @@ impl Bank {
         } }
         Ok(Self { strings,groups,modes,contact_strings,board_count:r,q:vec![0.0;n+r],v:vec![0.0;n+r],
             next_q:vec![0.0;n+r],next_v:vec![0.0;n+r],contact_compliance,
-            free_contact:vec![0.0;nc],rate,omitted_duplex_modes,transition,physical_board_k,
+            free_contact:vec![0.0;nc],rate,footprints:None,omitted_duplex_modes,transition,physical_board_k,
             board_half_damping,damped_board_v:vec![0.0;r],board_pre_loss:0.0,
             diagonal_omega2:oscillator.iter().map(|m|m.angular_frequency_rad_s.powi(2)).collect(),last_modal_loss_j:0.0,
             board_volume,board_basis,schur_inverse,contact_response:response,
@@ -400,6 +404,11 @@ impl Bank {
     pub fn contact_position(&self, contact: usize, q: &[f64]) -> f64 {
         let s = &self.strings[self.contact_strings[contact]];
         let n = self.modes.len();
+        if let Some(p) = &self.footprints {
+            let p = &p.points[contact];
+            return s.modes.clone().zip(&p.shape).map(|(k,g)| g*q[k]).sum::<f64>()
+                + p.lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)|g*x).sum::<f64>();
+        }
         s.modes.clone().map(|k| self.modes[k].hammer_shape*q[k]).sum::<f64>()
             + s.hammer_lift*s.bridge.iter().zip(&q[n..]).map(|(g,x)| g*x).sum::<f64>()
     }
@@ -447,6 +456,11 @@ impl Bank {
                 if let Some(c)=s.contact { self.free_contact[c]=position; }
             }
         }
+        if self.footprints.is_some() {
+            for c in 0..self.free_contact.len() {
+                self.free_contact[c] = self.contact_position(c, &self.next_q);
+            }
+        }
     }
 
     /// Finish the SAME prediction with held contact forces [N]. Candidate
@@ -455,6 +469,7 @@ impl Bank {
         let n=self.modes.len();let r=self.board_count;
         self.last_modal_loss_j=self.board_pre_loss;
         assert_eq!(forces.len(),self.contact_strings.len(),"one force per contact");
+        if let Some(p) = &mut self.footprints { p.gather(&self.strings, forces); }
         // S^-1 W^T was already computed for the compliance matrix. Keep it
         // rather than repeat the small dense solve for every accepted substep.
         // Silent contacts skip only multiplication, not sympathetic dynamics.
@@ -471,10 +486,10 @@ impl Bank {
             for si in group.clone() {
                 let s=&self.strings[si];
                 let contact=s.contact.map_or(0.0,|c|forces[c]);
-                reaction+=s.hammer_lift*contact;
+                reaction+=self.footprints.as_ref().map_or(s.hammer_lift*contact, |p|p.bridge_force[si]);
                 for k in s.modes.clone() {
                     let m=self.modes[k];
-                    let f=m.a*bbar+contact*m.hammer_shape;
+                    let f=m.a*bbar+self.footprints.as_ref().map_or(contact*m.hammer_shape, |p|p.modal_force[k]);
                     self.next_q[k]=self.free_q[k]+self.transition[k].bq*f;
                     self.next_v[k]=self.free_v[k]+self.transition[k].bv*f;
                     reaction+=m.a*0.5*(self.q[k]+self.next_q[k]);
