@@ -11,6 +11,8 @@ mod relaxation;
 #[path = "hammer_shank.rs"]
 mod shank;
 pub use shank::Geometry as ShankGeometry;
+#[path = "radiation.rs"]
+pub mod radiation;
 
 const CATCH_DISTANCE: f64 = 0.020; // idealized backcheck/rest gap
 const LET_OFF_DISTANCE: f64 = 0.0015; // Chabassier/Durufle JSV 2014 Table 3
@@ -50,12 +52,14 @@ pub struct Accounting {
     pub felt_relaxation_loss_j:f64,
     pub shank_loss_j:f64,
     pub modal_loss_j:f64,
+    /// Dissipation in the passive acoustic realization, not wood/felt loss.
+    pub radiation_loss_j:f64,
     pub damper_loss_j:f64,
     pub catch_loss_j:f64,
     pub max_balance_error_j:f64,
 }
 impl Accounting {
-    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.damper_loss_j+self.catch_loss_j}
+    pub fn dissipated_j(self)->f64 {self.felt_loss_j+self.shank_loss_j+self.modal_loss_j+self.radiation_loss_j+self.damper_loss_j+self.catch_loss_j}
 }
 
 pub struct Instrument {
@@ -64,6 +68,7 @@ pub struct Instrument {
     hammer_models:Vec<shank::Prepared>,
     creep:Vec<relaxation::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
+    radiation:Option<radiation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Point-image controls only. A spatial specification owns its pad/free
     /// break and individual drag values instead. Neither is verified Model D data.
@@ -151,13 +156,28 @@ impl Instrument {
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,spatial_dampers:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,spatial_dampers:None,radiation:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
     }
 
     pub fn sample_rate(&self)->u32{self.output_rate}
+    /// Attach before any excitation. Rows must already be in this bank's
+    /// complete mass-loaded basis. No state-reset/replacement while playing.
+    pub fn configure_radiation(&mut self,model:&radiation::Model)->Result<(),String>{
+        if self.radiation.is_some() || self.accounting.input_work_j!=0.
+            || self.bank.q.iter().chain(&self.bank.v).any(|v|*v!=0.)
+            || self.hammers.iter().any(|h|h.active||h.held) {
+            return Err("radiation must be prepared once, before piano excitation".into());
+        }
+        let prepared=radiation::Prepared::new(model,self.bank.rate,self.bank.board_count)?;
+        self.radiation=Some(prepared);Ok(())
+    }
+    pub fn radiation_energy_j(&self)->f64 {
+        self.radiation.as_ref().map_or(0.,radiation::Prepared::energy)
+    }
+    pub fn has_radiation(&self)->bool {self.radiation.is_some()}
     /// Cold preparation in the existing loaded basis. Publish only on complete
     /// admission; configuring a viscous law neither stores energy nor resets
     /// ongoing string, board, hammer or felt history. This is not a hot control.
@@ -238,7 +258,7 @@ impl Instrument {
     }
 
     pub fn energy_j(&self)->f64 {
-        let mut e=self.bank.energy();
+        let mut e=self.bank.energy()+self.radiation_energy_j();
         for (h,p) in self.hammers.iter().zip(&self.hammer_models) {e+=p.energy(&h.motion,CATCH_DISTANCE);}
         for (i,p) in self.contacts.iter().enumerate(){
             e+=self.creep[i].stored(&p.memory);
@@ -272,7 +292,11 @@ impl Instrument {
 
     fn mechanics_step(&mut self)->Result<(),Error>{
         let dt=1.0/f64::from(self.bank.rate);let nc=self.contacts.len();
-        let before=self.energy_j();let mut damper_loss=self.damp(0.5*dt)?;
+        let before=self.energy_j();
+        let mut radiation_loss=if let Some(air)=&mut self.radiation {
+            air.before(&mut self.bank.v[self.bank.modes.len()..])
+        } else {0.};
+        let mut damper_loss=self.damp(0.5*dt)?;
         self.bank.predict();self.active.clear();
         self.jack_force.fill(0.0);self.rest_force.fill(0.0);
         for i in 0..self.hammers.len() {
@@ -383,16 +407,20 @@ impl Instrument {
             }
         }
         damper_loss+=self.damp(0.5*dt)?;
+        if let Some(air)=&mut self.radiation {
+            radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]);
+        }
         let modal_loss=self.bank.last_modal_loss_j;
-        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+damper_loss+catch_loss-jack_work;
+        let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+damper_loss+catch_loss-jack_work;
         let tolerance=1e-9+1e-8*before.abs().max(after.abs());
         if !after.is_finite()||after>100.0{return Err(Error::NonFinite);}
-        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||catch_loss< -tolerance {
+        if balance.abs()>tolerance||felt_loss< -tolerance||shank_loss< -tolerance||modal_loss< -tolerance||radiation_loss< -tolerance||catch_loss< -tolerance {
             return Err(Error::Energy{defect_j:balance});
         }
         self.accounting.input_work_j+=jack_work;self.accounting.shank_loss_j+=shank_loss;
         self.accounting.felt_loss_j+=felt_loss;self.accounting.felt_relaxation_loss_j+=relaxation_loss;
         self.accounting.modal_loss_j+=modal_loss;
+        self.accounting.radiation_loss_j+=radiation_loss;
         self.accounting.damper_loss_j+=damper_loss;self.accounting.catch_loss_j+=catch_loss;
         self.accounting.max_balance_error_j=self.accounting.max_balance_error_j.max(balance.abs());
         Ok(())
@@ -416,11 +444,13 @@ impl Instrument {
         self.saved_q.copy_from_slice(&self.bank.q);self.saved_v.copy_from_slice(&self.bank.v);
         self.saved_hammers.copy_from_slice(&self.hammers);self.saved_contacts.clone_from_slice(&self.contacts);
         let saved=self.accounting;let modal=self.bank.last_modal_loss_j;
+        if let Some(air)=&mut self.radiation {air.checkpoint();}
         let mut average=0.0;
         for substep in 0..self.substeps {
             if let Err(error)=self.mechanics_step(){
                 self.bank.q.copy_from_slice(&self.saved_q);self.bank.v.copy_from_slice(&self.saved_v);
                 self.hammers.copy_from_slice(&self.saved_hammers);self.contacts.clone_from_slice(&self.saved_contacts);
+                if let Some(air)=&mut self.radiation {air.restore();}
                 self.accounting=saved;self.bank.last_modal_loss_j=modal;return Err(error);
             }
             if let Some(buffer)=trace.as_deref_mut(){
@@ -433,6 +463,10 @@ impl Instrument {
         Ok(average/self.substeps as f64)
     }
 }
+
+#[cfg(test)]
+#[path = "radiation_engine_tests.rs"]
+mod radiation_tests;
 
 #[cfg(test)]
 #[path = "damper_engine_tests.rs"]
