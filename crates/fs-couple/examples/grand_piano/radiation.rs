@@ -17,50 +17,8 @@ use fs_math::{c64::C64, det};
 
 pub const MAX_AIR_STATES: usize = 1024;
 
-#[derive(Clone, Debug)]
-pub struct Pole {
-    pub omega: f64,
-    pub zeta: f64,
-    /// Loaded-board velocity -> acoustic modal force. Signed entries matter.
-    pub coupling: Vec<f64>,
-}
-#[derive(Clone, Debug)]
-pub struct Model {
-    pub ports: usize,
-    pub poles: Vec<Pole>,
-}
-impl Model {
-    pub fn validate(&self) -> Result<(), String> {
-        if !(1..=super::super::linear::MAX_BOARD_MODES).contains(&self.ports)
-            || self.poles.is_empty() || self.poles.len() > MAX_AIR_STATES
-            || self.poles.iter().any(|p| !p.omega.is_finite() || p.omega <= 0.
-                || !p.zeta.is_finite() || !(0.0..1.0).contains(&p.zeta)
-                || p.coupling.len() != self.ports
-                || p.coupling.iter().any(|x| !x.is_finite())) {
-            return Err("invalid complete passive acoustic pole/port model".into());
-        }
-        Ok(())
-    }
-    /// Continuous impedance in the BEM's exp(-i omega t) convention. This is
-    /// the physical model being split, not its finite-step numerical transfer.
-    pub fn impedance(&self, omega: f64) -> Result<Vec<C64>, String> {
-        self.validate()?;
-        if !omega.is_finite() || omega <= 0. {return Err("invalid acoustic frequency".into());}
-        let mut z = vec![C64::ZERO; self.ports*self.ports];
-        for p in &self.poles {
-            let denominator = C64::new(p.omega*p.omega-omega*omega, -2.*p.zeta*p.omega*omega);
-            if denominator.abs() == 0. {return Err("unresolved lossless acoustic pole".into());}
-            let h = C64::new(0., -omega)/denominator;
-            for i in 0..self.ports {for j in 0..self.ports {
-                z[i*self.ports+j] = z[i*self.ports+j] + h.scale(p.coupling[i]*p.coupling[j]);
-            }}
-        }
-        if z.iter().any(|v| !v.re.is_finite() || !v.im.is_finite()) {
-            return Err("acoustic impedance overflow".into());
-        }
-        Ok(z)
-    }
-}
+// Shared positive-real model; the split runtime below is unchanged.
+pub use fs_couple::render::plate::impact::radiation::{Model,Pole};
 
 #[derive(Clone, Copy, Default)]
 struct Free { xx:f64, xp:f64, px:f64, pp:f64 }

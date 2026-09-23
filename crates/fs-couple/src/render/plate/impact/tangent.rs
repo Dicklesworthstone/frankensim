@@ -66,12 +66,14 @@ impl MechanicalStorage {
 }
 impl ImpactSystem {
     pub(super) fn hessian_vector(&self,x:&[f64],d:&[f64],out:&mut[f64])->bool {
-        let base=self.relaxation.as_ref().map_or(self.x.len(),|memory|memory.base_dim);
+        let base=self.relaxation.as_ref().map_or(self.x.len(),|memory|memory.base_dim)
+            .min(self.radiation.as_ref().map_or(self.x.len(),|air|air.base_dim));
         if x.len()!=self.x.len() || d.len()!=x.len() || out.len()!=x.len()
             || x.iter().chain(d).any(|v|!v.is_finite()) {return false;}
         if !self.contact.hessian_vector_with(&x[..base],&d[..base],&mut out[..base],
             |x,d,out|self.mechanical.hessian_vector(x,d,out)) {return false;}
         if let Some(memory)=&self.relaxation {memory.add_hessian(d,out);}
+        if let Some(air)=&self.radiation {air.add_hessian(d,out);}
         out.iter().all(|v|v.is_finite())
     }
 }
