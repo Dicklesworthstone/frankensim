@@ -9,6 +9,7 @@ use fs_la::LuWorkspace;
 mod structure;
 mod analytic;
 mod dissipation;
+mod relaxation;
 use dissipation::Dissipation;
 use structure::FlowPattern;
 
