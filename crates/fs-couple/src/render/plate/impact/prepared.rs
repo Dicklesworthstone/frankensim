@@ -61,6 +61,7 @@ impl ImpactSystem {
     ) -> Result<ImpactFrame, ImpactError> {
         for (_,offset,film) in &self.membranes { film.observe_interleaved(state,*offset)?; }
         for (_,offset,string) in &self.strings { string.observe_interleaved(state,*offset)?; }
+        for (_,offset,support) in &self.supports {support.observe_interleaved(state,*offset)?;}
         let frozen=self.system.hamiltonian(state);let mut crush=0.0;
         candidate.clone_from_slice(&self.histories.borrow());
         for (pad,h) in self.pads.iter().zip(candidate.iter_mut()) {

@@ -100,13 +100,13 @@ fn aperture_flow_reaches_the_real_exterior_neumann_pressure_operator() {
     let b=prepare(0.2);let surface=SpherePanels::from_triangles(b.triangles.clone()).unwrap();
     let omega=std::f64::consts::TAU*90.0;let medium=Medium::air();
     let positive=acceleration_fields(&b.weights[2..],omega).remove(0);
-    let negative:Vec<_>=positive.iter().map(|p|*p*(-2.0)).collect();
+    let negative:Vec<_>=positive.iter().map(|p|p.scale(-2.0)).collect();
     let solutions=solve_radiation_batch(&surface,omega/medium.sound_speed,medium,
         &[&positive,&negative],Formulation::PlainCbie).unwrap();
     let receiver=[[0.3,0.0,0.1]];
     let p=exterior_pressure_at_points(&surface,&solutions[0],medium,&receiver).unwrap()[0];
     let reversed=exterior_pressure_at_points(&surface,&solutions[1],medium,&receiver).unwrap()[0];
     assert!(p.abs()>1e-10 && p.abs().is_finite());
-    assert!((reversed+p*2.0).abs()<1e-8*p.abs());
+    assert!((reversed+p.scale(2.0)).abs()<1e-8*p.abs());
     assert!(solutions[0].radiated_power_roundoff_interval.1>=0.0);
 }

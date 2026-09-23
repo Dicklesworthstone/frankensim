@@ -31,6 +31,8 @@ pub mod linear;
 pub mod membrane;
 /// Geometric tension modulation of fixed-end filaments, using fs-nlmodal.
 pub mod string;
+/// Finite-mass translating supports with reciprocal string inertia and motion.
+pub mod supported;
 mod tangent;
 mod prepared;
 pub use prepared::{PreparedImpactSystem, ImpactSubstepConfig, ImpactSubstepReport, SubsteppedImpactSystem};
@@ -50,18 +52,20 @@ pub enum BodyPotential {
     Membrane(membrane::MembranePotential),
     /// Fixed-end Kirchhoff--Carrier filament with its original EI and modal basis.
     String(string::StringPotential),
+    /// Wires carried by one moving support, with exact kinetic cross terms.
+    SupportedStrings(supported::SupportedStrings),
     /// Linear reduced pencil (e.g. tensioned film). Zero frequency is an
     /// explicitly free inertial coordinate, not a low-frequency oscillator.
     Linear(Vec<f64>),
 }
 impl BodyPotential {
-    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::String(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
-    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::String(s)=>s.omegas(),Self::Linear(w)=>w}}
+    fn count(&self)->usize {match self {Self::Shell(s)=>s.mode_count(),Self::Membrane(s)=>s.reduction().mode_count(),Self::String(s)=>s.mode_count(),Self::SupportedStrings(s)=>s.mode_count(),Self::Linear(w)=>w.len()}}
+    fn omegas(&self)->&[f64] {match self {Self::Shell(s)=>s.omegas(),Self::Membrane(s)=>s.reduction().omegas(),Self::String(s)=>s.omegas(),Self::SupportedStrings(s)=>s.clock_bounds(),Self::Linear(w)=>w}}
     fn potential(&self,q:&[f64])->f64 {match self {
-        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::String(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
+        Self::Shell(s)=>s.potential(q),Self::Membrane(s)=>s.reduction().potential(q),Self::String(s)=>s.potential(q),Self::SupportedStrings(s)=>s.potential(q),Self::Linear(w)=>w.iter().zip(q).map(|(w,q)|0.5*(w*q).powi(2)).sum(),
     }}
     fn gradient(&self,q:&[f64],g:&mut[f64]) {match self {
-        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::String(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
+        Self::Shell(s)=>s.gradient(q,g),Self::Membrane(s)=>s.reduction().gradient(q,g),Self::String(s)=>s.gradient(q,g),Self::SupportedStrings(s)=>s.gradient(q,g),Self::Linear(w)=>{for ((g,w),q) in g.iter_mut().zip(w).zip(q) {*g=w*w*q;}}
     }}
 }
 /// One body in the concatenated mechanical basis.
@@ -214,6 +218,7 @@ pub struct ImpactSystem {
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
     strings:Vec<(usize,usize,string::StringPotential)>,
+    supports:Vec<(usize,usize,supported::SupportedStrings)>,
 }
 impl ImpactSystem {
     /// Compose real body storage, elastic contacts, felt patches and fluid volume.
@@ -242,7 +247,7 @@ impl ImpactSystem {
         }
         damping::validate(&dampers,modes)?;
         let mut x=vec![0.0;2*modes];let mut damping=Vec::with_capacity(modes);let mut potentials=Vec::new();
-        let mut offset=0;let mut membranes=Vec::new();let mut strings=Vec::new();
+        let mut offset=0;let mut membranes=Vec::new();let mut strings=Vec::new();let mut supports=Vec::new();
         for (body_index,body) in bodies.into_iter().enumerate() {
             let n=body.potential.count();
             if n==0 || body.initial.len()!=n || body.damping_per_s.len()!=n
@@ -258,6 +263,13 @@ impl ImpactSystem {
             if let BodyPotential::String(string)=&body.potential {
                 string.observe_interleaved(&x,offset)?;
                 strings.push((body_index,offset,string.clone()));
+            }
+            if let BodyPotential::SupportedStrings(support)=&body.potential {
+                if body.damping_per_s.iter().any(|d|*d!=0.0) {
+                    return Err(invalid("supported wire damping must use its transformed internal resistance"));
+                }
+                support.observe_interleaved(&x,offset)?;
+                supports.push((body_index,offset,support.clone()));
             }
             damping.extend(body.damping_per_s);offset+=n;potentials.push(body.potential);
         }
@@ -288,6 +300,7 @@ impl ImpactSystem {
             r[(2*i+1)*dim+2*i+1]=damping[i];g[(2*i+1)*modes+i]=1.0;}
         for pad in &retained {for (i,b) in pad.spec.creep.iter().enumerate() {let index=2*modes+pad.creep_start+i;r[index*dim+index]=b.stiffness_n_m/b.viscosity_n_s_m;}}
         damping::add_resistance(&dampers,modes,dim,&mut r)?;
+        for (_,offset,support) in &supports {support.add_resistance(*offset,dim,&mut r)?;}
         let histories=Rc::new(RefCell::new(histories));
         let mechanical=Rc::new(MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)});
         let contact=Rc::new(ContactStorage::new(Box::new(tangent::SharedStorage(Rc::clone(&mechanical))),modes,admitted)
@@ -296,7 +309,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,mechanical,contact,contact_loss})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -318,6 +331,17 @@ impl ImpactSystem {
     pub fn string_observation(&self,body:usize)->Option<string::StringObservation> {
         let (_,offset,string)=self.strings.iter().find(|(index,_,_)|*index==body)?;
         string.observe_interleaved(&self.x,*offset).ok()
+    }
+    /// Global coordinate and inverse-root-mass weight for a physical force
+    /// on a translating support. No direct force on its relative wire modes.
+    pub fn support_force_port(&self,body:usize)->Option<(usize,f64)> {
+        let (_,offset,support)=self.supports.iter().find(|(index,_,_)|*index==body)?;
+        Some((offset+support.support_coordinate(),support.force_weight()))
+    }
+    /// Physical support and carried-wire observations by original body index.
+    pub fn support_observation(&self,body:usize)->Option<supported::SupportObservation> {
+        let (_,offset,support)=self.supports.iter().find(|(index,_,_)|*index==body)?;
+        support.observe_interleaved(&self.x,*offset).ok()
     }
     /// Copy one accepted material history, not a new fitted material.
     #[must_use]
