@@ -2,9 +2,14 @@
 //! and nonlinear mechanics stay with their existing owners. A file is input,
 //! not proof that its numbers were measured or a calibrated manufacturer's CAD.
 use super::Error;
-use fs_plate::shell::profile::{AnnularRelief, ProfileShell, ProfileStation,
+use fs_plate::shell::profile::{AnnularRelief, ProfileStation,
     SurfaceIndentation, revolve};
-use std::io::Read;
+use fs_plate::shell::survey::MeshShell;
+use std::io::{Read, Write as _};
+use std::fmt::Write as _;
+
+#[path = "shell_mesh.rs"]
+mod mesh_input;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: usize = 1_048_576;
@@ -20,6 +25,9 @@ pub struct Specimen {
     pub poisson: f64,
     pub density_kg_m3: f64,
     pub band_hz: [f64; 2],
+    // Profile fields above are used only by the original revolved input.
+    sampled: Option<MeshShell>,
+    default_strike: Option<[f64;2]>,
 }
 impl Specimen {
     /// Original estimated splash, unchanged when no external geometry is selected.
@@ -31,7 +39,7 @@ impl Specimen {
                     ProfileStation {radius_m,height_m,thickness_m}).to_vec(),
             rings: vec![], dents: vec![], azimuths: 32,
             young_pa: 112.6e9, poisson: 0.342, density_kg_m3: 8607.0,
-            band_hz: [50.0,1200.0],
+            band_hz: [50.0,1200.0], sampled: None, default_strike: None,
         }
     }
 
@@ -92,13 +100,14 @@ impl Specimen {
         // Physical section and geometric admission belong to revolve, below.
         Ok(Self {stations,rings,dents,young_pa,poisson,density_kg_m3,
             azimuths:azimuths.ok_or("shell profile requires azimuths")?,
-            band_hz:band.ok_or("shell profile requires band_hz")?})
+            band_hz:band.ok_or("shell profile requires band_hz")?,sampled:None,default_strike:None})
     }
 
     /// Material and every detail enter the actual mass/stiffness geometry. Keep
     /// the existing work ceilings, and refuse visibly undersampled imported
     /// features rather than passing an omitted hammer/lathe detail off as solved.
-    pub fn build(&self) -> Result<ProfileShell, Error> {
+    pub fn build(&self) -> Result<MeshShell, Error> {
+        if let Some(shell) = &self.sampled { return Ok(shell.clone()); }
         let shell=revolve(&self.stations,self.azimuths,self.young_pa,self.poisson,self.density_kg_m3,
             &self.rings,&self.dents,super::mesh_budget())?;
         let inner=self.stations[0].radius_m; let outer=self.stations.last().unwrap().radius_m;
@@ -111,17 +120,61 @@ impl Specimen {
             return Err(format!("{} shell details underresolved: refine meridian stations/azimuths; max edge={} m",
                 shell.underresolved_features,shell.max_edge_m).into());
         }
-        Ok(shell)
+        Ok(shell.into())
+    }
+
+    /// Full supplied 3D geometry with explicit per-node thickness and materials.
+    /// No meridian, alloy-name lookup or reference profile is substituted.
+    pub fn parse_mesh(text: &str) -> Result<Self, Error> {
+        let (shell,band_hz,strike) = mesh_input::parse(text)?;
+        Ok(Self { stations:vec![],rings:vec![],dents:vec![],azimuths:0,
+            young_pa:0.,poisson:0.,density_kg_m3:0.,band_hz,
+            sampled:Some(shell),default_strike:Some(strike) })
+    }
+
+    pub fn default_strike_position(&self) -> Result<[f64;2],Error> {
+        if let Some(p) = self.default_strike { return Ok(p); }
+        let inner = self.stations.first().ok_or("shell has no default strike geometry")?.radius_m;
+        let outer = self.stations.last().ok_or("shell has no default strike geometry")?.radius_m;
+        Ok([(inner+2.0*outer)/3.0,0.0])
+    }
+
+    /// Export a declared revolved profile as explicit SI samples, before any
+    /// modal reduction. Round-trip floats retain the original geometry exactly.
+    pub fn mesh_text(&self) -> Result<String,Error> {
+        if self.sampled.is_some() { return Err("profile-to-mesh export requires a profile input".into()); }
+        let shell = self.build()?; let strike = self.default_strike_position()?;
+        let mut text = format!("{}\n# Declared profile inputs, not measurement evidence.\n",mesh_input::HEADER);
+        writeln!(text,"band_hz,{:.17e},{:.17e}",self.band_hz[0],self.band_hz[1])?;
+        writeln!(text,"strike,{:.17e},{:.17e}",strike[0],strike[1])?;
+        writeln!(text,"material,0,{:.17e},{:.17e},{:.17e}",self.young_pa,self.poisson,self.density_kg_m3)?;
+        for (i,(p,h)) in shell.mesh.nodes.iter().zip(&shell.nodal_thickness_m).enumerate() {
+            writeln!(text,"node,{i},{:.17e},{:.17e},{:.17e},{:.17e}",p[0],p[1],p[2],h)?;
+        }
+        for (i,t) in shell.mesh.tris.iter().enumerate() {
+            writeln!(text,"triangle,{i},{},{},{},0",t[0],t[1],t[2])?;
+        }
+        Ok(text)
+    }
+
+    pub fn input_label(&self) -> &'static str {
+        if self.sampled.is_some() { "supplied 3D mesh" } else { "supplied profile" }
     }
 }
 
 /// Extract geometry selection before the existing playing parser. Reject an
 /// unrelated command before file I/O; this option never changes drum physics.
 pub fn option(args: &mut Vec<String>) -> Result<Option<PathBuf>,Error> {
-    let mut positions=args.iter().enumerate().filter(|(_,a)| a.as_str()=="--shell-profile");
+    path_option(args,"--shell-profile")
+}
+pub fn mesh_option(args: &mut Vec<String>) -> Result<Option<PathBuf>,Error> {
+    path_option(args,"--shell-mesh")
+}
+fn path_option(args: &mut Vec<String>, flag: &str) -> Result<Option<PathBuf>,Error> {
+    let mut positions=args.iter().enumerate().filter(|(_,a)| a.as_str()==flag);
     let Some((i,_))=positions.next() else {return Ok(None);};
     if positions.next().is_some() || i+1==args.len() || args[i+1].starts_with("--") {
-        return Err("--shell-profile requires exactly one input path".into());
+        return Err(format!("{flag} requires exactly one input path").into());
     }
     let path=PathBuf::from(&args[i+1]);args.drain(i..i+2);Ok(Some(path))
 }
@@ -130,6 +183,39 @@ pub fn admit_command(path: Option<&Path>,command: &str) -> Result<(),Error> {
         return Err("--shell-profile applies to the splash shell execution path, not drum or snare commands".into());
     }
     Ok(())
+}
+
+/// Reject ambiguous geometry selections before opening either input.
+pub fn admit_selection(profile: Option<&Path>, mesh: Option<&Path>, command: &str) -> Result<(),Error> {
+    if profile.is_some() && mesh.is_some() { return Err("choose --shell-profile or --shell-mesh, not both".into()); }
+    if mesh.is_some() && !matches!(command,"splash"|"splash-wav"|"splash-mic") {
+        return Err("--shell-mesh applies only to the physical splash shell path".into());
+    }
+    admit_command(profile,command)
+}
+
+pub fn load_selection(profile: Option<&Path>, mesh: Option<&Path>) -> Result<Option<Specimen>,Error> {
+    if profile.is_some() && mesh.is_some() { return Err("choose one explicit shell geometry input".into()); }
+    if let Some(path) = mesh {
+        let mut text = String::new();
+        std::fs::File::open(path)?.take((mesh_input::MAX_BYTES+1) as u64).read_to_string(&mut text)?;
+        return Specimen::parse_mesh(&text).map(Some);
+    }
+    profile.map(Specimen::load).transpose()
+}
+
+/// Cold, no-clobber export front door. It performs no eigensolve or playback.
+pub fn export_command(args: &[String]) -> Result<bool,Error> {
+    if args.first().map(String::as_str) != Some("export-shell-mesh") { return Ok(false); }
+    if !(2..=3).contains(&args.len()) {
+        return Err("usage: percussion export-shell-mesh OUTPUT.fss [INPUT.profile]".into());
+    }
+    let input = if args.len() == 3 { Specimen::load(Path::new(&args[2]))? } else { Specimen::reference() };
+    let text = input.mesh_text()?;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&args[1])?;
+    file.write_all(text.as_bytes())?; file.flush()?;
+    eprintln!("wrote explicit shell mesh to {}; physical values retain their input/estimated status, not a measured specimen",args[1]);
+    Ok(true)
 }
 
 #[cfg(test)]

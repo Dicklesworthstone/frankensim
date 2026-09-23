@@ -153,3 +153,13 @@ bake remains 40–1640 Hz. Large scans, sharp features or broader frequency wind
 can exceed the existing budgets and should refuse, not truncate silently. An
 input file carries no automatic measured/calibrated status. Native execution and
 measured response comparisons remain required for instrument-fidelity claims.
+
+## Supply a non-axisymmetric shell mesh
+
+`--shell-mesh instrument.fss` admits explicit three-dimensional midsurface
+vertices, triangles, nodal thickness and per-facet materials instead of a
+revolved meridian. `export-shell-mesh OUTPUT.fss [INPUT.profile]` exports the
+existing profile geometry before modal preparation, without overwriting files.
+See [SHELL_MESH.md](SHELL_MESH.md) for the physical format, shared contact/audio
+path, examples and unchanged fidelity/budget limits. Exported reference inputs
+remain estimates; no measured specimen is supplied by this command.

@@ -47,6 +47,7 @@ pub fn shell_location(nodes: &[[f64;3]], triangles: &[[usize;3]], point: [f64;2]
     -> Result<(usize,[f64;3]),Error>
 {
     if point.iter().any(|v| !v.is_finite()) { return Err("strike position must be finite".into()); }
+    let mut hit:Option<(usize,[f64;3])>=None;
     for (index,t) in triangles.iter().enumerate() {
         let [a,b,c] = t.map(|i| nodes[i]);
         let det = (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
@@ -57,10 +58,21 @@ pub fn shell_location(nodes: &[[f64;3]], triangles: &[[usize;3]], point: [f64;2]
         if bary.iter().all(|v| v.is_finite() && *v >= -32.0*f64::EPSILON) {
             for b in &mut bary { *b = b.max(0.0); }
             let sum = bary.iter().sum::<f64>(); for b in &mut bary { *b /= sum; }
-            return Ok((index,bary));
+            if let Some((prior,weights))=hit {
+                // Adjacent facets legitimately meet at a shared edge/vertex.
+                // An unrelated projected sheet must not win by file order.
+                let previous=&triangles[prior];
+                let on_common_feature=t.iter().enumerate().all(|(k,n)|
+                    bary[k]<=64.0*f64::EPSILON || previous.contains(n))
+                    && previous.iter().enumerate().all(|(k,n)|
+                        weights[k]<=64.0*f64::EPSILON || t.contains(n));
+                if !on_common_feature {
+                    return Err("shell XY station is ambiguous across overlapping facets".into());
+                }
+            }else{hit=Some((index,bary));}
         }
     }
-    Err("strike position lies outside the physical shell surface (including its mounting hole)".into())
+    hit.ok_or_else(||"strike position lies outside the physical shell surface (including its mounting hole)".into())
 }
 
 #[cfg(test)]
@@ -87,4 +99,18 @@ mod tests {
         for (actual,expected) in bary.into_iter().zip([0.5,0.2,0.3]) { assert!((actual-expected).abs()<1e-14); }
         assert!(shell_location(&nodes,&[[0,1,2]],[0.8,0.8]).is_err());
     }
+    #[test]
+    fn shell_chart_accepts_shared_edges_but_refuses_overlapping_sheets() {
+        let nodes=[[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.],
+            [0.,0.,0.2],[1.,0.,0.2],[1.,1.,0.2]];
+        let faces=[[0,1,2],[0,2,3]];
+        for point in [[0.5,0.5],[0.,0.],[1.,1.]] {
+            assert_eq!(shell_location(&nodes,&faces,point).unwrap().0,0);
+        }
+        for faces in [[[0,1,2],[4,5,6]],[[4,5,6],[0,1,2]]] {
+            assert!(shell_location(&nodes,&faces,[0.6,0.2]).is_err());
+            assert!(shell_location(&nodes,&faces,[0.5,0.5]).is_err());
+        }
+    }
+
 }
