@@ -12,7 +12,7 @@
 //! owners. A bounded iteration count is not an allocation-free or hard-real-
 //! time claim. Cancellation is observed between complete mechanical steps.
 
-use super::BernoulliAperture;
+use super::{BernoulliAperture, plate::PlateApertureReduction};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::reed_bore::{FastSolveStats, ReedSolverMode, reed_pressure_face, reed_structural};
 use crate::unilateral_contact::slit_contact_discrete_coefficients;
@@ -132,6 +132,8 @@ pub struct DynamicAperture {
     reed: BeatingReed,
     lay: Obstacle,
     contact_storage: ContactStorage,
+    // A physical reduction is retained, not flattened into unguarded scalars.
+    plate: Option<Box<PlateApertureReduction>>,
     state: ApertureState,
     accepted_steps: u64,
 }
@@ -205,7 +207,7 @@ impl DynamicAperture {
             blowing_pressure_pa: 0.0,
             attack_s: 0.0,
         };
-        let model = Self { spec, reed, lay, contact_storage, state, accepted_steps: 0 };
+        let model = Self { spec, reed, lay, contact_storage, plate: None, state, accepted_steps: 0 };
         let (stiffness, damping) = reed_structural(reed);
         if !reed_pressure_face(reed).is_finite() || !stiffness.is_finite()
             || !damping.is_finite() || !model.energy_at(state).is_finite()
@@ -213,6 +215,41 @@ impl DynamicAperture {
             return Err(invalid("dynamic aperture derived mechanics or initial energy overflowed"));
         }
         Ok(model)
+    }
+
+    /// Bind the actual plate specimen to the existing nonlinear slit junction.
+    /// Geometry-derived mass, stiffness, width and pressure area cannot be
+    /// independently overridden. Fluid/load, clock, initial state and lay law
+    /// remain explicit, independent physical inputs. The plate and its material
+    /// receipts stay available throughout tube/network composition and resume.
+    ///
+    /// Every initial/candidate opening must satisfy the specimen's linear-slope
+    /// limit. A refused candidate changes neither this valve nor a composed
+    /// tube/network: both are still in their immutable preview phase.
+    ///
+    /// # Errors
+    /// Invalid specimen state, load/clock, or the existing contact/solver refusal.
+    pub fn from_plate(
+        plate: PlateApertureReduction,
+        density_kg_m3: f64,
+        impedance_pa_s_m3: f64,
+        time_step_s: f64,
+        max_steps: u64,
+        state: ApertureState,
+        lay: Obstacle,
+    ) -> Result<Self, AcousticRealizeError> {
+        plate.validate_opening(state.opening_m)?;
+        let spec = plate.dynamic_spec(density_kg_m3, impedance_pa_s_m3, time_step_s, max_steps);
+        let mut model = Self::new(spec, state, lay)?;
+        model.plate = Some(Box::new(plate));
+        Ok(model)
+    }
+
+    /// Original geometry/material reduction, absent on the authored-scalar path.
+    /// Read-only access prevents a moving specimen from silently changing basis.
+    #[must_use]
+    pub fn plate_reduction(&self) -> Option<&PlateApertureReduction> {
+        self.plate.as_deref()
     }
 
     /// Current accepted mechanical state, including nonzero vibration on resume.
@@ -287,6 +324,11 @@ impl DynamicAperture {
             Some(&self.lay), ReedSolverMode::Strict, &mut FastSolveStats::default(),
         )?;
         let state = ApertureState { opening_m: opening, opening_velocity_m_s: velocity };
+        if let Some(plate) = &self.plate {
+            // The admissible one-mode opening interval is convex, so checking
+            // the old and new endpoints also covers the midpoint used below.
+            plate.validate_opening(opening)?;
+        }
         let midpoint_opening_m = f64::midpoint(old.opening_m, opening).max(0.0);
         let vm = f64::midpoint(old.opening_velocity_m_s, velocity);
         let bore = outgoing + drive.incoming_pressure_pa;

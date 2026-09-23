@@ -19,6 +19,16 @@ use crate::bernoulli_aperture::{BernoulliAperture, dynamic::DynamicApertureSpec}
 use fs_exec::CancelGate;
 use fs_plate::{AssemblyOptions, PlateChart, SliceOptions, modes};
 
+/// Physical surface motion relative to the supplied rest chart, at one node.
+/// No unit-amplitude animation or rescaling is applied after the dynamics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlateApertureMotion {
+    /// [transverse displacement in m, two DKT rotations in rad].
+    pub displacement_rotation: [f64; 3],
+    /// [transverse velocity in m/s, two angular velocities in rad/s].
+    pub velocity_rotation_rate: [f64; 3],
+}
+
 /// Geometry, approximation limits and bounded offline mode selection.
 #[derive(Debug, Clone)]
 pub struct PlateApertureOptions {
@@ -273,6 +283,27 @@ impl PlateApertureReduction {
         }
         Ok(())
     }
+    /// Reconstruct physical nodal motion from an accepted opening and velocity.
+    /// This observes the mechanical state; it does not step or renormalize it.
+    ///
+    /// # Errors
+    /// Absent node, invalid state, slope-domain refusal or nonfinite projection.
+    pub fn nodal_motion(&self, node: usize, opening_m: f64, opening_velocity_m_s: f64)
+        -> Result<PlateApertureMotion, AcousticRealizeError>
+    {
+        self.validate_opening(opening_m)?;
+        let shape = self.shape.get(node).ok_or_else(|| invalid("plate aperture node is outside the source mesh"))?;
+        let displacement = opening_m - self.options.rest_opening_m;
+        let motion = PlateApertureMotion {
+            displacement_rotation: shape.map(|x| x * displacement),
+            velocity_rotation_rate: shape.map(|x| x * opening_velocity_m_s),
+        };
+        if !opening_velocity_m_s.is_finite() || !motion.displacement_rotation.iter()
+            .chain(&motion.velocity_rotation_rate).all(|x| x.is_finite())
+        { return Err(invalid("plate aperture physical nodal motion overflowed")); }
+        Ok(motion)
+    }
+
     /// Supply only the independent gas/load/clock budget to existing mechanics.
     /// No geometry-derived coefficient can be independently retuned here.
     /// The dynamic owner performs the full fluid/clock admission at construction.

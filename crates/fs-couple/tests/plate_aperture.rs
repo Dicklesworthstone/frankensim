@@ -124,3 +124,6 @@ fn malformed_geometry_budget_and_cancellation_refuse_without_substitute_modes() 
     let mut a = o.clone(); a.rest_opening_m = 0.0; bad.push(a);
     for options in bad { assert!(PlateApertureReduction::from_chart(c.clone(), options, &CancelGate::new()).is_err()); }
 }
+
+#[path = "plate_aperture/runtime.rs"]
+mod runtime;
