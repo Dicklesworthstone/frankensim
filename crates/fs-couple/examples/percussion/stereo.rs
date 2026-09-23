@@ -7,6 +7,9 @@ use fs_couple::pcm_wav::encode_pcm16_wav_interleaved;
 #[path = "observer_fit.rs"]
 mod observer_fit;
 
+#[path = "radiation_spec.rs"]
+pub mod radiation_spec;
+
 /// Same comma-separated SI position syntax as grand_piano. Remove only this
 /// option, transactionally: bad/duplicate input leaves all arguments unchanged.
 pub fn option(args:&mut Vec<String>)->Result<Option<[f64;3]>,Error> {
@@ -31,9 +34,16 @@ pub fn admit_command(right:Option<[f64;3]>,command:&str)->Result<(),Error> {
 }
 
 fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Error> {
+    bake_receivers_with_spec(boundary,receivers,radiation_spec::Spec::default(),&CancelGate::new_clock_free())
+}
+
+fn bake_receivers_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_spec::Spec,
+    gate:&CancelGate)->Result<Vec<Bake>,Error> {
+    if gate.is_requested() {return Err("radiation preparation cancelled".into());}
     let count=boundary.weights.len();let panels=boundary.triangles.len();
+    let (prepared_panels,work)=spec.work(panels,count,receivers.len())?;
     if !(1..=2).contains(&receivers.len()) || count==0 || count>MAX_INPUTS
-        || count!=boundary.state_modes.len() || panels==0 || panels>MAX_PANELS
+        || count!=boundary.state_modes.len() || panels==0 || panels>spec.max_panels
         || boundary.weights.iter().any(|b|b.len()!=panels || b.iter().any(|v|!v.is_finite())) {
         return Err("exterior radiation exceeds its receiver/shape/work contract".into());
     }
@@ -47,43 +57,54 @@ fn bake_receivers(boundary:&Boundary,receivers:&[Receiver])->Result<Vec<Bake>,Er
         let (propagation_delay_s,pressure_gain)=receiver.propagation(radius,medium,dt)?;
         baked.push(Bake {filters:Vec::with_capacity(count),range_m,medium,propagation_delay_s,pressure_gain});
     }
-    let surface=SpherePanels::from_triangles(boundary.triangles.clone())?;
-    let omega:Vec<_>=(0..81).map(|i|2.0*std::f64::consts::PI*(40.0+20.0*i as f64)).collect();
-    let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
+    let refined=curved_aperture::uniform_refinement(boundary,spec.subdivisions,spec.max_panels,gate)?;
+    let surface=SpherePanels::from_triangles(refined.triangles.clone())?;
+    let omega=spec.frequencies()?;
+    let mut values=vec![vec![vec![C64::new(0.0,0.0);omega.len()];count];receivers.len()];
+    eprintln!("radiation preparation: source_panels={panels}, prepared_panels={prepared_panels}, subdivisions={}, dense_work_units={work}, band_hz={:?}; same polyhedral source geometry, no mechanical refinement",spec.subdivisions,spec.band_hz);
     let mut ppw=f64::INFINITY;let mut condition=0.0_f64;
     // One formulation for the entire transfer; stitching different discrete
     // operators at kR=0.5 creates a numerical jump that a causal fit cannot fix.
     let formulation=if omega[omega.len()-1]*radius/medium.sound_speed<0.5 {
         Formulation::PlainCbie
     }else{Formulation::BurtonMiller};
-    for &w in &omega {
-        let k=w/medium.sound_speed;
-        let fields=acceleration_fields(&boundary.weights,w);
+    // Solve the highest frequency first: the BEM owner's wavelength guard can
+    // reject an underresolved band before spending work on its lower samples.
+    for index in (0..omega.len()).rev() {
+        if gate.is_requested() {return Err("radiation preparation cancelled".into());}
+        let w=omega[index];let k=w/medium.sound_speed;
+        let fields=acceleration_fields(&refined.weights,w);
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
         // Geometry, factorization and all source-mode solves are independent of
         // the observation point. Do not repeat them per microphone.
         let solutions=solve_radiation_batch(&surface,k,medium,&field_refs,formulation)?;
+        if solutions.len()!=count {return Err("BEM source batch lost a mechanical input".into());}
         for (input,solution) in solutions.iter().enumerate() {
-            if solution.radiated_power_roundoff_interval.1<0.0 {
-                return Err("BEM reports negative radiation power beyond roundoff; refine the acoustic solve".into());
+            if !solution.radiated_power_roundoff_interval.1.is_finite()
+                || !solution.panels_per_wavelength.is_finite()
+                || !solution.condition_lower_bound.is_finite()
+                || solution.radiated_power_roundoff_interval.1<0.0 {
+                return Err("BEM reports invalid diagnostics or negative radiation power beyond roundoff; refine the acoustic solve".into());
             }
             ppw=ppw.min(solution.panels_per_wavelength);condition=condition.max(solution.condition_lower_bound);
             for (channel,&receiver) in receivers.iter().enumerate() {
-                values[channel][input].push(receiver_response(&surface,solution,medium,receiver,
-                    radius,baked[channel].propagation_delay_s)?);
+                values[channel][input][index]=receiver_response(&surface,solution,medium,receiver,
+                    radius,baked[channel].propagation_delay_s)?;
             }
         }
     }
     for (channel,bake) in baked.iter_mut().enumerate() {
         let mut maximum=0.0_f64;let mut rms=0.0_f64;
         for row in &values[channel] {
-            let (filter,report)=observer_fit::fit(&omega,row,dt,8)?;
+            if gate.is_requested() {return Err("radiation fitting cancelled".into());}
+            let (filter,report)=observer_fit::fit(&omega,row,dt,spec.max_order)?;
             maximum=maximum.max(report.audit_maximum);rms=rms.max(report.audit_rms);
             eprintln!("observer fit: selected_order={}, attempts={}, selection_max={}, selection_rms={}, independent_audit_max={}, independent_audit_rms={}",
                 report.order,report.attempts,report.selection_maximum,report.selection_rms,report.audit_maximum,report.audit_rms);
             bake.filters.push(filter);
         }
-        eprintln!("receiver {channel} BEM bake: panels={panels}, inputs={count}, band_hz=40..1640, training=21, order_selection=20, independent_audit=40, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}");
+        eprintln!("receiver {channel} BEM bake: panels={prepared_panels}, inputs={count}, band_hz={:?}, training={}, order_selection={}, independent_audit={}, min_panels_per_wavelength={ppw}, condition_lower_bound_max={condition}, max_error={maximum}, worst_input_rms={rms}",
+            spec.band_hz,spec.training_intervals+1,spec.training_intervals,2*spec.training_intervals);
         eprintln!("receiver={:?}; independent causal filters from shared source solves; linear undeformed one-way acoustics, no radiation loading; propagation_delay_s={}, pressure_gain={}",
             receivers[channel],bake.propagation_delay_s,bake.pressure_gain);
     }
@@ -103,14 +124,26 @@ fn admit_render(experiment:&Experiment,frames:usize,full_scale_pa:f64)->Result<(
 
 pub(crate) fn render_receivers(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,
     receivers:&[Receiver])->Result<Vec<u8>,Error> {
+    render_receivers_with_spec(experiment,frames,full_scale_pa,receivers,
+        radiation_spec::Spec::default(),&CancelGate::new_clock_free())
+}
+
+pub(crate) fn render_receivers_with_spec(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,
+    receivers:&[Receiver],spec:radiation_spec::Spec,gate:&CancelGate)->Result<Vec<u8>,Error> {
     admit_render(experiment,frames,full_scale_pa)?;
-    let baked=bake_receivers(experiment.acoustics.as_ref().unwrap(),receivers)?;
-    render_baked(experiment,frames,full_scale_pa,&baked)
+    spec.admit_necks(experiment)?;
+    let baked=bake_receivers_with_spec(experiment.acoustics.as_ref().unwrap(),receivers,spec,gate)?;
+    if gate.is_requested() {return Err("radiation preparation cancelled before mechanics".into());}
+    render_baked_with_gate(experiment,frames,full_scale_pa,&baked,gate)
 }
 
 // Private so callers cannot replace geometry/BEM admission with an authored
 // transfer. Tests can isolate frame plumbing with explicitly labeled fixtures.
 fn render_baked(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,baked:&[Bake])->Result<Vec<u8>,Error> {
+    render_baked_with_gate(experiment,frames,full_scale_pa,baked,&CancelGate::new_clock_free())
+}
+fn render_baked_with_gate(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,
+    baked:&[Bake],gate:&CancelGate)->Result<Vec<u8>,Error> {
     admit_render(experiment,frames,full_scale_pa)?;
     let boundary=experiment.acoustics.as_ref().unwrap();
     let count=boundary.state_modes.len();let channels=baked.len();
@@ -123,10 +156,10 @@ fn render_baked(experiment:&mut Experiment,frames:usize,full_scale_pa:f64,baked:
     let mut block=vec![0.0;SUBSTEPS*count];
     let x=experiment.system.state();
     let mut previous:Vec<f64>=boundary.state_modes.iter().map(|&k|x[2*k+1]).collect();
-    let mut pressure=Vec::with_capacity(frames*channels);let gate=CancelGate::new_clock_free();
+    let mut pressure=Vec::with_capacity(frames*channels);
     for _ in 0..frames {
         for frame in block.chunks_exact_mut(count) {
-            experiment.system.step(&experiment.force,&gate)?;
+            experiment.system.step(&experiment.force,gate)?;
             let x=experiment.system.state();
             for ((sample,previous),&k) in frame.iter_mut().zip(&mut previous).zip(&boundary.state_modes) {
                 let velocity=x[2*k+1];*sample=(velocity-*previous)/MECHANICAL_DT;*previous=velocity;

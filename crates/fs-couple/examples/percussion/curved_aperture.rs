@@ -199,3 +199,39 @@ impl Boundary {
 #[cfg(test)]
 #[path = "curved_aperture_tests.rs"]
 mod tests;
+
+/// Uniform cold refinement of the SAME polyhedral boundary and piecewise-constant
+/// source fields. Reuse the conforming aperture refiner; never smooth/project a
+/// midpoint onto a different surface or average unrelated source-mode rows.
+pub(super) fn uniform_refinement(boundary: &Boundary, levels: u32, maximum: usize,
+    gate: &CancelGate) -> Result<Boundary, Error>
+{
+    if gate.is_requested() { return Err("radiation refinement cancelled".into()); }
+    let count=boundary.triangles.len();
+    if levels>4 || count==0 || maximum>fs_bem::helmholtz::MAX_DENSE_PANELS
+        || count.checked_mul(4_usize.pow(levels)).is_none_or(|n|n>maximum)
+        || boundary.weights.len()!=boundary.state_modes.len() || boundary.weights.is_empty()
+        || boundary.weights.iter().any(|r|r.len()!=count || r.iter().any(|v|!v.is_finite()))
+        || boundary.triangles.iter().flatten().flatten().any(|v|!v.is_finite()) {
+        return Err("radiation refinement exceeds its complete geometry/source budget".into());
+    }
+    let mut points=Vec::new(); let mut lookup=BTreeMap::new(); let mut faces=Vec::with_capacity(count);
+    for (parent,t) in boundary.triangles.iter().enumerate() {
+        if !area(*t).is_finite() || area(*t)<=0.0 { return Err("degenerate radiation panel".into()); }
+        let nodes=t.map(|p|*lookup.entry(p.map(|x|if x==0.0 {0}else{x.to_bits()})).or_insert_with(|| {
+            let i=points.len();points.push(p);i
+        }));
+        faces.push(Face {nodes,chart:None,parent});
+    }
+    check_closed(&faces.iter().map(|f|f.nodes).collect::<Vec<_>>())?;
+    for _ in 0..levels {
+        if gate.is_requested() { return Err("radiation refinement cancelled".into()); }
+        let mut marked=BTreeSet::new();
+        for f in &faces { for i in 0..3 { marked.insert(edge(f.nodes[i],f.nodes[(i+1)%3])); } }
+        faces=refine(&mut points,&faces,&marked,maximum)?;
+    }
+    check_closed(&faces.iter().map(|f|f.nodes).collect::<Vec<_>>())?;
+    Ok(Boundary {triangles:faces.iter().map(|f|f.nodes.map(|i|points[i])).collect(),
+        weights:boundary.weights.iter().map(|r|faces.iter().map(|f|r[f.parent]).collect()).collect(),
+        state_modes:boundary.state_modes.clone()})
+}

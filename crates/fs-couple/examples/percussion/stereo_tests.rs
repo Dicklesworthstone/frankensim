@@ -114,3 +114,71 @@ fn invalid_right_receiver_or_transfer_does_not_advance_the_drum() {
     let crate::Mechanics::Prepared(system)=&experiment.system else {panic!();};
     assert_eq!(system.samples_rendered(),0);
 }
+
+#[test]
+fn cold_boundary_refinement_preserves_flux_source_addresses_and_original_geometry() {
+    let mut b=tetrahedron();b.weights.push(vec![1.0,2.0,-3.0,4.0]);b.state_modes.push(17);
+    let triangles=b.triangles.clone();let weights=b.weights.clone();let gate=CancelGate::new_clock_free();
+    let original=SpherePanels::from_triangles(triangles.clone()).unwrap();
+    let flux=|rows:&[Vec<f64>],areas:&[f64]|rows.iter().map(|r|r.iter().zip(areas).map(|(b,a)|b*a).sum::<f64>()).collect::<Vec<_>>();
+    let expected=flux(&b.weights,original.areas());
+    for levels in 0..=2 {
+        let refined=curved_aperture::uniform_refinement(&b,levels,64,&gate).unwrap();
+        assert_eq!(refined.triangles.len(),4*4_usize.pow(levels));assert_eq!(refined.state_modes,b.state_modes);
+        let surface=SpherePanels::from_triangles(refined.triangles.clone()).unwrap();
+        for (actual,want) in flux(&refined.weights,surface.areas()).iter().zip(&expected) {assert!((actual-want).abs()<1e-16);}
+        for p in triangles.iter().flatten() {assert!(refined.triangles.iter().flatten().any(|q|q==p));}
+        for (i,normal) in surface.normals().iter().enumerate() {
+            let parent=i/(4_usize.pow(levels));
+            assert!(normal.iter().zip(&original.normals()[parent]).map(|(a,b)|a*b).sum::<f64>()>1.0-1e-12);
+        }
+    }
+    assert_eq!(b.triangles,triangles);assert_eq!(b.weights,weights);
+    assert!(curved_aperture::uniform_refinement(&b,2,63,&gate).is_err());
+    gate.request();assert!(curved_aperture::uniform_refinement(&b,1,64,&gate).is_err());
+}
+
+#[test]
+fn wider_radiation_band_uses_real_bem_and_independently_audited_receiver_filters() {
+    let mut b=tetrahedron();
+    // Prescribed breathing of a small closed polyhedron, not an eigensolve or a
+    // measured cymbal. It tests the full wider-band BEM -> digital filter path.
+    b.weights[0].fill(1.0);
+    let spec=radiation_spec::Spec {band_hz:[40.0,8000.0],training_intervals:64,max_order:24,
+        subdivisions:2,max_panels:64,max_dense_work:1_000_000_000};
+    let receivers=[Receiver::FinitePoint([0.0,0.0,0.12]),Receiver::FinitePoint([0.1,0.0,0.08])];
+    let gate=CancelGate::new_clock_free();let result=bake_receivers_with_spec(&b,&receivers,spec,&gate).unwrap();
+    assert_eq!(result.len(),2);assert_eq!(result[0].filters.len(),1);
+    let refined=curved_aperture::uniform_refinement(&b,2,64,&gate).unwrap();
+    let surface=SpherePanels::from_triangles(refined.triangles.clone()).unwrap();
+    let radius=b.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt()).fold(0.0_f64,f64::max);
+    let medium=Medium::air();let mut compared=0;
+    // New frequencies are absent from training, order selection AND audit.
+    for hz in [2207.0,3911.0,6123.0,7777.0] {
+        let w=core::f64::consts::TAU*hz;let fields=acceleration_fields(&refined.weights,w);
+        let solutions=solve_radiation_batch(&surface,w/medium.sound_speed,medium,&[&fields[0]],Formulation::BurtonMiller).unwrap();
+        for (channel,&receiver) in receivers.iter().enumerate() {
+            let truth=receiver_response(&surface,&solutions[0],medium,receiver,radius,result[channel].propagation_delay_s).unwrap();
+            let fitted=result[channel].filters[0].eval(w).unwrap().conj();
+            assert!((fitted-truth).abs()<0.15*truth.abs(),"out-of-grid frequency {hz}");compared+=1;
+        }
+    }
+    assert_eq!(compared,8);
+}
+
+#[test]
+fn acoustic_budget_cancellation_and_neck_band_refusals_never_advance_mechanics() {
+    let mut e=drum(4);let before=e.system.state().to_vec();let receiver=[Receiver::FinitePoint([0.08,0.05,0.35])];
+    let gate=CancelGate::new_clock_free();
+    let tiny=radiation_spec::Spec {max_dense_work:1,..radiation_spec::Spec::default()};
+    assert!(render_receivers_with_spec(&mut e,4,20.0,&receiver,tiny,&gate).is_err());
+    assert_eq!(e.system.state(),before);
+    gate.request();assert!(render_receivers_with_spec(&mut e,4,20.0,&receiver,radiation_spec::Spec::default(),&gate).is_err());
+    assert_eq!(e.system.state(),before);
+    let neck=crate::cavity::NeckOptions {radius_m:0.003,effective_length_m:0.008,
+        resistance_pa_s_m3:1000.0,azimuth_rad:0.4,axial_position_m:0.08};
+    let e=crate::drum_with_radiation(16,MECHANICAL_DT,false,true,None,false,crate::Stroke::default(),
+        true,Some(neck),None,None,&[],0.0,None,false).unwrap();
+    let broad=radiation_spec::Spec {band_hz:[40.0,8000.0],..radiation_spec::Spec::default()};
+    assert!(broad.admit_necks(&e).is_err());radiation_spec::Spec::default().admit_necks(&e).unwrap();
+}
