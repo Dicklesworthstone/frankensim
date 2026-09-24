@@ -4,8 +4,7 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-verify/**'
-      - 'crates/fs-conduction/src/bounds/**'
-      - 'crates/fs-conduction/src/bounds.rs'
+      - 'crates/fs-conduction/**'
       - '.github/workflows/thermal-bounds.yml'
   workflow_dispatch:
 permissions:
@@ -24,7 +23,9 @@ jobs:
         run: |
           scratch=$(mktemp -d)
           sed '/^#\[cfg(test)\]/,$d' crates/fs-verify/src/interval.rs > "$scratch/interval.rs"
-          printf '#![forbid(unsafe_code)]\n#[path="interval.rs"] pub mod interval;\n#[path="%s/crates/fs-verify/src/tet.rs"] pub mod tet;\n' "$GITHUB_WORKSPACE" > "$scratch/check.rs"
+          cp crates/fs-verify/src/tet.rs "$scratch/tet.rs"
+          cp -r crates/fs-verify/src/tet "$scratch/tet"
+          printf '#![forbid(unsafe_code)]\npub mod interval;\npub mod tet;\n' > "$scratch/check.rs"
           rustc --edition=2024 --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
           "$scratch/flux-tests"
       - name: Materialize pinned dependencies
@@ -32,3 +33,8 @@ jobs:
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::
+      - name: Test real conduction primal and dual consumers
+        run: |
+          cargo test --release -p fs-verify --features thermal-conduction --lib conduction::
+      - name: Execute mean-temperature comparison
+        run: cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
