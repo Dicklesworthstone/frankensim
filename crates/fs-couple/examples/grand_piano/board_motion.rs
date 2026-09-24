@@ -5,6 +5,10 @@
 use fs_plate::ShellMesh;
 use super::MAX_BOARD_MODES;
 
+/// Finite acoustic skin derived from the admitted board's section thicknesses.
+#[path = "board_skin.rs"]
+pub mod skin;
+
 #[derive(Debug)]
 pub struct MotionSurface {
     pub mesh: ShellMesh,
