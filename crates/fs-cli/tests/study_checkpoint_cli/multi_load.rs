@@ -126,8 +126,7 @@ fn invalid_native_load_families_refuse_before_creating_persistent_state() {
         let dir = scratch(&format!("load-family-refusal-{index}"));
         let input = source(&dir, &source_text);
         let db = dir.join("must-not-exist.db");
-        let out = document(&command("study").arg(&input).arg(&db).output().unwrap(), fs_cli::exit::REFUSED);
-        assert!(out.str_field("run_id").is_none());
+        refusal(&command("study").arg(&input).arg(&db).output().unwrap(), fs_cli::exit::REFUSED);
         assert!(!db.exists());
     }
 }

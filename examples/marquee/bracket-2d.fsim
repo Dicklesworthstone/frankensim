@@ -11,7 +11,7 @@
   (budgets
     :wall-time 300.0 s
     :memory 536870912 B
-    :max-iterations 8)
+    :max-iterations 32)
   (capabilities
     "optimization.marquee-topopt"
     "geometry.sdf"
@@ -47,5 +47,5 @@
     :sobolev-alpha 2.0
     :nucleation-period 4
     :hole-radius-cells 1.5
-    :steps 8)
+    :steps 32)
 )

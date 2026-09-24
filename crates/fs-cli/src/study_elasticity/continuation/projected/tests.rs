@@ -9,10 +9,10 @@ fn source() -> String {
         .replace(":youngs-modulus-pa 70000000000.0", ":youngs-modulus-pa 2.0")
         .replace(":load-traction-pa 1000000.0", ":load-traction-pa 1.0")
         .replace(":volume-fraction 0.45", ":volume-fraction 0.75")
-        .replace(":max-iterations 8", ":max-iterations 2")
+        .replace(":max-iterations 32", ":max-iterations 2")
         .replace(":move-cells 0.35", ":move-cells 0.1")
         .replace(":nucleation-period 4", ":nucleation-period 0")
-        .replace("    :steps 8)", &format!("    :steps 2\n{POLICY}"))
+        .replace("    :steps 32)", &format!("    :steps 2\n{POLICY}"))
 }
 fn spec() -> ElasticitySpec { parse(&source()).expect("explicit projected native study") }
 fn gate() -> CancelGate { CancelGate::new_clock_free() }

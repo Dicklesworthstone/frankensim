@@ -119,3 +119,17 @@ Focused native tests: `cargo test --release -p fs-cli --lib study::elasticity`
 and `cargo test --release -p fs-cli --test study_checkpoint_cli`. These new
 regressions require native execution; source inspection alone does not establish
 that this example accepts a step or that a checkpoint replays successfully.
+
+## Measured behaviour under a binding limit (2026-09-24)
+
+With this example's 2 Pa modulus and 1 Pa traction the baseline's sampled
+von Mises maximum is 1.586 Pa and the unconstrained first update reaches
+1.617 Pa, so the tracked 1e12 Pa limit never binds. Re-running with a binding
+limit over six steps: 1.59 or 1.60 Pa stops with `no-feasible-descent` and no
+accepted update; 1.62 Pa accepts one update then stops; 1.626 Pa completes all
+six steps with six of seven candidates refused in the last two; 1.65 Pa and
+above behave exactly like the unconstrained run. The candidate search only
+contracts the compliance step and has no stress-aware direction, so a strongly
+binding limit stalls the study rather than steering it. That is the mode's
+current capability boundary, not a tuning issue (bead
+frankensim-rc-root-q61wp.75).

@@ -32,6 +32,9 @@ use continuation::drive;
 const DRIVER: &str = "free-boundary-elasticity-study-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+/// Reported (never enforced) tolerance on the final material area of the
+/// augmented-Lagrangian mode: 1% of the design box.
+const VOLUME_TOLERANCE_FRACTION_OF_BOX: f64 = 0.01;
 const TRACE_DOMAIN: &str = "org.frankensim.cli.elasticity-study.trace.v1";
 const ID_DOMAIN: &str = "org.frankensim.cli.free-boundary-elasticity-study.v1";
 const NO_CLAIM: &str = "2-D plane-strain CutFEM compliance on an evolving bilinear level set. Each retained trajectory row binds post-evolution compliance, cut-quadrature material area and geometry snapshot to the same canonically re-solved design. This is Estimated numerical design evidence: no physical validation, continuous stress certificate, KKT/global-optimum claim, 3-D claim, or guaranteed discretization-error bound. Cancellation and wall enforcement occur between accepted-state updates, not inside one CutFEM solve. Each accepted update is durably retained before more physics.";
@@ -685,8 +688,33 @@ fn persist(
     let final_volume = report.volume.last().copied()
         .or_else(|| evidence.projected_current().map(|state| state.volume));
     let final_snapshot = report.snapshots.last().copied().unwrap_or_else(|| snapshot(phi));
+    // The augmented-Lagrangian mode only drives the area TOWARD its target;
+    // an iteration budget can end far from it. "completed" means every
+    // requested update ran, so the constraint outcome is stated separately.
+    // The projected mode states its own hard constraints in `constraints`.
+    let (volume_fields, volume_html) = match (spec.projected.is_none(), final_volume) {
+        (true, Some(volume)) => {
+            let (lo, hi) = spec.base.domain.as_ref().expect("validated domain").bounds;
+            let box_area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
+            let target = spec.base.constraints.as_ref().expect("validated constraints").volume_fraction
+                * box_area;
+            let violation = volume - target;
+            let tolerance = VOLUME_TOLERANCE_FRACTION_OF_BOX * box_area;
+            let satisfied = violation.abs() <= tolerance;
+            (
+                format!(
+                    ",\"volume_target_m2\":{target:.17e},\"volume_violation_m2\":{violation:.17e},\"volume_tolerance_m2\":{tolerance:.17e},\"volume_constraint_satisfied\":{satisfied}"
+                ),
+                format!(
+                    "<p>Material-area target {target:.6e} m²; final violation {violation:+.6e} m² (tolerance {tolerance:.3e} m²): {}.</p>",
+                    if satisfied { "constraint satisfied" } else { "CONSTRAINT NOT SATISFIED at termination" }
+                ),
+            )
+        }
+        _ => (String::new(), String::new()),
+    };
     let summary = format!(
-        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}}}",
+        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{}{volume_fields},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}}}",
         spec.id.to_hex(),
         spec.steps,
         final_volume.map_or("null".to_string(), |value| format!("{value:.17e}")),
@@ -710,7 +738,7 @@ fn persist(
         );
     }
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}<p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}{volume_html}<p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
         spec.steps,
         geometry_svg(phi),
         trace.to_hex()
@@ -1134,7 +1162,9 @@ mod tests {
     #[test]
     fn canonical_fixture_is_explicit_and_admitted() {
         let spec = parse(FIXTURE).expect("canonical elasticity fixture");
-        assert_eq!(spec.steps, 8);
+        // 32 steps: the tracked example ends inside the 1% area tolerance
+        // (measured 2026-09-24; 8 and 16 steps end infeasible).
+        assert_eq!(spec.steps, 32);
         assert_eq!(spec.load_direction, [0.0, -1.0]);
         assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 4);
     }

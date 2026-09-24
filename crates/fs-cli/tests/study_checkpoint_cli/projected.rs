@@ -77,8 +77,7 @@ fn projected_public_admission_refuses_missing_controls_before_creating_a_ledger(
         let dir = scratch(&format!("projected-refusal-{index}"));
         let input = source(&dir, &bad);
         let db = dir.join("must-not-exist.db");
-        let result = document(&command("study").arg(&input).arg(&db).output().unwrap(), fs_cli::exit::REFUSED);
-        assert!(result.str_field("run_id").is_none());
+        refusal(&command("study").arg(&input).arg(&db).output().unwrap(), fs_cli::exit::REFUSED);
         assert!(!db.exists(), "malformed policy must refuse before opening persistent state");
     }
 }

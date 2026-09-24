@@ -6,8 +6,8 @@ const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
 
 fn spec() -> ElasticitySpec {
     parse(&FIXTURE.replace(":mesh-level 4", ":mesh-level 3")
-        .replace(":max-iterations 8", ":max-iterations 2")
-        .replace(":steps 8", ":steps 2")
+        .replace(":max-iterations 32", ":max-iterations 2")
+        .replace(":steps 32", ":steps 2")
         .replace(":move-cells 0.35", ":move-cells 0.05")
         .replace(":hole-radius-cells 1.5", ":hole-radius-cells 0.5")
         .replace(":nucleation-period 4", ":nucleation-period 2"))
