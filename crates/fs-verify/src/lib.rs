@@ -12,9 +12,10 @@
 //! quadrature. An accepted candidate carries a VERIFIED color; a
 //! rejected or unbounded evaluation carries NOTHING (fail closed).
 //!
-//! v0 class: 1D elliptic with polynomial manufactured solutions (the
-//! quadrature-exactness backbone). The 2D FEEC H(div) equilibration
-//! rides fs-feec as the successor — CONTRACT no-claim. The nonlinear
+//! The original 1D polynomial-manufactured class remains available. `tet`
+//! adds domain-conditional 3D RT0 energy majorants for linear scalar diffusion
+//! with mixed Dirichlet, Neumann and Robin data. It does not promote a
+//! geometry, material or product capability's evidence authority. The nonlinear
 //! class gets the honest fallback: candidates are WARM STARTS with
 //! measured iteration savings, never certificates.
 
@@ -26,6 +27,9 @@ pub mod estimator;
 pub mod fem1d;
 #[cfg(feature = "certified-speculation")]
 pub mod interval;
+/// Equilibrated tetrahedral flux reconstruction and outward energy majorants.
+#[cfg(feature = "certified-speculation")]
+pub mod tet;
 #[cfg(feature = "certified-speculation")]
 pub mod zoo;
 

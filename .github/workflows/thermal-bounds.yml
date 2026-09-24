@@ -1,0 +1,26 @@
+name: Thermal flux bounds
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-verify/**'
+      - 'crates/fs-conduction/src/bounds/**'
+      - 'crates/fs-conduction/src/bounds.rs'
+      - '.github/workflows/thermal-bounds.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tetrahedral-flux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test tetrahedral energy bounds
+        run: cargo test --release -p fs-verify --features certified-speculation --lib tet::
