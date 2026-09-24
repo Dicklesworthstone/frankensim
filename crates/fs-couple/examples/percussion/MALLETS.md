@@ -6,10 +6,10 @@ contact with one supplied effective inertia and a circular felt face.
 Either or both may be selected; an unselected striker keeps its original law.
 These are replacements, never additional felt and Hertz reactions in parallel.
 
-The full face samples actual batter-head displacement at four positive-area
+The full face samples actual batter-head or cymbal-skin displacement at four positive-area
 quadrature sites. Each site keeps its own compression, irreversible conditioning
 and optional Kelvin recovery. All sites share one mallet inertia and react on
-the same head. There is no force pulse inferred from impact velocity, sound
+the same head or shell. There is no force pulse inferred from impact velocity, sound
 sample, output envelope or microphone gain adjustment.
 
 ```sh
@@ -103,16 +103,17 @@ creep once. `felt_crush_j` and `loss_j` in mechanics CSV expose those totals.
 Neither mallet is a direct radiation source; the existing observer receives the
 resulting head motion, and the same single trajectory drives mono or stereo.
 
-Available on `drum`, `drum-stretch`, `snare`, `snare-off` and their `-wav`/`-mic`
+Available on `drum`, `drum-stretch`, `snare`, `snare-off`, `splash` and their `-wav`/`-mic`
 forms. A snare automatically selects its nonlinear-capable joint solver when
 felt is supplied, independently of head/wire stretching. Preparation, analytic
 Newton and bounded substeps preserve the same physical model. Supplied head and
 wire specifications, head relaxation, carrier forces, fixed mufflers, and the
 already-admitted cavity and prescribed-vent options keep their semantics.
 The `drum-modal` linear-only image refuses rather than dropping felt history.
-Curved cymbal faces, rimshots, mallet rotation, shaft bending, stick-stick
-collisions, evolving footprint area, and exterior mallet radiation are outside
-this flat fixed-axis chart. Existing snare restrictions on compliant mutes remain.
+Rimshots, mallet rotation, shaft bending, stick-stick collisions, evolving
+footprint area, and exterior mallet radiation remain outside this fixed-axis
+chart. Existing snare restrictions on compliant mutes remain. Paired hi-hat
+mallets are not admitted by this change; no stand sites are removed to fit them.
 
 ## Focused tests
 
@@ -129,3 +130,82 @@ cargo test --release -p fs-couple --example percussion mallets::tests -- --test-
 
 Native tests and end-to-end audio require execution. Independent arithmetic and
 source checks are not evidence of a Rust test pass, audio fidelity or calibration.
+
+
+## Curvature-aware cymbal excitation
+
+The same tip files now select physical felt strikes on `splash`, `splash-wav`
+and `splash-mic`. Both strikers can independently be wood or felt. Supplied
+profiles and explicit 3D meshes feed the unchanged nonlinear shell reduction.
+
+```sh
+# Two independent estimated felt mallets on the SAME curved shell.
+# An offline preparation request, not a claimed completed/calibrated recording.
+(set -C; cargo run --release -p fs-couple --example percussion -- \
+  splash-mic 4800 20 --strike-position-m 0.06 0.01 --strike-speed-m-s 0.5 \
+  --mallet-spec crates/fs-couple/examples/percussion/estimated-felt-mallet.fsmallet \
+  --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0.3 \
+  --second-mallet-spec crates/fs-couple/examples/percussion/estimated-felt-mallet.fsmallet \
+  --analytic-newton --impact-substeps 8 511 \
+  --microphone-right -0.08,0.05,0.35 > felt-cymbal.wav)
+```
+
+The face remains a horizontal flat disk, not a pad preformed to the cymbal.
+Its reference plane is the maximum height of the actual POSITIVE finite-thickness
+skin over the entire disk. P1 triangle heights are maximized at vertices,
+edge/circle intersections and circular support points. Neither the center nor
+the four contact quadrature sites stand in for this complete geometric maximum.
+The supplied initial gap separates that whole plane from the shell.
+
+At each site the extra gap is `plane_z - skin_z`. The inertial coordinate still
+starts at minus the common initial gap; the site offset does not move the mass
+again. Compression is `mallet_down + shell_up - extra_gap - Kelvin_recovery`.
+The existing positive-side felt law supplies equal and opposite reactions.
+Different sites can begin or end contact at different times; they do not share
+an averaged strain or an invented force envelope. There is no parallel hard
+Hertz tip left at the old coordinate origin.
+
+The source vertices come from the SAME thickness/director construction as shell
+radiation. Barycentric queries use the positive skin's actual XY projection.
+Velocity/force rows include `theta cross director_offset`, retaining shell
+rotation and its conjugate contact moment. Areas are measured on the flat
+mallet face, not multiplied by sloped shell area or a guessed cosine correction.
+No extra modal or microphone channel is created.
+
+Full-disk admission checks every projected outer/hole edge, upward facet
+orientation and unit boundary winding. This rejects a hole or rim crossing
+that all four quadrature samples can miss, as well as reversed/folded or
+multiply covered charts. These are numerical geometry checks, not an
+exact-predicate/global-self-intersection certificate. Height fields that are
+not representable as this upward XY chart must use another physical image;
+they are not silently flattened, repaired or snapped.
+
+The first six stand-felt histories keep their addresses. Each selected mallet
+adds four histories AFTER the stand and before any compliant-mute histories.
+Two mallets therefore use fourteen of the existing sixteen felt-site slots.
+One mallet and one four-site moving mute fit; larger combinations refuse at
+the existing ceiling. Fixed viscous mufflers consume no felt slots. Neither
+pads nor modes are truncated to make a combination fit.
+
+Both original stick-force files push/retract the selected physical mallets.
+Analytic/finite-difference preparation, bounded internal substeps, supplied shell
+geometry, mono/stereo pressure, `--radiation-spec` and `--radiation-feedback`
+keep their existing paths. A failed mechanical tick restores all mallet, shell,
+stand and optional acoustic histories and consumes no force input. Unselected
+wooden tips and all drumhead excitation retain their previous equations.
+
+The new core tests cover local-gap selective contact, reciprocal impulse and
+history retry. Six curved-face regressions cover complete-disk height/holes,
+actual skin and rotational-row parity, two driven mallets with retained state,
+unselected trajectory parity, and exclusion of the old parallel Hertz tip.
+
+```sh
+cargo test --release -p fs-couple --lib profiled_tests
+cargo test --release -p fs-couple --example percussion mallets::shell::tests -- --test-threads=1
+```
+
+Four-site nonlinear stress quadrature is still an approximation. This does not
+model spherical mallet heads, mallet rocking, tangential friction, a resolved
+moving contact patch or measured manufacturer materials. Wide-area/steep-bell
+strikes may exhaust the existing felt or shell-validity limits; no force or
+geometry is clipped to guarantee a sound file.

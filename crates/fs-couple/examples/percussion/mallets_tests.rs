@@ -32,10 +32,10 @@ fn mallet_file_has_no_material_or_geometry_defaults_and_admits_only_physical_com
     }
     assert!(Spec::parse(&format!("{CARD}creep,3000,6\n")).is_ok());
     let selected=Selection {first:Some(s),second:None};
-    for c in ["drum","drum-mic","drum-stretch-wav","snare","snare-off-mic"] {
+    for c in ["drum","drum-mic","drum-stretch-wav","snare","snare-off-mic","splash","splash-wav","splash-mic"] {
         selected.admit(c,first(),None).unwrap();
     }
-    for c in ["splash","drum-modal","unknown"] {assert!(selected.admit(c,first(),None).is_err());}
+    for c in ["hihat","drum-modal","unknown"] {assert!(selected.admit(c,first(),None).is_err());}
     assert!(selected.admit("drum",Stroke::default(),None).is_err());
     let mut args=vec!["snare".into(),"--second-mallet-spec".into(),"right.fsmallet".into(),"32".into()];
     let paths=options(&mut args).unwrap();assert_eq!(paths,[None,Some("right.fsmallet".into())]);

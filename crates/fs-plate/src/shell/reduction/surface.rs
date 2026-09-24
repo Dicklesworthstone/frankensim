@@ -54,6 +54,25 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 }
 impl ShellReduction {
+    /// Reference skin vertices in ORIGINAL midsurface node order. Both contact
+    /// chart queries and the two-sided radiation surface use these same
+    /// thickness offsets. This allocates O(nodes), without constructing a BEM
+    /// boundary or imposing its unrelated acoustic panel budget.
+    ///
+    /// # Errors
+    /// Incompatible thickness, undefined directors or nonfinite offset geometry.
+    pub fn surface_positions(&self, nodal_thickness_m: &[f64], face: ShellFace)
+        -> Result<Vec<[f64; 3]>, PlateError>
+    {
+        let offsets = directors(self, nodal_thickness_m)?;
+        let positions: Vec<_> = self.reference_positions.iter().zip(offsets)
+            .map(|(p,d)| core::array::from_fn(|c| p[c] + face.sign()*d[c])).collect();
+        if positions.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(bad("shell skin reference positions overflow"));
+        }
+        Ok(positions)
+    }
+
     /// Project a physical point on the thickness-offset skin, retaining moments.
     /// Barycentrics use the ORIGINAL midsurface triangle's vertex order, on
     /// either side; the negative acoustic triangle has the reverse winding.

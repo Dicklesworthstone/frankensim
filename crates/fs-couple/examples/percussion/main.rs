@@ -86,6 +86,11 @@ fn splash_with_sticks(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Optio
 }
 #[allow(clippy::too_many_arguments)]
 fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>)->Result<Experiment,Error> {
+    splash_with_mallets(steps,dt_s,audio,stroke,supplied,mufflers,second,mute,&mallets::Selection::default())
+}
+#[allow(clippy::too_many_arguments)]
+fn splash_with_mallets(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Option<specimen::Specimen>,mufflers:&[muffling::Muffler],second:Option<Stroke>,mute:Option<&compliant_mute::Spec>,mallets:&mallets::Selection)->Result<Experiment,Error> {
+    mallets.admit("splash",stroke,second)?;
     muffling::admit_command(mufflers,"splash")?;
     if let Some(spec)=mute {spec.admit_command("splash")?;}
     let imported=supplied.is_some();let specimen=supplied.unwrap_or_else(specimen::Specimen::reference);
@@ -114,9 +119,22 @@ fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,suppli
     let second_coordinate=1+reduction.mode_count();let structural=second_coordinate+usize::from(second.is_some());
     let attachment=mute.map(|spec|spec.shell(&reduction,&shell.mesh.nodes,&shell.mesh.tris,structural)).transpose()?;
     let n=structural+attachment.as_ref().map_or(0,|a|a.bodies.len());
-    let second=second.map(|stroke|sticks::build_shell(stroke,&reduction,&shell.mesh.nodes,
-        &shell.mesh.tris,second_coordinate,n)).transpose()?;
-    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;let mut contact=vec![stick_weight];
+    let mut mallet_pads=Vec::new();
+    let (stick,stick_weight)=match &mallets.first {
+        Some(spec)=>{let tip=spec.compile_shell(&reduction,&shell,stroke,0,1,n)?;
+            mallet_pads.extend(tip.pads);(tip.body,tip.port.inverse_sqrt_mass)},
+        None=>stick_with_speed(stroke.speed_m_s)?,
+    };
+    let second=second.map(|stroke|->Result<_,Error>{
+        match &mallets.second {
+            Some(spec)=>{let tip=spec.compile_shell(&reduction,&shell,stroke,second_coordinate,1,n)?;
+                mallet_pads.extend(tip.pads);
+                Ok((tip.body,None,sticks::Port{coordinate:second_coordinate,weight:tip.port.inverse_sqrt_mass}))},
+            None=>{let (body,contact,port)=sticks::build_shell(stroke,&reduction,&shell.mesh.nodes,
+                &shell.mesh.tris,second_coordinate,n)?;Ok((body,Some(contact),port))},
+        }
+    }).transpose()?;
+    let mut contact=vec![stick_weight];
     contact.extend(port.iter().map(|b|-b));contact.resize(n,0.0);
     let mut pads=Vec::new();
     // Estimated felt annulus: OD30mm/ID13mm,6mm thickness,three loaded patches
@@ -142,8 +160,12 @@ fn splash_with_compliant_mute(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,suppli
     let mut dampers=muffling::shell_ports(mufflers,&reduction,&shell.mesh.nodes,&shell.mesh.tris)?;
     for damper in &mut dampers {damper.weights.resize(n,0.0);}
     let omegas=reduction.omegas().to_vec();let body=zero_body(BodyPotential::Shell(reduction),&omegas);
-    let mut bodies=vec![stick,body];let mut contacts=vec![elastic_contact(contact)?];
-    let second_stick=second.map(|(body,contact,port)|{bodies.push(body);contacts.push(contact);port});
+    let mut bodies=vec![stick,body];
+    // A selected felt face REPLACES its Hertz contact. Preserve all six stand
+    // histories first; each following mallet site has its own material history.
+    let mut contacts=if mallets.first.is_some(){Vec::new()}else{vec![elastic_contact(contact)?]};
+    let second_stick=second.map(|(body,contact,port)|{bodies.push(body);if let Some(c)=contact{contacts.push(c);}port});
+    pads.extend(mallet_pads);
     let mute=attachment.map(|a| {
         let observation=mute.expect("compiled mute specification").observation(a.ports,pads.len());
         bodies.extend(a.bodies);pads.extend(a.pads);observation
@@ -435,7 +457,7 @@ fn run()->Result<(),Error> {
     let supplied_drum=drum_path.as_deref().map(drum_spec::Spec::load).transpose()?;
     let drag_per_s=cavity_drag.unwrap_or(0.0);
     let experiment=match args[0].as_str(){
-        "splash"|"splash-wav"|"splash-mic"=>splash_with_compliant_mute(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref())?,
+        "splash"|"splash-wav"|"splash-mic"=>splash_with_mallets(steps,dt_s,audio,stroke,supplied_shell,&mufflers,second,compliant_mute.as_ref(),&mallets)?,
         "drum"|"drum-wav"|"drum-mic"=>drum_with_mallets(steps,dt_s,audio,false,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets)?,
         "drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"=>drum_with_mallets(steps,dt_s,audio,false,None,true,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,compliant_mute.as_ref(),prescribed_vent,head_relaxation.as_ref(),&mallets)?,
         "drum-modal"|"drum-modal-wav"|"drum-modal-mic"=>drum_with_mallets(steps,dt_s,audio,true,None,false,stroke,distributed_cavity,neck,supplied_drum,second,&mufflers,drag_per_s,None,prescribed_vent,head_relaxation.as_ref(),&mallets)?,

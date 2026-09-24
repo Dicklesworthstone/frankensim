@@ -1,4 +1,4 @@
-//! Finite circular felt faces acting on the real batter-head displacement.
+//! Finite circular felt faces on the real head or curved-shell displacement.
 //! The existing WoolFelt/Kelvin/impact owners supply all material history and
 //! time evolution. No fitted strike pulse, parallel Hertz tip, or output gain.
 use super::{Error, ModePair, Stroke, TensionedDisk};
@@ -8,6 +8,9 @@ use fs_couple::render::plate::impact::felt::KelvinBranch;
 use fs_couple::render::plate::impact::linear::wire::film_shapes;
 use fs_material::fiber::WoolFelt;
 use std::{collections::BTreeMap, io::Read};
+
+#[path="mallet_shell.rs"]
+mod shell;
 
 const HEADER:&str="frankensim-felt-mallet-v1";
 const MAX_BYTES:u64=65_536;
@@ -113,8 +116,9 @@ impl Selection {
     pub fn admit(&self,command:&str,first:Stroke,second:Option<Stroke>)->Result<(),Error> {
         if !self.enabled() {return Ok(());}
         if !matches!(command,"drum"|"drum-wav"|"drum-mic"|"drum-stretch"|"drum-stretch-wav"|"drum-stretch-mic"|
-            "snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic") {
-            return Err("felt mallets require drum/drum-stretch/snare mechanics, not the linear-only drum-modal or curved splash chart".into());
+            "snare"|"snare-wav"|"snare-mic"|"snare-off"|"snare-off-wav"|"snare-off-mic"|
+            "splash"|"splash-wav"|"splash-mic") {
+            return Err("felt mallets require nonlinear-capable drum, snare or splash mechanics; modal-only and paired-hi-hat images are not selected here".into());
         }
         if self.first.is_some() && first.position_m.is_none() {
             return Err("--mallet-spec requires --strike-position-m X Y".into());
