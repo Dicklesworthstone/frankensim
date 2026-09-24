@@ -50,3 +50,34 @@ fn g4_sdf3_precancellation_performs_no_geometry_or_equilibrium() {
     assert_eq!(error.exit, exit::BUDGET);
     assert_eq!(error.code, "cli-study-sdf3-wall-budget");
 }
+
+#[test]
+fn g4_sdf3_enrichment_setup_budget_is_not_a_numerical_failure() {
+    let setup = |error| {
+        AdaptiveContinuationError3::Goal(GoalRefinementError3::Preconditioner(
+            AdaptivePreconditionError3::Coarse(error),
+        ))
+    };
+    for reason in [
+        "adaptive coarse space/setup",
+        "transfer dimensions",
+        "vector interpolation entries",
+        "Galerkin operator applications",
+    ] {
+        assert!(refinement_budget(&setup(TwoLevelError::Budget(reason))));
+    }
+    for error in [
+        TwoLevelError::NotPositiveDefinite,
+        TwoLevelError::Nonsymmetric,
+        TwoLevelError::Invalid("nonfinite fine operator action"),
+        TwoLevelError::Cancelled,
+    ] {
+        assert!(!refinement_budget(&setup(error)));
+    }
+    assert!(refinement_budget(&AdaptiveContinuationError3::Background(
+        OctreeError3::LeafBudget
+    )));
+    assert!(refinement_budget(&AdaptiveContinuationError3::Goal(
+        GoalRefinementError3::Physics(ElasticityError3::Quadrature(QuadratureError3::PointBudget))
+    )));
+}

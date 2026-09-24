@@ -4,7 +4,9 @@ use super::*;
 use std::ops::ControlFlow;
 
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
-use fs_cutfem::elastic3::adaptive::enrichment::precondition::AdaptiveSolveSpace3;
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
+    AdaptivePreconditionError3, AdaptiveSolveSpace3,
+};
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
 use fs_cutfem::elastic3::{ElasticityError3, ElasticityOptions3};
 use fs_cutfem::octree3::{Octree3, OctreeError3};
@@ -12,7 +14,7 @@ use fs_cutfem::quad3::{QuadratureControl3, QuadratureError3, QuadratureOptions3,
 use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
-use fs_solver::op::two_level::TwoLevelBudget;
+use fs_solver::op::two_level::{TwoLevelBudget, TwoLevelError};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::adaptive_continuation::{
     AdaptiveContinuationError3, AdaptiveContinuationOptions3, AdaptiveContinuationReport3,
@@ -77,6 +79,19 @@ fn geometry_budget(error: &GoalRefinementError3) -> bool {
             QuadratureError3::BoxBudget | QuadratureError3::PointBudget
         ))
     )
+}
+
+fn refinement_budget(error: &AdaptiveContinuationError3) -> bool {
+    match error {
+        AdaptiveContinuationError3::Background(
+            OctreeError3::LeafBudget | OctreeError3::LevelBudget,
+        ) => true,
+        AdaptiveContinuationError3::Goal(GoalRefinementError3::Preconditioner(
+            AdaptivePreconditionError3::Coarse(TwoLevelError::Budget(_)),
+        )) => true,
+        AdaptiveContinuationError3::Goal(error) => geometry_budget(error),
+        _ => false,
+    }
 }
 
 fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
@@ -224,13 +239,10 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
             result.evaluation_stop,
             Some(EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. })
         )
-        || matches!(
-            &report.refinement_error,
-            Some(AdaptiveContinuationError3::Background(
-                OctreeError3::LeafBudget | OctreeError3::LevelBudget
-            ))
-        )
-        || matches!(&report.refinement_error, Some(AdaptiveContinuationError3::Goal(e)) if geometry_budget(e))
+        || report
+            .refinement_error
+            .as_ref()
+            .is_some_and(refinement_budget)
     {
         "budget-exhausted"
     } else {
