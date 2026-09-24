@@ -15,8 +15,8 @@ use super::audio::ImpactSource;
 ///
 /// Construction allocates; stepping does not allocate in this host or its solver.
 /// The supplied storage callbacks must independently avoid allocation. This is
-/// dense Newton with finite differences or explicit analytic tangents, NOT a
-/// measured hard-real-time contract.
+/// finite-difference Newton or analytic Newton with exact acoustic-pair
+/// condensation. This is NOT a measured hard-real-time contract.
 /// The model, basis, timestep, contact, Kelvin memory and felt conditioning are
 /// unchanged. Only accepted steps update physical history and the sample counter.
 pub struct PreparedImpactSystem {
@@ -34,7 +34,10 @@ impl ImpactSystem {
     /// # Errors
     /// Returns the numerical owner's workspace preparation refusal.
     pub fn prepare(self) -> Result<PreparedImpactSystem, ImpactError> {
-        let workspace = StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
+        let mut workspace = StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
+        if let Some(air)=&self.radiation {
+            workspace.set_condensed_pairs(&air.state_pairs()).map_err(ImpactError::PreparedSolve)?;
+        }
         let candidate = vec![0.0; self.x.len()];
         let output = vec![0.0; self.modes];
         let histories = self.histories.borrow().clone();
@@ -43,7 +46,9 @@ impl ImpactSystem {
 
     /// Prepare the same system using analytic storage tangents for Newton.
     /// Retains the complete Gonzalez energy correction, physical acceptance
-    /// gates, and all current state/history. No difference probes or new solver.
+    /// gates, and all current state/history. Independent acoustic pairs are
+    /// eliminated from the factorization, not the physical equation or state.
+    /// No difference probes, split acoustic updates, or new time integrator.
     ///
     /// # Errors
     /// Returns the existing workspace preparation refusal.
@@ -103,6 +108,32 @@ impl PreparedImpactSystem {
     /// resetting physical state, accepted time, or material history. Both solve
     /// the same equation and use the same physical acceptance gate.
     pub fn set_analytic_newton(&mut self, enabled: bool) { self.analytic_newton=enabled; }
+
+    /// Enable/disable exact acoustic-pair elimination for analytic Newton.
+    /// Enabled at preparation when radiation memory exists. Finite-difference
+    /// execution ignores the plan. This is a numerical choice: state, accepted
+    /// time, force ports, felt and material history remain untouched. Changing
+    /// the plan allocates and belongs outside a real-time callback.
+    ///
+    /// A failed pair solve falls back to full dense LU on the same Jacobian;
+    /// no coupling, acoustic pole or Gonzalez correction is dropped.
+    pub fn set_radiation_condensation(&mut self, enabled: bool) -> Result<(), ImpactError> {
+        let pairs=if enabled {self.inner.radiation.as_ref().map(|air|air.state_pairs()).unwrap_or_default()}
+            else {Vec::new()};
+        self.workspace.set_condensed_pairs(&pairs).map_err(ImpactError::PreparedSolve)
+    }
+
+    /// Planned dense border dimension when using analytic acoustic condensation.
+    /// Full state storage and all acoustic histories still exist.
+    pub fn condensed_newton_dimension(&self) -> Option<usize> {
+        if self.analytic_newton {self.workspace.condensed_dimension()} else {None}
+    }
+
+    /// (Condensed, full dense) Newton solves in the most recent solver call.
+    /// For substepped output this is the last internal attempt, not a tick sum.
+    pub fn newton_linear_solve_counts(&self) -> (usize, usize) {
+        self.workspace.linear_solve_counts()
+    }
 
     /// Resume reference execution without resetting motion, memory or time.
     #[must_use]
@@ -175,3 +206,7 @@ impl ImpactSource for PreparedImpactSystem {
         self.step(forces, gate)
     }
 }
+
+#[cfg(test)]
+#[path = "condensed_tests.rs"]
+mod condensed_tests;

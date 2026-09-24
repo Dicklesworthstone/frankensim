@@ -63,6 +63,11 @@ pub struct RadiationObservation {
 }
 pub(super) struct Memory { pub(super) base_dim:usize, omega:Vec<f64>, rates:Vec<f64> }
 impl Memory {
+    // Actual scalar positions, not an assumption that radiation is the tail:
+    // material relaxation may have been attached after these acoustic pairs.
+    pub(super) fn state_pairs(&self) -> Vec<[usize; 2]> {
+        (0..self.omega.len()).map(|i|[self.base_dim+2*i,self.base_dim+2*i+1]).collect()
+    }
     pub(super) fn add_hessian(&self,d:&[f64],out:&mut[f64]) {
         for (i,w) in self.omega.iter().enumerate() {
             let q=self.base_dim+2*i;out[q]=w*w*d[q];out[q+1]=d[q+1];

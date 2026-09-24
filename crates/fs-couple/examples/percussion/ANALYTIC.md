@@ -45,12 +45,12 @@ can call `ImpactSystem::prepare_analytic()` or toggle
 The `drum-modal`/snare image has its own joint contact solver and is not silently
 converted. Existing vented-exterior-audio restrictions are unchanged.
 
-The Jacobian and LU are still dense. This removes a substantial class of
-repeated nonlinear evaluations but is **not a measured speedup, real-time
-qualification or bandwidth/convergence certificate**. Hard impacts and branch
-transitions can still exhaust Newton; the original physical refusal is retained.
-It does not supply missing measured geometry, damping, hand contact, full-band
-cymbal modes or two-way radiation loading. These limits need separate work.
+The full Jacobian and dense fallback scratch remain. Radiation-loaded analytic
+execution additionally condenses independent acoustic pairs as described below.
+Neither change is a **measured speedup, real-time qualification or bandwidth/
+convergence certificate**. Hard impacts and branch transitions can still exhaust
+Newton; the original physical refusal is retained. These execution choices do
+not change geometry, materials or the selected acoustic model and its limits.
 
 Focused checks:
 
@@ -59,3 +59,10 @@ cargo test --release -p fs-phs --lib prepared::analytic
 cargo test --release -p fs-couple --lib render::plate::impact::tangent
 cargo test --release -p fs-couple --example percussion analytic -- --test-threads=1
 ```
+
+## Radiation memory factorization
+
+Loaded analytic percussion now eliminates independent acoustic pairs while
+retaining the complete Gonzalez correction in a scalar border. All physical
+states and histories remain. See `CONDENSED_RADIATION.md` for exact algebra,
+dense fallback, comparison controls and the unmeasured performance boundary.

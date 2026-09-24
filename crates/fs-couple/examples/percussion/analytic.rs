@@ -70,3 +70,7 @@ mod tests {
         assert!(e.system.membrane_observation(1).unwrap().stretching_energy_j>0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "condensed_impact_tests.rs"]
+mod condensed_tests;
