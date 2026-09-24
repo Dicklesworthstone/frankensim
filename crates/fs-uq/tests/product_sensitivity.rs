@@ -1,5 +1,6 @@
+use fs_blake3::{ContentHash, hash_domain};
 use fs_uq::{CorrelationModel, ParameterUncertainty, PropagationMethod, SobolExecution, UqPlan,
-    UqExecution, UqStatus};
+    UqCheckpointError, UqExecution, UqStatus};
 
 fn plan(rows: usize, dimensions: usize) -> UqPlan {
     let mut plan = UqPlan::new("response", PropagationMethod::MonteCarlo, rows * (dimensions + 2))
@@ -84,18 +85,23 @@ fn rows_reuse_counter_addressed_bases_and_replace_only_the_named_coordinate() {
 #[test]
 fn every_split_and_interrupted_hybrid_resume_without_repeating_paid_calls() {
     let plan = plan(4, 2);
-    let full = run(&plan, |x| x[0] + x[1]*x[1]);
+    let model = ContentHash([73; 32]);
+    let mut full_execution = SobolExecution::new(&plan).unwrap();
+    let full = full_execution.advance(usize::MAX, || false, |x| Ok::<_, &str>(x[0] + x[1]*x[1]));
     for split in 0..=plan.budget_max_samples {
         let mut execution = SobolExecution::new(&plan).unwrap();
         let prefix = execution.advance(split, || false, |x| Ok::<_, &str>(x[0] + x[1]*x[1]));
         if split < plan.budget_max_samples { assert!(prefix.estimate.is_none()); }
-        let mut execution = execution.clone();
+        let bytes = execution.checkpoint(model).unwrap();
+        let mut execution = SobolExecution::restore(&plan, model, &bytes).unwrap();
+        assert_eq!(execution.report(), prefix);
         let mut calls = 0;
         let result = execution.advance(usize::MAX, || false, |x| {
             calls += 1; Ok::<_, &str>(x[0] + x[1]*x[1])
         });
         assert_eq!(calls, plan.budget_max_samples - split);
         assert_eq!(result, full);
+        assert_eq!(execution.checkpoint(model), full_execution.checkpoint(model));
     }
     let mut execution = SobolExecution::new(&plan).unwrap();
     execution.advance(3, || false, |x| Ok::<_, &str>(x[0] + x[1]*x[1]));
@@ -107,6 +113,10 @@ fn every_split_and_interrupted_hybrid_resume_without_repeating_paid_calls() {
     assert_eq!(report.status, UqStatus::Cancelled);
     assert_eq!(report.evaluations_attempted, 3);
     assert_eq!(execution.observations(), paid);
+    let mut execution = SobolExecution::restore(
+        &plan, model, &execution.checkpoint(model).unwrap(),
+    ).unwrap();
+    assert_eq!(execution.report(), report);
     let mut first = true;
     let result = execution.advance(usize::MAX, || false, |x| {
         if first { assert_eq!(x, interrupted); first = false; }
@@ -137,9 +147,73 @@ fn pre_callback_cancellation_and_model_failures_do_not_filter_designs() {
         assert_eq!(refusal.evaluations_accepted, 3);
         assert!(refusal.estimate.is_none());
         assert!(refusal.rejection_reason.is_some());
+        assert_eq!(execution.checkpoint(ContentHash([73; 32])), Err(UqCheckpointError::NotResumable));
         assert_eq!(execution.advance(16, || panic!("refused"), |_| -> Result<f64,&str> {
             panic!("refused")
         }), refusal);
+    }
+}
+
+#[test]
+fn durable_sensitivity_binds_model_pairing_plan_and_exact_framing() {
+    let plan = plan(4, 2);
+    let model = ContentHash([73; 32]);
+    let mut execution = SobolExecution::new(&plan).unwrap();
+    execution.advance(3, || false, |x| Ok::<_, &str>(x[0] + x[1]));
+    let bytes = execution.checkpoint(model).unwrap();
+    assert_eq!(&bytes[..8], b"FSSOB001");
+    assert_eq!(SobolExecution::restore(&plan, ContentHash([74; 32]), &bytes).unwrap_err(), UqCheckpointError::IdentityMismatch);
+    let mut changes = Vec::new();
+    let mut p = plan.clone(); p.seed += 1; changes.push(p);
+    let mut p = plan.clone(); p.parameters.swap(0, 1); changes.push(p);
+    let mut p = plan.clone(); p.parameters[0].unit = "K".into(); changes.push(p);
+    let mut p = plan.clone(); p.target_qoi = "other".into(); changes.push(p);
+    let mut p = plan.clone(); p.budget_max_samples += 4; changes.push(p);
+    let mut p = plan.clone(); p.compliance_threshold = Some(2.0); changes.push(p);
+    for changed in changes {
+        assert_eq!(SobolExecution::restore(&changed, model, &bytes).unwrap_err(), UqCheckpointError::IdentityMismatch);
+    }
+    let mc = UqExecution::new(&plan).unwrap().checkpoint(model).unwrap();
+    assert!(SobolExecution::restore(&plan, model, &mc).is_err());
+    assert!(UqExecution::restore(&plan, model, &bytes).is_err());
+    for end in [0, 8, 40, 49, bytes.len() - 1] {
+        assert!(SobolExecution::restore(&plan, model, &bytes[..end]).is_err());
+    }
+    for index in [8, 49, bytes.len() - 1] {
+        let mut bad = bytes.clone(); bad[index] ^= 1;
+        assert_eq!(SobolExecution::restore(&plan, model, &bad).unwrap_err(), UqCheckpointError::IntegrityMismatch);
+    }
+    let reseal = |bytes: &mut [u8]| {
+        let end = bytes.len() - 32;
+        let checksum = hash_domain("org.frankensim.uq.sobol-sensitivity.checkpoint.v1", &bytes[..end]);
+        bytes[end..].copy_from_slice(checksum.as_bytes());
+    };
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut bad = bytes.clone(); bad[49..57].copy_from_slice(&value.to_bits().to_le_bytes()); reseal(&mut bad);
+        assert!(matches!(SobolExecution::restore(&plan, model, &bad), Err(UqCheckpointError::InvalidEncoding(_))));
+    }
+    let mut bad = bytes.clone(); bad[40] = 2; reseal(&mut bad);
+    assert!(SobolExecution::restore(&plan, model, &bad).is_err());
+    let mut bad = bytes.clone(); bad[41..49].copy_from_slice(&u64::MAX.to_le_bytes()); reseal(&mut bad);
+    assert!(SobolExecution::restore(&plan, model, &bad).is_err());
+    let mut bad = bytes; bad.push(0);
+    assert!(SobolExecution::restore(&plan, model, &bad).is_err());
+}
+
+#[test]
+fn durable_observations_preserve_extreme_values_and_undefined_normalization() {
+    let plan = plan(4, 2);
+    let model = ContentHash([73; 32]);
+    for constant in [-0.0_f64, f64::MAX, -f64::MAX] {
+        let mut execution = SobolExecution::new(&plan).unwrap();
+        execution.advance(usize::MAX, || false, |_| Ok::<_, &str>(constant));
+        let bytes = execution.checkpoint(model).unwrap();
+        let mut restored = SobolExecution::restore(&plan, model, &bytes).unwrap();
+        assert!(restored.observations().iter().all(|x| x.to_bits() == constant.to_bits()));
+        assert_eq!(restored.report(), execution.report());
+        assert_eq!(restored.report().status, UqStatus::Complete);
+        assert!(restored.report().estimate.is_none());
+        restored.advance(1, || panic!("complete"), |_| -> Result<f64, &str> { panic!("complete") });
     }
 }
 

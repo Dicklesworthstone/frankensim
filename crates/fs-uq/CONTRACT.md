@@ -171,6 +171,23 @@ structured errors rather than panicking.
 
 ## No-claim boundaries (slice 2)
 
+- Direct-model `SobolExecution` evaluates fixed Philox A/B/hybrid designs under
+  explicitly independent Gaussian/uniform physical inputs. Main and total
+  effects are Jansen variance-ratio estimates and include no confidence interval
+  or optional-stopping guarantee. Only a complete predeclared design exposes
+  estimates; finite-sample indices are not clipped, and zero sampled variance
+  remains undefined rather than implying zero sensitivity.
+- `SobolExecution::checkpoint` / `restore` retain exact ordered observations,
+  including partial rows, in bounded `FSSOB001` bytes. Identity binds every
+  `UqPlan` field, original evaluation cap, Philox addressing, A/B/hybrid pairing
+  and caller-supplied evaluator/model identity. Restore regenerates only sampler
+  inputs, never re-evaluates completed physical calls, and reconstructs all
+  statistics from retained observation bits. Errors/nonfinite observations are
+  terminal and cannot yield resumable prefixes. Completed checkpoints remain
+  terminal even when sensitivity normalization is undefined. Checksums detect
+  corruption but do not authenticate or validate the producing model; callers
+  must bind all fixed inputs and evaluator semantics and trust the source.
+
 - The IDA workhorse is a bilinear SDOF: the fiber-frame nonlinear
   time-history path arrives with fs-solid-advanced (tfz.14, in
   flight) — the fragility MACHINERY is what this slice ships.

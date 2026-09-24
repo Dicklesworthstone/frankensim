@@ -10,6 +10,9 @@ use crate::product_execution::sample_parameters;
 use crate::product_plan::admit_plan;
 use crate::{CorrelationModel, UncertaintyKind, UqPlan, UqStatus};
 
+#[path = "product_sensitivity_checkpoint.rs"]
+mod checkpoint;
+
 /// Estimated contribution of one independently distributed physical input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SobolEffect {
@@ -70,10 +73,10 @@ pub struct SobolReport {
 /// Correlated, joint-Gaussian and unstated dependence refuse rather than
 /// pretending that a coordinate swap preserves their probability law.
 ///
-/// The same deterministic evaluator must be used on every call. Clone retains
-/// an in-memory checkpoint including a partly evaluated row. There is no
-/// durable format or statistical optional-stopping rule. Long model calls must
-/// implement their own cancellation through `advance_interruptible`.
+/// The same deterministic evaluator must be used on every call. `checkpoint`
+/// and `restore` retain a partly evaluated row without repeating completed
+/// model calls. No statistical optional-stopping rule is inferred. Long model
+/// calls must implement their own cancellation through `advance_interruptible`.
 #[derive(Debug, Clone)]
 pub struct SobolExecution {
     plan: UqPlan,
