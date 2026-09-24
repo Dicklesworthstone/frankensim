@@ -160,3 +160,66 @@ fn dense_fallback_retains_new_interpair_coupling_and_finite_difference_calls() {
     work.step_into(&sys,&x,&[0.2,0.],0.003,&mut a,&mut ya).unwrap();
     dense.step_into(&sys,&x,&[0.2,0.],0.003,&mut b,&mut yb).unwrap();assert_eq!(a,b);assert_eq!(ya,yb);
 }
+
+#[test]
+fn auxiliary_unit_scaling_does_not_change_the_original_equation_or_its_solution() {
+    let n=9;let pairs=[[8,1],[7,2],[6,3]];
+    let mut plan=Condensation::new(n,&pairs).unwrap();
+    let mut base=vec![0.0;n*n];
+    for i in 0..n {for j in 0..n {
+        if plan.owner[i]==usize::MAX || plan.owner[j]==usize::MAX || plan.owner[i]==plan.owner[j] {
+            base[i*n+j]=if i==j {2.0+i as f64} else {0.01*((i*5+j*3)%7) as f64-0.03};
+        }
+    }}
+    let u:Vec<_>=(0..n).map(|i|0.1*(i as f64-3.0)).collect();
+    let v:Vec<_>=(0..n).map(|i|0.07*(i as f64-4.0)).collect();
+    let matrix=full(&base,&u,&v);
+    let want:Vec<_>=(0..n).map(|i|0.2*(i as f64-2.0)).collect();
+    let rhs:Vec<_>=(0..n).map(|i|(0..n).map(|j|matrix[i*n+j]*want[j]).sum()).collect();
+    for scale in [1e-140,1e-70,1.0,1e70,1e140] {
+        for i in 0..n {plan.left[i]=u[i]*scale;plan.right[i]=v[i]/scale;}
+        let mut out=vec![91.0;n];
+        assert!(plan.solve(&base,&rhs,&mut out,&mut ||Ok(())).unwrap(),"auxiliary scale {scale}");
+        for (x,y) in out.iter().zip(&want) {assert!((x-y).abs()<2e-12);}
+        assert!(plan.refinements<=MAX_REFINEMENTS);
+    }
+}
+
+#[test]
+fn refinement_solves_the_original_residual_with_the_same_factored_border() {
+    let mut plan=Condensation::new(5,&[[1,2],[3,4]]).unwrap();
+    let base=[3.0,0.2,-0.1,0.3,0.4, 0.1,2.0,0.2,0.0,0.0,
+        -0.2,-0.1,4.0,0.0,0.0, 0.4,0.0,0.0,2.0,0.3, -0.1,0.0,0.0,-0.2,3.0];
+    plan.left.copy_from_slice(&[1e-100,-2e-100,3e-100,0.0,4e-100]);
+    plan.right.copy_from_slice(&[1e99,2e99,-1e99,3e99,-2e99]);
+    let rhs=[0.2,0.1,-0.3,0.4,0.8];let mut answer=[0.0;5];
+    assert!(plan.solve(&base,&rhs,&mut answer,&mut ||Ok(())).unwrap());
+    let factored=plan.matrix.clone();let responses=plan.responses.clone();
+    // A known inaccurate candidate must fail the unchanged componentwise gate.
+    // Then solve its ORIGINAL-space residual, not the scaled Schur residual.
+    plan.candidate[2]+=1e-6;
+    assert_eq!(plan.check(&base,&rhs,&mut ||Ok(())).unwrap(),Some(false));
+    assert!(plan.solve_rhs(&base,&mut ||Ok(())).unwrap());
+    for i in 0..5 {plan.candidate[i]+=plan.correction[i];}
+    assert_eq!(plan.check(&base,&rhs,&mut ||Ok(())).unwrap(),Some(true));
+    assert_eq!(plan.matrix,factored);
+    for row in 0..4 {for j in 0..plan.dimension() {
+        assert_eq!(plan.responses[row*(plan.dimension()+1)+j],responses[row*(plan.dimension()+1)+j]);
+    }}
+    for (x,y) in plan.candidate.iter().zip(answer) {assert!((x-y).abs()<1e-14);}
+}
+
+
+#[test]
+fn equilibration_that_would_underflow_a_nonzero_border_entry_uses_dense_fallback() {
+    let mut plan=Condensation::new(4,&[[2,3]]).unwrap();
+    let mut base=[0.0;16];for i in 0..4 {base[4*i+i]=1.0;}
+    base[0]=1e300;base[1]=1e-100;
+    let mut out=[17.0;4];
+    assert!(!plan.solve(&base,&[1.0;4],&mut out,&mut ||Ok(())).unwrap());
+    assert_eq!(out,[17.0;4]);
+    // Restore resolvable units: a refused preparation did not poison reuse.
+    base[0]=1.0;
+    assert!(plan.solve(&base,&[1.0;4],&mut out,&mut ||Ok(())).unwrap());
+    assert_eq!(out,[1.0;4]);
+}
