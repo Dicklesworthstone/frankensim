@@ -4,7 +4,8 @@
 //! Multiple disjoint outward closed components are allowed. Self-intersection,
 //! component overlap and cavity accessibility remain input responsibilities.
 use super::{board_geometry::motion::MotionSurface, linear::Bank};
-use fs_bem::{helmholtz::{self, Formulation, Medium}, panel3d::SpherePanels};
+use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels,
+    radiation_policy::GeometryPolicy};
 use fs_math::c64::C64;
 use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU};
 
@@ -197,6 +198,9 @@ impl Boundary {
             return Err("invalid complete exterior response grid, basis or medium".into());
         }
         let plan=ReceiverSet::new(self,receivers,medium,near)?;
+        // Select from actual closed-component spectra, not the radius of the
+        // empty space between the soundboard and disjoint rigid scatterers.
+        let policy=GeometryPolicy::new(&self.surface).map_err(|e|e.to_string())?;
         let delays_s=plan.delays_s().to_vec();
         let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
         let mut minimum_ppw=f64::INFINITY;let mut maximum_condition_lower_bound=0.0_f64;
@@ -205,15 +209,17 @@ impl Boundary {
             let evaluation=plan.prepare(k)?;
             let fields:Vec<Vec<C64>>=self.weights.iter().map(|r|r.iter().map(|b|C64::new(0.,b/w)).collect()).collect();
             let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
-            let formulation=if k*self.radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
-            let solutions=helmholtz::solve_radiation_batch(&self.surface,k,medium,&refs,formulation)
-                .map_err(|e|format!("exterior solve at {} Hz: {e}",w/TAU))?;
+            let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
+            let solutions=policy.solve_batch(k,medium,&refs)
+                .map_err(|e|format!("exterior solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
             for (input,solution) in solutions.iter().enumerate() {
                 if !solution.panels_per_wavelength.is_finite() || solution.panels_per_wavelength<min_ppw
                     || !solution.condition_lower_bound.is_finite()
                     || !solution.radiated_power_roundoff_interval.1.is_finite()
                     || solution.radiated_power_roundoff_interval.1<0. {
-                    return Err(format!("exterior solve at {} Hz is under-resolved or has inadmissible radiation power/conditioning",w/TAU));
+                    return Err(format!("exterior solve at {} Hz ({formulation:?}) is under-resolved or has inadmissible radiation power/conditioning: ppw={}, condition lower bound={}, power interval={:?}",
+                        w/TAU,solution.panels_per_wavelength,solution.condition_lower_bound,
+                        solution.radiated_power_roundoff_interval));
                 }
                 minimum_ppw=minimum_ppw.min(solution.panels_per_wavelength);
                 maximum_condition_lower_bound=maximum_condition_lower_bound.max(solution.condition_lower_bound);

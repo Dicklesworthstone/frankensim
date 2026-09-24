@@ -3,6 +3,8 @@
 //! pressure/velocity transfer. exp(-i omega t): the force opposing motion
 //! adds -i omega Z to the same string/board dynamic stiffness.
 use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,ReceiverSet}};
+use fs_bem::radiation_policy::GeometryPolicy;
+#[cfg(test)]
 use fs_bem::helmholtz::{self,Formulation};
 use fs_math::c64::C64;
 use std::{f64::consts::TAU,fmt::Write};
@@ -49,9 +51,10 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
     let evaluation=plan.prepare(w/spec.medium.sound_speed)?;
     let fields:Vec<Vec<C64>>=boundary.weights.iter().map(|r|r.iter().map(|v|C64::new(*v,0.)).collect()).collect();
     let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();let k=w/spec.medium.sound_speed;
-    let formulation=if k*boundary.radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
-    let solutions=helmholtz::solve_radiation_batch(&boundary.surface,k,spec.medium,&refs,formulation)
-        .map_err(|e|format!("radiation-load solve at {} Hz: {e}",w/TAU))?;
+    let policy=GeometryPolicy::new(&boundary.surface).map_err(|e|e.to_string())?;
+    let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
+    let solutions=policy.solve_batch(k,spec.medium,&refs)
+        .map_err(|e|format!("radiation-load solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
     let mut impedance=vec![C64::ZERO;count*count];
     let mut receiver_transfer=vec![vec![C64::ZERO;count];spec.receivers.len()];
     let mut minimum_ppw=f64::INFINITY;let mut condition_lower_bound=0.0_f64;
@@ -60,7 +63,9 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
             || solution.panels_per_wavelength<spec.min_ppw || !solution.condition_lower_bound.is_finite()
             || !solution.radiated_power_roundoff_interval.1.is_finite()
             || solution.radiated_power_roundoff_interval.1<0. {
-            return Err(format!("radiation load at {} Hz has unresolved power, conditioning or wavelength resolution",w/TAU));
+            return Err(format!("radiation load at {} Hz ({formulation:?}) has unresolved power, conditioning or wavelength resolution: ppw={}, condition lower bound={}, power interval={:?}",
+                w/TAU,solution.panels_per_wavelength,solution.condition_lower_bound,
+                solution.radiated_power_roundoff_interval));
         }
         minimum_ppw=minimum_ppw.min(solution.panels_per_wavelength);
         condition_lower_bound=condition_lower_bound.max(solution.condition_lower_bound);
@@ -164,3 +169,7 @@ mod tests {
         assert!(model.bank().q.iter().chain(&model.bank().v).all(|v|*v==0.));
     }
 }
+
+#[cfg(test)]
+#[path="radiation_policy_consumer_tests.rs"]
+mod policy_tests;
