@@ -344,16 +344,15 @@ rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
 derives from the declared memory budget with the fixture default as a floor,
 so identical inputs at the fixture budget mesh identically.
 
-**The uniform h-ladder** (receipt block `ladder`, driver version 13). When the
+**The uniform h-ladder** (receipt block `ladder`, driver version 14). When the
 project declares `solver.fidelity = "ladder"`, the stage solves the audited base
 and then up to two further rungs, each one uniform 1→8 refinement of the
 labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
 parent facet, labels replicated, volume preserved), taken while the next rung
 still fits the declared memory budget (`memory_bytes / 256` tets) and the
 project declares no interface pairs (they bind to base faces: `stop` says so).
-Other fidelities solve the base once. Adaptive fidelity reports
-`"stop":"fidelity-adaptive-goal-not-evaluated"`: geometric quality refinement
-has not evaluated the requested goal-error criterion. Other single-rung paths
+Other fidelities except `adaptive` solve the base once. Adaptive fidelity has
+its own study block, described below. Other single-rung paths
 report `"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
 vertices, `h_m = (volume/tets)^(1/3)`, min dihedral, the QoI stage's functional
 `t_max_k` — the nodal maximum over the ThermalLimit region — nonlinear and
@@ -372,6 +371,36 @@ T_max 301.99578 → 301.99615 → 301.99610 K, i.e. `data-range`, half-width
 linear solve's true-residual gate is two decades below the declared
 `tolerance-rel` (floor 1e-13); the crate default of 1e-12 refused the second
 rung at 1.37e-12 after 1,256 Krylov iterations.
+
+**Adaptive linear solids** (`solver.fidelity = "adaptive"`, receipt block
+`adaptive`). Each candidate mesh is solved, uniformly enriched and solved
+again. A residual-checked linear adjoint on that enriched mesh evaluates the
+temperature at the enriched maximum's vertex. The exact owner-change remainder
+`I(T_coarse)(v_max) - max(T_coarse)` is retained, so the reported goal remains
+the declared region's actual nodal maximum. Acceptance requires both the
+absolute dual change plus absolute remainder and the independently measured
+maximum change to fit `accuracy_rel * abs(T_max_coarse)`. This is observed
+two-space agreement, not a continuum error bound; it adds no discretization
+half-width or Verified authority to the QoI receipt.
+
+When unresolved, incidence-distributed absolute dual residual contributions
+mark cells accounting for half their sum. Conforming longest-edge-star
+bisection preserves regional labels and source-face ancestry; every resulting
+solve still passes the refined-mode 5-degree/2.0 quality floor. A zero marking
+signal requests a global refinement, never success. The receipt retains each
+comparison's mesh sizes, maximum, quality, dual residual, owner remainder,
+marked count, actual solved-mesh count, and stopping reason. Memory-derived tet
+limits and a 17-primal-solve cap retain the last independently probed candidate
+when further work cannot fit. These output counts are not an allocator peak
+memory guarantee. Contact transfer, coupled airflow adjoints and nonlinear
+material adjoints have named unresolved stops in this staged producer.
+
+The remaining declared wall budget is checked between numerical operations.
+Expiry records `cli-solve-conduction-adaptive-wall-budget` through the ordinary
+stage-refusal path; a timing-dependent partial physics receipt is not published.
+Prior completed pipeline stages remain recoverable, while unfinished adaptive
+conduction restarts. An individual primal or dual solve does not preempt at a
+wall deadline. Successful physics receipts replay without a timing cutoff.
 
 The QoI receipt (schema v2) carries the ladder's estimate as the
 **Discretization term** — the first measured term of the eight — through

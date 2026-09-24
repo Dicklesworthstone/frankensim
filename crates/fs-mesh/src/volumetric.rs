@@ -1632,6 +1632,56 @@ impl LabeledTetComplex {
         }
     }
 
+    /// Refine marked cells by conforming edge-star bisection, preserving region
+    /// labels and source-facet ancestry on every child. Recovery evidence still
+    /// describes the original mesh. This operation does not improve or certify
+    /// element quality; consumers must check the resulting quality census.
+    ///
+    /// # Errors
+    /// Refuses invalid marks, exceeded output limits, unrepresentable splits,
+    /// missing source-face ancestry, or cancellation.
+    pub fn refine_marked(
+        &self,
+        cx: &Cx<'_>,
+        marked: &[usize],
+        limits: crate::TetRefinementLimits,
+    ) -> Result<Self, crate::TetRefinementError> {
+        let split = crate::MarkedTetRefinement::build(
+            cx,
+            &self.positions,
+            &self.tets,
+            marked,
+            &[],
+            limits,
+        )?;
+        let mut source_faces = Vec::new();
+        for (index, &(face, source)) in self.source_faces.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()
+                    .map_err(|_| crate::TetRefinementError::Cancelled)?;
+            }
+            source_faces.extend(
+                split
+                    .face_children(face)?
+                    .into_iter()
+                    .map(|face| (face, source)),
+            );
+        }
+        Ok(Self {
+            positions: split.positions().to_vec(),
+            tets: split.tetrahedra().to_vec(),
+            region_of_tet: split
+                .parent_elements()
+                .iter()
+                .map(|&parent| self.region_of_tet[parent])
+                .collect(),
+            source_faces,
+            length_unit: self.length_unit.clone(),
+            recovery: self.recovery,
+            flat_repair: self.flat_repair,
+        })
+    }
+
     /// Deterministic tet-quality census (see [`QualityCensus`]).
     #[must_use]
     pub fn quality(&self) -> QualityCensus {

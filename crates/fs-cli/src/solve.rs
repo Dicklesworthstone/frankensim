@@ -111,7 +111,8 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// checkpoint must not resume into it. Version 12 adds the uniform h-ladder.
 /// Version 13 removes the unevaluated adaptive-convergence claim; old receipts
 /// carrying that claim must not share a resumable run identity with this driver.
-pub const SOLVE_DRIVER_VERSION: u32 = 13;
+/// Version 14 executes bounded enriched-dual adaptive studies for linear solids.
+pub const SOLVE_DRIVER_VERSION: u32 = 14;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1261,6 +1262,8 @@ const LADDER_REFINEMENT_RATIO: f64 = 2.0;
 const LADDER_SAFETY_FACTOR: f64 = 1.25;
 /// Eça & Hoekstra's factor on the data range when no order is observable.
 const LADDER_DATA_RANGE_FACTOR: f64 = 3.0;
+/// Hard work cap in addition to the declared mesh and execution budgets.
+const ADAPTIVE_MAX_SOLVES: usize = 17;
 
 /// One solved rung: the region-owned mesh, its solution and what the receipt
 /// and the QoI stage need from it.
@@ -1272,6 +1275,445 @@ struct RungSolved {
     interface_pair_count: usize,
     interface_evidence: Option<Vec<u8>>,
     conjugate_fragment: Option<String>,
+    adjoint_data: Option<RungAdjointData>,
+}
+
+struct RungAdjointData {
+    boundary: fs_conduction::ThermalBoundary,
+    source: fs_conduction::ScalarField,
+    materials: fs_conduction::ElementMaterials,
+    fallback: fs_conduction::ConductivityModel,
+    linear: fs_conduction::LinearConfig,
+}
+
+/// A two-space observation of the actual nodal maximum. Absolute nodal dual
+/// contributions only prioritize cells; they are not continuum error bounds.
+struct AdaptiveProbe {
+    signed_linear_change_k: f64,
+    maximum_remainder_k: f64,
+    estimated_change_k: f64,
+    measured_change_k: f64,
+    dual_residual: f64,
+    dual_iterations: usize,
+    scores: Vec<f64>,
+}
+
+/// Prolong each parent tetrahedron's P1 field using topological lineage.
+/// Solver vertices are region-owned and may be renumbered; using geometric
+/// vertex IDs to index a solved temperature vector would change the field.
+fn adaptive_prolongation(
+    cx: &fs_exec::Cx<'_>,
+    complex: &fs_mesh::LabeledTetComplex,
+    coarse: &RungSolved,
+    split: &fs_mesh::TetRefinement,
+    fine: &RungSolved,
+) -> Result<Vec<f64>, SolveRefusal> {
+    let invalid = || {
+        conduction_error(
+            "cli-solve-conduction-adaptive-transfer",
+            "the enriched mesh cannot inherit the solved region-owned P1 field",
+            "report the inconsistent tetrahedron/vertex lineage",
+        )
+    };
+    let mut values = vec![None; fine.mesh.vertex_count()];
+    for (index, tet) in split.tetrahedra().iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| {
+                conduction_error(
+                    "cli-solve-cancelled",
+                    "adaptive field transfer cancelled",
+                    "resume the run",
+                )
+            })?;
+        }
+        let parent = index / 8;
+        let source_tet = complex.tets()[parent];
+        let solved_tet = coarse.mesh.complex().tets[parent];
+        let at = |vertex| {
+            source_tet
+                .iter()
+                .position(|&v| v == vertex)
+                .map(|slot| coarse.solution.temperature[solved_tet[slot] as usize])
+                .ok_or_else(invalid)
+        };
+        for (local, &vertex) in tet.iter().enumerate() {
+            let value = if (vertex as usize) < complex.positions().len() {
+                at(vertex)?
+            } else {
+                let [a, b] = split.midpoint_parents()[vertex as usize - complex.positions().len()];
+                f64::midpoint(at(a)?, at(b)?)
+            };
+            let dof = fine.mesh.complex().tets[index][local] as usize;
+            if values[dof].is_some_and(|previous| previous != value) {
+                return Err(invalid());
+            }
+            values[dof] = Some(value);
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| value.ok_or_else(invalid))
+        .collect()
+}
+
+fn adaptive_probe(
+    cx: &fs_exec::Cx<'_>,
+    coarse: &RungSolved,
+    fine: &RungSolved,
+    approximate: &[f64],
+    region: u32,
+) -> Result<AdaptiveProbe, SolveRefusal> {
+    let data = fine
+        .adjoint_data
+        .as_ref()
+        .expect("admitted adaptive linear problem");
+    let refusal = |error| {
+        conduction_error(
+            if matches!(error, fs_conduction::ConductionError::Cancelled { .. }) {
+                "cli-solve-cancelled"
+            } else {
+                "cli-solve-conduction-adaptive-adjoint"
+            },
+            format!("enriched discrete-goal adjoint refused: {error}"),
+            "inspect the material validity span and linear solver tolerance",
+        )
+    };
+    let design = fs_conduction::adjoint::ConductivityDesign::new(
+        fs_conduction::ConductionProblem {
+            mesh: &fine.mesh,
+            boundary: &data.boundary,
+            material: &data.fallback,
+            element_materials: Some(&data.materials),
+            source: &data.source,
+        },
+        data.linear,
+    )
+    .map_err(refusal)?;
+    let mut peak = None;
+    for (tet, &label) in fine.mesh.complex().tets.iter().zip(&fine.labels) {
+        if label != region {
+            continue;
+        }
+        for &vertex in tet {
+            let v = vertex as usize;
+            if peak.is_none_or(|previous: usize| {
+                fine.solution.temperature[v] > fine.solution.temperature[previous]
+                    || (fine.solution.temperature[v] == fine.solution.temperature[previous]
+                        && v < previous)
+            }) {
+                peak = Some(v);
+            }
+        }
+    }
+    let peak = peak.expect("declared goal region has tetrahedra");
+    let mut weights = vec![0.0; design.dofs().n()];
+    if let Ok(slot) = design.dofs().free().binary_search(&peak) {
+        weights[slot] = 1.0;
+    }
+    let dual = design
+        .discrete_goal_error(
+            cx,
+            &vec![1.0; design.parameter_count()],
+            &design.dofs().gather(approximate),
+            &weights,
+        )
+        .map_err(refusal)?;
+    let coarse_max = ladder_functional(
+        &coarse.labels,
+        &coarse.mesh.complex().tets,
+        &coarse.solution.temperature,
+        Some(region),
+    );
+    // max(T_f)-max(T_c) = [T_f(v*)-I T_c(v*)] + [I T_c(v*)-max(T_c)].
+    // The second term records the nonsmooth maximum's actual change of owner.
+    let remainder = approximate[peak] - coarse_max;
+    let measured_change = fine.solution.temperature[peak] - coarse_max;
+    let mut contribution = vec![0.0; fine.mesh.vertex_count()];
+    for (&vertex, &value) in design
+        .dofs()
+        .free()
+        .iter()
+        .zip(&dual.free_dof_contributions)
+    {
+        contribution[vertex] = value.abs();
+    }
+    let mut incidence = vec![0usize; fine.mesh.vertex_count()];
+    for tet in &fine.mesh.complex().tets {
+        for &v in tet {
+            incidence[v as usize] += 1;
+        }
+    }
+    let mut scores = vec![0.0; coarse.mesh.element_count()];
+    for (index, tet) in fine.mesh.complex().tets.iter().enumerate() {
+        if index % 256 == 0 {
+            cx.checkpoint().map_err(|_| {
+                conduction_error(
+                    "cli-solve-cancelled",
+                    "adaptive marking cancelled",
+                    "resume the run",
+                )
+            })?;
+        }
+        for &v in tet {
+            scores[index / 8] += contribution[v as usize] / incidence[v as usize] as f64;
+        }
+    }
+    let estimated_change = dual.signed_error.abs() + remainder.abs();
+    if scores
+        .iter()
+        .chain([&estimated_change, &measured_change])
+        .any(|value| !value.is_finite())
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-adaptive-nonfinite",
+            "adaptive goal arithmetic is nonfinite",
+            "inspect input scales and material data",
+        ));
+    }
+    Ok(AdaptiveProbe {
+        signed_linear_change_k: dual.signed_error,
+        maximum_remainder_k: remainder,
+        estimated_change_k: estimated_change,
+        measured_change_k: measured_change,
+        dual_residual: dual.dual_relative_residual,
+        dual_iterations: dual.dual_iterations,
+        scores,
+    })
+}
+
+fn adaptive_marks(scores: &[f64]) -> Vec<usize> {
+    let total: f64 = scores.iter().sum();
+    if total == 0.0 {
+        return Vec::new();
+    }
+    let mut order: Vec<_> = (0..scores.len()).collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    let mut captured = 0.0;
+    let mut marked = Vec::new();
+    for index in order {
+        captured += scores[index];
+        marked.push(index);
+        if captured >= total * 0.5 {
+            break;
+        }
+    }
+    marked.sort_unstable();
+    marked
+}
+
+fn adaptive_deadline(deadline: Option<(std::time::Instant, f64)>) -> Result<(), SolveRefusal> {
+    if deadline.is_some_and(|(started, available_s)| started.elapsed().as_secs_f64() >= available_s)
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-adaptive-wall-budget",
+            "adaptive conduction exhausted the remaining solve-time budget between numerical operations",
+            "increase budgets.solve-time and rerun; completed preceding stages remain retained, but the unfinished conduction stage restarts",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adaptive_study(
+    cx: &fs_exec::Cx<'_>,
+    mut complex: fs_mesh::LabeledTetComplex,
+    mut solved: RungSolved,
+    region: Option<u32>,
+    accuracy_rel: f64,
+    max_tets: usize,
+    deadline: Option<(std::time::Instant, f64)>,
+    solve_rung: impl Fn(&fs_mesh::LabeledTetComplex) -> Result<RungSolved, SolveRefusal>,
+) -> Result<(fs_mesh::LabeledTetComplex, RungSolved, String), SolveRefusal> {
+    let mut solves = 1usize;
+    let mut peak_tets = complex.tets().len();
+    let mut history = Vec::new();
+    let mut achieved = None;
+    let mut tolerance = None;
+    let mut status = "unresolved";
+    let mut stop = "memory-budget";
+    let number = |value| {
+        canonical_f64(value).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-adaptive-nonfinite",
+                "nonfinite adaptive receipt value",
+                "inspect the declared accuracy and physical scales",
+            )
+        })
+    };
+    let limits = fs_mesh::TetRefinementLimits {
+        // Each vertex belongs to a tet, so this also bounds the output vertex
+        // count. Like the existing ladder, this is not an allocator peak proof.
+        max_vertices: max_tets.saturating_mul(4),
+        max_tetrahedra: max_tets,
+    };
+    loop {
+        adaptive_deadline(deadline)?;
+        let Some(region) = region else {
+            stop = "unsupported-temperature-goal";
+            break;
+        };
+        if solved.interface_pair_count > 0 {
+            stop = "unsupported-interface-transfer";
+            break;
+        }
+        if solved.conjugate_fragment.is_some() {
+            stop = "unsupported-coupled-adjoint";
+            break;
+        }
+        let data = solved
+            .adjoint_data
+            .as_ref()
+            .expect("uncoupled adjoint data");
+        let nonlinear = (0..solved.mesh.element_count()).any(|element| {
+            data.materials
+                .model_for(element)
+                .is_ok_and(|model| model.is_temperature_dependent())
+        });
+        if nonlinear {
+            stop = "unsupported-nonlinear-adjoint";
+            break;
+        }
+        let coarse_max = ladder_functional(
+            &solved.labels,
+            &solved.mesh.complex().tets,
+            &solved.solution.temperature,
+            Some(region),
+        );
+        let tolerance_k = accuracy_rel * coarse_max.abs();
+        tolerance = Some(number(tolerance_k)?);
+        if solves >= ADAPTIVE_MAX_SOLVES {
+            stop = "solve-count-limit";
+            break;
+        }
+        let split =
+            match fs_mesh::TetRefinement::build(cx, complex.positions(), complex.tets(), limits) {
+                Ok(split) => split,
+                Err(fs_mesh::TetRefinementError::OutputLimit) => break,
+                Err(error) => {
+                    return Err(conduction_error(
+                        if error == fs_mesh::TetRefinementError::Cancelled {
+                            "cli-solve-cancelled"
+                        } else {
+                            "cli-solve-conduction-adaptive-refine"
+                        },
+                        format!("uniform enrichment refused: {error}"),
+                        "inspect mesh quality and cancellation",
+                    ));
+                }
+            };
+        let enriched = complex.refine_uniform();
+        let fine = solve_rung(&enriched)?;
+        solves += 1;
+        peak_tets = peak_tets.max(enriched.tets().len());
+        let approximate = adaptive_prolongation(cx, &complex, &solved, &split, &fine)?;
+        drop(split);
+        adaptive_deadline(deadline)?;
+        let probe = adaptive_probe(cx, &solved, &fine, &approximate, region)?;
+        adaptive_deadline(deadline)?;
+        let marks = adaptive_marks(&probe.scores);
+        achieved = Some(number(probe.estimated_change_k)?);
+        history.push(format!(
+            "{{\"mesh\":{},\"tets\":{},\"vertices\":{},\"t_max_k\":{},\
+             \"min_dihedral_deg\":{},\"probe_tets\":{},\"probe_t_max_k\":{},\
+             \"signed_linear_change_k\":{},\"maximum_remainder_k\":{},\
+             \"estimated_change_k\":{},\"measured_change_k\":{},\"tolerance_k\":{},\
+             \"dual_residual\":{},\"dual_iterations\":{},\"marked_cells\":{},\
+             \"absolute_contribution_sum_k\":{}}}",
+            history.len(),
+            complex.tets().len(),
+            complex.positions().len(),
+            number(coarse_max)?,
+            number(solved.census.min_dihedral_deg)?,
+            enriched.tets().len(),
+            number(ladder_functional(
+                &fine.labels,
+                &fine.mesh.complex().tets,
+                &fine.solution.temperature,
+                Some(region)
+            ))?,
+            number(probe.signed_linear_change_k)?,
+            number(probe.maximum_remainder_k)?,
+            number(probe.estimated_change_k)?,
+            number(probe.measured_change_k)?,
+            number(tolerance_k)?,
+            number(probe.dual_residual)?,
+            probe.dual_iterations,
+            marks.len(),
+            number(probe.scores.iter().sum())?,
+        ));
+        if probe.estimated_change_k <= tolerance_k && probe.measured_change_k.abs() <= tolerance_k {
+            status = "observed-tolerance-met";
+            stop = "enriched-maximum-comparison";
+            break;
+        }
+        if solves >= ADAPTIVE_MAX_SOLVES {
+            stop = "solve-count-limit";
+            break;
+        }
+        if marks.is_empty() {
+            // A zero marking signal is not success: use the already solved
+            // global enrichment, then independently probe that mesh again.
+            if enriched.tets().len().saturating_mul(8) > max_tets {
+                break;
+            }
+            complex = enriched;
+            solved = fine;
+        } else {
+            // Both the next local primal and its global probe must fit. Keep
+            // the last evaluated field when only one solve remains, so its
+            // retained discrepancy still belongs to the published mesh.
+            if solves.saturating_add(2) > ADAPTIVE_MAX_SOLVES {
+                stop = "solve-count-limit";
+                break;
+            }
+            drop(fine);
+            drop(enriched);
+            let next = match complex.refine_marked(cx, &marks, limits) {
+                Ok(next) => next,
+                Err(fs_mesh::TetRefinementError::OutputLimit) => break,
+                Err(error) => {
+                    return Err(conduction_error(
+                        if error == fs_mesh::TetRefinementError::Cancelled {
+                            "cli-solve-cancelled"
+                        } else {
+                            "cli-solve-conduction-adaptive-refine"
+                        },
+                        format!("marked refinement refused: {error}"),
+                        "inspect mesh quality and cancellation",
+                    ));
+                }
+            };
+            // Preserve the last evaluated mesh if the next one could never
+            // admit its required global probe inside the same mesh budget.
+            if next.tets().len().saturating_mul(8) > max_tets {
+                break;
+            }
+            solved = solve_rung(&next)?;
+            solves += 1;
+            complex = next;
+        }
+    }
+    let receipt = format!(
+        "{{\"status\":{},\"stop\":{},\"method\":\"enriched-discrete-dual-marked-edge-stars\",\
+         \"solved_meshes\":{},\"solve_limit\":{},\"peak_solved_tets\":{},\"tet_limit\":{},\
+         \"accuracy_rel\":{},\"tolerance_k\":{},\"last_estimated_change_k\":{},\
+         \"history\":[{}],\"continuum_error_bound\":false,\
+         \"deadline_policy\":\"between-numerical-operations\",\"no_claim\":{}}}",
+        json_string(status),
+        json_string(stop),
+        solves,
+        ADAPTIVE_MAX_SOLVES,
+        peak_tets,
+        max_tets,
+        number(accuracy_rel)?,
+        tolerance.as_deref().unwrap_or("null"),
+        achieved.as_deref().unwrap_or("null"),
+        history.join(","),
+        json_string(
+            "same-model nodal-maximum comparison against a globally enriched mesh; the dual's linear goal and explicit maximum remainder are retained; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+        ),
+    );
+    Ok((complex, solved, receipt))
 }
 
 /// One row of the conduction receipt's `ladder.rungs`.
@@ -1374,7 +1816,7 @@ fn ladder_row(
         min_dihedral_deg: solved.census.min_dihedral_deg,
         t_max_k: ladder_functional(
             &solved.labels,
-            complex.tets(),
+            &solved.mesh.complex().tets,
             &solved.solution.temperature,
             region,
         ),
@@ -2062,7 +2504,7 @@ impl<'a> SolveEngine<'a> {
                 SolveStage::FlowNetwork => self
                     .stage_flow_network(&mut context)
                     .map(|receipt| (receipt, Vec::new())),
-                SolveStage::Conduction => self.stage_conduction(&context).map(|product| {
+                SolveStage::Conduction => self.stage_conduction(&context, &state).map(|product| {
                     pending_qoi_inputs = Some(product.qoi_inputs);
                     (product.receipt, product.artifacts)
                 }),
@@ -2420,6 +2862,7 @@ impl<'a> SolveEngine<'a> {
     fn stage_conduction(
         &mut self,
         context: &StageContext,
+        state: &SolveDriverState,
     ) -> Result<ConductionStageProduct, SolveRefusal> {
         conduction_receipt(
             self.ledger,
@@ -2429,6 +2872,7 @@ impl<'a> SolveEngine<'a> {
             self.run,
             self.work,
             false,
+            self.token.wall_s - state.consumed_wall_s,
         )
     }
 
@@ -4954,6 +5398,7 @@ fn lower_thermal_interfaces(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn conduction_receipt(
     ledger: &Ledger,
     spec: &ProjectSpec,
@@ -4962,7 +5407,17 @@ fn conduction_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
+    available_wall_s: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
+    // A timed partial field is never published: the ordinary staged refusal
+    // retains the last completed pipeline prefix. Successful receipts replay
+    // numerically without making their identity depend on replay machine speed.
+    let deadline = (!resume
+        && spec
+            .solver
+            .as_ref()
+            .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE))
+    .then(|| (std::time::Instant::now(), available_wall_s));
     let stage = SolveStage::Conduction;
     let cancelled = || {
         if resume {
@@ -4973,6 +5428,7 @@ fn conduction_receipt(
     };
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 0)
         .map_err(|_| cancelled())?;
+    adaptive_deadline(deadline)?;
     let setup = spec
         .cooling
         .as_ref()
@@ -5082,6 +5538,8 @@ fn conduction_receipt(
             .budgets
             .as_ref()
             .map_or(0, |budgets| budgets.memory_bytes);
+        let adaptive_requested = spec.solver.as_ref()
+            .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE);
         let max_tets = usize::try_from(memory_bytes / 256)
             .unwrap_or(usize::MAX)
             .clamp(1, 4_000_000);
@@ -5124,6 +5582,7 @@ fn conduction_receipt(
         // lowering by parent facet, the conjugate exchange), so it is one
         // function of the labeled complex and runs once per rung.
         let solve_rung = |labeled: &fs_mesh::LabeledTetComplex| -> Result<RungSolved, SolveRefusal> {
+        adaptive_deadline(deadline)?;
         let census = labeled.quality();
         if let Some((what, fix)) = mesh_quality_refusal(&census, refinement.is_some()) {
             return Err(conduction_error(
@@ -5362,6 +5821,17 @@ fn conduction_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
+        let adjoint_data = if adaptive_requested && interface_resolution.pairs.is_empty()
+            && conjugate_fragment.is_none() {
+            let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+                &interface_faces, &BTreeMap::new())?.boundary;
+            let mut linear = fs_conduction::LinearConfig::default();
+            if let Some(solver) = &spec.solver {
+                linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
+            }
+            Some(RungAdjointData { boundary, source, materials: element_materials, fallback, linear })
+        } else { None };
+        adaptive_deadline(deadline)?;
         Ok(RungSolved {
             census,
             mesh,
@@ -5370,6 +5840,7 @@ fn conduction_receipt(
             interface_pair_count: interface_resolution.pairs.len(),
             interface_evidence,
             conjugate_fragment,
+            adjoint_data,
         })
         };
         // The h-ladder: rung 0 is the audited base; every further rung is one
@@ -5379,6 +5850,15 @@ fn conduction_receipt(
         // project with interfaces solves one rung and the receipt says so.
         let mut complex = audited.labeled().clone();
         let mut solved = solve_rung(&complex)?;
+        let adaptive_fragment = if adaptive_requested {
+            let budgets = spec.budgets.as_ref().expect("admitted solve budgets");
+            let (adaptive_complex, adaptive_solved, receipt) = adaptive_study(
+                &cx, complex, solved, ladder_region, budgets.accuracy_rel, max_tets, deadline, &solve_rung,
+            )?;
+            complex = adaptive_complex;
+            solved = adaptive_solved;
+            Some(receipt)
+        } else { None };
         let mut rungs = vec![ladder_row(0, &complex, &solved, ladder_region)];
         let mut ladder_stop: &'static str = "complete";
         let ladder_requested = spec
@@ -5388,14 +5868,10 @@ fn conduction_receipt(
         let trace_ladder = std::env::var_os("FS_CLI_TRACE_LADDER").is_some();
         loop {
             if !ladder_requested {
-                ladder_stop = if spec
-                    .solver
-                    .as_ref()
-                    .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
-                {
-                    // Geometric quality refinement is not a goal-error test.
-                    // Keep the solved estimate, with the missing criterion explicit.
-                    "fidelity-adaptive-goal-not-evaluated"
+                ladder_stop = if adaptive_requested {
+                    // Nonuniform adaptive history has its own receipt and must
+                    // never be interpreted as a uniform Richardson ladder.
+                    "fidelity-adaptive-study"
                 } else {
                     "fidelity-single-rung"
                 };
@@ -5450,9 +5926,9 @@ fn conduction_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
-        Ok((audited, solved, region_ids, rungs, estimate))
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate) = result;
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment) = result;
     let RungSolved {
         census,
         mesh,
@@ -5461,6 +5937,7 @@ fn conduction_receipt(
         interface_pair_count,
         interface_evidence,
         conjugate_fragment,
+        adjoint_data: _,
     } = solved;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
@@ -5595,7 +6072,7 @@ fn conduction_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -5633,6 +6110,7 @@ fn conduction_receipt(
         ladder_rows_json,
         json_string(ladder_estimate.stop),
         ladder_estimate_json,
+        adaptive_fragment.as_deref().unwrap_or("null"),
         conjugate_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
@@ -7785,8 +8263,16 @@ fn validate_resume_candidate(
                         0,
                     )
                     .map_err(|_| cancelled_resume_refusal(run))?;
-                    let rebuilt =
-                        conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
+                    let rebuilt = conduction_receipt(
+                        ledger,
+                        &project.spec,
+                        cards,
+                        &context,
+                        run,
+                        work,
+                        true,
+                        0.0,
+                    );
                     work.checkpoint(
                         SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
                         receipt_stage_index,
@@ -11864,6 +12350,18 @@ mod tests {
     use fs_project::{
         ConductionInterfaceResolution, ConductionSourceFace, ResolvedConductionInterfacePair,
     };
+
+    #[test]
+    fn adaptive_deadline_refuses_zero_and_negative_remaining_budget() {
+        for seconds in [0.0, -1.0] {
+            let refusal =
+                super::adaptive_deadline(Some((std::time::Instant::now(), seconds))).unwrap_err();
+            assert_eq!(refusal.code, "cli-solve-conduction-adaptive-wall-budget");
+            assert!(refusal.fix.contains("unfinished conduction stage restarts"));
+        }
+        assert!(super::adaptive_deadline(None).is_ok());
+        assert!(super::adaptive_deadline(Some((std::time::Instant::now(), 60.0))).is_ok());
+    }
 
     #[test]
     fn interface_resolution_identity_length_frames_user_controlled_names() {

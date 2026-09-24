@@ -1001,7 +1001,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 13,
+        SOLVE_DRIVER_VERSION, 14,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -4596,6 +4596,207 @@ fn ja_004_replay_reproduces_every_receipt_and_the_field_bitwise() {
 /// fs-airflow's discretization-receipt seam (QoI receipt v2). The default
 /// fidelity solves one rung and says so; that path is pinned by the g1
 /// conduction test above.
+#[test]
+fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_unbounded() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    assert!(
+        conduction.contains("\"status\":\"observed-tolerance-met\""),
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    assert!(
+        conduction.contains("\"maximum_remainder_k\":"),
+        "{conduction}"
+    );
+    assert!(
+        conduction.contains("\"continuum_error_bound\":false"),
+        "{conduction}"
+    );
+    assert!(!conduction.contains("fidelity-adaptive-goal-not-evaluated"));
+    let number = |key: &str| {
+        conduction
+            .split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let linear = number("\"signed_linear_change_k\":");
+    let remainder = number("\"maximum_remainder_k\":");
+    let measured = number("\"measured_change_k\":");
+    assert!(
+        (linear + remainder - measured).abs() < 1e-7,
+        "the checked dual and maximum-owner remainder reproduce the independently solved maximum change"
+    );
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 8, "{qoi}");
+    let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
+    let html = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report, "report_html"),
+    ))
+    .unwrap();
+    assert!(
+        html.contains("adaptive_status"),
+        "the normal report exposes adaptive results"
+    );
+    assert!(html.contains("observed-tolerance-met"));
+    assert!(
+        html.contains("no continuum error"),
+        "the report retains the adaptive scope"
+    );
+}
+
+#[test]
+fn g1_adaptive_fidelity_tight_accuracy_refines_and_resolves_the_marked_mesh() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-12;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    let solves: usize = conduction
+        .split("\"solved_meshes\":")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        solves > 2,
+        "tight accuracy must cause a real local re-solve: {conduction}"
+    );
+    assert!(
+        conduction.matches("\"probe_tets\":").count() > 1,
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"marked_cells\":"), "{conduction}");
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
+    let first_number = |text: &str, key: &str| {
+        text.split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let history = conduction
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split("]")
+        .next()
+        .unwrap();
+    let last_row = history.rsplit("{\"mesh\":").next().unwrap();
+    assert_eq!(
+        first_number(&conduction, "\"elements\":"),
+        first_number(last_row, "\"tets\":"),
+        "budget stopping must retain the last probed mesh, not an unprobed refinement"
+    );
+    assert_eq!(
+        first_number(&conduction, "\"max\":"),
+        first_number(last_row, "\"t_max_k\":"),
+        "the retained temperature field and final discrepancy describe the same mesh"
+    );
+    assert_eq!(
+        first_number(&conduction, "\"last_estimated_change_k\":"),
+        first_number(last_row, "\"estimated_change_k\":")
+    );
+}
+
+#[test]
+fn g1_adaptive_fidelity_names_the_unsupported_coupled_adjoint() {
+    let bytes = tetra_stl();
+    let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (_, _, conduction, _) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+    assert!(
+        conduction.contains("\"status\":\"unresolved\""),
+        "{conduction}"
+    );
+    assert!(
+        conduction.contains("\"stop\":\"unsupported-coupled-adjoint\""),
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"solved_meshes\":1,"), "{conduction}");
+    assert!(conduction.contains("\"history\":[]"), "{conduction}");
+}
+
+#[test]
+fn g1_adaptive_fidelity_memory_limit_keeps_the_last_probed_mesh_unresolved() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let budgets = spec.budgets.as_mut().unwrap();
+    budgets.accuracy_rel = 1e-12;
+    budgets.memory_bytes = 32 * 1024;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert!(
+        conduction.contains("\"status\":\"unresolved\""),
+        "{conduction}"
+    );
+    assert!(
+        conduction.contains("\"stop\":\"memory-budget\""),
+        "{conduction}"
+    );
+    let first_number = |text: &str, key: &str| {
+        text.split(key)
+            .nth(1)
+            .unwrap()
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let history = conduction
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let last_row = history.rsplit("{\"mesh\":").next().unwrap();
+    assert_eq!(
+        first_number(&conduction, "\"elements\":"),
+        first_number(last_row, "\"tets\":")
+    );
+    assert_eq!(
+        first_number(&conduction, "\"max\":"),
+        first_number(last_row, "\"t_max_k\":")
+    );
+    assert!(first_number(&conduction, "\"peak_solved_tets\":") <= 128.0);
+}
+
 #[test]
 fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term() {
     let bytes = tetra_stl();

@@ -347,3 +347,58 @@ fn uniform_refinement_of_the_comb_keeps_volume_walls_and_quality_over_two_rungs(
         );
     }
 }
+
+#[test]
+fn marked_refinement_keeps_region_volume_and_boundary_facet_ancestry() {
+    let vertices = fs_mesh::box_vertices(0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
+    let region = RegionSpec {
+        id: RegionId(3),
+        kind: RegionKind::Solid,
+        seed: [0.25, 0.25, 0.25],
+        triangles: fs_mesh::box_triangles(0),
+    };
+    with_cx(|cx| {
+        let base = volumetricize(
+            UnverifiedPlc::new(vertices, vec![region]),
+            VolumetricPolicy::fixture_default("m"),
+            cx,
+        )
+        .unwrap();
+        let base = base.labeled();
+        let limits = fs_mesh::TetRefinementLimits {
+            max_vertices: 1000,
+            max_tetrahedra: 1000,
+        };
+        let marked = base.refine_marked(cx, &[0], limits).unwrap();
+        assert!(marked.tets().len() > base.tets().len());
+        assert!(marked.tets().len() < base.tets().len() * 8);
+        assert!((per_region_volume(&marked).0[&3] - per_region_volume(base).0[&3]).abs() < 1e-12);
+        let replay = base.refine_marked(cx, &[0, 0], limits).unwrap();
+        assert_eq!(marked, replay);
+        let mut faces = BTreeMap::new();
+        for &[a, b, c, d] in marked.tets() {
+            for face in [[a, b, c], [a, b, d], [a, c, d], [b, c, d]] {
+                *faces.entry(sorted_face(face)).or_insert(0) += 1;
+            }
+        }
+        for &(face, parent) in marked.source_faces() {
+            assert_eq!(faces[&sorted_face(face)], 1);
+            assert!(
+                base.source_faces()
+                    .iter()
+                    .any(|&(_, original)| original == parent)
+            );
+        }
+        assert!(matches!(
+            base.refine_marked(
+                cx,
+                &[0],
+                fs_mesh::TetRefinementLimits {
+                    max_vertices: base.positions().len(),
+                    max_tetrahedra: base.tets().len(),
+                }
+            ),
+            Err(fs_mesh::TetRefinementError::OutputLimit)
+        ));
+    });
+}

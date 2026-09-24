@@ -295,6 +295,15 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                 ),
                 ("elements", &["mesh", "elements"][..]),
                 ("vertices", &["mesh", "vertices"][..]),
+                ("adaptive_status", &["adaptive", "status"][..]),
+                ("adaptive_stop", &["adaptive", "stop"][..]),
+                ("adaptive_solved_meshes", &["adaptive", "solved_meshes"][..]),
+                ("adaptive_tolerance_k", &["adaptive", "tolerance_k"][..]),
+                (
+                    "adaptive_estimated_change_k",
+                    &["adaptive", "last_estimated_change_k"][..],
+                ),
+                ("adaptive_scope", &["adaptive", "no_claim"][..]),
                 ("authority", &["authority"][..]),
             ] {
                 push_summary(&mut summary, receipt, label, path);
@@ -302,6 +311,7 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     .last()
                     .is_none_or(|(last, _)| last.as_str() != label)
                     && path.len() > 1
+                    && path[0] != "adaptive"
                 {
                     push_summary(&mut summary, receipt, label, &path[1..]);
                 }
