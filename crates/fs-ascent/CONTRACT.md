@@ -191,6 +191,19 @@ there is no torn state. Legacy `run`/`try_run` remain context-free wrappers.
 Problem evaluation budgets still flow through the optimizer stop algebra;
 orchestration cancellation is a distinct typed outcome.
 
+`TrustRegionState::run_cancellable` also polls before and after each
+Steihaug Hessian-vector product, the final model product, and the candidate
+objective/gradient evaluation. A request discards the unfinished proposal;
+accepted point/gradient, radius, history, iteration count and committed
+negative-curvature count remain unchanged. Every completed callback remains
+charged, including a discarded objective evaluation. Resume restarts only that
+proposal; with the same deterministic callbacks and sufficient remaining
+budget it reproduces the uninterrupted numerical trajectory while retaining
+the extra callback cost. Individual callbacks and vector operations
+remain non-preemptible; no wall-clock latency or serialized Krylov continuation
+is claimed. Focused G4 tests inject cancellation at every callback boundary,
+inside a later Krylov product, and through the public `Cx` adapter.
+
 ## Unsafe boundary
 
 None. `unsafe_code = "deny"`.

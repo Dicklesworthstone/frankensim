@@ -32,7 +32,7 @@ pub struct TrustRegionReport {
 /// Why control returned to the caller. A cancellation pause is not convergence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustRegionProgress {
-    /// Cancellation was observed at a complete outer-iteration boundary.
+    /// Cancellation was observed before publishing the next complete iteration.
     Paused,
     /// A numerical stopping rule, resource limit, or iteration cap fired.
     Stopped(StopReason),
@@ -63,6 +63,16 @@ pub struct TrustRegionState {
     negative_curvature_hits: usize,
     history: Vec<f64>,
     stalled: bool,
+}
+
+enum IterationOutcome {
+    Complete { usable: bool, negative_curvature: bool },
+    Paused,
+}
+
+enum SteihaugStop {
+    Unusable(usize),
+    Paused(usize),
 }
 
 fn inf_norm(values: &[f64]) -> f64 {
@@ -173,10 +183,13 @@ impl TrustRegionState {
         self.run_with_pause(fg, hv_at, rule, max_iters, &mut || false)
     }
 
-    /// As [`Self::run`], polling cancellation only at complete, resume-safe
-    /// outer-iteration boundaries. Callback execution and an in-flight
-    /// Steihaug solve are not interruptible here. A pause leaves the accepted
-    /// state untouched and can be resumed with a fresh cancellation context.
+    /// As [`Self::run`], polling before and after every Hessian-vector and
+    /// objective/gradient callback, including inside Steihaug-CG. Individual
+    /// callbacks and vector operations are not interruptible. Cancellation
+    /// discards the uncommitted trial, preserving the accepted point, radius,
+    /// history and iteration count. Spent callbacks remain charged. Resumption
+    /// with a fresh context restarts that trial from the accepted point; it
+    /// does not replay earlier accepted iterations or retain the Krylov basis.
     pub fn run_cancellable(
         &mut self,
         fg: crate::FnGrad<'_>,
@@ -222,7 +235,13 @@ impl TrustRegionState {
             if completed == max_iters {
                 break TrustRegionProgress::Stopped(StopReason::IterationCap);
             }
-            self.stalled = !self.iterate(fg, hv_at);
+            match self.iterate(fg, hv_at, paused) {
+                IterationOutcome::Paused => break TrustRegionProgress::Paused,
+                IterationOutcome::Complete { usable, negative_curvature } => {
+                    self.stalled = !usable;
+                    self.negative_curvature_hits += usize::from(negative_curvature);
+                }
+            }
             self.iters += 1;
             self.history.push(self.f);
             completed += 1;
@@ -233,54 +252,74 @@ impl TrustRegionState {
         }
     }
 
-    // false means an unusable model/precision stall; no candidate is accepted.
-    fn iterate(&mut self, fg: crate::FnGrad<'_>, hv_at: crate::FnHv<'_>) -> bool {
+    // Only callback counters change before the final cancellation checkpoint.
+    // An unusable model/precision stall never publishes a candidate.
+    fn iterate(
+        &mut self,
+        fg: crate::FnGrad<'_>,
+        hv_at: crate::FnHv<'_>,
+        paused: &mut dyn FnMut() -> bool,
+    ) -> IterationOutcome {
         let step = {
             let xc = self.x.clone();
             let mut hv = |v: &[f64]| hv_at(&xc, v);
-            steihaug(&self.g, &mut hv, self.delta, 1e-8)
+            steihaug(&self.g, &mut hv, self.delta, 1e-8, paused)
         };
         let (p, _hit, neg, hv_count) = match step {
             Ok(step) => step,
-            Err(hv_count) => {
+            Err(SteihaugStop::Unusable(hv_count)) => {
                 self.hv_evals += hv_count;
-                return false;
+                return IterationOutcome::Complete { usable: false, negative_curvature: false };
+            }
+            Err(SteihaugStop::Paused(hv_count)) => {
+                self.hv_evals += hv_count;
+                return IterationOutcome::Paused;
             }
         };
         self.hv_evals += hv_count;
-        if neg {
-            self.negative_curvature_hits += 1;
+        let complete = |usable| IterationOutcome::Complete { usable, negative_curvature: neg };
+        if paused() {
+            return IterationOutcome::Paused;
         }
         // Keep the established floating-point operation order on valid runs.
         let hp = hv_at(&self.x, &p);
         self.hv_evals += 1;
+        if paused() {
+            return IterationOutcome::Paused;
+        }
         assert_eq!(hp.len(), self.x.len(), "trust-region Hessian dimension mismatch");
         if hp.iter().any(|v| !v.is_finite()) {
-            return false;
+            return complete(false);
         }
         let gp: f64 = self.g.iter().zip(&p).map(|(a, b)| a * b).sum();
         let php: f64 = p.iter().zip(&hp).map(|(a, b)| a * b).sum();
         let model_decrease = -gp - 0.5 * php;
         if !model_decrease.is_finite() || model_decrease <= 0.0 {
-            return false;
+            return complete(false);
         }
         let x_new: Vec<f64> = self.x.iter().zip(&p).map(|(a, b)| a + b).collect();
         if x_new == self.x {
-            return false;
+            return complete(false);
         }
         if x_new.iter().any(|v| !v.is_finite()) {
             self.delta *= 0.25;
-            return true;
+            return complete(true);
+        }
+        if paused() {
+            return IterationOutcome::Paused;
         }
         let (f_new, g_new) = fg(&x_new);
         self.evals += 1;
+        if paused() {
+            return IterationOutcome::Paused;
+        }
         assert_eq!(g_new.len(), self.x.len(), "trust-region gradient dimension mismatch");
         // A trial outside the objective's domain is a rejected step, not a
         // new incumbent. In particular, -infinity must not look like an
         // infinite improvement, nor may NaN freeze the radius through rho.
         if !f_new.is_finite() || g_new.iter().any(|v| !v.is_finite()) {
             self.delta *= 0.25;
-            return true;
+            return complete(true);
         }
         let actual = self.f - f_new;
         let rho = if model_decrease.abs() < 1e-300 {
@@ -290,7 +329,7 @@ impl TrustRegionState {
         };
         if !actual.is_finite() || !rho.is_finite() {
             self.delta *= 0.25;
-            return true;
+            return complete(true);
         }
         let p_norm: f64 = p.iter().map(|v| v * v).sum::<f64>().sqrt();
         if rho < 0.25 {
@@ -303,19 +342,20 @@ impl TrustRegionState {
             self.f = f_new;
             self.g = g_new;
         }
-        true
+        complete(true)
     }
 }
 
 /// Steihaug-CG: approximately minimize m(p) = gᵀp + ½pᵀHp within
 /// ‖p‖ ≤ Δ. Returns (step, hit_boundary, negative_curvature, hv_count),
-/// or the spent Hessian count if the model/arithmetic is unusable.
+/// or the stop reason with the spent Hessian count.
 fn steihaug(
     g: &[f64],
     hv: &mut dyn FnMut(&[f64]) -> Vec<f64>,
     delta: f64,
     tol: f64,
-) -> Result<(Vec<f64>, bool, bool, usize), usize> {
+    paused: &mut dyn FnMut() -> bool,
+) -> Result<(Vec<f64>, bool, bool, usize), SteihaugStop> {
     let n = g.len();
     let mut p = vec![0.0f64; n];
     let mut r: Vec<f64> = g.iter().map(|v| -v).collect();
@@ -324,24 +364,30 @@ fn steihaug(
     let g_norm = rr.sqrt();
     let mut hv_count = 0usize;
     if !rr.is_finite() {
-        return Err(hv_count);
+        return Err(SteihaugStop::Unusable(hv_count));
     }
     for _ in 0..n.saturating_mul(2) {
         if rr.sqrt() < tol * g_norm.max(1e-30) {
             return Ok((p, false, false, hv_count));
         }
         if d.iter().any(|v| !v.is_finite()) {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
+        }
+        if paused() {
+            return Err(SteihaugStop::Paused(hv_count));
         }
         let hd = hv(&d);
         hv_count += 1;
+        if paused() {
+            return Err(SteihaugStop::Paused(hv_count));
+        }
         assert_eq!(hd.len(), n, "trust-region Hessian dimension mismatch");
         if hd.iter().any(|v| !v.is_finite()) {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
         }
         let dhd: f64 = d.iter().zip(&hd).map(|(a, b)| a * b).sum();
         if !dhd.is_finite() {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
         }
         if dhd <= 0.0 {
             // Negative curvature: follow d to the boundary.
@@ -352,12 +398,12 @@ fn steihaug(
             return if p.iter().all(|v| v.is_finite()) {
                 Ok((p, true, true, hv_count))
             } else {
-                Err(hv_count)
+                Err(SteihaugStop::Unusable(hv_count))
             };
         }
         let alpha = rr / dhd;
         if !alpha.is_finite() {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
         }
         let mut p_next = p.clone();
         for i in 0..n {
@@ -372,7 +418,7 @@ fn steihaug(
             return if p.iter().all(|v| v.is_finite()) {
                 Ok((p, true, false, hv_count))
             } else {
-                Err(hv_count)
+                Err(SteihaugStop::Unusable(hv_count))
             };
         }
         p = p_next;
@@ -381,11 +427,11 @@ fn steihaug(
         }
         let rr_new: f64 = r.iter().map(|v| v * v).sum();
         if !rr_new.is_finite() {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
         }
         let beta = rr_new / rr;
         if !beta.is_finite() {
-            return Err(hv_count);
+            return Err(SteihaugStop::Unusable(hv_count));
         }
         rr = rr_new;
         for i in 0..n {
@@ -395,7 +441,7 @@ fn steihaug(
     if p.iter().all(|v| v.is_finite()) {
         Ok((p, false, false, hv_count))
     } else {
-        Err(hv_count)
+        Err(SteihaugStop::Unusable(hv_count))
     }
 }
 
@@ -505,10 +551,10 @@ mod tests {
         let initial = TrustRegionState::new(&[-1.2, 1.0], &mut rosenbrock);
         let rule = StopRule::GradNorm(1e-12);
         let mut paused = initial.clone();
-        let mut boundaries = 0;
+        paused.run(&mut rosenbrock, &mut rosenbrock_hv, &rule, 2);
         let outcome = paused.run_with_pause(
             &mut rosenbrock, &mut rosenbrock_hv, &rule, 10,
-            &mut || { boundaries += 1; boundaries > 2 },
+            &mut || true,
         );
         assert_eq!(outcome.progress, TrustRegionProgress::Paused);
         assert_eq!(outcome.solution.iters, 2);
@@ -524,6 +570,137 @@ mod tests {
         let mut straight = initial;
         straight.run(&mut rosenbrock, &mut rosenbrock_hv, &rule, 12);
         assert_same_state(&straight, &paused);
+    }
+
+    // G4: every callback-side checkpoint of a real quadratic proposal must
+    // retain its work charges but publish none of the incomplete iteration.
+    #[test]
+    fn trust_region_pause_at_each_callback_boundary_is_atomic() {
+        let mut fg = |x: &[f64]| ((x[0] - 2.0).powi(2), vec![2.0 * (x[0] - 2.0)]);
+        let mut hv = |_: &[f64], v: &[f64]| vec![2.0 * v[0]];
+        let initial = TrustRegionState::new(&[0.0], &mut fg);
+        let rule = StopRule::GradNorm(1e-12);
+        let mut straight = initial.clone();
+        straight.run(&mut fg, &mut hv, &rule, 10);
+        // Entry, before/after CG Hv, before/after final-model Hv,
+        // before/after the candidate objective+gradient.
+        for (boundary, spent_hv, spent_fg) in [
+            (1, 0, 0), (2, 0, 0), (3, 1, 0), (4, 1, 0),
+            (5, 2, 0), (6, 2, 0), (7, 2, 1),
+        ] {
+            let mut state = initial.clone();
+            let mut polls = 0;
+            let outcome = state.run_with_pause(&mut fg, &mut hv, &rule, 10, &mut || {
+                polls += 1;
+                polls >= boundary
+            });
+            assert_eq!(outcome.progress, TrustRegionProgress::Paused);
+            let mut expected = initial.clone();
+            expected.hv_evals += spent_hv;
+            expected.evals += spent_fg;
+            assert_same_state(&expected, &state);
+            let checkpoint = state.clone();
+            state.run_with_pause(
+                &mut |_| panic!("paused objective"), &mut |_, _| panic!("paused Hessian"),
+                &rule, 10, &mut || true,
+            );
+            assert_same_state(&checkpoint, &state);
+            state.run(&mut fg, &mut hv, &rule, 10);
+            let mut expected = straight.clone();
+            expected.hv_evals += spent_hv;
+            expected.evals += spent_fg;
+            assert_same_state(&expected, &state);
+        }
+    }
+
+    // G4: use the public Cx adapter and request cancellation from each actual
+    // expensive callback. No callback following the requesting one may run.
+    #[test]
+    fn trust_region_cx_observes_callback_cancellation_before_publication() {
+        use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+        use std::cell::Cell;
+
+        for request_at in 1..=3 {
+            let gate = CancelGate::new();
+            let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+            let callbacks = Cell::new(0usize);
+            let mut fg = |x: &[f64]| ((x[0] - 2.0).powi(2), vec![2.0 * (x[0] - 2.0)]);
+            let mut state = TrustRegionState::new(&[0.0], &mut fg);
+            let before = state.clone();
+            let observe = || {
+                assert!(!gate.is_requested(), "callback ran after cancellation");
+                callbacks.set(callbacks.get() + 1);
+                if callbacks.get() == request_at { gate.request(); }
+            };
+            pool.scope(|arena| {
+                let cx = Cx::new(&gate, arena,
+                    StreamKey { seed: 0, kernel_id: 1, tile: 0, iteration: 0 },
+                    Budget::INFINITE, ExecMode::Deterministic);
+                let outcome = state.run_cancellable(
+                    &mut |x| { observe(); fg(x) },
+                    &mut |_, v| { observe(); vec![2.0 * v[0]] },
+                    &StopRule::Budget(2), 10, &cx,
+                );
+                assert_eq!(outcome.progress, TrustRegionProgress::Paused);
+            });
+            assert_eq!(callbacks.get(), request_at);
+            let mut expected = before;
+            expected.hv_evals += request_at.min(2);
+            expected.evals += usize::from(request_at == 3);
+            assert_same_state(&expected, &state);
+            // A cancelled objective still consumes its allowance. A fresh
+            // invocation cannot silently spend the same budget again.
+            if request_at == 3 {
+                let outcome = state.run(
+                    &mut |_| panic!("spent objective allowance was reissued"),
+                    &mut |_, _| panic!("spent allowance reached Hessian"),
+                    &StopRule::Budget(2), 10,
+                );
+                assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Budget));
+                assert_same_state(&expected, &state);
+            }
+        }
+    }
+
+    #[test]
+    fn trust_region_pause_during_later_krylov_product_retains_only_work() {
+        use std::cell::Cell;
+        let mut fg = |x: &[f64]| (0.5 * x[0] * x[0] + x[1] * x[1], vec![x[0], 2.0 * x[1]]);
+        let mut state = TrustRegionState::new(&[0.1, 0.1], &mut fg);
+        let before = state.clone();
+        let calls = Cell::new(0);
+        let outcome = state.run_with_pause(
+            &mut |_| panic!("cancelled Krylov solve reached objective"),
+            &mut |_, v| { calls.set(calls.get() + 1); vec![v[0], 2.0 * v[1]] },
+            &StopRule::GradNorm(1e-12), 10, &mut || calls.get() == 2,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Paused);
+        let mut expected = before;
+        expected.hv_evals += 2;
+        assert_same_state(&expected, &state);
+        state.run(&mut fg, &mut |_, v| vec![v[0], 2.0 * v[1]], &StopRule::GradNorm(1e-12), 10);
+        assert!(state.report().grad_norm <= 1e-12);
+    }
+
+    #[test]
+    fn trust_region_cancelled_negative_curvature_trial_is_not_committed() {
+        use std::cell::Cell;
+        let mut fg = |x: &[f64]| (-x[0] * x[0], vec![-2.0 * x[0]]);
+        let mut state = TrustRegionState::new(&[1.0], &mut fg);
+        let mut expected = state.clone();
+        let calls = Cell::new(0);
+        let outcome = state.run_with_pause(
+            &mut |_| panic!("cancelled model reached objective"),
+            &mut |_, v| { calls.set(calls.get() + 1); vec![-2.0 * v[0]] },
+            &StopRule::GradNorm(0.0), 1, &mut || calls.get() == 2,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Paused);
+        expected.hv_evals += 2;
+        assert_same_state(&expected, &state);
+        state.run(&mut fg, &mut |_, v| vec![-2.0 * v[0]], &StopRule::GradNorm(0.0), 1);
+        assert_eq!(state.report().negative_curvature_hits, 1);
+        assert_eq!(state.report().x, vec![2.0]);
+        assert_eq!(state.radius(), 2.0);
     }
 
     #[test]
