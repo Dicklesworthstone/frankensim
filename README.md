@@ -308,14 +308,33 @@ report stage that seals an HTML report, its JSON twin and a format-9 evidence
 package in the ledger. `report`, `package` and `run` are projections of those
 retained receipts. A project that omits `cooling.conduction` refuses at
 conduction by name (`cli-solve-conduction-undeclared`); one that omits a
-`temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated /
-indeterminate: the budget terms are honest NO-DATA until measured, and no
-capability is at L3 until a retained lane receipt backs it.
+`temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated;
+its verdict stays indeterminate while any budget term is NO-DATA. A project
+that declares `(solver :fidelity "ladder")` gets a measured discretization
+term from a three-rung uniform h-ladder (Richardson/GCI, or the Eça–Hoekstra
+data-range fallback when no order is observable).
+When the project declares an operating envelope and one temperature-maximum
+requirement, the conduction stage also propagates the declared INTERVAL inputs
+by re-solving at their vertices on the base mesh: inlet/reference temperature
+across the envelope crossed with the fan-curve pressure tolerance (the
+boundary-conditions term), the convection card's discrepancy allowance on the
+derived coefficient (model form), and a 100x tighter solver tolerance (solver
+algebraic); measurement is negligible because no observation data enter. On
+the tracked finned heatsink this measures five of eight terms (boundary
+conditions about 20.0 K, model form about 1.34 K, discretization about 0.001 K
+with the ladder); roundoff, geometry and material parameters stay NO-DATA, so
+the verdict is still indeterminate. Every term is Estimated, not a certificate.
 
 | Command | Purpose |
 |---------|---------|
 | `cargo run -p fs-cli --bin frankensim -- validate <project.fsim>` | Parse a canonical `fs-project` file, report all structural findings, and emit its canonical hash |
-| `frankensim [--json] study <study.fsim\|study.json> <ledger.db> [--budget N]` | Run the normalized scalar thermal radius study; retain accepted iterates, final geometry, SVG report and Estimated package. Unsupported physics, wrong units, invalid geometry and missing budgets refuse before creating a ledger |
+| `frankensim [--json] import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges N \| --step-root ID --target-h H)` | Admit STL/OBJ/PLY or a strict faceted STEP subset through the quarantine path into the ledger |
+| `frankensim [--json] solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]...` | Run the seven durable stages (import-verify, assign, material-resolve, flow-network, conduction, qoi, report); `solve --resume <run-id>` continues a retained run |
+| `frankensim [--json] run <project> <ledger.db> [--materials <pack>]...` | `solve` followed by report and package export |
+| `frankensim [--json] compare <left-run> <right-run> [<ledger.db>]` | Diff two retained runs' receipts without re-running physics |
+| `frankensim [--json] discover <request.json> <pack>...` | Report data coverage for a law-discovery request; the CLI registers no executable law yet, so nothing is admitted as a model |
+| `frankensim cooling-network <request.json>` (+ `cooling-network-uq`, `cooling-component-design`) | Experimental JSON workflows: 1-D air network coupled to a hand-authored P1 tet solid with contact, radiation, transients, adjoints, sizing, QMC propagation and power allocation. Not a `.fsim` project, not ledger-backed; see `examples/cooling-network/` |
+| `frankensim [--json] study <study.fsim\|study.json> <ledger.db> [--budget N]` | Run a declared study: the normalized scalar thermal radius study or the 2-D free-boundary elasticity study (`bracket-*.fsim`); retain accepted iterates, final geometry, SVG report and Estimated package. Unsupported physics, wrong units, invalid geometry and missing budgets refuse before creating a ledger |
 | `frankensim [--json] study --resume <study-run-id> <ledger.db> [--budget N]` | Replay the retained prefix using the returned `run_id` (`study-<receipt-hash>`) and continue with its original wall/iteration budget; budget exhaustion and cancellation remain explicit partial outcomes |
 | `frankensim [--json] report <study-run-id> <ledger.db>` | Export the retained HTML/SVG and JSON study report, preserving conflicting destination files |
 | `frankensim [--json] package <study-run-id> <ledger.db>` | Re-check and export the retained package; structural verification does not upgrade its Estimated numerical claims |
@@ -339,12 +358,23 @@ The executable study fixture is
 [`examples/marquee/thermal-2d.fsim`](examples/marquee/thermal-2d.fsim).
 It minimizes `J = integral(f*u)` for scalar Poisson on the normalized unit plate
 with circular cooling holes, a unit source and zero temperature on all boundaries.
-Only the hole radii move, at fixed centers and material area. The older
-`bracket-2d.fsim` elasticity declaration remains unsupported. The CLI admits at
+Only the hole radii move, at fixed centers and material area. The CLI admits at
 most 256 iterations, 32 holes and mesh level 5, with explicit wall time and at
 least 128 MiB declared memory. Memory is an admission estimate; cancellation is
-checked between bounded iterations. No elasticity, free-boundary topology,
-global optimality or guaranteed continuum error bound is claimed.
+checked between bounded iterations.
+
+[`examples/marquee/bracket-2d.fsim`](examples/marquee/bracket-2d.fsim) runs a
+free-boundary 2-D plane-strain elasticity study through the same verb: a
+bilinear level set on a uniform grid, CutFEM on the evolving level set,
+topological-derivative hole nucleation, and an augmented-Lagrangian area
+multiplier. The `bracket-*` variants add a projected hard-area mode, sampled
+von Mises limits, protected regions and independent load families. Each run
+retains iterates, the final level set, an HTML/JSON report and a structural
+package, and resumes from accepted state. The report states whether the area
+target was met at termination; "completed" only means every requested update
+ran. No 3-D, adaptive, error-estimated, KKT/global-optimality or guaranteed
+continuum error claim is made, and the elasticity path has no independent
+body-fitted oracle yet.
 
 ## Schema Promises
 
@@ -500,11 +530,10 @@ The workspace has grown beyond the first substrate and geometry layer. These cra
 
 ## Examples
 
-These examples remain library-level examples. The stable CLI surface covers
-project validation, quarantined geometry import, the solve producer prefix, and
-the optional declared heterogeneous-conduction stage with exact matching-P1
-finite contact. The QoI solve stage, report, and package remain explicitly
-unavailable.
+These are library-level examples. The CLI surface is described in the
+Command Reference above: the seven-stage `solve`/`run` pipeline with retained
+report and package exports, the `study` verb, and the experimental
+`cooling-network*` JSON workflows.
 
 ### Deterministic Sparse Assembly
 
@@ -1531,7 +1560,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Capability | Current state |
 |------------|---------------|
 | Stable public API | Not promised yet; contracts exist, but APIs may still change |
-| End-user CLI/application | Project validation, geometry import, and the solve producer prefix through flow-network are implemented. A project with an explicit conduction setup proceeds through heterogeneous steady conduction and exact matching-P1 finite contact; a project without it fails at the typed conduction gap. QoI, report, and package remain unavailable |
+| End-user CLI/application | A source-built CLI, not a packaged application. `solve`/`run` execute seven stages (import-verify through report) on declared `.fsim` projects; the QoI verdict is Estimated and remains indeterminate while any of its eight budget terms is NO-DATA. `study` runs the scalar thermal and 2-D elasticity studies. `cooling-network*` are experimental JSON workflows on hand-authored tet solids without geometry import or a ledger |
 | crates.io distribution | Not published |
 | GitHub Actions | Not authoritative for this repo; use DSR |
 | Full multiphysics solver suite | Not complete in the current workspace. The only production-grade 3-D solver is steady conduction; the nonlinear solid and fluid solvers are 2-D on fixture meshes. Retired from v1 by owner decision on 2026-09-01 (bead frankensim-rc-root-q61wp.25), each retained as an `[M]` deferred epic: IGA Kirchhoff–Love shells (.40), turbulence on a mesh (.41), compressible flow (.42), FMM-accelerated VPM (.43). No field-level FSI or transient multiphysics exists; the conduction ↔ 1-D air-path exchange is steady |
@@ -1540,7 +1569,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Enclosure airflow | `fs-airflow` validates monotone typed fan curves, bounds fan-law speed scaling, composes quadratic series/parallel losses with a mandatory explicit leakage branch, certifies the unique nominal-model operating root with `fs-ivl`, and hands evidence-bearing branch velocities/Reynolds inputs to `fs-convection`. Its retained tests use synthetic fixtures: no manufacturer curve/tolerance corpus, unequal parallel-fan model, installation-effects model, CFD comparison, experimental validation, or registered maturity claim exists |
 | Neural representations | `fs-rep-neural` exists as a first-class crate, but its current work is experimental/in flight and has no registered capability-maturity claim |
 | Design ledger | `fs-ledger` exists, but the registry holds it at L1: the evidence-binding guard was repaired (b4ece64b) and four GC suite failures remain red on one tracked upstream FrankenSQLite cascade-ordering root cause |
-| Browser flagships | Source surfaces exist, but the registry holds the capability at L1 and records a current cross-crate schema/build break |
+| Browser flagships | Source surfaces exist and build; the registry holds the capability at L1 because two campaign tests (grammarforge, sensorforge) are red |
 | Randomized NLA golden sentinel | Resolved: `rand_nla_golden_hash` is deliberately recorded (`0xeef1_0550_7daf_c0d5`) and verified identical on arm64 and x86-64 in both debug and release, after fixing a build-mode-dependent `powi` fixture; the workspace-wide `powi` sweep is tracked in bead `frankensim-powi-build-mode-determinism-4xnt` |
 | Ascent golden sentinels | Resolved: the trajectory and Pareto golden constants (`0xe185_4f98_a25e_3663` and `0x301b_04df_db91_3965`) under `TRAJECTORY_BIT_SEMANTICS_VERSION = 1` are requalified across darwin/arm64 and x86_64 in both debug and release profiles with clean-tree proofs; four retained receipts are archived at `crates/fs-ascent/tests/receipts/ascent_golden_{x86_64,aarch64}_{debug,release}.json` (bead `frankensim-ascent-golden-requalify-o6bne`) |
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |

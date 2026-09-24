@@ -558,12 +558,14 @@ pub(super) fn report_receipt(
                 .and_then(|d| d.str_field("ladder_status"))
                 .unwrap_or("");
             let rungs = derivation.and_then(|d| d.f64_field("rungs")).unwrap_or(0.0);
-            (
-                upper,
+            let reason = if kind == "discretization" {
                 format!(
                     "half-width in kelvin from the conduction stage's uniform h-ladder: {method} ({status}) over {rungs} rungs"
-                ),
-            )
+                )
+            } else {
+                format!("Estimated half-width in kelvin: {method}")
+            };
+            (upper, reason)
         } else {
             (
                 term.f64_field("value"),
@@ -695,7 +697,10 @@ pub(super) fn report_receipt(
         .with_no_claim(NoClaimItem {
             component: "report".to_string(),
             status: "projection".to_string(),
-            statement: "this report projects retained stage receipts and adds no physical, numerical, or validation authority; the QoI is an Estimated candidate whose eight uncertainty terms are NO-DATA, so no binary compliance verdict, DWR bound, corpus validation, or L3/L4 maturity is claimed".to_string(),
+            statement: format!(
+                "this report projects retained stage receipts and adds no physical, numerical, or validation authority; the QoI is an Estimated candidate with {measured_terms} of {} uncertainty terms measured (Estimated) and the rest NO-DATA; no DWR bound, corpus validation, or L3/L4 maturity is claimed, and while any term is NO-DATA no binary compliance verdict is claimed",
+                terms.len()
+            ),
         })
         .with_replay_command(format!(
             "frankensim solve <project.fsim> <ledger> --materials <pack>   # project canonical hash {}; run {run_hex}",
@@ -725,7 +730,7 @@ pub(super) fn report_receipt(
     .with_claim(Claim::estimated(
         format!("qoi.{}.{}", identity_token(qoi_name), identity_token(qoi_region)),
         format!(
-            "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with all {} engineering-uncertainty terms NO-DATA (receipt {})",
+            "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with {measured_terms} of {} engineering-uncertainty terms measured (Estimated) and the rest NO-DATA (receipt {})",
             terms.len(),
             qoi.completed.receipt.to_hex()
         ),

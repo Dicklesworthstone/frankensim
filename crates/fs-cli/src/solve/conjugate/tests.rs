@@ -64,7 +64,7 @@ fn paths() -> ConjugatePath {
     derive_air_path(&[
         law("hot-face", "hot", 0, 330.0),
         law("cold-face", "cold", 0, 290.0),
-    ], &operating(), 1.2, |_| Some(0.01)).expect("two derived paths")
+    ], &operating(), 1.2, |_| Some(0.01), 1.0).expect("two derived paths")
 }
 
 fn fixed_walls(path: &ConjugatePath, refs: &BTreeMap<String, f64>) -> Vec<SolidRegionState> {
@@ -122,7 +122,7 @@ fn missing_second_hydraulic_branch_refuses_instead_of_reusing_the_first() {
     let error = derive_air_path(&[
         law("cold-face", "cold", 0, 290.0),
         law("other-face", "missing", 0, 330.0),
-    ], &operating(), 1.2, |_| Some(0.01)).unwrap_err();
+    ], &operating(), 1.2, |_| Some(0.01), 1.0).unwrap_err();
     assert_eq!(error.code, "cli-solve-conduction-airflow-handoff");
 }
 
@@ -214,7 +214,7 @@ fn aggregate_publication_gate_detects_dropped_boundary_heat() {
 #[test]
 fn single_branch_keeps_its_branch_fields_and_records_the_acceleration() {
     let path = derive_air_path(&[law("cold-face", "cold", 0, 290.0)],
-        &operating(), 1.2, |_| Some(0.01)).expect("single path");
+        &operating(), 1.2, |_| Some(0.01), 1.0).expect("single path");
     let outcome = with_cx(|cx| run_exchange(cx, &path,
         |_, refs| Ok(fixed_walls(&path, refs)))).expect("exchange");
     let total = outcome.solution.branches[0].balance.solid_total_w;
@@ -246,7 +246,7 @@ fn production_exchange_resolves_stiff_card_derived_paths_without_increasing_the_
     let path = derive_air_path(&[
         law("cold-face", "cold", 0, 290.0),
         law("hot-face", "hot", 0, 330.0),
-    ], &operating(), 1.2, |_| Some(10.0)).expect("stiff derived paths");
+    ], &operating(), 1.2, |_| Some(10.0), 1.0).expect("stiff derived paths");
     let solid = |refs: &BTreeMap<String, f64>| -> Vec<SolidRegionState> {
         path.segments.iter().map(|segment| {
             let power = if segment.target == "cold-face" { 5.0 } else { 3.0 };
@@ -286,4 +286,25 @@ fn production_exchange_resolves_stiff_card_derived_paths_without_increasing_the_
         assert!(receipt.contains(&format!("\"max_history\":{}", CONJUGATE_IQN_CONFIG.max_history)));
         assert!(receipt.contains("\"fallback\":\"fixed\""));
     });
+}
+
+#[test]
+fn model_form_scale_reaches_the_air_path_the_exchange_uses() {
+    // The scale must act before the air path is built: scaling only the
+    // reported derivation would leave the fixed point on the nominal h.
+    let nominal = derive_air_path(&[law("cold-face", "cold", 0, 290.0)],
+        &operating(), 1.2, |_| Some(0.01), 1.0).expect("nominal path");
+    let weaker = derive_air_path(&[law("cold-face", "cold", 0, 290.0)],
+        &operating(), 1.2, |_| Some(0.01), 0.85).expect("scaled path");
+    let h = nominal.segments[0].htc_w_m2_k;
+    assert_eq!(weaker.segments[0].htc_w_m2_k.to_bits(), (h * 0.85).to_bits());
+    assert_eq!(derived_coefficients(&weaker)["cold-face"].to_bits(), (h * 0.85).to_bits());
+    let exchange = |path: &ConjugatePath| with_cx(|cx| run_exchange(cx, path,
+        |_, refs| Ok(fixed_walls(path, refs)))).expect("exchange");
+    let (a, b) = (exchange(&nominal), exchange(&weaker));
+    assert_ne!(
+        a.solution.reference_temperatures_k[0].to_bits(),
+        b.solution.reference_temperatures_k[0].to_bits(),
+        "a weaker coefficient must change the converged air reference"
+    );
 }

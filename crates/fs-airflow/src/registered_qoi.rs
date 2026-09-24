@@ -22,7 +22,7 @@ use fs_exec::Cx;
 use crate::OperatingPoint;
 use crate::qoi::{
     DiscretizationReceipt, JunctionRegion, QoiError, ThermalQoiDeclarations, ThermalQoiKind,
-    extract_junction_maximum_qoi, extract_thermal_qois,
+    extract_thermal_qois,
 };
 
 const CANDIDATE_ROW_DOMAIN: &str = "org.frankensim.fs-airflow.candidate-qoi-row.v1";
@@ -743,6 +743,36 @@ pub fn extract_registered_junction_maximum(
     limits: QoiExecutionLimits,
     cx: &Cx<'_>,
 ) -> Result<RegisteredQoiExtractionReceipt, RegisteredQoiError> {
+    extract_registered_junction_maximum_with_terms(
+        queries,
+        mesh,
+        solution,
+        junction_region,
+        discretization,
+        &[],
+        source_identity,
+        limits,
+        cx,
+    )
+}
+
+/// [`extract_registered_junction_maximum`] with caller-retained measured
+/// budget terms (see [`crate::qoi::QoiTermReceipt`]).
+///
+/// # Errors
+/// As [`extract_registered_junction_maximum`], plus a duplicate term source.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_registered_junction_maximum_with_terms(
+    queries: &[OutputQuery],
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    junction_region: &JunctionRegion,
+    discretization: Option<&DiscretizationReceipt>,
+    terms: &[crate::qoi::QoiTermReceipt],
+    source_identity: ContentHash,
+    limits: QoiExecutionLimits,
+    cx: &Cx<'_>,
+) -> Result<RegisteredQoiExtractionReceipt, RegisteredQoiError> {
     if cx.checkpoint().is_err() {
         return Err(RegisteredQoiError::Cancelled);
     }
@@ -833,7 +863,13 @@ pub fn extract_registered_junction_maximum(
         return Err(RegisteredQoiError::Cancelled);
     }
 
-    let maximum = extract_junction_maximum_qoi(mesh, solution, junction_region, discretization)?;
+    let maximum = crate::qoi::extract_junction_maximum_qoi_with_terms(
+        mesh,
+        solution,
+        junction_region,
+        discretization,
+        terms,
+    )?;
     let value = maximum.qoi.evidence.value.value();
     if !value.is_finite() {
         return Err(RegisteredQoiError::NonFiniteScalar {

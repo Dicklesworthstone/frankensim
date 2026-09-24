@@ -12,12 +12,13 @@
 //! - Bit-identical deterministic replay.
 
 use fs_airflow::qoi::{
-    DiscretizationReceipt, FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
-    ThermalQoiDeclarations, ThermalQoiKind, ThermalRequirement,
+    DiscretizationReceipt, FanPowerSpec, JunctionRegion, QoiTermReceipt, SafetyFactorAuthority,
+    SurfaceRegion, ThermalQoiDeclarations, ThermalQoiKind, ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputKind, OutputQuery, QoiExecutionLimits, QoiSemanticId, RegisteredQoiError,
-    extract_registered_junction_maximum, extract_registered_qois,
+    extract_registered_junction_maximum, extract_registered_junction_maximum_with_terms,
+    extract_registered_qois,
 };
 use fs_airflow::{
     EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
@@ -32,7 +33,7 @@ use fs_conduction::{
     ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, ProvenanceClass,
 };
 use fs_evidence::ColorRank;
-use fs_evidence::uncertainty::BudgetTotal;
+use fs_evidence::uncertainty::{BudgetTotal, EngineeringUncertaintyKind, TermValue};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 
@@ -789,4 +790,122 @@ fn rq_010_general_junction_candidate_identity_binds_discretization() {
         );
         assert_ne!(row_a.identity_hash, row_b.identity_hash);
     });
+}
+
+#[test]
+fn rq_term_receipts_fill_exactly_their_sources_and_bind_identity() {
+    use EngineeringUncertaintyKind as K;
+    let query = [OutputQuery::scalar_with_region(
+        "temperature-max",
+        "package",
+    )];
+    let receipts = |geometry: bool, parameters: f64| {
+        let mut terms = vec![
+            QoiTermReceipt::interval(K::Roundoff, 0.1, source("roundoff-enclosure")).unwrap(),
+            QoiTermReceipt::interval(K::SolverAlgebraic, 0.2, source("dual-weighted-residual"))
+                .unwrap(),
+            QoiTermReceipt::interval(K::Parameters, parameters, source("parameter-vertices"))
+                .unwrap(),
+            QoiTermReceipt::interval(K::BoundaryConditions, 0.5, source("envelope-vertices"))
+                .unwrap(),
+            QoiTermReceipt::interval(K::ModelForm, 0.6, source("card-allowance")).unwrap(),
+            QoiTermReceipt::negligible(
+                K::Measurement,
+                "no observation data enter the prediction",
+                source("design-prediction"),
+            )
+            .unwrap(),
+        ];
+        terms.push(if geometry {
+            QoiTermReceipt::interval(K::Geometry, 0.3, source("geometry-declaration")).unwrap()
+        } else {
+            QoiTermReceipt::gap(K::Geometry, "no as-built survey is declared", source("gap"))
+                .unwrap()
+        });
+        terms
+    };
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
+        let ladder = DiscretizationReceipt::try_new(1.0, source("ladder")).unwrap();
+        let extract = |terms: &[QoiTermReceipt]| {
+            extract_registered_junction_maximum_with_terms(
+                &query,
+                &mesh,
+                &solution,
+                &junction,
+                Some(&ladder),
+                terms,
+                hash_bytes(b"term-receipt-solution"),
+                QoiExecutionLimits::default(),
+                cx,
+            )
+        };
+        let full = extract(&receipts(true, 0.4)).unwrap();
+        let row = &full.rows[0];
+        // All eight sources measured: a bounded, conservative (linear) total.
+        match row.uncertainty.total() {
+            BudgetTotal::Bounded {
+                conservative_half_width,
+            } => {
+                assert!(
+                    (conservative_half_width - 3.1).abs() < 1e-12,
+                    "{conservative_half_width}"
+                );
+            }
+            other => panic!("expected a bounded total, got {other:?}"),
+        }
+        // A measured Parameters receipt replaces the material-provenance gap.
+        assert_eq!(
+            row.uncertainty.term(K::Parameters).value(),
+            &TermValue::interval(0.0, 0.4).unwrap()
+        );
+        // Omitting one receipt leaves exactly that source unknown.
+        let partial = extract(&receipts(false, 0.4)).unwrap();
+        match partial.rows[0].uncertainty.total() {
+            BudgetTotal::Unknown {
+                known_conservative_half_width,
+                unknown_terms,
+            } => {
+                assert_eq!(unknown_terms, vec![K::Geometry]);
+                assert_eq!(
+                    partial.rows[0].uncertainty.term(K::Geometry).value(),
+                    &TermValue::unknown("no as-built survey is declared").unwrap(),
+                    "a gap receipt keeps the source unknown under its own reason"
+                );
+                assert!((known_conservative_half_width - 2.8).abs() < 1e-12);
+            }
+            other => panic!("expected one unknown source, got {other:?}"),
+        }
+        // The scalar is unchanged; a changed propagation rebinds identity.
+        let changed = extract(&receipts(true, 0.45)).unwrap();
+        assert_eq!(row.value.to_bits(), changed.rows[0].value.to_bits());
+        assert_ne!(row.identity_hash, changed.rows[0].identity_hash);
+        assert_ne!(row.identity_hash, partial.rows[0].identity_hash);
+        // Duplicate sources refuse; the old entry point is the empty list.
+        let mut duplicate = receipts(true, 0.4);
+        duplicate.push(QoiTermReceipt::interval(K::ModelForm, 0.7, source("second")).unwrap());
+        assert!(extract(&duplicate).is_err());
+        let plain = extract_registered_junction_maximum(
+            &query,
+            &mesh,
+            &solution,
+            &junction,
+            Some(&ladder),
+            hash_bytes(b"term-receipt-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(
+            plain.rows[0].identity_hash,
+            extract(&[]).unwrap().rows[0].identity_hash
+        );
+    });
+    // Discretization has its own receipt; blank sources and bad widths refuse.
+    assert!(QoiTermReceipt::interval(K::Discretization, 1.0, source("x")).is_err());
+    assert!(QoiTermReceipt::interval(K::ModelForm, -0.1, source("x")).is_err());
+    assert!(QoiTermReceipt::interval(K::ModelForm, f64::NAN, source("x")).is_err());
+    assert!(QoiTermReceipt::interval(K::ModelForm, 0.1, source(" ")).is_err());
+    assert!(QoiTermReceipt::negligible(K::Measurement, " ", source("x")).is_err());
 }

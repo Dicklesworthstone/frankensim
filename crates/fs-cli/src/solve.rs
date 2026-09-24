@@ -44,9 +44,9 @@ use std::hash::BuildHasherDefault;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use fs_airflow::qoi::{DiscretizationReceipt, JunctionRegion};
+use fs_airflow::qoi::{DiscretizationReceipt, JunctionRegion, QoiTermReceipt};
 use fs_airflow::registered_qoi::{
-    OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_junction_maximum,
+    OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_junction_maximum_with_terms,
 };
 use fs_airflow::requirement_composition::{
     ComplianceOutcome, ThermalLimitSpec, compose_thermal_limits,
@@ -113,7 +113,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// carrying that claim must not share a resumable run identity with this driver.
 /// Version 14 executes bounded enriched-dual adaptive studies for linear solids.
 /// Version 15 records uniform enrichment when marked refinement fails mesh quality.
-pub const SOLVE_DRIVER_VERSION: u32 = 15;
+/// Version 16 retains declared-input propagation in the conduction receipt,
+/// admits refined meshes by dihedral floor alone (radius-edge is disclosed),
+/// and measures boundary, model-form, solver and measurement budget terms.
+pub const SOLVE_DRIVER_VERSION: u32 = 16;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -762,8 +765,23 @@ const RECOVERY_BYTES_PER_STEINER: u64 = 2048;
 /// quality census, not refused; refinement (bridge plan B2c) is what raises
 /// them.
 const CONDUCTION_MIN_DIHEDRAL_DEG: f64 = 1.0;
+/// Dihedral floor for meshes the ladder/adaptive fidelities solve on.
+///
+/// The radius-edge ratio is deliberately NOT a refusal: it is the Delaunay
+/// refiner's termination measure, not a P1 element-quality measure. Slivers
+/// pass it with near-0/180 degree dihedrals, while a wall-constrained wedge
+/// with a short edge fails it with benign angles (Shewchuk, "What is a good
+/// linear finite element?", 2002). MEASURED 2026-09-24 on the reference
+/// heatsink: refinement cannot insert non-encroaching circumcenters next to
+/// the thin fins (`split_walls` is off), so the worst ratio stays 45.0 at any
+/// memory budget while the smallest dihedral is 7.26 deg; a 2.0 radius-edge
+/// refusal (b9da34573) silently disabled the h-ladder on every finned body.
+/// The ratio stays disclosed in the receipt's quality census.
 const CONDUCTION_REFINED_MIN_DIHEDRAL_DEG: f64 = 5.0;
-const CONDUCTION_REFINED_MAX_RADIUS_EDGE: f64 = 2.0;
+/// Radius-edge bound locally bisected adaptive candidates may not exceed
+/// unless the uniform enrichment they refine already does (see the adaptive
+/// loop's no-degradation rule); it never refuses a solve by itself.
+const ADAPTIVE_MAX_RADIUS_EDGE: f64 = 2.0;
 
 /// The quality-floor refusal for a retained complex: `(what, fix)` when the
 /// mesh must not be solved on, `None` when it may (bridge plan B2b).
@@ -799,20 +817,6 @@ fn mesh_quality_refusal(
             "repair or re-tessellate the region surface near the degenerate element, or raise \
              budgets.memory_bytes; mesh refinement that lifts sliver angles is not yet part of \
              the conduction stage"
-                .to_string(),
-        ));
-    }
-    if refined && census.max_radius_edge > CONDUCTION_REFINED_MAX_RADIUS_EDGE {
-        return Some((
-            format!(
-                "the refined mesh's largest radius-edge ratio is {:.4}, exceeding the {} \
-                 quality floor (tets {}, worst ratio {:.3})",
-                census.max_radius_edge,
-                CONDUCTION_REFINED_MAX_RADIUS_EDGE,
-                census.tets,
-                census.max_radius_edge
-            ),
-            "increase budgets.memory_bytes to admit more refinement rounds, or adjust feature sizing"
                 .to_string(),
         ));
     }
@@ -1234,6 +1238,8 @@ struct QoiStageInputs {
     solution_artifact: ContentHash,
     /// An observed-order Richardson estimate from the h-ladder, when one ran.
     discretization: Option<LadderDiscretization>,
+    /// Declared-input propagation, when the project declares an envelope.
+    propagation: Option<InputPropagation>,
 }
 
 #[derive(Debug)]
@@ -1692,7 +1698,15 @@ fn adaptive_study(
             // guarantee. Never solve an inadmissible candidate: the global
             // enrichment already passed the same floor and can be reused if
             // its own next probe fits. Other producer failures still refuse.
-            if mesh_quality_refusal(&next.quality(), true).is_some() {
+            // Solve admission is dihedral-only, but local bisection must also
+            // not DEGRADE shape: a candidate whose worst radius-edge ratio
+            // exceeds both the classical 2.0 bound and the uniform
+            // enrichment's own ratio (uniform subdivision keeps shape
+            // classes) falls back exactly like a sub-floor dihedral.
+            let candidate_quality = next.quality();
+            let degraded = candidate_quality.max_radius_edge
+                > ADAPTIVE_MAX_RADIUS_EDGE.max(enriched.quality().max_radius_edge);
+            if degraded || mesh_quality_refusal(&candidate_quality, true).is_some() {
                 if enriched.tets().len().saturating_mul(8) > max_tets {
                     stop = "mesh-quality-refinement-budget";
                     break;
@@ -4295,6 +4309,7 @@ fn qoi_receipt(
             })
         })
         .transpose()?;
+    let term_receipts = propagation_term_receipts(inputs.propagation.as_ref(), conduction_receipt)?;
     let query = OutputQuery::scalar_with_region(&requested[0].name, &requirement.region);
     let severity = match requirement.severity {
         RequirementSeverity::ReliabilityDerating => "reliability-derating",
@@ -4349,12 +4364,13 @@ fn qoi_receipt(
         );
         work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_qoi_units)
             .map_err(|_| cancelled())?;
-        let extracted = extract_registered_junction_maximum(
+        let extracted = extract_registered_junction_maximum_with_terms(
             &[query],
             &inputs.mesh,
             &inputs.solution,
             &junction,
             discretization.as_ref(),
+            &term_receipts,
             inputs.solution_artifact,
             limits,
             &cx,
@@ -4469,15 +4485,31 @@ fn qoi_receipt(
                     json_string(&conduction_receipt.to_hex()),
                 ));
             }
-            // Any other measured interval term (roundoff, solver, material, boundary, etc.)
+            // Any other measured interval term (boundary, model form, solver).
             (TermValue::IntervalBound { lower, upper }, _) => {
                 measured_terms += 1;
+                let citation = term_receipts
+                    .iter()
+                    .find(|receipt| receipt.kind() == kind)
+                    .map_or("", |receipt| receipt.source().citation.as_str());
                 terms.push(format!(
                     "{{\"kind\":{},\"state\":\"interval\",\"lower_kelvin\":{},\"upper_kelvin\":{},\
-                     \"owner\":{},\"source\":{}}}",
+                     \"owner\":{},\"source\":{},\"derivation\":{{\"method\":{}}}}}",
                     json_string(kind.name()),
                     kelvin(&format!("{}.lower", kind.name()), *lower)?,
                     kelvin(&format!("{}.upper", kind.name()), *upper)?,
+                    json_string(term.provenance().role()),
+                    json_string(&term.provenance().digest().to_hex()),
+                    json_string(citation),
+                ));
+            }
+            (TermValue::Negligible { justification }, _) => {
+                measured_terms += 1;
+                terms.push(format!(
+                    "{{\"kind\":{},\"state\":\"negligible\",\"value\":0.0,\"reason\":{},\
+                     \"owner\":{},\"source\":{}}}",
+                    json_string(kind.name()),
+                    json_string(justification),
                     json_string(term.provenance().role()),
                     json_string(&term.provenance().digest().to_hex()),
                 ));
@@ -4496,10 +4528,10 @@ fn qoi_receipt(
     let no_claim = if measured_terms == 0 {
         "all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim".to_string()
     } else if no_data_terms == 0 {
-        "all eight engineering uncertainty terms carry bounded interval evidence; see individual term derivations and the conduction receipt".to_string()
+        "all eight engineering uncertainty terms carry Estimated evidence (see each term's derivation and the conduction receipt); the verdict is an Estimated decision, not a certificate".to_string()
     } else {
         format!(
-            "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA; the discretization term is a grid-refinement half-width from the conduction stage's uniform h-ladder (method and ladder status in its derivation; see the conduction receipt), not a DWR bound; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim"
+            "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA, so no binary compliance is claimed; measured terms are Estimated: a discretization term is an h-ladder half-width (not a DWR bound), boundary/model-form/solver terms are interval-vertex re-solves of declared inputs (see the conduction receipt's propagation), and measurement is negligible because no observation data enter; no validation, package, promotion, or conjugate-exchange claim"
         )
     };
     let nominal = canonical_f64(row.value).ok_or_else(|| {
@@ -4565,10 +4597,10 @@ fn qoi_receipt(
         progress: QoiProgressSummary {
             qoi_count: extracted.rows.len(),
             verdict: evaluation.outcome.as_str(),
-            weakest_term: Some(if measured_terms == 0 {
-                "all-eight-no-data"
-            } else {
-                "seven-no-data"
+            weakest_term: Some(match terms.len() - measured_terms {
+                8 => "all-eight-no-data",
+                0 => "none-no-data",
+                _ => "some-no-data",
             }),
             budget_terms_measured: measured_terms,
             budget_terms_total: terms.len(),
@@ -5417,7 +5449,8 @@ fn lower_thermal_interfaces(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-fn conduction_receipt(
+#[allow(clippy::too_many_arguments)]
+fn conduction_solve_receipt(
     ledger: &Ledger,
     spec: &ProjectSpec,
     cards: &CardPackSet,
@@ -5426,6 +5459,8 @@ fn conduction_receipt(
     work: EvidenceWork<'_>,
     resume: bool,
     available_wall_s: f64,
+    flow_override: Option<&FlowNetworkHandoff>,
+    htc_scale: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
@@ -5741,7 +5776,7 @@ fn conduction_receipt(
         let (solution, conjugate_fragment) = if laws.is_empty() {
             (solve_once(&BTreeMap::new())?, None)
         } else {
-            let handoff = context.flow_network.as_ref().ok_or_else(|| {
+            let handoff = flow_override.or(context.flow_network.as_ref()).ok_or_else(|| {
                 conduction_error(
                     "cli-solve-conduction-airflow-no-flow-network",
                     "an airflow-convection law is declared but the flow-network stage handed off no operating point",
@@ -5770,6 +5805,7 @@ fn conduction_receipt(
                 &handoff.operating,
                 handoff.air_density_kg_m3,
                 |target| areas.get(target).copied(),
+                htc_scale,
             )?;
             let coefficients = conjugate::derived_coefficients(&path);
             let path_targets: BTreeSet<&str> = path
@@ -6173,8 +6209,465 @@ fn conduction_receipt(
             region_ids,
             solution_artifact,
             discretization,
+            propagation: None,
         },
     })
+}
+
+/// Declared-input propagation for the temperature-maximum budget (bead
+/// frankensim-rc-root-q61wp.72).
+///
+/// Every declared input here is an INTERVAL (the operating envelope, a fan
+/// tolerance, a card's discrepancy allowance), so the propagation is interval
+/// vertex enumeration through real re-solves, not sampling: the producers run
+/// again on a perturbed project at base fidelity, and each term's half-width
+/// is the largest deviation of the region maximum from the base-fidelity
+/// nominal. Monotone response in each input is ASSUMED (it holds for these
+/// inputs physically: hotter inlet, weaker fan and smaller coefficient all
+/// heat the part); one joint worst corner is re-solved and any excess over
+/// the summed half-widths is charged to the boundary term, so an interaction
+/// cannot hide. Every value is Estimated.
+#[derive(Debug, Clone)]
+struct InputPropagation {
+    /// Base-fidelity nominal region maximum the deviations are taken from.
+    nominal_k: f64,
+    boundary: PropagatedTerm,
+    model_form: PropagatedTerm,
+    solver_algebraic: PropagatedTerm,
+    /// Deviation of the joint worst corner beyond the summed half-widths.
+    interaction_excess_k: f64,
+}
+
+#[derive(Debug, Clone)]
+enum PropagatedTerm {
+    Measured { half_width_k: f64, method: &'static str, detail: String, vertices: Vec<(String, f64)> },
+    Unmeasured { reason: String },
+}
+
+impl PropagatedTerm {
+    fn half_width(&self) -> Option<f64> {
+        match self {
+            Self::Measured { half_width_k, .. } => Some(*half_width_k),
+            Self::Unmeasured { .. } => None,
+        }
+    }
+
+    fn json(&self) -> Result<String, SolveRefusal> {
+        let number = |name: &str, value: f64| {
+            canonical_f64(value).ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-propagation",
+                    format!("propagation field `{name}` is non-finite ({value})"),
+                    "report the propagation defect",
+                )
+            })
+        };
+        Ok(match self {
+            Self::Measured { half_width_k, method, detail, vertices } => {
+                let rows = vertices
+                    .iter()
+                    .map(|(label, value)| {
+                        Ok(format!("{{\"vertex\":{},\"t_max_k\":{}}}", json_string(label), number(label, *value)?))
+                    })
+                    .collect::<Result<Vec<_>, SolveRefusal>>()?
+                    .join(",");
+                format!(
+                    "{{\"state\":\"measured\",\"half_width_k\":{},\"method\":{},\"detail\":{},\"vertices\":[{}]}}",
+                    number("half_width_k", *half_width_k)?,
+                    json_string(method),
+                    json_string(detail),
+                    rows
+                )
+            }
+            Self::Unmeasured { reason } => {
+                format!("{{\"state\":\"no-data\",\"reason\":{}}}", json_string(reason))
+            }
+        })
+    }
+}
+
+impl InputPropagation {
+    fn json(&self) -> Result<String, SolveRefusal> {
+        Ok(format!(
+            "{{\"nominal_base_k\":{},\"boundary_conditions\":{},\"model_form\":{},\"solver_algebraic\":{},\"interaction_excess_k\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+            canonical_f64(self.nominal_k).ok_or_else(|| conduction_error(
+                "cli-solve-conduction-propagation",
+                "the base nominal maximum is non-finite",
+                "report the propagation defect",
+            ))?,
+            self.boundary.json()?,
+            self.model_form.json()?,
+            self.solver_algebraic.json()?,
+            canonical_f64(self.interaction_excess_k).unwrap_or_else(|| "null".to_string()),
+            json_string(PROPAGATION_NO_CLAIM),
+        ))
+    }
+}
+
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the model-form term covers only the card allowance on the derived coefficient (omitted physics such as radiation is not covered); material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
+
+/// Budget receipts the QoI stage may cite: the propagation's measured terms
+/// (each citing the conduction receipt that retains its vertices) and the
+/// measurement source, which is negligible because this pipeline ingests no
+/// observation or comparison data.
+fn propagation_term_receipts(
+    propagation: Option<&InputPropagation>,
+    conduction_receipt: ContentHash,
+) -> Result<Vec<QoiTermReceipt>, SolveRefusal> {
+    let refused = |error: fs_airflow::qoi::QoiError| {
+        qoi_error(
+            "cli-solve-qoi-term-receipt",
+            format!("a propagated budget term was refused: {error}"),
+            "report the propagation defect; half-widths are finite and non-negative by construction",
+        )
+    };
+    let cite = |detail: &str| {
+        fs_airflow::SourceProvenance::new(
+            detail.to_string(),
+            format!("solve-conduction-receipt:{}", conduction_receipt.to_hex()),
+        )
+    };
+    let mut receipts = vec![QoiTermReceipt::negligible(
+        EngineeringUncertaintyKind::Measurement,
+        "the prediction ingests no observation or comparison data; declared inputs are carried by their own sources",
+        cite("design-stage prediction without measured inputs"),
+    )
+    .map_err(refused)?];
+    if let Some(propagation) = propagation {
+        for (kind, term) in [
+            (EngineeringUncertaintyKind::BoundaryConditions, &propagation.boundary),
+            (EngineeringUncertaintyKind::ModelForm, &propagation.model_form),
+            (EngineeringUncertaintyKind::SolverAlgebraic, &propagation.solver_algebraic),
+        ] {
+            receipts.push(
+                match term {
+                    PropagatedTerm::Measured { half_width_k, method, detail, .. } => {
+                        QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}")))
+                    }
+                    PropagatedTerm::Unmeasured { reason } => {
+                        QoiTermReceipt::gap(kind, reason.clone(), cite("declared-input propagation gap"))
+                    }
+                }
+                .map_err(refused)?,
+            );
+        }
+    }
+    Ok(receipts)
+}
+
+/// The single temperature-maximum requirement region, when the project
+/// declares one (the QoI stage enforces the singleton; absence skips).
+fn temperature_maximum_region(spec: &ProjectSpec) -> Option<&str> {
+    let requirements = spec.requirements.as_deref()?;
+    let mut matched = requirements
+        .iter()
+        .filter(|requirement| QoiSemanticId::parse(&requirement.qoi) == Some(QoiSemanticId::JunctionMaximum));
+    let first = matched.next()?;
+    matched.next().is_none().then_some(first.region.as_str())
+}
+
+/// Largest nodal temperature over the requirement region of one solve.
+fn region_maximum(
+    inputs: &QoiStageInputs,
+    region: &str,
+    work: EvidenceWork<'_>,
+) -> Result<Option<f64>, SolveRefusal> {
+    let Some(&region_id) = inputs.region_ids.get(region) else {
+        return Ok(None);
+    };
+    let (vertices, _) = trace_qoi_region_vertices(
+        &inputs.element_regions,
+        &inputs.mesh.complex().tets,
+        inputs.mesh.vertex_count(),
+        region_id,
+        work,
+    )
+    .map_err(|_| {
+        conduction_error(
+            "cli-solve-conduction-propagation",
+            "the propagation region trace was cancelled or overflowed",
+            "rerun the solve",
+        )
+    })?;
+    Ok(vertices
+        .iter()
+        .map(|&vertex| inputs.solution.temperature[vertex])
+        .fold(None, |best: Option<f64>, value| Some(best.map_or(value, |best| best.max(value)))))
+}
+
+/// A copy of the project that solves once on the base mesh: vertex runs
+/// measure input sensitivity, not discretization, and must not repeat the
+/// h-ladder or the adaptive loop.
+fn base_fidelity(spec: &ProjectSpec) -> ProjectSpec {
+    let mut base = spec.clone();
+    if let Some(solver) = base.solver.as_mut()
+        && (solver.fidelity == SOLVER_FIDELITY_LADDER || solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
+    {
+        solver.fidelity = "auto".to_string();
+    }
+    base
+}
+
+/// Set every inlet/reference temperature to `temperature_k`.
+fn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {
+    let mut perturbed = spec.clone();
+    if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {
+        for boundary in &mut setup.boundaries {
+            match &mut boundary.condition {
+                ThermalBoundaryCondition::Convection { reference_temperature, .. } => {
+                    reference_temperature.value = temperature_k;
+                }
+                ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {
+                    inlet_temperature.value = temperature_k;
+                }
+                _ => {}
+            }
+        }
+    }
+    perturbed
+}
+
+/// Scale every declared fan-curve pressure by `factor`.
+fn with_fan_pressure_scale(spec: &ProjectSpec, factor: f64) -> ProjectSpec {
+    let mut perturbed = spec.clone();
+    if let Some(system) = perturbed.cooling.as_mut().and_then(|cooling| cooling.fan_system.as_mut()) {
+        for bank in &mut system.banks {
+            for point in &mut bank.curve.points {
+                point.static_pressure.value *= factor;
+            }
+        }
+    }
+    perturbed
+}
+
+/// Largest declared relative fan pressure tolerance with an empirical basis.
+fn fan_pressure_tolerance(spec: &ProjectSpec) -> f64 {
+    spec.cooling
+        .as_ref()
+        .and_then(|cooling| cooling.fan_system.as_ref())
+        .map_or(0.0, |system| {
+            system
+                .banks
+                .iter()
+                .filter(|bank| bank.curve.tolerance_basis != fs_project::spec::FanToleranceBasis::Analytic)
+                .map(|bank| bank.curve.pressure_tolerance_rel)
+                .fold(0.0, f64::max)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_declared_inputs(
+    ledger: &Ledger,
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    context: &StageContext,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
+    available_wall_s: f64,
+) -> Result<Option<InputPropagation>, SolveRefusal> {
+    let (Some(region), Some(envelope)) = (temperature_maximum_region(spec), spec.envelope.as_ref())
+    else {
+        return Ok(None);
+    };
+    let base = base_fidelity(spec);
+    let solve = |project: &ProjectSpec, htc_scale: f64| -> Result<Option<f64>, SolveRefusal> {
+        let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
+        let product = conduction_solve_receipt(
+            ledger, project, cards, context, run, work, resume, available_wall_s,
+            Some(&handoff), htc_scale,
+        )?;
+        region_maximum(&product.qoi_inputs, region, work)
+    };
+    let Some(nominal) = solve(&base, 1.0)? else {
+        return Ok(None);
+    };
+    let deviation = |values: &[(String, f64)]| {
+        values.iter().map(|(_, value)| (value - nominal).abs()).fold(0.0, f64::max)
+    };
+    // A refused vertex (for example a fan curve that no longer reaches an
+    // operating point) leaves its term NO-DATA with the refusal as reason.
+    let vertex = |label: String, project: &ProjectSpec, htc_scale: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
+        match solve(project, htc_scale) {
+            Ok(Some(value)) => Ok(Ok((label, value))),
+            Ok(None) => Ok(Err(format!("vertex `{label}` produced no region maximum"))),
+            Err(error) if matches!(error.code, "cli-solve-cancelled" | "cli-solve-work-envelope") => Err(error),
+            Err(error) => Ok(Err(format!("vertex `{label}` refused: {} ({})", error.what, error.code))),
+        }
+    };
+
+    // Boundary and operating conditions: inlet/reference temperature across
+    // the declared ambient envelope, crossed with the fan-curve tolerance.
+    let (lo, hi) = (envelope.ambient_lo.value, envelope.ambient_hi.value);
+    let tolerance = fan_pressure_tolerance(spec);
+    let fan_factors: Vec<f64> = if tolerance > 0.0 { vec![1.0 - tolerance, 1.0 + tolerance] } else { vec![1.0] };
+    let mut boundary_values = Vec::new();
+    // (inlet temperature, fan factor, region maximum) per boundary vertex.
+    let mut boundary_points: Vec<(f64, f64, f64)> = Vec::new();
+    let mut boundary_refusal = None;
+    for temperature in [lo, hi] {
+        for &factor in &fan_factors {
+            let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);
+            match vertex(format!("inlet {temperature} K, fan pressure x{factor}"), &project, 1.0)? {
+                Ok(row) => {
+                    boundary_points.push((temperature, factor, row.1));
+                    boundary_values.push(row);
+                }
+                Err(reason) => boundary_refusal = boundary_refusal.or(Some(reason)),
+            }
+        }
+    }
+    let boundary = match boundary_refusal {
+        Some(reason) => PropagatedTerm::Unmeasured { reason },
+        None => PropagatedTerm::Measured {
+            half_width_k: deviation(&boundary_values),
+            method: "interval-vertex-resolve",
+            detail: format!(
+                "inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)"
+            ),
+            vertices: boundary_values.clone(),
+        },
+    };
+
+    // Model form: the convection card's declared discrepancy allowance on
+    // the derived coefficient. A declared (user) coefficient has none.
+    let setup = spec.cooling.as_ref().and_then(|cooling| cooling.conduction.as_ref());
+    let mut allowance: Option<f64> = None;
+    let mut model_gap = None;
+    for boundary in setup.map_or(&[][..], |setup| &setup.boundaries[..]) {
+        match &boundary.condition {
+            ThermalBoundaryCondition::AirflowConvection { correlation, .. } => {
+                let card = fs_convection::correlation_catalog()
+                    .into_iter()
+                    .find(|card| card.id.name() == correlation.as_str());
+                match card {
+                    Some(card) => allowance = Some(allowance.unwrap_or(0.0).max(card.model.discrepancy_rel)),
+                    None => model_gap = Some(format!("card `{correlation}` is not in the catalog")),
+                }
+            }
+            ThermalBoundaryCondition::Convection { .. } => {
+                model_gap = Some(format!(
+                    "the declared convection coefficient on `{}` carries no discrepancy allowance",
+                    boundary.target
+                ));
+            }
+            _ => {}
+        }
+    }
+    let model_form = match (model_gap, allowance) {
+        (Some(reason), _) => PropagatedTerm::Unmeasured { reason },
+        (None, None) => PropagatedTerm::Unmeasured {
+            reason: "no convection closure is declared, so no card allowance exists to propagate".to_string(),
+        },
+        (None, Some(rel)) => {
+            let mut values = Vec::new();
+            let mut refusal = None;
+            for scale in [1.0 - rel, 1.0 + rel] {
+                match vertex(format!("card coefficient x{scale}"), &base, scale)? {
+                    Ok(row) => values.push(row),
+                    Err(reason) => refusal = refusal.or(Some(reason)),
+                }
+            }
+            match refusal {
+                Some(reason) => PropagatedTerm::Unmeasured { reason },
+                None => PropagatedTerm::Measured {
+                    half_width_k: deviation(&values),
+                    method: "interval-vertex-resolve",
+                    detail: format!(
+                        "every card-derived coefficient scaled by 1 -/+ {rel}, the largest declared card discrepancy allowance (an engineering allowance, not a validated interval)"
+                    ),
+                    vertices: values,
+                },
+            }
+        }
+    };
+
+    // Joint worst corner: the hottest boundary vertex with the weaker
+    // coefficient. Excess over the summed half-widths is an interaction the
+    // per-source vertices missed; it is charged to the boundary term.
+    let mut interaction_excess_k = 0.0;
+    if let (Some(bc), Some(mf), Some(rel), Some(&(temperature, factor, _))) = (
+        boundary.half_width(),
+        model_form.half_width(),
+        allowance,
+        boundary_points.iter().max_by(|a, b| a.2.total_cmp(&b.2)),
+    ) {
+        let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);
+        if let Ok((_, joint)) = vertex("joint worst corner".to_string(), &project, 1.0 - rel)? {
+            interaction_excess_k = ((joint - nominal).abs() - (bc + mf)).max(0.0);
+        }
+    }
+    let boundary = match boundary {
+        PropagatedTerm::Measured { half_width_k, method, detail, vertices } if interaction_excess_k > 0.0 => {
+            PropagatedTerm::Measured {
+                half_width_k: half_width_k + interaction_excess_k,
+                method,
+                detail: format!("{detail}; includes {interaction_excess_k} K joint-corner interaction excess"),
+                vertices,
+            }
+        }
+        other => other,
+    };
+
+    // Solver/algebraic: re-solve the base nominal at a 100x tighter
+    // tolerance; the change bounds the retained tolerance's QoI effect.
+    let mut tight = base.clone();
+    let solver_algebraic = match tight.solver.as_mut() {
+        None => PropagatedTerm::Unmeasured { reason: "no solver tolerance is declared".to_string() },
+        Some(solver) => {
+            let declared = solver.tolerance_rel;
+            solver.tolerance_rel = declared * 1e-2;
+            match vertex(format!("tolerance {declared} x 0.01"), &tight, 1.0)? {
+                Ok(row) => PropagatedTerm::Measured {
+                    half_width_k: (row.1 - nominal).abs(),
+                    method: "tolerance-tightening-resolve",
+                    detail: format!(
+                        "the base nominal re-solved with the declared relative tolerance {declared} tightened 100x; the change is the Estimated effect of stopping at the declared tolerance"
+                    ),
+                    vertices: vec![row],
+                },
+                Err(reason) => PropagatedTerm::Unmeasured { reason },
+            }
+        }
+    };
+
+    Ok(Some(InputPropagation {
+        nominal_k: nominal,
+        boundary,
+        model_form,
+        solver_algebraic,
+        interaction_excess_k,
+    }))
+}
+
+/// The conduction stage: the nominal solve plus, when the project declares
+/// an envelope and one temperature-maximum requirement, the declared-input
+/// propagation retained in the same receipt (so resume replays it).
+#[allow(clippy::too_many_arguments)]
+fn conduction_receipt(
+    ledger: &Ledger,
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    context: &StageContext,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
+    available_wall_s: f64,
+) -> Result<ConductionStageProduct, SolveRefusal> {
+    let mut product = conduction_solve_receipt(
+        ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0,
+    )?;
+    if let Some(propagation) =
+        propagate_declared_inputs(ledger, spec, cards, context, run, work, resume, available_wall_s)?
+    {
+        let closing = product.receipt.pop();
+        debug_assert_eq!(closing, Some('}'), "a conduction receipt is one JSON object");
+        product.receipt.push_str(",\"propagation\":");
+        product.receipt.push_str(&propagation.json()?);
+        product.receipt.push('}');
+        product.qoi_inputs.propagation = Some(propagation);
+    }
+    Ok(product)
 }
 
 fn assignment_receipt(
@@ -12861,12 +13354,18 @@ mod tests {
         assert!(mesh_quality_refusal(&census(0, 2.5, 4), false).is_none());
         // Exactly the floor is admitted (the floor is a strict lower bound).
         assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0), false).is_none());
-        // Refined meshes enforce >= 5 deg dihedral floor and <= 2.0 radius-edge floor.
+        // Refined meshes enforce the stricter >= 5 deg dihedral floor.
         assert!(mesh_quality_refusal(&census(0, 4.9, 0), true).is_some());
-        let mut refined_census = census(0, 10.0, 0);
-        refined_census.max_radius_edge = 1.8;
+        assert!(mesh_quality_refusal(&census(0, 4.9, 0), false).is_none());
+        // Radius-edge is disclosed, never refused: the measured heatsink
+        // (ratio 45.0, smallest dihedral 7.26 deg) must reach the ladder.
+        let mut refined_census = census(0, 7.26, 0);
+        refined_census.max_radius_edge = 45.0028;
         assert!(mesh_quality_refusal(&refined_census, true).is_none());
-        refined_census.max_radius_edge = 2.5;
+        // ...but a refined mesh with a sub-floor dihedral still refuses
+        // whatever its radius-edge ratio.
+        refined_census.min_dihedral_deg = 4.0;
+        refined_census.max_radius_edge = 1.1;
         assert!(mesh_quality_refusal(&refined_census, true).is_some());
     }
 

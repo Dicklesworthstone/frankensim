@@ -428,8 +428,11 @@ fn the_foam_twin_shows_the_material_identity_change_and_its_consequences() {
         "the margin moves by exactly the maximum's delta: {out}"
     );
 
-    // Budget terms: the default fidelity measures none, so all eight stay
-    // NO-DATA on both sides and none is reported as changed.
+    // Budget terms: the default fidelity measures no discretization term.
+    // The declared-input propagation measures boundary conditions (the
+    // envelope moves a linear Robin maximum one-for-one) and the solver
+    // term, measurement is negligible, and the declared coefficient carries
+    // no model-form allowance; the other five stay NO-DATA on both sides.
     let terms = out
         .split("\"budget_terms\":[")
         .nth(1)
@@ -440,7 +443,7 @@ fn the_foam_twin_shows_the_material_identity_change_and_its_consequences() {
         terms
             .matches("\"state_left\":\"no-data\",\"state_right\":\"no-data\"")
             .count(),
-        8,
+        5,
         "{out}"
     );
     assert!(!terms.contains("\"changed\":true"), "{out}");

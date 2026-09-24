@@ -386,7 +386,11 @@ half-width or Verified authority to the QoI receipt.
 When unresolved, incidence-distributed absolute dual residual contributions
 mark cells accounting for half their sum. Conforming longest-edge-star
 bisection preserves regional labels and source-face ancestry; every resulting
-solve still passes the refined-mode 5-degree/2.0 quality floor. A zero marking
+solve still passes the refined-mode 5-degree dihedral floor, and a bisected
+candidate whose worst radius-edge ratio exceeds both 2.0 and its uniform
+enrichment's own ratio is treated as a quality failure (bisection may not
+degrade shape; admission of the Ruppert-refined base itself is dihedral-only
+because radius-edge is disclosed, not a P1 element-quality measure). A zero marking
 signal requests a global refinement, never success. The receipt retains each
 comparison's mesh sizes, maximum, quality, dual residual, owner remainder,
 marked count, actual solved-mesh count, and stopping reason. Memory-derived tet
@@ -414,11 +418,25 @@ half-width in kelvin, the term's provenance role
 `thermal-qoi-discretization-receipt`, and a `derivation` naming the method
 (`richardson-gci`, `eca-hoekstra-data-range` or `bitwise-agreement`), the
 ladder status, order, rung count, refinement ratio, safety factor and the
-conduction receipt it was read from. The stage still refuses
-(`cli-solve-qoi-budget-authority`) if any OTHER term, or this term without a
-ladder estimate, carries measured authority; the seven remaining terms are
-explicit NO-DATA and the `no_claim` text counts them. The verdict stays
-Estimated / indeterminate: one measured term does not close a budget. The
+conduction receipt it was read from.
+
+**Declared-input propagation** (conduction receipt block `propagation`, driver
+version 16). When the project declares an envelope and exactly one
+temperature-maximum requirement, the conduction stage re-runs flow-network and
+conduction at base fidelity for each vertex of the declared interval inputs:
+inlet/reference temperature at the envelope bounds crossed with fan-curve
+pressure x (1 -/+ declared tolerance) for the Boundary-conditions term; every
+card-derived coefficient x (1 -/+ the card's discrepancy allowance), inside
+the conjugate fixed point, for the Model-form term; one joint worst corner
+whose excess over the summed half-widths is added to the boundary term; and a
+100x tighter solver tolerance for the Solver-algebraic term. Each half-width is
+the largest deviation of the region maximum from the base-fidelity nominal;
+monotone response per input is assumed and disclosed. A refused vertex, or a
+declared (non-card) coefficient, keeps its term NO-DATA under a specific
+reason. Measurement is always negligible (the pipeline ingests no observation
+data). Roundoff, geometry and material parameters remain NO-DATA; while any
+term is NO-DATA the verdict stays Estimated / indeterminate and the `no_claim`
+text counts the NO-DATA terms. The
 report projects the interval term's magnitude into the uncertainty table and
 the QoI's `discretization_error`, and renders the ladder rows and estimate as
 its convergence section (fs-ladder's vocabulary via fs-report); a single-rung

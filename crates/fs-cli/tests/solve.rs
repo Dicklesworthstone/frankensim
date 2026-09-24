@@ -1001,7 +1001,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 15,
+        SOLVE_DRIVER_VERSION, 16,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3382,8 +3382,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         "\"elapsed_ms\":",
         "\"qoi_count\":1",
         "\"verdict\":\"indeterminate\"",
-        "\"weakest_term\":\"all-eight-no-data\"",
-        "\"budget_terms_measured\":0",
+        // Declared-input propagation measures boundary conditions and the
+        // solver term; measurement is negligible; five terms stay NO-DATA.
+        "\"weakest_term\":\"some-no-data\"",
+        "\"budget_terms_measured\":3",
         "\"budget_terms_total\":8",
     ] {
         assert!(
@@ -3505,7 +3507,7 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(report_receipt.contains("frankensim.cli.solve-report.v1"));
     assert!(report_receipt.contains("\"stage\":\"report\""));
     assert!(report_receipt.contains("\"verdict\":\"indeterminate\""));
-    assert!(report_receipt.contains("\"budget_terms_measured\":0"));
+    assert!(report_receipt.contains("\"budget_terms_measured\":3"));
     assert!(report_receipt.contains(&format!("\"qoi_receipt\":\"{}\"", receipts[5])));
     assert!(report_receipt.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])));
     let html = String::from_utf8(artifact_bytes(
@@ -4641,7 +4643,9 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         "the checked dual and maximum-owner remainder reproduce the independently solved maximum change"
     );
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 8, "{qoi}");
+    // The adaptive estimate is not a discretization receipt; the propagated
+    // boundary/solver terms and negligible measurement are measured.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 5, "{qoi}");
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
     let html = String::from_utf8(artifact_bytes(
         &ledger,
@@ -4896,9 +4900,11 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         qoi.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])),
         "{qoi}"
     );
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 7, "{qoi}");
+    // Ladder discretization + propagated boundary/solver + negligible
+    // measurement are measured; the other four stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
     assert!(
-        qoi.contains("7 of eight engineering uncertainty terms are explicit NO-DATA"),
+        qoi.contains("4 of eight engineering uncertainty terms are explicit NO-DATA"),
         "{qoi}"
     );
     let qoi_progress = progress
@@ -4906,8 +4912,8 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         .find(|line| line.contains("\"stage\":\"qoi\""))
         .expect("QoI progress row");
     for expected in [
-        "\"weakest_term\":\"seven-no-data\"",
-        "\"budget_terms_measured\":1",
+        "\"weakest_term\":\"some-no-data\"",
+        "\"budget_terms_measured\":4",
         "\"budget_terms_total\":8",
         "\"verdict\":\"indeterminate\"",
     ] {

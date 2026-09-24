@@ -443,8 +443,19 @@ log summary "artifacts written to ${ARTIFACT_DIR}"
 # maturity-registry capability it executed (only conduction is registered
 # today); `xtask check-maturity` reads exactly these rows.
 if [[ -n "${RETAIN_RECEIPT}" ]]; then
+  # The receipt names HEAD as the source that ran, so it may be minted only
+  # when the tracked source IS HEAD. An rch-synced worker tree keeps a stale
+  # .git while its files move (measured 2026-09-24: a receipt named fae92f51
+  # for a run of 6c33d6a1 sources), and a dirty local tree is the same lie.
+  SOURCE_DIRTY=0
+  if ! git -C "${REPO_ROOT}" diff --quiet HEAD -- crates xtask data examples scripts \
+      Cargo.toml Cargo.lock 2>/dev/null; then
+    SOURCE_DIRTY=1
+  fi
   if [[ "${FAILURES}" -ne 0 || "${THROUGH}" != "report" ]]; then
     log summary "receipt NOT retained: failures=${FAILURES} through=${THROUGH}"
+  elif [[ "${SOURCE_DIRTY}" -ne 0 ]]; then
+    log summary "receipt NOT retained: the tracked source differs from HEAD, so HEAD would not name the code that ran"
   else
     declare -A STAGE_CAPABILITY=(
       [import-verify]="" [assign]="" [material-resolve]="" [flow-network]=""

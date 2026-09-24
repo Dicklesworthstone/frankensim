@@ -331,6 +331,115 @@ impl DiscretizationReceipt {
     }
 }
 
+/// A caller-retained measured contribution to the junction-maximum budget
+/// for one uncertainty source other than `Discretization` (which keeps its
+/// own [`DiscretizationReceipt`]).
+///
+/// The extractor never manufactures one: the caller must have executed the
+/// propagation it cites (for example, re-solving at the vertices of a
+/// declared input interval). The value is an Estimated half-width in kelvin
+/// or an explicit negligible justification. A `gap` receipt keeps the term
+/// `Unknown` but replaces the generic reason with the propagation's own
+/// (for example why a vertex refused). A receipt for `Parameters` replaces
+/// the default material-provenance gap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QoiTermReceipt {
+    kind: EngineeringUncertaintyKind,
+    value: TermValue,
+    source: SourceProvenance,
+}
+
+impl QoiTermReceipt {
+    /// Admit a finite non-negative kelvin half-width for `kind`.
+    ///
+    /// # Errors
+    /// Refuses `Discretization`, a non-finite, negative or negative-zero
+    /// half-width, and a blank citation or identifier.
+    pub fn interval(
+        kind: EngineeringUncertaintyKind,
+        half_width: f64,
+        source: SourceProvenance,
+    ) -> Result<Self, QoiError> {
+        if !(half_width.is_finite() && half_width >= 0.0)
+            || (half_width == 0.0 && half_width.is_sign_negative())
+        {
+            return Err(QoiError::invalid(
+                "term receipt",
+                "half-width must be finite, non-negative, and not negative zero",
+            ));
+        }
+        Self::admit(kind, TermValue::interval(0.0, half_width)?, source)
+    }
+
+    /// Keep `kind` unknown under a specific, non-empty reason.
+    ///
+    /// # Errors
+    /// Refuses `Discretization`, a blank reason, and a blank citation or
+    /// identifier.
+    pub fn gap(
+        kind: EngineeringUncertaintyKind,
+        reason: impl Into<String>,
+        source: SourceProvenance,
+    ) -> Result<Self, QoiError> {
+        Self::admit(kind, TermValue::unknown(reason)?, source)
+    }
+
+    /// Admit an explicit zero contribution with a non-empty justification.
+    ///
+    /// # Errors
+    /// Refuses `Discretization`, a blank justification, and a blank citation
+    /// or identifier.
+    pub fn negligible(
+        kind: EngineeringUncertaintyKind,
+        justification: impl Into<String>,
+        source: SourceProvenance,
+    ) -> Result<Self, QoiError> {
+        Self::admit(kind, TermValue::negligible(justification)?, source)
+    }
+
+    fn admit(
+        kind: EngineeringUncertaintyKind,
+        value: TermValue,
+        source: SourceProvenance,
+    ) -> Result<Self, QoiError> {
+        if kind == EngineeringUncertaintyKind::Discretization {
+            return Err(QoiError::invalid(
+                "term receipt",
+                "the discretization term is admitted only through DiscretizationReceipt",
+            ));
+        }
+        if source.citation.trim().is_empty() || source.identifier.trim().is_empty() {
+            return Err(QoiError::invalid(
+                "term receipt source",
+                "citation and stable identifier must both be non-empty",
+            ));
+        }
+        Ok(Self {
+            kind,
+            value,
+            source,
+        })
+    }
+
+    /// Uncertainty source this receipt measures.
+    #[must_use]
+    pub const fn kind(&self) -> EngineeringUncertaintyKind {
+        self.kind
+    }
+
+    /// Admitted term value.
+    #[must_use]
+    pub const fn value(&self) -> &TermValue {
+        &self.value
+    }
+
+    /// Authority for the executed propagation.
+    #[must_use]
+    pub const fn source(&self) -> &SourceProvenance {
+        &self.source
+    }
+}
+
 /// Everything the caller declares for one thermal QoI extraction.
 ///
 /// Grouping these keeps the extraction entry point narrow as QoI families grow,
@@ -811,6 +920,7 @@ pub fn extract_thermal_qois(
         discretization_id,
         &temperature_model,
         &parameter_term,
+        &[],
     )?;
 
     let uniformity = surface_uniformity(
@@ -862,8 +972,37 @@ pub fn extract_junction_maximum_qoi(
     junction_region: &JunctionRegion,
     discretization: Option<&DiscretizationReceipt>,
 ) -> Result<JunctionMaximum, QoiError> {
+    extract_junction_maximum_qoi_with_terms(mesh, solution, junction_region, discretization, &[])
+}
+
+/// [`extract_junction_maximum_qoi`] with caller-retained measured terms.
+///
+/// Each receipt populates exactly its own source; every source without one
+/// keeps its named `Unknown`. The receipts are bound into the QoI identity,
+/// so a changed propagation rebinds the budget.
+///
+/// # Errors
+/// As [`extract_junction_maximum_qoi`], plus a refused duplicate source.
+pub fn extract_junction_maximum_qoi_with_terms(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    junction_region: &JunctionRegion,
+    discretization: Option<&DiscretizationReceipt>,
+    terms: &[QoiTermReceipt],
+) -> Result<JunctionMaximum, QoiError> {
     validate_solution(mesh, solution)?;
     validate_junction_region_indices(mesh, junction_region)?;
+    for (index, term) in terms.iter().enumerate() {
+        if terms[..index]
+            .iter()
+            .any(|earlier| earlier.kind == term.kind)
+        {
+            return Err(QoiError::invalid(
+                "term receipts",
+                format!("more than one receipt for the {} source", term.kind.name()),
+            ));
+        }
+    }
 
     let solution_id = solution_identity(mesh, solution);
     let discretization_id = discretization.map(discretization_identity);
@@ -877,6 +1016,7 @@ pub fn extract_junction_maximum_qoi(
         discretization_id,
         &temperature_model,
         &parameter_term,
+        terms,
     )?;
     Ok(maximum)
 }
@@ -899,18 +1039,35 @@ fn junction_maximum_qoi(
         &'static str,
         ContentHash,
     ),
+    terms: &[QoiTermReceipt],
 ) -> Result<(JunctionMaximum, ContentHash), QoiError> {
     let (maximum, maximum_vertex) = junction_maximum(solution, junction_region);
     let mut maximum_parents = vec![solution_id];
     if let Some(identity) = discretization_id {
         maximum_parents.push(identity);
     }
+    let term_ids: Vec<ContentHash> = terms.iter().map(term_receipt_identity).collect();
+    maximum_parents.extend(term_ids.iter().copied());
     let maximum_identity = qoi_identity(
         "junction-maximum",
         &maximum_parents,
         &region_identity(junction_region.name(), junction_region.vertices()),
     );
-    let mut maximum_known = vec![parameter_term.clone()];
+    // Receipts come first: the budget takes the first entry per source, so a
+    // measured Parameters receipt replaces the material-provenance gap.
+    let mut maximum_known: Vec<_> = terms
+        .iter()
+        .zip(&term_ids)
+        .map(|(term, identity)| {
+            (
+                term.kind,
+                term.value.clone(),
+                "thermal-qoi-term-receipt",
+                *identity,
+            )
+        })
+        .collect();
+    maximum_known.push(parameter_term.clone());
     if let (Some(receipt), Some(identity)) = (discretization, discretization_id) {
         maximum_known.push((
             EngineeringUncertaintyKind::Discretization,
@@ -1718,6 +1875,35 @@ fn requirement_identity(requirement: &ThermalRequirement) -> ContentHash {
     bytes.extend_from_slice(&requirement.safety_factor.factor.to_bits().to_le_bytes());
     push_string(&mut bytes, &requirement.safety_factor.source.citation);
     push_string(&mut bytes, &requirement.safety_factor.source.identifier);
+    hash_domain(QOI_IDENTITY_DOMAIN, &bytes)
+}
+
+fn term_receipt_identity(receipt: &QoiTermReceipt) -> ContentHash {
+    let mut bytes = Vec::new();
+    push_string(&mut bytes, "term-receipt");
+    push_string(&mut bytes, receipt.kind.name());
+    match &receipt.value {
+        TermValue::IntervalBound { lower, upper } => {
+            push_string(&mut bytes, "interval");
+            bytes.extend_from_slice(&lower.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&upper.to_bits().to_le_bytes());
+        }
+        TermValue::Negligible { justification } => {
+            push_string(&mut bytes, "negligible");
+            push_string(&mut bytes, justification);
+        }
+        TermValue::Unknown { reason } => {
+            push_string(&mut bytes, "gap");
+            push_string(&mut bytes, reason);
+        }
+        other => {
+            unreachable!(
+                "QoiTermReceipt admits only interval, negligible and gap values, got {other:?}"
+            )
+        }
+    }
+    push_string(&mut bytes, &receipt.source.citation);
+    push_string(&mut bytes, &receipt.source.identifier);
     hash_domain(QOI_IDENTITY_DOMAIN, &bytes)
 }
 

@@ -223,11 +223,16 @@ pub(super) struct ConjugatePath {
 
 /// Derive every branch at its own solved flow, then retain the same ordering
 /// on the flat solid side and the branch-major air side.
+///
+/// `htc_scale` multiplies every card-derived coefficient before the air path
+/// is built, so a model-form propagation perturbs the coefficient the
+/// conjugate fixed point actually uses. The nominal derivation passes `1.0`.
 pub(super) fn derive_air_path(
     laws: &[AirflowLaw],
     operating: &OperatingPoint,
     air_density_kg_m3: f64,
     wetted_area_m2: impl Fn(&str) -> Option<f64>,
+    htc_scale: f64,
 ) -> Result<ConjugatePath, SolveRefusal> {
     if laws.is_empty() {
         return Err(conduction_error(
@@ -247,7 +252,7 @@ pub(super) fn derive_air_path(
             end += 1;
         }
         let branch = derive_branch(
-            &laws[start..end], operating, air_density_kg_m3, &wetted_area_m2,
+            &laws[start..end], operating, air_density_kg_m3, &wetted_area_m2, htc_scale,
         )?;
         segments.extend(branch.segments.iter().cloned());
         branches.push(branch);
@@ -262,6 +267,7 @@ fn derive_branch(
     operating: &OperatingPoint,
     air_density_kg_m3: f64,
     wetted_area_m2: impl Fn(&str) -> Option<f64>,
+    htc_scale: f64,
 ) -> Result<ConjugateBranch, SolveRefusal> {
     let first = &laws[0];
     if !(air_density_kg_m3.is_finite() && air_density_kg_m3 > 0.0) {
@@ -335,7 +341,8 @@ fn derive_branch(
                 )
             })?
             .value
-            .value();
+            .value()
+            * htc_scale;
         let wetted = wetted_area_m2(&law.target).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-airflow-area",
