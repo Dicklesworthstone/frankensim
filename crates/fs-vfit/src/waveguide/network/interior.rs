@@ -14,7 +14,7 @@ pub(super) fn load_impedance(
     let first = segments[adjacent[0] / 2].impedance_pa_s_m3;
     let z = match kind {
         NetworkNode::Series { .. } => first + segments[adjacent[1] / 2].impedance_pa_s_m3,
-        NetworkNode::Shunt { .. } => {
+        NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => {
             let min_z = adjacent.iter().map(|&p| segments[p / 2].impedance_pa_s_m3)
                 .fold(f64::INFINITY, f64::min);
             let sum = adjacent.iter().fold(0.0, |s, &p| s + min_z / segments[p / 2].impedance_pa_s_m3);
