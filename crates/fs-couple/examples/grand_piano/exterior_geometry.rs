@@ -5,7 +5,7 @@
 //! component overlap and cavity accessibility remain input responsibilities.
 use super::{board_geometry::motion::MotionSurface, linear::Bank};
 use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels,
-    radiation_policy::GeometryPolicy};
+    radiation_policy::GeometryPolicy, near_field::FirstOrder};
 use fs_math::c64::C64;
 use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU};
 
@@ -33,6 +33,9 @@ pub struct Specification {
     pub receivers:Vec<[f64;3]>,
     /// Explicit triangle-integrated close receivers; omission retains centroid observation.
     pub near_field_receivers:bool,
+    /// Optional first-order patterns, indexed by receiver row (zero-based).
+    /// Missing entries retain the original omnidirectional pressure receiver.
+    pub receiver_patterns:BTreeMap<usize,FirstOrder>,
     pub medium:Medium,
     pub band_hz:(f64,f64),
     pub frequencies:usize,
@@ -51,11 +54,20 @@ impl Specification {
         let mut rows=text.lines().map(str::trim).filter(|l|!l.is_empty()&&!l.starts_with('#'));
         if rows.next()!=Some("frankensim-piano-exterior-si-v1") {return Err("expected frankensim-piano-exterior-si-v1".into());}
         let mut fields=BTreeMap::<String,Vec<String>>::new();let mut receivers=Vec::new();let mut rules=BTreeMap::new();
+        let mut receiver_patterns=BTreeMap::new();
         for row in rows {
             let f:Vec<_>=row.split(',').map(str::trim).collect();
             match f[0] {
                 "moving"|"rigid" if f.len()==2 && !f[1].is_empty()=>{
                     if rules.len()>=256 || rules.insert(f[1].into(),f[0]=="moving").is_some() {return Err("duplicate or excessive acoustic part mapping".into());}
+                }
+                "receiver-pattern" if f.len()==6=>{
+                    let index:usize=f[1].parse().map_err(|_|"receiver-pattern needs a zero-based receiver index")?;
+                    let pattern=FirstOrder::new(number(f[2])?,[number(f[3])?,number(f[4])?,number(f[5])?])
+                        .map_err(|e|e.to_string())?;
+                    if index>=2 || receiver_patterns.insert(index,pattern).is_some() {
+                        return Err("receiver-pattern index must be unique and 0 or 1".into());
+                    }
                 }
                 "receiver-m" if f.len()==4=>{
                     if receivers.len()==2 {return Err("at most two finite-point receivers".into());}
@@ -84,11 +96,15 @@ impl Specification {
         };
         let mut out=Self {source:source.join(","),scale_m:scalar("obj-scale-m")?,
             origin_obj:[number(&origin[0])?,number(&origin[1])?,number(&origin[2])?],
-            offset_m:scalar("max-skin-offset-m")?,receivers,near_field_receivers,
+            offset_m:scalar("max-skin-offset-m")?,receivers,near_field_receivers,receiver_patterns,
             medium:Medium {density:number(&gas[0])?,sound_speed:number(&gas[1])?},
             band_hz:(number(&band[0])?,number(&band[1])?),frequencies:band[2].parse().map_err(|_|"invalid frequency count")?,
             board_band_hz:scalar("board-band-hz")?,fit_order:get("fit-order",1)?[0].parse().map_err(|_|"invalid fit order")?,
             min_ppw:scalar("min-panels-per-wavelength")?,full_scale_pa:scalar("full-scale-pa")?,rules};
+        if out.receiver_patterns.keys().any(|i|*i>=out.receivers.len())
+            || (!near_field_receivers && out.receiver_patterns.values().any(|p|p.pressure_fraction()<1.)) {
+            return Err("directional receivers require receiver-evaluation,near-field and an existing receiver index".into());
+        }
         if out.receivers.is_empty() || !out.rules.values().any(|moving|*moving)
             || !(1e-9..=1e6).contains(&out.scale_m) || !(0.0..=0.05).contains(&out.offset_m)
             || out.medium.density<=0. || out.medium.sound_speed<=0.
@@ -100,6 +116,10 @@ impl Specification {
             return Err("invalid explicit exterior units, geometry, medium, frequency/fit or receiver budget".into());
         }
         if near_field_receivers {out.source.push_str("; near-field triangle-integrated receivers, surface-distance propagation");}
+        for (index,pattern) in &out.receiver_patterns {
+            out.source.push_str(&format!("; receiver {index}: ideal first-order alpha={}, front={:?}; Pa-equivalent on-axis plane-wave sensitivity",
+                pattern.pressure_fraction(),pattern.front_axis()));
+        }
         Ok(out)
     }
     pub fn omega(&self)->Vec<f64> {(0..self.frequencies).map(|i|
@@ -178,13 +198,19 @@ impl Boundary {
         self.weights=transformed;Ok(self)
     }
     pub fn sample(&self,spec:&Specification)->Result<Samples,String> {
-        self.sample_grid_mode(&spec.omega(),&spec.receivers,spec.medium,spec.min_ppw,spec.near_field_receivers)
+        let plan=ReceiverSet::for_spec(self,spec)?;
+        self.sample_grid_plan(&spec.omega(),&spec.receivers,spec.medium,spec.min_ppw,plan)
     }
     fn sample_grid(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64)
         ->Result<Samples,String> {
         self.sample_grid_mode(omega,receivers,medium,min_ppw,false)
     }
     fn sample_grid_mode(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64,near:bool)
+        ->Result<Samples,String> {
+        let plan=ReceiverSet::new(self,receivers,medium,near)?;
+        self.sample_grid_plan(omega,receivers,medium,min_ppw,plan)
+    }
+    fn sample_grid_plan(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64,plan:ReceiverSet<'_>)
         ->Result<Samples,String> {
         let count=self.weights.len();let panels=self.surface.areas().len();
         if count==0 || count>super::linear::MAX_BOARD_MODES || panels>MAX_PANELS
@@ -197,7 +223,6 @@ impl Boundary {
             || self.weights.iter().any(|r|r.len()!=panels || r.iter().any(|v|!v.is_finite())) {
             return Err("invalid complete exterior response grid, basis or medium".into());
         }
-        let plan=ReceiverSet::new(self,receivers,medium,near)?;
         // Select from actual closed-component spectra, not the radius of the
         // empty space between the soundboard and disjoint rigid scatterers.
         let policy=GeometryPolicy::new(&self.surface).map_err(|e|e.to_string())?;
@@ -235,7 +260,7 @@ impl Boundary {
 }
 
 /// Receiver-major, mode-major complex pressure per unit generalized
-/// acceleration. Time convention exp(-i omega t), no fitted transfer yet.
+/// acceleration (Pa-equivalent for selected first-order receivers). Time convention exp(-i omega t), no fitted transfer yet.
 /// Minimum panels/wavelength is a resolution check, NOT a convergence proof.
 pub struct Samples {
     pub omega:Vec<f64>,
@@ -362,3 +387,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 #[path="near_receiver_tests.rs"]
 mod near_receiver_tests;
+
+#[cfg(test)]
+#[path="directional_receiver_tests.rs"]
+mod directional_receiver_tests;
