@@ -57,3 +57,6 @@ impl StrikerProperties {
         Ok(result)
     }
 }
+
+/// Geometry-derived flexible shaft storage and reciprocal tip/hand ports.
+pub mod flexible;
