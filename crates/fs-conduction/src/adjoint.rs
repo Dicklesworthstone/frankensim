@@ -41,7 +41,7 @@ use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator_scaled_with_interfaces, element_stiffness, reduce,
 };
-use crate::material::ElementMaterials;
+use crate::material::{ElementMaterials, TemperatureSpan};
 use crate::solve::{ConductionProblem, LinearConfig};
 
 /// A conduction problem parameterized by per-element conductivity
@@ -55,6 +55,9 @@ pub struct ConductivityDesign<'m> {
     /// temperature-dependent model is refused, so this is not a
     /// linearization of `k(T)`.
     element_tensors: Vec<[[f64; 3]; 3]>,
+    /// A material-admissible assembly field. A constant sampled table still
+    /// has a bounded validity interval and must not be sampled at 0 K.
+    reference_temperature: Vec<f64>,
 }
 
 /// A primal solve at one design point.
@@ -117,6 +120,15 @@ impl<'m> ConductivityDesign<'m> {
         }
         let ne = problem.mesh.element_count();
         let mut element_tensors = Vec::with_capacity(ne);
+        let mut vertex_spans = vec![TemperatureSpan::Unbounded; problem.mesh.vertex_count()];
+        let reference = |span: TemperatureSpan| -> Result<f64, ConductionError> {
+            let temperature = match span {
+                TemperatureSpan::Unbounded => 0.0,
+                TemperatureSpan::Sampled { low, high } => f64::midpoint(low, high),
+            };
+            span.check(temperature)?;
+            Ok(temperature)
+        };
         for e in 0..ne {
             let model = match materials {
                 Some(assigned) => assigned.model_for(e)?,
@@ -129,14 +141,23 @@ impl<'m> ConductivityDesign<'m> {
                         .to_string(),
                 });
             }
-            element_tensors.push(model.tensor_at(0.0)?);
+            let span = model.temperature_span();
+            element_tensors.push(model.tensor_at(reference(span)?)?);
+            for &vertex in &problem.mesh.complex().tets[e] {
+                vertex_spans[vertex as usize] = vertex_spans[vertex as usize].intersect(span);
+            }
         }
+        let reference_temperature = vertex_spans
+            .into_iter()
+            .map(reference)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ConductivityDesign {
             problem,
             dofs,
             linear,
             element_materials: materials,
             element_tensors,
+            reference_temperature,
         })
     }
 
@@ -200,8 +221,10 @@ impl<'m> ConductivityDesign<'m> {
                 tolerance: self.linear.tolerance,
             });
         }
+        let temperature = self.dofs.scatter(&x);
+        self.check_temperature_support(&temperature)?;
         Ok(DesignSolution {
-            temperature: self.dofs.scatter(&x),
+            temperature,
             free_temperature: x,
             primal_relative_residual,
             primal_iterations: iters,
@@ -213,19 +236,35 @@ impl<'m> ConductivityDesign<'m> {
         cx: &Cx<'_>,
         rho: &[f64],
     ) -> Result<(fs_sparse::Csr, Vec<f64>), ConductionError> {
-        let zero = vec![0.0f64; self.problem.mesh.vertex_count()];
         let system = assemble_operator_scaled_with_interfaces(
             cx,
             self.problem.mesh,
             self.problem.boundary,
             self.problem.material,
             self.problem.source,
-            &zero,
+            &self.reference_temperature,
             Some(rho),
             None,
             self.element_materials,
         )?;
         Ok(reduce(&system, &self.dofs))
+    }
+
+    fn check_temperature_support(&self, temperature: &[f64]) -> Result<(), ConductionError> {
+        for e in 0..self.problem.mesh.element_count() {
+            let model = match self.element_materials {
+                Some(assigned) => assigned.model_for(e)?,
+                None => self.problem.material,
+            };
+            model
+                .temperature_span()
+                .check(crate::assemble::element_temperature(
+                    self.problem.mesh,
+                    e,
+                    temperature,
+                ))?;
+        }
+        Ok(())
     }
 
     /// Evaluate a linear goal's discrepancy without another primal solve.
@@ -274,6 +313,7 @@ impl<'m> ConductivityDesign<'m> {
                 });
             }
         }
+        self.check_temperature_support(&self.dofs.scatter(approximate_free_temperature))?;
         let (matrix, rhs) = self.system(cx, rho)?;
         let checkpoint = |at| {
             cx.checkpoint().map_err(|_| ConductionError::Cancelled {

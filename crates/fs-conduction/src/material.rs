@@ -487,7 +487,7 @@ impl ConductivityTable {
     /// True when the table actually varies with temperature.
     #[must_use]
     pub fn is_temperature_dependent(&self) -> bool {
-        self.knots.len() > 1
+        self.knots.windows(2).any(|pair| pair[0].1 != pair[1].1)
     }
 
     /// The temperature interval this table is usable over.

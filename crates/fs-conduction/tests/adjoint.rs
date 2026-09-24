@@ -130,6 +130,60 @@ fn ladder_linear_config() -> LinearConfig {
     }
 }
 
+/// G1/G3: a sampled constant is linear but keeps its material validity span.
+/// The primal and dual must agree with the same unrestricted constant inside
+/// that span, and must not silently extrapolate outside it.
+#[test]
+fn discrete_goal_error_accepts_bounded_constant_material_without_extrapolation() {
+    use fs_conduction::material::{ConductivityTable, TemperatureSpan};
+    let table =
+        ConductivityTable::declared_curve(vec![(250.0, 5.0), (400.0, 5.0), (700.0, 5.0)]).unwrap();
+    assert!(!table.is_temperature_dependent());
+    assert_eq!(
+        table.span(),
+        TemperatureSpan::Sampled {
+            low: 250.0,
+            high: 700.0
+        }
+    );
+    assert!(table.eval(0.0).is_err());
+    assert!(
+        ConductivityTable::declared_curve(vec![(250.0, 5.0), (700.0, 6.0)])
+            .unwrap()
+            .is_temperature_dependent()
+    );
+    let mut bounded = fixture(2);
+    bounded.material = ConductivityModel::isotropic(table);
+    bounded.source = ScalarField::Uniform(40.0);
+    let mut constant = fixture(2);
+    constant.material = ConductivityModel::isotropic_declared(5.0).unwrap();
+    constant.source = ScalarField::Uniform(40.0);
+    let design = ConductivityDesign::new(bounded.problem(), ladder_linear_config()).unwrap();
+    let reference = ConductivityDesign::new(constant.problem(), ladder_linear_config()).unwrap();
+    let rho = vec![1.0; design.parameter_count()];
+    with_cx(|cx| {
+        let solved = design.solve(cx, &rho).unwrap();
+        let other = reference.solve(cx, &rho).unwrap();
+        assert_eq!(solved.temperature, other.temperature);
+        let approximate = vec![300.0; design.dofs().n()];
+        let weights = vec![1.0 / design.dofs().n() as f64; design.dofs().n()];
+        let dual = design
+            .discrete_goal_error(cx, &rho, &approximate, &weights)
+            .unwrap();
+        let expected: f64 = solved
+            .free_temperature
+            .iter()
+            .zip(&weights)
+            .map(|(temperature, weight)| (temperature - 300.0) * weight)
+            .sum();
+        assert!((dual.signed_error - expected).abs() < 1e-8);
+        assert!(matches!(
+            design.discrete_goal_error(cx, &rho, &vec![900.0; weights.len()], &weights),
+            Err(fs_conduction::ConductionError::OutsideTemperatureSpan { .. })
+        ));
+    });
+}
+
 /// G1/G3: compare the dual residual against an independently solved primal
 /// goal difference, with anisotropy, nonzero Dirichlet lift and Robin loss.
 /// This checks a discrete identity, not continuum estimator effectivity.
