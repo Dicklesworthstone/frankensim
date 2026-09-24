@@ -942,6 +942,8 @@ dependencies = [
  "fs-adjoint",
  "fs-alloc",
  "fs-casebook",
+ "fs-couple",
+ "fs-dcontact",
  "fs-eproc",
  "fs-exec",
  "fs-feec",
@@ -1069,12 +1071,15 @@ dependencies = [
  "fs-checker",
  "fs-conduction",
  "fs-convection",
+ "fs-couple",
+ "fs-cutfem",
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
  "fs-geom",
  "fs-io",
  "fs-ir",
+ "fs-ivl",
  "fs-ledger",
  "fs-marquee",
  "fs-matdb",
@@ -1090,7 +1095,9 @@ dependencies = [
  "fs-rep-mesh",
  "fs-report",
  "fs-session",
+ "fs-solver",
  "fs-topols",
+ "fs-topopt",
  "fs-uq",
 ]
 
@@ -2639,6 +2646,7 @@ dependencies = [
  "fs-rep-mesh",
  "fs-solver",
  "fs-sparse",
+ "fs-spectral",
 ]
 
 [[package]]

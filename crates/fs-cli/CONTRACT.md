@@ -544,6 +544,29 @@ continues instead of resetting.
 
 ## Output and exit contract
 
+### Adaptive 3-D topology study
+
+With the `sdf3-study` feature, `study <study.fsim> <ledger.db>` admits the
+separate `fsim-sdf3-study :version 1` producer demonstrated by
+`examples/marquee/bracket-3d-adaptive.fsim`. It executes the raw implicit-domain
+3-D elasticity/SIMP solver with independent SI body loads, a continuation
+schedule, goal-guided octree refinement and raw-density transfer. Each new
+stage checks compliance and physical-volume directional derivatives and
+restores the projected-volume constraint before optimization. Geometry and
+Krylov budgets are cumulative; tree, per-solve and cooperative wall budgets
+are explicit. A stopped run retains its last accepted solved model.
+
+Sealed receipts use the existing study/report/package routing. Reports export
+the retained cell densities, connectivity, physical nodal displacements for
+each load, stage histories, gradient discrepancies and two-grid corrections.
+Export does not run the optimizer. The package is a structural provenance
+envelope; it confers no mechanics certificate. The admitted implicit boundary
+is fixed, and comparisons are discrete numerical observations. There is no
+continuum bound, optimum, manufacturing or peak-RSS guarantee. Durability is
+at invocation completion; optimizer resume and the generic `--budget` override
+are explicitly refused. A binary without the feature refuses this producer
+with an actionable feature message.
+
 ### Normalized thermal study
 
 `study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing

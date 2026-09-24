@@ -23,11 +23,13 @@ fs-checker = { path = "../fs-checker" }
 fs-conduction = { path = "../fs-conduction" }
 fs-convection = { path = "../fs-convection" }
 fs-couple = { path = "../fs-couple" }
+fs-cutfem = { path = "../fs-cutfem", optional = true }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
 fs-ir = { path = "../fs-ir" }
+fs-ivl = { path = "../fs-ivl", optional = true }
 fs-ledger = { path = "../fs-ledger" }
 fs-marquee = { path = "../fs-marquee" }
 fs-matdb = { path = "../fs-matdb" }
@@ -44,7 +46,12 @@ fs-report = { path = "../fs-report" }
 fs-session = { path = "../fs-session" }
 fs-solver = { path = "../fs-solver" }
 fs-topols = { path = "../fs-topols" }
+fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
 fs-uq = { path = "../fs-uq" }
+
+[features]
+# The numerical 3-D CutFEM study retains the underlying frontier feature gate.
+sdf3-study = ["dep:fs-cutfem", "dep:fs-ivl", "dep:fs-topopt"]
 
 [dev-dependencies]
 fs-geom = { path = "../fs-geom" }
@@ -52,3 +59,7 @@ fs-mbd = { path = "../fs-mbd" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "study_sdf3_cli"
+required-features = ["sdf3-study"]
