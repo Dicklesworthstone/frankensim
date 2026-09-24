@@ -99,3 +99,6 @@ fn invalid_mesh_sections_history_counts_and_out_of_window_gestures_are_not_silen
 
 #[path = "file_radiation.rs"]
 mod radiation;
+
+#[path = "duct_graph.rs"]
+mod duct_graph;

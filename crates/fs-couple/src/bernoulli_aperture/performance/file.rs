@@ -18,6 +18,8 @@ use fs_material::{gas::GasState, visco::GeneralizedMaxwell};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection, SliceOptions};
 use fs_scenario::gesture::GestureSchedule;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
+mod duct;
+use duct::DuctInput;
 
 /// Complete source grammar; the pressure suffix uses the existing gesture schema.
 pub const PLATE_VALVE_PERFORMANCE_SCHEMA: &str = "frankensim-plate-valve-performance-v1";
@@ -79,10 +81,19 @@ pub struct PlateValvePerformanceInfo {
     pub memory_branches: usize,
     /// Blowing-pressure input assignments compiled on the source clock.
     pub compiled_controls: usize,
-    /// Length actually represented by the tube's integer transit [m].
+    /// Actual acoustic graph nodes, including the unique inlet and every load.
+    pub duct_nodes: usize,
+    /// Physical propagating sections; a legacy tube has one.
+    pub duct_sections: usize,
+    /// Count of geometry-derived radiating terminals, not receiver count.
+    pub radiation_terminals: usize,
+    /// Sum of represented physical section lengths [m], NOT a unique path
+    /// length in a branched graph. Equal to the original tube value for one section.
     pub represented_tube_length_m: f64,
     /// Geometry-derived compact radiation replacing the memoryless terminal,
-    /// absent on the original explicitly prescribed-reflection path.
+    /// absent on the original explicitly prescribed-reflection path. In a graph
+    /// this describes the observed outlet (or a unique terminal for an internal
+    /// observation). See `radiation_loads()` for every terminal.
     pub radiation_load: Option<BaffledRadiationLoad>,
 }
 
@@ -90,13 +101,15 @@ pub struct PlateValvePerformanceInfo {
 pub struct PlateValvePerformance {
     info: PlateValvePerformanceInfo,
     renderer: AperturePerformance,
+    radiation_loads: Vec<(usize, BaffledRadiationLoad)>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate, bind its spatial lay and any
     /// supplied material memory, then compile the pressure phrase. Nothing steps
     /// during admission. Existing owners keep their physical/solver thresholds.
-    /// The tube has lossless axial propagation. Its terminal is either an explicit
-    /// memoryless reflection or a geometry-derived compact baffled radiation load.
+    /// Propagating sections are lossless; graph loads may store and dissipate
+    /// energy through explicit impedances, enclosed cavities, compliant walls
+    /// and geometry-derived compact baffled radiation.
     /// A selected radiation load replaces, never supplements, that reflection.
     /// Internal and exterior observations both use the accepted loaded mechanics.
     ///
@@ -109,48 +122,31 @@ impl PlateValvePerformance {
         checkpoint(gate)?;
         let parsed = Parsed::read(bytes,max_block,gate)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
-        // Reject an inadmissible radiation model before the plate eigensolve.
-        // Both load and receiver use this same physical mouth and medium.
-        let radiation_load=parsed.radiation_band.map(|band|BaffledRadiationLoad::new(
-            parsed.tube.radius_m,parsed.air.density,parsed.air.sound_speed,dt,band,gate))
-            .transpose().map_err(PlateValveInputError::Physics)?;
+        // Derive each declared physical load once, from its actual adjacent
+        // section and shared gas. No receiver changes the network's mechanics.
+        let duct=parsed.duct.prepare(&parsed.air,dt,parsed.observation,gate)?;
+        let z=duct.inlet_impedance(parsed.air.density)?;
+        let observation=duct.observation;
+        let radiation_load=duct.observed_radiation();
+        let radiation_loads=duct.radiation.clone();
         let plate=PlateApertureReduction::from_chart(parsed.chart,parsed.plate,gate)
             .map_err(PlateValveInputError::Physics)?;
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
             return Err(bad(0,"retained plate mode exceeds the declared mechanical angular-step allowance"));
         }
-        let z=parsed.tube.characteristic_impedance(parsed.air.density).map_err(PlateValveInputError::Physics)?;
         let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,parsed.air.density,z,
             dt,parsed.config.samples,parsed.initial).map_err(PlateValveInputError::Physics)?;
         if let Some((material,initial))=parsed.relaxation {
             valve=valve.with_plate_relaxation(material,initial).map_err(PlateValveInputError::Physics)?;
         }
         let memory_branches=valve.relaxation().map_or(0,|r|r.branches().len());
-        let (system,observation,represented)=if let Some(load)=radiation_load {
-            // A single existing network section supplies the SAME propagation
-            // and physical inlet, with the existing stateful terminal owner.
-            // No second bore, impedance solver or end-length correction is added.
-            let t=parsed.tube;
-            let network=ApertureNetwork::new(valve,TubeNetworkSpec {
-                nodes:vec![NetworkNode::Inlet,load.termination()],
-                sections:vec![TubeSection {nodes:[0,1],length_m:t.length_m,
-                    radius_m:t.radius_m,max_length_error_m:t.max_length_error_m}],
-                sound_speed_m_s:t.sound_speed_m_s,max_wave_memory_bytes:t.max_wave_memory_bytes,
-            }).map_err(PlateValveInputError::Physics)?;
-            let represented=network.represented_sections()[0].represented_length_m;
-            let observation=match parsed.observation {
-                ApertureObservation::Inlet=>ApertureObservation::Inlet,
-                ApertureObservation::TubeTerminal=>ApertureObservation::NetworkNode(1),
-                ApertureObservation::TubeBaffled(receiver)=>ApertureObservation::NetworkBaffled {node:1,receiver},
-                _=>unreachable!("source grammar admits one inlet, terminal or outlet receiver"),
-            };
-            (CoupledAperture::Network(network),observation,represented)
-        } else {
-            // Preserve the original arithmetic and allocations when unselected.
-            let tube=ApertureTube::new(valve,parsed.tube).map_err(PlateValveInputError::Physics)?;
-            let represented=tube.represented_length_m();
-            (CoupledAperture::Tube(tube),parsed.observation,represented)
+        let system=duct.bind(valve)?;
+        let (duct_nodes,duct_sections,represented)=match &system {
+            CoupledAperture::Tube(t)=>(2,1,t.represented_length_m()),
+            CoupledAperture::Network(n)=>(n.spec().nodes.len(),n.spec().sections.len(),
+                n.represented_sections().iter().map(|s|s.represented_length_m).sum()),
         };
+        if !represented.is_finite() {return Err(bad(0,"total represented duct length overflowed"));}
         let renderer=AperturePerformance::new(system,observation,parsed.schedule,parsed.config)
             .map_err(PlateValveInputError::Gesture)?;
         checkpoint(gate)?;
@@ -159,8 +155,9 @@ impl PlateValvePerformance {
             sample_rate_hz:parsed.config.sample_rate_hz,samples:parsed.config.samples,full_scale_pa:parsed.full_scale_pa,
             nodes:parsed.nodes,triangles:parsed.triangles,sections:parsed.sections,memory_branches,
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
+            duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer})
+        Ok(Self {info,renderer,radiation_loads})
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
@@ -168,14 +165,18 @@ impl PlateValvePerformance {
     /// Complete finite renderer with immutable access to the physical specimen.
     #[must_use]
     pub const fn renderer(&self) -> &AperturePerformance {&self.renderer}
+    /// Every physical radiation boundary, paired with its source graph node.
+    /// Each is applied once by the network; observing it adds no second load.
+    #[must_use]
+    pub fn radiation_loads(&self) -> &[(usize, BaffledRadiationLoad)] {&self.radiation_loads}
     /// Move the complete finite runtime into the existing pressure/PCM consumers.
     #[must_use]
     pub fn into_renderer(self) -> AperturePerformance {self.renderer}
 }
 
 struct Parsed {
-    config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,tube:UniformTubeSpec,
-    radiation_band:Option<f64>,observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,initial:ApertureState,
+    config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,
+    observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,initial:ApertureState,
     closure:PlateClosureSpec,relaxation:Option<(PlateRelaxationSpec,InitialApertureMemory)>,
     max_angular_step:f64,schedule:GestureSchedule,nodes:usize,triangles:usize,sections:usize,
 }
@@ -196,36 +197,17 @@ impl Parsed {
         let mut row=r.row("ambient")?;
         let air=GasState::try_new_moist_air(row.scalar()?,row.scalar()?,row.scalar()?)
             .map_err(|_|bad(r.line,"ambient outside the shared moist-air domain"))?;row.finish()?;
-        let mut row=r.row("tube")?;
-        let length_m=row.scalar()?;let radius_m=row.scalar()?;
-        let terminal=row.word()?;
-        let (terminal_reflection,radiation_band)=if terminal=="baffled-low-ka" {
-            // Zero here is only a placeholder in the geometry helper. It never
-            // becomes a physical memoryless load: this selection uses a network.
-            (0.0,Some(row.scalar()?))
-        } else {
-            let reflection:f64=terminal.parse().map_err(|_|bad(r.line,"tube requires a numeric reflectance or baffled-low-ka BAND_HZ"))?;
-            if !reflection.is_finite() || reflection.abs()>1.0 {
-                return Err(bad(r.line,"tube reflectance must be finite and passive"));
-            }
-            (reflection,None)
-        };
-        let tube=UniformTubeSpec{length_m,radius_m,terminal_reflection,
-            max_length_error_m:row.scalar()?,max_wave_memory_bytes:row.count(64*1024*1024)?,sound_speed_m_s:air.sound_speed};row.finish()?;
+        let duct=DuctInput::read(&mut r,&air,gate)?;
         let mut row=r.row("observation")?;
         let observation=match row.word()? {
             "inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
-            "baffled-outlet"=>ApertureObservation::TubeBaffled(CircularOutletReceiver {
-                position_m:[row.scalar()?,row.scalar()?,row.scalar()?],
-                radial_rings:row.count(128)?,angular_points:row.count(512)?,maximum_frequency_hz:row.scalar()?,
-            }),
-            _=>return Err(bad(r.line,"observation must explicitly name inlet, terminal or baffled-outlet")),
+            "network-node"=>ApertureObservation::NetworkNode(row.parse()?),
+            "baffled-outlet"=>ApertureObservation::TubeBaffled(read_receiver(&mut row)?),
+            "network-baffled"=>ApertureObservation::NetworkBaffled {
+                node:row.parse()?,receiver:read_receiver(&mut row)?,
+            },
+            _=>return Err(bad(r.line,"observation must name a physical inlet, terminal, network node or outlet receiver")),
         };row.finish()?;
-        if let (Some(band),ApertureObservation::TubeBaffled(receiver))=(radiation_band,observation) {
-            if receiver.maximum_frequency_hz>band {
-                return Err(bad(r.line,"exterior receiver band cannot exceed the selected radiation-load band"));
-            }
-        }
         let mut row=r.row("plate")?;
         let support=match row.word()? {"clamped"=>EdgeSupport::Clamped,"simply-supported"=>EdgeSupport::SimplySupported,
             _=>return Err(bad(r.line,"unsupported plate support law"))};
@@ -320,9 +302,13 @@ impl Parsed {
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{config,full_scale_pa,air,tube,radiation_band,observation,chart,plate,initial,closure,relaxation,max_angular_step,
+        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,initial,closure,relaxation,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
+}
+fn read_receiver(row:&mut Row<'_>)->Result<CircularOutletReceiver,PlateValveInputError> {
+    Ok(CircularOutletReceiver {position_m:[row.scalar()?,row.scalar()?,row.scalar()?],
+        radial_rings:row.count(128)?,angular_points:row.count(512)?,maximum_frequency_hz:row.scalar()?})
 }
 fn decode_schedule(text:&str)->Result<GestureSchedule,PlateValveInputError> {
     let lines=text.lines().count();
@@ -343,11 +329,13 @@ fn decode_schedule(text:&str)->Result<GestureSchedule,PlateValveInputError> {
 struct Reader<'a>{lines:Lines<'a>,line:usize}
 struct Row<'a>{fields:SplitAsciiWhitespace<'a>,line:usize}
 impl<'a> Reader<'a> {
-    fn row(&mut self,key:&str)->Result<Row<'a>,PlateValveInputError> {
+    fn next(&mut self)->Result<Row<'a>,PlateValveInputError> {
         self.line+=1;let line=self.lines.next().ok_or_else(||bad(self.line,"missing record"))?;
-        let mut fields=line.split_ascii_whitespace();
-        if fields.next()!=Some(key) {return Err(bad(self.line,"unexpected record kind or order"));}
-        Ok(Row{fields,line:self.line})
+        Ok(Row{fields:line.split_ascii_whitespace(),line:self.line})
+    }
+    fn row(&mut self,key:&str)->Result<Row<'a>,PlateValveInputError> {
+        let mut row=self.next()?;
+        if row.word()?!=key {return Err(bad(self.line,"unexpected record kind or order"));}Ok(row)
     }
     fn count(&mut self,key:&str,max:usize)->Result<usize,PlateValveInputError> {
         let mut row=self.row(key)?;let count=row.count(max)?;row.finish()?;Ok(count)
