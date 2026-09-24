@@ -187,7 +187,7 @@ impl UqExecution {
     }
 }
 
-fn sample_parameters(
+pub(crate) fn sample_parameters(
     plan: &UqPlan,
     factor: Option<&[Vec<f64>]>,
     ordinal: usize,
