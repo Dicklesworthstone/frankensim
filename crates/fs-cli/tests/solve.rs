@@ -122,10 +122,30 @@ fn material_pack_bytes_with_domain_and_conductivity(
     t_hi: f64,
     conductivity_w_mk: f64,
 ) -> Vec<u8> {
+    material_pack_bytes_with_property(
+        chemistry,
+        pack_id,
+        t_lo,
+        t_hi,
+        fs_matdb::PropertyValue::Scalar {
+            value: conductivity_w_mk,
+            dims: CONDUCTIVITY_DIMS,
+        },
+        fs_matdb::InterpolationPolicy::ConstantWithinValidity,
+    )
+}
+
+fn material_pack_bytes_with_property(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+    conductivity: fs_matdb::PropertyValue,
+    interpolation: fs_matdb::InterpolationPolicy,
+) -> Vec<u8> {
     use fs_matdb::{
-        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
-        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
-        UncertaintyModel,
+        ClaimSet, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack, ObservationDataset,
+        PropertyClaim, PropertyKey, Provenance, UncertaintyModel,
     };
     let provenance = || Provenance {
         source: "solve fixture conductivity table".to_string(),
@@ -148,16 +168,13 @@ fn material_pack_bytes_with_domain_and_conductivity(
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
-            value: PropertyValue::Scalar {
-                value: conductivity_w_mk,
-                dims: CONDUCTIVITY_DIMS,
-            },
+            value: conductivity,
             validity: fs_evidence::ValidityDomain::unconstrained().with("T", t_lo, t_hi),
             uncertainty: UncertaintyModel::HalfWidth {
                 half_width: 3.0,
                 confidence: 0.95,
             },
-            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            interpolation,
             observations: vec![observation],
             provenance: provenance(),
         })
@@ -614,6 +631,68 @@ fn multi_region_contact_project() -> ProjectSpec {
     spec
 }
 
+/// Five watts generated in the hot body have one exit: the declared unit-area
+/// joint into the fixed-temperature cold body. Thus conservation independently
+/// fixes the signed contact heat to -5 W and its mean temperature jump to
+/// -0.5 K for R'' = 0.1 m² K/W, regardless of the mesh or bulk conductivity.
+fn contact_refinement_project(fidelity: &str) -> ProjectSpec {
+    let mut spec = multi_region_contact_project();
+    spec.solver.as_mut().unwrap().fidelity = fidelity.to_string();
+    // Keep algebraic error below the independently checked 5 W / 0.5 K
+    // conservation oracles even on the finest uniform rung.
+    spec.solver.as_mut().unwrap().tolerance_rel = 1e-8;
+    spec.requirements.as_mut().unwrap()[0].region = "hot".to_string();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    setup.boundaries[1].condition = ThermalBoundaryCondition::HeatFlux {
+        outward_flux: QtyAny::new(0.0, fs_project::spec::dims::HEAT_FLUX),
+    };
+    spec
+}
+
+fn contact_refinement_receipt(spec: &ProjectSpec, cards: &CardPackSet) -> String {
+    let decoded = decode(spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, spec);
+    let outcome = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decoded,
+        cards,
+        &mut Vec::new(),
+    )
+    .expect("the contact refinement study completes through the ordinary staged solver");
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&receipt);
+    let number = |name| receipt_number_field(&receipt, name);
+    assert!((number("area_m2") - 1.0).abs() < 1e-12, "{receipt}");
+    assert!(
+        (number("conductance_w_per_k") - 10.0).abs() < 1e-10,
+        "{receipt}"
+    );
+    assert!((number("source_w") - 5.0).abs() < 1e-11, "{receipt}");
+    assert!(
+        (number("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5,
+        "{receipt}"
+    );
+    assert!((number("mean_jump_k") + 0.5).abs() < 2e-6, "{receipt}");
+    assert!((number("dirichlet_in_w") + 5.0).abs() < 2e-5, "{receipt}");
+    assert!(number("relative_closure") < 1e-6, "{receipt}");
+    let evidence = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&receipt, "evidence_artifact"),
+    ))
+    .unwrap();
+    assert_eq!(
+        receipt_number_field(&evidence, "pair_count"),
+        number("pair_count"),
+        "retained contact evidence describes the published refined field"
+    );
+    receipt
+}
+
 /// Leave the two real solids and their imported traces intact, but remove the
 /// complete declared-interface bundle so conduction must refuse the retained
 /// coincident boundary faces rather than infer a zero-resistance joint.
@@ -1001,7 +1080,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 15,
+        SOLVE_DRIVER_VERSION, 16,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3875,6 +3954,188 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
 }
 
 #[test]
+fn g1_contact_ladder_refines_both_traces_and_preserves_heat_and_jump() {
+    let spec = contact_refinement_project("ladder");
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    let rungs = receipt
+        .split("\"ladder\":{\"rungs\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let rows: Vec<_> = rungs.split("{\"rung\":").skip(1).collect();
+    assert_eq!(
+        rows.len(),
+        3,
+        "contact must no longer stop the h-ladder: {receipt}"
+    );
+    let pairs: Vec<_> = rows
+        .iter()
+        .map(|row| receipt_number_field(row, "interface_pairs"))
+        .collect();
+    assert!(pairs[0] > 0.0);
+    assert_eq!(
+        pairs[1],
+        4.0 * pairs[0],
+        "both matching traces split into four faces"
+    );
+    assert_eq!(pairs[2], 4.0 * pairs[1]);
+    assert_eq!(pairs[2], receipt_number_field(&receipt, "pair_count"));
+    for row in rows {
+        assert!(receipt_number_field(row, "min_dihedral_deg") >= 5.0);
+    }
+    assert!(!receipt.contains("interface-pairs-bind-base-faces"));
+}
+
+#[test]
+fn g1_contact_adaptive_probes_the_actual_hot_maximum_with_the_contact_operator() {
+    let spec = contact_refinement_project("adaptive");
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    assert!(
+        receipt.contains("\"status\":\"observed-tolerance-met\""),
+        "{receipt}"
+    );
+    assert_eq!(receipt_number_field(&receipt, "solved_meshes"), 2.0);
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert_eq!(
+        number("probe_interface_pairs"),
+        4.0 * number("interface_pairs")
+    );
+    assert!(number("interface_pairs") > 0.0);
+    assert!(
+        (number("signed_linear_change_k")
+            + number("linearization_remainder_k")
+            + number("maximum_remainder_k")
+            - number("measured_change_k"))
+        .abs()
+            < 1e-10
+    );
+    assert!(receipt.contains("\"continuum_error_bound\":false"));
+    assert!(!receipt.contains("unsupported-interface-transfer"));
+}
+
+#[test]
+fn g1_contact_adaptive_refines_and_retains_the_last_probed_contact_field() {
+    let mut spec = contact_refinement_project("adaptive");
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-10;
+    spec.budgets.as_mut().unwrap().memory_bytes = 2 * 1024 * 1024;
+    let receipt = contact_refinement_receipt(&spec, &contact_cards());
+    assert!(
+        receipt_number_field(&receipt, "solved_meshes") > 2.0,
+        "{receipt}"
+    );
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let rows: Vec<_> = history.split("{\"mesh\":").skip(1).collect();
+    assert!(
+        rows.len() > 1,
+        "a real contact mesh must be refined and independently probed: {receipt}"
+    );
+    let last = rows[rows.len() - 1];
+    for row in &rows {
+        assert!(receipt_number_field(row, "interface_pairs") > 0.0);
+        assert_eq!(
+            receipt_number_field(row, "probe_interface_pairs"),
+            4.0 * receipt_number_field(row, "interface_pairs"),
+            "each independent probe refines both joint traces, even when local marks stay inside a solid"
+        );
+    }
+    assert_eq!(
+        receipt_number_field(&receipt, "pair_count"),
+        receipt_number_field(last, "interface_pairs")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "elements"),
+        receipt_number_field(last, "tets")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "max"),
+        receipt_number_field(last, "t_max_k")
+    );
+    assert_eq!(
+        receipt_number_field(&receipt, "last_estimated_change_k"),
+        receipt_number_field(last, "estimated_change_k")
+    );
+}
+
+#[test]
+fn g1_contact_adaptive_uses_the_nonlinear_material_tangent_and_retains_its_remainder() {
+    let material = material_pack_bytes_with_property(
+        "AA6061",
+        "solve-nonlinear-contact-pack",
+        200.0,
+        450.0,
+        fs_matdb::PropertyValue::Curve {
+            abscissa: "T".to_string(),
+            abscissa_dims: fs_project::spec::dims::TEMPERATURE,
+            knots: vec![(200.0, 0.25), (450.0, 20.25)],
+            dims: CONDUCTIVITY_DIMS,
+        },
+        fs_matdb::InterpolationPolicy::LinearInside,
+    );
+    let cards = CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/nonlinear.fsmcdpk",
+            material,
+        ),
+        raw_pack(
+            CardPackKind::Interface,
+            "fixtures/contact.fsicdpk",
+            interface_pack_bytes(),
+        ),
+    ])
+    .unwrap();
+    let mut spec = contact_refinement_project("adaptive");
+    for binding in spec.materials.as_mut().unwrap() {
+        binding.card = cards.materials()[0].card().to_hex();
+    }
+    let receipt = contact_refinement_receipt(&spec, &cards);
+    assert!(
+        receipt.contains("\"status\":\"observed-tolerance-met\""),
+        "{receipt}"
+    );
+    let history = receipt
+        .split("\"history\":[")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    assert!(
+        history.contains("\"uses_nonlinear_jacobian\":true"),
+        "{receipt}"
+    );
+    let number = |name| receipt_number_field(history, name);
+    assert!(
+        number("linearization_remainder_k").abs() > 1e-10,
+        "the finite nonlinear remainder is measured and not silently dropped: {receipt}"
+    );
+    assert!(
+        (number("signed_linear_change_k")
+            + number("linearization_remainder_k")
+            + number("maximum_remainder_k")
+            - number("measured_change_k"))
+        .abs()
+            < 1e-10
+    );
+    assert!(receipt.contains("\"continuum_error_bound\":false"));
+}
+
+#[test]
 fn g0_conduction_stage_checks_interior_contact_resistance() {
     for peak in [0.1, 0.2] {
         let cards = contact_cards_with_interface(interface_pack_bytes_with_peak(Some(peak)));
@@ -4634,12 +4895,14 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
             .unwrap()
     };
     let linear = number("\"signed_linear_change_k\":");
+    let linearization = number("\"linearization_remainder_k\":");
     let remainder = number("\"maximum_remainder_k\":");
     let measured = number("\"measured_change_k\":");
     assert!(
-        (linear + remainder - measured).abs() < 1e-7,
-        "the checked dual and maximum-owner remainder reproduce the independently solved maximum change"
+        (linear + linearization + remainder - measured).abs() < 1e-7,
+        "the checked dual and both explicit remainders reproduce the independently solved maximum change"
     );
+    assert!(conduction.contains("\"uses_nonlinear_jacobian\":false"));
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
     assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 8, "{qoi}");
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();

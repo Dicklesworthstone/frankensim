@@ -113,7 +113,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// carrying that claim must not share a resumable run identity with this driver.
 /// Version 14 executes bounded enriched-dual adaptive studies for linear solids.
 /// Version 15 records uniform enrichment when marked refinement fails mesh quality.
-pub const SOLVE_DRIVER_VERSION: u32 = 15;
+/// Version 16 preserves finite contact through refinement and uses the actual
+/// linear/nonlinear residual and Jacobian for enriched goal comparisons.
+pub const SOLVE_DRIVER_VERSION: u32 = 16;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1281,6 +1283,7 @@ struct RungSolved {
 
 struct RungAdjointData {
     boundary: fs_conduction::ThermalBoundary,
+    interfaces: Option<fs_conduction::ThermalInterfaces>,
     source: fs_conduction::ScalarField,
     materials: fs_conduction::ElementMaterials,
     fallback: fs_conduction::ConductivityModel,
@@ -1291,11 +1294,14 @@ struct RungAdjointData {
 /// contributions only prioritize cells; they are not continuum error bounds.
 struct AdaptiveProbe {
     signed_linear_change_k: f64,
+    linearization_remainder_k: f64,
     maximum_remainder_k: f64,
     estimated_change_k: f64,
     measured_change_k: f64,
     dual_residual: f64,
     dual_iterations: usize,
+    primal_residual: f64,
+    uses_nonlinear_jacobian: bool,
     scores: Vec<f64>,
 }
 
@@ -1367,7 +1373,7 @@ fn adaptive_probe(
     let data = fine
         .adjoint_data
         .as_ref()
-        .expect("admitted adaptive linear problem");
+        .expect("admitted adaptive solid problem");
     let refusal = |error| {
         conduction_error(
             if matches!(error, fs_conduction::ConductionError::Cancelled { .. }) {
@@ -1379,17 +1385,6 @@ fn adaptive_probe(
             "inspect the material validity span and linear solver tolerance",
         )
     };
-    let design = fs_conduction::adjoint::ConductivityDesign::new(
-        fs_conduction::ConductionProblem {
-            mesh: &fine.mesh,
-            boundary: &data.boundary,
-            material: &data.fallback,
-            element_materials: Some(&data.materials),
-            source: &data.source,
-        },
-        data.linear,
-    )
-    .map_err(refusal)?;
     let mut peak = None;
     for (tet, &label) in fine.mesh.complex().tets.iter().zip(&fine.labels) {
         if label != region {
@@ -1407,18 +1402,24 @@ fn adaptive_probe(
         }
     }
     let peak = peak.expect("declared goal region has tetrahedra");
-    let mut weights = vec![0.0; design.dofs().n()];
-    if let Ok(slot) = design.dofs().free().binary_search(&peak) {
-        weights[slot] = 1.0;
-    }
-    let dual = design
-        .discrete_goal_error(
-            cx,
-            &vec![1.0; design.parameter_count()],
-            &design.dofs().gather(approximate),
-            &weights,
-        )
-        .map_err(refusal)?;
+    let mut weights = vec![0.0; fine.mesh.vertex_count()];
+    weights[peak] = 1.0;
+    let dual = fs_conduction::adjoint::compare_discrete_goal(
+        cx,
+        fs_conduction::ConductionProblem {
+            mesh: &fine.mesh,
+            boundary: &data.boundary,
+            material: &data.fallback,
+            element_materials: Some(&data.materials),
+            source: &data.source,
+        },
+        data.interfaces.as_ref(),
+        data.linear,
+        &fine.solution.temperature,
+        approximate,
+        &weights,
+    )
+    .map_err(refusal)?;
     let coarse_max = ladder_functional(
         &coarse.labels,
         &coarse.mesh.complex().tets,
@@ -1429,15 +1430,11 @@ fn adaptive_probe(
     // The second term records the nonsmooth maximum's actual change of owner.
     let remainder = approximate[peak] - coarse_max;
     let measured_change = fine.solution.temperature[peak] - coarse_max;
-    let mut contribution = vec![0.0; fine.mesh.vertex_count()];
-    for (&vertex, &value) in design
-        .dofs()
-        .free()
+    let contribution: Vec<_> = dual
+        .nodal_contributions
         .iter()
-        .zip(&dual.free_dof_contributions)
-    {
-        contribution[vertex] = value.abs();
-    }
+        .map(|value| value.abs())
+        .collect();
     let mut incidence = vec![0usize; fine.mesh.vertex_count()];
     for tet in &fine.mesh.complex().tets {
         for &v in tet {
@@ -1459,7 +1456,8 @@ fn adaptive_probe(
             scores[index / 8] += contribution[v as usize] / incidence[v as usize] as f64;
         }
     }
-    let estimated_change = dual.signed_error.abs() + remainder.abs();
+    let estimated_change =
+        dual.signed_residual_change.abs() + dual.linearization_remainder.abs() + remainder.abs();
     if scores
         .iter()
         .chain([&estimated_change, &measured_change])
@@ -1472,12 +1470,15 @@ fn adaptive_probe(
         ));
     }
     Ok(AdaptiveProbe {
-        signed_linear_change_k: dual.signed_error,
+        signed_linear_change_k: dual.signed_residual_change,
+        linearization_remainder_k: dual.linearization_remainder,
         maximum_remainder_k: remainder,
         estimated_change_k: estimated_change,
         measured_change_k: measured_change,
         dual_residual: dual.dual_relative_residual,
         dual_iterations: dual.dual_iterations,
+        primal_residual: dual.primal_relative_residual,
+        uses_nonlinear_jacobian: dual.uses_nonlinear_jacobian,
         scores,
     })
 }
@@ -1554,25 +1555,8 @@ fn adaptive_study(
             stop = "unsupported-temperature-goal";
             break;
         };
-        if solved.interface_pair_count > 0 {
-            stop = "unsupported-interface-transfer";
-            break;
-        }
         if solved.conjugate_fragment.is_some() {
             stop = "unsupported-coupled-adjoint";
-            break;
-        }
-        let data = solved
-            .adjoint_data
-            .as_ref()
-            .expect("uncoupled adjoint data");
-        let nonlinear = (0..solved.mesh.element_count()).any(|element| {
-            data.materials
-                .model_for(element)
-                .is_ok_and(|model| model.is_temperature_dependent())
-        });
-        if nonlinear {
-            stop = "unsupported-nonlinear-adjoint";
             break;
         }
         let coarse_max = ladder_functional(
@@ -1617,9 +1601,11 @@ fn adaptive_study(
         history.push(format!(
             "{{\"mesh\":{},\"tets\":{},\"vertices\":{},\"t_max_k\":{},\
              \"min_dihedral_deg\":{},\"probe_tets\":{},\"probe_t_max_k\":{},\
-             \"signed_linear_change_k\":{},\"maximum_remainder_k\":{},\
+             \"interface_pairs\":{},\"probe_interface_pairs\":{},\
+             \"signed_linear_change_k\":{},\"linearization_remainder_k\":{},\"maximum_remainder_k\":{},\
              \"estimated_change_k\":{},\"measured_change_k\":{},\"tolerance_k\":{},\
-             \"dual_residual\":{},\"dual_iterations\":{},\"marked_cells\":{},\
+             \"primal_residual\":{},\"dual_residual\":{},\"dual_iterations\":{},\
+             \"uses_nonlinear_jacobian\":{},\"marked_cells\":{},\
              \"absolute_contribution_sum_k\":{}}}",
             history.len(),
             complex.tets().len(),
@@ -1633,13 +1619,18 @@ fn adaptive_study(
                 &fine.solution.temperature,
                 Some(region)
             ))?,
+            solved.interface_pair_count,
+            fine.interface_pair_count,
             number(probe.signed_linear_change_k)?,
+            number(probe.linearization_remainder_k)?,
             number(probe.maximum_remainder_k)?,
             number(probe.estimated_change_k)?,
             number(probe.measured_change_k)?,
             number(tolerance_k)?,
+            number(probe.primal_residual)?,
             number(probe.dual_residual)?,
             probe.dual_iterations,
+            probe.uses_nonlinear_jacobian,
             marks.len(),
             number(probe.scores.iter().sum())?,
         ));
@@ -1728,7 +1719,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the dual's linear goal and explicit maximum remainder are retained; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact and nonlinear conductivity, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     Ok((complex, solved, receipt))
@@ -1740,6 +1731,7 @@ struct LadderRung {
     rung: usize,
     tets: usize,
     vertices: usize,
+    interface_pairs: usize,
     /// `(volume / tets)^(1/3)`, m — halves per rung by construction.
     h_m: f64,
     min_dihedral_deg: f64,
@@ -1830,6 +1822,7 @@ fn ladder_row(
         rung,
         tets: complex.tets().len(),
         vertices: complex.positions().len(),
+        interface_pairs: solved.interface_pair_count,
         h_m: effective_h(complex.positions(), complex.tets()),
         min_dihedral_deg: solved.census.min_dihedral_deg,
         t_max_k: ladder_functional(
@@ -5710,6 +5703,16 @@ fn conduction_receipt(
                 // clause; the floor keeps a tiny declared tolerance sane.
                 config.linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
+            if adaptive_requested && derived.is_empty() {
+                // The enriched comparison independently checks this same
+                // nonlinear residual against the adjoint's linear tolerance.
+                // Leave room below that gate and solve each inner system more
+                // tightly so the nonlinear stop cannot stall at its CG floor.
+                config.stop.residual_rtol = config.linear.tolerance * 0.5;
+                config.stop.residual_atol = 0.0;
+                config.stop.step_atol = 0.0;
+                config.linear.tolerance *= 0.1;
+            }
             if let Some(envelope) = &spec.envelope {
                 config.initial = fs_conduction::InitialGuess::Uniform(
                     (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
@@ -5839,15 +5842,17 @@ fn conduction_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
-        let adjoint_data = if adaptive_requested && interface_resolution.pairs.is_empty()
-            && conjugate_fragment.is_none() {
+        let adjoint_data = if adaptive_requested && conjugate_fragment.is_none() {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &BTreeMap::new())?.boundary;
+            let interfaces = lower_thermal_interfaces(
+                spec, cards, &mesh, &boundary, &interface_resolution,
+            )?;
             let mut linear = fs_conduction::LinearConfig::default();
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
-            Some(RungAdjointData { boundary, source, materials: element_materials, fallback, linear })
+            Some(RungAdjointData { boundary, interfaces, source, materials: element_materials, fallback, linear })
         } else { None };
         adaptive_deadline(deadline)?;
         Ok(RungSolved {
@@ -5864,8 +5869,9 @@ fn conduction_receipt(
         // The h-ladder: rung 0 is the audited base; every further rung is one
         // uniform 1->8 refinement (fs-mesh CONTRACT item 16), taken while the
         // next rung still fits the declared memory budget and the ladder is
-        // short of LADDER_RUNGS. Interface pairs bind to base faces, so a
-        // project with interfaces solves one rung and the receipt says so.
+        // short of LADDER_RUNGS. Each solve rebuilds region-owned traces and
+        // resolves their subtriangles against the declared source faces, so
+        // finite contact, boundary laws and source ownership survive refinement.
         let mut complex = audited.labeled().clone();
         let mut solved = solve_rung(&complex)?;
         let adaptive_fragment = if adaptive_requested {
@@ -5896,10 +5902,6 @@ fn conduction_receipt(
                 break;
             }
             if rungs.len() >= LADDER_RUNGS {
-                break;
-            }
-            if solved.interface_pair_count > 0 {
-                ladder_stop = "interface-pairs-bind-base-faces";
                 break;
             }
             if complex.tets().len().saturating_mul(8) > max_tets {
@@ -6037,12 +6039,13 @@ fn conduction_receipt(
         .iter()
         .map(|row| {
             Ok(format!(
-                "{{\"rung\":{},\"tets\":{},\"vertices\":{},\"h_m\":{},\"min_dihedral_deg\":{},\
+                "{{\"rung\":{},\"tets\":{},\"vertices\":{},\"interface_pairs\":{},\"h_m\":{},\"min_dihedral_deg\":{},\
                  \"t_max_k\":{},\"nonlinear_iterations\":{},\"krylov_iterations\":{},\
                  \"final_residual\":{}}}",
                 row.rung,
                 row.tets,
                 row.vertices,
+                row.interface_pairs,
                 finite("ladder.h_m", row.h_m)?,
                 finite("ladder.min_dihedral_deg", row.min_dihedral_deg)?,
                 finite("ladder.t_max_k", row.t_max_k)?,
