@@ -23,13 +23,6 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
-# Optional: equilibrated continuum mean enclosure (fs-verify::tet). It lives in
-# this consumer so the verifier never depends on the solver (fs-conduction ->
-# fs-adjoint -> fs-verify would otherwise close a cycle).
-fs-verify = { path = "../fs-verify", features = ["certified-speculation"], optional = true }
-
-[features]
-equilibrated-mean = ["dep:fs-verify"]
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
@@ -40,10 +33,6 @@ fs-io = { path = "../fs-io" }
 fs-mesh = { path = "../fs-mesh" }
 fs-mms = { path = "../fs-mms" }
 fs-vvreg = { path = "../fs-vvreg" }
-
-[[example]]
-name = "conduction_mean"
-required-features = ["equilibrated-mean"]
 
 [lints]
 workspace = true

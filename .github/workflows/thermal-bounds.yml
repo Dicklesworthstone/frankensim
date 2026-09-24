@@ -35,6 +35,6 @@ jobs:
           cargo test --release -p fs-verify --features certified-speculation --lib tet::
       - name: Test real conduction primal and dual consumers
         run: |
-          cargo test --release -p fs-conduction --features equilibrated-mean --lib verified_mean::
+          cargo test --release -p fs-verify --features thermal-conduction --lib conduction::
       - name: Execute mean-temperature comparison
-        run: cargo run --release -p fs-conduction --features equilibrated-mean --example conduction_mean -- 4 2.0
+        run: cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0

@@ -7,8 +7,8 @@ The existing 1D speculation APIs and their evidence authorities are unchanged.
 ## Real consumer
 
 ```sh
-cargo run -p fs-conduction --features equilibrated-mean --example conduction_mean -- 4 2.0
-cargo test -p fs-conduction --features equilibrated-mean --lib verified_mean::
+cargo run -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
+cargo test -p fs-verify --features thermal-conduction --lib conduction::
 cargo test -p fs-verify --features certified-speculation --lib tet::
 ```
 
