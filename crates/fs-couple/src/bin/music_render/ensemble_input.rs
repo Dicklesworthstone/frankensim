@@ -92,6 +92,7 @@ struct SourceInfo {
     components: usize,
     modes: usize,
     controls: usize,
+    exterior_json: String,
 }
 // Preserve finite wrappers for producers whose raw scheduler has no horizon.
 type DynamicEnsemble = PressureEnsemble<Box<dyn PressureRenderer>>;
@@ -116,7 +117,7 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: i.schema, hash: i.input_hash, rate: i.sample_rate_hz,
                 samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: i.voices, modes: i.modes, controls: 0,
+                components: i.voices, modes: i.modes, controls: 0, exterior_json: String::new(),
             })
         }
         Kind::Bow => {
@@ -125,7 +126,7 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: BOWED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls,
+                components: 1, modes: i.string_modes + 1, controls: i.compiled_controls, exterior_json: String::new(),
             })
         }
         Kind::Plate => {
@@ -134,16 +135,17 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: i.retained_modes, controls: 0,
+                components: 1, modes: i.retained_modes, controls: 0, exterior_json: String::new(),
             })
         }
         Kind::Valve => {
             let p = PlateValvePerformance::from_bytes(&bytes, block, &CancelGate::new()).map_err(|e|e.to_string())?;
             let i = p.info();
+            let exterior_json = super::wind_input::outlet_provenance(p.renderer());
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
-                components:1,modes:1,controls:i.compiled_controls,
+                components:1,modes:1,controls:i.compiled_controls,exterior_json,
             })
         }
         Kind::Reed => {
@@ -152,7 +154,7 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             (Box::new(p) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: REED_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                components: 1, modes: 0, controls: i.compiled_controls,
+                components: 1, modes: 0, controls: i.compiled_controls, exterior_json: String::new(),
             })
         }
     };
@@ -217,6 +219,8 @@ pub(super) fn run(args: &[String]) -> Result<(), String> {
         let o = aligned.observation;
         let scope = if source.kind == Kind::Reed {
             ",\"observation_scope\":\"bore-pressure-plus-compact-jet-proxy; not exterior microphone\""
+        } else if !source.exterior_json.is_empty() {
+            source.exterior_json.as_str()
         } else if source.kind == Kind::Valve {
             ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\""
         } else { "" };

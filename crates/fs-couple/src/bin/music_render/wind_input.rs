@@ -4,7 +4,7 @@ use std::path::Path;
 use fs_blake3::ContentHash;
 use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA};
-use fs_couple::bernoulli_aperture::performance::{ApertureObservation, CoupledAperture};
+use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
 use fs_exec::CancelGate;
 use super::{RATE, create_outputs, json_string, stream_output};
@@ -38,6 +38,18 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
     Ok((*input, *output, block.unwrap_or(512), decimate))
 }
 
+// A physical propagation delay is source geometry, not an output/filter latency
+// to be removed by ensemble alignment. Keep it on the mechanical sample clock.
+pub(super) fn outlet_provenance(p: &AperturePerformance) -> String {
+    let ApertureObservation::TubeBaffled(c) = p.observation() else { return String::new(); };
+    let CoupledAperture::Tube(t) = p.system() else { unreachable!("outlet receiver requires a tube"); };
+    let mic = p.baffled_receiver().expect("admitted receiver");
+    format!(",\"observation_scope\":\"one-way exterior Rayleigh pressure; uniform circular outlet in infinite rigid baffle; terminal load is independently supplied\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"propagation_delay_mechanical_samples\":[{},{}],\"radiation_feedback_added\":false}}",
+        c.position_m[0],c.position_m[1],c.position_m[2],t.spec().radius_m,
+        t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s,
+        c.radial_rings,c.angular_points,c.maximum_frequency_hz,mic.delay_samples.0,mic.delay_samples.1)
+}
+
 struct Loaded {
     source: Box<dyn PressureRenderer>, rate:u32, samples:u64, full_scale_pa:f64,
     hash:ContentHash, fixture:&'static str, source_json:String,
@@ -49,9 +61,15 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
         let p=PlateValvePerformance::from_bytes(bytes,block,&CancelGate::new()).map_err(|e|e.to_string())?;
         let i=p.info();let a=p.renderer().system().aperture();
         let plate=a.plate_reduction().expect("plate file retains its specimen");
-        let observation=match p.renderer().observation() {ApertureObservation::Inlet=>"inlet",_=>"terminal"};
+        let observation=match p.renderer().observation() {
+            ApertureObservation::Inlet=>"inlet", ApertureObservation::TubeTerminal=>"terminal",
+            ApertureObservation::TubeBaffled(_)=>"baffled-outlet", _=>unreachable!("file owns a uniform tube"),
+        };
+        let receiver_json=outlet_provenance(p.renderer());
+        let scope=if receiver_json.is_empty() { "internal pressure, not an exterior microphone" }
+            else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
         let requested=match p.renderer().system() {CoupledAperture::Tube(t)=>t.spec().length_m,_=>unreachable!("file owns a uniform tube")};
-        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; lossless tube interior; internal pressure, not an exterior microphone\"}}",
+        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; lossless tube interior; {scope}\"{receiver_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,

@@ -3,12 +3,15 @@
 //! This adapter owns the existing system, not a replacement voice. Plate shape,
 //! spatial closure, material memory, wall/load state and traveling waves remain
 //! in their physical owners. Only pressure assignments are scheduled. The output
-//! is a named INTERNAL pressure trace; it is not an exterior microphone model.
+//! is either a named internal pressure or an explicitly selected one-way baffled
+//! outlet receiver. The latter observes actual terminal FLOW, not bore pressure.
 
 /// Supplied mesh, closure, material memory and canonical pressure sources.
 pub mod file;
 
 use super::dynamic::DynamicAperture;
+use crate::acoustic_realize::AcousticRealizeError;
+use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use super::network::ApertureNetwork;
 use super::tube::{ApertureTube, TubeDrive};
 use crate::pcm_wav::observation::PressureRenderer;
@@ -34,7 +37,7 @@ impl CoupledAperture {
 }
 
 /// Which physical pressure is sampled once per complete mechanical step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ApertureObservation {
     /// Junction pressure used in the implicit pressure/structure solve.
     Inlet,
@@ -42,6 +45,11 @@ pub enum ApertureObservation {
     TubeTerminal,
     /// Actual accepted node pressure in a connected tube network.
     NetworkNode(usize),
+    /// One-way exterior receiver of a uniform tube's outward terminal flow.
+    /// The circular mouth lies in an infinite rigid baffle. The authored
+    /// terminal reflection still drives the mechanics; no additional radiation
+    /// reaction is silently applied or claimed to match that terminal load.
+    TubeBaffled(CircularOutletReceiver),
 }
 
 /// Finite window and bounded offline pressure compilation.
@@ -72,12 +80,16 @@ pub struct AperturePerformanceConfig {
 pub struct AperturePerformance {
     system: CoupledAperture,
     observation: ApertureObservation,
+    receiver: Option<BaffledPressure>,
     config: AperturePerformanceConfig,
     schedule: GestureSchedule,
     controls: Vec<ScheduledControl>,
     next: usize,
     held_pressure_pa: f64,
     poisoned: bool,
+}
+fn receiver_error(error: String) -> RenderError {
+    RenderError::Voice(AcousticRealizeError::Nonlinear(error))
 }
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 fn invalid(what: &'static str) -> GestureCompileError { GestureCompileError::Invalid { what } }
@@ -100,11 +112,20 @@ impl AperturePerformance {
             || a.accepted_steps() != 0 || config.samples > a.spec().max_steps
             || a.spec().time_step_s.to_bits() != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
         { return Err(invalid("aperture performance requires a matching clock, positive capacity/window and an unadvanced complete physical system")); }
-        match (&system, observation) {
-            (_, ApertureObservation::Inlet) | (CoupledAperture::Tube(_), ApertureObservation::TubeTerminal) => {}
-            (CoupledAperture::Network(m), ApertureObservation::NetworkNode(n)) if n < m.spec().nodes.len() => {}
+        let receiver = match (&system, observation) {
+            (_, ApertureObservation::Inlet) | (CoupledAperture::Tube(_), ApertureObservation::TubeTerminal) => None,
+            (CoupledAperture::Network(m), ApertureObservation::NetworkNode(n)) if n < m.spec().nodes.len() => None,
+            (CoupledAperture::Tube(m), ApertureObservation::TubeBaffled(location)) => {
+                // Radius and gas are the actual physical tube's, never an
+                // independently tuned observer area or invented gain. Waveguide
+                // construction is quiescent, so the initial flow history is zero.
+                Some(BaffledPressure::circular_outlet(m.spec().radius_m,
+                    config.sample_rate_hz, location, RayleighMedium {
+                        density: a.spec().density_kg_m3, sound_speed: m.spec().sound_speed_m_s,
+                    }).map_err(|e| GestureCompileError::Render(receiver_error(e)))?)
+            }
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
-        }
+        };
         let [track] = schedule.tracks() else {
             return Err(invalid("one explicitly typed blowing-pressure track is required"));
         };
@@ -123,7 +144,7 @@ impl AperturePerformance {
         let controls = compile_pressure_gestures(&schedule, &[PressureGestureBinding {
             track: track.id.clone(), voice: 0,
         }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
-        Ok(Self { system, observation, config, schedule, controls, next: 0,
+        Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
             held_pressure_pa: 0.0, poisoned: false })
     }
 
@@ -139,6 +160,11 @@ impl AperturePerformance {
     /// Named physical location of the output trace.
     #[must_use]
     pub const fn observation(&self) -> ApertureObservation { self.observation }
+    /// Immutable receiver geometry/delay information, absent for internal traces.
+    /// The physical propagation delay remains inside this source; downstream
+    /// rate-conversion or ensemble alignment must not remove it.
+    #[must_use]
+    pub fn baffled_receiver(&self) -> Option<&BaffledPressure> { self.receiver.as_ref() }
     /// Controls committed with successful mechanical samples, never ahead of them.
     #[must_use]
     pub fn applied_controls(&self) -> &[ScheduledControl] { &self.controls[..self.next] }
@@ -157,6 +183,9 @@ impl AperturePerformance {
                 Ok(match self.observation {
                     ApertureObservation::Inlet => f.aperture.bore_pressure_pa,
                     ApertureObservation::TubeTerminal => f.waveguide.terminal_pressure_pa,
+                    ApertureObservation::TubeBaffled(_) => self.receiver.as_mut()
+                        .expect("baffled observation constructed its complete receiver")
+                        .step(&[f.waveguide.terminal_flow_m3_s]).map_err(receiver_error)?,
                     _ => unreachable!("observer admitted against the exclusively owned system"),
                 })
             }

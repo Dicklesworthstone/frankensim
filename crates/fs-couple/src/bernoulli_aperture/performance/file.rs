@@ -9,6 +9,7 @@ use crate::bernoulli_aperture::plate::{PlateApertureOptions, PlateApertureReduct
 use crate::bernoulli_aperture::plate::closure::PlateClosureSpec;
 use crate::bernoulli_aperture::tube::{ApertureTube, UniformTubeSpec};
 use crate::render::schedule::GestureCompileError;
+use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
 use fs_material::{gas::GasState, visco::GeneralizedMaxwell};
@@ -90,7 +91,8 @@ impl PlateValvePerformance {
     /// supplied material memory, then compile the pressure phrase. Nothing steps
     /// during admission. Existing owners keep their physical/solver thresholds.
     /// The uniform tube has lossless axial propagation and an explicitly supplied
-    /// passive memoryless terminal; observations are INTERNAL pressure only.
+    /// passive memoryless terminal. Internal traces and explicit one-way baffled
+    /// outlet receivers remain distinct observations of the same mechanics.
     ///
     /// # Errors
     /// Invalid/count-limited source, cancellation, section/mesh/reduction/contact/
@@ -164,8 +166,14 @@ impl Parsed {
         let tube=UniformTubeSpec{length_m:row.scalar()?,radius_m:row.scalar()?,terminal_reflection:row.scalar()?,
             max_length_error_m:row.scalar()?,max_wave_memory_bytes:row.count(64*1024*1024)?,sound_speed_m_s:air.sound_speed};row.finish()?;
         let mut row=r.row("observation")?;
-        let observation=match row.word()? {"inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
-            _=>return Err(bad(r.line,"observation must explicitly name inlet or terminal internal pressure"))};row.finish()?;
+        let observation=match row.word()? {
+            "inlet"=>ApertureObservation::Inlet,"terminal"=>ApertureObservation::TubeTerminal,
+            "baffled-outlet"=>ApertureObservation::TubeBaffled(CircularOutletReceiver {
+                position_m:[row.scalar()?,row.scalar()?,row.scalar()?],
+                radial_rings:row.count(128)?,angular_points:row.count(512)?,maximum_frequency_hz:row.scalar()?,
+            }),
+            _=>return Err(bad(r.line,"observation must explicitly name inlet, terminal or baffled-outlet")),
+        };row.finish()?;
         let mut row=r.row("plate")?;
         let support=match row.word()? {"clamped"=>EdgeSupport::Clamped,"simply-supported"=>EdgeSupport::SimplySupported,
             _=>return Err(bad(r.line,"unsupported plate support law"))};
