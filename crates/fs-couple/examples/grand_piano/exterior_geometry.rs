@@ -8,6 +8,9 @@ use fs_bem::{helmholtz::{self, Formulation, Medium}, panel3d::SpherePanels};
 use fs_math::c64::C64;
 use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU};
 
+#[path = "exterior_section_skin.rs"]
+mod section_skin;
+
 pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
 pub const MAX_SPEC_BYTES:usize=64*1024;

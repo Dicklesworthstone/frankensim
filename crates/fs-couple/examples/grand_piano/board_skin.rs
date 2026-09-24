@@ -6,6 +6,8 @@
 //! rim are closed, never capped across the XY plane. No ribs/cabinet/lid are
 //! invented. This is the FE section-column image, not a scanned smooth finish.
 //!
+//! `build_continuous` is an explicitly selected volume-preserving P1
+//! thickness reconstruction for smooth tapers; it reports facetwise changes.
 //! Heights use a declared 1 nm grid solely to avoid sub-roundoff step facets.
 //! The actual maximum thickness change and enclosed-volume error are returned.
 //! Folded graphs, nonmanifold steps and unresolved panels refuse, not repair.
@@ -102,6 +104,14 @@ impl Skin {
     /// loaded coordinates may differ from its unloaded reference. No material
     /// constants, node normals or thicknesses are inferred from a visual asset.
     pub fn from_source(motion: &MotionSurface, source: &str, offset_limit_m: f64, cap: usize) -> Result<Self,String> {
+        Self::build(&motion.mesh, &Self::source_thickness(motion, source)?, offset_limit_m, cap)
+    }
+    /// Explicit alternative for a smooth manufactured panel represented by
+    /// cellwise structural sections. Never selected as an automatic fallback.
+    pub fn continuous_from_source(motion: &MotionSurface, source: &str, offset_limit_m: f64, cap: usize) -> Result<Self,String> {
+        Self::build_continuous(&motion.mesh, &Self::source_thickness(motion, source)?, offset_limit_m, cap)
+    }
+    fn source_thickness(motion: &MotionSurface, source: &str) -> Result<Vec<f64>, String> {
         if source.len() > MAX_SOURCE_BYTES { return Err("section skin source exceeds 8 MiB".into()); }
         let mut rows = source.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
         if !matches!(rows.next(), Some("frankensim-board-geometry-si-v1" | "frankensim-crowned-board-si-v1")) {
@@ -122,7 +132,7 @@ impl Skin {
             thickness[e] = Some(f[5].parse::<f64>().map_err(|_| "invalid skin section thickness")?);
         }
         let thickness = thickness.into_iter().collect::<Option<Vec<_>>>().ok_or("missing skin section thickness")?;
-        Self::build(&motion.mesh, &thickness, offset_limit_m, cap)
+        Ok(thickness)
     }
     /// Construct a column-union boundary. 1 nm height quantization is explicit;
     /// source thickness and structural operators are NEVER changed. No source
@@ -187,23 +197,98 @@ impl Skin {
                 b.wall(e,a,c,low,high)?;b.wall(e,a,c,-high,-low)?;
             }
         }
+        b.skin.finish(rounded_volume)
+    }
+    /// Explicit mass-lumped P1 reconstruction of VERTICAL half thickness.
+    /// Each nodal value is sum(A*h)/(2*sum(A_xy)) over incident facets. Hence
+    /// sum(A_xy*mean(2*z_node)) == sum(A*h): total physical section volume is
+    /// preserved before the stated 1 nm rounding. Structural cards/operators
+    /// are not changed; individual acoustic facet thicknesses DO change, and
+    /// their maximum mean-thickness discrepancy is reported. This alternative
+    /// avoids fictitious internal step walls when sections approximate a smooth
+    /// taper. It is not a recovered scan or a unique manufacturing geometry.
+    pub fn build_continuous(mesh: &ShellMesh, thickness: &[f64], offset_limit_m: f64, cap: usize) -> Result<Self, String> {
+        if mesh.nodes.len()>20_000 || mesh.tris.len()>40_000 || mesh.tris.is_empty()
+            || thickness.len()!=mesh.tris.len() || !offset_limit_m.is_finite()
+            || offset_limit_m<=0. || offset_limit_m>0.05 || !(1..=MAX_EXPORT_PANELS).contains(&cap)
+            || mesh.nodes.iter().flatten().any(|v|!v.is_finite() || v.abs()>100.) {
+            return Err("invalid continuous section-skin geometry, offset or work budget".into());
+        }
+        let mut mass=vec![0.;mesh.nodes.len()];let mut volume=mass.clone();
+        let mut edges=BTreeMap::<(usize,usize),Vec<(usize,usize,usize)>>::new();
+        let mut source_volume=0.;let mut unique=BTreeSet::new();
+        for (e,tri) in mesh.tris.iter().enumerate() {
+            let g=mesh.facet(e).map_err(|e|e.to_string())?;let h=thickness[e];
+            if !h.is_finite() || h<=0. || g.frame[2][2]<0.95 {return Err("continuous skin requires finite positive sections and an upward shallow graph".into());}
+            let mut sorted=*tri;sorted.sort_unstable();
+            if !unique.insert(sorted) {return Err("duplicate source facet in continuous skin".into());}
+            source_volume+=g.area_m2*h;
+            for i in 0..3 {
+                mass[tri[i]]+=g.area_m2*g.frame[2][2];volume[tri[i]]+=g.area_m2*h*0.5;
+                let(a,b)=(tri[i],tri[(i+1)%3]);edges.entry((a.min(b),a.max(b))).or_default().push((e,a,b));
+            }
+        }
+        let mut degree=vec![0;mesh.nodes.len()];
+        for uses in edges.values() {
+            if uses.len()==1 {degree[uses[0].1]+=1;degree[uses[0].2]+=1;}
+            else if uses.len()!=2 || uses[0].1!=uses[1].2 || uses[0].2!=uses[1].1 {
+                return Err("nonmanifold/orientation error in continuous source skin".into());
+            }
+        }
+        if degree.iter().any(|&n|n!=0 && n!=2) {return Err("pinched continuous source boundary".into());}
+        let mut heights=Vec::with_capacity(mass.len());let mut maximum_offset=0.0_f64;
+        for (m,v) in mass.iter().zip(volume) {
+            let h=v/m;
+            if !h.is_finite() || h<=0. || h>offset_limit_m {return Err("continuous skin height is absent/nonfinite or exceeds the declared limit".into());}
+            let z=(h/HEIGHT_QUANTUM_M).round() as i64;
+            let h=z as f64*HEIGHT_QUANTUM_M;
+            if z<=0 || h>offset_limit_m {return Err("continuous section thickness/offset unresolved on the 1 nm grid".into());}
+            heights.push(z);maximum_offset=maximum_offset.max(h);
+        }
+        let mut rounded_volume=0.;let mut maximum_change=0.0_f64;
+        for (e,t) in mesh.tris.iter().enumerate() {
+            let g=mesh.facet(e).map_err(|e|e.to_string())?;
+            let mean=t.iter().map(|&i|heights[i] as f64*HEIGHT_QUANTUM_M).sum::<f64>()/3.;
+            let h=2.*g.frame[2][2]*mean;
+            rounded_volume+=g.area_m2*h;maximum_change=maximum_change.max((h-thickness[e]).abs());
+        }
+        let skin=Self {vertices:Vec::new(),triangles:Vec::new(),embeddings:Vec::new(),source_triangles:mesh.tris.clone(),source_nodes:mesh.nodes.clone(),
+            section_volume_m3:source_volume,volume_m3:0.,maximum_thickness_change_m:maximum_change,maximum_offset_m:maximum_offset};
+        let mut b=Builder {mesh,skin,ids:BTreeMap::new(),levels:Vec::new(),cap};
+        for (e,&t) in mesh.tris.iter().enumerate() {for sign in [1_i64,-1] {
+            let order=if sign==1 {[0,1,2]}else{[0,2,1]};
+            let ids=order.map(|i|b.vertex(t[i],sign*heights[t[i]]));
+            b.face(ids,Embedding {element:e,bary:order.map(unit),z:order.map(|i|sign as f64*heights[t[i]] as f64*HEIGHT_QUANTUM_M)})?;
+        }}
+        for uses in edges.values() {if uses.len()==1 {
+            let(e,a,c)=uses[0];let t=mesh.tris[e];
+            let ia=t.iter().position(|&n|n==a).ok_or("missing boundary node")?;
+            let ic=t.iter().position(|&n|n==c).ok_or("missing boundary node")?;
+            let za=heights[a] as f64*HEIGHT_QUANTUM_M;let zc=heights[c] as f64*HEIGHT_QUANTUM_M;
+            let ring=[b.vertex(a,-heights[a]),b.vertex(c,-heights[c]),b.vertex(c,heights[c]),b.vertex(a,heights[a])];
+            b.face([ring[0],ring[1],ring[2]],Embedding {element:e,bary:[unit(ia),unit(ic),unit(ic)],z:[-za,-zc,zc]})?;
+            b.face([ring[0],ring[2],ring[3]],Embedding {element:e,bary:[unit(ia),unit(ic),unit(ia)],z:[-za,zc,za]})?;
+        }}
+        b.skin.finish(rounded_volume)
+    }
+    fn finish(mut self, rounded_volume: f64) -> Result<Self, String> {
         // Prove exact indexed closure after splitting all level junctions.
         // Four incident walls on a vertical edge (a pinched step) must refuse.
         let mut closure=BTreeMap::<(usize,usize),(usize,i32)>::new();
-        for t in &b.skin.triangles {for i in 0..3 {
+        for t in &self.triangles {for i in 0..3 {
             let (a,c)=(t[i],t[(i+1)%3]);let use_count=closure.entry((a.min(c),a.max(c))).or_default();
             use_count.0+=1;use_count.1+=if a<c {1}else{-1};
         }}
         if closure.values().any(|v|*v!=(2,0)) {return Err("generated section steps are nonmanifold; no boundary repair was performed".into());}
-        let origin=mesh.nodes[0];
-        let volume=b.skin.triangles.iter().map(|t| {
-            let [a,c,d]=t.map(|i|sub(b.skin.vertices[i],origin));dot(a,cross(c,d))/6.
+        let origin=self.source_nodes[0];
+        let volume=self.triangles.iter().map(|t| {
+            let [a,c,d]=t.map(|i|sub(self.vertices[i],origin));dot(a,cross(c,d))/6.
         }).sum::<f64>();
-        if !volume.is_finite() || !source_volume.is_finite() || source_volume<=0.
+        if !volume.is_finite() || !self.section_volume_m3.is_finite() || self.section_volume_m3<=0.
             || (volume-rounded_volume).abs()>1e-10*rounded_volume+1e-15 {
             return Err("section skin did not close the column volume".into());
         }
-        b.skin.volume_m3=volume;Ok(b.skin)
+        self.volume_m3=volume;Ok(self)
     }
     pub fn panel_triangles(&self)->Vec<[[f64;3];3]> {
         self.triangles.iter().map(|t|t.map(|i|self.vertices[i])).collect()
@@ -233,7 +318,7 @@ impl Skin {
         Ok(out)
     }
     pub fn obj(&self)->String {
-        let mut out=format!("# Admitted section-column acoustic image, SI metres; not a scanned cabinet.\n# height quantum {} m; maximum section thickness change {} m\n# section volume {} m3; skin volume {} m3\no {LABEL}\n",HEIGHT_QUANTUM_M,self.maximum_thickness_change_m,self.section_volume_m3,self.volume_m3);
+        let mut out=format!("# Admitted board-thickness acoustic image, SI metres; not a scanned cabinet.\n# height quantum {} m; maximum facet mean-thickness change {} m\n# section volume {} m3; skin volume {} m3\no {LABEL}\n",HEIGHT_QUANTUM_M,self.maximum_thickness_change_m,self.section_volume_m3,self.volume_m3);
         for p in &self.vertices {writeln!(out,"v {:.17e} {:.17e} {:.17e}",p[0],p[1],p[2]).unwrap();}
         for t in &self.triangles {writeln!(out,"f {} {} {}",t[0]+1,t[1]+1,t[2]+1).unwrap();}
         out

@@ -22,10 +22,12 @@
 #[path="grand_piano/exterior_loading.rs"] mod exterior_loading;
 #[path="grand_piano/radiation_fit.rs"] mod radiation_fit;
 #[path="grand_piano/exterior_playback.rs"] mod playback;
+#[path="grand_piano/section_skin_cli.rs"] mod section_skin;
 use exterior_geometry::{Boundary,Specification,RATE};
 use std::{fmt::Write as _,io::{Read,Write}};
 
-const USAGE:&str="piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe DRIVE_KEY OUTPUT.csv
+const USAGE:&str="piano_exterior export-skin BOARD.fsb|BOARD.fss SCALE.csv|steinway-d ACOUSTICS.fspe OUTPUT.obj [--continuous-thickness]
+piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe DRIVE_KEY OUTPUT.csv
 piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
@@ -43,6 +45,17 @@ string material damping for a declared conservative-structure comparison.
 It retains the complete complex radiation load and all original modes. Near
 fixed-interface string poles use a bounded coupled solve, not fabricated loss.
 This option is not accepted by response, render or render-loaded.
+
+BODY.obj can instead be the explicit keyword board-skin: derive both faces,
+rim/hole walls and section-thickness steps from the SAME prepared physical board.
+Both board-skin and board-skin-continuous require SI identity transform and only
+moving,soundboard_skin. The continuous variant EXPLICITLY reconstructs a nodal
+thickness field while preserving total section volume; per-facet changes are
+reported. It is suitable for a smooth taper represented by cellwise sections.
+Neither variant invents a cabinet/lid or changes the structural cards.
+export-skin (optionally --continuous-thickness) writes that equilibrium surface as OBJ,
+without a BEM solve; it can exceed the renderer's separate 2048-panel limit.
+The 1 nm height grid and volume discrepancy are reported. See SECTION_SKIN.md.
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
 and edges of a finite soundboard. Label every part as moving or rigid in the
@@ -115,14 +128,21 @@ fn prepare(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spec:Specifica
 }
 fn prepare_controlled(board_text:&str,courses:Vec<geometry::Course>,obj:&str,spec:Specification,
     options:&playback::Options,controls:playback::Controls)->Result<Scene,String> {
+    prepare_controlled_body(board_text,courses,Some(obj),spec,options,controls,false)
+}
+fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Option<&str>,mut spec:Specification,
+    options:&playback::Options,controls:playback::Controls,continuous:bool)->Result<Scene,String> {
     options.validate()?;
+    if obj.is_none() {spec.require_board_skin()?;}
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let board=if crowned_board::is_crowned(board_text) {
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
     } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
     let piano=controls.instrument(courses,&board.modes,options)?;
-    let boundary=Boundary::from_obj(obj,&spec,board.motion.as_ref().ok_or("missing full-vector structural motion")?)?
-        .loaded(&piano.bank)?;
+    let (bare,description)=section_skin::boundary(obj,board_text,&spec,
+        board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
+    let boundary=bare.loaded(&piano.bank)?;
+    spec.source.push_str(&format!("; {description}"));
     Ok(Scene {piano,board,boundary,spec})
 }
 fn response(scene:&Scene)->Result<String,String> {
@@ -159,7 +179,12 @@ fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specifi
 }
 fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,
     drive:u8,options:&playback::Options,damping:bool)->Result<String,String> {
+    admittance_controlled_body(board_text,courses,Some(obj),spec,drive,options,damping,false)
+}
+fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Option<&str>,spec:&Specification,
+    drive:u8,options:&playback::Options,damping:bool,continuous:bool)->Result<String,String> {
     options.validate()?;
+    if obj.is_none() {spec.require_board_skin()?;}
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
     let board=if crowned_board::is_crowned(board_text) {
@@ -167,10 +192,11 @@ fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,sp
     } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
     let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
         0.45*f64::from(RATE),options.modes,damping)?;
-    let boundary=Boundary::from_obj(obj,spec,board.motion.as_ref().ok_or("missing harmonic surface motion")?)?
-        .loaded(model.bank())?;
+    let (bare,description)=section_skin::boundary(obj,board_text,spec,
+        board.motion.as_ref().ok_or("missing harmonic surface motion")?,continuous)?;
+    let boundary=bare.loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
-    Ok(format!("# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+    Ok(format!("# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
         board.provenance,if damping {"original wood/string material damping"}else{"explicitly disabled by --lossless-structure"},
         board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
 }
@@ -193,6 +219,13 @@ fn run(args:&[String])->Result<(),String> {
     match args {
         []=>{println!("{USAGE}");Ok(())},
         [help] if help=="--help" || help=="-h"=>{println!("{USAGE}");Ok(())},
+        [command,board,strings,spec,output,tail @ ..] if command=="export-skin"=>{
+            let continuous=match tail {
+                []=>false,[flag] if flag=="--continuous-thickness"=>true,
+                _=>return Err("export-skin accepts only optional --continuous-thickness".into()),
+            };
+            section_skin::export(board,strings,spec,output,continuous)
+        },
         [command,board,strings,obj,spec,drive,output,tail @ ..] if command=="admittance"=>{
             let (options,damping)=admittance_options(tail)?;
             let drive:u8=drive.parse().map_err(|_|"admittance requires a MIDI bridge key in 21..108")?;
@@ -202,8 +235,8 @@ fn run(args:&[String])->Result<(),String> {
             let courses=scale(strings)?;
             if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
             let board=read_bounded(board,8*1024*1024)?;
-            let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
-            let csv=admittance_controlled(&board,&courses,&obj,&spec,drive,&options,damping)?;
+            let (obj,continuous)=section_skin::read_body(obj)?;
+            let csv=admittance_controlled_body(&board,&courses,obj.as_deref(),&spec,drive,&options,damping,continuous)?;
             publish(output,csv.as_bytes())?;
             println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
             Ok(())
@@ -225,8 +258,8 @@ fn run(args:&[String])->Result<(),String> {
             let score=frames.map(|n|options.score(&keys,n as u64)).transpose()?;
             let controls=playback::Controls::load(&options,&courses)?;
             let geometry=read_bounded(board,8*1024*1024)?;
-            let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
-            let mut scene=prepare_controlled(&geometry,courses,&obj,spec,&options,controls)?;
+            let (obj,continuous)=section_skin::read_body(obj)?;
+            let mut scene=prepare_controlled_body(&geometry,courses,obj.as_deref(),spec,&options,controls,continuous)?;
             if let (Some(n),Some(score))=(frames,score) {
                 let (baked,samples,load_report)=bake(&mut scene,command=="render-loaded")?;
                 let score_report=score.report;

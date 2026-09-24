@@ -87,3 +87,37 @@ fn holes_stay_open_and_source_assignment_and_resource_failures_do_not_invent_geo
     let mut moved=motion; moved.mesh.nodes[0][2]+=0.001;
     assert!(skin.normal_weights(&moved,&normals(&skin)).is_err());
 }
+
+#[test]
+fn continuous_reconstruction_is_explicit_volume_preserving_and_has_no_step_pinches() {
+    let mesh=flat();let h=[0.01,0.004,0.01,0.004];
+    assert!(Skin::build(&mesh,&h,0.02,1000).is_err());
+    let smooth=Skin::build_continuous(&mesh,&h,0.02,1000).unwrap();
+    assert!((smooth.volume_m3-0.007).abs()<1e-14);
+    assert!(smooth.maximum_thickness_change_m>0.001);
+    assert_eq!(smooth.triangles.len(),16);
+    check_rigid(&smooth,&rigid(mesh));
+}
+
+#[test]
+fn source_model_d_reconstruction_exports_a_closed_continuous_skin_with_every_section() {
+    // Actual existing Model D reconstruction and its physical section rows.
+    // Zero shapes here construct STATIC geometry only, not artificial modes.
+    let preset=crate::steinway_d::build(4).unwrap();
+    crate::board_geometry::BoardGeometry::read(&preset.geometry).unwrap();
+    let mut nodes=Vec::new();let mut triangles=Vec::new();
+    for row in preset.geometry.lines() {
+        let f:Vec<_>=row.split(',').collect();
+        if f[0]=="node" {nodes.push([f[2].parse().unwrap(),f[3].parse().unwrap(),0.]);}
+        if f[0]=="triangle" {triangles.push([f[2].parse().unwrap(),f[3].parse().unwrap(),f[4].parse().unwrap()]);}
+    }
+    let count=nodes.len();let mesh=ShellMesh::new(nodes,triangles).unwrap();
+    let motion=MotionSurface::new(mesh,vec![vec![[0.;6];count]]).unwrap();
+    let skin=Skin::continuous_from_source(&motion,&preset.geometry,0.02,2048).unwrap();
+    assert!(skin.triangles.len()>1000 && skin.triangles.len()<=2048);
+    assert!((skin.volume_m3/skin.section_volume_m3-1.).abs()<1e-6);
+    assert!(skin.maximum_thickness_change_m>HEIGHT_QUANTUM_M);
+    let obj=fs_io::obj::read_obj_document(&skin.obj()).unwrap();
+    assert_eq!(obj.soup.triangles.len(),skin.triangles.len());
+    assert!(obj.regions.iter().all(|r|r.has_label(LABEL)));
+}
