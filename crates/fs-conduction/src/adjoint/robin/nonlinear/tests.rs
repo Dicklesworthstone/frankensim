@@ -151,11 +151,11 @@ fn nonlinear_derivative_budget_zero_input_and_cancellation_are_explicit() {
         let zero = base.apply(cx, &base.zero_direction()).unwrap();
         assert_eq!(zero.iterations, 0);
         assert!(zero.temperature_k.iter().all(|&t| t == 0.0));
-        base.linear.max_iterations = 1;
-        base.linear.restart = 1;
+        base.response.linear.max_iterations = 1;
+        base.response.linear.restart = 1;
         let mut direction = base.zero_direction(); direction.references_k[0] = 1.0;
         assert!(matches!(base.apply(cx, &direction), Err(ConductionError::LinearSolveFailed { krylov_iterations: 1, .. })));
-        base.linear.restart = 0;
+        base.response.linear.restart = 0;
         assert!(matches!(base.apply(cx, &direction), Err(ConductionError::Config { .. })));
     });
     let gate = CancelGate::new_clock_free(); gate.request();
