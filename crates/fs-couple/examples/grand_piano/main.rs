@@ -308,8 +308,19 @@ fn selected_scale(text: Option<&str>, options: &Options) -> Result<Vec<geometry:
     }
     Ok(scale)
 }
+fn load_string_stretching(scale: &[geometry::Course], options: &Options)
+    -> Result<Option<linear::string_stretching::Specification>, String> {
+    options.string_stretching.as_deref().map(|path|
+        linear::string_stretching::Specification::load(path, scale)).transpose()
+}
 fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options) -> Result<engine::Instrument, String> {
+    let stretching = load_string_stretching(&scale, options)?;
+    prepare_instrument_with_string_material(scale, modes, options, stretching.as_ref())
+}
+fn prepare_instrument_with_string_material(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    options: &Options, stretching: Option<&linear::string_stretching::Specification>)
+    -> Result<engine::Instrument, String> {
     let dampers = match options.dampers.as_deref() {
         None => None,
         Some("estimated") => Some(linear::dampers::Specification::estimated(&scale)?),
@@ -317,18 +328,23 @@ fn prepare_instrument(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     };
     let text = options.hammers.as_ref().map(|path| std::fs::read_to_string(path)
         .map_err(|e| format!("{path}: {e}"))).transpose()?;
-    let mut piano = prepare_instrument_with_hammers(scale, modes, options, text.as_deref())?;
+    let mut piano = prepare_instrument_with_admitted_materials(scale, modes, options, text.as_deref(), stretching)?;
     if let Some(spec) = &dampers { piano.configure_dampers(spec)?; }
     Ok(piano)
 }
 fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
+    let stretching = load_string_stretching(&scale, options)?;
+    prepare_instrument_with_admitted_materials(scale, modes, options, text, stretching.as_ref())
+}
+fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    options: &Options, text: Option<&str>, stretching: Option<&linear::string_stretching::Specification>)
+    -> Result<engine::Instrument, String> {
+    if options.string_stretching.is_some() && stretching.is_none() {
+        return Err("supplied string stretching was not admitted; no linear fallback".into());
+    }
     let imported = text.map(|text| hammer_materials::read(text,
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
-    // Admit against the complete, already-tuned scale before it is moved into
-    // the engine. No EA is inferred from effective winding mass, EI or tension.
-    let stretching = options.string_stretching.as_deref().map(|path|
-        linear::string_stretching::Specification::load(path, &scale)).transpose()?;
     let footprints=options.hammer_footprints.as_deref().map(|path|
         linear::hammer_footprint::Specification::load(path,&scale)).transpose()?;
     let mut piano = if options.preset.is_some() {
@@ -348,7 +364,7 @@ fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }?;
-    if let Some(spec) = &stretching { piano.configure_string_stretching(spec)?; }
+    if let Some(spec) = stretching { piano.configure_string_stretching(spec)?; }
     Ok(piano)
 }
 fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<linear::BoardMode>, String> {
@@ -387,6 +403,12 @@ fn study_key(scale: &[geometry::Course], requested: Option<u8>) -> Result<u8, St
 
 fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options) -> Result<(), String> {
+    let stretching = load_string_stretching(&scale, options)?;
+    render_with_string_material(path, scale, modes, surface, options, stretching.as_ref())
+}
+fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
+    surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
+    stretching: Option<&linear::string_stretching::Specification>) -> Result<(), String> {
     study_key(&scale, options.note)?;
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
@@ -409,7 +431,7 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
     }};
-    let piano = prepare_instrument(scale, modes, options)?;
+    let piano = prepare_instrument_with_string_material(scale, modes, options, stretching)?;
     debug_assert_eq!(piano.sample_rate(), rate);
     if let Some(path) = &options.string_stretching {
         let count = (0..piano.bank.strings.len())
@@ -480,6 +502,9 @@ fn run() -> Result<(), String> {
     let scale_text = options.scale.as_ref().map(read).transpose()?;
     let board_text = options.board.as_ref().map(read).transpose()?;
     let scale = selected_scale(scale_text.as_deref(), &options)?;
+    // Freeze supplied string material before geometry work or any exports.
+    // Playback receives this admitted value, never a later read of the path.
+    let stretching = load_string_stretching(&scale, &options)?;
     let scale_source = options.scale.as_deref().unwrap_or(if options.preset.is_some() {
         "RT-0425 Appendix A wrapped-string MODEL: 84 published courses plus four estimated extensions"
     } else { "ESTIMATED demonstration" });
@@ -539,7 +564,9 @@ fn run() -> Result<(), String> {
         std::fs::write(path, format!("# Source: {board_source}\n{}", write_board_for_scale(&modes, &scale)))
             .map_err(|e| e.to_string())?;
     }
-    if let Some(path) = &options.render { return render(path, scale, &modes, surface.as_deref(), &options); }
+    if let Some(path) = &options.render {
+        return render_with_string_material(path, scale, &modes, surface.as_deref(), &options, stretching.as_ref());
+    }
     println!("Model D published envelope: {} x {} m; board {} -> {} m (center -> edge).",
         geometry::D_LENGTH_M, geometry::D_WIDTH_M, geometry::D_BOARD_CENTER_M, geometry::D_BOARD_EDGE_M);
     println!("{} courses; {} speaking strings; {} board modes.", scale.len(), scale.iter().map(|c| c.unison).sum::<usize>(), modes.len());
@@ -811,3 +838,7 @@ mod render_tests {
             &o, Some("invalid material")).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "string_render_tests.rs"]
+mod string_render_tests;
