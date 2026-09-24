@@ -345,7 +345,7 @@ impl Instrument {
         let dt=1.0/f64::from(self.bank.rate);let nc=self.contacts.len();
         let before=self.energy_j();
         let mut radiation_loss=if let Some(air)=&mut self.radiation {
-            air.before(&mut self.bank.v[self.bank.modes.len()..])
+            air.before(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?
         } else {0.};
         let mut damper_loss=self.damp(0.5*dt)?;
         self.bank.begin_string_stretching_step();
@@ -425,7 +425,7 @@ impl Instrument {
         }
         damper_loss+=self.damp(0.5*dt)?;
         if let Some(air)=&mut self.radiation {
-            radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]);
+            radiation_loss+=air.after(&mut self.bank.v[self.bank.modes.len()..]).map_err(Error::Contact)?;
         }
         let modal_loss=self.bank.last_modal_loss_j;
         let after=self.energy_j();let balance=after-before+felt_loss+shank_loss+modal_loss+radiation_loss+damper_loss+catch_loss-jack_work;

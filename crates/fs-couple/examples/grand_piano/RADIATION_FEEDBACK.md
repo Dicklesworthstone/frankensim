@@ -78,11 +78,28 @@ opposing `-l^T*p_air` force to the board. The cross-power cancels exactly in
 the continuous equations; wood, string, hammer, felt and damper losses remain
 owned by their original models.
 
-At every mechanics substep a symmetric composition of exact pairwise velocity
-rotations and existing exact acoustic free-oscillator flows surrounds the
-original nonlinear piano step. This is **second-order operator splitting**,
-not an exact full-system propagator. Coupling rotations conserve combined
-kinetic energy; damped free flows remove their reported energy. A separate
+At every mechanics substep, the shared `fs_phs::PreparedPortExchange` evolves
+the **complete** rectangular velocity coupling together. Its cold thin SVD
+uses the existing `fs-la` owner, checks orthogonality and componentwise
+reconstruction, then prepares independent rotations with `fs-math`. It does
+not sequentially split noncommuting physical-port exchanges. Reordering ports
+or orthogonally mixing identical acoustic poles therefore does not introduce
+a separate basis-dependent coupling approximation.
+
+Thin directions are used only to apply updates to the original full vectors.
+Every acoustic state, including uncoupled history outside the thin span, stays
+present; no small singular-value threshold or physical mode cutoff is applied.
+A failed decomposition refuses preparation, never substitutes pairwise flows.
+Cold work is limited to `60 * max(ports,poles) * min(ports,poles)^2` SVD sweep
+terms within the existing 32-port/1024-pole envelope. Runtime uses preallocated
+scratch and publishes both velocity banks only after finite/energy checks.
+
+A symmetric composition of this collective coupling and the existing exact
+acoustic free-oscillator flows surrounds the original nonlinear piano step.
+This remains **second-order operator splitting**, not an exact full-system
+propagator. Collective coupling conserves combined kinetic energy to its
+admitted decomposition/roundoff tolerance; damped free flows remove their
+reported energy. Conservative roundoff is never counted as physical loss. A separate
 rate-resolution bound rejects excessive coupling strength. Passivity alone
 is not a time-step accuracy certificate: convergence with mechanical rate is
 still required, especially during hammer attacks and near acoustic poles.
@@ -116,3 +133,23 @@ rigid. This does not add room acoustics, flexible rim mechanics, axial string
 motion, a full keyboard action, new external Steinway mesh bytes or factory
 material measurements. No measured-instrument or full-band realism claim follows
 from completing this time-domain coupling.
+
+
+## Focused collective-exchange regressions
+
+The shared owner has analytic single-direction, full-quadratic-pHS refinement,
+rectangular/rank-deficient, orthogonal-coordinate, zero-load and every-boundary
+cancellation/retry checks. The piano consumer also compares real hammer notes
+and every observed board substep for two different acoustic realizations of
+the same full impedance. Existing loaded-note energy, rollback and unloaded
+bit-parity tests remain unchanged in scope. Native commands are:
+
+```sh
+cargo test -p fs-phs --lib port_exchange
+cargo test --release -p fs-couple --example grand_piano radiation
+cargo test --release -p fs-couple --example piano_exterior radiation
+```
+
+Tests in source are not passing-run evidence. Basis independence of the
+isolated coupling also does not certify the complete split piano's time-step
+accuracy, passive-fit bandwidth or measured-instrument realism.
