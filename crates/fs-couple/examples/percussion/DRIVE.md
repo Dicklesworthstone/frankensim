@@ -6,7 +6,14 @@ works with every existing splash/drum/snare command and numerical image,
 including the admitted cavity and stretching combinations. The same stepped
 mechanics feeds CSV observations and the existing BEM pressure renderer.
 
-The file has no header. Each row is `time_s,force_n` in seconds and newtons;
+A reusable rhythmic score can instead begin with `frankensim-stick-score-v1`.
+It supplies tempo changes, named SI hand-force gestures, accented strokes and
+rolls to the same player port; overlapping gestures add before playback.
+See [SCORE.md](SCORE.md) and the complete alternating right/left example files.
+`--second-stick-force-file` independently drives an explicitly selected second
+stick; it does not duplicate the resonator or reset rebound between strokes.
+
+The original CSV format has no header. Each row is `time_s,force_n` in seconds and newtons;
 blank lines and `#` comments are allowed. Times are finite, nonnegative and
 strictly increasing. At least two rows are required; the first and last force
 must be zero. Force is zero outside these endpoints. Positive force pushes
@@ -36,7 +43,7 @@ materials, geometry, head basis, snare contacts, cavity and acoustic boundary
 are unchanged. Further pushes and lifts act on the moving stick; they do not
 teleport it, prescribe an impact velocity, restart a one-shot sound or clear
 head/air/felt/snare history. Impact timing and rebound follow from mechanics.
-This is a fixed-axis, single-stick player port, not a two-hand motion capture or
+Each file addresses one fixed-axis player port, not a human motion-capture or
 feedback controller. A row does not guarantee a strike at its timestamp.
 
 Linear interpolation is integrated over each mechanical interval, including

@@ -4,11 +4,17 @@
 //! toward the head; negative force lifts it. Linear interpolation is integrated
 //! over each mechanical interval, so a knot between ticks is not discarded.
 //! The first and last forces must be zero, with zero force outside the file.
+//! A frankensim-stick-score-v1 file adds tempo, reusable SI force shapes and
+//! beat-based strokes/rolls; it compiles before playback, including overlaps.
+//! See SCORE.md. The original CSV path and hot-loop arithmetic are unchanged.
 //! These are external player inputs. Contact, rebound, head/air/snare storage,
 //! radiation and the energy gate remain owned by the existing mechanics.
 use super::super::Error;
 use fs_couple::render::plate::impact::ImpactError;
 use std::io::Read;
+
+#[path = "drive_score.rs"]
+mod score;
 
 const MAX_KNOTS: usize = 65_536;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -29,6 +35,7 @@ impl Program {
         if text.len() as u64 > MAX_BYTES {
             return Err("stick-force file exceeds the 4 MiB admission budget".into());
         }
+        if score::selected(text) { return score::parse(text); }
         let mut knots: Vec<Knot> = Vec::new();
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
@@ -134,9 +141,9 @@ fn file_option(args: &mut Vec<String>, flag: &str) -> Result<Option<Program>, Er
         if selected.is_some() {
             return Err(format!("{flag} may be supplied only once").into());
         }
-        let path = args.get(i + 1).ok_or_else(|| format!("{flag} needs a CSV path"))?;
+        let path = args.get(i + 1).ok_or_else(|| format!("{flag} needs a force CSV or score path"))?;
         if path.starts_with("--") {
-            return Err(format!("{flag} needs a CSV path, not another option").into());
+            return Err(format!("{flag} needs a force CSV or score path, not another option").into());
         }
         selected = Some(Program::load(path)?);
         args.drain(i..i + 2);
@@ -309,3 +316,7 @@ mod tests {
         assert!(matches!(d.forces(&external), Err(ImpactError::Budget)));
     }
 }
+
+#[cfg(test)]
+#[path = "drive_score_tests.rs"]
+mod score_tests;

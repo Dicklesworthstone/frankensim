@@ -1,0 +1,10 @@
+frankensim-stick-score-v1
+# Illustrative external hand forces, not measured contact pulses.
+tempo,0,240
+shape,tap,0,0
+shape,tap,0.003,2
+shape,tap,0.006,0
+shape,tap,0.009,-1
+shape,tap,0.012,0
+roll,0,1,4,tap,1
+stroke,2,tap,0.25
