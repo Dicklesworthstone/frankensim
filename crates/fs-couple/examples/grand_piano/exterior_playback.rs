@@ -23,13 +23,14 @@ pub struct Options {
     pub hammer_footprints: Option<String>,
     pub dampers: Option<String>,
     pub string_stretching: Option<String>,
+    pub rigid_assembly: Option<String>,
 }
 impl Default for Options {
     fn default() -> Self {
         Self { substeps: 4, modes: 24, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
-            hammer_footprints: None, dampers: None, string_stretching: None }
+            hammer_footprints: None, dampers: None, string_stretching: None, rigid_assembly: None }
     }
 }
 impl Options {
@@ -52,7 +53,7 @@ impl Options {
                 result.mapping_explicit = true;
                 continue;
             }
-            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching",
+            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--rigid-assembly",
                 "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
@@ -66,6 +67,7 @@ impl Options {
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
                 "--dampers" => result.dampers = Some(value.clone()),
                 "--string-stretching" => result.string_stretching = Some(value.clone()),
+                "--rigid-assembly" => result.rigid_assembly = Some(value.clone()),
                 "--performance" => result.performance = Some(value.clone()),
                 "--midi" => {
                     if result.midi.replace(value.clone()).is_some() { return Err("duplicate MIDI score".into()); }
@@ -88,18 +90,21 @@ impl Options {
         Ok(result)
     }
     /// Frequency-domain analysis has no hammer or pedal state. It admits only
-    /// resolution controls, so material/gesture options cannot be silently ignored.
+    /// resolution and rigid-geometry controls; material/gesture options cannot be silently ignored.
     pub fn harmonic(args: &[String]) -> Result<Self, String> {
         let options = Self::parse(args)?;
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
             || options.string_stretching.is_some() {
-            return Err("response/admittance accept only --modes and --substeps, not playback controls".into());
+            return Err("response/admittance accept --modes, --substeps and --rigid-assembly, not playback controls".into());
         }
         Ok(options)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.rigid_assembly.as_ref().is_some_and(|p| p.trim().is_empty()) {
+            return Err("--rigid-assembly requires a nonempty assembly path".into());
+        }
         if self.string_stretching.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--string-stretching requires a nonempty complete material specification path".into());
         }
