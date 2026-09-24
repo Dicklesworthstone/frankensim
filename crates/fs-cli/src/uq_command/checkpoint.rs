@@ -3,7 +3,7 @@
 
 use super::{Failure, MAX_PRODUCT_SAMPLES, Result};
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_uq::{UqExecution, UqPlan};
+use fs_uq::{QmcConfig, QmcExecution, UqExecution, UqPlan};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -42,6 +42,18 @@ pub(super) fn model_identity(base_text: &str, bindings: &str) -> Result<ContentH
 }
 
 pub(super) fn restore(path: &Path, plan: &UqPlan, identity: ContentHash) -> Result<UqExecution> {
+    UqExecution::restore(plan, identity, &read(path)?)
+        .map_err(|error| failure(format!("{}: {error}", path.display())))
+}
+
+pub(super) fn restore_qmc(
+    path: &Path, plan: &UqPlan, layout: QmcConfig, identity: ContentHash,
+) -> Result<QmcExecution> {
+    QmcExecution::restore(plan, layout, identity, &read(path)?)
+        .map_err(|error| failure(format!("{}: {error}", path.display())))
+}
+
+fn read(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path)
         .map_err(|error| failure(format!("cannot open {}: {error}", path.display())))?;
     let mut bytes = Vec::new();
@@ -50,8 +62,7 @@ pub(super) fn restore(path: &Path, plan: &UqPlan, identity: ContentHash) -> Resu
     if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
         return Err(failure("checkpoint exceeds the product observation budget"));
     }
-    UqExecution::restore(plan, identity, &bytes)
-        .map_err(|error| failure(format!("{}: {error}", path.display())))
+    Ok(bytes)
 }
 
 /// One fresh output owned by this invocation. Never opens an existing file
@@ -82,6 +93,11 @@ impl Output {
     }
 
     pub(super) fn save(&self, execution: &UqExecution, identity: ContentHash) -> Result<()> {
+        let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
+        self.publish(&bytes)
+    }
+
+    pub(super) fn save_qmc(&self, execution: &QmcExecution, identity: ContentHash) -> Result<()> {
         let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
         self.publish(&bytes)
     }

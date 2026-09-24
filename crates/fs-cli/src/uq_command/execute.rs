@@ -70,9 +70,8 @@ impl Options {
             return Err(bad("--max-new-samples requires --checkpoint so the unfinished prefix is retained"));
         }
         if options.qmc_replicates.is_some()
-            && (options.checkpoint.is_some() || options.resume.is_some() || options.max_new_samples.is_some()
-                || options.compliance.is_some() || options.design.is_some()) {
-            return Err(bad("QMC currently requires a fixed sample layout without MC checkpoints, sequential compliance or candidate-selection flags"));
+            && (options.compliance.is_some() || options.design.is_some()) {
+            return Err(bad("QMC requires a fixed sample layout without sequential compliance or candidate-selection flags"));
         }
         Ok(options)
     }
@@ -118,7 +117,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
     if let Some(replicates) = options.qmc_replicates {
-        return qmc::execute(&base, &config, replicates);
+        return qmc::execute(base_text, &base, &config, options, replicates);
     }
     if let Some(grid) = &options.design {
         return design::execute(base_text,&base,&config,options,grid);

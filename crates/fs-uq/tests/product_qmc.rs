@@ -163,3 +163,71 @@ fn every_layout_and_joint_measure_is_admitted_before_evaluation() {
     for i in 1..11 { p.parameters.push(ParameterUncertainty::uniform(format!("x{i}"), 0.0, 1.0, "1")); }
     assert!(QmcExecution::new(&p, config()).is_err());
 }
+
+#[test]
+fn durable_recovery_retains_an_incomplete_net_and_retries_the_interrupted_point() {
+    let p = plan();
+    let model = fs_blake3::hash_domain("qmc-test-model", b"response = x");
+    let mut full = QmcExecution::new(&p, config()).unwrap();
+    full.advance(384, || false, value);
+    let mut split = QmcExecution::new(&p, config()).unwrap();
+    split.advance(133, || false, value);
+    let mut interrupted = Vec::new();
+    split.advance_interruptible(1, || false, |x| {
+        interrupted = x.to_vec(); Ok::<_, &str>(None)
+    });
+    let bytes = split.checkpoint(model).unwrap();
+    let mut resumed = QmcExecution::restore(&p, config(), model, &bytes).unwrap();
+    assert_eq!(resumed.report(), split.report());
+    assert_eq!(resumed.observations().len(), 133);
+    assert_eq!(resumed.report().completed_replicates, 1);
+    resumed.advance(1, || false, |x| { assert_eq!(x, interrupted.as_slice()); value(x) });
+    resumed.advance(384, || false, value);
+    assert_eq!(resumed.report(), full.report());
+    assert_eq!(resumed.checkpoint(model).unwrap(), full.checkpoint(model).unwrap());
+    let mut terminal = QmcExecution::restore(&p, config(), model, &resumed.checkpoint(model).unwrap()).unwrap();
+    assert_eq!(terminal.advance(1, || panic!("complete"), |_| -> Result<f64, &str> { panic!("complete") }), full.report());
+}
+
+#[test]
+fn durable_qmc_identity_binds_layout_plan_model_and_sampler() {
+    let p = plan();
+    let model = fs_blake3::hash_domain("qmc-test-model", b"response = x");
+    let mut execution = QmcExecution::new(&p, config()).unwrap();
+    execution.advance(2, || false, value);
+    let bytes = execution.checkpoint(model).unwrap();
+    // Same total sample count with different net grouping changes EVERY point
+    // after the first net and the units of the error estimate; reject it.
+    let alternate = QmcConfig { replicates: 6, samples_per_replicate: 64 };
+    assert_eq!(QmcExecution::restore(&p, alternate, model, &bytes).unwrap_err(), fs_uq::UqCheckpointError::IdentityMismatch);
+    let mut changed = p.clone(); changed.seed += 1;
+    assert_eq!(QmcExecution::restore(&changed, config(), model, &bytes).unwrap_err(), fs_uq::UqCheckpointError::IdentityMismatch);
+    assert_eq!(QmcExecution::restore(&p, config(), fs_blake3::ContentHash([0; 32]), &bytes).unwrap_err(), fs_uq::UqCheckpointError::IdentityMismatch);
+    let mut mc_plan = p.clone(); mc_plan.method = PropagationMethod::MonteCarlo;
+    let mc = fs_uq::UqExecution::new(&mc_plan).unwrap().checkpoint(model).unwrap();
+    assert!(QmcExecution::restore(&p, config(), model, &mc).is_err());
+    assert!(fs_uq::UqExecution::restore(&mc_plan, model, &bytes).is_err());
+    execution.advance(1, || false, |_| Err::<f64, _>("solver refused"));
+    assert_eq!(execution.checkpoint(model), Err(fs_uq::UqCheckpointError::NotResumable));
+}
+
+#[test]
+fn durable_qmc_rejects_corruption_and_preserves_exact_finite_bits() {
+    let p = plan();
+    let model = fs_blake3::hash_domain("qmc-test-model", b"response = x");
+    let mut execution = QmcExecution::new(&p, config()).unwrap();
+    execution.advance(1, || false, |_| Ok::<_, &str>(-0.0));
+    let bytes = execution.checkpoint(model).unwrap();
+    let restored = QmcExecution::restore(&p, config(), model, &bytes).unwrap();
+    assert_eq!(restored.observations()[0].to_bits(), (-0.0_f64).to_bits());
+    for index in [0, 8, 40, 41, 49, bytes.len() - 1] {
+        let mut changed = bytes.clone(); changed[index] ^= 0x80;
+        assert!(QmcExecution::restore(&p, config(), model, &changed).is_err());
+    }
+    let mut nonfinite = bytes;
+    nonfinite[49..57].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
+    let checksum_start = nonfinite.len() - 32;
+    let checksum = fs_blake3::hash_domain("org.frankensim.uq.qmc.checkpoint.v1", &nonfinite[..checksum_start]);
+    nonfinite[checksum_start..].copy_from_slice(&checksum.0);
+    assert!(QmcExecution::restore(&p, config(), model, &nonfinite).is_err());
+}
