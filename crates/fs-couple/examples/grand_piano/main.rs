@@ -19,7 +19,7 @@ mod hammer_materials;
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
-    [--dampers estimated | pads.fspd]
+    [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
     [--concert-pitch 430..450 | --raw-tensions]
     [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
@@ -64,6 +64,13 @@ damper. 'estimated' declares approximate spans and drag; a file must cover
 every scale key with a pad or explicit free row. It requires --render and
 uses existing MIDI/CSV key, sustain and sostenuto controls. See DAMPERS.md.
 This is spatial drag, not falling-pad or hysteretic felt contact mechanics.
+--string-stretching supplies linear or geometric-extension selection for EVERY
+scale key. A stretch row supplies axial rigidity EA in N and a moderate-slope
+bound; these are not inferred from tension, EI or winding mass. It requires
+--render, retains the same strings/bridge/hammer/pedal states, and solves
+extension and felt contact in the same mechanical tick. All-linear selection
+preserves the original image. No pitch automation, clipping, modal retuning or
+output processing is substituted; see STRING_STRETCHING.md for the SI format.
 --dump-geometry/--dump-obj export the board model; export alone skips eigenanalysis.
 Thickness taper, material constants and key assignment include explicit estimates.
 Default per-key WoolFelt loading envelopes are source-derived; crush/unloading
@@ -110,6 +117,7 @@ struct Options {
     render: Option<String>, scale: Option<String>, board: Option<String>,
     board_geometry: Option<String>, performance: Option<String>, preset: Option<String>,
     hammers: Option<String>, hammer_footprints: Option<String>, dampers: Option<String>,
+    string_stretching: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
@@ -123,6 +131,7 @@ impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, raw_tensions: false,
+            string_stretching: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
@@ -153,6 +162,7 @@ impl Options {
                 "--hammers" => options.hammers = Some(value.clone()),
                 "--hammer-footprints" => options.hammer_footprints = Some(value.clone()),
                 "--dampers" => options.dampers = Some(value.clone()),
+                "--string-stretching" => options.string_stretching = Some(value.clone()),
                 "--concert-pitch" => options.concert_pitch = Some(value.parse().map_err(|_| invalid())?),
                 "--mesh-divisions" => options.mesh_divisions = value.parse().map_err(|_| invalid())?,
                 "--dump-geometry" => options.dump_geometry = Some(value.clone()),
@@ -211,6 +221,10 @@ impl Options {
         if options.dampers.as_ref().is_some_and(|s| s.trim().is_empty() || options.render.is_none()) {
             return Err("--dampers requires --render and either estimated or a nonempty specification path".into());
         }
+        if options.string_stretching.as_ref().is_some_and(|s|
+            s.trim().is_empty() || s.starts_with("--") || options.render.is_none()) {
+            return Err("--string-stretching requires --render and a complete nonempty specification path".into());
+        }
         if !(4..=24).contains(&options.mesh_divisions)
             || (!options.uses_preset_board() && (seen.contains("--mesh-divisions")
                 || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
@@ -253,7 +267,8 @@ impl Options {
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
-            options.dampers.as_ref().filter(|s| s.as_str() != "estimated")];
+            options.dampers.as_ref().filter(|s| s.as_str() != "estimated"),
+            options.string_stretching.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
@@ -310,9 +325,13 @@ fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear
     options: &Options, text: Option<&str>) -> Result<engine::Instrument, String> {
     let imported = text.map(|text| hammer_materials::read(text,
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
+    // Admit against the complete, already-tuned scale before it is moved into
+    // the engine. No EA is inferred from effective winding mass, EI or tension.
+    let stretching = options.string_stretching.as_deref().map(|path|
+        linear::string_stretching::Specification::load(path, &scale)).transpose()?;
     let footprints=options.hammer_footprints.as_deref().map(|path|
         linear::hammer_footprint::Specification::load(path,&scale)).transpose()?;
-    if options.preset.is_some() {
+    let mut piano = if options.preset.is_some() {
         let materials = match imported {
             Some(materials) => materials,
             None => scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?,
@@ -328,7 +347,9 @@ fn prepare_instrument_with_hammers(scale: Vec<geometry::Course>, modes: &[linear
             options.modes,true,spec)
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
-    }
+    }?;
+    if let Some(spec) = &stretching { piano.configure_string_stretching(spec)?; }
+    Ok(piano)
 }
 fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<linear::BoardMode>, String> {
     match text {
@@ -390,6 +411,11 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     }};
     let piano = prepare_instrument(scale, modes, options)?;
     debug_assert_eq!(piano.sample_rate(), rate);
+    if let Some(path) = &options.string_stretching {
+        let count = (0..piano.bank.strings.len())
+            .filter(|&i| piano.bank.string_stretching_observation(i).is_some()).count();
+        println!("String extension: {path}; {count} geometric speaking/duplex channels; same-tick contact and reciprocal bridge work. Zero means explicit all-linear selection. EA is supplied, not inferred; slope/iteration limits refuse rather than clamp. No real-time or calibration claim; see STRING_STRETCHING.md.");
+    }
     if let Some(path)=&options.hammer_footprints {
         println!("Hammer contact geometry: {path}; {} independent felt sites, unchanged total course area and hammer mass. No inferred/calibrated face width; see HAMMER_FOOTPRINTS.md.",
             piano.hammer_contact_count());
@@ -523,6 +549,10 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() { eprintln!("grand_piano: {error}"); std::process::exit(1); }
 }
+
+#[cfg(test)]
+#[path = "string_stretching_render_tests.rs"]
+mod string_stretching_render_tests;
 
 #[cfg(test)]
 #[path = "hammer_footprint_render_tests.rs"]

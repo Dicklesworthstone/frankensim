@@ -17,6 +17,43 @@ point/finite hammer faces, jack-force CSV, MIDI mapping, sustain, sostenuto,
 una corda, spatial dampers and one-way or passive radiation feedback. Existing
 inputs without this option retain the original linear-string image.
 
+## Grand-piano preset and half-space playback
+
+The `grand_piano` renderer accepts the same material format and solver through
+`--string-stretching axial.fspx`. For example, with complete supplied scale and
+material files:
+
+```sh
+cargo run --release -p fs-couple --example grand_piano -- \
+  --preset steinway-d --scale strings.csv --string-stretching axial.fspx \
+  --midi score.mid --dampers estimated --microphone-right 1,1,1 \
+  --duration 6 --render piano.wav
+```
+
+The option requires `--render`, a nonempty file path and a record for every
+selected scale key. `--note` never narrows the material coverage requirement.
+The renderer admits the supplied material against its already-tuned scale and
+attaches it before excitation, for every default/preset/imported hammer path.
+Unreadable or invalid input refuses instead of silently reverting to linear
+strings. The material path cannot also name a render or export output.
+
+This composes with CSV and MIDI performances, finite hammer footprints, supplied
+hammer cards, all pedals, spatial dampers and the existing mono/stereo Rayleigh
+receivers. The render reports the selected speaking/duplex channel count;
+zero means explicit all-linear selection. All-linear files preserve the original
+playback arithmetic, including the Model D preset. Acoustic assumptions remain
+those of `grand_piano`, not the finite-body exterior renderer above.
+
+Five focused `grand_piano` regressions cover CLI/source admission, malformed and
+incomplete material files, changing actual tension with the original energy
+ledger, bitwise all-linear playback, and nonlinear MIDI/CSV stereo equivalence
+across different block sizes with finite hammers and spatial dampers. Run them
+with the existing target; their existence is not a native passing-test claim:
+
+```sh
+cargo test -p fs-couple --example grand_piano string_stretching
+```
+
 ## Complete per-key SI input
 
 ```text
@@ -40,8 +77,9 @@ that missing material input. One course's supplied EA applies to all its unison
 members and existing duplex segments; the geometry and individual detuning
 remain those of the original scale.
 
-Missing files, duplicate/extra/missing keys, nonfinite values and invalid slope
-limits refuse before structural eigenanalysis or acoustic BEM preparation.
+On exterior commands, missing files, duplicate/extra/missing keys, nonfinite
+values and invalid slope limits refuse before structural eigenanalysis or
+acoustic BEM preparation.
 An explicitly all-linear file is legal and retains the old numerical path.
 `response` and `admittance` reject the option: their present linear harmonic
 experiments cannot silently stand in for an amplitude-dependent response.
