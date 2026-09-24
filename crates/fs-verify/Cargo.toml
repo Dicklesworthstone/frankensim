@@ -14,18 +14,21 @@ layer = "L3"
 # The verifier (bead lmp4.1): OFF by default per the Ambition-Tag
 # gating rule until its Gauntlet tier + kill-metric stay green.
 certified-speculation = []
-# Real steady FEM primal/dual consumer; no default-path maturity promotion.
-thermal-conduction = ["certified-speculation", "dep:fs-conduction", "dep:fs-exec"]
+# Solver-independent mean-field verification; the native FEM adapter belongs
+# to fs-conduction, which already consumes fs-adjoint -> fs-verify.
+thermal-conduction = ["certified-speculation"]
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
-fs-conduction = { path = "../fs-conduction", optional = true }
 fs-evidence = { path = "../fs-evidence" }
-fs-exec = { path = "../fs-exec", optional = true }
 fs-obs = { path = "../fs-obs" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+# Native cross-crate fixtures are dev-only: production dependencies remain
+# fs-conduction -> fs-adjoint -> fs-verify, never the reverse.
+fs-conduction = { path = "../fs-conduction", features = ["thermal-verification"] }
+fs-exec = { path = "../fs-exec" }
 fs-math = { path = "../fs-math" }
 
 [[example]]

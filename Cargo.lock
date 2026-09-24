@@ -1115,6 +1115,7 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
+ "fs-verify",
  "fs-vvreg",
 ]
 
@@ -2695,8 +2696,11 @@ dependencies = [
 name = "fs-verify"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
+ "fs-conduction",
  "fs-evidence",
+ "fs-exec",
  "fs-math",
  "fs-obs",
 ]

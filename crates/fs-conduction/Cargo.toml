@@ -10,6 +10,10 @@ description = "Steady heat conduction on tet complexes: FEEC 0-form weak-form as
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Nominal linear, exact-polyhedral-domain continuum mean bounds stay opt-in.
+thermal-verification = ["dep:fs-verify"]
+
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
 fs-blake3 = { path = "../fs-blake3" }
@@ -23,6 +27,7 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-verify = { path = "../fs-verify", optional = true, features = ["thermal-conduction"] }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }

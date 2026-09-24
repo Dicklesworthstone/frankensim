@@ -13,7 +13,8 @@ cargo test -p fs-verify --features thermal-conduction --lib conduction::
 cargo test -p fs-verify --features certified-speculation --lib tet::
 ```
 
-`conduction::solve_with_mean_bound` consumes the existing `ConductionProblem`
+`fs_conduction::verification::solve_with_mean_bound`, enabled by
+`fs-conduction/thermal-verification`, consumes the existing `ConductionProblem`
 and explicit `MeanSolveConfig`. It returns the original FEM solution/report,
 an actual unit-source homogeneous-boundary dual solution/report, and a bound
 on whole-domain volume-mean temperature. No second thermal solver is implemented.
@@ -24,13 +25,19 @@ It uses a unit slab, 300 K end faces, adiabatic sides and constant heating;
 the analytic comparison is `300 + source/(12*kx)` K. It emits produced interval
 endpoints, not a precomputed interval. Native success requires execution.
 
-`conduction::bound_temperature_mean` bounds an existing P1 temperature field
+`fs_conduction::verification::bound_temperature_mean` bounds an existing P1 temperature field
 without repeating its primal solve. Pass the original `ConductionProblem`,
 the full nodal temperatures, explicit dual `SolveConfig` and `FluxBudget`.
 The field need not be converged: the bound includes its remaining algebraic
 error. Invalid lengths, non-finite values and a mismatched Dirichlet trace
 refuse before the dual solve. The returned `MeanFieldBound` contains the actual
 dual report and mean enclosure; it does not invent a primal solver report.
+
+The native adapter lives with the conduction solver; `fs-verify::conduction`
+retains the actual fields/reports while verifying their mean. The production
+dependency direction is `fs-conduction -> fs-adjoint -> fs-verify` (with the
+optional direct verification edge). Only the example and cross-crate tests
+consume the native solver through a dev dependency, avoiding a Cargo cycle.
 
 ## Mathematical scope
 
