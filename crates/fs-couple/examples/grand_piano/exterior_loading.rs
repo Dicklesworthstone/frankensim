@@ -2,7 +2,7 @@
 //! One existing modal BEM batch gives both Z = G^T A P and every receiver's
 //! pressure/velocity transfer. exp(-i omega t): the force opposing motion
 //! adds -i omega Z to the same string/board dynamic stiffness.
-use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,RATE}};
+use super::{bridge_response::{BridgeResponse,Response}, exterior_geometry::{Boundary,Specification,MAX_PANELS,ReceiverSet}};
 use fs_bem::helmholtz::{self,Formulation};
 use fs_math::c64::C64;
 use std::{f64::consts::TAU,fmt::Write};
@@ -45,13 +45,8 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
         || !(1..=2).contains(&spec.receivers.len()) {
         return Err("invalid complete radiation-loading basis, medium or requested frequency".into());
     }
-    for p in &spec.receivers {
-        let radius=(0..3).fold(0.0_f64,|n,c|n.hypot(p[c]-boundary.center[c]));
-        let delay=(radius-boundary.radius)/spec.medium.sound_speed;
-        if p.iter().any(|v|!v.is_finite()) || !delay.is_finite() || !(2./f64::from(RATE)..=0.5).contains(&delay) {
-            return Err("loaded-response receiver must satisfy the exterior enclosing-sphere admission".into());
-        }
-    }
+    let plan=ReceiverSet::for_spec(boundary,spec)?;
+    let evaluation=plan.prepare(w/spec.medium.sound_speed)?;
     let fields:Vec<Vec<C64>>=boundary.weights.iter().map(|r|r.iter().map(|v|C64::new(*v,0.)).collect()).collect();
     let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();let k=w/spec.medium.sound_speed;
     let formulation=if k*boundary.radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
@@ -73,8 +68,7 @@ pub fn sample(boundary:&Boundary,spec:&Specification,w:f64)->Result<LoadingSampl
             impedance[i*count+j]=row.iter().zip(boundary.surface.areas()).zip(&solution.pressure)
                 .fold(C64::ZERO,|sum,((shape,area),p)|sum+p.scale(shape*area));
         }
-        let pressure=helmholtz::exterior_pressure_at_points(&boundary.surface,solution,spec.medium,&spec.receivers)
-            .map_err(|e|e.to_string())?;
+        let pressure=evaluation.pressure(solution)?;
         for (row,p) in receiver_transfer.iter_mut().zip(pressure) {row[j]=p;}
     }
     if impedance.iter().chain(receiver_transfer.iter().flatten()).any(|v|!finite(*v)) {
