@@ -113,27 +113,62 @@ claim is made without measurement. Stationary-reference radiation and all
 previously declared cymbal/drum modeling limitations remain unchanged.
 
 
-## Balanced elimination and residual correction
+## Sparse directional assembly and numerically balanced elimination
 
-The scalar Gonzalez border now uses reciprocal power-of-two scaling of its
-rank-one factors. The original factors remain unchanged for verification and
-dense fallback. Every scaled coefficient must round-trip exactly; otherwise
-scaling is discarded rather than dropping a subnormal term. An identically
-zero update uses a dummy zero auxiliary equation.
+Loaded analytic execution now uses both row and column traversal of the
+CURRENT `J-R` operator. Rows still evaluate the original residual. Columns
+apply the operator to an analytic Hessian direction, skipping only exactly
+zero direction components. Every nonzero coefficient, including subnormal
+couplings, is retained; an updated operator rebuilds both traversals before
+use. Per-row sums still receive terms in increasing source-index order.
+The unselected dense analytic and finite-difference arithmetic is unchanged.
+Finite-difference calls do not build the column traversal.
 
-A small but nonzero leaf pivot can cause severe subtractive cancellation in
-back-substitution even when the full matrix is well-conditioned. At most two
-full-equation residual corrections reuse the same condensed operator before
-falling back to dense LU. They are linear-solve corrections, not extra physical
-timesteps or nonlinear iterations. No force, material history, state address,
-energy tolerance or contact parameter changes.
+This matters because the uncorrected Hessian of each independent acoustic
+state has only one nonzero component. The old traversal multiplied every
+operator edge by a mostly zero vector for every acoustic column. The new
+traversal visits only edges incident on nonzero components. Nonlinear storage,
+contact-loss tangents and the COMPLETE rank-one Gonzalez correction remain.
+No declarations about a permanently diagonal Hessian are trusted: the actual
+computed direction supplies its support on every call.
 
-Every candidate is checked against the original full floating-point matrix,
-with the original 128*epsilon*(n+1) absolute-equation-scale allowance. Refusal
-or cancellation publishes no partial candidate. Balance and correction vectors
-are allocated during preparation; this does not reduce workspace memory.
+The 132-state regression has 326 operator edges. It compares 43,032 scalar
+operator products for the original dense analytic assembly with 652 for the
+new assembly, including the rank-one direction. This 66-fold reduction is
+ONLY in that counted operation, not a measured overall speedup. Hessian-vector
+callbacks, residual evaluation, full Jacobian storage, state/history checks,
+Schur products and factorization have not disappeared.
 
-Three additional unit regressions cover extreme auxiliary factors and exact
-zero updates, subnormal preservation, and recovery/cancellation/retry for a
-tiny leaf pivot. They require native execution; independent matrix arithmetic
-is not a passing Rust result or a real-time speed measurement.
+The scalar border is also balanced using reciprocal powers of two on its
+rank-one factors. Original factors remain untouched for the full-matrix
+check and dense fallback. Scaling is discarded if any coefficient would not
+round-trip exactly, so it cannot erase underflowed entries. A zero outer
+product uses a dummy zero auxiliary equation instead of an arbitrarily large
+irrelevant one. This changes no physical coordinate or tolerance.
+
+Subtractive cancellation during leaf recovery can fail the original backward
+error gate even when the complete matrix is well-conditioned. At most two
+residual corrections reuse the SAME eliminated operator. Every candidate is
+checked against the original full floating-point matrix before publication.
+The error allowance remains `128 * epsilon * (n+1)` times the absolute equation
+scale. Cancellation or an unsuccessful correction retains the original dense
+fallback and never publishes a partial correction. No extra Newton iteration,
+mechanical step, force evaluation, or history update is counted as a correction.
+
+`PreparedImpactSystem::newton_flow_product_count()` (low-level:
+`StepWorkspace::jacobian_flow_product_count()`) reports scalar operator products
+in analytic Jacobian assembly during the most recent solver call. It excludes
+Hessian, residual, factorization and finite-difference work; counts include
+rejected Newton attempts and saturate at `usize::MAX`. On a substepped image
+this is still the last internal attempt, not an output-tick sum.
+
+The new scratch is allocated during preparation: an optional column index
+buffer reserved for a same-size dense operator, plus linear-size balance,
+residual, correction and flow vectors. It adds memory; it does not claim a
+reduced-memory implementation. Refresh and execution stay within that capacity.
+
+Five additional regressions cover extreme auxiliary scaling, exact preservation
+of subnormal coefficients, correction/cancellation at a tiny leaf pivot, bitwise
+column/row traversal parity after topology changes, and complete Jacobian
+parity with the 132-state operation count. Independent arithmetic checks are
+not Rust test execution or a real-time deadline measurement.

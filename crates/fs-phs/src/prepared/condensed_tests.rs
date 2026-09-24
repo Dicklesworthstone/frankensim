@@ -283,6 +283,33 @@ fn binary_balance_never_erases_nonzero_subnormal_couplings() {
 
 
 #[test]
+fn acoustic_jacobian_uses_nonzero_column_support_not_all_edges_per_state() {
+    let sys=system(64);let n=sys.n;let mut dense=StepWorkspace::new(&sys).unwrap();
+    let mut sparse=StepWorkspace::new(&sys).unwrap();plan(&mut sparse,n);
+    dense.flow.refresh(&sys).unwrap();sparse.flow.refresh(&sys).unwrap();
+    let mut x0=vec![0.0;n];x0[0]=0.3;x0[1]=-0.6;
+    for i in 0..n {dense.x[i]=x0[i]+0.0005*(i+1) as f64;}
+    sparse.x.copy_from_slice(&dense.x);
+    let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
+    let diss=Some(Dissipation{force:&resist,tangent:Some(&tangent)});
+    dense.analytic_jacobian_into(&sys,&x0,0.003,&action,diss,&mut ||Ok(())).unwrap();
+    sparse.analytic_jacobian_into(&sys,&x0,0.003,&action,diss,&mut ||Ok(())).unwrap();
+    let edges=(0..n).map(|r|sparse.flow.row(r).len()).sum::<usize>();
+    assert_eq!(n,132);assert_eq!(edges,326);
+    assert_eq!(dense.jacobian_flow_product_count(),43032);
+    assert_eq!(sparse.jacobian_flow_product_count(),652);
+    let p=sparse.condensation.as_ref().unwrap();let restored=full(&sparse.jacobian,&p.left,&p.right);
+    for (a,b) in restored.iter().zip(&dense.jacobian) {assert!((a-b).abs()<1e-12*b.abs().max(1.0));}
+    // Counts describe one solver call, not a lifetime counter or a claim that
+    // residual evaluation / physical Hessian actions have disappeared.
+    sparse.set_condensed_pairs(&[]).unwrap();
+    let mut x1=vec![0.0;n];let mut y=[0.0;2];
+    sparse.step_into(&sys,&x0,&[0.0;2],0.0,&mut x1,&mut y).unwrap();
+    assert_eq!(sparse.jacobian_flow_product_count(),0);
+    assert_eq!(x1,x0);
+}
+
+#[test]
 fn residual_correction_recovers_a_well_conditioned_system_with_a_tiny_leaf_pivot() {
     let epsilon=1e-20_f64;
     let base=[1.,1.,0.,0.,0., 1.,epsilon,0.,0.,0., 0.,0.,1.,0.,0.,

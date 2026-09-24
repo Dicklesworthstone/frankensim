@@ -77,13 +77,26 @@ impl StepWorkspace {
                 self.trial[col] = 0.0;
                 result?;
             }
-            for row in 0..n {
-                let mut flow = 0.0;
-                for &k in self.flow.row(row) {
-                    flow += (sys.j[row*n+k] - sys.r[row*n+k]) * self.plus[k];
+            if let Some(plan)=&mut self.condensation {
+                // The uncorrected acoustic Hessian columns have very small
+                // support. Scatter them through current operator columns, rather
+                // than multiplying every edge by zeros for every acoustic state.
+                let products=self.flow.apply_direction(sys,&self.plus,&mut plan.flow,poll)?;
+                self.jacobian_flow_products=self.jacobian_flow_products.saturating_add(products);
+                for row in 0..n {
+                    let flow=plan.flow[row]-if dissipation.is_some() {self.nonlinear_loss[row]} else {0.0};
+                    self.jacobian[row*n+col]=(if row==col {1.0} else {0.0})-dt*flow;
                 }
-                if dissipation.is_some() { flow -= self.nonlinear_loss[row]; }
-                self.jacobian[row*n+col] = (if row == col { 1.0 } else { 0.0 }) - dt*flow;
+            } else {
+                for row in 0..n {
+                    let mut flow = 0.0;
+                    for &k in self.flow.row(row) {
+                        flow += (sys.j[row*n+k] - sys.r[row*n+k]) * self.plus[k];
+                    }
+                    self.jacobian_flow_products=self.jacobian_flow_products.saturating_add(self.flow.row(row).len());
+                    if dissipation.is_some() { flow -= self.nonlinear_loss[row]; }
+                    self.jacobian[row*n+col] = (if row == col { 1.0 } else { 0.0 }) - dt*flow;
+                }
             }
         }
         if let Some(plan)=&mut self.condensation {
@@ -95,13 +108,11 @@ impl StepWorkspace {
                 port.directional(&self.midpoint,&self.nonlinear_effort,&self.trial,
                     &self.delta,&mut self.nonlinear_loss)?;
             }
+            let products=self.flow.apply_direction(sys,&self.delta,&mut plan.flow,poll)?;
+            self.jacobian_flow_products=self.jacobian_flow_products.saturating_add(products);
             for row in 0..n {
                 poll()?;
-                let mut flow=0.0;
-                for &k in self.flow.row(row) {
-                    flow+=(sys.j[row*n+k]-sys.r[row*n+k])*self.delta[k];
-                }
-                if dissipation.is_some() { flow-=self.nonlinear_loss[row]; }
+                let flow=plan.flow[row]-if dissipation.is_some() {self.nonlinear_loss[row]} else {0.0};
                 plan.left[row]=-dt*flow;
             }
             norm(&plan.left)?; norm(&plan.right)?;

@@ -18,6 +18,7 @@ pub(super) struct Condensation {
     owner: Vec<usize>,
     pub(super) left: Vec<f64>,
     pub(super) right: Vec<f64>,
+    pub(super) flow: Vec<f64>,
     scaled_left: Vec<f64>,
     scaled_right: Vec<f64>,
     matrix: Vec<f64>,
@@ -75,7 +76,7 @@ impl Condensation {
             .ok_or_else(|| dimensions("condensed responses extent"))?;
         Ok(Self {
             n, pairs: pairs.to_vec(), retained, owner,
-            left: zeroed(n)?, right: zeroed(n)?, scaled_left: zeroed(n)?, scaled_right: zeroed(n)?,
+            left: zeroed(n)?, right: zeroed(n)?, flow: zeroed(n)?, scaled_left: zeroed(n)?, scaled_right: zeroed(n)?,
             matrix: zeroed(entries)?,
             rhs: zeroed(k)?, solution: zeroed(k)?, responses: zeroed(response_size)?,
             candidate: zeroed(n)?, correction: zeroed(n)?, error: zeroed(n)?,
