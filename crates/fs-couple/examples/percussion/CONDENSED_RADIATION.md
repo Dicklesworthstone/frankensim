@@ -48,8 +48,10 @@ checking the original 132-state equation against the full dense solve.
 Every update checks the pair-block structure with EXACT zero comparisons.
 An arbitrarily small nonzero coupling between two eliminated blocks is not
 removed. Unexpected structure, a singular leaf/border solve, nonfinite
-elimination, or failed full-equation backward error uses the existing full
-dense LU on the SAME complete analytic matrix. The fallback does not remove
+elimination, or unresolved full-equation backward error uses the existing full
+dense LU on the SAME complete analytic matrix. Before that fallback, the
+solver can correct roundoff with at most two solves of the same condensed
+system against the original full-equation residual, as described below. The fallback does not remove
 radiation, change contact strength, relax an energy tolerance or skip time.
 
 Using a scalar border also avoids requiring the entire uncorrected `B` to be
@@ -109,3 +111,29 @@ Authored tests and matrix arithmetic alone are not a native passing result.
 No wall-clock speedup, audio fidelity, real-time deadline or reduced-memory
 claim is made without measurement. Stationary-reference radiation and all
 previously declared cymbal/drum modeling limitations remain unchanged.
+
+
+## Balanced elimination and residual correction
+
+The scalar Gonzalez border now uses reciprocal power-of-two scaling of its
+rank-one factors. The original factors remain unchanged for verification and
+dense fallback. Every scaled coefficient must round-trip exactly; otherwise
+scaling is discarded rather than dropping a subnormal term. An identically
+zero update uses a dummy zero auxiliary equation.
+
+A small but nonzero leaf pivot can cause severe subtractive cancellation in
+back-substitution even when the full matrix is well-conditioned. At most two
+full-equation residual corrections reuse the same condensed operator before
+falling back to dense LU. They are linear-solve corrections, not extra physical
+timesteps or nonlinear iterations. No force, material history, state address,
+energy tolerance or contact parameter changes.
+
+Every candidate is checked against the original full floating-point matrix,
+with the original 128*epsilon*(n+1) absolute-equation-scale allowance. Refusal
+or cancellation publishes no partial candidate. Balance and correction vectors
+are allocated during preparation; this does not reduce workspace memory.
+
+Three additional unit regressions cover extreme auxiliary factors and exact
+zero updates, subnormal preservation, and recovery/cancellation/retry for a
+tiny leaf pivot. They require native execution; independent matrix arithmetic
+is not a passing Rust result or a real-time speed measurement.

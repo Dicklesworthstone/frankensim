@@ -18,6 +18,8 @@ pub(super) struct Condensation {
     owner: Vec<usize>,
     pub(super) left: Vec<f64>,
     pub(super) right: Vec<f64>,
+    scaled_left: Vec<f64>,
+    scaled_right: Vec<f64>,
     matrix: Vec<f64>,
     rhs: Vec<f64>,
     solution: Vec<f64>,
@@ -30,6 +32,21 @@ pub(super) struct Condensation {
     leaf_lu: Vec<LuWorkspace>,
     border_lu: LuWorkspace,
     refinements: usize,
+}
+
+// Exact binary scaling, including values whose exponent is subnormal. The
+// reciprocal scaling changes only the auxiliary unknown; it never rescales
+// physical state, storage, force, or the caller's original rank-one factors.
+fn exponent(x: f64) -> i32 {
+    let bits=x.abs().to_bits(); let field=(bits>>52) as i32;
+    if field==0 { -1074+63-bits.leading_zeros() as i32 } else { field-1023 }
+}
+fn scale_binary(mut x: f64, mut shift: i32) -> f64 {
+    // At most two factors are needed: finite f64 exponents span 2098 values,
+    // and the chosen shift is half the difference of two such exponents.
+    while shift>1023 { x*=f64::from_bits(2046_u64<<52); shift-=1023; }
+    while shift< -1022 { x*=f64::MIN_POSITIVE; shift+=1022; }
+    x*f64::from_bits(((shift+1023) as u64)<<52)
 }
 
 impl Condensation {
@@ -58,7 +75,8 @@ impl Condensation {
             .ok_or_else(|| dimensions("condensed responses extent"))?;
         Ok(Self {
             n, pairs: pairs.to_vec(), retained, owner,
-            left: zeroed(n)?, right: zeroed(n)?, matrix: zeroed(entries)?,
+            left: zeroed(n)?, right: zeroed(n)?, scaled_left: zeroed(n)?, scaled_right: zeroed(n)?,
+            matrix: zeroed(entries)?,
             rhs: zeroed(k)?, solution: zeroed(k)?, responses: zeroed(response_size)?,
             candidate: zeroed(n)?, correction: zeroed(n)?, error: zeroed(n)?,
             row_scale: zeroed(k)?, col_scale: zeroed(k)?, leaf_lu,
@@ -67,6 +85,29 @@ impl Condensation {
         })
     }
     pub(super) fn dimension(&self) -> usize { self.retained.len()+1 }
+
+    fn balance(&mut self) {
+        let left=self.left.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+        let right=self.right.iter().fold(0.0_f64,|s,x|s.max(x.abs()));
+        if left==0.0 || right==0.0 {
+            // The original outer product is exactly zero. A dummy y=0 avoids
+            // imposing an arbitrarily scaled, irrelevant auxiliary equation.
+            self.scaled_left.fill(0.0); self.scaled_right.fill(0.0); return;
+        }
+        let shift=(exponent(right)-exponent(left))/2;
+        let mut reversible=true;
+        for i in 0..self.n {
+            self.scaled_left[i]=scale_binary(self.left[i],shift);
+            self.scaled_right[i]=scale_binary(self.right[i],-shift);
+            reversible &= self.scaled_left[i].is_finite() && self.scaled_right[i].is_finite()
+                && scale_binary(self.scaled_left[i],-shift).to_bits()==self.left[i].to_bits()
+                && scale_binary(self.scaled_right[i],shift).to_bits()==self.right[i].to_bits();
+        }
+        // Do not discard an underflowed coefficient for better conditioning.
+        if !reversible {
+            self.scaled_left.copy_from_slice(&self.left); self.scaled_right.copy_from_slice(&self.right);
+        }
+    }
 
     /// Solve (base + left * right^T) x = rhs. Return false without publication
     /// on unsuitable structure, failed elimination or failed ORIGINAL backward
@@ -113,27 +154,27 @@ impl Condensation {
                     && base[row*n+col]!=0.0 { return Ok(false); }
             }}
         }
-        self.matrix.fill(0.0);
+        self.balance(); self.matrix.fill(0.0);
         for (i,&row) in self.retained.iter().enumerate() {
             for (j,&col) in self.retained.iter().enumerate() { self.matrix[i*k+j]=base[row*n+col]; }
-            self.matrix[i*k+last]=self.left[row]; self.matrix[last*k+i]=-self.right[row];
+            self.matrix[i*k+last]=self.scaled_left[row]; self.matrix[last*k+i]=-self.scaled_right[row];
         }
         self.matrix[last*k+last]=1.0;
-        // Augment y=right^T*x. Keep D^-1 F, NOT a formed inverse. Reuse each
+        // Augment y=scaled_right^T*x. Keep D^-1 F, NOT a formed inverse. Reuse each
         // original pivoted factor for all border columns and every later RHS.
         for (p,&[a,b]) in self.pairs.iter().enumerate() {
             poll()?;
             let d=[base[a*n+a],base[a*n+b],base[b*n+a],base[b*n+b]];
             if self.leaf_lu[p].factor(&d).is_err() { return Ok(false); }
             for j in 0..k {
-                let input=if j==last { [self.left[a],self.left[b]] }
+                let input=if j==last { [self.scaled_left[a],self.scaled_left[b]] }
                     else { let col=self.retained[j]; [base[a*n+col],base[b*n+col]] };
                 let mut response=[0.0;2];
                 if self.leaf_lu[p].solve_factored_into(&input,&mut response).is_err() { return Ok(false); }
                 for side in 0..2 { self.responses[(2*p+side)*(k+1)+j]=response[side]; }
             }
             for i in 0..k {
-                let e=if i==last { [-self.right[a],-self.right[b]] }
+                let e=if i==last { [-self.scaled_right[a],-self.scaled_right[b]] }
                     else { let row=self.retained[i]; [base[row*n+a],base[row*n+b]] };
                 for j in 0..k {
                     let at=i*k+j;
@@ -181,7 +222,7 @@ impl Condensation {
             if self.leaf_lu[p].solve_factored_into(&[self.error[a],self.error[b]],&mut response).is_err() { return Ok(false); }
             for side in 0..2 { self.responses[(2*p+side)*(k+1)+k]=response[side]; }
             for i in 0..k {
-                let e=if i==last { [-self.right[a],-self.right[b]] }
+                let e=if i==last { [-self.scaled_right[a],-self.scaled_right[b]] }
                     else { let row=self.retained[i]; [base[row*n+a],base[row*n+b]] };
                 self.rhs[i]=(-e[0]).mul_add(response[0],self.rhs[i]);
                 self.rhs[i]=(-e[1]).mul_add(response[1],self.rhs[i]);
@@ -212,17 +253,18 @@ impl Condensation {
     where F: FnMut() -> Result<(), PreparedStepError> {
         let n=self.n;
         if self.candidate.iter().any(|x|!x.is_finite()) { return Ok(None); }
-        let dot=self.right.iter().zip(&self.candidate).map(|(v,x)|v*x).sum::<f64>();
-        let dot_abs=self.right.iter().zip(&self.candidate).map(|(v,x)|(v*x).abs()).sum::<f64>();
-        if !dot.is_finite() || !dot_abs.is_finite() { return Ok(None); }
+        // Check the ORIGINAL floating-point matrix used by dense fallback.
+        // Form each outer-product entry before applying it: right^T*x may
+        // overflow even when every matrix coefficient and residual is finite.
         let mut accepted=true;
         for row in 0..n {
             poll()?;
-            let mut residual=(-self.left[row]).mul_add(dot,rhs[row]);
-            let mut magnitude=rhs[row].abs()+self.left[row].abs()*dot_abs;
+            let mut residual=rhs[row]; let mut magnitude=rhs[row].abs();
             for col in 0..n {
                 let a=base[row*n+col]; let x=self.candidate[col];
-                residual=(-a).mul_add(x,residual); magnitude+=(a*x).abs();
+                let outer=self.left[row]*self.right[col];
+                residual=(-(a+outer)).mul_add(x,residual);
+                magnitude+=(a*x).abs()+(outer*x).abs();
             }
             let tolerance=128.0*f64::EPSILON*(n+1) as f64*magnitude;
             if !residual.is_finite() || !tolerance.is_finite() { return Ok(None); }

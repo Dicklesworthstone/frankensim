@@ -223,3 +223,94 @@ fn equilibration_that_would_underflow_a_nonzero_border_entry_uses_dense_fallback
     assert!(plan.solve(&base,&[1.0;4],&mut out,&mut ||Ok(())).unwrap());
     assert_eq!(out,[1.0;4]);
 }
+
+#[test]
+fn scalar_border_scaling_preserves_extreme_rank_one_factors_and_zero_updates() {
+    let n=5; let pairs=[[1,2],[3,4]];
+    let mut base=vec![0.0;n*n]; for i in 0..n { base[i*n+i]=2.0+i as f64; }
+    base[1]=-0.25; base[n]=0.5; base[3]=0.125; base[3*n]=-0.5;
+    let u=[0.5,-0.25,0.125,0.25,-0.5]; let v=[0.25,0.5,-0.25,0.125,0.25];
+    let rhs=[1.0,-2.0,3.0,-4.0,5.0]; let mut expected=[0.0;5];
+    LuWorkspace::new(n).unwrap().solve_into(&full(&base,&u,&v),&rhs,&mut expected).unwrap();
+    for shift in [-1000,-500,0,500,1000] {
+        let mut plan=Condensation::new(n,&pairs).unwrap();
+        for i in 0..n { plan.left[i]=scale_binary(u[i],shift); plan.right[i]=scale_binary(v[i],-shift); }
+        let left=plan.left.clone(); let right=plan.right.clone(); let mut out=[99.0;5];
+        assert!(plan.solve(&base,&rhs,&mut out,&mut ||Ok(())).unwrap());
+        for (a,b) in out.iter().zip(expected) { assert!((a-b).abs()<2e-13); }
+        assert_eq!(plan.left,left); assert_eq!(plan.right,right);
+        for i in 0..n { for j in 0..n {
+            assert_eq!(plan.scaled_left[i]*plan.scaled_right[j],left[i]*right[j]);
+        }}
+    }
+    // An identically zero update must not require v^T*x to be representable.
+    let mut plan=Condensation::new(n,&pairs).unwrap(); plan.right.fill(f64::MAX);
+    let mut out=[0.0;5]; let huge_rhs=[1e100;5];
+    assert!(plan.solve(&base,&huge_rhs,&mut out,&mut ||Ok(())).unwrap());
+    LuWorkspace::new(n).unwrap().solve_into(&base,&huge_rhs,&mut expected).unwrap();
+    for (a,b) in out.iter().zip(expected) { assert!((a-b).abs()<1e-14*b.abs()); }
+}
+
+#[test]
+fn binary_balance_never_erases_nonzero_subnormal_couplings() {
+    let mut plan=Condensation::new(3,&[[1,2]]).unwrap();
+    plan.left=vec![1.0,f64::from_bits(1),-0.0]; plan.right=vec![1e-200,0.0,-1e-200];
+    plan.balance();
+    // Normalizing the large entries would lose left[1]; keep the original
+    // factors rather than silently sparsifying the auxiliary equation.
+    assert_eq!(plan.scaled_left,plan.left); assert_eq!(plan.scaled_right,plan.right);
+    assert_eq!(plan.scaled_left[1].to_bits(),1);
+    assert_eq!(plan.scaled_left[2].to_bits(),(-0.0_f64).to_bits());
+    assert_eq!(exponent(f64::from_bits(1)),-1074);
+    assert_eq!(exponent(f64::MIN_POSITIVE),-1022);
+    assert_eq!(exponent(f64::MAX),1023);
+    for x in [f64::from_bits(1),0.125,1.0,f64::MAX] {
+        assert_eq!(scale_binary(x,0).to_bits(),x.to_bits());
+    }
+    // Exercise binary scaling beyond the exponent of a single finite factor.
+    let mut extremes=Condensation::new(3,&[[1,2]]).unwrap();
+    extremes.left[0]=f64::from_bits(1);extremes.right[0]=f64::MAX;extremes.balance();
+    assert!(extremes.scaled_left[0].is_normal() && extremes.scaled_right[0].is_normal());
+    assert_eq!(extremes.left[0]*extremes.right[0],extremes.scaled_left[0]*extremes.scaled_right[0]);
+    let mut out=[17.0;3]; let mut calls=0;
+    let base=[1.,0.,0.,0.,1.,0.,0.,0.,1.];
+    assert_eq!(plan.solve(&base,&[0.25;3],&mut out,&mut || {
+        calls+=1; if calls==3 {Err(PreparedStepError::Cancelled)} else {Ok(())}
+    }).unwrap_err(),PreparedStepError::Cancelled);
+    assert_eq!(out,[17.0;3]);
+    assert!(plan.solve(&base,&[0.25;3],&mut out,&mut ||Ok(())).unwrap());
+}
+
+
+#[test]
+fn residual_correction_recovers_a_well_conditioned_system_with_a_tiny_leaf_pivot() {
+    let epsilon=1e-20_f64;
+    let base=[1.,1.,0.,0.,0., 1.,epsilon,0.,0.,0., 0.,0.,1.,0.,0.,
+        0.,0.,0.,2.,0., 0.,0.,0.,0.,3.];
+    let rhs=[1.,2.,3.,4.,5.];
+    // A is nonsingular and well-conditioned. Eliminating the tiny (not zero)
+    // leaf pivot loses its recovered coordinate through subtractive cancellation.
+    let naive_border=(1.-2./epsilon)/(1.-1./epsilon);
+    let naive_leaf=2./epsilon-naive_border/epsilon;
+    assert!((naive_border+naive_leaf-rhs[0]).abs()>0.5);
+    let mut plan=Condensation::new(5,&[[1,2],[3,4]]).unwrap();
+    // Locate the first residual-correction solve after the current factor
+    // and equilibration traversal, rather than coupling to an old poll count.
+    let mut before_correction=0;
+    assert!(plan.factor(&base,&mut ||{before_correction+=1;Ok(())}).unwrap());
+    plan.error.copy_from_slice(&rhs);
+    assert!(plan.solve_rhs(&base,&mut ||{before_correction+=1;Ok(())}).unwrap());
+    plan.candidate.copy_from_slice(&plan.correction);
+    assert_eq!(plan.check(&base,&rhs,&mut ||{before_correction+=1;Ok(())}).unwrap(),Some(false));
+    let mut answer=[17.;5];let mut polls=0;
+    // Cancellation during correction must not publish the inaccurate candidate.
+    assert_eq!(plan.solve(&base,&rhs,&mut answer,&mut || {
+        polls+=1;if polls==before_correction+1 {Err(PreparedStepError::Cancelled)} else {Ok(())}
+    }).unwrap_err(),PreparedStepError::Cancelled);
+    assert_eq!(answer,[17.;5]);
+    assert!(plan.solve(&base,&rhs,&mut answer,&mut ||Ok(())).unwrap());
+    let mut expected=[0.;5];LuWorkspace::new(5).unwrap().solve_into(&base,&rhs,&mut expected).unwrap();
+    for (a,b) in answer.iter().zip(expected) {assert!((a-b).abs()<1e-13);}
+    let mut fresh=Condensation::new(5,&[[1,2],[3,4]]).unwrap();let mut retry=[0.;5];
+    assert!(fresh.solve(&base,&rhs,&mut retry,&mut ||Ok(())).unwrap());assert_eq!(answer,retry);
+}
