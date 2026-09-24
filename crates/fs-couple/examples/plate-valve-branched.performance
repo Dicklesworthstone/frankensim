@@ -7,10 +7,10 @@ duct_node junction
 duct_node wall 0.001 0.1 200000 40
 duct_node baffled-low-ka 1500
 duct_node cavity 0.00001 0.0015 0.02 200000
-duct_section 0 1 0.075 0.007 0.002
-duct_section 1 2 0.075 0.007 0.002
+duct_section 0 1 0.07 0.007 0.002
+duct_section 1 2 0.08 0.007 0.002
 duct_section 2 3 0.1 0.008 0.002
-duct_section 1 4 0.04 0.002 0.002
+duct_section 1 4 0.043 0.002 0.002
 observation network-baffled 3 0 0 0.2 8 32 1500
 plate clamped 0 0 0.2 450 0 0.5
 aperture 0.0002 0.25 0.1

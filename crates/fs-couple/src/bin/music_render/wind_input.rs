@@ -84,10 +84,16 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
         let observation=match p.renderer().observation() {
             ApertureObservation::Inlet=>"inlet",
             ApertureObservation::TubeTerminal=>"terminal",
-            ApertureObservation::NetworkNode(_)=>if i.duct_sections==1 {"terminal"} else {"network-node"},
+            ApertureObservation::NetworkNode(node)=>match p.renderer().system() {
+                CoupledAperture::Network(n) if i.duct_sections==1 && matches!(n.spec().nodes[node],
+                    fs_couple::bernoulli_aperture::network::NetworkNode::Termination {..}
+                    | fs_couple::bernoulli_aperture::network::NetworkNode::Impedance {..}
+                    | fs_couple::bernoulli_aperture::network::NetworkNode::Relaxation {..})=>"terminal",
+                _=>"network-node",
+            },
             ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {..}=>"baffled-outlet",
         };
-        let receiver_json=outlet_provenance(p.renderer(),i.radiation_load);
+        let receiver_json=format!("{}{}",outlet_provenance(p.renderer(),i.radiation_load),super::duct_metadata::provenance(&p));
         let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
             else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };

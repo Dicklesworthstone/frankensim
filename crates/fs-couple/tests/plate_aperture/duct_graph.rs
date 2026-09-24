@@ -15,10 +15,10 @@ duct_node junction\n\
 duct_node wall 0.001 0.1 200000 40\n\
 duct_node baffled-low-ka 1500\n\
 duct_node cavity 0.00001 0.0015 0.02 200000\n\
-duct_section 0 1 0.075 0.007 0.002\n\
-duct_section 1 2 0.075 0.007 0.002\n\
+duct_section 0 1 0.07 0.007 0.002\n\
+duct_section 1 2 0.08 0.007 0.002\n\
 duct_section 2 3 0.1 0.008 0.002\n\
-duct_section 1 4 0.04 0.002 0.002";
+duct_section 1 4 0.043 0.002 0.002";
 const OBSERVATION:&str="observation network-baffled 3 0 0 0.2 8 32 1500";
 fn graph_input() -> String {
     INPUT.replace("tube 0.25 0.007 -0.8 0.002 1048576",GRAPH)
@@ -37,10 +37,10 @@ fn graph(speed:f64,density:f64) -> TubeNetworkSpec {
         nodes:vec![NetworkNode::Inlet,NetworkNode::Junction,wall().shunt().unwrap(),
             radiation.termination(),cavity().termination(density,speed).unwrap()],
         sections:vec![
-            TubeSection {nodes:[0,1],length_m:0.075,radius_m:0.007,max_length_error_m:0.002},
-            TubeSection {nodes:[1,2],length_m:0.075,radius_m:0.007,max_length_error_m:0.002},
+            TubeSection {nodes:[0,1],length_m:0.07,radius_m:0.007,max_length_error_m:0.002},
+            TubeSection {nodes:[1,2],length_m:0.08,radius_m:0.007,max_length_error_m:0.002},
             TubeSection {nodes:[2,3],length_m:0.1,radius_m:0.008,max_length_error_m:0.002},
-            TubeSection {nodes:[1,4],length_m:0.04,radius_m:0.002,max_length_error_m:0.002},
+            TubeSection {nodes:[1,4],length_m:0.043,radius_m:0.002,max_length_error_m:0.002},
         ],sound_speed_m_s:speed,max_wave_memory_bytes:1<<20,
     }
 }
@@ -98,7 +98,7 @@ fn side_chamber_wall_and_return_path_change_actual_valve_motion_not_just_output(
     let mut changed=[
         load(&text.replace("cavity 0.00001","cavity 0.00002")).into_renderer(),
         load(&text.replace("wall 0.001 0.1 200000 40","wall 0.001 0.1 400000 40")).into_renderer(),
-        load(&text.replace("1 4 0.04 0.002","1 4 0.08 0.002")).into_renderer(),
+        load(&text.replace("1 4 0.043 0.002","1 4 0.086 0.002")).into_renderer(),
     ];
     let mut moved=[false;3];let mut sound=[false;3];
     for _ in 0..128 {
@@ -153,8 +153,8 @@ fn graph_topology_physical_loads_and_observer_ambiguities_refuse_without_substit
         source.replace("duct_section 0 1","duct_section 0 0"),
         source.replace("duct_section 1 4","duct_section 1 99"),
         source.replace("duct_section 1 4","duct_section 2 3"),
-        source.replace("0.04 0.002 0.002","0 0.002 0.002"),
-        source.replace("0.04 0.002 0.002","0.04 0.002 0"),
+        source.replace("0.043 0.002 0.002","0 0.002 0.002"),
+        source.replace("0.043 0.002 0.002","0.043 0.002 0"),
         source.replace("cavity 0.00001","cavity -0.00001"),
         source.replace("wall 0.001 0.1","wall 0.001 -0.1"),
         source.replace("baffled-low-ka 1500","baffled-low-ka 10000"),
@@ -174,7 +174,7 @@ fn graph_topology_physical_loads_and_observer_ambiguities_refuse_without_substit
 fn more_than_one_radiating_terminal_is_retained_but_only_the_named_outlet_is_observed() {
     let two=graph_input().replace("network 5 4","network 6 5")
         .replace("duct_section 0 1","duct_node baffled-low-ka 1500\nduct_section 0 1")
-        .replace(OBSERVATION,&format!("duct_section 1 5 0.06 0.003 0.002\n{OBSERVATION}"));
+        .replace(OBSERVATION,&format!("duct_section 1 5 0.057 0.003 0.002\n{OBSERVATION}"));
     let loaded=load(&two);
     assert_eq!(loaded.info().radiation_terminals,2);
     assert_eq!(loaded.radiation_loads().iter().map(|(n,_)|*n).collect::<Vec<_>>(),vec![3,5]);
@@ -188,4 +188,23 @@ fn more_than_one_radiating_terminal_is_retained_but_only_the_named_outlet_is_obs
     }
     assert!(distinct);
     for node in [3,5] {assert!(network(&a).node_frame(node).unwrap().stored_energy_j>0.0);}
+}
+
+#[test]
+fn explicit_inline_and_shunt_impedances_participate_in_pressure_and_energy() {
+    let chain="network 4 3 1048576\nduct_node inlet\nduct_node series 100000 10 none\n\
+        duct_node shunt 40000 20 0.00000001\nduct_node baffled-low-ka 1500\n\
+        duct_section 0 1 0.07 0.007 0.002\nduct_section 1 2 0.08 0.007 0.002\n\
+        duct_section 2 3 0.1 0.008 0.002";
+    let text=graph_input().replace(GRAPH,chain);
+    let mut r=load(&text).into_renderer();let mut drop=false;let mut loss=false;
+    for _ in 0..96 {
+        r.block(&mut [0.0;37]).unwrap();
+        let n=network(&r);let inline=n.node_frame(1).unwrap();
+        assert!(matches!(n.spec().nodes[1],NetworkNode::Series{..}));
+        assert!(matches!(n.spec().nodes[2],NetworkNode::Shunt{..}));
+        drop|=(inline.pressure_pa-inline.series_other_pressure_pa.unwrap()).abs()>1e-10;
+        loss|=inline.absorbed_energy_j>0.0;
+    }
+    assert!(drop && loss,"the series node must not be replaced with a continuous-pressure junction");
 }
