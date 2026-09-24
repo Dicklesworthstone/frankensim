@@ -4,6 +4,9 @@
 //! quantile. Replicate means, NOT dependent points within a net, are the units
 //! used for a descriptive standard error. No optional-stopping bound is implied.
 
+#[path = "product_qmc_checkpoint.rs"]
+mod checkpoint;
+
 use core::fmt::Display;
 use fs_evidence::Color;
 use fs_rand::qmc::{MAX_SOBOL_DIM, Sobol};
@@ -64,7 +67,8 @@ pub struct QmcReport {
 /// Resumable bounded propagation for 1..=10 parameters using the existing Sobol
 /// table. No pseudo-random tail is silently substituted beyond that limit.
 ///
-/// Clone is an in-memory checkpoint. The owned plan and layout cannot change on
+/// Clone is an in-memory checkpoint; [`Self::checkpoint`] persists it.
+/// The owned plan and layout cannot change on
 /// resume, and the callback must keep the same model meaning. Sample ordinals
 /// are replicate-major and random-access; interruption retries the exact point.
 /// A rejected sample is terminal: continuing after discarding it would censor

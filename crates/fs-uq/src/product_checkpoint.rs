@@ -166,7 +166,7 @@ fn numbers(bytes: &mut Vec<u8>, values: &[f64]) {
     }
 }
 
-fn execution_identity(plan: &UqPlan, model_identity: ContentHash) -> ContentHash {
+pub(crate) fn execution_identity(plan: &UqPlan, model_identity: ContentHash) -> ContentHash {
     // A length-framed, explicitly tagged encoding, not Debug/JSON formatting.
     // This domain also pins the Philox ordinal addressing and normal transform;
     // changing sampler semantics requires a new domain/version and checkpoint.

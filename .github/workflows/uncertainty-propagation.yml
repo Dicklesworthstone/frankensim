@@ -1,0 +1,26 @@
+name: Uncertainty propagation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-uq/**'
+      - 'crates/fs-cli/src/uq_command/**'
+      - 'crates/fs-cli/tests/cooling_uq_qmc_cli.rs'
+      - '.github/workflows/uncertainty-propagation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qmc-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test QMC propagation and durable recovery
+        run: cargo test --release -p fs-uq --lib product_qmc && cargo test --release -p fs-uq --test product_qmc
