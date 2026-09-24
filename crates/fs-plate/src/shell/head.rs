@@ -2,13 +2,16 @@
 //! membrane stepper. Geometry, film elasticity/density, thickness and tension
 //! are separate inputs. A drumhead brand does not specify the installed tension.
 //! The fixed rim uses w=0 with free slope; finite bending stiffness is retained.
-//! This baseline omits tuning-lug nonuniformity, coating, contact and enclosed
-//! air. Those are physical coupled participants, not baked frequency corrections.
+//! Uniform tension remains the original image. An explicit equilibrated affine
+//! variation resolves spatial/anisotropic prestress, not tuning-lug mechanics.
 use super::profile::{ProfileBudget,ProfileStation,revolve};
 use crate::{AssemblyOptions,EdgeSupport,PlateError,PlateMesh,PlateModel,PlateSection,assemble};
 
 /// Geometric stretching with cold, statically condensed in-plane relaxation.
 pub mod nonlinear;
+/// Equilibrated spatial installed tension on the actual head mesh.
+pub mod tension;
+pub use tension::TensionVariation;
 
 /// Explicit circular film and numerical sampling.
 #[derive(Clone,Copy,Debug)]
@@ -32,8 +35,10 @@ pub struct TensionedDiskSpec {
 }
 /// Actual film pencil and geometry, ready for the existing modal facility.
 pub struct TensionedDisk {
-    /// Supplied physical values.
+    /// Supplied physical values, including the uniform base tension.
     pub spec:TensionedDiskSpec,
+    /// Admitted spatial variation about that base; zero for the original image.
+    pub tension_variation:TensionVariation,
     /// Generated planar triangles, with a unique center.
     pub mesh:PlateMesh,
     /// Actual section used in both stiffness and mass.
@@ -48,6 +53,18 @@ impl TensionedDisk {
     /// # Errors
     /// Invalid physical values, discretization/budget or existing FEM refusal.
     pub fn new(spec:TensionedDiskSpec,budget:ProfileBudget)->Result<Self,PlateError> {
+        Self::new_with_tension_variation(spec,TensionVariation::default(),budget)
+    }
+    /// Construct the same film with an explicit equilibrated prestress field.
+    /// The field changes the physical pencil BEFORE modal reduction. It never
+    /// retunes a previously computed oscillator, changes mass or adds damping.
+    /// Zero variation preserves the original uniform assembly arithmetic.
+    /// # Errors
+    /// Invalid fields, loss of tension anywhere on the polygonal head, geometry,
+    /// budgets, or the existing plate assembler's refusals.
+    pub fn new_with_tension_variation(spec:TensionedDiskSpec,variation:TensionVariation,
+        budget:ProfileBudget)->Result<Self,PlateError> {
+        variation.validate()?;
         let bad=||PlateError::BadSection{what:"disk requires positive finite radius/tension and bounded radial sampling"};
         if !spec.radius_m.is_finite() || spec.radius_m<=0.0 || !spec.tension_n_m.is_finite()
             || spec.tension_n_m<=0.0 || spec.radial_intervals==0
@@ -59,10 +76,15 @@ impl TensionedDisk {
         let generated=revolve(&stations,spec.azimuths,spec.young_pa,spec.poisson,spec.density_kg_m3,&[],&[],budget)?;
         let mesh=PlateMesh::from_unstructured(generated.mesh.nodes.iter().map(|p|(p[0],p[1])).collect(),generated.mesh.tris)?;
         let section=PlateSection::isotropic(spec.young_pa,spec.poisson,spec.thickness_m,spec.density_kg_m3)?;
-        let model=assemble(&mesh,&section,&generated.outer_nodes,&[],&AssemblyOptions {
-            pretension:spec.tension_n_m,support:EdgeSupport::SimplySupported,
+        let uniform=variation.is_zero();
+        if !uniform { variation.validate_mesh(spec.tension_n_m,&mesh)?; }
+        // Do not subtract a large isotropic matrix to replace its prestress:
+        // build bending/mass once, then add the FULL admitted tensor instead.
+        let mut model=assemble(&mesh,&section,&generated.outer_nodes,&[],&AssemblyOptions {
+            pretension:if uniform {spec.tension_n_m}else{0.0},support:EdgeSupport::SimplySupported,
         })?;
-        Ok(Self{spec,mesh,section,model,mass_kg:generated.mass_kg})
+        if !uniform { variation.add_to(spec.tension_n_m,&mesh,&mut model)?; }
+        Ok(Self{spec,tension_variation:variation,mesh,section,model,mass_kg:generated.mass_kg})
     }
     /// Project one unit pressure into a supplied mass-normalized mode. Using
     /// the SAME weights for volume displacement gives reciprocal cavity work.
