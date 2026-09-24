@@ -22,8 +22,9 @@ in, and visual MTL properties are not interpreted as elastic constants.
 All admitted speaking strings, unison members and duplex spans remain present,
 including unplayed courses. The bank's moving-endpoint inertia completion,
 reciprocal cross-potential, actual tension/flexural partials and complete retained
-board basis are reused. At most 24 partials per string are retained by this
-wrapper, with the existing 21.6 kHz ceiling; the structural slice is the complete
+board basis are reused. The default is at most 24 partials per string;
+`--modes 1..512` exposes the existing retention budget, with the same 21.6 kHz
+ceiling. The structural slice is the complete
 admitted slice through `board-band-hz`. No mode is silently dropped to make a
 failed solve pass. High duplex partials outside the retained band are reported;
 the existing endpoint stiffness/mass contributions remain.
@@ -44,10 +45,54 @@ are retained; no fitted damping constant or matrix symmetrization replaces them.
 
 Under `exp(-i omega t)`, velocity is `-i omega q`. The opposing fluid load adds
 `-i omega Z` to the mechanical dynamic stiffness. The many independent string
-coordinates are eliminated into a board-sized Schur complement, then recovered
-for a separate full-equation residual and power balance. Exact unresolved
-lossless string poles refuse rather than adding artificial damping or nudging
-the requested frequency. The numerical solve is the existing complex LU owner.
+coordinates are normally eliminated into a board-sized Schur complement, then
+recovered for a separate full-equation residual and power balance. Coordinates
+near fixed-interface string poles instead remain in a bounded coupled border.
+They are solved with the board by the existing pivoted complex LU owner, never
+by dividing by an unresolved string diagonal. A fixed-interface pole is not
+necessarily a singularity of the complete coupled piano: it can be a bridge
+antiresonance with finite string motion.
+
+The border retains the full cross-potential, self-stiffness, material damping
+and supplied acoustic matrix. It adds neither artificial damping nor a pole
+shift, pseudoinverse, modal deletion or frequency interpolation. At most 128
+near-pole string coordinates may join the original board solve; exceeding this
+setup budget refuses. Singular LU, nonfinite results and failed full-equation
+or power checks still refuse. This does not supply an arbitrary solution at a
+genuine unresolved coupled-system resonance.
+
+## Explicit conservative-structure comparison
+
+`admittance` alone accepts `--lossless-structure`:
+
+```sh
+cargo run --release -p fs-couple --example piano_exterior -- \
+  admittance settled.fss strings.csv acoustic-body.obj acoustic.fspe 69 bridge.csv \
+  --modes 128 --lossless-structure
+```
+
+This deliberately sets the original wood and string material damping to zero.
+The same geometry, installed tension, mass, string partials and bridge
+couplings remain, and the **complete complex acoustic load stays active**.
+It is a controlled lossless-structure comparison, not a claim about real wood
+or string losses. The CSV header records the selection. Wood and string power
+columns are zero; admitted input power balances radiation. The one-way columns
+still omit the fluid reaction, so genuine undamped coupled resonances can
+refuse that comparison instead of being smoothed into a finite peak.
+
+Without the option, material damping and the original well-conditioned Schur
+arithmetic remain unchanged. `response`, `render` and `render-loaded` reject
+the flag; no played piano silently loses its existing physical dissipation.
+Numeric retention controls keep their previous meaning. Duplicate flags and
+missing option values refuse before input/output access.
+
+Four new response tests compare exact/near/coincident partials against the
+original time bank's full energy Hessian, retain normal damped behavior, and
+check the complete pole-budget refusal. Two command regressions cover strict
+selection and actual finite-body BEM/bridge output through a physical partial.
+The existing sympathetic-string regression now probes the silent course's
+actual fundamental rather than an arbitrary off-resonance frequency; its
+original effect-size and reciprocity thresholds remain unchanged.
 
 ## CSV and comparisons
 

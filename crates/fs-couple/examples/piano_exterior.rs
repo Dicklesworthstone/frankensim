@@ -38,6 +38,11 @@ piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj A
 These playback options apply to both render and render-loaded.
 response and admittance also accept --modes/--substeps after the output path,
 so harmonic comparisons can use the SAME retained string/board system.
+admittance alone accepts --lossless-structure to remove the existing wood and
+string material damping for a declared conservative-structure comparison.
+It retains the complete complex radiation load and all original modes. Near
+fixed-interface string poles use a bounded coupled solve, not fabricated loss.
+This option is not accepted by response, render or render-loaded.
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
 and edges of a finite soundboard. Label every part as moving or rigid in the
@@ -132,11 +137,28 @@ fn response(scene:&Scene)->Result<String,String> {
     }}
     Ok(csv)
 }
+/// Only admittance admits the explicit conservative-structure comparison.
+/// Preserve option/value boundaries: a flag cannot repair a missing value.
+fn admittance_options(args:&[String])->Result<(playback::Options,bool),String> {
+    let mut numeric=Vec::new();let mut damping=true;let mut args=args.iter();
+    while let Some(flag)=args.next() {
+        if flag=="--lossless-structure" {
+            if !damping {return Err("duplicate --lossless-structure".into());}
+            damping=false;
+        } else {
+            numeric.push(flag.clone());
+            let value=args.next().filter(|s|!s.starts_with("--"))
+                .ok_or_else(||format!("missing value for {flag}"))?;
+            numeric.push(value.clone());
+        }
+    }
+    Ok((playback::Options::harmonic(&numeric)?,damping))
+}
 fn admittance(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,drive:u8)->Result<String,String> {
-    admittance_controlled(board_text,courses,obj,spec,drive,&playback::Options::default())
+    admittance_controlled(board_text,courses,obj,spec,drive,&playback::Options::default(),true)
 }
 fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,spec:&Specification,
-    drive:u8,options:&playback::Options)->Result<String,String> {
+    drive:u8,options:&playback::Options,damping:bool)->Result<String,String> {
     options.validate()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
@@ -144,12 +166,13 @@ fn admittance_controlled(board_text:&str,courses:&[geometry::Course],obj:&str,sp
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
     } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
     let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
-        0.45*f64::from(RATE),options.modes,true)?;
+        0.45*f64::from(RATE),options.modes,damping)?;
     let boundary=Boundary::from_obj(obj,spec,board.motion.as_ref().ok_or("missing harmonic surface motion")?)?
         .loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
-    Ok(format!("# structure: {}\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
-        board.provenance,board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
+    Ok(format!("# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
+        board.provenance,if damping {"original wood/string material damping"}else{"explicitly disabled by --lossless-structure"},
+        board.modes.len(),model.bank().modes.len(),model.bank().omitted_duplex_modes,csv))
 }
 /// Admit both acoustic realizations before attaching the load or dispatching
 /// any score event. Loaded and one-way output share the original PCM path.
@@ -171,7 +194,7 @@ fn run(args:&[String])->Result<(),String> {
         []=>{println!("{USAGE}");Ok(())},
         [help] if help=="--help" || help=="-h"=>{println!("{USAGE}");Ok(())},
         [command,board,strings,obj,spec,drive,output,tail @ ..] if command=="admittance"=>{
-            let options=playback::Options::harmonic(tail)?;
+            let (options,damping)=admittance_options(tail)?;
             let drive:u8=drive.parse().map_err(|_|"admittance requires a MIDI bridge key in 21..108")?;
             if !(21..=108).contains(&drive) {return Err("admittance drive key outside 21..108".into());}
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
@@ -180,7 +203,7 @@ fn run(args:&[String])->Result<(),String> {
             if !courses.iter().any(|c|c.midi==drive) {return Err("admittance drive key is absent from the scale".into());}
             let board=read_bounded(board,8*1024*1024)?;
             let obj=read_bounded(obj,exterior_geometry::MAX_OBJ_BYTES)?;
-            let csv=admittance_controlled(&board,&courses,&obj,&spec,drive,&options)?;
+            let csv=admittance_controlled(&board,&courses,&obj,&spec,drive,&options,damping)?;
             publish(output,csv.as_bytes())?;
             println!("Written {output}: radiation-loaded bridge mobility and pressure per 1 N peak, all retained strings and physical loss channels. No time-domain feedback or measured-fidelity claim.");
             Ok(())
@@ -307,3 +330,7 @@ mod tests {
 #[cfg(test)]
 #[path="grand_piano/radiation_render_tests.rs"]
 mod radiation_render_tests;
+
+#[cfg(test)]
+#[path="grand_piano/lossless_admittance_tests.rs"]
+mod lossless_admittance_tests;

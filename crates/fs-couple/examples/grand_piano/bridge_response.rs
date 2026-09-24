@@ -2,13 +2,17 @@
 //! exp(-i omega t), force amplitudes are peak (not RMS). No time stepper,
 //! fitted resonance, invented string frequency, or altered playback state.
 //! The same endpoint inertia completion and reciprocal cross-potential are
-//! retained. All string coordinates are eliminated into a board-sized Schur
-//! complement, then recovered for a separate residual and power audit.
+//! retained. Regular string coordinates are eliminated into a board-sized Schur
+//! complement. Near fixed-interface poles stay in a bounded, pivoted border;
+//! the full recovered equation and power balance are audited in both cases.
 use super::{geometry::Course, linear::{Bank, BoardMode, MAX_BOARD_MODES}};
 use fs_la::eigen_complex::lu_complex;
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::c64::C64;
 use std::f64::consts::{PI, TAU};
+
+/// Numerical border capacity, not a physical string or retained-mode cutoff.
+const MAX_RETAINED_STRING_POLES: usize = 128;
 
 fn finite(z:C64)->bool {z.re.is_finite() && z.im.is_finite()}
 fn product(row:&[f64],x:&[C64])->C64 {
@@ -42,6 +46,8 @@ pub struct Response {
     pub power_defect_w: f64,
     /// Normwise backward error of the FULL recovered block equation.
     pub backward_error: f64,
+    /// String coordinates retained in the pivoted border, not removed modes.
+    pub retained_string_poles: usize,
 }
 impl BridgeResponse {
     pub fn new(courses:&[Course],board:&[BoardMode],rate:u32,band_hz:f64,
@@ -118,13 +124,19 @@ impl BridgeResponse {
                 -w*self.board_c[i*r+j]);
             if let Some(z)=z {matrix[i*r+j]=matrix[i*r+j]+iw*z[i*r+j];}
         }}
-        let mut divisors=Vec::with_capacity(n);
+        let mut divisors=Vec::with_capacity(n);let mut poles=Vec::new();
         for (k,mode) in self.bank.modes.iter().enumerate() {
             let d=C64::new(mode.omega.powi(2)-w*w,-w*self.string_c[k]);
-            // Exact undamped fixed-interface poles require a different pivot
-            // partition. Never insert artificial loss or shift the frequency.
-            if !finite(d) || d.abs()<=64.*f64::EPSILON*(mode.omega.powi(2)+w*w) {
-                return Err(format!("unresolved fixed-interface string pole at {hz} Hz, mode {k}"));
+            if !finite(d) {return Err(format!("nonfinite string divisor at {hz} Hz, mode {k}"));}
+            // A fixed-interface pole is NOT necessarily a resonance of the
+            // coupled piano. Do not divide by its small diagonal; retain that
+            // original coordinate and let the existing pivoted LU solve it.
+            // This threshold changes only the partition, not any coefficient.
+            if d.abs()<=8.*f64::EPSILON.sqrt()*(mode.omega.powi(2)+w*w) {
+                if poles.len()==MAX_RETAINED_STRING_POLES {
+                    return Err("harmonic response exceeds the 128-coordinate string-pole border budget".into());
+                }
+                poles.push(k);
             }
             divisors.push(d);
         }
@@ -134,24 +146,35 @@ impl BridgeResponse {
                 let mode=self.bank.modes[k];
                 // omega_s^2 beta^2 - a^2/D, evaluated without catastrophic
                 // low-frequency cancellation of the two static terms.
-                weight=weight+C64::new(-w*w,-w*self.string_c[k])
-                    .scale(mode.omega.powi(2)*mode.beta.powi(2))/divisors[k];
+                weight=weight+if poles.binary_search(&k).is_ok() {
+                    // Keep this coordinate's full board self-term; its cross
+                    // reaction is solved explicitly in the bordered equation.
+                    C64::new(mode.omega.powi(2)*mode.beta.powi(2),0.)
+                } else {C64::new(-w*w,-w*self.string_c[k])
+                    .scale(mode.omega.powi(2)*mode.beta.powi(2))/divisors[k]};
             }
             for i in 0..r {for j in 0..r {
                 matrix[i*r+j]=matrix[i*r+j]+weight.scale(port.bridge[i]*port.bridge[j]);
             }}
         }
         if matrix.iter().any(|v|!finite(*v)) {return Err("harmonic Schur overflow".into());}
-        let lu=lu_complex(&matrix,r).map_err(|_|"singular radiation-loaded bridge equation")?;
-        let mut q=force.clone();lu.solve(&mut q);
-        if q.iter().any(|v|!finite(*v)) {return Err("nonfinite harmonic board response".into());}
+        let (q,pole_displacements)=if poles.is_empty() {
+            // Preserve the original operation order away from string poles.
+            let lu=lu_complex(&matrix,r).map_err(|_|"singular radiation-loaded bridge equation")?;
+            let mut q=force.clone();lu.solve(&mut q);(q,Vec::new())
+        } else {self.solve_pole_border(&matrix,&force,&divisors,&poles)?};
+        if q.iter().chain(&pole_displacements).any(|v|!finite(*v)) {
+            return Err("nonfinite harmonic board/string response".into());
+        }
         let mut strings=vec![C64::ZERO;n];
         let mut reconstructed=vec![C64::ZERO;r];let mut row_norm=vec![0.;r];
         let mut string_loss_w=0.;let mut worst_residual=0.0_f64;let mut operator_norm=0.0_f64;
         for port in &self.bank.strings {
             let b=product(&port.bridge,&q);let abs_g:f64=port.bridge.iter().map(|v|v.abs()).sum();
             for k in port.modes.clone() {
-                let m=self.bank.modes[k];let displacement=b.scale(m.a)/divisors[k];
+                let m=self.bank.modes[k];let displacement=match poles.binary_search(&k) {
+                    Ok(slot)=>pole_displacements[slot],Err(_)=>b.scale(m.a)/divisors[k],
+                };
                 if !finite(displacement) {return Err("nonfinite recovered string response".into());}
                 strings[k]=displacement;
                 worst_residual=worst_residual.max((divisors[k]*displacement-b.scale(m.a)).abs());
@@ -197,9 +220,38 @@ impl BridgeResponse {
             return Err(format!("bridge response failed full-equation/power admission: backward={backward_error}, defect={power_defect_w} W, radiation={radiation_w} W"));
         }
         Ok(Response {board_displacement:q,string_displacement:strings,bridge_velocity,input_w,
-            board_loss_w,string_loss_w,radiation_w,power_defect_w,backward_error})
+            board_loss_w,string_loss_w,radiation_w,power_defect_w,backward_error,
+            retained_string_poles:poles.len()})
+    }
+
+    /// [board, retained string coordinates]. Regular strings are already
+    /// eliminated. The exact symmetric cross-potential stays on BOTH sides;
+    /// supplied radiation retains its original entries (including reciprocity
+    /// or lack of it). No pseudoinverse, pole shift or artificial loss.
+    fn solve_pole_border(&self, board:&[C64], force:&[C64], divisors:&[C64],
+        poles:&[usize])->Result<(Vec<C64>,Vec<C64>),String> {
+        let r=self.bank.board_count;let size=r+poles.len();
+        let mut matrix=vec![C64::ZERO;size*size];let mut rhs=vec![C64::ZERO;size];
+        for i in 0..r {matrix[i*size..i*size+r].copy_from_slice(&board[i*r..(i+1)*r]);}
+        rhs[..r].copy_from_slice(force);
+        for (slot,&k) in poles.iter().enumerate() {
+            let row=r+slot;let mode=self.bank.modes[k];
+            matrix[row*size+row]=divisors[k];
+            for (i,g) in self.bank.strings[mode.string].bridge.iter().enumerate() {
+                let cross=C64::new(-mode.a*g,0.);
+                matrix[i*size+row]=cross;matrix[row*size+i]=cross;
+            }
+        }
+        if matrix.iter().any(|v|!finite(*v)) {return Err("harmonic string-pole border overflow".into());}
+        let lu=lu_complex(&matrix,size).map_err(|_|"singular coupled bridge/string-pole equation")?;
+        lu.solve(&mut rhs);
+        Ok((rhs[..r].to_vec(),rhs[r..].to_vec()))
     }
 }
+
+#[cfg(test)]
+#[path="bridge_pole_tests.rs"]
+mod pole_tests;
 
 #[cfg(test)]
 mod tests {
@@ -260,10 +312,13 @@ mod tests {
         assert!((a.bridge_velocity[1]-b.bridge_velocity[0]).abs()<1e-10*a.bridge_velocity[1].abs());
         let (courses,board)=inputs();
         let one=BridgeResponse::new(&courses[..1],&board,192_000,21_600.,4,true).unwrap();
-        let one=one.solve(431.,69,C64::ONE,None).unwrap();
-        let both=model.solve(431.,69,C64::ONE,None).unwrap();
-        assert!((one.bridge_velocity[0]-both.bridge_velocity[0]).abs()>1e-6*both.bridge_velocity[0].abs());
         let first=model.bank.strings.iter().position(|s|s.course==1).unwrap();
+        // Probe the actual silent course's fundamental, not an unrelated
+        // frequency where its correctly retained reaction can be tiny.
+        let hz=model.bank.modes[model.bank.strings[first].modes.start].omega/TAU;
+        let one=one.solve(hz,69,C64::ONE,None).unwrap();
+        let both=model.solve(hz,69,C64::ONE,None).unwrap();
+        assert!((one.bridge_velocity[0]-both.bridge_velocity[0]).abs()>1e-6*both.bridge_velocity[0].abs());
         assert!(both.string_displacement[model.bank.strings[first].modes.clone()].iter().any(|v|v.abs()>0.));
         assert!(model.bank.q.iter().chain(&model.bank.v).all(|v|*v==0.));
     }
@@ -288,7 +343,8 @@ mod tests {
     #[test]
     fn refusals_do_not_shift_poles_or_invent_damping_and_zero_force_is_zero() {
         let m=model(false);let pole=m.bank.modes[0].omega/TAU;
-        assert!(m.solve(pole,69,C64::ONE,None).is_err());
+        let at_pole=m.solve(pole,69,C64::ONE,None).unwrap();
+        assert!(at_pole.retained_string_poles>0);assert!(at_pole.backward_error<1e-9);
         for hz in [0.,f64::NAN,21_601.] {assert!(m.solve(hz,69,C64::ONE,None).is_err());}
         assert!(m.solve(277.,60,C64::ONE,None).is_err());
         assert!(m.solve(277.,69,C64::ONE,Some(&[C64::ZERO])).is_err());
