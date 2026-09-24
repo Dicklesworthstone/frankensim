@@ -48,6 +48,11 @@ jobs:
       - name: Test OBJ physical-region preservation
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-io obj::tests -- --test-threads=1
+      - name: Test geometry-aware close acoustic receivers
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-bem --lib near_field -- --test-threads=1 2>&1 | tee piano-near-field-tests.log
       - name: Test mesh import and source-piano playback
         if: ${{ !cancelled() }}
         run: |
