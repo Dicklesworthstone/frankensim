@@ -1001,7 +1001,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 14,
+        SOLVE_DRIVER_VERSION, 15,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -4701,6 +4701,10 @@ fn g1_adaptive_fidelity_tight_accuracy_refines_and_resolves_the_marked_mesh() {
             .parse::<f64>()
             .unwrap()
     };
+    assert!(
+        first_number(&conduction, "\"uniform_quality_fallbacks\":") > 0.0,
+        "this tight study exercises an admissible uniform fallback when local bisection loses quality"
+    );
     let history = conduction
         .split("\"history\":[")
         .nth(1)

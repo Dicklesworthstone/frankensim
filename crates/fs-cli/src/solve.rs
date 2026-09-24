@@ -112,7 +112,8 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 13 removes the unevaluated adaptive-convergence claim; old receipts
 /// carrying that claim must not share a resumable run identity with this driver.
 /// Version 14 executes bounded enriched-dual adaptive studies for linear solids.
-pub const SOLVE_DRIVER_VERSION: u32 = 14;
+/// Version 15 records uniform enrichment when marked refinement fails mesh quality.
+pub const SOLVE_DRIVER_VERSION: u32 = 15;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1526,6 +1527,7 @@ fn adaptive_study(
 ) -> Result<(fs_mesh::LabeledTetComplex, RungSolved, String), SolveRefusal> {
     let mut solves = 1usize;
     let mut peak_tets = complex.tets().len();
+    let mut uniform_quality_fallbacks = 0usize;
     let mut history = Vec::new();
     let mut achieved = None;
     let mut tolerance = None;
@@ -1666,8 +1668,6 @@ fn adaptive_study(
                 stop = "solve-count-limit";
                 break;
             }
-            drop(fine);
-            drop(enriched);
             let next = match complex.refine_marked(cx, &marks, limits) {
                 Ok(next) => next,
                 Err(fs_mesh::TetRefinementError::OutputLimit) => break,
@@ -1688,6 +1688,22 @@ fn adaptive_study(
             if next.tets().len().saturating_mul(8) > max_tets {
                 break;
             }
+            // Edge-star bisection is conforming but has no shape-regularity
+            // guarantee. Never solve an inadmissible candidate: the global
+            // enrichment already passed the same floor and can be reused if
+            // its own next probe fits. Other producer failures still refuse.
+            if mesh_quality_refusal(&next.quality(), true).is_some() {
+                if enriched.tets().len().saturating_mul(8) > max_tets {
+                    stop = "mesh-quality-refinement-budget";
+                    break;
+                }
+                uniform_quality_fallbacks += 1;
+                complex = enriched;
+                solved = fine;
+                continue;
+            }
+            drop(fine);
+            drop(enriched);
             solved = solve_rung(&next)?;
             solves += 1;
             complex = next;
@@ -1696,6 +1712,7 @@ fn adaptive_study(
     let receipt = format!(
         "{{\"status\":{},\"stop\":{},\"method\":\"enriched-discrete-dual-marked-edge-stars\",\
          \"solved_meshes\":{},\"solve_limit\":{},\"peak_solved_tets\":{},\"tet_limit\":{},\
+         \"uniform_quality_fallbacks\":{},\
          \"accuracy_rel\":{},\"tolerance_k\":{},\"last_estimated_change_k\":{},\
          \"history\":[{}],\"continuum_error_bound\":false,\
          \"deadline_policy\":\"between-numerical-operations\",\"no_claim\":{}}}",
@@ -1705,6 +1722,7 @@ fn adaptive_study(
         ADAPTIVE_MAX_SOLVES,
         peak_tets,
         max_tets,
+        uniform_quality_fallbacks,
         number(accuracy_rel)?,
         tolerance.as_deref().unwrap_or("null"),
         achieved.as_deref().unwrap_or("null"),

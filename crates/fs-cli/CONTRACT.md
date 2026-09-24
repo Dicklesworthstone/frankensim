@@ -344,7 +344,7 @@ rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
 derives from the declared memory budget with the fixture default as a floor,
 so identical inputs at the fixture budget mesh identically.
 
-**The uniform h-ladder** (receipt block `ladder`, driver version 14). When the
+**The uniform h-ladder** (receipt block `ladder`, driver version 15). When the
 project declares `solver.fidelity = "ladder"`, the stage solves the audited base
 and then up to two further rungs, each one uniform 1→8 refinement of the
 labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
@@ -394,6 +394,11 @@ limits and a 17-primal-solve cap retain the last independently probed candidate
 when further work cannot fit. These output counts are not an allocator peak
 memory guarantee. Contact transfer, coupled airflow adjoints and nonlinear
 material adjoints have named unresolved stops in this staged producer.
+If a marked candidate fails the quality floor, the already solved admissible
+global enrichment is reused only when its own next probe fits; the receipt
+counts these uniform quality fallbacks. Otherwise the last fully probed field
+is retained with `mesh-quality-refinement-budget`. No low-quality candidate is
+solved, and unrelated solver/material failures still refuse.
 
 The remaining declared wall budget is checked between numerical operations.
 Expiry records `cli-solve-conduction-adaptive-wall-budget` through the ordinary

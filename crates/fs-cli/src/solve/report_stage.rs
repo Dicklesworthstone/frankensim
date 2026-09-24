@@ -298,6 +298,10 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                 ("adaptive_status", &["adaptive", "status"][..]),
                 ("adaptive_stop", &["adaptive", "stop"][..]),
                 ("adaptive_solved_meshes", &["adaptive", "solved_meshes"][..]),
+                (
+                    "adaptive_uniform_quality_fallbacks",
+                    &["adaptive", "uniform_quality_fallbacks"][..],
+                ),
                 ("adaptive_tolerance_k", &["adaptive", "tolerance_k"][..]),
                 (
                     "adaptive_estimated_change_k",

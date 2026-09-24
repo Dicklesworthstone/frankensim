@@ -315,7 +315,9 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
 }
 
 #[cfg(test)]
+#[path = "continuation/tests.rs"]
 mod tests;
 
 #[cfg(test)]
+#[path = "continuation/interruption.rs"]
 mod interruption;
