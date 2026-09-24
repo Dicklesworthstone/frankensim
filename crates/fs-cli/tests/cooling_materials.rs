@@ -108,7 +108,7 @@ fn scalarizing_a_directional_material_refuses_before_creating_a_checkpoint() {
     let text = json::compact(&fs::read_to_string(&request).unwrap());
     fs::write(&request, text.replace(
         r#""kind":"material-principal-conductivity","material":"substrate","axis":0"#,
-        r#""kind":"material-conductivity","material":"substrate"#,
+        r#""kind":"material-conductivity","material":"substrate""#,
     )).unwrap();
     let checkpoint = dir.join("must-not-exist.bin");
     let result = command("cooling-network-uq", &base).arg(&request)

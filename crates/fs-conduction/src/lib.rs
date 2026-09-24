@@ -74,6 +74,9 @@ pub mod radiation;
 /// and first-mode applicability boundary.
 pub mod reduced_slab;
 pub mod solve;
+/// Equilibrated continuum mean-temperature enclosure on real solves.
+#[cfg(feature = "equilibrated-mean")]
+pub mod verified_mean;
 /// Transient conduction by the method of lines: declared volumetric heat
 /// capacity, the exact P1 capacitance matrix, and theta-method stepping.
 pub mod transient;

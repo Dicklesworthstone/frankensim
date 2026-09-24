@@ -1,6 +1,6 @@
 //! Executable real-FEM / continuum-mean comparison for a heated slab.
 //!
-//! cargo run -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
+//! cargo run -p fs-conduction --features equilibrated-mean --example conduction_mean -- 4 2.0
 //! Arguments: cells per axis (2,4,8,16), volumetric heat source W/m^3.
 //! Geometry and coefficients are illustrative exact nominal declarations.
 use std::error::Error;
@@ -10,7 +10,7 @@ use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, Initia
     Nonlinearity, ScalarField, ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::fixtures::{on_box_face, unit_cube};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_verify::conduction::{MeanSolveConfig, solve_with_mean_bound};
+use fs_conduction::verified_mean::{MeanSolveConfig, solve_with_mean_bound};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();

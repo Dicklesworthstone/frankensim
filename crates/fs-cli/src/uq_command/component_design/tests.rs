@@ -1,14 +1,14 @@
 use super::*;
 // Compacted so fixture edits are independent of the example's formatting.
 static BASE: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| crate::json_read::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    std::sync::LazyLock::new(|| crate::uq_command::json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/cooling-network/adjoint-component-contact-pulse.json"))));
 const SPEC: &str = r#"{"schema":"frankensim.cooling-component-design.v1","units":"SI",
     "temperature_limit_k":304,"power_tolerance_w":0.0001,"temperature_tolerance_k":0.0001,
     "max_evaluations":128,"max_total_steps":100000,"wall_seconds":60,
     "priority":[{"component":"chip","interval":0,"min_power_w":0,"max_power_w":8},
                 {"component":"memory","interval":0,"min_power_w":0,"max_power_w":8}]}"#;
-fn plan() -> Plan { Plan::parse(&J::parse(BASE).unwrap(),&J::parse(SPEC).unwrap()).unwrap() }
+fn plan() -> Plan { Plan::parse(&J::parse(&BASE).unwrap(),&J::parse(SPEC).unwrap()).unwrap() }
 fn deadline() -> Instant { Instant::now()+Duration::from_secs(60) }
 fn fake(plan: &Plan, values: &[f64]) -> Evaluation {
     Evaluation {document:J::Null,peak:300.0+2.0*values[0]+0.25*values[1],peak_time:20.0,
@@ -20,7 +20,7 @@ fn interval<'a>(base: &'a J, index: usize) -> &'a J {
 
 #[test]
 fn controls_keep_footprints_other_component_watts_and_absolute_overrides() {
-    let base=J::parse(BASE).unwrap();
+    let base=J::parse(&BASE).unwrap();
     let spec=J::parse(&SPEC.replace("\"component\":\"memory\",\"interval\":0",
         "\"component\":\"standby\",\"interval\":1")).unwrap();
     let plan=Plan::parse(&base,&spec).unwrap();
@@ -33,14 +33,14 @@ fn controls_keep_footprints_other_component_watts_and_absolute_overrides() {
     assert_eq!(interval(&request,1).path(&["component_powers_w","chip"]).unwrap().as_f64(),Some(0.0));
     assert_eq!(interval(&request,1).path(&["component_powers_w","standby"]).unwrap().as_f64(),Some(2.0));
     assert_eq!(plan.planned_steps,14);
-    assert_eq!(base,J::parse(BASE).unwrap());
+    assert_eq!(base,J::parse(&BASE).unwrap());
     assert!(plan.request(&[9.0,2.0]).is_err());
     assert!(plan.request(&[f64::NAN,2.0]).is_err());
 }
 
 #[test]
 fn incompatible_or_ambiguous_policies_refuse_before_any_candidate() {
-    let base=J::parse(BASE).unwrap();
+    let base=J::parse(&BASE).unwrap();
     for text in [SPEC.replace("\"memory\"","\"chip\""),SPEC.replace("\"memory\"","\"unknown\""),
         SPEC.replace("\"interval\":0","\"interval\":99"),SPEC.replace("\"min_power_w\":0","\"min_power_w\":-1"),
         SPEC.replace("\"max_evaluations\":128","\"max_evaluations\":0")] {

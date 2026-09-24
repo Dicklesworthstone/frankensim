@@ -38,7 +38,7 @@ fn encode(j:&J)->String {
 }
 #[test]
 fn nonlinear_contact_study_uses_local_cells_then_a_global_check_and_replays_the_field() {
-    let result=run(FIXTURE);let study=result.get("mesh_convergence").unwrap();
+    let result=run(&FIXTURE);let study=result.get("mesh_convergence").unwrap();
     assert_eq!(study.str_field("method"),Some("goal-recovery-edge-bisection"));
     assert_eq!(study.get("global_confirmation"),Some(&J::Bool(true)));
     assert!(n(study,"total_adjoint_sweeps")>0.0);
@@ -58,7 +58,7 @@ fn nonlinear_contact_study_uses_local_cells_then_a_global_check_and_replays_the_
     assert!(resolved.get("mesh_convergence").is_none());
     assert!(resolved.path(&["solid","component_power"]).is_none());
     assert!(resolved.path(&["solid","nodal_source_w_m3"]).is_some());
-    let original=J::parse(FIXTURE).unwrap();
+    let original=J::parse(&FIXTURE).unwrap();
     assert_eq!(resolved.path(&["solid","materials"]),original.path(&["solid","materials"]));
     let contact=&result.get("contacts").unwrap().as_array().unwrap()[0];
     assert!((n(contact,"area_m2")-0.01).abs()<1e-12);
@@ -84,10 +84,10 @@ fn local_agreement_cannot_skip_the_budgeted_global_confirmation() {
 }
 #[test]
 fn contact_vertex_order_does_not_change_the_adaptive_physical_problem() {
-    let original=run(FIXTURE);
+    let original=run(&FIXTURE);
     let reordered=FIXTURE.replace("\"side_b\":[12,13,15]","\"side_b\":[15,12,13]")
         .replace("\"side_b\":[12,14,15]","\"side_b\":[14,15,12]");
-    assert_ne!(reordered,FIXTURE);
+    assert_ne!(reordered,FIXTURE.as_str());
     let reordered=run(&reordered);
     assert_eq!(original.get("solid_temperatures_k"),reordered.get("solid_temperatures_k"));
     assert_eq!(original.get("contacts"),reordered.get("contacts"));

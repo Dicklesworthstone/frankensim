@@ -4,8 +4,8 @@ use super::super::tests::{close, with_cx};
 
 // Compacted so fixture edits are independent of the example's formatting.
 static CONTACT: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| crate::json_read::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/size-contact-slab.json"))));
-fn request() -> Request { Request::parse(CONTACT).unwrap() }
+    std::sync::LazyLock::new(|| crate::network_command::json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/size-contact-slab.json"))));
+fn request() -> Request { Request::parse(&CONTACT).unwrap() }
 fn coefficients(r: &Request) -> BTreeMap<String, f64> { r.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect() }
 fn oracle(first: f64, bypass: f64, h: f64) -> (f64, f64, f64) {
     let c1: f64 = 1.2 * 0.003 * 1007.0;

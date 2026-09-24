@@ -77,7 +77,7 @@ fn incomplete_success_and_unusable_active_derivatives_do_not_bypass_any_limit() 
 
 #[test]
 fn optional_constraint_parsing_does_not_weaken_the_original_allocation_admission() {
-    let base=J::parse(BASE).unwrap();let mut spec=J::parse(SPEC).unwrap();
+    let base=J::parse(&BASE).unwrap();let mut spec=J::parse(SPEC).unwrap();
     input::put(&mut spec,"thermal_constraints",J::parse(r#"[{"name":"memory","component":"memory","temperature_limit_k":301}]"#).unwrap()).unwrap();
     let (p,limits)=parse_plan(&base,&spec).unwrap();assert_eq!(limits.len(),1);
     assert_eq!(p.planned_steps,14);assert_eq!(limits[0].objective.get("gradient"),Some(&J::Bool(false)));

@@ -3,7 +3,7 @@ use super::super::super::tests::with_cx;
 
 // Compacted so fixture edits are independent of the example's formatting.
 static FIXTURE: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| crate::json_read::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    std::sync::LazyLock::new(|| crate::network_command::json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/cooling-network/repeated-contact-pulse.json"))));
 
 fn controlled_text(controller: &str, repeat_prefix: &str) -> String {

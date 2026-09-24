@@ -75,7 +75,7 @@ fn scaled_power(text: &str, value: f64) -> String {
     text.replace("\"total_w\":1",&format!("\"total_w\":{value}"))
         .replace("\"watts\":1",&format!("\"watts\":{value}"))
 }
-fn power_limit() -> f64 { objective(&cooling(&scaled_power(BASE,1.25))) }
+fn power_limit() -> f64 { objective(&cooling(&scaled_power(&BASE,1.25))) }
 
 #[test]
 fn actual_workload_and_fan_candidates_use_family_confidence_and_sampled_inputs() {
@@ -83,10 +83,10 @@ fn actual_workload_and_fan_candidates_use_family_confidence_and_sampled_inputs()
         let limit = if power { power_limit() } else {
             assert!(BASE.contains("\"speed_ratio\":1,"));
             let low = objective(&cooling(&BASE.replace("\"speed_ratio\":1,","\"speed_ratio\":0.5,")));
-            let high = objective(&cooling(BASE));
+            let high = objective(&cooling(&BASE));
             assert!(low > high); 0.5*(low+high)
         };
-        let output = run(BASE,&uq(limit,false),&policy(power));
+        let output = run(&BASE,&uq(limit,false),&policy(power));
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         let result = decoded(&output);
         assert_eq!(result.str_field("status"),Some("selected"));
@@ -106,30 +106,30 @@ fn cross_candidate_chunks_and_terminal_resume_reproduce_result_and_checkpoint_by
     let plan = uq(power_limit(),false); let root = dir();
     let full = root.join("full.bin"); let first = root.join("first.bin");
     let second = root.join("second.bin"); let last = root.join("last.bin");
-    let complete = run(BASE,&plan,&with_paths(policy(true),None,&full,None));
+    let complete = run(&BASE,&plan,&with_paths(policy(true),None,&full,None));
     assert!(complete.status.success(),"{}",String::from_utf8_lossy(&complete.stderr));
-    let a = run(BASE,&plan,&with_paths(policy(true),None,&first,Some(11)));
+    let a = run(&BASE,&plan,&with_paths(policy(true),None,&first,Some(11)));
     assert_eq!(a.status.code(),Some(6)); assert_eq!(n(&decoded(&a),"samples_evaluated"),11.0);
-    let b = run(BASE,&plan,&with_paths(policy(true),Some(&first),&second,Some(26)));
+    let b = run(&BASE,&plan,&with_paths(policy(true),Some(&first),&second,Some(26)));
     assert_eq!(b.status.code(),Some(6));
     let rows = decoded(&b); let rows = rows.get("candidates").unwrap().as_array().unwrap();
     assert_eq!(n(&rows[2],"samples_evaluated"),32.0);
     assert_eq!(n(&rows[1],"samples_evaluated"),5.0);
-    let c = run(BASE,&plan,&with_paths(policy(true),Some(&second),&last,None));
+    let c = run(&BASE,&plan,&with_paths(policy(true),Some(&second),&last,None));
     assert!(c.status.success(),"{}",String::from_utf8_lossy(&c.stderr));
     assert_eq!(c.stdout,complete.stdout); assert_eq!(fs::read(&last).unwrap(),fs::read(&full).unwrap());
     let terminal = root.join("terminal.bin");
     let tiny_time = plan.replace("\"wall_seconds\":180","\"wall_seconds\":1e-12");
-    let d = run(BASE,&tiny_time,&with_paths(policy(true),Some(&last),&terminal,Some(0)));
+    let d = run(&BASE,&tiny_time,&with_paths(policy(true),Some(&last),&terminal,Some(0)));
     assert!(d.status.success()); assert_eq!(d.stdout,complete.stdout);
     assert_eq!(fs::read(&terminal).unwrap(),fs::read(&full).unwrap());
 
     let mut changed = policy(true); changed[1] = "0.5,1,1.6".into();
     let refused = root.join("wrong-family.bin");
-    let e = run(BASE,&plan,&with_paths(changed,Some(&first),&refused,None));
+    let e = run(&BASE,&plan,&with_paths(changed,Some(&first),&refused,None));
     assert!(!e.status.success()); assert!(e.stdout.is_empty()); assert!(!refused.exists());
     let before = fs::read(&last).unwrap();
-    let e = run(BASE,&plan,&with_paths(policy(true),Some(&last),&last,None));
+    let e = run(&BASE,&plan,&with_paths(policy(true),Some(&last),&last,None));
     assert!(!e.status.success()); assert_eq!(before,fs::read(&last).unwrap());
 }
 
@@ -155,14 +155,14 @@ fn unresolved_sample_budgets_and_model_failures_never_publish_a_selected_design(
     let plan = uq(power_limit(),false);
     let small = plan.replace("\"samples\":64","\"samples\":2");
     let mut options = policy(true); *options.last_mut().unwrap() = "2".into();
-    let out = run(BASE,&small,&options);
+    let out = run(&BASE,&small,&options);
     assert_eq!(out.status.code(),Some(6));
     let result = decoded(&out);
     assert_eq!(result.str_field("status"),Some("inconclusive"));
     assert_eq!(result.get("selected_multiplier"),Some(&J::Null));
     assert_eq!(n(&result,"samples_evaluated"),6.0);
 
-    let all_bad = run(BASE,&uq(299.0,false),&policy(true));
+    let all_bad = run(&BASE,&uq(299.0,false),&policy(true));
     assert!(all_bad.status.success());
     assert_eq!(decoded(&all_bad).str_field("status"),Some("no-qualified-candidate"));
     assert_eq!(decoded(&all_bad).get("selected_multiplier"),Some(&J::Null));
@@ -171,7 +171,7 @@ fn unresolved_sample_budgets_and_model_failures_never_publish_a_selected_design(
         "\"kind\":\"gaussian\",\"mean\":-1,\"std_dev\":0");
     assert_ne!(failed,uq(400.0,false));
     let checkpoint = dir().join("failed.bin");
-    let out = run(BASE,&failed,&with_paths(policy(true),None,&checkpoint,None));
+    let out = run(&BASE,&failed,&with_paths(policy(true),None,&checkpoint,None));
     assert!(!out.status.success()); assert!(out.stdout.is_empty());
     assert!(fs::read(&checkpoint).unwrap().starts_with(b"FRANKENSIM-UQ-FAILED"));
 }

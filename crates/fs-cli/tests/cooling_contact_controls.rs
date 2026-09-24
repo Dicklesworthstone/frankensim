@@ -48,12 +48,12 @@ fn without_last_section(text: &str, section: &str) -> String {
     format!("{prefix}}}")
 }
 fn slab(resistance: f64, gradient: bool) -> String {
-    without_last_section(SLAB, "design")
+    without_last_section(&SLAB, "design")
         .replace("\"gradient\":true", &format!("\"gradient\":{gradient}"))
         .replace("\"resistance_m2_k_w\":0.01", &format!("\"resistance_m2_k_w\":{resistance}"))
 }
 fn nonlinear_steady(resistance: f64, gradient: bool) -> String {
-    without_last_section(PULSE, "transient")
+    without_last_section(&PULSE, "transient")
         .replace("\"gradient\":false", &format!("\"gradient\":{gradient}"))
         .replace("\"resistance_m2_k_w\":0.01", &format!("\"resistance_m2_k_w\":{resistance}"))
 }

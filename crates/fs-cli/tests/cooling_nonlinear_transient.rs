@@ -36,7 +36,7 @@ fn write(dir:&Path,name:&str,text:&str)->PathBuf {
 #[test]
 fn nonlinear_contact_pulse_matches_independent_endpoint_fem_and_energy() {
     let dir=scratch("oracle");
-    let path=write(&dir,"pulse.json",FIXTURE);
+    let path=write(&dir,"pulse.json",&FIXTURE);
     let output=run(&path);let doc=document(&output);
     let trajectory=doc.get("transient").unwrap();
     close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),306.1651033635,3e-5);
@@ -60,7 +60,7 @@ fn a_constant_curve_matches_the_original_linear_material_trajectory() {
     let dir=scratch("linear-control");
     let constant=FIXTURE.replace("\"conductivity_w_m_k\":[2,110]","\"conductivity_w_m_k\":[20,20]")
         .replace("\"conductivity_w_m_k\":[1,7]","\"conductivity_w_m_k\":[2,2]");
-    assert_ne!(constant,FIXTURE);
+    assert_ne!(constant,FIXTURE.as_str());
     let doc=document(&run(&write(&dir,"constant.json",&constant)));
     let trajectory=doc.get("transient").unwrap();
     close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),306.3431585002163,3e-5);
@@ -91,7 +91,7 @@ fn missing_invalid_and_exhausted_policies_never_publish_a_trajectory() {
         FIXTURE.replace("\"temperature_k\":[280,400]","\"temperature_k\":[100,200]"),
     ];
     for (i,text) in cases.iter().enumerate(){
-        assert_ne!(text,FIXTURE);
+        assert_ne!(text,FIXTURE.as_str());
         let output=run(&write(&dir,&format!("invalid-{i}.json"),text));
         assert!(!output.status.success());
         assert!(output.stdout.is_empty(),"a rejected endpoint must not publish a partial history");

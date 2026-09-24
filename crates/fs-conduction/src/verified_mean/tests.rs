@@ -1,9 +1,9 @@
 use super::*;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_conduction::{ConductivityModel, ConductionMesh, ElementMaterials, InitialGuess,
+use crate::{ConductivityModel, ConductionMesh, ElementMaterials, InitialGuess,
     MaterialId, MaterialTable, Nonlinearity};
-use fs_conduction::fixtures::{on_box_face, unit_cube};
+use crate::fixtures::{on_box_face, unit_cube};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
 fn with_cx<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
@@ -34,7 +34,7 @@ fn config() -> MeanSolveConfig {
     dual.initial = InitialGuess::Uniform(0.0);
     MeanSolveConfig { primal: solve, dual, flux: FluxBudget::default() }
 }
-fn contains(interval: crate::interval::Iv, truth: f64) {
+fn contains(interval: fs_verify::interval::Iv, truth: f64) {
     assert!(interval.lo <= truth && truth <= interval.hi, "{interval:?} excludes {truth}");
 }
 

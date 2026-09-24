@@ -3552,13 +3552,21 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         "the project limit is already effective and must not be safety-factored twice"
     );
     assert!(qoi_receipt.contains(&format!("\"conduction_solution\":\"{solution_hash}\"")));
-    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 8);
+    // Propagation measures boundary conditions and the solver term, and
+    // measurement is negligible; the other five sources stay explicit NO-DATA.
+    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 5);
     for kind in EngineeringUncertaintyKind::ALL {
+        let measured = matches!(
+            kind,
+            EngineeringUncertaintyKind::BoundaryConditions
+                | EngineeringUncertaintyKind::SolverAlgebraic
+                | EngineeringUncertaintyKind::Measurement
+        );
         let needle = format!("\"kind\":\"{}\",\"state\":\"no-data\"", kind.name());
         assert_eq!(
             qoi_receipt.matches(&needle).count(),
-            1,
-            "the QoI receipt must retain exactly one explicit NO-DATA term for {}",
+            usize::from(!measured),
+            "NO-DATA state of {} in the QoI receipt",
             kind.name()
         );
     }

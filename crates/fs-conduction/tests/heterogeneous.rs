@@ -1377,7 +1377,8 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
         .expect("boundary");
     let materials =
         MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
-    assert_eq!(materials.receipts().len(), 5);
+    // 2 receipts from table_a plus 4 from table_b (source knot kept).
+    assert_eq!(materials.receipts().len(), 6);
     let assigned = ElementMaterials::from_region_ids(
         materials,
         &two_layer_ids(&mesh),

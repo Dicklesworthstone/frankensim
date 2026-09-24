@@ -44,7 +44,7 @@ fn exact(h:f64,r:f64)->f64 {
 
 #[test]
 fn real_command_closes_stiff_mixing_and_keeps_total_contact_and_htc_gradients() {
-    let dir=scratch(); let output=run(&dir,"stiff.json",STIFF); let result=document(&output);
+    let dir=scratch(); let output=run(&dir,"stiff.json",&STIFF); let result=document(&output);
     assert_eq!(result.path(&["coupling_solver","method"]).and_then(J::as_str),Some("iqn-ils"));
     assert_eq!(result.path(&["coupling_solver","adjoint_method"]).and_then(J::as_str),Some("iqn-ils"));
     assert!(value(&result,&["coupling_iterations"])<=12.0);
@@ -59,12 +59,12 @@ fn real_command_closes_stiff_mixing_and_keeps_total_contact_and_htc_gradients() 
     let expected_h=(exact(800.0*delta.exp(),0.01)-exact(800.0*(-delta).exp(),0.01))/(2.0*delta);
     close(last.f64_field("dobjective_dlog_htc").unwrap(),expected_h,3e-6);
     // Same executable/request/runtime: fresh deterministic secants reproduce output.
-    let replay=run(&dir,"replay.json",STIFF); document(&replay); assert_eq!(output.stdout,replay.stdout);
+    let replay=run(&dir,"replay.json",&STIFF); document(&replay); assert_eq!(output.stdout,replay.stdout);
 }
 
 #[test]
 fn nonlinear_contact_pulse_retains_its_physical_peak_and_energy_under_acceleration() {
-    let dir=scratch(); let result=document(&run(&dir,"pulse.json",PULSE));
+    let dir=scratch(); let result=document(&run(&dir,"pulse.json",&PULSE));
     assert_eq!(result.path(&["coupling_solver","method"]).and_then(J::as_str),Some("iqn-ils"));
     assert_eq!(result.path(&["coupling_solver","adjoint_method"]),Some(&J::Null));
     assert_eq!(result.get("contact_sensitivities"),Some(&J::Null));

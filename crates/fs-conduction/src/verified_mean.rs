@@ -1,6 +1,6 @@
 //! Real steady-conduction consumer of the tetrahedral continuum verifier.
 //!
-//! This adapter consumes `fs_conduction::ConductionProblem` without inventing
+//! This adapter consumes this crate's `ConductionProblem` without inventing
 //! another thermal solver or replacing its material/boundary model. The primal
 //! and unit-source homogeneous-boundary dual both use the existing FEM solver;
 //! the verifier independently encloses their discretization AND algebraic errors.
@@ -20,13 +20,13 @@
 
 use std::collections::BTreeSet;
 
-use fs_conduction::{
+use crate::{
     ConductionError, ConductionProblem, ConductionSolution, ScalarField, SolveConfig,
     TemperatureSpan, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder,
 };
 use fs_exec::Cx;
 
-use crate::tet::{self, BoundaryCondition, BoundaryFace, FluxBudget, MeanBound, TetError, TetProblem};
+use fs_verify::tet::{self, BoundaryCondition, BoundaryFace, FluxBudget, MeanBound, TetError, TetProblem};
 
 /// Solvers retain their own tolerances; these are not substituted for an error bound.
 #[derive(Debug, Clone, Default)]
@@ -204,9 +204,9 @@ pub fn solve_with_mean_bound(
     let admitted = admit(cx, problem, config.flux)?;
     let boundary = dual_boundary(cx, problem)?;
     let unit_source = ScalarField::Uniform(1.0);
-    let primal = fs_conduction::solve(cx, problem, config.primal)?;
+    let primal = crate::solve(cx, problem, config.primal)?;
     poll(cx)?;
-    let dual = fs_conduction::solve(cx, ConductionProblem {
+    let dual = crate::solve(cx, ConductionProblem {
         boundary: &boundary, source: &unit_source, ..problem
     }, config.dual)?;
     poll(cx)?;

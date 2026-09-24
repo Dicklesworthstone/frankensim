@@ -49,7 +49,7 @@ fn encode(value:&J)->String {
 
 #[test]
 fn contact_hotspot_study_solves_actual_meshes_and_replays_the_published_field() {
-    let result=run(FIXTURE);
+    let result=run(&FIXTURE);
     let study=result.get("mesh_convergence").unwrap();
     assert_eq!(study.str_field("status"),Some("successive-mesh-tolerance-met"));
     let rows=study.get("history").unwrap().as_array().unwrap();
@@ -72,7 +72,7 @@ fn contact_hotspot_study_solves_actual_meshes_and_replays_the_published_field() 
     let density=solid.get("nodal_source_w_m3").unwrap().as_array().unwrap();
     assert!((density[4].as_f64().unwrap()-48000.).abs()<1e-8);
     assert_eq!(density.len(),result.get("solid_temperatures_k").unwrap().as_array().unwrap().len());
-    let original=J::parse(FIXTURE).unwrap();
+    let original=J::parse(&FIXTURE).unwrap();
     assert_eq!(solid.get("materials"),original.path(&["solid","materials"]));
     let contacts=result.get("contacts").unwrap().as_array().unwrap();
     assert!((n(&contacts[0],"area_m2")-0.01).abs()<1e-12);
@@ -81,9 +81,9 @@ fn contact_hotspot_study_solves_actual_meshes_and_replays_the_published_field() 
 
 #[test]
 fn reusing_the_original_hot_vertex_is_detectably_a_different_physical_source() {
-    let result=run(FIXTURE);
+    let result=run(&FIXTURE);
     let mut wrong=result.path(&["mesh_convergence","resolved_request"]).unwrap().clone();
-    let original=J::parse(FIXTURE).unwrap();
+    let original=J::parse(&FIXTURE).unwrap();
     let component=original.path(&["solid","component_power"]).unwrap().clone();
     let solid=member(&mut wrong,"solid");
     fields(solid).retain(|(key,_)|key!="nodal_source_w_m3");

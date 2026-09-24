@@ -64,7 +64,7 @@ fn progress(output: &Output, count: usize) -> J {
 #[test]
 fn zero_uncertainty_measures_the_peak_not_the_final_temperature() {
     let dir = scratch("peak");
-    let base = write(&dir, "base.json", BASE);
+    let base = write(&dir, "base.json", &BASE);
     let nominal = direct(&base);
     let peak = value(&nominal, &["transient", "sampled_peak_objective_k"]);
     let final_value = value(&nominal, &["objective", "value_k"]);

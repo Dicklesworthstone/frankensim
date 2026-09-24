@@ -20,8 +20,6 @@
 //! measured iteration savings, never certificates.
 
 /// Actual steady FEM primal/dual solves with a scoped continuum mean bound.
-#[cfg(feature = "thermal-conduction")]
-pub mod conduction;
 #[cfg(feature = "certified-speculation")]
 pub mod economics;
 #[cfg(feature = "certified-speculation")]
