@@ -6,6 +6,7 @@ use fs_couple::pcm_wav::observation::{DecimatedRenderer, PressureRenderer};
 use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA};
 use fs_couple::bernoulli_aperture::performance::{ApertureObservation, AperturePerformance, CoupledAperture};
 use fs_couple::bernoulli_aperture::performance::file::{PlateValvePerformance, MAX_PLATE_VALVE_PERFORMANCE_BYTES, PLATE_VALVE_PERFORMANCE_SCHEMA};
+use fs_couple::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use fs_exec::CancelGate;
 use super::{RATE, create_outputs, json_string, stream_output};
 
@@ -40,14 +41,33 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool), String> {
 
 // A physical propagation delay is source geometry, not an output/filter latency
 // to be removed by ensemble alignment. Keep it on the mechanical sample clock.
-pub(super) fn outlet_provenance(p: &AperturePerformance) -> String {
-    let ApertureObservation::TubeBaffled(c) = p.observation() else { return String::new(); };
-    let CoupledAperture::Tube(t) = p.system() else { unreachable!("outlet receiver requires a tube"); };
-    let mic = p.baffled_receiver().expect("admitted receiver");
-    format!(",\"observation_scope\":\"one-way exterior Rayleigh pressure; uniform circular outlet in infinite rigid baffle; terminal load is independently supplied\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"propagation_delay_mechanical_samples\":[{},{}],\"radiation_feedback_added\":false}}",
-        c.position_m[0],c.position_m[1],c.position_m[2],t.spec().radius_m,
-        t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s,
-        c.radial_rings,c.angular_points,c.maximum_frequency_hz,mic.delay_samples.0,mic.delay_samples.1)
+pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<BaffledRadiationLoad>) -> String {
+    let load_json=if let Some(load)=radiation {
+        let spec=load.load();let term=spec.terms()[0];
+        format!(",\"radiation_load\":{{\"model\":\"compact-baffled-piston-positive-real-v1\",\"maximum_frequency_hz\":{:e},\"resistance_pa_s_m3\":{:e},\"pole_rate_per_s\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_resistance_relative_error\":{:e},\"replaces_memoryless_reflection\":true,\"extra_end_correction_m\":0,\"scope\":\"finite-sample low-ka analogue and bilinear checks, not broadband or measured calibration\"}}",
+            load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
+            load.max_complex_relative_error(),load.max_resistance_relative_error())
+    } else {String::new()};
+    let (c,radius,speed)=match (p.observation(),p.system()) {
+        (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.spec().sound_speed_m_s),
+        (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
+            let section=n.spec().sections.iter().find(|s|s.nodes.contains(&node)).expect("admitted physical outlet section");
+            (receiver,section.radius_m,n.spec().sound_speed_m_s)
+        }
+        _=>return if radiation.is_some() {
+            format!(",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\"{load_json}")
+        } else {String::new()},
+    };
+    let mic=p.baffled_receiver().expect("admitted receiver");
+    let scope=if radiation.is_some() {
+        "exterior Rayleigh pressure from radiation-loaded terminal flow; compact passive load and uniform circular outlet in infinite rigid baffle"
+    } else {
+        "one-way exterior Rayleigh pressure; uniform circular outlet in infinite rigid baffle; terminal load is independently supplied"
+    };
+    format!(",\"observation_scope\":\"{scope}\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"propagation_delay_mechanical_samples\":[{},{}],\"radiation_feedback_added\":{}}}{load_json}",
+        c.position_m[0],c.position_m[1],c.position_m[2],radius,
+        p.system().aperture().spec().density_kg_m3,speed,
+        c.radial_rings,c.angular_points,c.maximum_frequency_hz,mic.delay_samples.0,mic.delay_samples.1,radiation.is_some())
 }
 
 struct Loaded {
@@ -62,13 +82,19 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
         let i=p.info();let a=p.renderer().system().aperture();
         let plate=a.plate_reduction().expect("plate file retains its specimen");
         let observation=match p.renderer().observation() {
-            ApertureObservation::Inlet=>"inlet", ApertureObservation::TubeTerminal=>"terminal",
-            ApertureObservation::TubeBaffled(_)=>"baffled-outlet", _=>unreachable!("file owns a uniform tube"),
+            ApertureObservation::Inlet=>"inlet",
+            ApertureObservation::TubeTerminal|ApertureObservation::NetworkNode(1)=>"terminal",
+            ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {node:1,..}=>"baffled-outlet",
+            _=>unreachable!("file owns one section and its physical outlet"),
         };
-        let receiver_json=outlet_provenance(p.renderer());
-        let scope=if receiver_json.is_empty() { "internal pressure, not an exterior microphone" }
+        let receiver_json=outlet_provenance(p.renderer(),i.radiation_load);
+        let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
+            else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
-        let requested=match p.renderer().system() {CoupledAperture::Tube(t)=>t.spec().length_m,_=>unreachable!("file owns a uniform tube")};
+        let requested=match p.renderer().system() {
+            CoupledAperture::Tube(t)=>t.spec().length_m,
+            CoupledAperture::Network(n)=>n.spec().sections[0].length_m,
+        };
         let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; lossless tube interior; {scope}\"{receiver_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());

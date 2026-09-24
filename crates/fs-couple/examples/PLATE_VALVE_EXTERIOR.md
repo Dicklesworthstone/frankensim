@@ -67,3 +67,77 @@ Keep the complete `AperturePerformance` through cancellation/resume to retain bo
 wave and receiver history. A physical or acoustic callback failure poisons the
 pressure adapter, rather than resuming mismatched histories. Finite windows do
 not synthesize padding or flush propagation tails beyond their declared duration.
+
+## Optional compact radiation feedback
+
+The fixed-reflection example above remains unchanged. To let exterior radiation
+react on the valve and returning tube waves, select a **physical terminal load**
+instead of the numeric reflection:
+
+```bash
+cargo run --release -p fs-couple --bin music_render -- \
+  wind crates/fs-couple/examples/plate-valve-radiating.performance \
+  /tmp/plate-valve-radiating.wav --decimate --block 37
+```
+
+The new alternative `tube` record is:
+
+```text
+tube LENGTH_M RADIUS_M baffled-low-ka MAX_FREQUENCY_HZ LENGTH_ERROR_M MAX_WAVE_BYTES
+```
+
+The committed example uses `tube 0.25 0.007 baffled-low-ka 1500 0.002 1048576`
+and a 1.5 kHz receiver band. Everything else—the original mesh, material-memory
+law, contact profile, pressure phrase, receiver position and PCM scale—is the
+same as the one-way example. The two terminal forms are mutually exclusive;
+there is no simultaneous numeric reflectance or separately tuned end correction.
+The tube length is the physical interior length, not a radiation-extended length.
+
+`BaffledRadiationLoad` derives the load from the actual radius a, gas density rho
+and sound speed c. With Zc=rho*c/(pi*a²), alpha=8/(3*pi), its impedance is
+
+```text
+Z(s) = R s/(s+p)
+R = 2 alpha² Zc
+p = 2 alpha c/a
+```
+
+These coefficients match the leading resistance `(ka)²/2` and inertance
+`alpha*ka` of the uniform baffled piston. They are not fitted to the generated
+waveform. The existing passive relaxation-impedance owner advances its retained
+flow state and returns the reflected wave. The existing characteristic network
+and nonlinear valve solve provide the rest of the reciprocal dynamics. No new
+integrator, delayed force correction, extra damping or second propagation path
+is introduced. Near-field energy belongs to the load's stored energy; positive
+radiation loss is counted once in the joint work balance, not confused with all
+terminal port work. Internal pressure observations can select the same load.
+
+This is a **compact approximation**, not an exact broadband radiation boundary.
+Admission requires ka<=0.5 and dt*fmax<=0.1. Before plate reduction, 32 positive
+frequencies are compared with the existing full Rayleigh disk oracle. Both the
+analogue response and the actual bilinear response must meet fixed 5% relative
+complex-impedance AND resistance checks. Resistance has its own check because
+small radiation losses can be hidden by much larger reactive pressure. Failed
+checks refuse the source; no coefficients or tolerances are retuned. The oracle
+has finite spatial quadrature, and the checks are sampled estimates, not a
+continuum error bound. The pressure phrase is not automatically band-limited;
+nonlinear out-of-band content still needs refinement and physical assessment.
+
+The receiver's declared band must not exceed the load's. It observes the same
+accepted terminal volume flow that participates in the load equation, so the
+radiation-modified mechanics reach the exterior waveform. The receiver itself
+adds no second energy sink. Moving only the receiver retains exactly the same
+loaded mechanics. Its numerical Rayleigh transfer and the compact load are
+compatible approximations to the same baffled geometry, not a claim of exact
+all-frequency source/radiator consistency. Unbaffled bells, viscothermal tube
+loss, body scattering, room acoustics and measured calibration remain outside
+this path.
+
+The file uses a single existing network section and its passive terminal; this
+requires slightly more admitted wave payload than a bare memoryless tube. Source
+metadata retains the load coefficients, checked discrepancies and declared band.
+`ensemble --valve` accepts the same file: each part keeps its complete material,
+load, propagation and receiver history and its source clock. Geometric receiver
+delay is not cancelled by filter-latency alignment, and source PCM scales remain
+encoding declarations rather than hidden ensemble gains. Existing output-file,
+finite-window, cancellation and failed-callback rules are unchanged.

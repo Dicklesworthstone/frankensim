@@ -96,3 +96,6 @@ fn invalid_mesh_sections_history_counts_and_out_of_window_gestures_are_not_silen
     assert!(PlateValvePerformance::from_bytes(INPUT.as_bytes(),37,&gate).is_err());
     assert!(PlateValvePerformance::from_bytes(INPUT.as_bytes(),0,&CancelGate::new()).is_err());
 }
+
+#[path = "file_radiation.rs"]
+mod radiation;

@@ -138,3 +138,6 @@ fn incomplete_or_underresolved_exterior_observations_refuse_before_wav_creation(
         assert!(!output.exists());assert!(!output.with_extension("provenance.json").exists());
     }
 }
+
+#[path = "radiation.rs"]
+mod radiation;
