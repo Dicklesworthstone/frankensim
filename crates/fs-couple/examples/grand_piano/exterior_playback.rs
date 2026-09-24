@@ -22,13 +22,14 @@ pub struct Options {
     pub hammers: Option<String>,
     pub hammer_footprints: Option<String>,
     pub dampers: Option<String>,
+    pub string_stretching: Option<String>,
 }
 impl Default for Options {
     fn default() -> Self {
         Self { substeps: 4, modes: 24, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
-            hammer_footprints: None, dampers: None }
+            hammer_footprints: None, dampers: None, string_stretching: None }
     }
 }
 impl Options {
@@ -51,7 +52,7 @@ impl Options {
                 result.mapping_explicit = true;
                 continue;
             }
-            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers",
+            if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching",
                 "--midi", "--performance", "--midi-channel", "--midi-velocity-max-m-s", "--note", "--velocity"].contains(&flag.as_str()) {
                 return Err(format!("unknown exterior playback option {flag}"));
             }
@@ -64,6 +65,7 @@ impl Options {
                 "--hammers" => result.hammers = Some(value.clone()),
                 "--hammer-footprints" => result.hammer_footprints = Some(value.clone()),
                 "--dampers" => result.dampers = Some(value.clone()),
+                "--string-stretching" => result.string_stretching = Some(value.clone()),
                 "--performance" => result.performance = Some(value.clone()),
                 "--midi" => {
                     if result.midi.replace(value.clone()).is_some() { return Err("duplicate MIDI score".into()); }
@@ -91,12 +93,16 @@ impl Options {
         let options = Self::parse(args)?;
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
-            || options.hammer_footprints.is_some() || options.dampers.is_some() {
+            || options.hammer_footprints.is_some() || options.dampers.is_some()
+            || options.string_stretching.is_some() {
             return Err("response/admittance accept only --modes and --substeps, not playback controls".into());
         }
         Ok(options)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.string_stretching.as_ref().is_some_and(|p| p.trim().is_empty()) {
+            return Err("--string-stretching requires a nonempty complete material specification path".into());
+        }
         if !(1..=linear::MAX_STRING_MODES).contains(&self.modes)
             || !(1..=16).contains(&self.substeps) {
             return Err("exterior playback requires --modes 1..512 and --substeps 1..16".into());
@@ -119,11 +125,12 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer faces: {}; dampers: {}. These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
             self.hammer_footprints.as_deref().unwrap_or("point"),
-            self.dampers.as_deref().unwrap_or("point"))
+            self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
+            self.string_stretching.as_deref().unwrap_or("inline or original linear image"))
     }
 }
 
@@ -133,6 +140,7 @@ pub struct Controls {
     materials: Vec<hammer_materials::Material>,
     footprints: Option<linear::hammer_footprint::Specification>,
     dampers: Option<linear::dampers::Specification>,
+    stretching: Option<linear::string_stretching::Specification>,
 }
 impl Controls {
     pub fn load(options: &Options, courses: &[Course]) -> Result<Self, String> {
@@ -146,7 +154,12 @@ impl Controls {
             Some(path) => Some(super::read_bounded(path, 1024 * 1024)?),
             None => None,
         };
-        Self::from_texts(courses, hammers.as_deref(), footprints.as_deref(), dampers.as_deref())
+        let mut controls = Self::from_texts(courses, hammers.as_deref(), footprints.as_deref(), dampers.as_deref())?;
+        // Parse the COMPLETE material file before structure/BEM preparation.
+        // An absent or invalid supplied file cannot select the linear image.
+        controls.stretching = options.string_stretching.as_deref().map(|path|
+            linear::string_stretching::Specification::load(path, courses)).transpose()?;
+        Ok(controls)
     }
     /// The owners perform geometry, constitutive, duplicate and coverage checks.
     /// 'estimated' is explicit damper selection, never a missing-file fallback.
@@ -164,7 +177,14 @@ impl Controls {
             Some(text) => Some(linear::dampers::Specification::read(text, courses)?),
             None => None,
         };
-        Ok(Self { materials, footprints, dampers })
+        Ok(Self { materials, footprints, dampers, stretching: None })
+    }
+    /// Cold inline equivalent of --string-stretching, through the SAME owner.
+    /// Explicit per-key EA is independent of tension, EI and winding mass.
+    pub fn with_string_stretching(mut self, text: &str, courses: &[Course]) -> Result<Self, String> {
+        if self.stretching.is_some() { return Err("duplicate string stretching selection".into()); }
+        self.stretching = Some(linear::string_stretching::Specification::read(text, courses)?);
+        Ok(self)
     }
     /// Reuse the source shank and original nonlinear felt/bridge engine. Larger
     /// mode budgets never relax its output-frequency ceiling; changing substeps
@@ -172,10 +192,14 @@ impl Controls {
     pub fn instrument(self, courses: Vec<Course>, board: &[linear::BoardMode], options: &Options)
         -> Result<engine::Instrument, String> {
         options.validate()?;
+        if options.string_stretching.is_some() && self.stretching.is_none() {
+            return Err("supplied string stretching controls were not admitted; no linear fallback".into());
+        }
         let mut piano = engine::Instrument::new_with_contact_geometry(courses, board, RATE,
             options.substeps, options.modes, true, self.materials,
             Some(engine::ShankGeometry::published()), self.footprints.as_ref())?;
         if let Some(dampers) = &self.dampers { piano.configure_dampers(dampers)?; }
+        if let Some(stretching) = &self.stretching { piano.configure_string_stretching(stretching)?; }
         Ok(piano)
     }
 }
@@ -257,3 +281,7 @@ mod tests {
         assert!(Controls::load(&options, &[c]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "exterior_stretching_tests.rs"]
+mod stretching_tests;
