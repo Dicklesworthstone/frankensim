@@ -5,7 +5,8 @@ on:
     paths:
       - 'crates/fs-uq/**'
       - 'crates/fs-cli/src/uq_command/**'
-      - 'crates/fs-cli/tests/cooling_uq_qmc_cli.rs'
+      - 'crates/fs-cli/tests/cooling_network_qmc.rs'
+      - 'crates/fs-cli/tests/cooling_qmc_recovery_admission.rs'
       - '.github/workflows/uncertainty-propagation.yml'
   workflow_dispatch:
 permissions:
@@ -23,4 +24,6 @@ jobs:
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Test QMC propagation and durable recovery
-        run: cargo test --release -p fs-uq --lib product_qmc && cargo test --release -p fs-uq --test product_qmc
+        run: cargo test --release -p fs-uq --lib product_ && cargo test --release -p fs-uq --test product_qmc
+      - name: Test native cooling QMC recovery
+        run: cargo test --release -p fs-cli --test cooling_network_qmc --test cooling_qmc_recovery_admission
