@@ -11,6 +11,7 @@ mod checkpoint;
 mod compliance;
 mod design;
 mod qmc;
+mod sensitivity;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -20,6 +21,7 @@ pub(super) struct Options {
     compliance: Option<Policy>,
     design: Option<DesignGrid>,
     qmc_replicates: Option<usize>,
+    sobol_sensitivity: bool,
 }
 
 impl Options {
@@ -36,6 +38,9 @@ impl Options {
                 let count = count_option(value, "--qmc-replicates")?;
                 if !(2..=256).contains(&count) { return Err(bad("--qmc-replicates must be in 2..=256")); }
                 options.qmc_replicates = Some(count);
+            } else if flag == "--sensitivity" && !options.sobol_sensitivity {
+                if value != "sobol" { return Err(bad("--sensitivity supports only sobol")); }
+                options.sobol_sensitivity = true;
             } else if flag == "--checkpoint" && options.checkpoint.is_none() {
                 options.checkpoint = Some(PathBuf::from(value.as_os_str()));
             } else if flag == "--resume" && options.resume.is_none() {
@@ -72,6 +77,12 @@ impl Options {
         if options.qmc_replicates.is_some()
             && (options.compliance.is_some() || options.design.is_some()) {
             return Err(bad("QMC requires a fixed sample layout without sequential compliance or candidate-selection flags"));
+        }
+        if options.sobol_sensitivity
+            && (options.qmc_replicates.is_some() || options.compliance.is_some()
+                || options.design.is_some() || options.checkpoint.is_some()
+                || options.resume.is_some() || options.max_new_samples.is_some()) {
+            return Err(bad("Sobol sensitivity requires a fixed design without QMC, recovery, sequential compliance or candidate-selection flags"));
         }
         Ok(options)
     }
@@ -116,6 +127,9 @@ pub(super) fn execute(base_text: &str, uq_text: &str) -> Result<String> {
 pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Options) -> Result<ExecutionOutput> {
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
+    if options.sobol_sensitivity {
+        return sensitivity::execute(&base, &config);
+    }
     if let Some(replicates) = options.qmc_replicates {
         return qmc::execute(base_text, &base, &config, options, replicates);
     }
