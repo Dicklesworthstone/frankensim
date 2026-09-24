@@ -17,6 +17,36 @@ pub struct FeltStriker {
     pub port: JawPort,
 }
 impl FeltStriker {
+    /// A flat (or otherwise authored) face above a nonconforming target.
+    /// `clearances_m[i]` is the nonnegative EXTRA reference gap at site i,
+    /// in addition to the common `jaw.initial_gap_m`. The caller derives it
+    /// from geometry; it is not a material thickness or a contact-weight scale.
+    ///
+    /// All sites still share one inertia and independently retain the original
+    /// WoolFelt/Kelvin histories. Only the affine contact offset changes. Zero
+    /// clearances preserve `new` exactly, including its coordinate origin.
+    ///
+    /// # Errors
+    /// Invalid shape, negative/nonfinite or overflowing gap, or any refusal
+    /// from the existing finite-area striker and pad owners.
+    pub fn new_with_clearances(total: usize, coordinate: usize, sites: &[PadSite],
+        jaw: &CompliantJaw, clearances_m: &[f64]) -> Result<Self, ImpactError>
+    {
+        if clearances_m.len() != sites.len() || clearances_m.iter().any(|d|
+            !d.is_finite() || *d < 0.0 || !(jaw.initial_gap_m + d).is_finite())
+        {
+            return Err(invalid("felt striker requires one finite nonnegative clearance per site"));
+        }
+        let mut result = Self::new(total, coordinate, sites, jaw)?;
+        for (pad, &clearance) in result.pads.iter_mut().zip(clearances_m) {
+            // Keep the common inertial origin at -initial_gap. Adding a site
+            // offset MUST NOT move that origin, or the gap is counted twice.
+            if clearance != 0.0 { pad.precompression_m = -clearance; }
+            pad.validate(total)?;
+        }
+        Ok(result)
+    }
+
     /// `sites` use the complete target layout, including a reserved, ZERO
     /// `coordinate` entry. The supplied jaw owns effective mass, launch speed,
     /// felt properties and whole-footprint Kelvin elements. A negative-side jaw
@@ -149,5 +179,90 @@ mod tests {
         for row in [vec![1.0,2.0],vec![0.0],vec![0.0,0.0],vec![0.0,f64::NAN]] {
             assert!(FeltStriker::new(2,0,&[PadSite {weights:row,..site.clone()}],&j).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod profiled_tests {
+    use super::*;
+    use super::super::{PadSide, super::{ImpactConfig, ImpactSystem, felt::KelvinBranch}};
+    use fs_exec::CancelGate;
+    use fs_material::fiber::WoolFelt;
+    use fs_phs::Storage;
+
+    fn jaw() -> CompliantJaw {
+        CompliantJaw { side:PadSide::Positive, mass_kg:0.02, drag_n_s_m:0.0,
+            initial_gap_m:0.00002, initial_velocity_m_s:0.5, thickness_m:0.006,
+            law:WoolFelt::new(1e6,0.2,2.2,3.0,0.15,0.7).unwrap(),
+            prior_maximum_strain:0.0, creep:vec![] }
+    }
+    fn cfg() -> ImpactConfig {
+        ImpactConfig { dt_s:2e-6,max_steps:2000,maximum_energy_j:1.0,
+            energy_absolute_tolerance_j:1e-10,energy_relative_tolerance:1e-7,
+            maximum_generalized_force:1e4 }
+    }
+    fn sites() -> Vec<PadSite> {
+        vec![PadSite { weights:vec![0.0,2.0],area_m2:0.0001 },
+            PadSite { weights:vec![0.0,2.0],area_m2:0.0003 }]
+    }
+    #[test]
+    fn local_clearances_preserve_one_mass_area_and_material_time_constants() {
+        let mut j=jaw();j.creep.push(KelvinBranch { stiffness_n_m:1000.,viscosity_n_s_m:2. });
+        let base=FeltStriker::new(2,0,&sites(),&j).unwrap();
+        let same=FeltStriker::new_with_clearances(2,0,&sites(),&j,&[0.,0.]).unwrap();
+        let profiled=FeltStriker::new_with_clearances(2,0,&sites(),&j,&[0.,0.001]).unwrap();
+        assert_eq!(base.body.initial[0].displacement_m_sqrt_kg,profiled.body.initial[0].displacement_m_sqrt_kg);
+        assert_eq!(base.body.initial[0].velocity_m_sqrt_kg_per_s,profiled.body.initial[0].velocity_m_sqrt_kg_per_s);
+        for ((a,b),c) in base.pads.iter().zip(&same.pads).zip(&profiled.pads) {
+            assert_eq!(a.precompression_m.to_bits(),b.precompression_m.to_bits());
+            assert_eq!(a.weights,c.weights);assert_eq!(a.area_m2,c.area_m2);
+            assert_eq!(a.creep[0].stiffness_n_m,c.creep[0].stiffness_n_m);
+            assert_eq!(a.creep[0].viscosity_n_s_m,c.creep[0].viscosity_n_s_m);
+        }
+        assert_eq!(profiled.pads[1].precompression_m,-0.001);
+        for invalid in [vec![],vec![0.,-1.],vec![0.,f64::NAN],vec![f64::INFINITY,0.]] {
+            assert!(FeltStriker::new_with_clearances(2,0,&sites(),&j,&invalid).is_err());
+        }
+    }
+    #[test]
+    fn a_recessed_site_does_not_contact_early_or_duplicate_the_high_site_force() {
+        let mut j=jaw();j.initial_velocity_m_s=0.;
+        let make=|sites:&[PadSite],gaps:&[f64]| {
+            let a=FeltStriker::new_with_clearances(2,0,sites,&j,gaps).unwrap();
+            let target=ImpactBody::free_mass(0.25,0.,0.).unwrap().0;
+            ImpactSystem::new(vec![a.body,target],vec![],a.pads,vec![],cfg()).unwrap()
+        };
+        let a=make(&sites(),&[0.,0.001]);let single=make(&sites()[..1],&[0.]);
+        let mut x=a.state().to_vec();x[0]=0.0002*0.02_f64.sqrt();
+        let mut g=vec![0.;x.len()];let mut one=g.clone();
+        a.mechanical.gradient(&x,&mut g);single.mechanical.gradient(&x,&mut one);
+        assert_eq!(g,one);assert_eq!(a.mechanical.hamiltonian(&x),single.mechanical.hamiltonian(&x));
+        assert!(g[0]>0. && g[2]>0.);
+        assert!((g[0]*0.02_f64.sqrt()-g[2]*0.25_f64.sqrt()).abs()<1e-12);
+    }
+    #[test]
+    fn profiled_felt_collision_has_reciprocal_impulse_loss_and_exact_retry() {
+        let make=|| {
+            let a=FeltStriker::new_with_clearances(2,0,&sites(),&jaw(),&[0.,0.0001]).unwrap();
+            let target=ImpactBody::free_mass(0.25,0.,0.).unwrap().0;
+            ImpactSystem::new(vec![a.body,target],vec![],a.pads,vec![],cfg()).unwrap().prepare_analytic().unwrap()
+        };
+        let mut a=make();let mut clean=make();let initial=a.stored_energy_j();
+        let gate=CancelGate::new_clock_free();let mut loss=0.;
+        for tick in 0..1000 {
+            if tick==400 {
+                let old=a.state().to_vec();let h=a.felt_history(0).unwrap();
+                let cancelled=CancelGate::new_clock_free();cancelled.request();
+                assert!(a.step(&[0.;2],&cancelled).is_err());
+                assert_eq!(a.state(),old);assert_eq!(a.felt_history(0).unwrap(),h);
+            }
+            let f=a.step(&[0.;2],&gate).unwrap();clean.step(&[0.;2],&gate).unwrap();
+            assert_eq!(a.state(),clean.state());loss+=f.dissipated_energy_j;
+            assert!((f.stored_energy_j+loss-initial).abs()<1e-7);
+            // Jaw axis is down and target axis up: physical signed momentum.
+            assert!((a.state()[1]*0.02_f64.sqrt()-a.state()[3]*0.25_f64.sqrt()-0.01).abs()<1e-8);
+        }
+        assert!(loss>0. && a.state()[2]<0.);
+        assert!(a.felt_history(0).unwrap().eps_max>0.);
     }
 }
