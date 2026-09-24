@@ -108,6 +108,9 @@ use fs_qty::Dims;
 
 use crate::AirflowError;
 
+/// Discrete solid-temperature goals with the air-reference feedback retained.
+pub mod goal;
+
 /// The `fs-couple` port kind this seam exchanges: temperature (effort) against
 /// entropy flow.
 ///

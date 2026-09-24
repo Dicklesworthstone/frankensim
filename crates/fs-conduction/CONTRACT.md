@@ -1007,6 +1007,17 @@ authority.
   data, failed Krylov solve or cancellation refuses. The existing adjoint
   target checks linear equivalence/unit scaling, quadratic remainder scaling
   for a genuinely nonlinear material, and these refusal boundaries.
+  `RobinGoalLinearization` extends this two-field seam to consumer-owned
+  reference feedback. It retains the same checked solid residuals and actual
+  material/contact tangent without another primal solve, exposes the existing
+  Robin pullback, and verifies `J_s^T lambda - W^T wall_adjoint = weights`
+  against the ORIGINAL goal norm. Supplied reference changes correct both
+  the reference primal and the two-field residual by the exact integrated
+  Robin loads. Fixed adjoints remain zero and both complete residuals must
+  pass the declared tolerance. Inner pullbacks use one tenth of that tolerance;
+  their total Krylov count is supplied by the consumer. The feedback data is
+  a numerical input, not proof of an external derivative: `fs-airflow` owns
+  the physical exponential-law implementation and its independent checks.
 - The fin case is a MODEL comparison against the 1-D fin equation, not a
   discretization check. Its 2% envelope carries the fin model's own error; the
   Biot number that bounds it is computed and printed by the test.

@@ -11,4 +11,5 @@ pub use fs_tribo::resistive_film::{
 };
 
 #[cfg(test)]
+#[path = "resistive/tests.rs"]
 mod tests;
