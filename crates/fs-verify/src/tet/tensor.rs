@@ -141,6 +141,14 @@ impl Conductivity<'_> {
 }
 
 impl TensorTetProblem<'_> {
+    /// Check the coefficient count, work envelope, and outward SPD/inverse
+    /// admission before a consumer spends work on a primal solve. This does
+    /// not validate geometry, boundary traces or a candidate field.
+    pub fn validate_conductivity(
+        &self, budget: FluxBudget, mut keep_going: impl FnMut() -> bool,
+    ) -> Result<(), TetError> {
+        self.prepare(budget, &mut keep_going).map(|_| ())
+    }
     fn prepare(&self, budget: FluxBudget, keep_going: &mut impl FnMut() -> bool) -> Result<Vec<Tensor>, TetError> {
         poll(keep_going)?;
         if self.tets.len() > budget.max_cells || self.vertices.len() > budget.max_cells.saturating_mul(4)
