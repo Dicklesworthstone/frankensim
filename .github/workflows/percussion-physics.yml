@@ -30,7 +30,10 @@ jobs:
           retention-days: 3
       - name: Test the dependency-free Reynolds pressure kernel
         run: |
-          rustc --edition=2024 --test crates/fs-flux/src/gas_film/resistive.rs -o "$RUNNER_TEMP/film-tests"
+          mkdir "$RUNNER_TEMP/film-tests-src"
+          cp crates/fs-flux/src/gas_film/resistive.rs "$RUNNER_TEMP/film-tests-src/lib.rs"
+          cp crates/fs-flux/src/gas_film/resistive/tests.rs "$RUNNER_TEMP/film-tests-src/tests.rs"
+          rustc --edition=2024 --test "$RUNNER_TEMP/film-tests-src/lib.rs" -o "$RUNNER_TEMP/film-tests"
           "$RUNNER_TEMP/film-tests"
       - name: Materialize the repository's pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml

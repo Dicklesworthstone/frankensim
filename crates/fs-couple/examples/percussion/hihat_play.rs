@@ -15,6 +15,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let second=sticks::option(&mut args)?;
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
+    let squeeze=squeeze::option(&mut args)?;
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
@@ -34,7 +35,10 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         [args[4].parse()?,args[5].parse()?,args[6].parse()?]
     }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?;
+    let pair=match squeeze.as_ref() {
+        Some(film)=>build_with_squeeze(&spec,&upper,&lower,stroke,second,steps,dt,audio,Some(film))?,
+        None=>build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?,
+    };
     let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
     let (mut e,loaded)=if feedback {
         let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
@@ -48,8 +52,9 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     if let Some(program)=second_force{let p=e.second_stick.ok_or("missing hi-hat second stick")?;
         inputs.push(mechanics::drive::Input{program,coordinate:p.coordinate,tip_weight:p.weight});}
     e.system=e.system.with_stick_drives(inputs,dt,steps,e.force.len())?;
-    eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking or squeeze-film air",
-        pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points());
+    eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
+        pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
+        if squeeze.is_some(){"quasistatic incompressible Reynolds, declared validity limits"}else{"none"});
     let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
         let wav=match loaded {

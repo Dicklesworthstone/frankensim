@@ -10,6 +10,8 @@ use input::{Spec,Mount};
 #[path="hihat_play.rs"]
 mod play;
 pub use play::{is_command,run};
+#[path="hihat_squeeze.rs"]
+mod squeeze;
 
 // One independently prepared physical shell and its exact inner-skin chart.
 struct Shell {
@@ -86,6 +88,11 @@ fn collision(spec:&Spec,upper:&Shell,lower:&Shell,lo:usize,total:usize)->Result<
 
 fn build(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool)->Result<Pair,Error> {
+    build_with_squeeze(spec,upper,lower,stroke,second,steps,dt,audio,None)
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>)->Result<Pair,Error> {
     spec.validate()?;
     let upper=Shell::new(upper,dt)?;let lower=Shell::new(lower,dt)?;
     // Conservative reference separation for the ENTIRE finite skins, not just
@@ -130,6 +137,9 @@ fn build(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:S
     for (k,w) in p.weights.iter().enumerate(){a[hi.start+k]=-w;}
     let p=lower.port([spec.sites[0].0,-spec.sites[0].1],ShellFace::Negative)?;
     for (k,w) in p.weights.iter().enumerate(){b[lo.start+k]=*w;}
+    // Compile before moving either basis; cell/face gaps use both real skins.
+    // Stick and pedal columns are zero: pressure loads the shells reciprocally.
+    let film=film.map(|f|f.compile(spec,&upper,&lower,hi.start,lo.start,total)).transpose()?;
     let upper_omega=upper.reduction.omegas().to_vec();let lower_omega=lower.reduction.omegas().to_vec();
     let mut up=zero_body(BodyPotential::Shell(upper.reduction),&upper_omega);
     let mut down=zero_body(BodyPotential::Shell(lower.reduction),&lower_omega);
@@ -138,6 +148,7 @@ fn build(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:S
     let mut bodies=vec![stick,up,down,carriage];
     let second_stick=second.map(|(body,contact,port)|{bodies.push(body);contacts.push(contact);port});
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
+    let system=match film {Some(film)=>system.with_squeeze_film(film)?,None=>system};
     Ok(Pair{experiment:Experiment{mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo})
