@@ -149,7 +149,7 @@ impl<'a> Geometry<'a> {
 
 // Exact-coordinate seam welding; no tolerance repair. Component-wise winding
 // needs oriented closed components, not the approximate centroid flux test.
-fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,HelmholtzError> {
+pub(crate) fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,HelmholtzError> {
     let mut vertices=BTreeMap::<[u64;3],usize>::new();
     let mut edges=BTreeMap::<(usize,usize),Vec<(usize,usize,usize)>>::new(); let mut faces=BTreeSet::new();
     for (face,t) in triangles.iter().enumerate() {

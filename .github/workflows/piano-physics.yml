@@ -53,6 +53,11 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release -p fs-bem --lib near_field -- --test-threads=1 2>&1 | tee piano-near-field-tests.log
+      - name: Test geometry-derived radiation formulation
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          cargo test --release -p fs-bem --lib radiation_policy -- --test-threads=1 2>&1 | tee piano-radiation-policy-tests.log
       - name: Test mesh import and source-piano playback
         if: ${{ !cancelled() }}
         run: |
