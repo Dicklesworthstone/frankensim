@@ -49,40 +49,46 @@ pub fn goal_bound(
     problem: &TetProblem<'_>, candidate: &[f64], dual_candidate: &[f64],
     weights: &[f64], budget: FluxBudget, mut keep_going: impl FnMut() -> bool,
 ) -> Result<GoalBound, TetError> {
-    poll(&mut keep_going)?;
+    goal_bound_impl(&Problem::from(problem), candidate, dual_candidate, weights, budget, &mut keep_going)
+}
+
+pub(super) fn goal_bound_impl(
+    problem: &Problem<'_>, candidate: &[f64], dual_candidate: &[f64],
+    weights: &[f64], budget: FluxBudget, keep_going: &mut impl FnMut() -> bool,
+) -> Result<GoalBound, TetError> {
+    poll(keep_going)?;
     if problem.tets.len() > budget.max_cells { return Err(TetError::Budget); }
     if weights.len() != problem.tets.len() || weights.iter().any(|w| !w.is_finite()) {
         return Err(TetError::Invalid("finite cell weights required for the exact functional"));
     }
-    let primal = energy_bound(problem, candidate, budget, &mut keep_going)?;
+    let primal = energy_bound_impl(problem, candidate, budget, keep_going)?;
     let mut dual_boundary = Vec::with_capacity(problem.boundary.len());
     for face in problem.boundary {
-        poll(&mut keep_going)?;
+        poll(keep_going)?;
         dual_boundary.push(BoundaryFace { vertices: face.vertices, condition: match face.condition {
             BoundaryCondition::Dirichlet(_) => BoundaryCondition::Dirichlet([0.0; 3]),
             BoundaryCondition::Neumann(_) => BoundaryCondition::Neumann(0.0),
             BoundaryCondition::Robin { h, .. } => BoundaryCondition::Robin { h, reference: [0.0; 3] },
         }});
     }
-    let dual_problem = TetProblem { source: weights, boundary: &dual_boundary, ..*problem };
-    let dual = energy_bound(&dual_problem, dual_candidate, budget, &mut keep_going)?;
-    let (cells, faces) = build(problem, candidate, budget, &mut keep_going)?;
-    let (dual_cells, _) = build(&dual_problem, dual_candidate, budget, &mut keep_going)?;
+    let dual_problem = Problem { source: weights, boundary: &dual_boundary, ..*problem };
+    let dual = energy_bound_impl(&dual_problem, dual_candidate, budget, keep_going)?;
+    let (cells, faces) = build(problem, candidate, budget, keep_going)?;
+    let (dual_cells, _) = build(&dual_problem, dual_candidate, budget, keep_going)?;
     let mut value = Iv::zero();
     let mut residual = Iv::zero();
     let mut volume = Iv::zero();
     for (e, cell) in cells.iter().enumerate() {
-        poll(&mut keep_going)?;
+        poll(keep_going)?;
         let u = problem.tets[e].map(|i| Iv::point(candidate[i]));
         let z = problem.tets[e].map(|i| Iv::point(dual_candidate[i]));
         volume = volume.add(cell.volume);
         value = value.add(linear_integral(&u, cell.volume).mul(Iv::point(weights[e])));
         residual = residual.add(linear_integral(&z, cell.volume).mul(Iv::point(problem.source[e])))
-            .sub(cell.volume.mul(Iv::point(problem.conductivity[e]))
-                .mul(dot(cell.gradient, dual_cells[e].gradient)));
+            .sub(problem.conductivity.bilinear_integral(e, cell.gradient, dual_cells[e].gradient, cell.volume));
     }
     for face in &faces {
-        poll(&mut keep_going)?;
+        poll(keep_going)?;
         let z = face.vertices.map(|i| Iv::point(dual_candidate[i]));
         match face.condition {
             Some(BoundaryCondition::Neumann(q)) => {
@@ -99,7 +105,7 @@ pub fn goal_bound(
     }
     let remainder = Iv::point(primal.energy_error_upper).mul(Iv::point(dual.energy_error_upper));
     let enclosure = value.add(residual).add(Iv { lo: -remainder.hi, hi: remainder.hi });
-    poll(&mut keep_going)?;
+    poll(keep_going)?;
     if enclosure.is_unbounded() || volume.is_unbounded() || volume.lo <= 0.0 {
         return Err(TetError::Unbounded);
     }
@@ -114,10 +120,17 @@ pub fn mean_bound(
     problem: &TetProblem<'_>, candidate: &[f64], dual_candidate: &[f64],
     budget: FluxBudget, mut keep_going: impl FnMut() -> bool,
 ) -> Result<MeanBound, TetError> {
-    poll(&mut keep_going)?;
+    mean_bound_impl(&Problem::from(problem), candidate, dual_candidate, budget, &mut keep_going)
+}
+
+pub(super) fn mean_bound_impl(
+    problem: &Problem<'_>, candidate: &[f64], dual_candidate: &[f64],
+    budget: FluxBudget, keep_going: &mut impl FnMut() -> bool,
+) -> Result<MeanBound, TetError> {
+    poll(keep_going)?;
     if problem.tets.len() > budget.max_cells { return Err(TetError::Budget); }
     let weights = vec![1.0; problem.tets.len()];
-    let integral = goal_bound(problem, candidate, dual_candidate, &weights, budget, &mut keep_going)?;
+    let integral = goal_bound_impl(problem, candidate, dual_candidate, &weights, budget, keep_going)?;
     let enclosure = integral.enclosure.div_pos(integral.domain_volume);
     let candidate_mean = integral.candidate_value.div_pos(integral.domain_volume);
     if enclosure.is_unbounded() || candidate_mean.is_unbounded() { return Err(TetError::Unbounded); }

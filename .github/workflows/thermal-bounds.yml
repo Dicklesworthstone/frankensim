@@ -29,7 +29,17 @@ jobs:
           rustc --edition=2024 --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
           "$scratch/flux-tests"
       - name: Materialize pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # The pinned NumPy .bat checks out with different line endings.
+            # Restore ONLY this known blob in the fresh CI sibling, then rerun
+            # all original pin/cleanliness checks. No verifier is bypassed.
+            file=legacy_numpy_code/numpy/doc/make.bat
+            expected=bf42cca10b732e4277a3737f605b00d30b82b69c
+            test "$(git -C ../franken_numpy rev-parse "HEAD:$file")" = "$expected"
+            git -C ../franken_numpy cat-file blob "$expected" > "../franken_numpy/$file"
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::
