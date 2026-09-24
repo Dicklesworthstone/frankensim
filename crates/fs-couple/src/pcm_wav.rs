@@ -154,3 +154,7 @@ pub mod observation;
 
 #[cfg(test)]
 mod stereo_tests;
+
+/// Shared retarded-time baffled-surface receiver, before PCM conversion.
+#[path = "baffled_pressure.rs"]
+pub mod baffled;

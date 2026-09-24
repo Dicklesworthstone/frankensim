@@ -44,6 +44,7 @@ jobs:
           set -o pipefail
           cargo test --release -p fs-dcontact --lib opening 2>&1 | tee percussion-aperture-contact.log
           cargo test --release -p fs-couple --lib bernoulli_aperture::plate::closure 2>&1 | tee percussion-aperture-flow.log
+          cargo test --release -p fs-couple --lib pcm_wav::baffled 2>&1 | tee percussion-baffled-pressure.log
       - name: Test nonlinear percussion, material history and mixed playback
         if: ${{ !cancelled() }}
         run: set -o pipefail; cargo test --release -p fs-couple --test prepared_impact --test percussion_impact --test membrane_impact --test modal_cavity_impact --test cylindrical_cavity --test bowed_ensemble --test ensemble_render --test modal_friction --test pressure_ensemble --test plate_aperture --test dynamic_aperture --test aperture_tube --example plate_aperture 2>&1 | tee percussion-mechanics.log
