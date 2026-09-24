@@ -28,6 +28,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::interval::Iv;
 
 mod geometry;
+mod goal;
+pub use goal::{GoalBound, MeanBound, goal_bound, mean_bound};
 use geometry::{Cell, Face, build, dot, integral_square, scale, sub};
 
 /// Data on one exterior face, ordered as `BoundaryFace::vertices`.

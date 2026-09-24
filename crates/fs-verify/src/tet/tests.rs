@@ -149,3 +149,43 @@ fn duplicate_cells_and_missing_boundary_are_not_silently_admitted() {
     fixture.boundary.pop();
     assert!(energy_bound(&fixture.problem(), &u, FluxBudget::default(), || true).is_err());
 }
+
+
+#[test]
+fn mean_goal_encloses_the_exact_continuum_value_and_refines() {
+    let mut previous = f64::INFINITY;
+    for n in [2, 4] {
+        let (fixture, u) = cube(n, 2.0, |x| x*(1.0-x));
+        let z: Vec<_> = u.iter().map(|v| 0.5*v).collect();
+        let bound = mean_bound(&fixture.problem(), &u, &z, FluxBudget::default(), || true).unwrap();
+        assert!(bound.enclosure.lo <= 1.0/6.0 && bound.enclosure.hi >= 1.0/6.0, "{bound:?}");
+        let width = bound.enclosure.hi-bound.enclosure.lo;
+        assert!(width < 0.3*previous, "quadratic goal refinement: {width} versus {previous}");
+        previous = width;
+    }
+}
+
+#[test]
+fn goal_residual_correction_retains_arbitrary_candidate_algebraic_error() {
+    let (fixture, interpolant) = cube(4, 2.0, |x| x*(1.0-x));
+    let zero = vec![0.0; interpolant.len()];
+    let z: Vec<_> = interpolant.iter().map(|v| 0.5*v).collect();
+    let bound = mean_bound(&fixture.problem(), &zero, &z, FluxBudget::default(), || true).unwrap();
+    assert!(bound.integral.residual_correction.lo > 0.14);
+    assert!(bound.integral.remainder_upper < 0.14, "omitting the residual would miss the true value");
+    assert!(bound.enclosure.lo <= 1.0/6.0 && bound.enclosure.hi >= 1.0/6.0);
+}
+
+#[test]
+fn goal_weights_and_homogeneous_dual_trace_are_bound_to_the_problem() {
+    let (fixture, u) = cube(2, 2.0, |x| x*(1.0-x));
+    let z: Vec<_> = u.iter().map(|v| 0.5*v).collect();
+    let a = goal_bound(&fixture.problem(), &u, &z, &vec![1.0; fixture.tets.len()], FluxBudget::default(), || true).unwrap();
+    let doubled_z: Vec<_> = z.iter().map(|v| 2.0*v).collect();
+    let b = goal_bound(&fixture.problem(), &u, &doubled_z, &vec![2.0; fixture.tets.len()], FluxBudget::default(), || true).unwrap();
+    assert!(b.enclosure.lo <= 1.0/3.0 && b.enclosure.hi >= 1.0/3.0);
+    assert!((b.candidate_value.hi-2.0*a.candidate_value.hi).abs() < 1e-10);
+    let mut invalid_z = z;
+    invalid_z[0] = 1.0;
+    assert!(matches!(mean_bound(&fixture.problem(), &u, &invalid_z, FluxBudget::default(), || true), Err(TetError::Invalid(_))));
+}

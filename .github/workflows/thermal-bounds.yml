@@ -20,7 +20,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Compile and test original dependency-free numerical modules
+        run: |
+          scratch=$(mktemp -d)
+          sed '/^#\[cfg(test)\]/,$d' crates/fs-verify/src/interval.rs > "$scratch/interval.rs"
+          printf '#![forbid(unsafe_code)]\n#[path="interval.rs"] pub mod interval;\n#[path="%s/crates/fs-verify/src/tet.rs"] pub mod tet;\n' "$GITHUB_WORKSPACE" > "$scratch/check.rs"
+          rustc --edition=2024 --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
+          "$scratch/flux-tests"
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
-      - name: Test tetrahedral energy bounds
-        run: cargo test --release -p fs-verify --features certified-speculation --lib tet::
+      - name: Test tetrahedral energy and goal bounds in the workspace
+        run: |
+          cargo test --release -p fs-verify --features certified-speculation --lib tet::
