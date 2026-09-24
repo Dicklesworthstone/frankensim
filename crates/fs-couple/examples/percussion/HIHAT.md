@@ -113,11 +113,17 @@ The complete reference skins must pass a conservative separating-plane check.
 
 This is an axial, fixed-reference, small-slope image. It does NOT include full
 stand rocking, tangential friction, changing contact normals/pairings, pedal
-lever geometry, gravity, air squeeze-film loading, or acoustics recomputed as
+lever geometry, gravity, or acoustics recomputed as
 the gap closes. Sampling stations do not certify absence of interpenetration
 between stations. Stationary one-way BEM during a closing gesture is explicitly
 an approximation, not a gap-dependent scattering or full-band hi-hat claim.
 Material, spatial, modal and temporal convergence remain separate obligations.
+
+Optional `--squeeze-film INPUT.fsf` adds reciprocal, geometry-derived thin-gap
+air resistance inside the same mechanical solve. See [SQUEEZE_FILM.md](SQUEEZE_FILM.md)
+for its required inputs and incompressible applicability limits. Trapped pockets
+require a different storage model and refuse; the flag does not make the BEM
+scene move with the closing gap.
 
 Focused native checks:
 

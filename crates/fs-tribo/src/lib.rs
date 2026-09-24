@@ -5,6 +5,8 @@
 
 /// Solver-independent finite-patch tangential partial-slip rung.
 pub mod partial_slip;
+/// Solver-independent reciprocal Reynolds resistance of deforming thin films.
+pub mod resistive_film;
 /// Solver-independent rolling and contour-deformation loss candidates.
 pub mod rolling_loss;
 /// Deterministic finite-patch filtering of measured surface-height traces.

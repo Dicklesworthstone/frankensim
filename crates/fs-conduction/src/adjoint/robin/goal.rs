@@ -7,6 +7,9 @@ use super::{
     nonlinear, poll, reduce, temperature_dependent, true_residual, vector,
 };
 
+mod feedback;
+pub use feedback::{RobinGoalFeedback, RobinGoalLinearization};
+
 /// An observed linear-goal difference on one discrete mesh. An enriched-mesh
 /// caller may supply a prolonged coarse field as the approximation. This is
 /// neither a continuum bound nor a material/shape derivative.

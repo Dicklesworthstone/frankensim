@@ -67,7 +67,7 @@ fn geometry(points: [Vector; 4]) -> Result<(Iv, [Vector; 4]), TetError> {
 }
 
 pub(super) fn build(
-    problem: &TetProblem<'_>, candidate: &[f64], budget: FluxBudget,
+    problem: &Problem<'_>, candidate: &[f64], budget: FluxBudget,
     keep_going: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<Cell>, Vec<Face>), TetError> {
     poll(keep_going)?;
@@ -85,10 +85,10 @@ pub(super) fn build(
             return Err(TetError::Invalid("non-finite coordinates"));
         }
     }
-    if candidate.iter().chain(problem.source).any(|v| !v.is_finite())
-        || problem.conductivity.iter().any(|k| !k.is_finite() || *k <= 0.0) {
-        return Err(TetError::Invalid("finite data and positive conductivity required"));
+    if candidate.iter().chain(problem.source).any(|v| !v.is_finite()) {
+        return Err(TetError::Invalid("finite data required"));
     }
+    problem.conductivity.validate(keep_going)?;
     let mut declarations = BTreeMap::new();
     for boundary in problem.boundary {
         poll(keep_going)?;

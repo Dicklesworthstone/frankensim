@@ -1154,12 +1154,14 @@ dependencies = [
  "fs-conduction",
  "fs-convection",
  "fs-couple",
+ "fs-cutfem",
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
  "fs-geom",
  "fs-io",
  "fs-ir",
+ "fs-ivl",
  "fs-ledger",
  "fs-marquee",
  "fs-matdb",
@@ -1177,6 +1179,7 @@ dependencies = [
  "fs-session",
  "fs-solver",
  "fs-topols",
+ "fs-topopt",
  "fs-uq",
 ]
 
@@ -1590,6 +1593,7 @@ dependencies = [
  "fs-solid",
  "fs-solver",
  "fs-sparse",
+ "fs-tribo",
 ]
 
 [[package]]
@@ -2788,7 +2792,9 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-blake3",
+ "fs-conduction",
  "fs-evidence",
+ "fs-exec",
  "fs-math",
  "fs-obs",
 ]

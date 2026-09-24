@@ -27,6 +27,33 @@ Runtime dependencies are `fs-blake3`, `fs-conduction`, `fs-convection`,
 quantities, as a Re/Pr handoff to the existing convection rung, and as the
 CHT ladder's correlation-rung transfer.
 
+### Coupled discrete thermal goals
+
+`conjugate::goal::compare_discrete_goal` compares two supplied full solid
+fields under one or more independent air paths sharing that solid. It binds
+the same names, coefficient and wetted areas as the actual uniform Robin
+traces, independently admits every branch through the existing temperature
+and watt gates, and remarches the air at both fields. Its physical residual
+is `R_c(T) = R_s(T) - B [r(T)-r_bound]`. The transpose uses the actual solid
+material/contact Jacobian and an analytic reverse sweep of the exponential
+air law. A fresh, bounded IQN history solves the reduced transpose equation;
+neither the primal iteration history nor perturbed solver runs supply a
+derivative. The complete coupled primal and dual residuals are recomputed
+before publication, and inner Krylov work plus interface sweeps are retained.
+The interface equation normalizes the goal by its largest nodal weight, so
+its absolute stopping threshold is independent of the objective's units.
+
+The output retains signed full-node residual contributions and the measured
+linearization remainder. Consumers must retain that remainder, including
+nonlinear material truncation and finite solve arithmetic. These are
+observations between discrete fields, not continuum bounds. Flow, h, material
+laws, mesh, fixed temperatures and contact resistance remain fixed; the API
+adds no hydraulic, moving-interface, radiation or mixed-network derivative.
+`tests/conjugate_goal.rs` uses actual P1/conjugate primals, an independent
+effective-conductance adjoint oracle at high NTU, downstream serial heating,
+multiple independent inlets, quadratic nonlinear-remainder scaling, objective
+unit rescaling, and binding/reference/budget/cancellation refusals.
+
 ## Public types and semantics
 
 - `FanCurve` owns typed `(VolumetricFlowRate, Pressure)` points, source identity,

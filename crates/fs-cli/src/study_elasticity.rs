@@ -29,7 +29,12 @@ use super::STUDY_RUN_RECEIPT_SCHEMA;
 mod continuation;
 use continuation::drive;
 
+#[cfg(feature = "sdf3-study")]
+#[path = "study_elasticity/sdf3.rs"]
+mod sdf3;
+
 const DRIVER: &str = "free-boundary-elasticity-study-v1";
+const SDF3_DRIVER: &str = "adaptive-sdf3-elasticity-study-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 /// Reported (never enforced) tolerance on the final material area of the
@@ -65,6 +70,11 @@ fn quoted(value: &str) -> String {
 }
 
 fn failure_output(command: &'static str, mode: OutputMode, error: Failure) -> CommandOutput {
+    let fix = if error.code.starts_with("cli-study-sdf3") {
+        "use examples/marquee/bracket-3d-adaptive.fsim and its explicit geometry, load and work limits"
+    } else {
+        "use examples/marquee/bracket-2d.fsim and preserve every explicit elasticity-study field"
+    };
     refusal(
         mode,
         error.exit,
@@ -72,7 +82,7 @@ fn failure_output(command: &'static str, mode: OutputMode, error: Failure) -> Co
             command,
             error.code,
             error.message,
-            "use examples/marquee/bracket-2d.fsim and preserve every explicit elasticity-study field",
+            fix,
         ),
         None,
     )
@@ -573,8 +583,12 @@ fn budget(text: Option<&str>) -> Result<Option<usize>> {
 }
 
 fn ir(id: ContentHash, ordinal: usize) -> String {
+    ir_for(DRIVER, id, ordinal)
+}
+
+fn ir_for(driver: &str, id: ContentHash, ordinal: usize) -> String {
     format!(
-        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"ordinal\":{ordinal},\"units\":\"SI\",\"objective\":\"J\"}}",
+        "{{\"driver\":{driver:?},\"study_id\":\"{}\",\"ordinal\":{ordinal},\"units\":\"SI\",\"objective\":\"J\"}}",
         id.to_hex()
     )
 }
@@ -590,7 +604,7 @@ fn render(out: Outcome, mode: OutputMode) -> CommandOutput {
     let exit_code = match out.status {
         "completed" => exit::SUCCESS,
         "cancelled" => exit::CANCELLED,
-        "no-feasible-descent" => exit::REFUSED,
+        "no-feasible-descent" | "numerical-failure" => exit::REFUSED,
         _ => exit::BUDGET,
     };
     let stdout = match mode {
@@ -894,8 +908,9 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         .to_string();
     let value = JsonValue::parse(&text)
         .map_err(|error| fail("cli-study-elasticity-receipt", error.to_string()))?;
+    let driver = value.str_field("driver");
     if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA)
-        || value.str_field("driver") != Some(DRIVER)
+        || !matches!(driver, Some(DRIVER | SDF3_DRIVER))
     {
         return Err(fail(
             "cli-study-elasticity-receipt",
@@ -914,7 +929,7 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         .op(producer)?
         .ok_or_else(|| fail("cli-study-elasticity-receipt", "missing producing operation"))?;
     if op.session.as_deref() != Some(study_id.as_bytes().as_slice())
-        || op.ir != ir(study_id, ordinal)
+        || op.ir != ir_for(driver.expect("admitted producer"), study_id, ordinal)
         || op.outcome.as_deref() != Some("ok")
         || !ledger.edge_exists(producer, &hash, EdgeRole::Out)?
     {
@@ -1001,6 +1016,19 @@ pub(crate) fn study_path(
             message: error.to_string(),
             exit: exit::INPUT,
         })?;
+        let is_sdf3 = fs_ir::sexpr::parse(source).ok().is_some_and(|root| {
+            matches!(&root.kind, NodeKind::List(items) if items.first().is_some_and(|item|
+                matches!(&item.kind, NodeKind::Symbol(name) if name == "fsim-sdf3-study")))
+        });
+        if is_sdf3 {
+            #[cfg(feature = "sdf3-study")]
+            return sdf3::study(source, ledger_path, override_text, &CancelGate::new());
+            #[cfg(not(feature = "sdf3-study"))]
+            return Err(fail(
+                "cli-study-sdf3-feature",
+                "3-D adaptive studies require a binary built with --features sdf3-study",
+            ));
+        }
         let spec = parse(source)?;
         let ledger = Ledger::open(
             ledger_path
@@ -1034,6 +1062,12 @@ pub(crate) fn resume_path(
                 .ok_or_else(|| fail("cli-study-elasticity-ledger-path", "ledger path is not UTF-8"))?,
         )?;
         let old = load(&ledger, pointer)?;
+        if old.value.str_field("driver") == Some(SDF3_DRIVER) {
+            return Err(fail(
+                "cli-study-sdf3-resume-unsupported",
+                "3-D study receipts support retained report/package export; optimizer resume is not implemented",
+            ));
+        }
         let source = linked(&ledger, &old.value, "source", "study-source")?;
         let source = std::str::from_utf8(&source)
             .map_err(|error| fail("cli-study-elasticity-receipt", error.to_string()))?;
@@ -1066,7 +1100,7 @@ pub(crate) fn owns_run(pointer: &str, path: &Path) -> bool {
         return false;
     };
     value.str_field("schema") == Some(STUDY_RUN_RECEIPT_SCHEMA)
-        && value.str_field("driver") == Some(DRIVER)
+        && matches!(value.str_field("driver"), Some(DRIVER | SDF3_DRIVER))
 }
 
 pub(crate) fn looks_like(path: &Path) -> bool {
@@ -1085,7 +1119,9 @@ pub(crate) fn looks_like(path: &Path) -> bool {
     {
         return false;
     }
-    std::str::from_utf8(&bytes).is_ok_and(|text| text.contains("elasticity-2d"))
+    std::str::from_utf8(&bytes).is_ok_and(|text| {
+        text.contains("elasticity-2d") || text.contains("fsim-sdf3-study")
+    })
 }
 
 pub(crate) fn export(
@@ -1109,6 +1145,13 @@ pub(crate) fn export(
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let fields: &[(&str, &str, &str)] = if command == "package" {
             &[("package", "study-package", "fspkg")]
+        } else if loaded.value.str_field("driver") == Some(SDF3_DRIVER) {
+            &[
+                ("report_html", "study-report-html", "html"),
+                ("report_json", "study-report-json", "json"),
+                ("design", "study-design", "design.json"),
+                ("iterations", "study-iterations", "stages.json"),
+            ]
         } else {
             &[
                 ("report_html", "study-report-html", "html"),

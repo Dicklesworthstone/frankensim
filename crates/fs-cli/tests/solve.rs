@@ -1080,7 +1080,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 17,
+        SOLVE_DRIVER_VERSION, 18,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -5005,24 +5005,117 @@ fn g1_adaptive_fidelity_tight_accuracy_refines_and_resolves_the_marked_mesh() {
 }
 
 #[test]
-fn g1_adaptive_fidelity_names_the_unsupported_coupled_adjoint() {
+fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     let bytes = tetra_stl();
     let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
     spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
     let decoded = decode(&spec);
     let ledger = Ledger::open(":memory:").unwrap();
     import_fixture(&ledger, &spec, bytes);
+    let (_, qoi, conduction, _) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+    assert_balanced_json(&conduction);
+    assert!(
+        conduction.contains("\"status\":\"observed-tolerance-met\""),
+        "{conduction}"
+    );
+    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    assert!(!conduction.contains("unsupported-coupled-adjoint"));
+    assert!(conduction.contains("analytic-air-solid-transpose-iqn-ils"));
+    let history = conduction.split("\"history\":[").nth(1).unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert_eq!(number("branch_count"), 1.0);
+    assert!(number("interface_iterations") >= 1.0);
+    assert!(number("interface_residual") <= number("interface_tolerance"));
+    let residual_gate = (spec.solver.as_ref().unwrap().tolerance_rel * 1e-2).max(1e-13);
+    assert!(number("primal_residual") <= residual_gate);
+    assert!(number("dual_residual") <= residual_gate);
+    assert!(
+        (number("signed_linear_change_k") + number("linearization_remainder_k")
+            + number("maximum_remainder_k") - number("measured_change_k")).abs() < 1e-10,
+        "the coupled dual and explicit remainders must recover the independent maximum change"
+    );
+    assert!(number("linearization_remainder_k").abs() < 1e-8,
+        "the linear solid and affine air law leave only numerical error in the remainder: {history}");
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 8, "{qoi}");
+}
+
+#[test]
+fn g1_adaptive_conjugate_contact_preserves_the_heat_path_and_both_traces() {
+    let mut spec = contact_refinement_project("adaptive");
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+        ThermalBoundaryCondition::AirflowConvection {
+            branch: "cold".to_string(),
+            order: 0,
+            inlet_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            hydraulic_diameter: QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            channel_length: QtyAny::new(0.3, fs_project::spec::dims::LENGTH),
+            correlation: "convection.gnielinski".to_string(),
+        };
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let outcome = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decoded, &contact_cards(), &mut Vec::new()).unwrap();
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    assert_balanced_json(&conduction);
+    assert!(conduction.contains("\"status\":\"observed-tolerance-met\""), "{conduction}");
+    // Five watts leave the hot body through its only exit, the finite joint,
+    // then leave the cold body's exterior through the declared air branch.
+    let number = |name| receipt_number_field(&conduction, name);
+    assert!((number("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5);
+    assert!((number("mean_jump_k") + 0.5).abs() < 2e-6);
+    assert!((number("air_total_w") - 5.0).abs() < 2e-5);
+    assert!(number("relative_closure") < 1e-6);
+    let history = conduction.split("\"history\":[").nth(1).unwrap();
+    let number = |name| receipt_number_field(history, name);
+    assert!(number("interface_pairs") > 0.0);
+    assert_eq!(number("probe_interface_pairs"), 4.0 * number("interface_pairs"));
+    assert_eq!(number("branch_count"), 1.0);
+    assert!(number("interface_residual") <= number("interface_tolerance"));
+    assert!((number("signed_linear_change_k") + number("linearization_remainder_k")
+        + number("maximum_remainder_k") - number("measured_change_k")).abs() < 1e-10);
+}
+
+#[test]
+fn g1_adaptive_conjugate_fidelity_refines_and_retains_the_last_probed_field() {
+    let bytes = tetra_stl();
+    let mut spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    spec.solver.as_mut().unwrap().fidelity = "adaptive".to_string();
+    let budgets = spec.budgets.as_mut().unwrap();
+    budgets.accuracy_rel = 1e-12;
+    budgets.memory_bytes = 64 * 1024;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
     let (_, _, conduction, _) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+    assert_balanced_json(&conduction);
+    assert!(receipt_number_field(&conduction, "solved_meshes") > 2.0, "{conduction}");
+    let history = conduction.split("\"history\":[").nth(1).unwrap().split(']').next().unwrap();
+    let rows: Vec<_> = history.split("{\"mesh\":").skip(1).collect();
+    assert!(rows.len() > 1, "{conduction}");
+    for row in &rows {
+        assert_eq!(receipt_number_field(row, "branch_count"), 1.0);
+        assert!(receipt_number_field(row, "interface_residual")
+            <= receipt_number_field(row, "interface_tolerance"));
+        assert!((receipt_number_field(row, "signed_linear_change_k")
+            + receipt_number_field(row, "linearization_remainder_k")
+            + receipt_number_field(row, "maximum_remainder_k")
+            - receipt_number_field(row, "measured_change_k")).abs() < 1e-10);
+    }
+    let last = rows.last().unwrap();
+    assert_eq!(receipt_number_field(&conduction, "elements"), receipt_number_field(last, "tets"));
+    assert_eq!(receipt_number_field(&conduction, "max"), receipt_number_field(last, "t_max_k"));
+    assert_eq!(receipt_number_field(&conduction, "last_estimated_change_k"),
+        receipt_number_field(last, "estimated_change_k"));
     assert!(
         conduction.contains("\"status\":\"unresolved\""),
         "{conduction}"
     );
-    assert!(
-        conduction.contains("\"stop\":\"unsupported-coupled-adjoint\""),
-        "{conduction}"
-    );
-    assert!(conduction.contains("\"solved_meshes\":1,"), "{conduction}");
-    assert!(conduction.contains("\"history\":[]"), "{conduction}");
+    assert!(conduction.contains("\"continuum_error_bound\":false"));
 }
 
 #[test]

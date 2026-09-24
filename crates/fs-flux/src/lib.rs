@@ -18,6 +18,9 @@ pub mod bdm;
 /// Reduced circular-capillary flow screening with an explicit Newtonian,
 /// fully-developed applicability boundary.
 pub mod capillary;
+/// Reciprocal quasistatic Reynolds pressure for deforming thin-gap interfaces.
+#[path = "gas_film/resistive.rs"]
+pub mod resistive_film;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]

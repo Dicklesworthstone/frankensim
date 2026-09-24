@@ -19,7 +19,7 @@
 //! class gets the honest fallback: candidates are WARM STARTS with
 //! measured iteration savings, never certificates.
 
-/// Actual steady FEM primal/dual solves with a scoped continuum mean bound.
+/// Retained primal/dual temperature fields with a scoped continuum mean bound.
 #[cfg(feature = "thermal-conduction")]
 pub mod conduction;
 #[cfg(feature = "certified-speculation")]

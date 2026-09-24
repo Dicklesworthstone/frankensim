@@ -156,7 +156,7 @@ fn shared_fem_slab_matches_two_independent_air_resistances_in_series_with_the_so
             }, config).expect("actual shared-solid FEM solve")
         };
         let mut calls = 0;
-        let outcome = run_exchange(cx, &path, |_, refs| {
+        let outcome = run_exchange(cx, &path, false, |_, refs| {
             calls += 1;
             let field = solve_once(refs);
             Ok(path.segments.iter().map(|segment| {
@@ -201,7 +201,7 @@ fn shared_fem_slab_matches_two_independent_air_resistances_in_series_with_the_so
 #[test]
 fn aggregate_publication_gate_detects_dropped_boundary_heat() {
     let path = paths();
-    let outcome = with_cx(|cx| run_exchange(cx, &path,
+    let outcome = with_cx(|cx| run_exchange(cx, &path, false,
         |_, refs| Ok(fixed_walls(&path, refs)))).expect("exchange");
     assert!(receipt_fragment(&path, &outcome).is_err(), "unverified final solve must not publish");
     let total: f64 = outcome.solution.branches.iter().map(|b| b.balance.solid_total_w).sum();
@@ -215,7 +215,7 @@ fn aggregate_publication_gate_detects_dropped_boundary_heat() {
 fn single_branch_keeps_its_branch_fields_and_records_the_acceleration() {
     let path = derive_air_path(&[law("cold-face", "cold", 0, 290.0)],
         &operating(), 1.2, |_| Some(0.01), 1.0).expect("single path");
-    let outcome = with_cx(|cx| run_exchange(cx, &path,
+    let outcome = with_cx(|cx| run_exchange(cx, &path, false,
         |_, refs| Ok(fixed_walls(&path, refs)))).expect("exchange");
     let total = outcome.solution.branches[0].balance.solid_total_w;
     let checked = cross_check_decomposition(outcome, total, 0.0).expect("checked");
@@ -231,7 +231,7 @@ fn single_branch_keeps_its_branch_fields_and_records_the_acceleration() {
 #[test]
 fn shared_solid_refusals_keep_the_original_code_and_message() {
     let path = paths();
-    let error = with_cx(|cx| run_exchange(cx, &path, |_, _| {
+    let error = with_cx(|cx| run_exchange(cx, &path, false, |_, _| {
         Err(conduction_error("test-solid-refusal", "sentinel solid diagnosis", "sentinel fix"))
     })).unwrap_err();
     assert_eq!(error.code, "test-solid-refusal");
@@ -272,7 +272,7 @@ fn production_exchange_resolves_stiff_card_derived_paths_without_increasing_the_
         );
         assert!(matches!(plain, Err(AirflowError::ConjugateNotConverged { .. })));
         let mut calls = 0;
-        let outcome = run_exchange(cx, &path, |_, refs| {
+        let outcome = run_exchange(cx, &path, false, |_, refs| {
             calls += 1;
             Ok(solid(refs))
         }).expect("production IQN exchange");
@@ -299,7 +299,7 @@ fn model_form_scale_reaches_the_air_path_the_exchange_uses() {
     let h = nominal.segments[0].htc_w_m2_k;
     assert_eq!(weaker.segments[0].htc_w_m2_k.to_bits(), (h * 0.85).to_bits());
     assert_eq!(derived_coefficients(&weaker)["cold-face"].to_bits(), (h * 0.85).to_bits());
-    let exchange = |path: &ConjugatePath| with_cx(|cx| run_exchange(cx, path,
+    let exchange = |path: &ConjugatePath| with_cx(|cx| run_exchange(cx, path, false,
         |_, refs| Ok(fixed_walls(path, refs)))).expect("exchange");
     let (a, b) = (exchange(&nominal), exchange(&weaker));
     assert_ne!(

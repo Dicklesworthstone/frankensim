@@ -77,6 +77,9 @@ pub mod solve;
 /// Transient conduction by the method of lines: declared volumetric heat
 /// capacity, the exact P1 capacitance matrix, and theta-method stepping.
 pub mod transient;
+/// Nominal linear continuum mean-temperature bounds from the equilibrated-flux verifier.
+#[cfg(feature = "thermal-verification")]
+pub mod verification;
 
 use core::fmt;
 

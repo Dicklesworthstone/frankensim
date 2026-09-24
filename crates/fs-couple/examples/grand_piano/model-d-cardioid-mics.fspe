@@ -1,0 +1,17 @@
+frankensim-piano-exterior-si-v1
+source,estimated,Ideal cardioid study; medium positions and axes are explicit estimates not measured Steinway or microphone data
+obj-scale-m,1
+obj-origin,0,0,0
+max-skin-offset-m,0.02
+medium,1.2,340
+band-hz,40,300,65
+board-band-hz,300
+fit-order,8
+min-panels-per-wavelength,6
+full-scale-pa,2
+receiver-evaluation,near-field
+receiver-m,0.2,1,0.15
+receiver-m,1.2,1,0.15
+receiver-pattern,0,0.5,0,0,-1
+receiver-pattern,1,0.5,0,0,-1
+moving,soundboard_skin

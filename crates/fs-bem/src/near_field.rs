@@ -14,6 +14,10 @@ use crate::{helmholtz::{self, HelmholtzError, Medium, RadiationSolution}, panel3
 use fs_math::{c64::C64, det};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path="near_field_velocity.rs"]
+mod velocity;
+pub use velocity::{FirstOrder, VectorObservation};
+
 const MAX_PANELS: usize = helmholtz::MAX_DENSE_PANELS;
 const MAX_RECEIVERS: usize = 64;
 const FOUR_PI: f64 = 4. * std::f64::consts::PI;
@@ -127,10 +131,13 @@ impl<'a> Geometry<'a> {
     /// # Errors
     /// Invalid k/medium, exhausted refinement/work, or nonfinite quadrature.
     pub fn prepare(&self, k:f64, medium:Medium, options:Options) -> Result<Prepared<'a>,HelmholtzError> {
+        self.prepare_fields(k,medium,options,false)
+    }
+    fn prepare_fields(&self,k:f64,medium:Medium,options:Options,with_velocity:bool) -> Result<Prepared<'a>,HelmholtzError> {
         options.validate()?;
         let omega_rho=k*medium.sound_speed*medium.density;
         if !k.is_finite() || k<=0. || !medium.density.is_finite() || medium.density<=0.
-            || !medium.sound_speed.is_finite() || medium.sound_speed<=0. || !omega_rho.is_finite() {
+            || !medium.sound_speed.is_finite() || medium.sound_speed<=0. || !omega_rho.is_finite() || omega_rho<=0. {
             return Err(bad("near-field evaluation needs positive finite k and medium"));
         }
         let triangles=self.surface.triangles().ok_or_else(||bad("missing retained receiver triangles"))?;
@@ -139,11 +146,11 @@ impl<'a> Geometry<'a> {
         for &x in &self.points {
             let mut row=Vec::with_capacity(triangles.len());
             for (i,&t) in triangles.iter().enumerate() {
-                row.push(integrate(k,x,t,self.surface.normals()[i],0,&mut work)?);
+                row.push(integrate_fields(k,x,t,self.surface.normals()[i],0,&mut work,with_velocity)?);
             }
             rows.push(row);
         }
-        Ok(Prepared {surface:self.surface,k,medium,rows,kernel_evaluations:work.evaluations})
+        Ok(Prepared {surface:self.surface,k,medium,rows,with_velocity,kernel_evaluations:work.evaluations})
     }
 }
 
@@ -189,11 +196,12 @@ pub(crate) fn components(triangles:&[Triangle]) -> Result<Vec<Vec<usize>>,Helmho
 }
 
 #[derive(Clone,Copy,Default)]
-struct Integral { s:C64, d:C64, abs_s:f64, abs_d:f64, error_s:f64, error_d:f64 }
+struct Integral { s:C64, d:C64, abs_s:f64, abs_d:f64, error_s:f64, error_d:f64, gradient:velocity::Derivative }
 impl Integral {
     fn add(&mut self,b:Self) {
         self.s=self.s+b.s;self.d=self.d+b.d;self.abs_s+=b.abs_s;self.abs_d+=b.abs_d;
         self.error_s+=b.error_s;self.error_d+=b.error_d;
+        self.gradient.add(b.gradient);
     }
 }
 struct Work { options:Options, evaluations:usize }
@@ -203,7 +211,7 @@ const X8:[f64;8]=[0.019855071751231884,0.10166676129318664,0.2372337950418355,0.
     0.5917173212478249,0.7627662049581645,0.8983332387068134,0.9801449282487681];
 const W8:[f64;8]=[0.05061426814518813,0.11119051722668724,0.15685332293894366,0.181341891689181,
     0.181341891689181,0.15685332293894366,0.11119051722668724,0.05061426814518813];
-fn rule(k:f64,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&mut Work) -> Result<Integral,HelmholtzError> {
+fn rule(k:f64,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&mut Work,with_velocity:bool) -> Result<Integral,HelmholtzError> {
     let count=nodes.len()*nodes.len();
     work.evaluations=work.evaluations.checked_add(count).filter(|n|*n<=work.options.maximum_kernel_evaluations)
         .ok_or_else(||bad("near-field kernel-evaluation budget exhausted"))?;
@@ -216,6 +224,7 @@ fn rule(k:f64,x:Point,t:Triangle,normal:Point,nodes:&[f64],weights:&[f64],work:&
         let projection=dot(normal,delta)/r;let dg=g*C64::new(1./r,-k).scale(projection);
         let jac=wa*wb*area2*a;
         out.s=out.s+g.scale(jac);out.d=out.d+dg.scale(jac);
+        if with_velocity {out.gradient.accumulate(k,g,delta,r,normal,jac)?;}
         out.abs_s+=jac/(FOUR_PI*r);out.abs_d+=jac/(FOUR_PI*r)*(1./r).hypot(k)*projection.abs();
     }}
     if ![out.s.re,out.s.im,out.d.re,out.d.im,out.abs_s,out.abs_d].iter().all(|v|v.is_finite()) {
@@ -228,23 +237,28 @@ fn children([a,b,c]:Triangle) -> [Triangle;4] {
     [[a,ab,ca],[ab,b,bc],[ca,bc,c],[ab,bc,ca]]
 }
 fn integrate(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work) -> Result<Integral,HelmholtzError> {
-    let coarse=rule(k,x,t,normal,&X4,&W4,work)?;let mut fine=rule(k,x,t,normal,&X8,&W8,work)?;
+    integrate_fields(k,x,t,normal,depth,work,false)
+}
+fn integrate_fields(k:f64,x:Point,t:Triangle,normal:Point,depth:usize,work:&mut Work,with_velocity:bool) -> Result<Integral,HelmholtzError> {
+    let coarse=rule(k,x,t,normal,&X4,&W4,work,with_velocity)?;let mut fine=rule(k,x,t,normal,&X8,&W8,work,with_velocity)?;
     fine.error_s=(fine.s-coarse.s).abs();fine.error_d=(fine.d-coarse.d).abs();
     let size=[norm(sub(t[1],t[0])),norm(sub(t[2],t[1])),norm(sub(t[0],t[2]))].into_iter().fold(0.0_f64,f64::max);
     let separated=size<=2.*distance(x,t) && k*size<=3.;
     let tol=work.options.relative_tolerance;
     // The geometric/phase condition prevents two rules from jointly missing
     // a sharp nearby peak or an under-sampled oscillation.
-    if separated && fine.error_s<=tol*fine.abs_s && fine.error_d<=tol*fine.abs_d {return Ok(fine);}
+    let gradient_ok=!with_velocity || fine.gradient.accept(&coarse.gradient,tol);
+    if separated && fine.error_s<=tol*fine.abs_s && fine.error_d<=tol*fine.abs_d && gradient_ok {return Ok(fine);}
     if depth==work.options.maximum_depth {return Err(bad("near-field triangle refinement depth exhausted"));}
     let mut sum=Integral::default();
-    for child in children(t) {sum.add(integrate(k,x,child,normal,depth+1,work)?);}
+    for child in children(t) {sum.add(integrate_fields(k,x,child,normal,depth+1,work,with_velocity)?);}
     Ok(sum)
 }
 
 /// Frequency-specific Green representation rows. No new solve is performed.
 pub struct Prepared<'a> {
     surface:&'a SpherePanels,k:f64,medium:Medium,rows:Vec<Vec<Integral>>,
+    with_velocity:bool,
     /// Actual quadrature work during preparation, shared by every modal field.
     pub kernel_evaluations:usize,
 }
@@ -285,3 +299,7 @@ impl Prepared<'_> {
 #[cfg(test)]
 #[path="near_field_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="near_field_velocity_tests.rs"]
+mod velocity_tests;

@@ -480,4 +480,6 @@ impl<'m> ConductivityDesign<'m> {
 /// Robin-boundary and assembled-load tangents and adjoints, including k(T).
 pub mod robin;
 
-pub use robin::goal::{DiscreteGoalComparison, compare_discrete_goal};
+pub use robin::goal::{
+    DiscreteGoalComparison, RobinGoalFeedback, RobinGoalLinearization, compare_discrete_goal,
+};

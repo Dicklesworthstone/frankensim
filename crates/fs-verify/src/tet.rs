@@ -1,16 +1,17 @@
 //! Outward-evaluated equilibrated RT0 majorants on a conforming tetrahedral domain.
 //!
-//! The admitted PDE is -div(k grad u)=f, with element-constant scalar k>0
-//! and f, P1 Dirichlet data, constant outward Neumann flux, and constant
-//! positive Robin h with P1 reference data. Coordinates and coefficients are
-//! interpreted as exact real values of their binary64 encodings.
+//! The admitted PDE is -div(K grad u)=f, with element-constant scalar k>0
+//! or symmetric positive-definite tensor K, and element-constant f, P1
+//! Dirichlet data, constant outward Neumann flux, and constant positive Robin
+//! h with P1 reference data. Coordinates and coefficients are interpreted as
+//! exact real values of their binary64 encodings.
 //!
 //! A graph solve only proposes face fluxes. A rooted forest then defines an
 //! EXACT conservative flux by real-arithmetic elimination, enclosed by `Iv`:
 //! every cell's outgoing flux sums to f*volume and shared faces use one flux
 //! with opposite signs. No small floating-point residual is called equilibrium.
 //! For q in H(div), div q=f and q.n=g_N, integration by parts gives
-//!   ||u-v||_a <= (||q+k grad v||^2_(1/k)
+//!   ||u-v||_a <= (||q+K grad v||^2_(K^-1)
 //!                  + ||q.n-h(v-u_ref)||^2_(1/h,Robin))^(1/2).
 //! All integrands are quadratic polynomials and simplex moments are evaluated
 //! outward, including geometry. This includes algebraic error in ANY admitted
@@ -29,7 +30,10 @@ use crate::interval::Iv;
 
 mod geometry;
 mod goal;
+mod tensor;
 pub use goal::{GoalBound, MeanBound, goal_bound, mean_bound};
+pub use tensor::{ConductivityTensor, TensorTetProblem, tensor_energy_bound, tensor_goal_bound, tensor_mean_bound};
+use tensor::Conductivity;
 use geometry::{Cell, Face, build, dot, integral_square, scale, sub};
 
 /// Data on one exterior face, ordered as `BoundaryFace::vertices`.
@@ -58,6 +62,22 @@ pub struct TetProblem<'a> {
     pub conductivity: &'a [f64],
     pub source: &'a [f64],
     pub boundary: &'a [BoundaryFace],
+}
+
+/// Shared geometry/source/boundary view; the exact conductivity is never replaced.
+#[derive(Clone, Copy)]
+struct Problem<'a> {
+    vertices: &'a [[f64; 3]],
+    tets: &'a [[usize; 4]],
+    conductivity: Conductivity<'a>,
+    source: &'a [f64],
+    boundary: &'a [BoundaryFace],
+}
+impl<'a> From<&TetProblem<'a>> for Problem<'a> {
+    fn from(p: &TetProblem<'a>) -> Self {
+        Self { vertices: p.vertices, tets: p.tets, conductivity: Conductivity::Scalar(p.conductivity),
+            source: p.source, boundary: p.boundary }
+    }
 }
 
 /// Admission and work limits. CG is a bounded proposal, not a proof obligation.
@@ -89,7 +109,7 @@ impl std::fmt::Display for TetError {
 }
 impl std::error::Error for TetError {}
 
-/// Bound on sqrt(integral k|grad(u-v)|^2 + integral_R h(u-v)^2).
+/// Bound on sqrt(integral grad(u-v).K.grad(u-v) + integral_R h(u-v)^2).
 /// Does not include geometry/model/input uncertainty and is not a maximum bound.
 #[derive(Debug, Clone)]
 pub struct EnergyBound {
@@ -123,32 +143,35 @@ pub fn energy_bound(
     budget: FluxBudget,
     mut keep_going: impl FnMut() -> bool,
 ) -> Result<EnergyBound, TetError> {
-    let (cells, faces) = build(problem, candidate, budget, &mut keep_going)?;
-    let (mut flux, proposal_iterations) = propose(problem, &cells, &faces, budget, &mut keep_going)?;
-    equilibrate(problem, &cells, &faces, &mut flux, &mut keep_going)?;
+    energy_bound_impl(&Problem::from(problem), candidate, budget, &mut keep_going)
+}
+
+fn energy_bound_impl(
+    problem: &Problem<'_>, candidate: &[f64], budget: FluxBudget,
+    keep_going: &mut impl FnMut() -> bool,
+) -> Result<EnergyBound, TetError> {
+    let (cells, faces) = build(problem, candidate, budget, keep_going)?;
+    let (mut flux, proposal_iterations) = propose(problem, &cells, &faces, budget, keep_going)?;
+    equilibrate(problem, &cells, &faces, &mut flux, keep_going)?;
     let mut total = Iv::zero();
     let mut contributions = Vec::with_capacity(cells.len());
     let mut outward = Vec::with_capacity(cells.len());
     for (e, cell) in cells.iter().enumerate() {
-        poll(&mut keep_going)?;
+        poll(keep_going)?;
         let local = std::array::from_fn(|i| {
             let face = &faces[cell.faces[i]];
             signed(flux[cell.faces[i]], face.sign(e))
         });
         let mut defect = [[Iv::zero(); 3]; 4];
         for (j, value) in defect.iter_mut().enumerate() {
-            *value = scale(cell.gradient, Iv::point(problem.conductivity[e]));
+            *value = problem.conductivity.apply(e, cell.gradient);
             for (i, integral) in local.iter().enumerate() {
                 let basis = scale(sub(cell.points[j], cell.points[i]),
                     integral.div_pos(cell.volume.scale_pos(3.0)));
                 for d in 0..3 { value[d] = value[d].add(basis[d]); }
             }
         }
-        let squared: Vec<Iv> = (0..3).map(|d| {
-            integral_square(&defect.map(|v| v[d]), cell.volume, 20.0)
-        }).collect();
-        let mut eta = squared.into_iter().fold(Iv::zero(), Iv::add)
-            .div_pos(Iv::point(problem.conductivity[e]));
+        let mut eta = problem.conductivity.defect_integral(e, &defect, cell.volume);
         for (i, &f) in cell.faces.iter().enumerate() {
             if let Some(BoundaryCondition::Robin { h, reference }) = faces[f].condition {
                 let qn = local[i].div_pos(faces[f].area);
@@ -165,7 +188,7 @@ pub fn energy_bound(
         total = total.add(eta);
         outward.push(local);
     }
-    poll(&mut keep_going)?;
+    poll(keep_going)?;
     let root = total.sqrt();
     if root.is_unbounded() { return Err(TetError::Unbounded); }
     Ok(EnergyBound {
@@ -180,7 +203,7 @@ pub fn energy_bound(
 /// Weighted graph projection improves the proposal. It is intentionally not
 /// trusted: early CG termination is safe because exact forest repair follows.
 fn propose(
-    problem: &TetProblem<'_>, cells: &[Cell], faces: &[Face], budget: FluxBudget,
+    problem: &Problem<'_>, cells: &[Cell], faces: &[Face], budget: FluxBudget,
     keep_going: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<Iv>, usize), TetError> {
     let n = cells.len();
@@ -196,9 +219,9 @@ fn propose(
         let proposed = if let Some(BoundaryCondition::Neumann(q)) = face.condition {
             face.area.mul(Iv::point(q))
         } else {
-            let mut q = -problem.conductivity[a] * midpoint(dot(cells[a].gradient, face.normal_area))?;
+            let mut q = problem.conductivity.flux_proposal(a, cells[a].gradient, face.normal_area)?;
             if let Some(&(b, _)) = face.sides.get(1) {
-                q = 0.5 * q - 0.5 * problem.conductivity[b] * midpoint(dot(cells[b].gradient, face.normal_area))?;
+                q = 0.5 * q + 0.5 * problem.conductivity.flux_proposal(b, cells[b].gradient, face.normal_area)?;
             }
             Iv::point(q)
         };
@@ -206,7 +229,8 @@ fn propose(
         rhs[a] -= f;
         if let Some(&(b, _)) = face.sides.get(1) { rhs[b] += f; }
         let resistance = face.sides.iter().map(|&(e, _)| {
-            midpoint(cells[e].volume).map(|v| v / problem.conductivity[e])
+            let k = problem.conductivity.normal_coefficient(e, face.normal_area, face.area)?;
+            midpoint(cells[e].volume).map(|v| v / k)
         }).collect::<Result<Vec<_>, _>>()?.into_iter().sum::<f64>();
         let area = midpoint(face.area)?;
         let weight = if fixed { 0.0 } else { area * area / resistance };
@@ -268,7 +292,7 @@ fn propose(
 }
 
 fn equilibrate(
-    problem: &TetProblem<'_>, cells: &[Cell], faces: &[Face], flux: &mut [Iv],
+    problem: &Problem<'_>, cells: &[Cell], faces: &[Face], flux: &mut [Iv],
     keep_going: &mut impl FnMut() -> bool,
 ) -> Result<(), TetError> {
     let mut parent = vec![None; cells.len()];

@@ -221,6 +221,44 @@ pub(super) struct ConjugatePath {
     branches: Vec<ConjugateBranch>,
 }
 
+impl ConjugatePath {
+    /// Preserve the independently supplied paths in the same branch-major
+    /// order as the solid's Robin rows for the coupled goal linearization.
+    pub(super) fn air_paths(&self) -> Vec<AirPath> {
+        self.branches.iter().map(|branch| branch.air_path.clone()).collect()
+    }
+}
+
+fn exchange_config(adaptive: bool) -> ConjugateConfig {
+    let mut config = ConjugateConfig {
+        relaxation: Relaxation::Fixed { omega: CONJUGATE_STARTUP_OMEGA },
+        ..ConjugateConfig::default()
+    };
+    if adaptive {
+        // The goal comparison independently checks the fully coupled solid
+        // residual. Tighten the reference solve without weakening its watt gate.
+        config.temperature_tolerance_k = 1.0e-11;
+    }
+    config
+}
+
+pub(super) fn goal_config(linear: fs_conduction::LinearConfig)
+    -> fs_airflow::conjugate::goal::CoupledGoalConfig
+{
+    use fs_airflow::conjugate::goal::{CoupledGoalConfig, InterfaceSolveConfig};
+    CoupledGoalConfig {
+        solid: linear,
+        primal: exchange_config(true),
+        interface: InterfaceSolveConfig {
+            max_iterations: 32,
+            absolute_tolerance: 1.0e-12,
+            relative_tolerance: 1.0e-12,
+            relaxation: 1.0,
+        },
+        acceleration: CONJUGATE_IQN_CONFIG,
+    }
+}
+
 /// Derive every branch at its own solved flow, then retain the same ordering
 /// on the flat solid side and the branch-major air side.
 ///
@@ -446,17 +484,15 @@ pub(super) struct ConjugateOutcome {
 pub(super) fn run_exchange(
     cx: &Cx<'_>,
     path: &ConjugatePath,
+    adaptive: bool,
     mut solid: impl FnMut(
         &Cx<'_>, &BTreeMap<String, f64>,
     ) -> Result<Vec<SolidRegionState>, SolveRefusal>,
 ) -> Result<ConjugateOutcome, SolveRefusal> {
-    let config = ConjugateConfig {
-        relaxation: Relaxation::Fixed { omega: CONJUGATE_STARTUP_OMEGA },
-        ..ConjugateConfig::default()
-    };
+    let config = exchange_config(adaptive);
     let mut stashed: Option<SolveRefusal> = None;
     let targets: Vec<String> = path.segments.iter().map(|s| s.target.clone()).collect();
-    let air_paths: Vec<AirPath> = path.branches.iter().map(|b| b.air_path.clone()).collect();
+    let air_paths = path.air_paths();
     let result = solve_conjugate_branches_iqn(cx, &air_paths, &config, CONJUGATE_IQN_CONFIG, |cx, references| {
         let by_target: BTreeMap<String, f64> = targets.iter().cloned()
             .zip(references.iter().copied()).collect();

@@ -16,6 +16,7 @@ continuum = ["dep:fs-la", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse"]
 quarter-wave = []
 
 [dependencies]
+fs-tribo = { path = "../fs-tribo" }
 fs-la = { path = "../fs-la", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
 fs-solver = { path = "../fs-solver", optional = true }
