@@ -7,14 +7,18 @@
 //! must restore volume feasibility and re-solve their new baseline.
 //! `continuation` advances SIMP/projection models on the SAME retained geometry,
 //! restores stage feasibility and can gate each baseline with numerical gradients.
+//! `adaptive_continuation` joins those stages with actual compliance-DWR
+//! background refinement and atomic, freshly solved raw-design transfers.
 //!
 //! Numerical cut volumes, discrete sensitivities and energy-based marking are
-//! not DWR estimates, continuum certificates or proofs of optimality. The graph
-//! Helmholtz filter is not the tetrahedral FEEC filter.
+//! not continuum certificates or proofs of optimality. The adaptive driver uses
+//! the separate `sdf3_goal` residual estimator, not energy-based marking. The
+//! graph Helmholtz filter is not the tetrahedral FEEC filter.
 
 mod operator;
 mod refine;
 pub mod continuation;
+pub mod adaptive_continuation;
 pub mod response;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
@@ -55,6 +59,7 @@ pub struct CutDensityStudy3<O: Sdf3Elasticity = CutElasticity3> {
     filter: CsrOp,
     mass: Vec<f64>,
     params: SimpParams,
+    filter_radius: f64,
 }
 
 struct Design3 { projected: Vec<f64>, slope: Vec<f64>, scales: Vec<f64>, volume: f64 }
@@ -98,7 +103,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             coo.push(i,i,weight); coo.push(j,j,weight);
             coo.push(i,j,-weight); coo.push(j,i,-weight);
         }
-        Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params }
+        Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params, filter_radius: radius }
     }
 
     /// Read-only access to the geometry, accepted scales, and field ordering.
