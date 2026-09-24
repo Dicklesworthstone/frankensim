@@ -4,6 +4,9 @@ use super::*;
 use crate::bernoulli_aperture::cavity::HelmholtzLoadSpec;
 use crate::bernoulli_aperture::wall::{WallPatch, WallPin};
 use fs_vfit::impedance::SeriesImpedanceSpec;
+use crate::bernoulli_aperture::viscothermal::{
+    ViscothermalSectionSpec, ViscothermalSection, with_viscothermal_sections,
+};
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
 const MAX_DUCT_NODES: usize = 64;
@@ -12,8 +15,8 @@ const MAX_WAVE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) enum DuctInput {
     // Keep the original source's arithmetic and runtime when no graph is named.
-    Tube { spec: UniformTubeSpec, radiation_band: Option<f64> },
-    Graph { nodes: Vec<NodeInput>, sections: Vec<TubeSection>, max_bytes: usize },
+    Tube { spec: UniformTubeSpec, radiation_band: Option<f64>, loss: Option<ViscothermalSectionSpec> },
+    Graph { nodes: Vec<NodeInput>, sections: Vec<TubeSection>, max_bytes: usize, losses: Vec<Option<ViscothermalSectionSpec>> },
 }
 
 pub(super) enum NodeInput {
@@ -28,6 +31,7 @@ pub(super) struct PreparedDuct {
     graph: Option<TubeNetworkSpec>,
     pub observation: ApertureObservation,
     pub radiation: Vec<(usize, BaffledRadiationLoad)>,
+    pub losses: Vec<ViscothermalSection>,
 }
 
 impl DuctInput {
@@ -54,8 +58,9 @@ impl DuctInput {
                 let spec = UniformTubeSpec { length_m, radius_m, terminal_reflection,
                     max_length_error_m: row.scalar()?, max_wave_memory_bytes: row.count(MAX_WAVE_BYTES)?,
                     sound_speed_m_s: air.sound_speed };
+                let loss = read_loss(&mut row)?;
                 row.finish()?;
-                Ok(Self::Tube { spec, radiation_band })
+                Ok(Self::Tube { spec, radiation_band, loss })
             }
             "network" => {
                 let count = row.count(MAX_DUCT_NODES)?;
@@ -101,6 +106,7 @@ impl DuctInput {
                     nodes.push(input);
                 }
                 let mut sections = Vec::with_capacity(section_count);
+                let mut losses = Vec::with_capacity(section_count);
                 for _ in 0..section_count {
                     checkpoint(gate)?;
                     let mut row = r.row("duct_section")?;
@@ -110,13 +116,14 @@ impl DuctInput {
                     }
                     let section = TubeSection { nodes, length_m: row.scalar()?, radius_m: row.scalar()?,
                         max_length_error_m: row.scalar()? };
+                    losses.push(read_loss(&mut row)?);
                     row.finish()?;
                     if section.length_m <= 0.0 || section.radius_m <= 0.0 || section.max_length_error_m < 0.0 {
                         return Err(bad(r.line, "duct sections require positive dimensions and nonnegative length error"));
                     }
                     sections.push(section);
                 }
-                Ok(Self::Graph { nodes, sections, max_bytes })
+                Ok(Self::Graph { nodes, sections, max_bytes, losses })
             }
             _ => Err(bad(r.line, "expected an explicit tube or network after ambient")),
         }
@@ -127,33 +134,40 @@ impl DuctInput {
     {
         let physics = PlateValveInputError::Physics;
         match self {
-            Self::Tube { spec, radiation_band } => {
+            Self::Tube { spec, radiation_band, loss } => {
                 if !matches!(observation, ApertureObservation::Inlet | ApertureObservation::TubeTerminal
                     | ApertureObservation::TubeBaffled(_)) {
                     return Err(bad(0, "a tube observation must name inlet, terminal or baffled-outlet"));
                 }
-                let Some(band) = radiation_band else {
-                    return Ok(PreparedDuct { tube: Some(spec), graph: None, observation, radiation: vec![] });
-                };
-                let load = BaffledRadiationLoad::new(spec.radius_m, air.density, air.sound_speed, dt, band, gate)
-                    .map_err(physics)?;
+                if radiation_band.is_none() && loss.is_none() {
+                    return Ok(PreparedDuct { tube: Some(spec), graph: None, observation, radiation: vec![], losses: vec![] });
+                }
+                let mut radiation = Vec::new();
+                let terminal = if let Some(band) = radiation_band {
+                    let load = BaffledRadiationLoad::new(spec.radius_m, air.density, air.sound_speed, dt, band, gate)
+                        .map_err(physics)?;
+                    radiation.push((1, load));
+                    load.termination()
+                } else { NetworkNode::Termination { reflection: spec.terminal_reflection } };
                 let observation = match observation {
                     ApertureObservation::Inlet => observation,
                     ApertureObservation::TubeTerminal => ApertureObservation::NetworkNode(1),
                     ApertureObservation::TubeBaffled(receiver) => {
-                        check_receiver_band(receiver, band)?;
+                        if let Some(band) = radiation_band {check_receiver_band(receiver, band)?;}
                         ApertureObservation::NetworkBaffled { node: 1, receiver }
                     }
                     _ => unreachable!("tube observation was admitted"),
                 };
-                Ok(PreparedDuct { tube: None, graph: Some(TubeNetworkSpec {
-                    nodes: vec![NetworkNode::Inlet, load.termination()],
+                let mut prepared = PreparedDuct { tube: None, graph: Some(TubeNetworkSpec {
+                    nodes: vec![NetworkNode::Inlet, terminal],
                     sections: vec![TubeSection { nodes: [0, 1], length_m: spec.length_m,
                         radius_m: spec.radius_m, max_length_error_m: spec.max_length_error_m }],
                     sound_speed_m_s: air.sound_speed, max_wave_memory_bytes: spec.max_wave_memory_bytes,
-                }), observation, radiation: vec![(1, load)] })
+                }), observation, radiation, losses: vec![] };
+                prepared.install_losses(air, dt, &[loss], gate)?;
+                Ok(prepared)
             }
-            Self::Graph { nodes, sections, max_bytes } => {
+            Self::Graph { nodes, sections, max_bytes, losses } => {
                 match observation {
                     ApertureObservation::Inlet => {},
                     ApertureObservation::NetworkNode(node) if node < nodes.len() => {},
@@ -192,13 +206,36 @@ impl DuctInput {
                 // Admit the actual pressure area before deriving the moving plate.
                 // Full graph topology and storage stay owned by ApertureNetwork.
                 graph.inlet_impedance(air.density).map_err(physics)?;
-                Ok(PreparedDuct { tube: None, graph: Some(graph), observation, radiation })
+                let mut prepared = PreparedDuct { tube: None, graph: Some(graph), observation, radiation, losses: vec![] };
+                prepared.install_losses(air, dt, &losses, gate)?;
+                Ok(prepared)
             }
         }
     }
 }
 
 impl PreparedDuct {
+    fn install_losses(&mut self, air: &GasState, dt: f64,
+        assignments: &[Option<ViscothermalSectionSpec>], gate: &CancelGate) -> Result<(), PlateValveInputError>
+    {
+        if assignments.iter().all(Option::is_none) {return Ok(());}
+        if let ApertureObservation::NetworkBaffled {receiver, ..} = self.observation {
+            for options in assignments.iter().flatten() {
+                if receiver.maximum_frequency_hz > options.maximum_frequency_hz {
+                    return Err(bad(0, "receiver band cannot exceed any selected viscothermal section band"));
+                }
+            }
+        }
+        let graph = self.graph.as_ref().expect("loss selection uses the existing network owner");
+        let selections: Vec<_> = assignments.iter().enumerate().filter_map(|(section, selected)|
+            selected.map(|s| ViscothermalSectionSpec { section, ..s })).collect();
+        let (lowered, reports) = with_viscothermal_sections(graph.clone(), air, dt, &selections, gate)
+            .map_err(PlateValveInputError::Physics)?;
+        self.graph = Some(lowered);
+        self.losses = reports;
+        Ok(())
+    }
+
     pub fn inlet_impedance(&self, density: f64) -> Result<f64, PlateValveInputError> {
         match (&self.tube, &self.graph) {
             (Some(tube), None) => tube.characteristic_impedance(density),
@@ -244,4 +281,20 @@ fn check_receiver_band(receiver: CircularOutletReceiver, band: f64) -> Result<()
         return Err(bad(0, "exterior receiver band cannot exceed the selected radiation-load band"));
     }
     Ok(())
+}
+
+// Optional suffix on the original tube/section record. It names numerical
+// approximation choices only: all transport coefficients come from `ambient`.
+fn read_loss(row: &mut Row<'_>) -> Result<Option<ViscothermalSectionSpec>, PlateValveInputError> {
+    let Some(kind) = row.fields.next() else {return Ok(None);};
+    if kind != "viscothermal" {return Err(bad(row.line, "expected viscothermal MIN_HZ MAX_HZ CELLS ARMS or end of section"));}
+    let selected = ViscothermalSectionSpec {
+        section: 0, // Assigned from the original section address at preparation.
+        minimum_frequency_hz: row.scalar()?, maximum_frequency_hz: row.scalar()?,
+        cells: row.count(128)?,
+    };
+    // The shared owner has an explicit eight-arm spectrum. Do not silently
+    // accept and ignore a caller's different finite-order request.
+    if row.count(8)? != 8 {return Err(bad(row.line, "the shared viscothermal owner requires exactly eight arms"));}
+    Ok(Some(selected))
 }

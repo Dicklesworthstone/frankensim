@@ -13,6 +13,7 @@ use crate::bernoulli_aperture::radiation::BaffledRadiationLoad;
 use crate::render::schedule::GestureCompileError;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use fs_blake3::{ContentHash, hash_domain};
+use crate::bernoulli_aperture::viscothermal::ViscothermalSection;
 use fs_exec::CancelGate;
 use fs_material::{gas::GasState, visco::GeneralizedMaxwell};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateSection, SliceOptions};
@@ -102,13 +103,15 @@ pub struct PlateValvePerformance {
     info: PlateValvePerformanceInfo,
     renderer: AperturePerformance,
     radiation_loads: Vec<(usize, BaffledRadiationLoad)>,
+    viscothermal_losses: Vec<ViscothermalSection>,
 }
 impl PlateValvePerformance {
     /// Parse every record, derive the actual plate, bind its spatial lay and any
     /// supplied material memory, then compile the pressure phrase. Nothing steps
     /// during admission. Existing owners keep their physical/solver thresholds.
-    /// Propagating sections are lossless; graph loads may store and dissipate
-    /// energy through explicit impedances, enclosed cavities, compliant walls
+    /// Propagating intervals are lossless; an explicit viscothermal selection
+    /// places gas-derived series/thermal memories along each selected section.
+    /// Other graph loads retain explicit impedances, enclosed cavities, compliant walls
     /// and geometry-derived compact baffled radiation.
     /// A selected radiation load replaces, never supplements, that reflection.
     /// Internal and exterior observations both use the accepted loaded mechanics.
@@ -129,6 +132,7 @@ impl PlateValvePerformance {
         let observation=duct.observation;
         let radiation_load=duct.observed_radiation();
         let radiation_loads=duct.radiation.clone();
+        let viscothermal_losses=duct.losses.clone();
         let plate=PlateApertureReduction::from_chart(parsed.chart,parsed.plate,gate)
             .map_err(PlateValveInputError::Physics)?;
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
@@ -157,7 +161,7 @@ impl PlateValvePerformance {
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
-        Ok(Self {info,renderer,radiation_loads})
+        Ok(Self {info,renderer,radiation_loads,viscothermal_losses})
     }
     /// Exact source facts, retained separately from the evolving physical state.
     #[must_use]
@@ -169,6 +173,11 @@ impl PlateValvePerformance {
     /// Each is applied once by the network; observing it adds no second load.
     #[must_use]
     pub fn radiation_loads(&self) -> &[(usize, BaffledRadiationLoad)] {&self.radiation_loads}
+    /// Original section assignments and the exact retained RL/RC loss sites.
+    /// Empty means no distributed gas loss was selected; it does not imply
+    /// the absence of separately declared terminal, wall or cavity dissipation.
+    #[must_use]
+    pub fn viscothermal_losses(&self) -> &[ViscothermalSection] {&self.viscothermal_losses}
     /// Move the complete finite runtime into the existing pressure/PCM consumers.
     #[must_use]
     pub fn into_renderer(self) -> AperturePerformance {self.renderer}

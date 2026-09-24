@@ -102,3 +102,6 @@ mod radiation;
 
 #[path = "duct_graph.rs"]
 mod duct_graph;
+
+#[path = "file_viscothermal.rs"]
+mod viscothermal;

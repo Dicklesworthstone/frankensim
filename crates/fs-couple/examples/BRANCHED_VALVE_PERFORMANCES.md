@@ -131,3 +131,13 @@ side-chamber/wall effects on actual valve motion, inline load pressure drops,
 cancellation with retained load history, native/decimated WAV, and mixed-rate
 ensembles. These implementation tests do not establish continuum convergence,
 measured instrument fidelity or real-time throughput.
+
+## Optional distributed gas losses
+
+A `tube` or individual `duct_section` may append
+`viscothermal MIN_HZ MAX_HZ CELLS ARMS`. This selects gas-derived viscous series
+and thermal shunt memory inside the same graph; it does not change the original
+node addresses or total integer transit. The 64-node/128-section source limits
+above apply before this bounded numerical subdivision. See
+[VISCOTHERMAL_DUCTS.md](VISCOTHERMAL_DUCTS.md) for complete commands, the supplied
+example, explicit wide-tube use-band checks and remaining physical limits.
