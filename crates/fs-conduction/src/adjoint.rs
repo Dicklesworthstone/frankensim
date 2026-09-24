@@ -1,5 +1,9 @@
-//! The adjoint hook: `dJ/dρ` for a LINEAR conduction solve whose design
-//! parameters are per-element conductivity multipliers.
+//! Conductivity-design gradients and discrete thermal goal comparisons.
+//!
+//! [`ConductivityDesign`] computes `dJ/dρ` for a LINEAR conduction solve
+//! whose design parameters are per-element conductivity multipliers.
+//! [`compare_discrete_goal`] also supports nonlinear k(T) and matching
+//! contacts, retaining the finite linearization remainder explicitly.
 //!
 //! # What this establishes
 //!
@@ -20,11 +24,10 @@
 //!
 //! # What this does NOT establish
 //!
-//! - Nothing about the NONLINEAR `k(T)` case. The construction refuses
-//!   a temperature-dependent model rather than silently linearizing:
-//!   the correct Jacobian there is [`crate::assemble_jacobian`]'s
-//!   nonsymmetric operator, and wiring the nonlinear IFT path is a
-//!   separate piece of work with its own evidence.
+//! - The conductivity DESIGN hook refuses nonlinear `k(T)`. The separate
+//!   Robin/load responses and two-field goal comparison use
+//!   [`crate::assemble_jacobian`]'s nonsymmetric operator, but supply no
+//!   nonlinear conductivity-parameter gradient.
 //! - Nothing about SHAPE derivatives. `ρ` is a coefficient, not a
 //!   geometry; mesh-motion sensitivity is `fs-adjoint`'s Hadamard path
 //!   and is not wired here.
@@ -474,5 +477,7 @@ impl<'m> ConductivityDesign<'m> {
     }
 }
 
-/// Linear Robin-boundary and assembled-load tangents and adjoints.
+/// Robin-boundary and assembled-load tangents and adjoints, including k(T).
 pub mod robin;
+
+pub use robin::goal::{DiscreteGoalComparison, compare_discrete_goal};
