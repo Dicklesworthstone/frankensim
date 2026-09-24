@@ -5,6 +5,10 @@ use super::{ImpactError, ImpactSystem, invalid};
 use fs_math::det;
 use fs_phs::RelaxationBranch;
 
+#[path = "shell_relaxation.rs"]
+mod shell;
+pub use shell::ShellBendingSpectrum;
+
 /// Initial viscous strain is a physical initial condition, not a solver choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialMemory {
