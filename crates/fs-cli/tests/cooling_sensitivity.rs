@@ -23,6 +23,15 @@ fn parsed(output: &Output) -> J {
     assert_eq!(value.str_field("schema"), Some("frankensim.cooling-network-uq.sensitivity.v1"));
     value
 }
+fn progress(output: &Output) -> J {
+    assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::BUDGET)), "{}", String::from_utf8_lossy(&output.stderr));
+    let value = J::parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    assert_eq!(value.str_field("schema"), Some("frankensim.cooling-network-uq.sensitivity.progress.v1"));
+    for field in ["effects", "base_output_std_dev_k", "mean_k", "probability_of_compliance", "confidence_interval"] {
+        assert!(value.get(field).is_none(), "published {field} from a partial design");
+    }
+    value
+}
 fn number(root: &J, name: &str) -> f64 { root.get(name).unwrap().as_f64().unwrap() }
 fn one_input(transient: bool) -> String {
     let target = if transient { r#"{"kind":"initial-temperature"}"# }
@@ -106,7 +115,8 @@ fn incompatible_modes_fail_before_reading_inputs_or_creating_outputs() {
         assert_eq!(result.status.code(), Some(i32::from(fs_cli::exit::USAGE)));
         assert!(result.stdout.is_empty());
     }
-    let result = command(&missing, &missing).arg("--checkpoint").arg(&output).output().unwrap();
+    let result = command(&missing, &missing).args(["--qmc-replicates", "2"])
+        .arg("--checkpoint").arg(&output).output().unwrap();
     assert_eq!(result.status.code(), Some(i32::from(fs_cli::exit::USAGE)));
     assert!(!output.exists());
 }
@@ -128,12 +138,113 @@ fn invalid_layout_dependence_and_physical_failure_never_publish_indices() {
     let base_text = fs::read_to_string(&base).unwrap();
     assert!(base_text.contains("\"linear_iterations\": 20000"));
     fs::write(&broken, base_text.replace("\"linear_iterations\": 20000", "\"linear_iterations\": 0")).unwrap();
-    let result = command(&broken, &request).output().unwrap();
+    let failed_checkpoint = dir.join("failed.sobol");
+    let result = command(&broken, &request).arg("--checkpoint").arg(&failed_checkpoint).output().unwrap();
     assert!(!result.status.success()); assert!(result.stdout.is_empty());
     assert_ne!(result.status.code(), Some(i32::from(fs_cli::exit::BUDGET)));
+    assert!(fs::read(&failed_checkpoint).unwrap().starts_with(b"FRANKENSIM-UQ-FAILED\n"));
+    let refused_destination = dir.join("must-not-resume.sobol");
+    let resumed = command(&broken, &request).arg("--resume").arg(&failed_checkpoint)
+        .arg("--checkpoint").arg(&refused_destination).output().unwrap();
+    assert!(!resumed.status.success());
+    assert!(!refused_destination.exists());
     let short = dir.join("timeout.json");
     fs::write(&short, one_input(false).replace("\"wall_seconds\":300", "\"wall_seconds\":0.000000001")).unwrap();
     let result = command(&base, &short).output().unwrap();
     assert_eq!(result.status.code(), Some(i32::from(fs_cli::exit::BUDGET)));
     assert!(result.stdout.is_empty());
+    let retained_timeout = dir.join("timeout.sobol");
+    let result = command(&base, &short).arg("--checkpoint").arg(&retained_timeout).output().unwrap();
+    let report = progress(&result);
+    assert_eq!(report.str_field("termination"), Some("wall-time-budget"));
+    assert_eq!(number(&report, "samples_evaluated"), 0.0);
+    let continued = dir.join("continued.sobol");
+    let result = command(&base, &request).arg("--resume").arg(&retained_timeout)
+        .arg("--checkpoint").arg(&continued).args(["--max-new-samples", "1"]).output().unwrap();
+    assert_eq!(number(&progress(&result), "samples_evaluated"), 1.0);
+}
+
+#[test]
+fn real_cooling_sobol_retains_partial_hybrid_rows_and_replays_exactly() {
+    let dir = scratch("recovery");
+    let base = example("fan-correlated-hotspot.json");
+    let request = dir.join("two-inputs.json");
+    fs::write(&request, r#"{
+        "schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":12,
+        "wall_seconds":300,"correlation":{"kind":"independent"},
+        "parameters":[
+            {"target":{"kind":"inlet-temperature","index":0},"distribution":{"kind":"uniform","lo":299,"hi":301}},
+            {"target":{"kind":"component-power","component":"chip"},"distribution":{"kind":"uniform","lo":0.8,"hi":1.2}}
+        ]}"#).unwrap();
+    let full_path = dir.join("full.sobol");
+    let full = command(&base, &request).arg("--checkpoint").arg(&full_path).output().unwrap();
+    parsed(&full);
+    let first_path = dir.join("first.sobol");
+    let first = command(&base, &request).arg("--checkpoint").arg(&first_path)
+        .args(["--max-new-samples", "3"]).output().unwrap();
+    let report = progress(&first);
+    assert_eq!(number(&report, "samples_evaluated"), 3.0);
+    assert_eq!(number(&report, "completed_rows"), 0.0);
+    assert_eq!(number(&report, "next_row_slot"), 3.0);
+    assert_eq!(report.str_field("next_evaluation_kind"), Some("hybrid"));
+    assert_eq!(report.str_field("next_hybrid_parameter"), Some("component[chip].power_w"));
+    let retained = fs::read(&first_path).unwrap();
+    assert_eq!(&retained[..8], b"FSSOB001");
+    let second_path = dir.join("second.sobol");
+    let second = command(&base, &request).arg("--resume").arg(&first_path)
+        .arg("--checkpoint").arg(&second_path).args(["--max-new-samples", "2"]).output().unwrap();
+    let report = progress(&second);
+    assert_eq!(number(&report, "samples_evaluated"), 5.0);
+    assert_eq!(number(&report, "samples_evaluated_this_run"), 2.0);
+    assert_eq!(number(&report, "completed_rows"), 1.0);
+    assert_eq!(number(&report, "next_row_ordinal"), 1.0);
+    assert_eq!(report.str_field("next_evaluation_kind"), Some("base-b"));
+    assert_eq!(fs::read(&first_path).unwrap(), retained);
+    let completed_path = dir.join("completed.sobol");
+    let completed = command(&base, &request).arg("--resume").arg(&second_path)
+        .arg("--checkpoint").arg(&completed_path).output().unwrap();
+    parsed(&completed);
+    assert_eq!(completed.stdout, full.stdout);
+    assert_eq!(fs::read(&completed_path).unwrap(), fs::read(&full_path).unwrap());
+    // A completed checkpoint is terminal even with too little time to solve.
+    let short = dir.join("short.json");
+    fs::write(&short, fs::read_to_string(&request).unwrap().replace("\"wall_seconds\":300", "\"wall_seconds\":0.000000001")).unwrap();
+    let terminal = command(&base, &short).arg("--resume").arg(&completed_path).output().unwrap();
+    parsed(&terminal);
+    assert_eq!(terminal.stdout, full.stdout);
+}
+
+#[test]
+fn changed_identity_corruption_and_existing_destinations_refuse_before_writing() {
+    let dir = scratch("identity");
+    let base = example("fan-correlated-hotspot.json");
+    let request = dir.join("original.json");
+    fs::write(&request, one_input(false)).unwrap();
+    let checkpoint = dir.join("empty.sobol");
+    let initial = command(&base, &request).arg("--checkpoint").arg(&checkpoint)
+        .args(["--max-new-samples", "0"]).output().unwrap();
+    assert_eq!(number(&progress(&initial), "samples_evaluated"), 0.0);
+    let saved = fs::read(&checkpoint).unwrap();
+    let changed_base = dir.join("changed-base.json");
+    fs::write(&changed_base, format!("{}\n", fs::read_to_string(&base).unwrap())).unwrap();
+    let changed_request = dir.join("changed-seed.json");
+    fs::write(&changed_request, one_input(false).replace("\"73\"", "\"74\"")).unwrap();
+    let corrupt = dir.join("corrupt.sobol");
+    let mut corrupt_bytes = saved.clone(); *corrupt_bytes.last_mut().unwrap() ^= 1;
+    fs::write(&corrupt, corrupt_bytes).unwrap();
+    for (index, (model, plan, source)) in [
+        (&changed_base, &request, &checkpoint),
+        (&base, &changed_request, &checkpoint),
+        (&base, &request, &corrupt),
+    ].into_iter().enumerate() {
+        let destination = dir.join(format!("refused-{index}.sobol"));
+        let output = command(model, plan).arg("--resume").arg(source)
+            .arg("--checkpoint").arg(&destination).output().unwrap();
+        assert!(!output.status.success()); assert!(output.stdout.is_empty());
+        assert!(!destination.exists());
+    }
+    let overwrite = command(&base, &request).arg("--resume").arg(&checkpoint)
+        .arg("--checkpoint").arg(&checkpoint).output().unwrap();
+    assert!(!overwrite.status.success());
+    assert_eq!(fs::read(&checkpoint).unwrap(), saved);
 }
