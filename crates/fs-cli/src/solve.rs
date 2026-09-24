@@ -115,7 +115,8 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 15 records uniform enrichment when marked refinement fails mesh quality.
 /// Version 16 preserves finite contact through refinement and uses the actual
 /// linear/nonlinear residual and Jacobian for enriched goal comparisons.
-pub const SOLVE_DRIVER_VERSION: u32 = 16;
+/// Version 17 closes the independent-air-branch feedback in adaptive goals.
+pub const SOLVE_DRIVER_VERSION: u32 = 17;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1288,6 +1289,7 @@ struct RungAdjointData {
     materials: fs_conduction::ElementMaterials,
     fallback: fs_conduction::ConductivityModel,
     linear: fs_conduction::LinearConfig,
+    air_paths: Vec<fs_airflow::conjugate::AirPath>,
 }
 
 /// A two-space observation of the actual nodal maximum. Absolute nodal dual
@@ -1302,7 +1304,15 @@ struct AdaptiveProbe {
     dual_iterations: usize,
     primal_residual: f64,
     uses_nonlinear_jacobian: bool,
+    coupled_adjoint: Option<CoupledAdjointProbe>,
     scores: Vec<f64>,
+}
+
+struct CoupledAdjointProbe {
+    branch_count: usize,
+    iterations: usize,
+    residual: f64,
+    tolerance: f64,
 }
 
 /// Prolong each parent tetrahedron's P1 field using topological lineage.
@@ -1373,7 +1383,7 @@ fn adaptive_probe(
     let data = fine
         .adjoint_data
         .as_ref()
-        .expect("admitted adaptive solid problem");
+        .expect("admitted adaptive thermal problem");
     let refusal = |error| {
         conduction_error(
             if matches!(error, fs_conduction::ConductionError::Cancelled { .. }) {
@@ -1404,22 +1414,40 @@ fn adaptive_probe(
     let peak = peak.expect("declared goal region has tetrahedra");
     let mut weights = vec![0.0; fine.mesh.vertex_count()];
     weights[peak] = 1.0;
-    let dual = fs_conduction::adjoint::compare_discrete_goal(
-        cx,
-        fs_conduction::ConductionProblem {
-            mesh: &fine.mesh,
-            boundary: &data.boundary,
-            material: &data.fallback,
-            element_materials: Some(&data.materials),
-            source: &data.source,
-        },
-        data.interfaces.as_ref(),
-        data.linear,
-        &fine.solution.temperature,
-        approximate,
-        &weights,
-    )
-    .map_err(refusal)?;
+    let problem = fs_conduction::ConductionProblem {
+        mesh: &fine.mesh,
+        boundary: &data.boundary,
+        material: &data.fallback,
+        element_materials: Some(&data.materials),
+        source: &data.source,
+    };
+    let (dual, coupled_adjoint) = if data.air_paths.is_empty() {
+        (fs_conduction::adjoint::compare_discrete_goal(
+            cx, problem, data.interfaces.as_ref(), data.linear,
+            &fine.solution.temperature, approximate, &weights,
+        ).map_err(refusal)?, None)
+    } else {
+        use fs_airflow::conjugate::goal::CoupledGoalError;
+        let result = fs_airflow::conjugate::goal::compare_discrete_goal(
+            cx, problem, data.interfaces.as_ref(), &data.air_paths,
+            conjugate::goal_config(data.linear),
+            &fine.solution.temperature, approximate, &weights,
+        ).map_err(|error| conduction_error(
+            if matches!(error, CoupledGoalError::Interrupted
+                | CoupledGoalError::Solid(fs_conduction::ConductionError::Cancelled { .. })
+                | CoupledGoalError::Air(fs_airflow::AirflowError::Cancelled { .. })) {
+                "cli-solve-cancelled"
+            } else { "cli-solve-conduction-adaptive-coupled-adjoint" },
+            format!("enriched coupled-goal adjoint refused: {error}"),
+            "inspect the material tangent, branch balance, and coupled residual tolerance",
+        ))?;
+        (result.goal, Some(CoupledAdjointProbe {
+            branch_count: data.air_paths.len(),
+            iterations: result.interface_iterations,
+            residual: result.interface_residual,
+            tolerance: result.interface_tolerance,
+        }))
+    };
     let coarse_max = ladder_functional(
         &coarse.labels,
         &coarse.mesh.complex().tets,
@@ -1479,6 +1507,7 @@ fn adaptive_probe(
         dual_iterations: dual.dual_iterations,
         primal_residual: dual.primal_relative_residual,
         uses_nonlinear_jacobian: dual.uses_nonlinear_jacobian,
+        coupled_adjoint,
         scores,
     })
 }
@@ -1555,10 +1584,6 @@ fn adaptive_study(
             stop = "unsupported-temperature-goal";
             break;
         };
-        if solved.conjugate_fragment.is_some() {
-            stop = "unsupported-coupled-adjoint";
-            break;
-        }
         let coarse_max = ladder_functional(
             &solved.labels,
             &solved.mesh.complex().tets,
@@ -1598,6 +1623,18 @@ fn adaptive_study(
         adaptive_deadline(deadline)?;
         let marks = adaptive_marks(&probe.scores);
         achieved = Some(number(probe.estimated_change_k)?);
+        let coupled = match &probe.coupled_adjoint {
+            Some(dual) => format!(
+                "{{\"branch_count\":{},\"method\":\"analytic-air-solid-transpose-iqn-ils\",\
+                 \"interface_iterations\":{},\"interface_iteration_limit\":32,\
+                 \"interface_residual\":{},\"interface_tolerance\":{},\
+                 \"reference_tolerance_k\":{}}}",
+                dual.branch_count, dual.iterations, number(dual.residual)?, number(dual.tolerance)?,
+                number(conjugate::goal_config(fs_conduction::LinearConfig::default())
+                    .primal.temperature_tolerance_k)?,
+            ),
+            None => "null".to_string(),
+        };
         history.push(format!(
             "{{\"mesh\":{},\"tets\":{},\"vertices\":{},\"t_max_k\":{},\
              \"min_dihedral_deg\":{},\"probe_tets\":{},\"probe_t_max_k\":{},\
@@ -1605,7 +1642,7 @@ fn adaptive_study(
              \"signed_linear_change_k\":{},\"linearization_remainder_k\":{},\"maximum_remainder_k\":{},\
              \"estimated_change_k\":{},\"measured_change_k\":{},\"tolerance_k\":{},\
              \"primal_residual\":{},\"dual_residual\":{},\"dual_iterations\":{},\
-             \"uses_nonlinear_jacobian\":{},\"marked_cells\":{},\
+             \"uses_nonlinear_jacobian\":{},\"coupled_adjoint\":{},\"marked_cells\":{},\
              \"absolute_contribution_sum_k\":{}}}",
             history.len(),
             complex.tets().len(),
@@ -1631,6 +1668,7 @@ fn adaptive_study(
             number(probe.dual_residual)?,
             probe.dual_iterations,
             probe.uses_nonlinear_jacobian,
+            coupled,
             marks.len(),
             number(probe.scores.iter().sum())?,
         ));
@@ -1719,7 +1757,7 @@ fn adaptive_study(
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
         json_string(
-            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact and nonlinear conductivity, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
+            "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact, nonlinear conductivity, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
     Ok((complex, solved, receipt))
@@ -5703,7 +5741,7 @@ fn conduction_receipt(
                 // clause; the floor keeps a tiny declared tolerance sane.
                 config.linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
-            if adaptive_requested && derived.is_empty() {
+            if adaptive_requested {
                 // The enriched comparison independently checks this same
                 // nonlinear residual against the adjoint's linear tolerance.
                 // Leave room below that gate and solve each inner system more
@@ -5741,8 +5779,8 @@ fn conduction_receipt(
             })
         };
         let laws = conjugate::airflow_laws(setup)?;
-        let (solution, conjugate_fragment) = if laws.is_empty() {
-            (solve_once(&BTreeMap::new())?, None)
+        let (solution, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty() {
+            (solve_once(&BTreeMap::new())?, None, BTreeMap::new(), Vec::new())
         } else {
             let handoff = context.flow_network.as_ref().ok_or_else(|| {
                 conduction_error(
@@ -5803,7 +5841,7 @@ fn conduction_receipt(
                     })
                     .collect::<Result<Vec<_>, SolveRefusal>>()
             };
-            let outcome = conjugate::run_exchange(&cx, &path, |_, references| {
+            let outcome = conjugate::run_exchange(&cx, &path, adaptive_requested, |_, references| {
                 let derived: BTreeMap<String, (f64, f64)> = references
                     .iter()
                     .map(|(target, reference)| {
@@ -5837,14 +5875,14 @@ fn conduction_receipt(
                 off_path_w,
             )?;
             let fragment = conjugate::receipt_fragment(&path, &outcome)?;
-            (solution, Some(fragment))
+            (solution, Some(fragment), converged, path.air_paths())
         };
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
-        let adjoint_data = if adaptive_requested && conjugate_fragment.is_none() {
+        let adjoint_data = if adaptive_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
-                &interface_faces, &BTreeMap::new())?.boundary;
+                &interface_faces, &derived_boundary)?.boundary;
             let interfaces = lower_thermal_interfaces(
                 spec, cards, &mesh, &boundary, &interface_resolution,
             )?;
@@ -5852,7 +5890,7 @@ fn conduction_receipt(
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
-            Some(RungAdjointData { boundary, interfaces, source, materials: element_materials, fallback, linear })
+            Some(RungAdjointData { boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths })
         } else { None };
         adaptive_deadline(deadline)?;
         Ok(RungSolved {

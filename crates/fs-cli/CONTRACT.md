@@ -377,10 +377,20 @@ linear solve's true-residual gate is two decades below the declared
 `tolerance-rel` (floor 1e-13); the crate default of 1e-12 refused the second
 rung at 1.37e-12 after 1,256 Krylov iterations.
 
-**Adaptive solid conduction** (`solver.fidelity = "adaptive"`, receipt block
+**Adaptive thermal goals** (`solver.fidelity = "adaptive"`, receipt block
 `adaptive`). Each candidate mesh is solved, uniformly enriched and solved
 again. The enriched goal comparison uses the production residual and actual
 transposed Jacobian, including nonlinear `k(T)` terms and fixed finite contact.
+Declared independent airflow branches participate through their analytic
+wall-to-reference feedback at the flow-network operating point. Each mesh
+rebuilds its own wetted areas and card-derived coefficients, closes the primal
+exchange, and binds the exact converged Robin references to its adjoint. Both
+the enriched field and prolonged coarse field are marched through the same
+fine-mesh air model before forming residual differences. The full coupled
+transpose residual is checked after a bounded IQN-ILS interface solve; the
+primal iteration trace is never differentiated. Branch reference and watt
+gates remain independent. The history records branch count, interface work,
+residual and tolerance; hydrodynamic feedback and mixing are outside this model.
 The reference primal and dual both pass independent residual checks. Adaptive
 primal stopping is tightened to satisfy the comparison's residual gate; step
 stagnation alone cannot provide an accepted reference. The explicitly observed
@@ -403,7 +413,8 @@ residuals, linearization and owner remainders, nonlinear-Jacobian selection,
 marked count, actual solved-mesh count, and stopping reason. Memory-derived tet
 limits and a 17-primal-solve cap retain the last independently probed candidate
 when further work cannot fit. These output counts are not an allocator peak
-memory guarantee. Coupled airflow adjoints retain a named unresolved stop.
+memory guarantee. Coupled comparisons have at most 32 interface sweeps, each
+with the declared inner Krylov budget, and use a 1e-11 K primal reference gate.
 Temperature-dependent contact resistance remains refused by material lowering.
 An active material kink or invalid temperature span refuses the unique tangent;
 there is no frozen-conductivity substitute. Marked and uniform meshes regenerate
