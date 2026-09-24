@@ -25,6 +25,8 @@ pub mod cavity;
 pub mod compliant;
 /// Physical, spatially localized viscous attachments.
 pub mod damping;
+/// Reciprocal configuration-dependent squeeze-film pressure ports.
+pub mod squeeze;
 /// Hereditary material loss in the existing shared mechanical time owner.
 pub mod relaxation;
 /// Passive multiport acoustic reaction in the same nonlinear time equation.
@@ -221,6 +223,7 @@ pub struct ImpactSystem {
     mechanical:Rc<MechanicalStorage>,contact:Rc<ContactStorage>,contact_loss:bool,
     relaxation:Option<relaxation::Memory>,
     radiation:Option<radiation::Memory>,
+    squeeze_films:Vec<squeeze::ResistiveFilm>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
     strings:Vec<(usize,usize,string::StringPotential)>,
@@ -244,7 +247,7 @@ impl ImpactSystem {
         config:ImpactConfig)->Result<Self,ImpactError> {
         let modes=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.potential.count()))
             .ok_or_else(||invalid("mode count overflow"))?;
-        if modes==0 || modes>MAX_IMPACT_MODES || contacts.len()>32 || pads.len()>16 || volumes.len()>8
+        if modes==0 || modes>MAX_IMPACT_MODES || contacts.len()>32 || pads.len()>16 || volumes.len()>16 || volumes.len()>8
             || config.max_steps==0 || config.max_steps>(1u64<<53)
             || ![config.dt_s,config.maximum_energy_j,config.energy_absolute_tolerance_j,
                 config.energy_relative_tolerance,config.maximum_generalized_force].iter().all(|v|v.is_finite() && *v>0.0)
@@ -315,7 +318,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,radiation:None,relaxation:None})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,radiation:None,relaxation:None,squeeze_films:Vec::new()})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]
@@ -370,14 +373,14 @@ impl ImpactSystem {
             return Err(invalid("external generalized force shape or ceiling failed"));
         }
         let before=self.stored_energy_j();
-        if self.contact_loss {
+        if self.has_nonlinear_dissipation() {
             // Reference execution owns temporary scratch; prepare() retains it.
             // Both use the SAME equation, port law, and physical acceptance gate.
             let mut workspace=fs_phs::StepWorkspace::new(&self.system).map_err(ImpactError::PreparedSolve)?;
             let mut candidate=vec![0.0;self.x.len()];let mut output=vec![0.0;self.modes];
             let ledger=workspace.step_into_dissipative_controlled(&self.system,&self.x,external,
                 self.config.dt_s,&mut candidate,&mut output,
-                &|x,e,out|self.contact.dissipative_flow_into(x,e,out),None,None,||gate.is_requested())
+                &|x,e,out|self.dissipative_flow_into(x,e,out),None,None,||gate.is_requested())
                 .map_err(|e|match e {fs_phs::PreparedStepError::Cancelled=>ImpactError::Cancelled,
                     fs_phs::PreparedStepError::Solver(e)=>ImpactError::PreparedSolve(e)})?;
             let mut histories=self.histories.borrow().clone();
