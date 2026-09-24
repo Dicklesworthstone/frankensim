@@ -11,10 +11,16 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const BASE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/fan-hotspot.json"));
-const TRANSIENT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/adjoint-repeated-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static BASE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/fan-hotspot.json"))));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static TRANSIENT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/adjoint-repeated-contact-pulse.json"))));
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 fn dir() -> PathBuf {
@@ -75,8 +81,8 @@ fn power_limit() -> f64 { objective(&cooling(&scaled_power(BASE,1.25))) }
 fn actual_workload_and_fan_candidates_use_family_confidence_and_sampled_inputs() {
     for power in [true,false] {
         let limit = if power { power_limit() } else {
-            assert!(BASE.contains("\"speed_ratio\": 1,"));
-            let low = objective(&cooling(&BASE.replace("\"speed_ratio\": 1,","\"speed_ratio\": 0.5,")));
+            assert!(BASE.contains("\"speed_ratio\":1,"));
+            let low = objective(&cooling(&BASE.replace("\"speed_ratio\":1,","\"speed_ratio\":0.5,")));
             let high = objective(&cooling(BASE));
             assert!(low > high); 0.5*(low+high)
         };

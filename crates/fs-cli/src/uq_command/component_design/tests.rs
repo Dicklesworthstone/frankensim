@@ -1,6 +1,8 @@
 use super::*;
-const BASE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/adjoint-component-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting.
+static BASE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| crate::json_read::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/adjoint-component-contact-pulse.json"))));
 const SPEC: &str = r#"{"schema":"frankensim.cooling-component-design.v1","units":"SI",
     "temperature_limit_k":304,"power_tolerance_w":0.0001,"temperature_tolerance_k":0.0001,
     "max_evaluations":128,"max_total_steps":100000,"wall_seconds":60,

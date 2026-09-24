@@ -19,7 +19,7 @@ fn binary_help_and_missing_request_have_stable_exit_classes() {
     let help = Command::new(env!("CARGO_BIN_EXE_frankensim"))
         .args(["cooling-network", "--help"]).output().unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8(help.stdout).unwrap().contains("tetrahedral solid"));
+    assert!(String::from_utf8(help.stdout).unwrap().contains("cooling-network <request.json>"));
     let bad = Command::new(env!("CARGO_BIN_EXE_frankensim"))
         .args(["--json", "cooling-network"]).output().unwrap();
     assert_eq!(bad.status.code(), Some(2));

@@ -16,6 +16,7 @@ fs-cutfem = { path = "../fs-cutfem" }
 [dev-dependencies]
 fs-ivl = { path = "../fs-ivl" }
 fs-material = { path = "../fs-material" }
+fs-solver = { path = "../fs-solver" }
 
 [lints]
 workspace = true

@@ -408,8 +408,48 @@ impl Parser<'_> {
     }
 }
 
+/// Remove insignificant whitespace (outside strings) from JSON text.
+///
+/// Fixture-rewriting tests edit request JSON by exact substring; the tracked
+/// examples may be pretty-printed or compact. Compacting first makes those
+/// edits independent of formatting, so a reformatted fixture cannot turn a
+/// perturbation into a silent no-op. String contents are left untouched.
+#[must_use]
+pub fn compact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for ch in text.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            out.push(ch);
+        } else if !matches!(ch, ' ' | '\n' | '\r' | '\t') {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_removes_only_insignificant_whitespace() {
+        let pretty = "{\n  \"a\": [1, 2],\n  \"s\": \"x y\\\" z\\n\"\n}\n";
+        assert_eq!(super::compact(pretty), "{\"a\":[1,2],\"s\":\"x y\\\" z\\n\"}");
+        assert_eq!(
+            JsonValue::parse(&super::compact(pretty)).unwrap(),
+            JsonValue::parse(pretty).unwrap()
+        );
+    }
+
     use super::*;
 
     #[test]

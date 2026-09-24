@@ -34,14 +34,14 @@ fn document(output: &Output) -> J {
 fn close(a: f64, b: f64, tolerance: f64) { assert!((a - b).abs() <= tolerance, "{a} != {b}"); }
 
 fn fixed_request(path: &Path, axial_k: f64) {
-    fs::write(path, format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":300,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"material-principal-conductivity","material":"substrate","axis":0}},"distribution":{{"kind":"uniform","lo":{axial_k},"hi":{axial_k}}}}]}}"#)).unwrap();
+    fs::write(path, format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":300,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"material-principal-conductivity","material":"substrate","axis":0}},"distribution":{{"kind":"uniform","lo":{axial_k},"hi":{axial_k}}}}}]}}"#)).unwrap();
 }
 
 #[test]
 fn oriented_principal_values_and_the_same_full_tensor_produce_the_same_field() {
     let base = example("orthotropic-hotspot.json");
     let dir = scratch("tensor");
-    let text = fs::read_to_string(&base).unwrap();
+    let text = json::compact(&fs::read_to_string(&base).unwrap());
     let from = r#""orthotropic":{"principal_axes":[[0.6,0.8,0],[-0.8,0.6,0],[0,0,1]],"conductivity_w_m_k":[20,2,1]}"#;
     assert!(text.contains(from));
     let tensor = dir.join("tensor.json");
@@ -105,7 +105,7 @@ fn scalarizing_a_directional_material_refuses_before_creating_a_checkpoint() {
     let base = example("orthotropic-hotspot.json");
     let request = dir.join("invalid-target.json");
     fixed_request(&request, 20.0);
-    let text = fs::read_to_string(&request).unwrap();
+    let text = json::compact(&fs::read_to_string(&request).unwrap());
     fs::write(&request, text.replace(
         r#""kind":"material-principal-conductivity","material":"substrate","axis":0"#,
         r#""kind":"material-conductivity","material":"substrate"#,
@@ -122,7 +122,7 @@ fn scalarizing_a_directional_material_refuses_before_creating_a_checkpoint() {
 #[test]
 fn nonlinear_material_reaches_the_real_solver_and_refuses_extrapolation() {
     let dir = scratch("nonlinear");
-    let text = fs::read_to_string(example("orthotropic-hotspot.json")).unwrap();
+    let text = json::compact(&fs::read_to_string(example("orthotropic-hotspot.json")).unwrap());
     let scalar = r#""name":"spreader","conductivity_w_m_k":20"#;
     assert!(text.contains(scalar));
     let curve = dir.join("curve.json");

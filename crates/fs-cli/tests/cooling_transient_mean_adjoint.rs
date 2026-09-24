@@ -6,8 +6,11 @@ use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/adjoint-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static FIXTURE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/adjoint-contact-pulse.json"))));
 fn run(source: &str) -> J {
     let mut child = Command::new(env!("CARGO_BIN_EXE_frankensim"))
         .args(["--json","cooling-network","/dev/stdin"])

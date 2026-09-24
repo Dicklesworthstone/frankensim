@@ -9,8 +9,14 @@ use std::path::{Path,PathBuf};
 use std::process::{Command,Output};
 use std::sync::atomic::{AtomicUsize,Ordering};
 
-const STIFF:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/stiff-mixed-contact.json"));
-const PULSE:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/nonlinear-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static STIFF: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/stiff-mixed-contact.json"))));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static PULSE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/nonlinear-contact-pulse.json"))));
 static NEXT:AtomicUsize=AtomicUsize::new(0);
 fn scratch()->PathBuf {
     let nanos=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

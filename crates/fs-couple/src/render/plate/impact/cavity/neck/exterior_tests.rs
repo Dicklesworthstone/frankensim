@@ -1,6 +1,7 @@
 use super::*;
 use super::super::super::super::{BodyPotential,ImpactBody,ImpactConfig,
     felt::{FeltPad,KelvinBranch},radiation::Pole,relaxation::InitialMemory,ImpactSubstepConfig};
+use crate::render::plate::impact::audio::ImpactSource;
 use crate::vibroacoustic::CavityModes;
 
 fn config()->ImpactConfig {ImpactConfig {dt_s:2e-6,max_steps:2000,maximum_energy_j:20.,

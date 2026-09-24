@@ -87,7 +87,8 @@ impl FanDrive {
             return Err(producer("published flow is not the declared fan operating point"));
         }
         let prefix = output.strip_suffix("}\n").ok_or_else(|| bad("internal result framing mismatch"))?;
-        Ok(format!("{prefix},\"fan\":{{\"name\":{},\"source\":{},\"source_id\":{},\"count\":{},\"arrangement\":{},\"speed_ratio\":{},\"inlet\":{},\"outlet\":{},\"flow_m3_s\":{},\"static_pressure_pa\":{},\"pressure_residual_pa\":{},\"air_power_w\":{},\"electrical_power_w\":null,\"pressure_tolerance_rel\":{},\"authority\":\"nominal fan/graph intersection; caller-declared curve and allowance, not propagated uncertainty or hardware validation; no fan heating\"}}}}\n",
+        let separator = if prefix.ends_with('{') { "" } else { "," };
+        Ok(format!("{prefix}{separator}\"fan\":{{\"name\":{},\"source\":{},\"source_id\":{},\"count\":{},\"arrangement\":{},\"speed_ratio\":{},\"inlet\":{},\"outlet\":{},\"flow_m3_s\":{},\"static_pressure_pa\":{},\"pressure_residual_pa\":{},\"air_power_w\":{},\"electrical_power_w\":null,\"pressure_tolerance_rel\":{},\"authority\":\"nominal fan/graph intersection; caller-declared curve and allowance, not propagated uncertainty or hardware validation; no fan heating\"}}}}\n",
             quote(self.curve.name()), quote(&self.curve.source().citation), quote(&self.curve.source().identifier),
             self.count, quote(match self.arrangement { FanArrangement::Series => "series", FanArrangement::Parallel => "parallel" }),
             num(speed)?, self.inlet, self.outlet, num(q)?, num(pressure)?, num(residual)?, num(q * pressure)?,

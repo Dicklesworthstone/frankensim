@@ -2,7 +2,9 @@
 use super::*;
 use super::super::tests::{close, with_cx};
 
-const CONTACT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/size-contact-slab.json"));
+// Compacted so fixture edits are independent of the example's formatting.
+static CONTACT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| crate::json_read::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/cooling-network/size-contact-slab.json"))));
 fn request() -> Request { Request::parse(CONTACT).unwrap() }
 fn coefficients(r: &Request) -> BTreeMap<String, f64> { r.surfaces.iter().map(|s| (s.name.clone(), s.h)).collect() }
 fn oracle(first: f64, bypass: f64, h: f64) -> (f64, f64, f64) {
@@ -45,11 +47,11 @@ fn coupled_contact_resolves_a_temperature_jump_and_the_continuous_slab_solution(
 
 #[test]
 fn contact_keeps_heterogeneous_component_power_and_peak_gradients_connected() {
-    let text = CONTACT.replace("\"conductivity_w_m_k\": 10,", r#""materials":[
+    let text = CONTACT.replace("\"conductivity_w_m_k\":10,", r#""materials":[
         {"name":"a","conductivity_w_m_k":20,"source":"declared"},
         {"name":"b","conductivity_w_m_k":2,"source":"declared"}],
         "element_materials":["a","a","a","a","a","a","b","b","b","b","b","b"],"#)
-        .replace("\"source_w_m3\": 0,", r#""component_power":{"total_w":1,"relative_tolerance":1e-12,
+        .replace("\"source_w_m3\":0,", r#""component_power":{"total_w":1,"relative_tolerance":1e-12,
             "components":[{"name":"chip","watts":1,"vertices":[4]}]},"#);
     let mut r = Request::parse(&text).unwrap();
     for inlet in &mut r.inlets { inlet.temperature = Temperature::new(300.0); }
@@ -94,12 +96,12 @@ fn missing_nonmatching_and_double_owned_contact_faces_refuse_before_solve() {
     let r = request();
     assert!(Contacts::parse(None, &r.mesh, &r.surfaces, true).is_err());
     for (from, to) in [
-        ("\"resistance_m2_k_w\": 0.01", "\"resistance_m2_k_w\": 0"),
-        ("\"side_a\": [1,4,10]", "\"side_a\": [0,3,9]"),
-        ("\"side_a\": [1,4,10]", "\"side_a\": [0,1,4]"),
-        ("\"side_b\": [12,14,15]", "\"side_b\": [12,13,15]"),
-        ("\"adiabatic_remainder\": true", "\"adiabatic_remainder\": false"),
-        ("\"contacts\": [", "\"unknown_contacts\": ["),
+        ("\"resistance_m2_k_w\":0.01", "\"resistance_m2_k_w\":0"),
+        ("\"side_a\":[1,4,10]", "\"side_a\":[0,3,9]"),
+        ("\"side_a\":[1,4,10]", "\"side_a\":[0,1,4]"),
+        ("\"side_b\":[12,14,15]", "\"side_b\":[12,13,15]"),
+        ("\"adiabatic_remainder\":true", "\"adiabatic_remainder\":false"),
+        ("\"contacts\":[", "\"unknown_contacts\":["),
     ] {
         assert!(CONTACT.contains(from));
         assert!(Request::parse(&CONTACT.replace(from,to)).is_err(), "accepted {from} -> {to}");

@@ -16,7 +16,7 @@ fn reactive_reflection_returns_after_exact_transit_in_both_orientations() {
         let mut net = WaveguideNetwork::new(&[NetworkNode::Inlet, NetworkNode::Impedance { load: spec }],
             &[NetworkSegment { nodes: ends, one_way_samples: 3, impedance_pa_s_m3: 1.0 }], 0.02, 1<<20).unwrap();
         let mut boundary = SeriesImpedance::new(spec, 1.0, 0.02).unwrap();
-        let (mut forward, mut backward) = ([0.0;3], [0.0;3]);
+        let (mut forward, mut backward) = ([0.0_f64;3], [0.0_f64;3]);
         for n in 0..128 {
             let a = if n == 0 { 10.0 } else { 0.0 };
             let terminal = boundary.step(forward[n%3]).unwrap();

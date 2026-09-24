@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BASE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/nonlinear-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static BASE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/nonlinear-contact-pulse.json"))));
 
 fn scratch(name: &str) -> PathBuf {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -47,7 +50,7 @@ fn short_base() -> String {
         .replace("\"duration_s\":120", "\"duration_s\":4")
 }
 fn plan(target: &str, lo: f64, hi: f64, samples: usize, ceiling: f64) -> String {
-    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"79","samples":{samples},"wall_seconds":300,"qoi":{{"kind":"transient-sampled-peak"}},"temperature_limit_k":{ceiling},"correlation":{{"kind":"independent"}},"parameters":[{{"target":{target},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}]}}"#)
+    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"79","samples":{samples},"wall_seconds":300,"qoi":{{"kind":"transient-sampled-peak"}},"temperature_limit_k":{ceiling},"correlation":{{"kind":"independent"}},"parameters":[{{"target":{target},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}}]}}"#)
 }
 fn progress(output: &Output, count: usize) -> J {
     assert_eq!(output.status.code(), Some(i32::from(fs_cli::exit::BUDGET)),

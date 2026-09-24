@@ -9,10 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SLAB: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/size-contact-slab.json"));
-const PULSE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/nonlinear-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static SLAB: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/size-contact-slab.json"))));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static PULSE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/nonlinear-contact-pulse.json"))));
 
 fn scratch(name: &str) -> PathBuf {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -37,14 +43,14 @@ fn direct(dir: &Path, name: &str, text: &str) -> J {
 fn number(doc: &J, path: &[&str]) -> f64 { doc.path(path).and_then(J::as_f64).unwrap() }
 fn close(a: f64, b: f64, tolerance: f64) { assert!((a-b).abs() <= tolerance, "{a} != {b}"); }
 fn without_last_section(text: &str, section: &str) -> String {
-    let delimiter = format!(",\n  \"{section}\":");
+    let delimiter = format!(",\"{section}\":");
     let (prefix, _) = text.split_once(&delimiter).expect("fixture's final section");
-    format!("{prefix}\n}}\n")
+    format!("{prefix}}}")
 }
 fn slab(resistance: f64, gradient: bool) -> String {
     without_last_section(SLAB, "design")
-        .replace("\"gradient\": true", &format!("\"gradient\": {gradient}"))
-        .replace("\"resistance_m2_k_w\": 0.01", &format!("\"resistance_m2_k_w\": {resistance}"))
+        .replace("\"gradient\":true", &format!("\"gradient\":{gradient}"))
+        .replace("\"resistance_m2_k_w\":0.01", &format!("\"resistance_m2_k_w\":{resistance}"))
 }
 fn nonlinear_steady(resistance: f64, gradient: bool) -> String {
     without_last_section(PULSE, "transient")
@@ -59,7 +65,7 @@ fn gradient(doc: &J) -> f64 {
 }
 fn uq_plan(lo: f64, hi: f64, samples: usize, transient: bool) -> String {
     let qoi = if transient { ",\"qoi\":{\"kind\":\"transient-sampled-peak\"}" } else { "" };
-    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":{samples},"wall_seconds":300,"temperature_limit_k":305,"correlation":{{"kind":"independent"}}{qoi},"parameters":[{{"target":{{"kind":"contact-resistance","contact":"bondline"}},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}]}}"#)
+    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":{samples},"wall_seconds":300,"temperature_limit_k":305,"correlation":{{"kind":"independent"}}{qoi},"parameters":[{{"target":{{"kind":"contact-resistance","contact":"bondline"}},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}}]}}"#)
 }
 
 #[test]
@@ -107,8 +113,8 @@ fn nonlinear_contact_gradient_includes_the_temperature_dependent_material_jacobi
 fn splitting_the_interface_preserves_total_derivative_and_orders_controls_by_name() {
     let dir = scratch("partition");
     let text = slab(0.01, true);
-    let start = text.find("\"contacts\": [").unwrap();
-    let end = text.find("\n  },\n  \"objective\"").unwrap();
+    let start = text.find("\"contacts\":[").unwrap();
+    let end = text.find("},\"objective\"").unwrap();
     let replacement = r#""contacts":[
         {"name":"z-first","source":"fixture","side_a_material":"left","side_b_material":"right","resistance_m2_k_w":0.01,
          "face_pairs":[{"side_a":[1,4,10],"side_b":[12,13,15]}]},

@@ -7,8 +7,11 @@ use json::JsonValue as J;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cooling-network/adjoint-repeated-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static FIXTURE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/cooling-network/adjoint-repeated-contact-pulse.json"))));
 const ADJOINT: &str = "\"adjoint\":{\"qoi\":\"sampled-peak\",\"max_checkpoint_bytes\":1048576},";
 const REPEAT: &str = "\"repeat\":{\"cycles\":3,\"max_total_steps\":21},";
 

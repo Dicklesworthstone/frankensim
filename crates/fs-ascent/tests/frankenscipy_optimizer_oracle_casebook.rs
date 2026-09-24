@@ -296,6 +296,8 @@ fn convergence_status_name(status: &ConvergenceStatus) -> &'static str {
         ConvergenceStatus::CallbackStop => "callback-stop",
         ConvergenceStatus::NotImplemented => "not-implemented",
         ConvergenceStatus::InvalidInput => "invalid-input",
+        ConvergenceStatus::Infeasible => "infeasible",
+        ConvergenceStatus::LinAlgError => "linalg-error",
     }
 }
 
@@ -311,6 +313,8 @@ fn method_name(method: OptimizeMethod) -> &'static str {
         OptimizeMethod::Tnc => "Tnc",
         OptimizeMethod::Slsqp => "Slsqp",
         OptimizeMethod::TrustConstr => "TrustConstr",
+        OptimizeMethod::TrustNcg => "TrustNcg",
+        OptimizeMethod::Dogleg => "Dogleg",
     }
 }
 
@@ -363,7 +367,7 @@ fn oracle_bits(method: OptimizeMethod, result: OptimizeResult) -> OracleBits {
     }
 }
 
-fn oracle_options(method: OptimizeMethod) -> MinimizeOptions {
+fn oracle_options(method: OptimizeMethod) -> MinimizeOptions<'static> {
     MinimizeOptions {
         method: Some(method),
         tol: Some(ORACLE_TOLERANCE),
@@ -374,7 +378,6 @@ fn oracle_options(method: OptimizeMethod) -> MinimizeOptions {
         gradient: None,
         hessp: None,
         bounds: None,
-        has_general_constraints: false,
         gradient_available: true,
         fixture_id: Some(ORACLE_FIXTURE_ID),
         seed: None,

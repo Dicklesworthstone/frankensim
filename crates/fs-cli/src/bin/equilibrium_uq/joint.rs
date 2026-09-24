@@ -117,4 +117,5 @@ pub(super) fn output(loaded: &EquilibriumDesignFile, options: &Options, result: 
 }
 
 #[cfg(test)]
+#[path = "joint/tests.rs"]
 mod tests;

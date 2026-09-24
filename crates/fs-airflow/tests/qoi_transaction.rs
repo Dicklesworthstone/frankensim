@@ -348,8 +348,12 @@ fn tx_001_complete_atomic_transaction_lifecycle() {
         compose_thermal_limits(&extraction.rows, &reqs, false, cx).unwrap()
     });
     assert_eq!(receipt.evaluations.len(), 2);
-    assert_eq!(receipt.satisfied_count, 2);
+    // Both budgets keep unknown sources (the material-provenance gap at
+    // least), so composition refuses a binary verdict: a large nominal
+    // margin is not compliance while any term is unbounded.
+    assert_eq!(receipt.satisfied_count, 0);
     assert_eq!(receipt.violated_count, 0);
+    assert_eq!(receipt.indeterminate_count, 2);
 
     let state_evaluated = QoiTransactionState::Evaluated {
         plan_hash,

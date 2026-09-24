@@ -14,7 +14,7 @@ fn assert_close(actual: &[f64], expected: &[f64]) {
 #[test]
 fn opposing_residuals_do_not_disappear_into_a_scalar_mean() {
     let mut iqn = accelerator(2);
-    let mut x = vec![0.0, 0.0];
+    let mut x: Vec<f64> = vec![0.0, 0.0];
     let mut plain = x.clone();
     for _ in 0..5 {
         // The signed mean is zero at every nonconverged iterate. Plain
@@ -31,7 +31,7 @@ fn opposing_residuals_do_not_disappear_into_a_scalar_mean() {
 #[test]
 fn independent_modes_recover_the_coupled_linear_solution() {
     let mut iqn = accelerator(2);
-    let mut x = vec![0.0, 0.0];
+    let mut x: Vec<f64> = vec![0.0, 0.0];
     let mut saw_full_rank = false;
     for _ in 0..8 {
         // (I-A)x=b gives x=[1,-2], independently by direct substitution.

@@ -25,7 +25,7 @@ impl Drop for Scratch {
 }
 fn plan(vary: bool) -> String {
     let (elo,ehi,tlo,thi)=if vary {(0.75,0.95,285.0,305.0)}else{(0.85,0.85,290.0,290.0)};
-    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":600,"temperature_limit_k":335,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"radiation-emissivity","surface":"first-face"}},"distribution":{{"kind":"uniform","lo":{elo},"hi":{ehi}}}},{{"target":{{"kind":"radiation-ambient-temperature","surface":"last-face"}},"distribution":{{"kind":"uniform","lo":{tlo},"hi":{thi}}}}]}}"#)
+    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":600,"temperature_limit_k":335,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"radiation-emissivity","surface":"first-face"}},"distribution":{{"kind":"uniform","lo":{elo},"hi":{ehi}}}}},{{"target":{{"kind":"radiation-ambient-temperature","surface":"last-face"}},"distribution":{{"kind":"uniform","lo":{tlo},"hi":{thi}}}}}]}}"#)
 }
 fn evaluate(dir: &Scratch, request: &str, extras: &[&str]) -> Output {
     let spec=dir.file("uq.json");std::fs::write(&spec,request).unwrap();

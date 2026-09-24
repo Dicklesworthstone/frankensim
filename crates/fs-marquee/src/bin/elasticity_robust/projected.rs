@@ -12,9 +12,13 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+#[path = "projected/stress.rs"]
 mod stress;
+#[path = "projected/checkpoint.rs"]
 mod checkpoint;
+#[path = "projected/refinement.rs"]
 mod refinement;
+#[path = "projected/design_regions.rs"]
 mod design_regions;
 
 fn quoted(value: &str) -> String {

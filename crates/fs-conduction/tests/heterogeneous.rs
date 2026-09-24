@@ -1350,7 +1350,9 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
     )
     .expect("table-b");
     assert_eq!(table_a.receipts().len(), 2);
-    assert_eq!(table_b.receipts().len(), 3);
+    // Query grid {280, 340, 400} plus the claim's in-range source knot 350
+    // (tables keep source knots since cda5a3146).
+    assert_eq!(table_b.receipts().len(), 4);
     let left = ConductivityModel::isotropic(table_a);
     let right = ConductivityModel::isotropic(table_b);
     let fallback = ConductivityModel::isotropic_declared(1.0).expect("declared fallback");

@@ -213,7 +213,7 @@ impl Scratch {
 impl Drop for Scratch {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
 fn uq_plan(vary:bool)->String {
     let (lo,hi)=if vary {(0.5,0.95)}else{(0.85,0.85)};
-    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":600,"qoi":{{"kind":"transient-sampled-peak"}},"temperature_limit_k":310,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"radiation-emissivity","surface":"first-face"}},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}]}}"#)
+    format!(r#"{{"schema":"frankensim.cooling-network-uq.v1","seed":"73","samples":4,"wall_seconds":600,"qoi":{{"kind":"transient-sampled-peak"}},"temperature_limit_k":310,"correlation":{{"kind":"independent"}},"parameters":[{{"target":{{"kind":"radiation-emissivity","surface":"first-face"}},"distribution":{{"kind":"uniform","lo":{lo},"hi":{hi}}}}}]}}"#)
 }
 
 #[test]

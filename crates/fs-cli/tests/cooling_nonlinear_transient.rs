@@ -10,7 +10,10 @@ use std::path::{Path,PathBuf};
 use std::process::{Command,Output};
 use std::time::{SystemTime,UNIX_EPOCH};
 
-const FIXTURE:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/nonlinear-contact-pulse.json"));
+// Compacted so fixture edits are independent of the example's formatting
+// (a 2026-09-22 reformat silently turned every compact-spelled edit into a no-op).
+static FIXTURE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| json::compact(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../examples/cooling-network/nonlinear-contact-pulse.json"))));
 const POLICY:&str=r#""nonlinear":{"max_iterations":32,"residual_rtol":1e-10,"residual_atol_j":1e-10,"armijo_c":1e-4,"shrink":0.5,"max_backtracks":24},"#;
 fn scratch(name:&str)->PathBuf {
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
