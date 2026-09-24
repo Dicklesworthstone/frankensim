@@ -149,6 +149,27 @@ material-hysteresis rung would need a disjoint work channel.
   the continuous periodic profile retains the requested RMS height to
   floating-point roundoff.
 
+## Quasistatic Reynolds film
+
+`resistive_film` owns the solver-independent incompressible thin-film pressure
+law shared with the compatibility surface `fs-flux::resistive_film`. At each
+configuration it solves the bounded pressure island `L(h) p = A B v` and applies
+the reciprocal resisting force `B^T A p`. The analytic tangent includes both
+gap-dependent conductance and independent mechanical effort changes. Cell areas,
+port weights and Poiseuille conductances are never independently normalized.
+This law carries no clock or pressure history; the mechanical caller owns
+stepping, cancellation between calls and integrated energy accounting.
+
+The fixed limits are 64 pressure cells, 256 channels and 256 mechanical ports.
+Nonpositive channel apertures close exactly; collapsed volume cells, trapped
+pressure pockets, pressure/gap limit violations and unresolved factorizations
+refuse without modifying output slices. No leakage, gap floor, pressure clipping
+or diagonal repair is introduced. Compressibility, thermal/slip effects, fluid
+inertia, evolving topology, fluid radiation and elastohydrodynamic closure are
+outside this law. The existing nine pressure-law tests run through the fs-flux
+compatibility surface, while fs-couple tests exercise reciprocal mechanical
+reaction, joint dissipation and atomic retry in its existing time integrator.
+
 ## Error model
 
 `TriboError` is a total refusal surface for missing identity, non-dry media,
@@ -216,7 +237,7 @@ This crate does not mint material admission, calibration, the upstream
 `fs-matdb::InterfaceSystemCard` query receipt, a flash-temperature error bound
 or thermal-port solution, a roughness measurement or statistical roughness
 model, adhesion, plasticity, finite-patch partial
-slip as a resolved contact field, lubrication/EHL, contact geometry evolution,
+slip as a resolved contact field, general lubrication/EHL, contact geometry evolution,
 wear geometry updates, stop time, Euler-disc ranking, one-millimetre optimum,
 sound pressure, loudness, or experimental/video correspondence. The surface
 trace leaf consumes a caller-supplied one-dimensional profile and a local

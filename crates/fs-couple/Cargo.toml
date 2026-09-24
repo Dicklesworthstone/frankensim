@@ -17,7 +17,6 @@ fs-dcontact = { path = "../fs-dcontact" }
 fs-duct = { path = "../fs-duct" }
 fs-exec = { path = "../fs-exec" }
 fs-fft = { path = "../fs-fft" }
-fs-flux = { path = "../fs-flux", default-features = false }
 fs-iface = { path = "../fs-iface" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }

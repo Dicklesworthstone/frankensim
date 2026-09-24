@@ -1,11 +1,11 @@
 //! Reynolds-film resistance in the EXISTING joint mechanical time equation.
-//! fs-flux owns the pressure law; fs-phs owns stepping and dissipation receipts.
+//! fs-tribo owns the pressure law; fs-phs owns stepping and dissipation receipts.
 //! Contact, film pressure and its state-dependent tangent are evaluated at the
 //! same trial configuration and discrete-gradient effort, never one tick late.
-pub use fs_flux::resistive_film::{FilmCell, FilmChannel, FilmError, FilmLimits,
+pub use fs_tribo::resistive_film::{FilmCell, FilmChannel, FilmError, FilmLimits,
     FilmReport, GapPort, ResistiveFilm};
 use super::{ImpactError, ImpactSystem, MAX_IMPACT_MODES, invalid};
-use fs_flux::resistive_film::MAX_CELLS;
+use fs_tribo::resistive_film::MAX_CELLS;
 
 impl ImpactSystem {
     /// Add one immutable fluid pressure island without replacing contacts,

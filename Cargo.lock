@@ -1200,6 +1200,7 @@ dependencies = [
  "fs-fft",
  "fs-geom",
  "fs-iface",
+ "fs-io",
  "fs-la",
  "fs-matdb",
  "fs-material",
@@ -1215,6 +1216,7 @@ dependencies = [
  "fs-rand",
  "fs-scenario",
  "fs-solid",
+ "fs-solver",
  "fs-substrate",
  "fs-tribo",
  "fs-vfit",
@@ -1501,6 +1503,7 @@ dependencies = [
  "fs-solid",
  "fs-solver",
  "fs-sparse",
+ "fs-tribo",
 ]
 
 [[package]]
