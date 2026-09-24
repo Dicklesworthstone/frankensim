@@ -479,17 +479,42 @@ pub fn solve_and_grade_with_source(
     level: u32,
     source: ThermalSource,
 ) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
+    solve_and_grade_controlled(design, level, source, &mut || true)
+        .map(|grade| grade.expect("uninterrupted solve cannot stop"))
+}
+
+type SolveGrade = (f64, Vec<f64>, [f64; 3], usize, usize);
+
+/// None means the caller stopped work; no partial numerical result escapes.
+fn solve_and_grade_controlled(
+    design: &PlateWithHoles,
+    level: u32,
+    source: ThermalSource,
+    keep_going: &mut impl FnMut() -> bool,
+) -> Result<Option<SolveGrade>, fs_cutfem::CutFemError> {
     source.validate()?;
+    if !keep_going() {
+        return Ok(None);
+    }
     let grid = Quadtree::uniform(level);
     let params = fem_params(level);
     let f = |x: f64, y: f64| source.value(x, y);
     let g = |_x: f64, _y: f64| 0.0;
     let space = Space::build(&grid, design, params)?;
+    if !keep_going() {
+        return Ok(None);
+    }
     let sol = space.solve(&f, &g)?;
+    if !keep_going() {
+        return Ok(None);
+    }
     let nodal = space.nodal_values(&sol.free, &g);
     // Compliance J = ∫ f·u over Ω (the DWR goal functional with w = f).
     let goal = GoalContext { weight: &f };
     let j = goal_value(&space, &nodal, &goal)?;
+    if !keep_going() {
+        return Ok(None);
+    }
     // DWR discretization estimate for THIS goal (estimated color: DWR
     // constants are not guaranteed — the lmp4.4 rule).
     let dwr = estimate(&grid, design, params, &f, &g, &goal)?;
@@ -502,6 +527,9 @@ pub fn solve_and_grade_with_source(
     let mut grads = Vec::with_capacity(design.radii.len());
     let samples = 64usize;
     for (c, r) in design.centers.iter().zip(&design.radii) {
+        if !keep_going() {
+            return Ok(None);
+        }
         let mut acc = 0.0f64;
         for k in 0..samples {
             #[allow(clippy::cast_precision_loss)]
@@ -545,7 +573,7 @@ pub fn solve_and_grade_with_source(
             what: "thermal solve produced non-finite objective, gradient or error estimate".into(),
         });
     }
-    Ok((j, grads, cert, sol.iters, space.cut_rules().len()))
+    Ok(Some((j, grads, cert, sol.iters, space.cut_rules().len())))
 }
 
 /// Sufficient decrease parameter (c1) in the Armijo line search condition.
@@ -573,8 +601,12 @@ pub fn armijo_next_design(
         current_solver_iters,
         current_cut_cell_count,
         ThermalSource::UNIT,
+        &mut || true,
     )
+    .map(|accepted| accepted.expect("uninterrupted line search cannot stop"))
 }
+
+type AcceptedDesign = (PlateWithHoles, f64, f64, usize, [f64; 3], usize, usize);
 
 fn armijo_with_source(
     design: &PlateWithHoles,
@@ -585,9 +617,10 @@ fn armijo_with_source(
     current_solver_iters: usize,
     current_cut_cell_count: usize,
     source: ThermalSource,
-) -> Result<(PlateWithHoles, f64, f64, usize, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
+    keep_going: &mut impl FnMut() -> bool,
+) -> Result<Option<AcceptedDesign>, fs_cutfem::CutFemError> {
     if config.step_size == 0.0 {
-        return Ok((
+        return Ok(Some((
             design.clone(),
             current_objective,
             0.0,
@@ -595,10 +628,13 @@ fn armijo_with_source(
             current_cert,
             current_solver_iters,
             current_cut_cell_count,
-        ));
+        )));
     }
 
     for backtracks in 0..=MAX_ARMIJO_BACKTRACKS {
+        if !keep_going() {
+            return Ok(None);
+        }
         #[allow(clippy::cast_precision_loss)]
         let step = config.step_size * 0.5_f64.powi(backtracks as i32);
         let mut candidate = design.clone();
@@ -622,17 +658,20 @@ fn armijo_with_source(
             continue;
         }
 
-        let (
+        let Some((
             candidate_objective,
             _,
             candidate_cert,
             candidate_solver_iters,
             candidate_cut_cell_count,
-        ) = solve_and_grade_with_source(&candidate, config.level, source)?;
+        )) = solve_and_grade_controlled(&candidate, config.level, source, keep_going)?
+        else {
+            return Ok(None);
+        };
         if candidate_objective
             <= current_objective + ARMIJO_SUFFICIENT_DECREASE * directional_derivative
         {
-            return Ok((
+            return Ok(Some((
                 candidate,
                 candidate_objective,
                 step,
@@ -640,11 +679,11 @@ fn armijo_with_source(
                 candidate_cert,
                 candidate_solver_iters,
                 candidate_cut_cell_count,
-            ));
+            )));
         }
     }
 
-    Ok((
+    Ok(Some((
         design.clone(),
         current_objective,
         0.0,
@@ -652,7 +691,7 @@ fn armijo_with_source(
         current_cert,
         current_solver_iters,
         current_cut_cell_count,
-    ))
+    )))
 }
 
 fn certificate_color(cert: [f64; 3]) -> Color {
@@ -689,6 +728,17 @@ pub fn run_study(
     let mut runner = StudyRunner::new(design, config.clone())?;
     while runner.advance()? {}
     Ok(runner.report())
+}
+
+/// Outcome of one controlled optimizer transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StudyAdvance {
+    /// One complete transition was accepted and recorded.
+    Advanced,
+    /// The declared iteration count had already been reached.
+    Complete,
+    /// The caller stopped work; the accepted design and trace are unchanged.
+    Interrupted,
 }
 
 /// Incremental thermal radius optimizer. An unsuccessful step leaves the
@@ -742,15 +792,36 @@ impl StudyRunner {
 
     /// Advance once, or return false once the declared iteration count is reached.
     pub fn advance(&mut self) -> Result<bool, fs_cutfem::CutFemError> {
+        self.advance_controlled(|| true)
+            .map(|outcome| outcome == StudyAdvance::Advanced)
+    }
+
+    /// Advance transactionally while the caller permits more work.
+    ///
+    /// The callback is checked before assembly, between state-solve/goal/DWR
+    /// phases, for each hole's gradient, between Armijo trials, and immediately
+    /// before committing the transition. False returns `Interrupted` without
+    /// changing either the accepted geometry or any trace record. The same
+    /// runner can be retried when resources become available again.
+    ///
+    /// Individual assembly, linear solves and DWR estimation remain synchronous:
+    /// this is phase-boundary cancellation, not an intra-kernel latency claim.
+    pub fn advance_controlled(
+        &mut self,
+        mut keep_going: impl FnMut() -> bool,
+    ) -> Result<StudyAdvance, fs_cutfem::CutFemError> {
         let iter = self.iterations.len();
         if iter == self.config.steps {
-            return Ok(false);
+            return Ok(StudyAdvance::Complete);
         }
         let design = &self.design;
         let config = &self.config;
-        let (j, grads, cert, iters, cut_cell_count) =
-            solve_and_grade_with_source(design, config.level, self.source)?;
-        let (
+        let Some((j, grads, cert, iters, cut_cell_count)) =
+            solve_and_grade_controlled(design, config.level, self.source, &mut keep_going)?
+        else {
+            return Ok(StudyAdvance::Interrupted);
+        };
+        let Some((
             next_design,
             accepted_compliance,
             accepted_step,
@@ -758,7 +829,7 @@ impl StudyRunner {
             accepted_cert,
             accepted_solver_iters,
             accepted_cut_cell_count,
-        ) = armijo_with_source(
+        )) = armijo_with_source(
             design,
             config,
             j,
@@ -767,7 +838,14 @@ impl StudyRunner {
             iters,
             cut_cell_count,
             self.source,
-        )?;
+            &mut keep_going,
+        )?
+        else {
+            return Ok(StudyAdvance::Interrupted);
+        };
+        if !keep_going() {
+            return Ok(StudyAdvance::Interrupted);
+        }
         let color = certificate_color(cert);
         let accepted_color = certificate_color(accepted_cert);
         let gradient_norm = grads
@@ -802,7 +880,7 @@ impl StudyRunner {
             backtracks,
         });
         self.design = next_design;
-        Ok(true)
+        Ok(StudyAdvance::Advanced)
     }
 
     /// Snapshot the exact accepted trace. No solve or area re-projection occurs.
@@ -906,4 +984,102 @@ fn canonical_trace_hash(
     }
     append_f64_slice(&mut bytes, &design.radii);
     hash_bytes(&bytes).to_hex()
+}
+
+#[cfg(test)]
+mod controlled_tests {
+    use super::*;
+
+    fn runner(steps: usize) -> StudyRunner {
+        let design = PlateWithHoles {
+            centers: vec![[0.3, 0.5], [0.7, 0.5]],
+            radii: vec![0.12, 0.18],
+        };
+        let config = StudyConfig {
+            level: 4,
+            steps,
+            step_size: 1.0,
+            area_target: design.area(),
+            r_min: 0.08,
+            r_max: 0.20,
+        };
+        StudyRunner::new(design, config).expect("admitted smoke fixture")
+    }
+
+    #[test]
+    fn interruption_before_work_preserves_the_initial_checkpoint() {
+        let mut study = runner(1);
+        let before = study.report();
+        assert_eq!(
+            study.advance_controlled(|| false).unwrap(),
+            StudyAdvance::Interrupted
+        );
+        let after = study.report();
+        assert_eq!(after.design, before.design);
+        assert_eq!(after.iterations, before.iterations);
+        assert_eq!(after.trace_hash, before.trace_hash);
+    }
+
+    #[test]
+    fn interruption_after_state_solve_can_resume_bit_exactly() {
+        let mut study = runner(1);
+        let before = study.report();
+        let mut polls = 0;
+        assert_eq!(
+            study.advance_controlled(|| {
+                polls += 1;
+                polls < 3
+            }).unwrap(),
+            StudyAdvance::Interrupted
+        );
+        assert_eq!(polls, 3, "stop after the state solve, before DWR work");
+        assert_eq!(study.report().trace_hash, before.trace_hash);
+        assert_eq!(study.design(), &before.design);
+        assert!(study.iterations().is_empty());
+        assert!(study.advance().unwrap());
+        let mut uninterrupted = runner(1);
+        assert!(uninterrupted.advance().unwrap());
+        assert_eq!(study.report().trace_hash, uninterrupted.report().trace_hash);
+        assert_eq!(study.iterations(), uninterrupted.iterations());
+        assert_eq!(study.design(), uninterrupted.design());
+    }
+
+    #[test]
+    fn interruption_at_commit_preserves_an_accepted_prefix() {
+        let mut study = runner(2);
+        assert!(study.advance().unwrap());
+        let before = study.report();
+        let mut reference = study.clone();
+        let mut poll_count = 0;
+        assert_eq!(
+            reference.advance_controlled(|| {
+                poll_count += 1;
+                true
+            }).unwrap(),
+            StudyAdvance::Advanced
+        );
+        let mut polls = 0;
+        assert_eq!(
+            study.advance_controlled(|| {
+                polls += 1;
+                polls < poll_count
+            }).unwrap(),
+            StudyAdvance::Interrupted
+        );
+        assert_eq!(study.report().trace_hash, before.trace_hash);
+        assert_eq!(study.iterations(), before.iterations.as_slice());
+        assert_eq!(study.design(), &before.design);
+        assert!(study.advance().unwrap());
+        assert_eq!(study.report().trace_hash, reference.report().trace_hash);
+    }
+
+    #[test]
+    fn completed_study_does_not_request_more_work() {
+        let mut study = runner(0);
+        assert_eq!(
+            study.advance_controlled(|| panic!("completed study must not poll")).unwrap(),
+            StudyAdvance::Complete
+        );
+        assert!(!study.advance().unwrap());
+    }
 }

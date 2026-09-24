@@ -344,13 +344,18 @@ rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
 derives from the declared memory budget with the fixture default as a floor,
 so identical inputs at the fixture budget mesh identically.
 
-**The uniform h-ladder** (receipt block `ladder`, driver version 15). When the
+**The uniform h-ladder** (receipt block `ladder`, driver version 16). When the
 project declares `solver.fidelity = "ladder"`, the stage solves the audited base
 and then up to two further rungs, each one uniform 1→8 refinement of the
 labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
 parent facet, labels replicated, volume preserved), taken while the next rung
-still fits the declared memory budget (`memory_bytes / 256` tets) and the
-project declares no interface pairs (they bind to base faces: `stop` says so).
+still fits the declared memory budget (`memory_bytes / 256` tets). Declared
+matching-P1 finite contacts are resolved again on every rung: the two
+region-owned traces must have exact matching subtriangles, each contained in
+its retained source face and covered by the same declared interface/card.
+An unbound, ambiguous or nonmatching descendant refuses; no contact is dropped
+or replaced by perfect contact. The receipt carries each rung's interface-pair
+count and the final field's regenerated interface evidence and heat/jump report.
 Other fidelities except `adaptive` solve the base once. Adaptive fidelity has
 its own study block, described below. Other single-rung paths
 report `"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
@@ -372,13 +377,18 @@ linear solve's true-residual gate is two decades below the declared
 `tolerance-rel` (floor 1e-13); the crate default of 1e-12 refused the second
 rung at 1.37e-12 after 1,256 Krylov iterations.
 
-**Adaptive linear solids** (`solver.fidelity = "adaptive"`, receipt block
+**Adaptive solid conduction** (`solver.fidelity = "adaptive"`, receipt block
 `adaptive`). Each candidate mesh is solved, uniformly enriched and solved
-again. A residual-checked linear adjoint on that enriched mesh evaluates the
-temperature at the enriched maximum's vertex. The exact owner-change remainder
+again. The enriched goal comparison uses the production residual and actual
+transposed Jacobian, including nonlinear `k(T)` terms and fixed finite contact.
+The reference primal and dual both pass independent residual checks. Adaptive
+primal stopping is tightened to satisfy the comparison's residual gate; step
+stagnation alone cannot provide an accepted reference. The explicitly observed
+linearization remainder is retained, including remaining dual/arithmetic error.
+The goal is temperature at the enriched maximum's vertex. The exact owner-change remainder
 `I(T_coarse)(v_max) - max(T_coarse)` is retained, so the reported goal remains
 the declared region's actual nodal maximum. Acceptance requires both the
-absolute dual change plus absolute remainder and the independently measured
+absolute dual change plus both absolute remainders and the independently measured
 maximum change to fit `accuracy_rel * abs(T_max_coarse)`. This is observed
 two-space agreement, not a continuum error bound; it adds no discretization
 half-width or Verified authority to the QoI receipt.
@@ -392,12 +402,16 @@ enrichment's own ratio is treated as a quality failure (bisection may not
 degrade shape; admission of the Ruppert-refined base itself is dihedral-only
 because radius-edge is disclosed, not a P1 element-quality measure). A zero marking
 signal requests a global refinement, never success. The receipt retains each
-comparison's mesh sizes, maximum, quality, dual residual, owner remainder,
+comparison's mesh sizes, contact-pair counts, maximum, quality, primal/dual
+residuals, linearization and owner remainders, nonlinear-Jacobian selection,
 marked count, actual solved-mesh count, and stopping reason. Memory-derived tet
 limits and a 17-primal-solve cap retain the last independently probed candidate
 when further work cannot fit. These output counts are not an allocator peak
-memory guarantee. Contact transfer, coupled airflow adjoints and nonlinear
-material adjoints have named unresolved stops in this staged producer.
+memory guarantee. Coupled airflow adjoints retain a named unresolved stop.
+Temperature-dependent contact resistance remains refused by material lowering.
+An active material kink or invalid temperature span refuses the unique tangent;
+there is no frozen-conductivity substitute. Marked and uniform meshes regenerate
+the same declared matching contact and boundary/source ownership before solving.
 If a marked candidate fails the quality floor, the already solved admissible
 global enrichment is reused only when its own next probe fits; the receipt
 counts these uniform quality fallbacks. Otherwise the last fully probed field

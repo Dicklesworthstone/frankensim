@@ -141,7 +141,8 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
         Kind::Valve => {
             let p = PlateValvePerformance::from_bytes(&bytes, block, &CancelGate::new()).map_err(|e|e.to_string())?;
             let i = p.info();
-            let exterior_json = super::wind_input::outlet_provenance(p.renderer(),i.radiation_load);
+            let exterior_json = format!("{}{}",super::wind_input::outlet_provenance(p.renderer(),i.radiation_load),
+                super::duct_metadata::provenance(&p));
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,

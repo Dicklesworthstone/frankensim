@@ -295,6 +295,7 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                 ),
                 ("elements", &["mesh", "elements"][..]),
                 ("vertices", &["mesh", "vertices"][..]),
+                ("interface_pairs", &["interfaces", "pair_count"][..]),
                 ("adaptive_status", &["adaptive", "status"][..]),
                 ("adaptive_stop", &["adaptive", "stop"][..]),
                 ("adaptive_solved_meshes", &["adaptive", "solved_meshes"][..]),

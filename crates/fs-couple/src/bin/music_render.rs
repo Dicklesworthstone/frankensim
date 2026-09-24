@@ -71,6 +71,8 @@
 //! content hash is the replay check). Sample rate is pinned at 48 kHz to
 //! keep the ecosystem coherent (fs-psycho refuses other rates).
 
+#[path = "music_render/duct_metadata.rs"]
+mod duct_metadata;
 #[path = "music_render/wind_input.rs"]
 mod wind_input;
 #[path = "music_render/modal_input.rs"]

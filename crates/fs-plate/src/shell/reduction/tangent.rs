@@ -36,3 +36,7 @@ impl ShellReduction {
         }
     }
 }
+
+// Material-memory consumers need the physical flexural part of this tangent.
+#[path = "bending.rs"]
+mod bending;

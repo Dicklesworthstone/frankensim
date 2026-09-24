@@ -141,3 +141,6 @@ fn incomplete_or_underresolved_exterior_observations_refuse_before_wav_creation(
 
 #[path = "radiation.rs"]
 mod radiation;
+
+#[path = "duct_graph.rs"]
+mod duct_graph;

@@ -218,9 +218,13 @@ impl From<FmmError> for BemError {
 }
 
 pub mod helmholtz;
+/// Geometry-admitted, adaptively integrated finite receivers near closed surfaces.
+pub mod near_field;
 pub mod panel2d;
 pub mod panel3d;
 pub mod radiation_bake;
+/// Geometry-derived resonance-exclusion policy for the existing radiation solver.
+pub mod radiation_policy;
 pub mod wake2d;
 
 pub use panel2d::{

@@ -80,9 +80,8 @@ impl Options {
         }
         if options.sobol_sensitivity
             && (options.qmc_replicates.is_some() || options.compliance.is_some()
-                || options.design.is_some() || options.checkpoint.is_some()
-                || options.resume.is_some() || options.max_new_samples.is_some()) {
-            return Err(bad("Sobol sensitivity requires a fixed design without QMC, recovery, sequential compliance or candidate-selection flags"));
+                || options.design.is_some()) {
+            return Err(bad("Sobol sensitivity requires a fixed design without QMC, sequential compliance or candidate-selection flags"));
         }
         Ok(options)
     }
@@ -128,7 +127,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
     let base = J::parse(base_text).map_err(|error| bad(format!("invalid base JSON: {error}")))?;
     let config = Config::parse(uq_text, &base)?;
     if options.sobol_sensitivity {
-        return sensitivity::execute(&base, &config);
+        return sensitivity::execute(base_text, &base, &config, options);
     }
     if let Some(replicates) = options.qmc_replicates {
         return qmc::execute(base_text, &base, &config, options, replicates);

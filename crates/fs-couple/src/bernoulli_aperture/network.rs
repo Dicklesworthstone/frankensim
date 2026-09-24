@@ -36,7 +36,7 @@ impl TubeSection {
         }
     }
 
-    fn realize(&self, speed: f64, density: f64, dt: f64) -> Result<SectionRealization, AcousticRealizeError> {
+    pub(super) fn realize(&self, speed: f64, density: f64, dt: f64) -> Result<SectionRealization, AcousticRealizeError> {
         let z = self.uniform(speed).characteristic_impedance(density)?;
         if !self.max_length_error_m.is_finite() || self.max_length_error_m < 0.0 {
             return Err(invalid("each network section needs a finite nonnegative length-error allowance"));

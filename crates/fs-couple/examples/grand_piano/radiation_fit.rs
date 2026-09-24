@@ -1,5 +1,5 @@
 //! Geometry sampling uses the shared passive multiport fitter, not a second fit.
-use super::{exterior_geometry::{Boundary,Specification,Samples},exterior_loading};
+use super::{exterior_geometry::{Boundary,Specification,Samples,ReceiverSet},exterior_loading};
 use fs_math::c64::C64;
 pub use fs_couple::render::plate::impact::radiation::fit::{Fit,fit};
 const MAX_PORTS:usize=32;
@@ -12,6 +12,7 @@ pub fn prepare(boundary:&Boundary,spec:&Specification,mechanics_rate:u32)->Resul
     if mechanics_rate<8_000 || 8.*omega[omega.len()-1]>=0.9*std::f64::consts::PI*f64::from(mechanics_rate) {
         return Err("loaded playback's off-band storage poles exceed the declared mechanical-rate guard".into());
     }
+    let delays_s=ReceiverSet::for_spec(boundary,spec)?.delays_s().to_vec();
     let mut matrices=Vec::with_capacity(omega.len());
     let mut values=vec![vec![Vec::with_capacity(omega.len());r];spec.receivers.len()];
     let mut minimum_ppw=f64::INFINITY;let mut maximum_condition_lower_bound=0.0_f64;
@@ -24,9 +25,5 @@ pub fn prepare(boundary:&Boundary,spec:&Specification,mechanics_rate:u32)->Resul
         }
     }
     let fitted=fit(&omega,&matrices,r)?;
-    let delays_s=spec.receivers.iter().map(|p| {
-        let radius=(0..3).fold(0.0_f64,|a,j|a.hypot(p[j]-boundary.center[j]));
-        (radius-boundary.radius)/spec.medium.sound_speed
-    }).collect();
     Ok((fitted,Samples {omega,values,delays_s,minimum_ppw,maximum_condition_lower_bound}))
 }

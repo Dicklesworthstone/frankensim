@@ -114,10 +114,15 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
 pub trait AdaptiveSdf3Elasticity: Sdf3Elasticity {
     /// Read-only adaptive operator, not a reassembled approximation.
     fn adaptive(&self) -> &AdaptiveElasticity3;
+    /// Consume the solve wrapper while retaining its exact geometry and scales.
+    /// An enrichment estimator chooses and accounts for its own solve policy.
+    fn into_adaptive(self) -> AdaptiveElasticity3;
 }
 impl AdaptiveSdf3Elasticity for AdaptiveElasticity3 {
     fn adaptive(&self) -> &AdaptiveElasticity3 { self }
+    fn into_adaptive(self) -> AdaptiveElasticity3 { self }
 }
 impl AdaptiveSdf3Elasticity for AdaptiveSolveSpace3 {
     fn adaptive(&self) -> &AdaptiveElasticity3 { self.elasticity() }
+    fn into_adaptive(self) -> AdaptiveElasticity3 { self.into_elasticity() }
 }

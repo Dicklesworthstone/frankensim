@@ -139,3 +139,6 @@ mod performance;
 
 #[path = "plate_aperture/file.rs"]
 mod file;
+
+#[path = "plate_aperture/viscothermal.rs"]
+mod viscothermal;

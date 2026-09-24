@@ -72,11 +72,57 @@ A `temperature_limit_k` does not turn sensitivity into a compliance-indicator
 analysis and does not produce an approval or probability decision.
 
 A wall interruption returns `BUDGET` with no partial sensitivity distribution.
-This CLI mode currently refuses checkpoint/resume/chunk flags, QMC flags,
-sequential compliance and candidate-selection flags. `SobolExecution` supports
-sample-boundary cancellation, partial-row retention and in-memory clone/resume,
-but has no durable checkpoint transport. Its estimates are unavailable until
-the complete predeclared design succeeds.
+QMC flags, sequential compliance and candidate selection remain incompatible
+with this fixed sensitivity design. Estimates are unavailable until the
+complete predeclared design succeeds.
+
+## Retain and resume expensive sensitivity evaluations
+
+Add `--checkpoint NEW-PATH` to retain every completed physical evaluation,
+including an unfinished row's A, B and hybrid observations:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-sensitivity-hotspot.json \
+  --sensitivity sobol --checkpoint first.sobol --max-new-samples 3
+
+cargo run -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-sensitivity-hotspot.json \
+  --sensitivity sobol --resume first.sobol --checkpoint completed.sobol
+```
+
+The first invocation spends at most three physical evaluations, stopping inside
+the first row, and exits `BUDGET`. Its `sensitivity.progress.v1` JSON reports
+accepted work, completed rows, the next row/slot and which hybrid parameter
+comes next. It contains no sensitivity indices or base-output dispersion. The
+second invocation continues at that exact input; it does not replay paid
+physical solves. Each invocation receives the request's `wall_seconds` anew,
+but the original lifetime evaluation count remains fixed. An interrupted child
+is killed and reaped; its unobserved A, B or hybrid input is retried. An
+unfinished transient restarts its complete trajectory. A completed checkpoint
+publishes the final report without another solve.
+
+`--max-new-samples` requires a checkpoint destination; zero saves an empty
+prefix or copies an admitted resume state. Both chunk and wall interruptions
+publish only progress until the whole fixed design completes. Without an
+output checkpoint, a wall interruption exits `BUDGET` with no result output.
+
+The existing bounded, atomic file writer requires fresh destinations and never
+overwrites the resume source. The `FSSOB001` format binds exact base-request
+bytes, evaluator executable bytes, target bindings, all plan fields, seed,
+parameter order, original budget and A/B/hybrid pairing. It is distinct from
+MC and randomized-QMC checkpoints. Changed identities, corrupted data and
+invalid layouts refuse before a destination is reserved or a solver starts.
+Changing wall allowance or chunk size is permitted. Checksums detect
+corruption, not authenticity; use trusted checkpoint inputs. A physical solver
+failure replaces this invocation's output with a terminal failure diagnosis
+that cannot resume, preserving the rule against dropping failed observations.
+
+The library exposes the same recovery through `SobolExecution::checkpoint`
+and `SobolExecution::restore`; it regenerates deterministic sampler inputs from
+the retained ordinal and requires the caller's exact evaluator/model identity.
 
 No confidence interval, adaptive stopping guarantee, continuous-time peak
 bound, mesh convergence, physical-model validation or safety claim is made.
@@ -92,9 +138,12 @@ cargo test -p fs-cli --test cooling_sensitivity
 ```
 
 The tests include analytical additive/interaction models, marginal sampling,
-exact input pairing, cancellation/retry, numerical range, and real steady and
-transient cooling commands. Their presence is not a claim that native tests
-have run on this checkout.
+exact input pairing, durable cancellation/retry, numerical range, and real
+steady and transient cooling commands. A real two-input design split into
+3+2+remaining evaluations must reproduce uninterrupted report and checkpoint
+bytes, including recovery from inside a hybrid row. Changed identities,
+corruption, terminal failures and checkpoint destination protection are checked.
+Their presence is not a claim that native tests have run on this checkout.
 
 Reference: M. J. W. Jansen, *Analysis of variance designs for model output*,
 Computer Physics Communications 117 (1999), 35-43;

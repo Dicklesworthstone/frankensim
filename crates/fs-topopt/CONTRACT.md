@@ -131,8 +131,41 @@ It reports per-stage compliance, volume, derivative discrepancies and actual
 stops before exporting the retained densities. The unchanged command without
 `--continuation` still executes one fixed model. The schedule completion label
 does not certify stationarity, global optimality, continuum accuracy,
-manufacturing thickness or full elasticity-marquee acceptance. DWR-driven
-geometry refinement remains a separate between-study operation.
+manufacturing thickness or full elasticity-marquee acceptance.
+
+`sdf3::adaptive_continuation::controlled_adaptive_sdf3_continuation` now joins
+the existing real compliance DWR estimator to this gradient-checked schedule.
+Before each later stage it enriches the accepted background, inherits physical
+stiffness and re-solves the reference load family. Weighted absolute local
+goal residuals select original leaves through deterministic Dörfler marking.
+The marked candidate inherits raw densities, rebuilds the same physical-radius
+filter, restores projected-volume feasibility and passes the compliance AND
+volume gradient gates before optimization. Reference body/surface laws are
+reintegrated on every background. Coarse nodal loads and solved fields never
+initialize the new stage; the enriched stiffness experiment is distinct from
+the new filtered density model and cannot establish cross-model descent.
+
+Each refined proposal remains separate until its entire bounded stage and final
+publication checkpoint complete. Geometry/level/leaf/transfer limits, numerical
+failures, gradient-gate failures and cancellation leave the previous accepted
+tree, model, scales, design and fields usable. All rejected numerical work is
+still charged. Stage zero retains the fixed-grid driver's solved-prefix behavior.
+The operator builder owns unchanged implicit geometry, material, support and
+quadrature policy, plus cumulative geometry budgets; the driver checks active
+tree membership and the existing transfer's geometric/constraint compatibility.
+Octree refinement changes the background; it never meshes or moves the implicit
+boundary. DWR is a numerical two-grid correction with consistency terms, not a
+continuum enclosure or thickness/topology certification.
+
+Run the real adaptive schedule with
+`cargo run -p fs-topopt --features cutfem-marquee --example elastic_sdf3 -- --adaptive-continuation 3 250000`.
+It shares a cumulative quadrature allowance and reports marked cells, actual
+refinement acceptance, gradient discrepancies, restoration, stop causes and the
+last accepted raw/projected design. Focused G1/G4 tests exercise three stages,
+two actual DWR refinement cycles, each new design map's gradient/volume gates,
+second-proposal cancellation preserving the first refined solution exactly,
+and an enrichment leaf-cap stop. This does not close the full marquee bead's
+moving-boundary, witness-oracle, continuum-bound or both-ISA golden requirements.
 
 ## Invariants
 

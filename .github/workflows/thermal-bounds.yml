@@ -1,0 +1,40 @@
+name: Thermal flux bounds
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-verify/**'
+      - 'crates/fs-conduction/**'
+      - '.github/workflows/thermal-bounds.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tetrahedral-flux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and test original dependency-free numerical modules
+        run: |
+          scratch=$(mktemp -d)
+          sed '/^#\[cfg(test)\]/,$d' crates/fs-verify/src/interval.rs > "$scratch/interval.rs"
+          cp crates/fs-verify/src/tet.rs "$scratch/tet.rs"
+          cp -r crates/fs-verify/src/tet "$scratch/tet"
+          printf '#![forbid(unsafe_code)]\npub mod interval;\npub mod tet;\n' > "$scratch/check.rs"
+          rustc --edition=2024 --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
+          "$scratch/flux-tests"
+      - name: Materialize pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test tetrahedral energy and goal bounds in the workspace
+        run: |
+          cargo test --release -p fs-verify --features certified-speculation --lib tet::
+      - name: Test real conduction primal and dual consumers
+        run: |
+          cargo test --release -p fs-verify --features thermal-conduction --lib conduction::
+      - name: Execute mean-temperature comparison
+        run: cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0

@@ -37,7 +37,7 @@ mod support;
 use std::cell::RefCell;
 
 use fs_adjoint::{ift_gradient_matfree, verify_gradient};
-use fs_conduction::adjoint::ConductivityDesign;
+use fs_conduction::adjoint::{ConductivityDesign, compare_discrete_goal};
 use fs_conduction::assemble::{DofMap, assemble_operator, reduce};
 use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
@@ -128,6 +128,259 @@ fn ladder_linear_config() -> LinearConfig {
         max_iterations: 60_000,
         restart: 60,
     }
+}
+
+/// G1/G3: the general comparison reduces to the independently solved linear
+/// identity, including a nonzero Dirichlet lift and signed/scaled goals.
+#[test]
+fn discrete_goal_comparison_matches_linear_design_and_preserves_fixed_nodes() {
+    let fixture = fixture(3);
+    let config = ladder_linear_config();
+    let design = ConductivityDesign::new(fixture.problem(), config).unwrap();
+    with_cx(|cx| {
+        let solved = design
+            .solve(cx, &vec![1.0; design.parameter_count()])
+            .unwrap();
+        let approximate = vec![300.0; fixture.mesh.vertex_count()];
+        let weights: Vec<_> = (0..approximate.len())
+            .map(|i| if i % 3 == 0 { -0.25 } else { 1.0 })
+            .collect();
+        let expected: f64 = weights
+            .iter()
+            .zip(&solved.temperature)
+            .map(|(w, t)| w * (t - 300.0))
+            .sum();
+        assert!(expected.abs() > 1.0);
+        for scale in [1.0, -2.0, 1e-200, 1e200] {
+            let scaled: Vec<_> = weights.iter().map(|w| w * scale).collect();
+            let report = compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                config,
+                &solved.temperature,
+                &approximate,
+                &scaled,
+            )
+            .unwrap();
+            assert!(!report.uses_nonlinear_jacobian);
+            assert!(
+                (report.signed_residual_change / scale - expected).abs() < 1e-8 * expected.abs()
+            );
+            assert!(report.linearization_remainder.abs() / scale.abs() < 1e-8 * expected.abs());
+            assert!(report.dual_relative_residual < config.tolerance);
+            for &v in design.dofs().fixed() {
+                assert_eq!(report.nodal_contributions[v], 0.0);
+            }
+        }
+        let zero = compare_discrete_goal(
+            cx,
+            fixture.problem(),
+            None,
+            config,
+            &solved.temperature,
+            &approximate,
+            &vec![0.0; approximate.len()],
+        )
+        .unwrap();
+        assert_eq!(zero.dual_iterations, 0);
+        assert_eq!(zero.signed_goal_change, 0.0);
+        assert_eq!(zero.linearization_remainder, 0.0);
+    });
+}
+
+/// G1/G3: k linear in T makes the residual quadratic. The correct K'(T)
+/// tangent therefore leaves an O(delta^2) remainder. A frozen-conductivity
+/// adjoint leaves an O(delta) defect and fails this independent scaling check.
+#[test]
+fn discrete_goal_comparison_nonlinear_remainder_is_quadratic_and_not_omitted() {
+    use fs_conduction::{ConductivityTable, InitialGuess, SolveConfig};
+    let mut fixture = fixture(3);
+    fixture.material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.0), (600.0, 36.0)]).unwrap(),
+    );
+    fixture.source = ScalarField::Uniform(1000.0);
+    let mut config = SolveConfig::default();
+    config.initial = InitialGuess::Uniform(300.0);
+    config.linear = ladder_linear_config();
+    config.stop.residual_rtol = 1e-12;
+    config.stop.step_atol = 0.0;
+    let linear = config.linear;
+    with_cx(|cx| {
+        let solved = fs_conduction::solve(cx, fixture.problem(), config).unwrap();
+        let weights = vec![1.0 / fixture.mesh.vertex_count() as f64; fixture.mesh.vertex_count()];
+        let mut remainders = Vec::new();
+        for fraction in [0.4, 0.2, 0.1] {
+            let approximate: Vec<_> = solved
+                .temperature
+                .iter()
+                .map(|t| t + fraction * (300.0 - t))
+                .collect();
+            let report = compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                linear,
+                &solved.temperature,
+                &approximate,
+                &weights,
+            )
+            .unwrap();
+            assert!(report.uses_nonlinear_jacobian);
+            let expected: f64 = solved
+                .temperature
+                .iter()
+                .zip(&approximate)
+                .zip(&weights)
+                .map(|((t, a), w)| (t - a) * w)
+                .sum();
+            assert!((report.signed_goal_change - expected).abs() < 1e-12);
+            assert!(
+                (report.signed_residual_change + report.linearization_remainder - expected).abs()
+                    < 1e-10
+            );
+            assert!(
+                report.linearization_remainder.abs() > 1e-4,
+                "fixture must expose a finite nonlinear remainder: {report:?}"
+            );
+            remainders.push(report.linearization_remainder);
+        }
+        for pair in remainders.windows(2) {
+            assert!(
+                (pair[0] / pair[1] - 4.0).abs() < 2e-4,
+                "remainders: {remainders:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn discrete_goal_comparison_refuses_unverified_primal_changed_boundary_and_bad_inputs() {
+    use fs_conduction::ConductionError;
+    let fixture = fixture(2);
+    let config = ladder_linear_config();
+    let design = ConductivityDesign::new(fixture.problem(), config).unwrap();
+    let solved = with_cx(|cx| {
+        design
+            .solve(cx, &vec![1.0; design.parameter_count()])
+            .unwrap()
+    });
+    let approximate = vec![300.0; fixture.mesh.vertex_count()];
+    let weights = vec![1.0; approximate.len()];
+    with_cx(|cx| {
+        let compare = |reference: &[f64], approximate: &[f64], weights: &[f64], config| {
+            compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                config,
+                reference,
+                approximate,
+                weights,
+            )
+        };
+        assert!(matches!(
+            compare(&approximate, &approximate, &weights, config),
+            Err(ConductionError::LinearSolveFailed { .. })
+        ));
+        let mut changed = approximate.clone();
+        changed[design.dofs().fixed()[0]] += 1.0;
+        assert!(matches!(
+            compare(&solved.temperature, &changed, &weights, config),
+            Err(ConductionError::Config { .. })
+        ));
+        assert!(matches!(
+            compare(&solved.temperature, &[], &weights, config),
+            Err(ConductionError::FieldLength { .. })
+        ));
+        let mut nonfinite = approximate.clone();
+        nonfinite[0] = f64::NAN;
+        assert!(matches!(
+            compare(&solved.temperature, &nonfinite, &weights, config),
+            Err(ConductionError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            compare(
+                &solved.temperature,
+                &approximate,
+                &weights,
+                LinearConfig {
+                    max_iterations: 0,
+                    ..config
+                }
+            ),
+            Err(ConductionError::Config { .. })
+        ));
+        assert!(matches!(
+            compare(
+                &solved.temperature,
+                &approximate,
+                &weights,
+                LinearConfig {
+                    max_iterations: 1,
+                    ..config
+                }
+            ),
+            Err(ConductionError::LinearSolveFailed { .. })
+        ));
+    });
+    support::with_cancelled_cx(|cx| {
+        assert!(matches!(
+            compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                config,
+                &solved.temperature,
+                &approximate,
+                &weights
+            ),
+            Err(ConductionError::Cancelled { .. })
+        ))
+    });
+}
+
+#[test]
+fn discrete_goal_comparison_refuses_nonsmooth_reference_and_material_extrapolation() {
+    use fs_conduction::{ConductionError, ConductivityTable};
+    let mut fixture = fixture(2);
+    fixture.material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(250.0, 1.0), (300.0, 3.0), (400.0, 9.0)]).unwrap(),
+    );
+    fixture.source = ScalarField::Uniform(0.0);
+    fixture.boundary = ThermalBoundaryBuilder::new(&fixture.mesh)
+        .remainder("cooled", ThermalBc::robin(30.0, 300.0).unwrap())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let uniform = vec![300.0; fixture.mesh.vertex_count()];
+    let weights = vec![1.0; uniform.len()];
+    with_cx(|cx| {
+        assert!(matches!(
+            compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                ladder_linear_config(),
+                &uniform,
+                &uniform,
+                &weights
+            ),
+            Err(ConductionError::Config { .. })
+        ));
+        assert!(matches!(
+            compare_discrete_goal(
+                cx,
+                fixture.problem(),
+                None,
+                ladder_linear_config(),
+                &uniform,
+                &vec![500.0; uniform.len()],
+                &weights
+            ),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
+    });
 }
 
 /// G1/G3: a sampled constant is linear but keeps its material validity span.

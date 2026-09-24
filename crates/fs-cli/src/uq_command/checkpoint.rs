@@ -3,7 +3,7 @@
 
 use super::{Failure, MAX_PRODUCT_SAMPLES, Result};
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_uq::{QmcConfig, QmcExecution, UqExecution, UqPlan};
+use fs_uq::{QmcConfig, QmcExecution, SobolExecution, UqExecution, UqPlan};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -53,6 +53,13 @@ pub(super) fn restore_qmc(
         .map_err(|error| failure(format!("{}: {error}", path.display())))
 }
 
+pub(super) fn restore_sobol(
+    path: &Path, plan: &UqPlan, identity: ContentHash,
+) -> Result<SobolExecution> {
+    SobolExecution::restore(plan, identity, &read(path)?)
+        .map_err(|error| failure(format!("{}: {error}", path.display())))
+}
+
 fn read(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path)
         .map_err(|error| failure(format!("cannot open {}: {error}", path.display())))?;
@@ -98,6 +105,11 @@ impl Output {
     }
 
     pub(super) fn save_qmc(&self, execution: &QmcExecution, identity: ContentHash) -> Result<()> {
+        let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
+        self.publish(&bytes)
+    }
+
+    pub(super) fn save_sobol(&self, execution: &SobolExecution, identity: ContentHash) -> Result<()> {
         let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
         self.publish(&bytes)
     }

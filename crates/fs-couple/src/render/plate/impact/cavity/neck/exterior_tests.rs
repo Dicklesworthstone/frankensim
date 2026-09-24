@@ -1,4 +1,5 @@
 use super::*;
+use crate::render::plate::impact::audio::ImpactSource;
 use super::super::super::super::{BodyPotential,ImpactBody,ImpactConfig,
     felt::{FeltPad,KelvinBranch},radiation::Pole,relaxation::InitialMemory,ImpactSubstepConfig};
 use crate::render::plate::impact::audio::ImpactSource;

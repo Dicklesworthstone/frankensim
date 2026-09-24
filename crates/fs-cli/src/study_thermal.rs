@@ -10,7 +10,7 @@ use std::time::Instant;
 use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 use fs_exec::CancelGate;
 use fs_ledger::{EdgeRole, FiveExplicits, Ledger, LedgerError, OpOutcome};
-use fs_marquee::study::{PlateWithHoles, StudyConfig, StudyRunner};
+use fs_marquee::study::{PlateWithHoles, StudyAdvance, StudyConfig, StudyRunner};
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_project::study::{StudySpec, parse_study_strict, print_study_sexpr};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionId};
@@ -24,7 +24,7 @@ pub const STUDY_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.study-run-receipt.v1"
 const RECEIPT_KIND: &str = "study-run-receipt";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 const DRIVER: &str = "normalized-thermal-study-v1";
-const NO_CLAIM: &str = "Normalized scalar Poisson compliance; fixed centers and circular hole radii. Estimated DWR and algebraic terms, no guaranteed error bound, elasticity, free-boundary topology, KKT or optimality claim. Memory is an admission estimate, not measured peak RSS. Cancellation is checked between bounded iterations, not inside CutFEM solves. The checker proves package structure only.";
+const NO_CLAIM: &str = "Normalized scalar Poisson compliance; fixed centers and circular hole radii. Estimated DWR and algebraic terms, no guaranteed error bound, elasticity, free-boundary topology, KKT or optimality claim. Memory is an admission estimate, not measured peak RSS. Cancellation and wall budgets are checked at numerical phase boundaries, not inside individual assembly, linear-solve or DWR kernels. The checker proves package structure only.";
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -336,6 +336,7 @@ fn drive(
     let mut runner = StudyRunner::new(design(&a.spec), a.config.clone())
         .map_err(|e| fail("cli-study-geometry", e.to_string()))?;
     let mut used_wall = 0.0;
+    let mut last_observed_clock = 0.0;
     let mut predecessor = None;
     if let Some(old) = prior {
         if old.value.str_field("study_id") != Some(a.id.to_hex().as_str()) {
@@ -356,36 +357,50 @@ fn drive(
             .f64_field("consumed_wall_s")
             .filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| fail("cli-study-resume-budget", "invalid retained wall charge"))?;
-        let mut replay_clock = 0.0;
+        let checkpoint = format!("study-{}", old.hash.to_hex());
         for _ in 0..count {
-            if gate.is_requested() {
-                return Err(Failure {
-                    code: "cli-study-cancelled",
-                    message: "cancelled while replaying retained prefix; no publication".into(),
-                    exit: exit::CANCELLED,
-                });
-            }
-            let now = clock();
-            if !now.is_finite() || now < replay_clock {
-                return Err(fail(
-                    "cli-study-clock",
-                    "replay clock must be finite and monotonic",
-                ));
-            }
-            replay_clock = now;
-            if now >= a.wall_s - used_wall {
-                return Err(Failure {
-                    code: "cli-study-resume-budget",
-                    message: format!(
-                        "wall budget exhausted during prefix replay; retained checkpoint: study-{}",
-                        old.hash.to_hex()
-                    ),
-                    exit: exit::BUDGET,
-                });
-            }
+            let mut stopped = None;
             runner
-                .advance()
-                .map_err(|e| fail("cli-study-replay", e.to_string()))?;
+                .advance_controlled(|| {
+                    if gate.is_requested() {
+                        stopped = Some(Failure {
+                            code: "cli-study-cancelled",
+                            message: format!("cancelled while replaying retained prefix; no publication; retained checkpoint: {checkpoint}"),
+                            exit: exit::CANCELLED,
+                        });
+                        return false;
+                    }
+                    let now = clock();
+                    if !now.is_finite() || now < last_observed_clock {
+                        stopped = Some(fail(
+                            "cli-study-clock",
+                            format!("replay clock must be finite and monotonic; retained checkpoint: {checkpoint}"),
+                        ));
+                        return false;
+                    }
+                    last_observed_clock = now;
+                    if gate.is_requested() {
+                        stopped = Some(Failure {
+                            code: "cli-study-cancelled",
+                            message: format!("cancelled while replaying retained prefix; no publication; retained checkpoint: {checkpoint}"),
+                            exit: exit::CANCELLED,
+                        });
+                        return false;
+                    }
+                    if now >= a.wall_s - used_wall {
+                        stopped = Some(Failure {
+                            code: "cli-study-resume-budget",
+                            message: format!("wall budget exhausted during prefix replay; retained checkpoint: {checkpoint}"),
+                            exit: exit::BUDGET,
+                        });
+                        return false;
+                    }
+                    true
+                })
+                .map_err(|e| fail("cli-study-replay", format!("{e}; retained checkpoint: {checkpoint}")))?;
+            if let Some(e) = stopped {
+                return Err(e);
+            }
         }
         if old.value.str_field("trace_hash") != Some(runner.report().trace_hash.as_str()) {
             return Err(fail(
@@ -439,15 +454,19 @@ fn drive(
         .expect("admitted budget")
         .min(a.config.steps);
     let mut previous_clock = 0.0;
-    let mut exhausted = charge(0, used_wall)?;
-    loop {
+    // A phase can be interrupted without completing an iteration. Meter IDs
+    // therefore identify observations, not iteration numbers.
+    let mut meter_ordinal = 0usize;
+    let mut exhausted = charge(meter_ordinal, used_wall)?;
+    let mut poll = || -> Result<(f64, Option<&'static str>)> {
         let now = clock();
-        if !now.is_finite() || now < previous_clock {
+        if !now.is_finite() || now < last_observed_clock {
             return Err(fail(
                 "cli-study-clock",
                 "study clock must be finite and monotonic",
             ));
         }
+        last_observed_clock = now;
         let delta = now - previous_clock;
         previous_clock = now;
         let next_wall = used_wall + delta;
@@ -458,12 +477,22 @@ fn drive(
             ));
         }
         used_wall = next_wall;
-        exhausted |= charge(runner.iterations().len() + 1, delta)?;
+        meter_ordinal += 1;
+        exhausted |= charge(meter_ordinal, delta)?;
+        let stop = if gate.is_requested() {
+            Some("cancelled")
+        } else if exhausted || used_wall >= a.wall_s {
+            Some("budget-exhausted")
+        } else {
+            None
+        };
+        Ok((used_wall, stop))
+    };
+    loop {
+        let (wall_s, stop) = poll()?;
         let n = runner.iterations().len();
-        let status = if gate.is_requested() {
-            "cancelled"
-        } else if exhausted {
-            "budget-exhausted"
+        let status = if let Some(reason) = stop {
+            reason
         } else if n == a.config.steps {
             "completed"
         } else if n >= limit || cap.is_some_and(|c| n - start_count >= c) {
@@ -471,17 +500,43 @@ fn drive(
         } else {
             "running"
         };
-        let out = persist(a, ledger, &runner, status, used_wall, predecessor)?;
+        let out = persist(a, ledger, &runner, status, wall_s, predecessor)?;
         predecessor = ContentHash::from_hex(out.pointer.trim_start_matches("study-"));
         if status != "running" {
             return Ok(out);
         }
-        runner.advance().map_err(|e| {
-            fail(
-                "cli-study-solve",
-                format!("{e}; last durable checkpoint: {}", out.pointer),
-            )
-        })?;
+        let mut stopped = None;
+        let mut polling_failure = None;
+        let advanced = runner
+            .advance_controlled(|| match poll() {
+                Ok((_, None)) => true,
+                Ok((wall, Some(reason))) => {
+                    stopped = Some((wall, reason));
+                    false
+                }
+                Err(e) => {
+                    polling_failure = Some(e);
+                    false
+                }
+            })
+            .map_err(|e| {
+                fail(
+                    "cli-study-solve",
+                    format!("{e}; last durable checkpoint: {}", out.pointer),
+                )
+            })?;
+        if let Some(mut e) = polling_failure {
+            let _ = write!(e.message, "; last durable checkpoint: {}", out.pointer);
+            return Err(e);
+        }
+        if advanced == StudyAdvance::Interrupted {
+            let (wall, reason) = stopped.ok_or_else(|| {
+                fail("cli-study-control", "interrupted study has no terminal reason")
+            })?;
+            // The runner retained its previous accepted state. Publish that
+            // state with the real terminal reason and charge, not a partial step.
+            return persist(a, ledger, &runner, reason, wall, predecessor);
+        }
     }
 }
 
@@ -1053,14 +1108,13 @@ mod tests {
         );
         assert_eq!(ledger.table_count("ops").unwrap(), 0);
         let gate = CancelGate::new_clock_free();
-        let ticks = Cell::new(0);
         let clock = || {
-            let n = ticks.get();
-            ticks.set(n + 1);
-            if n == 1 {
+            // Initial checkpoint plus the first accepted transition: request
+            // cancellation before any second-transition numerical work.
+            if ledger.table_count("ops").unwrap() >= 2 {
                 gate.request();
             }
-            n as f64
+            0.0
         };
         let cancelled = drive(&a, &ledger, None, &gate, &clock, None).unwrap();
         assert_eq!(cancelled.status, "cancelled");
@@ -1121,5 +1175,100 @@ mod tests {
             bad.to_str().unwrap(),
         ]);
         assert_ne!(refused.exit_code, exit::SUCCESS);
+    }
+
+    #[test]
+    fn g4_mid_step_deadline_retains_the_design_and_charges_work() {
+        let a = admit(&short_source(), false).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let ticks = Cell::new(0);
+        let clock = || {
+            let n = ticks.get();
+            ticks.set(n + 1);
+            if n < 3 { 0.0 } else { a.wall_s }
+        };
+        let out = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &clock,
+            None,
+        ).unwrap();
+        assert_eq!(out.status, "budget-exhausted");
+        assert_eq!(ticks.get(), 4, "deadline is checked after the state solve");
+        let saved = load(&ledger, &out.pointer).unwrap();
+        assert_eq!(integer(&saved.value, "iterations_completed").unwrap(), 0);
+        assert_eq!(saved.value.f64_field("consumed_wall_s"), Some(a.wall_s));
+        let initial = StudyRunner::new(design(&a.spec), a.config.clone()).unwrap().report();
+        assert_eq!(saved.value.str_field("trace_hash"), Some(initial.trace_hash.as_str()));
+        let package = linked(&ledger, &saved.value, "package", "study-package").unwrap();
+        let package = EvidencePackage::from_json(std::str::from_utf8(&package).unwrap()).unwrap();
+        assert!(package.declared_claims_unverified().is_empty());
+        assert_eq!(ledger.table_count("ops").unwrap(), 2);
+    }
+
+    #[test]
+    fn g4_mid_step_invalid_clocks_refuse_without_publishing_a_transition() {
+        for bad_time in [f64::NAN, f64::INFINITY, 0.5] {
+            let a = admit(&short_source(), false).unwrap();
+            let ledger = Ledger::open(":memory:").unwrap();
+            let ticks = Cell::new(0);
+            let clock = || {
+                let n = ticks.get();
+                ticks.set(n + 1);
+                match n {
+                    0 => 0.0,
+                    1 => 1.0,
+                    _ => bad_time,
+                }
+            };
+            let e = drive(
+                &a,
+                &ledger,
+                None,
+                &CancelGate::new_clock_free(),
+                &clock,
+                None,
+            ).unwrap_err();
+            assert_eq!(e.code, "cli-study-clock");
+            assert!(e.message.contains("last durable checkpoint: study-"));
+            assert_eq!(ledger.table_count("ops").unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn g4_resume_deadline_interrupts_replay_before_publication() {
+        let a = admit(&short_source(), false).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let partial = drive(
+            &a,
+            &ledger,
+            Some(1),
+            &CancelGate::new_clock_free(),
+            &|| 0.0,
+            None,
+        ).unwrap();
+        let checkpoint = load(&ledger, &partial.pointer).unwrap();
+        let before = ledger.table_count("ops").unwrap();
+        let ticks = Cell::new(0);
+        let clock = || {
+            let n = ticks.get();
+            ticks.set(n + 1);
+            if n == 0 { 0.0 } else { a.wall_s }
+        };
+        let e = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &clock,
+            Some(&checkpoint),
+        ).unwrap_err();
+        assert_eq!(e.code, "cli-study-resume-budget");
+        assert_eq!(e.exit, exit::BUDGET);
+        assert!(e.message.contains(&partial.pointer));
+        assert_eq!(ticks.get(), 2);
+        assert_eq!(ledger.table_count("ops").unwrap(), before);
     }
 }

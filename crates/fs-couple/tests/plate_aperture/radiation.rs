@@ -140,9 +140,9 @@ fn failed_physics_and_cancelled_audio_preserve_radiation_material_and_receiver_h
     render_pressure_pcm16(&mut actual,&mut pcm,&CancelGate::new(),&mut scratch,271).unwrap();
     let before=actual.system().aperture().state();let pending=actual.pending_controls().to_vec();
     let gate=CancelGate::new();gate.request();scratch.fill(-123.0);
-    assert_eq!(render_pressure_pcm16(&mut actual,&mut pcm,&gate,&mut scratch,SAMPLES as u64-271).unwrap(),ScheduledWavProgress::Cancelled{samples:0});
+    assert_eq!(render_pressure_pcm16(&mut actual,&mut pcm,&gate,&mut scratch,SAMPLES-271).unwrap(),ScheduledWavProgress::Cancelled{samples:0});
     assert_eq!(scratch,[-123.0;37]);assert_eq!(actual.system().aperture().state(),before);
     assert_eq!(actual.pending_controls(),pending);
-    render_pressure_pcm16(&mut actual,&mut pcm,&CancelGate::new(),&mut scratch,SAMPLES as u64-271).unwrap();
+    render_pressure_pcm16(&mut actual,&mut pcm,&CancelGate::new(),&mut scratch,SAMPLES-271).unwrap();
     assert_eq!(pcm.finish().unwrap().0.into_inner(),fs_couple::pcm_wav::encode_pcm16_wav(&uninterrupted,RATE,0.01).unwrap().0);
 }

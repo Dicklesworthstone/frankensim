@@ -13,6 +13,7 @@
 //! retained but derivative requests refuse rather than choosing a unique slope.
 
 mod nonlinear;
+pub(super) mod goal;
 
 use std::collections::BTreeSet;
 

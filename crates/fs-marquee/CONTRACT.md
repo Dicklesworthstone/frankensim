@@ -19,7 +19,7 @@ no-claim boundary.
 - `scope_summary()`: static diagnostic text for agents, ledgers, and reports.
 - `VERSION`: crate version for provenance stamping.
 - With `marquee`: `study::{PlateWithHoles, StudyConfig, StudyReport,
-  IterRecord, StudyRunner, ThermalSource, run_study, solve_and_grade_with_source}`.
+  IterRecord, StudyRunner, StudyAdvance, ThermalSource, run_study, solve_and_grade_with_source}`.
   `ThermalSource` declares a finite affine load, nonnegative on the unit plate
   and not identically zero. `StudyRunner::new_with_source` uses it in the state,
   compliance, DWR goal and every line-search trial, and binds it into the trace.
@@ -77,9 +77,22 @@ one accepted transition without mutating its previous state on a solver error.
 `design`, `iterations`, and `report` expose the retained state. The batch
 `run_study` delegates to this same runner. A caller can stop, meter or persist
 between transitions; each transition has one current-design solve and at most
-nine line-search solves (each grade also runs its DWR estimator). There is no
-explicit `Cx` polling inside a transition, so intra-solve cancellation latency
-remains a no-claim boundary.
+nine line-search solves (each grade also runs its DWR estimator).
+
+`advance_controlled` additionally accepts a continuation callback. It polls
+before assembly, between state-solve/goal/DWR phases, for each hole's gradient,
+between Armijo trials, and before committing a transition. A false callback
+returns `StudyAdvance::Interrupted` with the prior accepted design, trace and
+iteration count unchanged. `Advanced` and `Complete` distinguish a committed
+transition from an already-finished run. The ordinary `advance` delegates with
+an always-true callback and retains its existing boolean API.
+
+The thermal CLI uses these checks for cancellation and wall-budget enforcement,
+including during prefix replay. It retains the last accepted state with a
+cancelled or budget-exhausted terminal and the observed elapsed charge. Failed
+replay leaves the existing durable checkpoint untouched. No callback polls
+inside individual assembly, linear-solve or DWR kernels, and no intra-kernel
+cancellation-latency guarantee is claimed.
 
 ## Unsafe boundary
 
@@ -112,6 +125,13 @@ solver work starts, and execute the six marquee falsifiers:
    and N/2 checkpoint resumes to identical endpoint.
 6. `mq_011_falsifier_mutation_proof_monotonicity`: Sign-flipped ascent fails
    Armijo monotonicity check and is rejected.
+
+The `study::controlled_tests` unit tests cover pre-work interruption,
+interruption after the state solve, interruption at commit with a retained
+prefix, retry/replay equality, and completed-run behavior. The thermal CLI's
+`g4_mid_step_*` and `g4_resume_deadline_*` tests exercise deadline accounting,
+invalid clocks and interruption during replay. Test presence is not execution
+evidence; these additions were not run in the authoring environment.
 
 ## No-claim boundaries
 

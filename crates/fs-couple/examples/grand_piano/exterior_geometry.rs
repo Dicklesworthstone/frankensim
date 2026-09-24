@@ -4,7 +4,8 @@
 //! Multiple disjoint outward closed components are allowed. Self-intersection,
 //! component overlap and cavity accessibility remain input responsibilities.
 use super::{board_geometry::motion::MotionSurface, linear::Bank};
-use fs_bem::{helmholtz::{self, Formulation, Medium}, panel3d::SpherePanels};
+use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels,
+    radiation_policy::GeometryPolicy};
 use fs_math::c64::C64;
 use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU};
 
@@ -13,6 +14,10 @@ mod section_skin;
 
 #[path = "exterior_rigid.rs"]
 pub mod rigid;
+
+#[path = "exterior_receivers.rs"]
+mod receivers;
+pub use receivers::ReceiverSet;
 
 pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
@@ -26,6 +31,8 @@ pub struct Specification {
     pub origin_obj:[f64;3],
     pub offset_m:f64,
     pub receivers:Vec<[f64;3]>,
+    /// Explicit triangle-integrated close receivers; omission retains centroid observation.
+    pub near_field_receivers:bool,
     pub medium:Medium,
     pub band_hz:(f64,f64),
     pub frequencies:usize,
@@ -54,7 +61,7 @@ impl Specification {
                     if receivers.len()==2 {return Err("at most two finite-point receivers".into());}
                     receivers.push([number(f[1])?,number(f[2])?,number(f[3])?]);
                 }
-                "source"|"obj-scale-m"|"obj-origin"|"max-skin-offset-m"|"medium"|
+                "receiver-evaluation"|"source"|"obj-scale-m"|"obj-origin"|"max-skin-offset-m"|"medium"|
                 "band-hz"|"board-band-hz"|"fit-order"|"min-panels-per-wavelength"|"full-scale-pa"=>{
                     if fields.insert(f[0].into(),f[1..].iter().map(|s|(*s).to_owned()).collect()).is_some() {return Err(format!("duplicate acoustic row {}",f[0]));}
                 }
@@ -69,9 +76,15 @@ impl Specification {
         if source.len()<2 || !["estimated","mixed","published","measured"].contains(&source[0].as_str())
             || source[1..].iter().all(String::is_empty) {return Err("source requires authority and attribution".into());}
         let origin=get("obj-origin",3)?;let gas=get("medium",2)?;let band=get("band-hz",3)?;
-        let out=Self {source:source.join(","),scale_m:scalar("obj-scale-m")?,
+        let near_field_receivers=match fields.get("receiver-evaluation").map(Vec::as_slice) {
+            None=>false,
+            Some([value]) if value=="centroid"=>false,
+            Some([value]) if value=="near-field"=>true,
+            _=>return Err("receiver-evaluation must be centroid or near-field".into()),
+        };
+        let mut out=Self {source:source.join(","),scale_m:scalar("obj-scale-m")?,
             origin_obj:[number(&origin[0])?,number(&origin[1])?,number(&origin[2])?],
-            offset_m:scalar("max-skin-offset-m")?,receivers,
+            offset_m:scalar("max-skin-offset-m")?,receivers,near_field_receivers,
             medium:Medium {density:number(&gas[0])?,sound_speed:number(&gas[1])?},
             band_hz:(number(&band[0])?,number(&band[1])?),frequencies:band[2].parse().map_err(|_|"invalid frequency count")?,
             board_band_hz:scalar("board-band-hz")?,fit_order:get("fit-order",1)?[0].parse().map_err(|_|"invalid fit order")?,
@@ -86,6 +99,7 @@ impl Specification {
             || out.min_ppw<6. || out.full_scale_pa<=0. {
             return Err("invalid explicit exterior units, geometry, medium, frequency/fit or receiver budget".into());
         }
+        if near_field_receivers {out.source.push_str("; near-field triangle-integrated receivers, surface-distance propagation");}
         Ok(out)
     }
     pub fn omega(&self)->Vec<f64> {(0..self.frequencies).map(|i|
@@ -164,9 +178,13 @@ impl Boundary {
         self.weights=transformed;Ok(self)
     }
     pub fn sample(&self,spec:&Specification)->Result<Samples,String> {
-        self.sample_grid(&spec.omega(),&spec.receivers,spec.medium,spec.min_ppw)
+        self.sample_grid_mode(&spec.omega(),&spec.receivers,spec.medium,spec.min_ppw,spec.near_field_receivers)
     }
     fn sample_grid(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64)
+        ->Result<Samples,String> {
+        self.sample_grid_mode(omega,receivers,medium,min_ppw,false)
+    }
+    fn sample_grid_mode(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64,near:bool)
         ->Result<Samples,String> {
         let count=self.weights.len();let panels=self.surface.areas().len();
         if count==0 || count>super::linear::MAX_BOARD_MODES || panels>MAX_PANELS
@@ -179,36 +197,33 @@ impl Boundary {
             || self.weights.iter().any(|r|r.len()!=panels || r.iter().any(|v|!v.is_finite())) {
             return Err("invalid complete exterior response grid, basis or medium".into());
         }
-        let mut delays_s=Vec::new();
-        for &point in receivers {
-            let delay=(norm(sub(point,self.center))-self.radius)/medium.sound_speed;
-            // This is conservative: some true exterior close points refuse.
-            if point.iter().any(|v|!v.is_finite()) || !delay.is_finite()
-                || delay<2./f64::from(RATE) || delay>0.5 {
-                return Err("receiver must be outside the enclosing sphere, with 2 samples to 0.5 seconds of guaranteed propagation".into());
-            }
-            delays_s.push(delay);
-        }
+        let plan=ReceiverSet::new(self,receivers,medium,near)?;
+        // Select from actual closed-component spectra, not the radius of the
+        // empty space between the soundboard and disjoint rigid scatterers.
+        let policy=GeometryPolicy::new(&self.surface).map_err(|e|e.to_string())?;
+        let delays_s=plan.delays_s().to_vec();
         let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
         let mut minimum_ppw=f64::INFINITY;let mut maximum_condition_lower_bound=0.0_f64;
         for &w in omega {
             let k=w/medium.sound_speed;
+            let evaluation=plan.prepare(k)?;
             let fields:Vec<Vec<C64>>=self.weights.iter().map(|r|r.iter().map(|b|C64::new(0.,b/w)).collect()).collect();
             let refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
-            let formulation=if k*self.radius<0.5 {Formulation::PlainCbie}else{Formulation::BurtonMiller};
-            let solutions=helmholtz::solve_radiation_batch(&self.surface,k,medium,&refs,formulation)
-                .map_err(|e|format!("exterior solve at {} Hz: {e}",w/TAU))?;
+            let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
+            let solutions=policy.solve_batch(k,medium,&refs)
+                .map_err(|e|format!("exterior solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
             for (input,solution) in solutions.iter().enumerate() {
                 if !solution.panels_per_wavelength.is_finite() || solution.panels_per_wavelength<min_ppw
                     || !solution.condition_lower_bound.is_finite()
                     || !solution.radiated_power_roundoff_interval.1.is_finite()
                     || solution.radiated_power_roundoff_interval.1<0. {
-                    return Err(format!("exterior solve at {} Hz is under-resolved or has inadmissible radiation power/conditioning",w/TAU));
+                    return Err(format!("exterior solve at {} Hz ({formulation:?}) is under-resolved or has inadmissible radiation power/conditioning: ppw={}, condition lower bound={}, power interval={:?}",
+                        w/TAU,solution.panels_per_wavelength,solution.condition_lower_bound,
+                        solution.radiated_power_roundoff_interval));
                 }
                 minimum_ppw=minimum_ppw.min(solution.panels_per_wavelength);
                 maximum_condition_lower_bound=maximum_condition_lower_bound.max(solution.condition_lower_bound);
-                let pressure=helmholtz::exterior_pressure_at_points(&self.surface,solution,medium,receivers)
-                    .map_err(|e|e.to_string())?;
+                let pressure=evaluation.pressure(solution)?;
                 for (channel,p) in pressure.into_iter().enumerate() {
                     if !p.re.is_finite() || !p.im.is_finite() {return Err("exterior receiver pressure is nonfinite".into());}
                     values[channel][input].push(p);
@@ -343,3 +358,7 @@ pub(crate) mod tests {
         assert!(b.sample_grid(&[TAU*100.],&[[0.05,0.05,0.]],spec.medium,6.).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="near_receiver_tests.rs"]
+mod near_receiver_tests;

@@ -993,6 +993,20 @@ authority.
   independent primal goal difference and check scaling, resolved/zero goals,
   invalid data, exhausted iterations and cancellation. They do not establish
   continuum effectivity, a certified bound, or an adaptive CLI solve loop.
+  `adjoint::compare_discrete_goal` additionally compares two full fields under
+  the production linear or nonlinear operator, including heterogeneous k(T)
+  and declared matching-P1 contact. It checks the reference primal residual
+  and prescribed temperatures, then reuses the PCG or actual nonsymmetric
+  K'(T) transpose solve. Its signed contributions are
+  `lambda_i [R(T_reference)-R(T_approximate)]_i`; its separately retained
+  `linearization_remainder` is the measured goal change minus their sum.
+  This includes finite nonlinear truncation and remaining dual arithmetic
+  error, so a consumer must account for its magnitude. It is an observation
+  between supplied discrete fields, never a bound on the continuum solution.
+  A kink at the reference, extrapolation, unverified reference, changed fixed
+  data, failed Krylov solve or cancellation refuses. The existing adjoint
+  target checks linear equivalence/unit scaling, quadratic remainder scaling
+  for a genuinely nonlinear material, and these refusal boundaries.
 - The fin case is a MODEL comparison against the 1-D fin equation, not a
   discretization check. Its 2% envelope carries the fin model's own error; the
   Biot number that bounds it is computed and printed by the test.
@@ -1005,7 +1019,7 @@ authority.
   normalized by the patch's analytic solid angle. The 1% conductance envelope
   carries faceted-surface geometry error; the separate 0.1% L2 envelope is the
   discretization claim and must shrink like `h²`.
-- The adjoint hook covers the LINEAR case only, and refuses a
+- The conductivity-design parameter adjoint covers the LINEAR case only, and refuses a
   temperature-dependent material rather than silently linearizing. The
   manufactured P1 dual uses `z(s) = s - s^4/4`, `-Delta z = 3s^2`, homogeneous
   Dirichlet data at `s=0`, and a natural boundary elsewhere. Its L2 ladder and
@@ -1036,7 +1050,9 @@ authority.
   golden and is labelled as such.
 - **Cross-ISA determinism.** No G5 audit has been run on a second ISA, so the
   class stays `DeterministicPerIsa`.
-- **Nonlinear adjoint.** Refused rather than approximated.
+- **Nonlinear conductivity-design adjoint.** Still refused. The separate
+  Robin/load response and two-field goal comparison use the actual k(T)
+  Jacobian; they do not supply conductivity-parameter or shape derivatives.
 - **Parallel assembly.** The assembly is single-threaded. The determinism
   argument above states what a parallel implementation would have to preserve
   (staging in canonical element order), but no parallel path exists to test.

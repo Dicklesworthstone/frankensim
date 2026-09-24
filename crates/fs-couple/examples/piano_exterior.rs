@@ -23,22 +23,23 @@
 #[path="grand_piano/radiation_fit.rs"] mod radiation_fit;
 #[path="grand_piano/exterior_playback.rs"] mod playback;
 #[path="grand_piano/section_skin_cli.rs"] mod section_skin;
-use exterior_geometry::{Boundary,Specification,RATE};
+use exterior_geometry::{Boundary,Specification,RATE,rigid::Assembly};
 use std::{fmt::Write as _,io::{Read,Write}};
 
 const USAGE:&str="piano_exterior export-skin BOARD.fsb|BOARD.fss SCALE.csv|steinway-d ACOUSTICS.fspe OUTPUT.obj [--continuous-thickness]
+piano_exterior export-rigid ASSEMBLY.fspr OUTPUT.obj
 piano_exterior admittance BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe DRIVE_KEY OUTPUT.csv
 piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.csv
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
-    [--modes 1..512] [--substeps 1..16]
+    [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated|pads.fspd]
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
 These playback options apply to both render and render-loaded.
-response and admittance also accept --modes/--substeps after the output path,
+response and admittance also accept --modes/--substeps and --rigid-assembly after the output path,
 so harmonic comparisons can use the SAME retained string/board system.
 admittance alone accepts --lossless-structure to remove the existing wood and
 string material damping for a declared conservative-structure comparison.
@@ -56,6 +57,15 @@ Neither variant invents a cabinet/lid or changes the structural cards.
 export-skin (optionally --continuous-thickness) writes that equilibrium surface as OBJ,
 without a BEM solve; it can exceed the renderer's separate 2048-panel limit.
 The 1 nm height grid and volume discrepancy are reported. See SECTION_SKIN.md.
+
+--rigid-assembly appends selected, posed OBJ lid/cabinet parts to EITHER native
+board-skin variant or a supplied BODY.obj. Exact source labels, source units,
+SI hinge axes/pivots and translations are explicit. Rigid parts join the SAME
+BEM with zero source velocity; pressure AND radiation reaction reflect the pose.
+Assets load once before modal preparation. No auto-remeshing, material guesses,
+missing-file fallback, dynamic hinges or extra board mass. The combined scene
+still obeys the 2048-panel budget. export-rigid writes the posed SI parts for
+inspection without a board eigensolve or BEM. See RIGID_ASSEMBLY.md.
 
 Use one explicitly supplied closed outward acoustic skin, including both sides
 and edges of a finite soundboard. Label every part as moving or rigid in the
@@ -134,6 +144,7 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     options:&playback::Options,controls:playback::Controls,continuous:bool)->Result<Scene,String> {
     options.validate()?;
     if obj.is_none() {spec.require_board_skin()?;}
+    let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let board=if crowned_board::is_crowned(board_text) {
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
@@ -141,6 +152,11 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let piano=controls.instrument(courses,&board.modes,options)?;
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
+    let bare=if let Some(rigid)=&rigid {
+        let combined=rigid.attach(bare)?;
+        spec.source.push_str(&format!("; {}",rigid.report()));
+        combined
+    } else {bare};
     let boundary=bare.loaded(&piano.bank)?;
     spec.source.push_str(&format!("; {description}"));
     Ok(Scene {piano,board,boundary,spec})
@@ -185,6 +201,7 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     drive:u8,options:&playback::Options,damping:bool,continuous:bool)->Result<String,String> {
     options.validate()?;
     if obj.is_none() {spec.require_board_skin()?;}
+    let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
     let board=if crowned_board::is_crowned(board_text) {
@@ -194,6 +211,9 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
         0.45*f64::from(RATE),options.modes,damping)?;
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
         board.motion.as_ref().ok_or("missing harmonic surface motion")?,continuous)?;
+    let (bare,description)=if let Some(rigid)=&rigid {
+        (rigid.attach(bare)?,format!("{description}; {}",rigid.report()))
+    } else {(bare,description)};
     let boundary=bare.loaded(model.bank())?;
     let csv=exterior_loading::sweep(&boundary,&model,spec,drive)?;
     Ok(format!("# acoustic geometry: {description}\n# structure: {}\n# structural loss: {}; radiation loading remains in the coupled columns\n# board modes={}, retained string coordinates={}, omitted high-frequency duplex mode sets={}\n{}",
@@ -219,6 +239,13 @@ fn run(args:&[String])->Result<(),String> {
     match args {
         []=>{println!("{USAGE}");Ok(())},
         [help] if help=="--help" || help=="-h"=>{println!("{USAGE}");Ok(())},
+        [command,input,output] if command=="export-rigid"=>{
+            if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
+            let assembly=Assembly::load(input)?;
+            publish(output,assembly.obj().as_bytes())?;
+            println!("Written {output}: {} Geometry only, no BEM or render certificate.",assembly.report());
+            Ok(())
+        },
         [command,board,strings,spec,output,tail @ ..] if command=="export-skin"=>{
             let continuous=match tail {
                 []=>false,[flag] if flag=="--continuous-thickness"=>true,
@@ -367,3 +394,7 @@ mod radiation_render_tests;
 #[cfg(test)]
 #[path="grand_piano/lossless_admittance_tests.rs"]
 mod lossless_admittance_tests;
+
+#[cfg(test)]
+#[path="grand_piano/rigid_assembly_render_tests.rs"]
+mod rigid_assembly_render_tests;

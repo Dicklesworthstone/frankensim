@@ -83,19 +83,25 @@ fn load(bytes:&[u8],block:usize)->Result<Loaded,String> {
         let plate=a.plate_reduction().expect("plate file retains its specimen");
         let observation=match p.renderer().observation() {
             ApertureObservation::Inlet=>"inlet",
-            ApertureObservation::TubeTerminal|ApertureObservation::NetworkNode(1)=>"terminal",
-            ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {node:1,..}=>"baffled-outlet",
-            _=>unreachable!("file owns one section and its physical outlet"),
+            ApertureObservation::TubeTerminal=>"terminal",
+            ApertureObservation::NetworkNode(node)=>match p.renderer().system() {
+                CoupledAperture::Network(n) if i.duct_sections==1 && matches!(n.spec().nodes[node],
+                    fs_couple::bernoulli_aperture::network::NetworkNode::Termination {..}
+                    | fs_couple::bernoulli_aperture::network::NetworkNode::Impedance {..}
+                    | fs_couple::bernoulli_aperture::network::NetworkNode::Relaxation {..})=>"terminal",
+                _=>"network-node",
+            },
+            ApertureObservation::TubeBaffled(_)|ApertureObservation::NetworkBaffled {..}=>"baffled-outlet",
         };
-        let receiver_json=outlet_provenance(p.renderer(),i.radiation_load);
+        let receiver_json=format!("{}{}",outlet_provenance(p.renderer(),i.radiation_load),super::duct_metadata::provenance(&p));
         let scope=if observation!="baffled-outlet" { "internal pressure, not an exterior microphone" }
             else if i.radiation_load.is_some() { "exterior baffled-outlet pressure with compact passive radiation feedback; not broadband matched radiation or measured calibration" }
             else { "one-way exterior baffled-outlet pressure; no matched radiation load or measured-instrument claim" };
         let requested=match p.renderer().system() {
             CoupledAperture::Tube(t)=>t.spec().length_m,
-            CoupledAperture::Network(n)=>n.spec().sections[0].length_m,
+            CoupledAperture::Network(n)=>n.spec().sections.iter().map(|s|s.length_m).sum(),
         };
-        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; lossless tube interior; {scope}\"{receiver_json}}}",
+        let source_json=format!("\"plate_valve_input\":{{\"schema\":\"{PLATE_VALVE_PERFORMANCE_SCHEMA}\",\"blake3\":\"{}\",\"nodes\":{},\"triangles\":{},\"sections\":{},\"memory_branches\":{},\"compiled_controls\":{},\"pressure_point\":\"{observation}\",\"requested_tube_length_m\":{:e},\"represented_tube_length_m\":{:e},\"effective_mass_kg\":{:e},\"stiffness_n_m\":{:e},\"pressure_area_m2\":{:e},\"model_scope\":\"one linear plate mode; spatial lay and supplied material history; lossless propagating sections with explicit local loads; {scope}\"{receiver_json}}}",
             i.input_hash.to_hex(),i.nodes,i.triangles,i.sections,i.memory_branches,i.compiled_controls,
             requested,i.represented_tube_length_m,plate.mass_kg(),plate.stiffness_n_m(),plate.pressure_area_m2());
         Ok(Loaded{source:Box::new(p.into_renderer()),rate:i.sample_rate_hz,samples:i.samples,
