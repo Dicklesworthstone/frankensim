@@ -15,6 +15,9 @@
 use super::{CavityCoupling,ImpactError,ModalAcousticState,invalid};
 use fs_exec::CancelGate;
 
+/// Separate interior neck impedance from a coupled exterior pressure field.
+pub mod exterior;
+
 /// Physical opening and its averaged pressure-basis values, in cavity order.
 #[derive(Debug,Clone)]
 pub struct CavityNeck {
@@ -35,6 +38,9 @@ pub struct CavityNeck {
 
 #[derive(Debug,Clone)]
 pub(super) struct CompiledNeck {
+    // True only when the supplied inertia/resistance explicitly omit exterior
+    // radiation. Ordinary effective-length necks keep their original meaning.
+    pub exterior_load:bool,
     pub area_m2:f64,
     pub effective_length_m:f64,
     pub coordinate:usize,
@@ -135,7 +141,7 @@ impl CavityCoupling {
             if !compactness.is_finite() || compactness>0.3 {
                 return Err(invalid("neck is outside the declared compact acoustic chart; use a distributed duct"));
             }
-            additions.push(CompiledNeck {area_m2:neck.area_m2,effective_length_m:neck.effective_length_m,
+            additions.push(CompiledNeck {exterior_load:false,area_m2:neck.area_m2,effective_length_m:neck.effective_length_m,
                 coordinate:self.total+index,volume_weight:weight,
                 drag_per_s:drag,resistance:neck.resistance_pa_s_m3,initial,
                 fixed_wall_omega:stiffness.sqrt(),averages:neck.pressure_shape_averages});
@@ -176,7 +182,7 @@ impl CavityCoupling {
             return Err(invalid("neck observation overflow"));
         }
         Ok(NeckObservation {coordinate:neck.coordinate,displaced_volume_m3:volume,
-            volume_flow_m3_s:flow,driving_pressure_pa,resistive_pressure_drop_pa:drop,
-            kinetic_energy_j:energy,dissipated_power_w:power})
+            volume_flow_m3_s:flow,driving_pressure_pa:driving_pressure_pa,
+            resistive_pressure_drop_pa:drop,kinetic_energy_j:energy,dissipated_power_w:power})
     }
 }

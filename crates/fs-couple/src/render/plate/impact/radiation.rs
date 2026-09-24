@@ -138,6 +138,28 @@ impl ImpactSystem {
         self.radiation=Some(Memory {base_dim,omega,rates:model.poles.iter().map(|p|2.*p.zeta*p.omega).collect()});
         Ok(self)
     }
+    /// Endpoint generalized force exerted ON one original coordinate by the
+    /// attached exterior load [N/sqrt(kg)]. This includes signed cross-source
+    /// reaction. It is not an external drive, receiver pressure or time-averaged
+    /// dissipation; the load's work is already internal to the joint energy law.
+    ///
+    /// Read the actual skew-interconnection coefficients and the load's canonical
+    /// momenta. This also works when hereditary material was appended after air:
+    /// no tail-position, fitted end correction or second force model is assumed.
+    /// With no radiation attached, the reaction is exactly zero.
+    pub fn radiation_force(&self, mode:usize)->Result<f64,ImpactError> {
+        if mode>=self.modes {return Err(invalid("unknown radiation force coordinate"));}
+        let Some(air)=&self.radiation else {return Ok(0.0);};
+        let dim=self.system.state_dim();let (j,_,_)=self.system.structure();
+        let mut force=0.0;
+        for pole in 0..air.omega.len() {
+            let momentum=air.base_dim+2*pole+1;
+            force+=j[(2*mode+1)*dim+momentum]*self.x[momentum];
+        }
+        if !force.is_finite() {return Err(invalid("nonfinite exterior radiation reaction"));}
+        Ok(force)
+    }
+
     pub fn radiation_observation(&self)->Option<RadiationObservation> {
         self.radiation.as_ref().map(|air|air.observe(&self.x))
     }
