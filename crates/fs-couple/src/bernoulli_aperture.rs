@@ -78,3 +78,6 @@ mod tests {
         assert!(u1 > 0.0);
     }
 }
+
+/// Geometry-derived distributed viscous and thermal wall losses.
+pub mod viscothermal;
