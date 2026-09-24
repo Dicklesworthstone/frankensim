@@ -8,6 +8,9 @@
 //! small motions about the supplied geometry, lumped centroidal inertia.
 //! No shear deformation, glue slip, stress stiffening or preload equilibrium.
 
+/// Tapered round-beam flexure with consistent rotary inertia.
+pub mod beam;
+
 use super::{ShellMesh, ShellModel, ShellSupport, assemble_shell_sections};
 use crate::{PlateError, PlateSection};
 use fs_sparse::{Coo, Csr};
