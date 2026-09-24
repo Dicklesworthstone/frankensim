@@ -1,6 +1,7 @@
 //! Declared two-head drum geometry/materials, lowered through existing owners.
 //! No authored resonances, retuned samples, implicit material defaults or new FEM.
 use std::io::Read;
+use fs_plate::shell::head::TensionVariation;
 use super::{Error, ModePair, TensionedDisk, TensionedDiskSpec, mesh_budget};
 
 pub const HEADER: &str = "frankensim-drum-spec-v1";
@@ -23,6 +24,8 @@ pub struct Spec {
     pub outer_radius_m: f64,
     /// Batter then resonant head; both use the same geometric mesh.
     pub heads: [Head; 2],
+    /// Equilibrated installed tensor variations; zero preserves uniform heads.
+    pub tension_variation: [TensionVariation; 2],
     pub radial_intervals: usize,
     pub azimuths: usize,
     pub band_hz: [f64; 2],
@@ -34,6 +37,7 @@ impl Spec {
             density_kg_m3: 1390.0, tension_n_m: 3000.0, damping_ratio: 0.001 };
         Self { radius_m: 0.1778-0.0075, depth_m: 0.1651, outer_radius_m: 0.1778,
             heads: [batter, Head { thickness_m: 0.0000762, tension_n_m: 1500.0, ..batter }],
+            tension_variation: [TensionVariation::default(); 2],
             radial_intervals: 5, azimuths: 32, band_hz: [80.0, 500.0] }
     }
     pub fn validate(self) -> Result<(), Error> {
@@ -47,6 +51,7 @@ impl Spec {
             || !(std::f64::consts::TAU*self.band_hz[1]).powi(2).is_finite() {
             return Err("drum needs 1..32 radial intervals, 8..128 azimuths and a finite increasing nonnegative frequency window".into());
         }
+        for field in self.tension_variation { field.validate()?; }
         for head in self.heads {
             if [head.thickness_m,head.young_pa,head.poisson,head.density_kg_m3,
                 head.tension_n_m,head.damping_ratio].iter().any(|v| !v.is_finite())
@@ -84,10 +89,10 @@ impl Spec {
     pub fn head(self, index: usize) -> Result<TensionedDisk, Error> {
         self.validate()?;
         let h = self.heads.get(index).ok_or("head index must be batter or resonant")?;
-        Ok(TensionedDisk::new(TensionedDiskSpec { radius_m: self.radius_m,
+        Ok(TensionedDisk::new_with_tension_variation(TensionedDiskSpec { radius_m: self.radius_m,
             thickness_m: h.thickness_m, young_pa: h.young_pa, poisson: h.poisson,
             density_kg_m3: h.density_kg_m3, tension_n_m: h.tension_n_m,
-            radial_intervals: self.radial_intervals, azimuths: self.azimuths },mesh_budget())?)
+            radial_intervals: self.radial_intervals, azimuths: self.azimuths },self.tension_variation[index],mesh_budget())?)
     }
     pub fn prepare(self, dt_s: f64, audio: bool) -> Result<(Vec<TensionedDisk>,Vec<Vec<ModePair>>),Error> {
         self.admit_clock(dt_s,audio)?;
@@ -96,6 +101,10 @@ impl Spec {
         let pi = std::f64::consts::PI;
         for i in 0..2 {
             let film = self.head(i)?;
+            if !self.tension_variation[i].is_zero() {
+                eprintln!("head {i}: base tension {} N/m, equilibrated tensor variation {:?}; fixed rim, no inferred lug forces or measured-map claim",
+                    self.heads[i].tension_n_m,self.tension_variation[i]);
+            }
             let pairs = fs_modal::slice_window(&film.model.k,&film.model.m,
                 ((2.0*pi*self.band_hz[0]).powi(2),(2.0*pi*self.band_hz[1]).powi(2)),
                 &fs_plate::SliceOptions::default())?.modes;
@@ -112,11 +121,14 @@ impl Spec {
         std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;
         Self::read(&text)
     }
-    /// All five records are mandatory; order is free and comments start with #.
+    /// Geometry, both heads, mesh and band are mandatory. Optional per-head
+    /// tension_variation rows add a physical equilibrated tensor, not pitches.
+    /// Order is free and comments start with #.
     pub fn read(text: &str) -> Result<Self, Error> {
         if text.len()>MAX_BYTES { return Err("drum specification exceeds 64 KiB".into()); }
         let (mut header,mut geometry,mut mesh,mut band) = (false,None,None,None);
         let mut heads = [None,None];
+        let mut variations = [None,None];
         for (number,raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
@@ -126,7 +138,7 @@ impl Spec {
                 header=true; continue;
             }
             let fields: Vec<_> = row.split(',').map(str::trim).collect();
-            let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3,
+            let count = match fields[0] { "geometry"=>4, "head"=>8, "mesh"|"band_hz"=>3, "tension_variation"=>9,
                 _=>return Err(error("unknown record")) };
             if fields.len()!=count { return Err(error("wrong number of fields")); }
             let value = |i: usize| -> Result<f64,Error> {
@@ -143,6 +155,12 @@ impl Spec {
                     if heads[i].is_some() { return Err(error("duplicate head")); }
                     heads[i]=Some(Head {thickness_m:value(2)?,young_pa:value(3)?,poisson:value(4)?,
                         density_kg_m3:value(5)?,tension_n_m:value(6)?,damping_ratio:value(7)?});
+                }
+                "tension_variation" => {
+                    let i=match fields[1] {"batter"=>0,"resonant"=>1,_=>return Err(error("unknown tension-variation head"))};
+                    if variations[i].is_some() { return Err(error("duplicate head tension variation")); }
+                    variations[i]=Some(TensionVariation {constant_n_m:[value(2)?,value(3)?,value(4)?],
+                        gradient_n_m2:[value(5)?,value(6)?,value(7)?,value(8)?]});
                 }
                 "mesh" => {
                     if mesh.is_some() { return Err(error("duplicate mesh")); }
@@ -161,6 +179,7 @@ impl Spec {
         let [radial_intervals,azimuths]=mesh.ok_or("missing drum mesh")?;
         let result=Self {radius_m,depth_m,outer_radius_m,radial_intervals,azimuths,
             band_hz:band.ok_or("missing head frequency window")?,
+            tension_variation:variations.map(Option::unwrap_or_default),
             heads:[heads[0].ok_or("missing batter head")?,heads[1].ok_or("missing resonant head")?]};
         result.validate()?; Ok(result)
     }
@@ -186,3 +205,7 @@ pub fn admit_command(path: Option<&str>, command: &str) -> Result<(),Error> {
 #[cfg(test)]
 #[path = "drum_spec_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="tension_render_tests.rs"]
+mod tension_tests;

@@ -68,8 +68,8 @@ means zero declared head drag, not fallback damping. The batter and resonant
 head can have different thicknesses, materials, tensions and losses.
 
 `mesh` gives shared radial intervals and azimuthal divisions. `band_hz` gives
-the explicit retained eigenfrequency window. Every record is mandatory, each
-head appears exactly once, record order is free, and `#` starts a comment.
+the explicit retained eigenfrequency window. The five base records are mandatory;
+each head appears exactly once. Record order is free, and `#` starts a comment.
 Unknown records, duplicates, missing values, nonfinite parameters and invalid
 material domains refuse. Input reads are bounded to 64 KiB. Constitutive
 validation remains with the existing section owner.
@@ -85,9 +85,10 @@ are CSV-only. These checks do not establish modal convergence or full-band sound
 
 ## Scope and verification
 
-This remains a homogeneous isotropic two-film model with constant installed
-tensions and a rigid cylindrical shell/rim. Elastic shell motion, tuning-lug
-nonuniformity, layered/coated-head identification and measured damping are not
+This remains a homogeneous isotropic two-film material model with uniform
+installed tension by default, optional equilibrated spatial tensor variation,
+and a rigid cylindrical shell/rim. Elastic shell motion, individual tuning-lug
+mechanics, layered/coated-head identification and measured damping are not
 created by importing a file. The gas properties, distributed-air basis limits,
 striker, tip contact and snare properties remain the existing declared inputs.
 Exterior radiation is the existing one-way, undeformed-boundary calculation;
@@ -107,3 +108,11 @@ cargo test --release -p fs-couple --example percussion -- --test-threads=1
 A successful import is neither a measured-specimen certificate nor a real-time
 performance claim. It provides the physical parameter path needed for those
 subsequent comparisons without editing the solver or the example's Rust source.
+
+## Spatial installed tension
+
+Optional per-head `tension_variation` records now supply equilibrated affine
+tensor prestress to the original head pencil before eigenanalysis. See
+[TENSION.md](TENSION.md) for the SI law, complete example, tensile-domain checks
+and composition with contact, cavity, nonlinear heads and pressure rendering.
+Omitted or all-zero variations preserve the existing uniform-tension image.

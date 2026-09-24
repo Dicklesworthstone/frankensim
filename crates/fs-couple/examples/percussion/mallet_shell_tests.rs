@@ -11,7 +11,8 @@ fn specimen()->specimen::Specimen {let mut s=specimen::Specimen::reference();s.a
 fn first()->Stroke{Stroke{speed_m_s:0.5,position_m:Some([0.06,0.01])}}
 fn second()->Stroke{Stroke{speed_m_s:0.3,position_m:Some([-0.05,0.02])}}
 fn inner(m:&Mechanics)->&ImpactSystem {
-    match m {Mechanics::Reference(s)|Mechanics::Nonlinear(s)|Mechanics::Substepped(s)=>s,
+    match m {Mechanics::Reference(s)=>s, Mechanics::Nonlinear(s)=>s,
+        Mechanics::Substepped(s)=>s,
         Mechanics::Driven{inner:s,..}=>inner(s),Mechanics::Prepared(_)=>panic!("felt-capable image required")}
 }
 fn build(selection:&Selection,audio:bool)->Experiment {
