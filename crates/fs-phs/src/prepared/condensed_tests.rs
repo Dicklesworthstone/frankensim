@@ -1,0 +1,162 @@
+use super::*;
+use crate::{PortHamiltonian, StepWorkspace, Storage};
+use super::super::dissipation::Dissipation;
+
+fn full(base:&[f64],u:&[f64],v:&[f64])->Vec<f64> {
+    let n=u.len();(0..n*n).map(|a|base[a]+u[a/n]*v[a%n]).collect()
+}
+#[test]
+fn bordered_rank_one_solve_matches_full_lu_with_permuted_noncontiguous_pairs() {
+    for count in 1..=12 {
+        let n=3+2*count; let pairs:Vec<_>=(0..count).map(|p|[n-1-p,1+p]).collect();
+        let mut plan=Condensation::new(n,&pairs).unwrap();
+        assert_eq!(plan.dimension(),4);
+        for seed in 0..8 {
+            let mut base=vec![0.0;n*n];
+            for row in 0..n { for col in 0..n {
+                if plan.owner[row]==usize::MAX || plan.owner[col]==usize::MAX
+                    || plan.owner[row]==plan.owner[col] {
+                    base[row*n+col]=if row==col {3.0} else {0.04*((row*7+col*11+seed)%13) as f64-0.24};
+                }
+            }}
+            for i in 0..n { plan.left[i]=0.1*(i as f64-2.0);plan.right[i]=0.03*((i+seed)%7) as f64-0.07; }
+            let matrix=full(&base,&plan.left,&plan.right);
+            let rhs:Vec<_>=(0..n).map(|i|0.2*(i as f64+1.0)).collect();
+            let (mut expected,mut actual)=(vec![0.0;n],vec![0.0;n]);
+            LuWorkspace::new(n).unwrap().solve_into(&matrix,&rhs,&mut expected).unwrap();
+            assert!(plan.solve(&base,&rhs,&mut actual,&mut ||Ok(())).unwrap());
+            for (a,b) in actual.iter().zip(expected) {assert!((a-b).abs()<1e-11);}
+        }
+    }
+    // Full uncorrected base is singular, but the corrected matrix is not.
+    // Eliminating a scalar border does not need Sherman--Morrison's base inverse.
+    let mut plan=Condensation::new(3,&[[1,2]]).unwrap();
+    plan.left[0]=1.0;plan.right[0]=2.0;
+    let mut answer=[0.0;3];
+    assert!(plan.solve(&[0.,0.,0.,0.,1.,0.,0.,0.,1.],&[4.,3.,5.],&mut answer,&mut ||Ok(())).unwrap());
+    assert_eq!(answer,[2.,3.,5.]);
+}
+
+#[test]
+fn unsuited_structure_and_singular_leaves_never_publish_an_approximation() {
+    let mut plan=Condensation::new(5,&[[1,2],[3,4]]).unwrap();
+    let mut base=vec![0.0;25];for i in 0..5 {base[i*5+i]=1.0;}
+    let mut out=[17.;5];
+    // Even the smallest subnormal coefficient is a real coupling.
+    base[1*5+3]=f64::from_bits(1);
+    assert!(!plan.solve(&base,&[1.;5],&mut out,&mut ||Ok(())).unwrap());assert_eq!(out,[17.;5]);
+    base[1*5+3]=0.;base[1*5+1]=0.;
+    assert!(!plan.solve(&base,&[1.;5],&mut out,&mut ||Ok(())).unwrap());assert_eq!(out,[17.;5]);
+    base[1*5+1]=1.;let mut polls=0;
+    assert_eq!(plan.solve(&base,&[1.;5],&mut out,&mut ||{polls+=1;if polls==4 {Err(PreparedStepError::Cancelled)}else{Ok(())}}).unwrap_err(),PreparedStepError::Cancelled);
+    assert_eq!(out,[17.;5]);
+    assert!(plan.solve(&base,&[1.;5],&mut out,&mut ||Ok(())).unwrap());assert_eq!(out,[1.;5]);
+    for pairs in [vec![[1,1]],vec![[1,5]],vec![[1,2],[2,3]]] {assert!(Condensation::new(5,&pairs).is_err());}
+}
+
+struct Potential(usize);
+impl Storage for Potential {
+    fn hamiltonian(&self,x:&[f64])->f64 {
+        10.0*x[0].powi(4)+(0..self.0/2).map(|i|0.5*((4.0+i as f64)*x[2*i].powi(2)+x[2*i+1].powi(2))).sum::<f64>()
+    }
+    fn gradient(&self,x:&[f64],out:&mut[f64]) {
+        for i in 0..self.0/2 {out[2*i]=(4.0+i as f64)*x[2*i];out[2*i+1]=x[2*i+1];}
+        out[0]+=40.0*x[0].powi(3);
+    }
+}
+impl Potential {
+    fn hessian(&self,x:&[f64],d:&[f64],out:&mut[f64])->bool {
+        for i in 0..self.0/2 {out[2*i]=(4.0+i as f64)*d[2*i];out[2*i+1]=d[2*i+1];}
+        out[0]+=120.0*x[0]*x[0]*d[0];true
+    }
+}
+fn system(pairs:usize)->PortHamiltonian {
+    let n=4+2*pairs;let mut j=vec![0.;n*n];let mut r=vec![0.;n*n];let mut g=vec![0.;n*2];
+    for i in 0..n/2 {let a=2*i;j[a*n+a+1]=1.;j[(a+1)*n+a]=-1.;r[(a+1)*n+a+1]=0.1;}
+    for p in 0..pairs {let a=5+2*p;let l=if p%2==0 {0.7}else{-0.4};j[n+a]=-l;j[a*n+1]=l;}
+    g[2]=1.;g[3*2+1]=1.;
+    PortHamiltonian::new(n,2,j,r,g,Box::new(Potential(n))).unwrap()
+}
+fn resist(x:&[f64],e:&[f64],out:&mut[f64])->bool {out.fill(0.);out[1]=(0.2+x[0]*x[0])*e[1];true}
+fn tangent(x:&[f64],e:&[f64],dx:&[f64],de:&[f64],out:&mut[f64])->bool {
+    out.fill(0.);out[1]=2.*x[0]*dx[0]*e[1]+(0.2+x[0]*x[0])*de[1];true
+}
+fn plan(work:&mut StepWorkspace,n:usize) {work.set_condensed_pairs(&(4..n).step_by(2).map(|i|[i,i+1]).collect::<Vec<_>>()).unwrap();}
+
+#[test]
+fn split_jacobian_keeps_every_energy_and_nonlinear_dissipation_derivative() {
+    let sys=system(4);let n=sys.n;let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
+    for loss in [false,true] { for zero_increment in [false,true] {
+        let mut dense=StepWorkspace::new(&sys).unwrap();let mut sparse=StepWorkspace::new(&sys).unwrap();plan(&mut sparse,n);
+        dense.flow.refresh(&sys).unwrap();sparse.flow.refresh(&sys).unwrap();
+        let mut x0=vec![0.0;n];x0[0]=0.3;x0[1]=-0.6;x0[2]=-0.1;
+        let mut x1=x0.clone();if !zero_increment {for i in 0..n {x1[i]+=0.005*(i as f64-2.0);}}
+        dense.x.copy_from_slice(&x1);sparse.x.copy_from_slice(&x1);
+        let diss=if loss {Some(Dissipation{force:&resist,tangent:Some(&tangent)})}else{None};
+        dense.analytic_jacobian_into(&sys,&x0,0.01,&action,diss,&mut ||Ok(())).unwrap();
+        sparse.analytic_jacobian_into(&sys,&x0,0.01,&action,diss,&mut ||Ok(())).unwrap();
+        let c=sparse.condensation.as_ref().unwrap();let restored=full(&sparse.jacobian,&c.left,&c.right);
+        for (a,b) in restored.iter().zip(&dense.jacobian) {assert!((a-b).abs()<1e-13);}
+        if !zero_increment {assert!(c.right.iter().any(|x|x.abs()>1e-7));}
+    }}
+}
+
+#[test]
+fn full_nonlinear_steps_eliminate_128_linear_states_and_keep_work_and_loss() {
+    let sys=system(64);let n=sys.n;let mut dense=StepWorkspace::new(&sys).unwrap();
+    let mut sparse=StepWorkspace::new(&sys).unwrap();plan(&mut sparse,n);
+    assert_eq!(n,132);assert_eq!(sparse.condensed_dimension(),Some(5));
+    let mut x=vec![0.0;n];x[0]=0.3;x[1]=-0.6;x[2]=0.1;let mut z=x.clone();
+    let (mut a,mut b)=(vec![0.0;n],vec![0.0;n]);let (mut ya,mut yb)=([0.0;2],[0.0;2]);
+    let initial=sys.hamiltonian(&x);let mut work=0.;let mut loss=0.;let mut count=0;
+    let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
+    for step in 0..60 {
+        let force=[if step<20 {0.7}else{0.},-0.03];let dt=0.003;
+        let fast=sparse.step_into_dissipative_controlled(&sys,&x,&force,dt,&mut a,&mut ya,
+            &resist,Some(&action),Some(&tangent),||false).unwrap();
+        dense.step_into_dissipative_controlled(&sys,&z,&force,dt,&mut b,&mut yb,
+            &resist,Some(&action),Some(&tangent),||false).unwrap();
+        for (v,w) in a.iter().zip(&b) {assert!((v-w).abs()<2e-9);}
+        assert!(fast.balance_residual().abs()<1e-10);assert!(fast.dissipated>=0.);
+        assert!((fast.supplied-dt*(force[0]*ya[0]+force[1]*ya[1])).abs()<1e-15);
+        assert_eq!(sparse.linear_solve_counts(),(fast.newton_iters,0));count+=fast.newton_iters;
+        work+=fast.supplied;loss+=fast.dissipated;x.copy_from_slice(&a);z.copy_from_slice(&b);
+    }
+    assert!(count>0);assert!((sys.hamiltonian(&x)-initial+loss-work).abs()<1e-9);
+}
+
+#[test]
+fn cancelled_condensed_step_retries_exactly_and_disabling_preserves_dense_path() {
+    let sys=system(3);let n=sys.n;let mut work=StepWorkspace::new(&sys).unwrap();plan(&mut work,n);
+    let mut x=vec![0.;n];x[0]=0.3;x[1]=-0.6;
+    let mut out=vec![123.;n];let mut y=[456.;2];let mut polls=0;
+    let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
+    let error=work.step_into_analytic_controlled(&sys,&x,&[0.2,0.],0.003,&mut out,&mut y,&action,
+        ||{polls+=1;polls==2*n+5}).unwrap_err();
+    assert_eq!(error,PreparedStepError::Cancelled);assert_eq!(out,vec![123.;n]);assert_eq!(y,[456.;2]);
+    let mut fresh=StepWorkspace::new(&sys).unwrap();plan(&mut fresh,n);
+    let mut expected=vec![0.;n];let mut ye=[0.;2];
+    work.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut out,&mut y,&action).unwrap();
+    fresh.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut expected,&mut ye,&action).unwrap();assert_eq!(out,expected);assert_eq!(y,ye);
+    assert!(work.set_condensed_pairs(&[[0,n]]).is_err());assert_eq!(work.condensed_dimension(),Some(5));
+    work.set_condensed_pairs(&[]).unwrap();let mut dense=StepWorkspace::new(&sys).unwrap();
+    work.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut out,&mut y,&action).unwrap();
+    dense.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut expected,&mut ye,&action).unwrap();assert_eq!(out,expected);assert_eq!(y,ye);
+}
+
+#[test]
+fn dense_fallback_retains_new_interpair_coupling_and_finite_difference_calls() {
+    let mut sys=system(3);let n=sys.n;let mut work=StepWorkspace::new(&sys).unwrap();plan(&mut work,n);
+    // Change operator topology after workspace construction. This must NOT be
+    // discarded based on a previously valid pair plan.
+    sys.j[5*n+7]=0.3;sys.j[7*n+5]=-0.3;
+    let mut x=vec![0.;n];x[0]=0.3;x[1]=-0.6;
+    let (mut a,mut b)=(vec![0.;n],vec![0.;n]);let (mut ya,mut yb)=([0.;2],[0.;2]);
+    let mut dense=StepWorkspace::new(&sys).unwrap();
+    let action=|x:&[f64],d:&[f64],o:&mut[f64]|Potential(n).hessian(x,d,o);
+    let f=work.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut a,&mut ya,&action).unwrap();
+    dense.step_into_analytic(&sys,&x,&[0.2,0.],0.003,&mut b,&mut yb,&action).unwrap();
+    assert_eq!(work.linear_solve_counts(),(0,f.newton_iters));for (a,b) in a.iter().zip(&b){assert!((a-b).abs()<1e-11);}
+    work.step_into(&sys,&x,&[0.2,0.],0.003,&mut a,&mut ya).unwrap();
+    dense.step_into(&sys,&x,&[0.2,0.],0.003,&mut b,&mut yb).unwrap();assert_eq!(a,b);assert_eq!(ya,yb);
+}

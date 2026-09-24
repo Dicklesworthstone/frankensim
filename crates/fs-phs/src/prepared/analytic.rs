@@ -14,6 +14,7 @@ impl StepWorkspace {
     ) -> Result<(), PreparedStepError>
     where F: FnMut() -> Result<(), PreparedStepError> {
         let n = self.n;
+        let condensed=self.condensation.is_some();
         for i in 0..n {
             self.midpoint[i] = f64::midpoint(x0[i], self.x[i]);
             self.delta[i] = self.x[i] - x0[i];
@@ -58,10 +59,17 @@ impl StepWorkspace {
                     - 2.0*alpha*self.delta[col]) / length2
             } else { 0.0 };
             for row in 0..n {
-                self.plus[row] = 0.5*self.plus[row] + self.delta[row]*derivative
-                    + if row == col { alpha } else { 0.0 };
+                self.plus[row] = if condensed {
+                    // Assemble the pair-sparse base DIRECTLY, not by subtracting
+                    // a rounded rank-one product from an already dense matrix.
+                    0.5*self.plus[row] + if row == col { alpha } else { 0.0 }
+                } else {
+                    0.5*self.plus[row] + self.delta[row]*derivative
+                        + if row == col { alpha } else { 0.0 }
+                };
             }
             norm(&self.plus)?;
+            if let Some(plan)=&mut self.condensation { plan.right[col]=derivative; }
             if let Some(port) = dissipation {
                 self.trial[col] = 0.5; // d(midpoint)/d(x1_col)
                 let result = port.directional(&self.midpoint, &self.nonlinear_effort,
@@ -77,6 +85,26 @@ impl StepWorkspace {
                 if dissipation.is_some() { flow -= self.nonlinear_loss[row]; }
                 self.jacobian[row*n+col] = (if row == col { 1.0 } else { 0.0 }) - dt*flow;
             }
+        }
+        if let Some(plan)=&mut self.condensation {
+            // A = B + u v^T. Nonlinear dissipation contributes its EFFORT
+            // derivative to u; its independent midpoint-state derivative stays
+            // in B. The tangent callback is linear in these two directions.
+            if let Some(port)=dissipation {
+                self.trial.fill(0.0);
+                port.directional(&self.midpoint,&self.nonlinear_effort,&self.trial,
+                    &self.delta,&mut self.nonlinear_loss)?;
+            }
+            for row in 0..n {
+                poll()?;
+                let mut flow=0.0;
+                for &k in self.flow.row(row) {
+                    flow+=(sys.j[row*n+k]-sys.r[row*n+k])*self.delta[k];
+                }
+                if dissipation.is_some() { flow-=self.nonlinear_loss[row]; }
+                plan.left[row]=-dt*flow;
+            }
+            norm(&plan.left)?; norm(&plan.right)?;
         }
         norm(&self.jacobian)?;
         Ok(())

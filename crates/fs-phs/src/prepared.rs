@@ -8,6 +8,7 @@ use crate::{PhsError, PortHamiltonian, NEWTON_MAX, NEWTON_TOL, discrete_gradient
 use fs_la::LuWorkspace;
 mod structure;
 mod analytic;
+mod condensed;
 mod dissipation;
 mod relaxation;
 use dissipation::Dissipation;
@@ -70,14 +71,16 @@ impl std::error::Error for PreparedStepError {}
 /// [`crate::Storage`] callbacks not allocating. Storage must be read-only during
 /// a trial; material history belongs at the caller's accepted-step boundary.
 ///
-/// Newton uses central differences by default or explicit analytic tangents,
-/// with the same dense LU. Neither is a hard-real-time
-/// performance certificate. The LU traversal is unblocked and may differ from
+/// Newton uses central differences by default or explicit analytic tangents.
+/// Analytic callers may opt into exact independent-pair condensation with the
+/// complete Gonzalez correction; unsuitable layouts retain full dense LU.
+/// Neither mode is a hard-real-time performance certificate. The LU traversal is unblocked and may differ from
 /// [`crate::step`] by floating-point roundoff. Both paths use the same Gonzalez
 /// kernel. Exact nonzero J-R dependency rows are retained across Newton probes;
 /// they are refreshed from the current operators before every step. No numerical
-/// threshold drops couplings. The Jacobian and LU remain dense. No existing
-/// reference-path bit semantics are changed.
+/// threshold drops couplings. The full Jacobian is retained for admission and
+/// dense fallback; condensation reduces factorization work, not state dimension.
+/// No existing reference-path bit semantics are changed.
 #[derive(Debug)]
 pub struct StepWorkspace {
     n: usize,
@@ -99,6 +102,8 @@ pub struct StepWorkspace {
     output: Vec<f64>,
     lu: LuWorkspace,
     flow: FlowPattern,
+    condensation: Option<condensed::Condensation>,
+    linear_solves: (usize, usize),
 }
 
 fn dimensions(what: &'static str) -> PhsError { PhsError::Dimension { what } }
@@ -162,8 +167,41 @@ impl StepWorkspace {
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
             lu: LuWorkspace::new(n).map_err(|_| dimensions("prepared LU capacity"))?,
             flow: FlowPattern::new(n)?,
+            condensation: None, linear_solves: (0, 0),
         })
     }
+
+    /// Opt into exact elimination of independent state pairs during analytic Newton.
+    ///
+    /// All other coordinates, plus the full Gonzalez rank-one correction, stay
+    /// in a dense border. The actual Jacobian's pair-block sparsity is checked
+    /// on EVERY update, without a numerical zero threshold. Unexpected coupling,
+    /// singular leaf blocks or failed backward error use the original full LU
+    /// on the same matrix, never an approximate equation. Finite-difference calls
+    /// ignore this plan. Empty selection disables it. Preparation allocates;
+    /// stepping does not allocate in this solver or the elimination workspace.
+    ///
+    /// # Errors
+    /// Repeated/out-of-range coordinates, unrepresentable extent, or allocation
+    /// failure. A refused replacement leaves the previous plan intact.
+    pub fn set_condensed_pairs(&mut self, pairs: &[[usize; 2]]) -> Result<(), PhsError> {
+        let next=if pairs.is_empty() { None }
+            else { Some(condensed::Condensation::new(self.n,pairs)?) };
+        self.condensation=next;
+        Ok(())
+    }
+
+    /// Planned dense border size, including the scalar Gonzalez correction.
+    /// This is an algebraic work dimension, not a real-time performance claim.
+    #[must_use]
+    pub fn condensed_dimension(&self) -> Option<usize> {
+        self.condensation.as_ref().map(condensed::Condensation::dimension)
+    }
+
+    /// (Condensed solves, full dense solves) attempted in the most recent call.
+    /// Full solves include safe fallbacks from an unsuitable elimination plan.
+    #[must_use]
+    pub fn linear_solve_counts(&self) -> (usize, usize) { self.linear_solves }
 
     /// Set a bounded Newton-update budget (at most the reference path's budget).
     /// Zero permits only a state already satisfying the step equation.
@@ -224,7 +262,8 @@ impl StepWorkspace {
     /// including every contact, internal state and frozen material history.
     /// Return false for an unsupported action. Missing/nonfinite actions refuse;
     /// there is no silent fallback. Piecewise laws use their branch tangent.
-    /// The dense LU and all original equation/energy acceptance limits remain.
+    /// All original equation/energy acceptance limits remain. A configured pair
+    /// plan changes only the linear solve, with full dense LU as safe fallback.
     ///
     /// # Errors
     /// The original step refusals plus an unsupported/nonfinite Hessian action.
@@ -264,6 +303,7 @@ impl StepWorkspace {
         hessian: Option<&dyn Fn(&[f64], &[f64], &mut [f64]) -> bool>,
         dissipation: Option<Dissipation<'_>>, mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.linear_solves=(0, 0);
         let mut poll = || {
             if cancelled() { Err(PreparedStepError::Cancelled) } else { Ok(()) }
         };
@@ -347,8 +387,24 @@ impl StepWorkspace {
                 }
             }
             poll()?;
-            self.lu.solve_into(&self.jacobian, &self.residual, &mut self.delta)
-                .map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
+            let condensed=if hessian.is_some() {
+                if let Some(plan)=&mut self.condensation {
+                    let solved=plan.solve(&self.jacobian,&self.residual,&mut self.delta,&mut poll)?;
+                    if solved { self.linear_solves.0+=1; }
+                    else {
+                        // Restore the FULL analytic Jacobian before dense fallback.
+                        for row in 0..n { for col in 0..n {
+                            self.jacobian[row*n+col]+=plan.left[row]*plan.right[col];
+                        }}
+                    }
+                    solved
+                } else { false }
+            } else { false };
+            if !condensed {
+                self.linear_solves.1+=1;
+                self.lu.solve_into(&self.jacobian, &self.residual, &mut self.delta)
+                    .map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
+            }
             poll()?;
             for row in 0..n { self.x[row] -= self.delta[row]; }
             iterations += 1;
