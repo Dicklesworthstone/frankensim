@@ -40,6 +40,7 @@ use fs_exec::{
     PreparedGemmDecision, PreparedGemmRow, TilePool, TuneError, TuneEvidence, TuneObservation,
     TuneRow, TuneSource, Tuner,
 };
+use fs_la::gemm::GemmRunReport;
 use fs_ledger::Ledger;
 
 pub use fs_la::{GEMM_DEPGRAPH_RECEIPT_DOMAIN, GemmGraphEvidenceClass};
@@ -542,7 +543,7 @@ pub enum GemmTuneError {
         /// Drained numerical-run report when cancellation was returned by
         /// fs-la. `None` means the gate was observed between dispatch calls;
         /// earlier completed probes may still contribute to the peak.
-        report: Option<Box<fs_la::GemmRunReport>>,
+        report: Option<Box<GemmRunReport>>,
     },
     /// Tuner-side refusal (invalid pin, evidence, or adoption).
     Tune(TuneError),
@@ -570,7 +571,7 @@ pub enum GemmTuneError {
         /// Largest session-owned logical reservation concurrency reached.
         peak_used_bytes: u128,
         /// Drained numerical-run report when refusal occurred inside fs-la.
-        report: Option<Box<fs_la::GemmRunReport>>,
+        report: Option<Box<GemmRunReport>>,
     },
     /// Checked arithmetic could not represent the session or fs-la memory plan.
     MemoryPlanOverflow {
@@ -588,7 +589,7 @@ pub enum GemmTuneError {
         /// Largest session-owned logical reservation concurrency reached.
         peak_used_bytes: u128,
         /// Drained numerical-run report, including memory and tile progress.
-        report: Box<fs_la::GemmRunReport>,
+        report: Box<GemmRunReport>,
     },
 }
 
@@ -812,7 +813,7 @@ pub struct GemmDispatch {
     pub validated_tune_row: Option<ValidatedGemmTuneRow>,
     /// Final production execution receipt. Its `pool_runs` prove the selected
     /// plan traversed the caller's TilePool rather than a detached thread path.
-    pub run: fs_la::GemmRunReport,
+    pub run: GemmRunReport,
 }
 
 impl GemmDispatch {
@@ -1042,7 +1043,7 @@ impl GemmExecutionReceipt {
     /// Project a successful numerical run report onto identity-stable fields.
     /// Error paths retain their full report in [`GemmTuneError`] instead.
     #[must_use]
-    pub fn from_report(report: &fs_la::GemmRunReport) -> Self {
+    pub fn from_report(report: &GemmRunReport) -> Self {
         Self {
             declared_run: report.declared_run.0,
             completed_tiles: report.completed_tiles,
@@ -3186,7 +3187,7 @@ mod tests {
     #[test]
     fn execution_receipt_excludes_schedule_measurements() {
         let operation_run = fs_exec::RunId(7);
-        let no_product = fs_la::GemmRunReport {
+        let no_product = GemmRunReport {
             declared_run: operation_run,
             completed_tiles: 0,
             total_tiles: 0,
@@ -3208,7 +3209,7 @@ mod tests {
             cancel_latencies_ns: Vec::new(),
             tiles_by_worker: vec![2, 2],
         };
-        let first = fs_la::GemmRunReport {
+        let first = GemmRunReport {
             declared_run: operation_run,
             completed_tiles: 32,
             total_tiles: 32,
@@ -3220,7 +3221,7 @@ mod tests {
         noisy_panel.cross_ccd_steals = 17;
         noisy_panel.cancel_latencies_ns = vec![3, 5, 8];
         noisy_panel.tiles_by_worker = vec![4, 0];
-        let mut second = fs_la::GemmRunReport {
+        let mut second = GemmRunReport {
             declared_run: operation_run,
             completed_tiles: 32,
             total_tiles: 32,
@@ -3501,7 +3502,7 @@ mod tests {
         let decision = tuner.prepare_gemm_decision(&key);
         let error = execute_prepared_decision(&mut tuner, decision, |_| {
             Err::<(), _>(GemmTuneError::from(fs_la::GemmCancelled {
-                report: Box::new(fs_la::GemmRunReport {
+                report: Box::new(GemmRunReport {
                     declared_run: fs_exec::RunId(9),
                     completed_tiles: 7,
                     total_tiles: 19,
@@ -3536,7 +3537,7 @@ mod tests {
 
     #[test]
     fn executor_failure_retains_full_memory_and_progress_report() {
-        let report = fs_la::GemmRunReport {
+        let report = GemmRunReport {
             declared_run: fs_exec::RunId(12),
             completed_tiles: 3,
             total_tiles: 11,
