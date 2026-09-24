@@ -20,7 +20,7 @@ jobs:
         run: >-
           git archive --format=tar.gz -o percussion-source.tar.gz HEAD
           crates/fs-phs crates/fs-couple crates/fs-plate crates/fs-material
-          crates/fs-dcontact crates/fs-la .beads/issues.jsonl
+          crates/fs-dcontact crates/fs-la crates/fs-flux .beads/issues.jsonl
           COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md
           COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md
       - uses: actions/upload-artifact@v4
@@ -28,6 +28,10 @@ jobs:
           name: percussion-source
           path: percussion-source.tar.gz
           retention-days: 3
+      - name: Test the dependency-free Reynolds pressure kernel
+        run: |
+          rustc --edition=2024 --test crates/fs-flux/src/gas_film/resistive.rs -o "$RUNNER_TEMP/film-tests"
+          "$RUNNER_TEMP/film-tests"
       - name: Materialize the repository's pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       # Keep provenance failures red, but report actual compiler/test results
