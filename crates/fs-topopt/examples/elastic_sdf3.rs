@@ -3,6 +3,8 @@
 //! Arguments: accepted-update cap, cumulative Krylov-iteration cap. Prints a
 //! CSV history followed by accepted cell densities; interrupted work exits
 //! nonzero after printing its accepted prefix. All units are dimensionless.
+//! Prefix --continuation to run (p,beta)=(1,1),(2,2),(3,8), restoring
+//! volume and checking compliance/volume gradients at every stage baseline.
 //! The curved design domain is z < 0.7 + 0.1*x*(1-x) inside the unit box.
 //! This field is implicit, not an exact distance function. The two dead body
 //! loads are independent. No continuum, manufacturing or optimality claim.
@@ -12,9 +14,10 @@ use fs_cutfem::elastic3::{CutElasticity3,ElasticityOptions3};
 use fs_cutfem::quad3::{QuadratureControl3,QuadratureOptions3};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
-use fs_topopt::{MultiLoadOcOptions,MultiLoadOcTermination,SimpParams,SolveBudget,SolveControl};
+use fs_topopt::{ContinuationTermination,GradientCheckOptions,MultiLoadOcOptions,MultiLoadOcTermination,SimpParams,SolveBudget,SolveControl};
 use fs_topopt::pipeline::LoadCase;
 use fs_topopt::sdf3::{CutDensityStudy3,controlled_sdf3_optimality_criteria};
+use fs_topopt::sdf3::continuation::controlled_gradient_checked_sdf3_continuation;
 
 struct CurvedCantilever;
 impl CutSdf3 for CurvedCantilever {
@@ -31,8 +34,10 @@ impl CutSdf3 for CurvedCantilever {
     }
 }
 fn main()->Result<(),Box<dyn std::error::Error>> {
-    let args:Vec<String>=std::env::args().skip(1).collect();
-    if args.len()>2 {return Err("usage: elastic_sdf3 [UPDATES [TOTAL_KRYLOV_ITERATIONS]]".into());}
+    let mut args:Vec<String>=std::env::args().skip(1).collect();
+    let continuation=args.first().is_some_and(|arg|arg=="--continuation");
+    if continuation {args.remove(0);}
+    if args.len()>2 {return Err("usage: elastic_sdf3 [--continuation] [UPDATES_PER_STAGE [TOTAL_KRYLOV_ITERATIONS]]".into());}
     let updates=args.first().map_or(Ok(5),|s|s.parse::<usize>())?;
     let iterations=args.get(1).map_or(Ok(250_000),|s|s.parse::<usize>())?;
     let mut poll=|_|ControlFlow::Continue(());
@@ -46,11 +51,34 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
     let geometry_work=quadrature.work();
     let mut poll=|_|ControlFlow::Continue(());
     let mut control=SolveControl::new(SolveBudget {total_iterations:iterations,..Default::default()},&mut poll);
-    let report=controlled_sdf3_optimality_criteria(&mut study,
-        &[LoadCase {force:&y,weight:0.3},LoadCase {force:&z,weight:0.7}],&rho,
-        MultiLoadOcOptions {max_iterations:updates,..Default::default()},&mut control);
-    println!("iteration,compliance,volume_fraction,max_change");
-    for row in &report.history {println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.compliance,row.volume_fraction,row.max_change);}
+    let loads=[LoadCase {force:&y,weight:0.3},LoadCase {force:&z,weight:0.7}];
+    let options=MultiLoadOcOptions {max_iterations:updates,..Default::default()};
+    let (report,finished)=if continuation {
+        let schedule=[(1.0,1.0),(2.0,2.0),(3.0,8.0)]
+            .map(|(penal,beta)|SimpParams {penal,beta,..Default::default()});
+        let stages=controlled_gradient_checked_sdf3_continuation(&mut study,&loads,&rho,&schedule,
+            options,GradientCheckOptions::default(),&mut control);
+        println!("stage,penal,beta,iteration,compliance,volume_fraction,max_change");
+        for stage in &stages.stages {
+            for row in &stage.history {println!("{},{},{},{},{:.17e},{:.17e},{:.17e}",
+                stage.stage,stage.params.penal,stage.params.beta,row.iteration,row.compliance,row.volume_fraction,row.max_change);}
+            let check=stage.gradient_check.as_ref().expect("gradient-gated stage");
+            for probe in &check.probes {eprintln!("stage={} direction={:?} gradient_relative_error={:.9e} volume_gradient_relative_error={:.9e} passed={}",
+                stage.stage,probe.direction,probe.compliance_relative_error,probe.volume_relative_error,check.passed());}
+            eprintln!("stage={} incoming_volume={:.9e} restoration_scale={:.9e} stage_stop={:?}",
+                stage.stage,stage.incoming_volume_fraction,stage.restoration_scale,stage.termination);
+        }
+        eprintln!("continuation_stop={:?}; stopped_stage={:?}; evaluation_stop={:?}; rejected_gradient_check={:?}; cumulative_linear_iterations={}; cross_model_descent_claimed=false",
+            stages.termination,stages.stopped_stage,stages.evaluation_stop,stages.rejected_gradient_check,stages.work.linear_iterations);
+        (stages.last,stages.termination==ContinuationTermination::ScheduleComplete)
+    } else {
+        let report=controlled_sdf3_optimality_criteria(&mut study,&loads,&rho,options,&mut control);
+        println!("iteration,compliance,volume_fraction,max_change");
+        for row in &report.history {println!("{},{:.17e},{:.17e},{:.17e}",row.iteration,row.compliance,row.volume_fraction,row.max_change);}
+        let finished=!matches!(report.termination,MultiLoadOcTermination::Cancelled|MultiLoadOcTermination::LinearBudget|MultiLoadOcTermination::NumericalFailure);
+        (Some(report),finished)
+    };
+    let Some(report)=report else {return Err("study stopped before any checked equilibrium baseline; no design is exported".into());};
     eprintln!("termination={:?}; cut_cells={}; geometry_points={}; linear_iterations={}; geometry_rebuilt=false; optimality_certified=false",
         report.termination,study.cells(),geometry_work.points,report.work.linear_iterations);
     if !report.history.is_empty() {
@@ -59,8 +87,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             println!("{},{},{},{raw:.17e},{physical:.17e}",key[0],key[1],key[2]);
         }
     }
-    if matches!(report.termination,MultiLoadOcTermination::Cancelled|MultiLoadOcTermination::LinearBudget|MultiLoadOcTermination::NumericalFailure) {
-        return Err(format!("study interrupted: {:?}",report.evaluation_stop).into());
+    if !finished {
+        return Err("study interrupted or continuation gradient gate failed; exported fields describe the retained prefix".into());
     }
     Ok(())
 }

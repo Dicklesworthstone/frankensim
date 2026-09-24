@@ -102,6 +102,38 @@ cubical homology), so the optimization stack lives here.
   real flux; and the volume projection lives ON THE BAND — a global
   shift silently fills voids from the inside.
 
+## 3-D cut-cell continuation
+
+`sdf3::continuation` provides `controlled_sdf3_continuation` and
+`controlled_gradient_checked_sdf3_continuation` on both Cartesian and adaptive
+`CutDensityStudy3` backends. Each finite SIMP/projection stage uses the existing
+volume restoration and independently loaded OC solver; no geometry, quadrature,
+support, load or filter rebuild occurs during the schedule. Sharpening a
+projection first measures the incoming design under the new model and restores
+its projected-volume feasibility before establishing a fresh equilibrium
+baseline. Compliance descent is measured within each stage, never across
+different material models. `MultiLoadContinuationReport` retains each model's
+actual history, restoration scale, gradient evidence and stopping reason.
+
+The optional required gradient gate and standalone
+`controlled_sdf3_gradient_check` reuse the existing second-order one-sided
+heterogeneous-direction experiment. They independently solve every load at up
+to five designs and compare both compliance and physical-volume derivatives
+through the complete graph-filter/projection/SIMP map. Checks restore incoming
+stiffness scales on success and returned failure. A rejected gate or interrupted
+stage restores both parameters and scales to the latest completely solved
+accepted state. Restoration, probe, setup and rejected-trial work all consumes
+the same `SolveControl` budget; no work is refunded by rollback.
+
+Run the existing raw-implicit example with
+`cargo run -p fs-topopt --features cutfem-marquee --example elastic_sdf3 -- --continuation 5 250000`.
+It reports per-stage compliance, volume, derivative discrepancies and actual
+stops before exporting the retained densities. The unchanged command without
+`--continuation` still executes one fixed model. The schedule completion label
+does not certify stationarity, global optimality, continuum accuracy,
+manufacturing thickness or full elasticity-marquee acceptance. DWR-driven
+geometry refinement remains a separate between-study operation.
+
 ## Invariants
 
 - Every stage of the density chain has an exact derivative; the

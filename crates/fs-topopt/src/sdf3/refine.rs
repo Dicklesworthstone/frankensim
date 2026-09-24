@@ -4,6 +4,12 @@ use fs_cutfem::octree3::Octant3;
 use crate::{EvaluationStop,SolveControl};
 use super::{CutDensityStudy3,Sdf3Elasticity};
 
+pub(super) struct RestoredDensity3 {
+    pub rho: Vec<f64>,
+    pub incoming_volume: f64,
+    pub scale: f64,
+}
+
 /// Copy each target leaf's closest source-ancestor RAW density. This is an
 /// initialization operation, not reuse of a solved displacement, projected
 /// material volume or certificate. Caller owns geometric/problem identity.
@@ -48,11 +54,17 @@ impl<O:Sdf3Elasticity> CutDensityStudy3<O> {
     /// OC's 1e-3 floor when its optimizer admits a different material range.
     pub fn feasible_start_with_floor(&self,incoming:&[f64],cap:f64,tolerance:f64,floor:f64,control:&mut SolveControl<'_>)
         ->Result<Vec<f64>,EvaluationStop> {
+        self.restore_start_with_floor(incoming,cap,tolerance,floor,control).map(|start|start.rho)
+    }
+
+    pub(super) fn restore_start_with_floor(&self,incoming:&[f64],cap:f64,tolerance:f64,floor:f64,control:&mut SolveControl<'_>)
+        ->Result<RestoredDensity3,EvaluationStop> {
         assert!(cap.is_finite()&&cap>0.0&&cap<=1.0&&tolerance.is_finite()&&tolerance>=0.0&&tolerance<cap,"invalid volume restoration policy");
         assert!(floor.is_finite()&&floor>0.0&&floor<1.0,"invalid raw density floor");
         assert!(incoming.iter().all(|r|r.is_finite()&&(floor..=1.0).contains(r)),"invalid incoming raw design");
         let limit=cap+tolerance;
-        if self.design(incoming,control)?.volume<=limit {return Ok(incoming.to_vec());}
+        let incoming_volume=self.design(incoming,control)?.volume;
+        if incoming_volume<=limit {return Ok(RestoredDensity3 {rho:incoming.to_vec(),incoming_volume,scale:1.0});}
         let mut feasible=vec![floor;incoming.len()];
         if self.design(&feasible,control)?.volume>limit {return Err(EvaluationStop::Breakdown{stage:"sdf3-volume-restoration"});}
         let (mut low,mut high)=(0.0,1.0);
@@ -62,6 +74,7 @@ impl<O:Sdf3Elasticity> CutDensityStudy3<O> {
             let trial:Vec<f64>=incoming.iter().map(|r|(floor+mid*(r-floor)).clamp(floor,1.0)).collect();
             if self.design(&trial,control)?.volume<=limit {low=mid;feasible=trial;}else{high=mid;}
         }
-        control.checkpoint("sdf3-volume-restoration-publish")?;Ok(feasible)
+        control.checkpoint("sdf3-volume-restoration-publish")?;
+        Ok(RestoredDensity3 {rho:feasible,incoming_volume,scale:low})
     }
 }

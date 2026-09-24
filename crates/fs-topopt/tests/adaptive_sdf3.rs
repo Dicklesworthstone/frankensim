@@ -104,3 +104,30 @@ fn adaptive_zero_budget_and_replay_use_the_same_driver() {
     let a=run(&mut study,100000);let b=run(&mut study,100000);assert!(a.history.len()>1);
     assert_eq!(a.rho,b.rho);assert_eq!(a.displacements,b.displacements);assert_eq!(a.work,b.work);
 }
+
+#[test]
+fn continuation_reuses_the_nonuniform_cut_space_and_checks_its_pullback() {
+    use fs_topopt::{ContinuationTermination, GradientCheckOptions};
+    use fs_topopt::sdf3::continuation::controlled_gradient_checked_sdf3_continuation;
+    let (mut study, force) = fixture(&tree(), SimpParams::default());
+    let leaves = study.operator().leaves().to_vec();
+    let nodes = study.operator().nodes().to_vec();
+    let rho = vec![0.5; study.cells()];
+    let stages = [(1.0, 1.0), (3.0, 4.0)]
+        .map(|(penal, beta)| SimpParams { penal, beta, ..Default::default() });
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let report = controlled_gradient_checked_sdf3_continuation(&mut study,
+        &[LoadCase { force: &force, weight: 1.0 }], &rho, &stages,
+        MultiLoadOcOptions { max_iterations: 1, ..options() }, GradientCheckOptions::default(), &mut control);
+    assert_eq!(report.termination, ContinuationTermination::ScheduleComplete, "{report:?}");
+    assert_eq!(report.stages.len(), 2);
+    assert_eq!(study.operator().leaves(), leaves);
+    assert_eq!(study.operator().nodes(), nodes);
+    for stage in &report.stages {
+        assert!(stage.gradient_check.as_ref().unwrap().passed());
+        assert_eq!(stage.history.len(), 2);
+        assert!(stage.history[1].compliance < stage.history[0].compliance);
+        assert!(stage.history[1].volume_fraction <= 0.5 + options().volume_tolerance);
+    }
+}

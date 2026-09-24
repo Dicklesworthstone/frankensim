@@ -133,6 +133,70 @@ fn volume(
     else { Err(breakdown("gradient-check-volume")) }
 }
 
+/// Shared numerical experiment for the tetrahedral and cut-cell design maps.
+/// The owner supplies actual equilibria and retains its own rollback boundary.
+pub(crate) struct GradientSample {
+    pub compliance: f64,
+    pub compliance_gradient: Vec<f64>,
+    pub volume: f64,
+    pub volume_gradient: Vec<f64>,
+}
+
+pub(crate) fn audit_design_map(
+    params: SimpParams,
+    rho: &[f64],
+    options: GradientCheckOptions,
+    control: &mut SolveControl<'_>,
+    mut evaluate: impl FnMut(&[f64], bool, &mut SolveControl<'_>) -> Result<GradientSample, EvaluationStop>,
+) -> Result<MultiLoadGradientCheck, EvaluationStop> {
+    control.checkpoint("gradient-check")?;
+    let baseline = evaluate(rho, true, control)?;
+    let mut probes = Vec::with_capacity(2);
+    for direction in [GradientDirection::Increasing, GradientDirection::Decreasing] {
+        control.checkpoint("gradient-probe")?;
+        let h = options.step;
+        // Complementary heterogeneous weights exercise spatial pullbacks;
+        // uniform material scalings could conceal a transpose error.
+        let mask: Vec<f64> = rho.iter().enumerate().map(|(index, &r)| {
+            let even = index % 2 == 0;
+            let d = match direction {
+                GradientDirection::Increasing => if even { 1.0 } else { 0.5 },
+                GradientDirection::Decreasing => if even { -0.5 } else { -1.0 },
+            };
+            if (0.0..=1.0).contains(&(r + (2.0 * h) * d)) { d } else { 0.0 }
+        }).collect();
+        let active = mask.iter().filter(|&&d| d != 0.0).count();
+        if active == 0 { continue; }
+        let one: Vec<f64> = rho.iter().zip(&mask).map(|(r, d)| r + h * d).collect();
+        let two: Vec<f64> = rho.iter().zip(&mask).map(|(r, d)| r + (2.0 * h) * d).collect();
+        for (((&r, &d), &a), &b) in rho.iter().zip(&mask).zip(&one).zip(&two) {
+            if !a.is_finite() || !b.is_finite() || !(0.0..=1.0).contains(&a)
+                || !(0.0..=1.0).contains(&b) || (d != 0.0 && (a == r || a == b)) {
+                return Err(breakdown("gradient-check-stencil"));
+            }
+        }
+        let ca: f64 = baseline.compliance_gradient.iter().zip(&mask).map(|(g, d)| g * d).sum();
+        let va: f64 = baseline.volume_gradient.iter().zip(&mask).map(|(g, d)| g * d).sum();
+        let first = evaluate(&one, false, control)?;
+        let second = evaluate(&two, false, control)?;
+        let cd = difference(baseline.compliance, first.compliance, second.compliance, h)?;
+        let vd = difference(baseline.volume, first.volume, second.volume, h)?;
+        probes.push(GradientProbe {
+            direction, active_densities: active,
+            compliance_analytic: ca, compliance_difference: cd,
+            compliance_relative_error: relative_error(ca, cd)?,
+            volume_analytic: va, volume_difference: vd,
+            volume_relative_error: relative_error(va, vd)?,
+        });
+    }
+    if probes.is_empty() { return Err(breakdown("gradient-check-empty")); }
+    control.checkpoint("gradient-check-publish")?;
+    Ok(MultiLoadGradientCheck {
+        params, options, baseline_compliance: baseline.compliance,
+        baseline_volume_fraction: baseline.volume, probes, work: control.work(),
+    })
+}
+
 /// Audit the full design-to-physics chain without changing the caller's operator.
 ///
 /// Uses at most five independent-load evaluations: baseline plus two second-
@@ -168,60 +232,20 @@ pub fn controlled_multi_load_gradient_check(
     let total: f64 = cell_vol.iter().sum();
     assert!(total.is_finite(), "total cell volume must be finite");
     let previous_moduli = elasticity.moduli.clone();
-    let outcome = (|| {
-        control.checkpoint("gradient-check")?;
-        let (baseline_volume, volume_gradient) =
-            pipeline.try_volume_and_gradient(rho, cell_vol, control)?;
-        let baseline = pipeline.try_multi_load_compliance_and_gradient(elasticity, rho, loads, control)?;
-        let mut probes = Vec::with_capacity(2);
-        for direction in [GradientDirection::Increasing, GradientDirection::Decreasing] {
-            control.checkpoint("gradient-probe")?;
-            let h = options.step;
-            // Complementary heterogeneous weights exercise the filter's
-            // spatial pullback; uniform +/-1 probes could conceal errors in
-            // a constant-preserving filter or transpose implementation.
-            let mask: Vec<f64> = rho.iter().enumerate().map(|(index, &r)| {
-                let even = index % 2 == 0;
-                let d = match direction {
-                    GradientDirection::Increasing => if even { 1.0 } else { 0.5 },
-                    GradientDirection::Decreasing => if even { -0.5 } else { -1.0 },
-                };
-                if (0.0..=1.0).contains(&(r + (2.0 * h) * d)) { d } else { 0.0 }
-            }).collect();
-            let active = mask.iter().filter(|&&d| d != 0.0).count();
-            if active == 0 { continue; }
-            let one: Vec<f64> = rho.iter().zip(&mask).map(|(r, d)| r + h * d).collect();
-            let two: Vec<f64> = rho.iter().zip(&mask).map(|(r, d)| r + (2.0 * h) * d).collect();
-            for (((&r, &d), &a), &b) in rho.iter().zip(&mask).zip(&one).zip(&two) {
-                if !a.is_finite() || !b.is_finite() || !(0.0..=1.0).contains(&a)
-                    || !(0.0..=1.0).contains(&b) || (d != 0.0 && (a == r || a == b)) {
-                    return Err(breakdown("gradient-check-stencil"));
-                }
-            }
-            let ca: f64 = baseline.gradient.iter().zip(&mask).map(|(g, d)| g * d).sum();
-            let va: f64 = volume_gradient.iter().zip(&mask).map(|(g, d)| g * d).sum();
-            let c1 = pipeline.try_multi_load_compliance_and_gradient(elasticity, &one, loads, control)?;
-            let v1 = volume(pipeline, &one, cell_vol, total, control)?;
-            let c2 = pipeline.try_multi_load_compliance_and_gradient(elasticity, &two, loads, control)?;
-            let v2 = volume(pipeline, &two, cell_vol, total, control)?;
-            let cd = difference(baseline.compliance, c1.compliance, c2.compliance, h)?;
-            let vd = difference(baseline_volume, v1, v2, h)?;
-            probes.push(GradientProbe {
-                direction, active_densities: active,
-                compliance_analytic: ca, compliance_difference: cd,
-                compliance_relative_error: relative_error(ca, cd)?,
-                volume_analytic: va, volume_difference: vd,
-                volume_relative_error: relative_error(va, vd)?,
-            });
-        }
-        if probes.is_empty() { return Err(breakdown("gradient-check-empty")); }
-        control.checkpoint("gradient-check-publish")?;
-        Ok(MultiLoadGradientCheck {
-            params: pipeline.params, options,
-            baseline_compliance: baseline.compliance,
-            baseline_volume_fraction: baseline_volume, probes, work: control.work(),
+    let outcome = audit_design_map(pipeline.params, rho, options, control, |point, baseline, control| {
+        let before = if baseline {
+            Some(pipeline.try_volume_and_gradient(point, cell_vol, control)?)
+        } else { None };
+        let solved = pipeline.try_multi_load_compliance_and_gradient(elasticity, point, loads, control)?;
+        let (volume, volume_gradient) = match before {
+            Some(values) => values,
+            None => (volume(pipeline, point, cell_vol, total, control)?, Vec::new()),
+        };
+        Ok(GradientSample {
+            compliance: solved.compliance, compliance_gradient: solved.gradient,
+            volume, volume_gradient,
         })
-    })();
+    });
     elasticity.moduli = previous_moduli;
     outcome
 }

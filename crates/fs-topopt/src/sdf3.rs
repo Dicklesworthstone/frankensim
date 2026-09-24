@@ -5,6 +5,8 @@
 //! Geometry and quadrature stay fixed inside each optimization call. Refined
 //! studies reassemble geometry between calls, inherit only raw densities, and
 //! must restore volume feasibility and re-solve their new baseline.
+//! `continuation` advances SIMP/projection models on the SAME retained geometry,
+//! restores stage feasibility and can gate each baseline with numerical gradients.
 //!
 //! Numerical cut volumes, discrete sensitivities and energy-based marking are
 //! not DWR estimates, continuum certificates or proofs of optimality. The graph
@@ -12,6 +14,7 @@
 
 mod operator;
 mod refine;
+pub mod continuation;
 pub mod response;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
@@ -24,6 +27,26 @@ use crate::multi_load::{MultiLoadOcIteration, MultiLoadOcOptions, MultiLoadOcRep
 use crate::pipeline::{LoadCase, MultiLoadCompliance, SimpParams};
 
 fn failure(stage: &'static str) -> EvaluationStop { EvaluationStop::Breakdown { stage } }
+
+fn assert_loads<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, loads: &[LoadCase<'_>]) {
+    assert!(!loads.is_empty() && loads.iter().any(|l| l.weight > 0.0), "at least one positive load weight required");
+    for load in loads {
+        assert!(load.weight.is_finite() && load.weight >= 0.0, "invalid load weight");
+        assert_eq!(load.force.len(), study.operator.n(), "load shape mismatch");
+        assert!(load.force.iter().all(|f| f.is_finite()), "nonfinite load");
+    }
+}
+
+fn assert_oc_inputs<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, loads: &[LoadCase<'_>],
+    rho0: &[f64], options: MultiLoadOcOptions) {
+    assert_loads(study, loads);
+    assert_eq!(rho0.len(),study.cells(),"initial density shape mismatch");
+    assert!(rho0.iter().all(|r|r.is_finite()&&(1e-3..=1.0).contains(r)),"OC densities must lie in [0.001,1]");
+    assert!(options.volume_fraction.is_finite()&&options.volume_fraction>0.0&&options.volume_fraction<=1.0,"invalid volume cap");
+    assert!(options.move_limit.is_finite()&&options.move_limit>0.0&&options.move_limit<=1.0,"invalid move limit");
+    assert!(options.volume_tolerance.is_finite()&&options.volume_tolerance>=0.0&&options.volume_tolerance<options.volume_fraction,"invalid volume tolerance");
+    assert!(options.change_tolerance.is_finite()&&options.change_tolerance>=0.0&&options.max_backtracks<=64,"invalid stopping/backtracking policy");
+}
 
 /// Geometry-bound density pipeline. The default backend preserves existing
 /// Cartesian callers; an adaptive backend uses independent master-node DOFs.
@@ -81,7 +104,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Read-only access to the geometry, accepted scales, and field ordering.
     #[must_use]
     pub const fn operator(&self) -> &O { &self.operator }
-    /// Fixed material/projection model for this study.
+    /// Current material/projection model, matching the last accepted stage.
     #[must_use]
     pub const fn params(&self) -> SimpParams { self.params }
     /// Raw cell count, also the design dimension.
@@ -139,12 +162,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate(&mut self,rho:&[f64],loads:&[LoadCase<'_>],control:&mut SolveControl<'_>)
         -> Result<CutDensityEvaluation3,EvaluationStop> {
         control.checkpoint("sdf3-evaluation")?;
-        assert!(!loads.is_empty() && loads.iter().any(|l|l.weight>0.0),"at least one positive load weight required");
-        for load in loads {
-            assert!(load.weight.is_finite()&&load.weight>=0.0,"invalid load weight");
-            assert_eq!(load.force.len(),self.operator.n(),"load shape mismatch");
-            assert!(load.force.iter().all(|f|f.is_finite()),"nonfinite load");
-        }
+        assert_loads(self, loads);
         let design = self.design(rho,control)?;
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales).map_err(|_|failure("sdf3-scales"))?;
@@ -227,12 +245,7 @@ fn trial(rho:&[f64],ratios:&[f64],lambda:f64,step:f64)->Vec<f64> {
 /// or remeshing is performed. Parameters are fixed throughout this call.
 pub fn controlled_sdf3_optimality_criteria<O:Sdf3Elasticity>(study:&mut CutDensityStudy3<O>,loads:&[LoadCase<'_>],rho0:&[f64],
     options:MultiLoadOcOptions,control:&mut SolveControl<'_>)->MultiLoadOcReport {
-    assert_eq!(rho0.len(),study.cells(),"initial density shape mismatch");
-    assert!(rho0.iter().all(|r|r.is_finite()&&(1e-3..=1.0).contains(r)),"OC densities must lie in [0.001,1]");
-    assert!(options.volume_fraction.is_finite()&&options.volume_fraction>0.0&&options.volume_fraction<=1.0,"invalid volume cap");
-    assert!(options.move_limit.is_finite()&&options.move_limit>0.0&&options.move_limit<=1.0,"invalid move limit");
-    assert!(options.volume_tolerance.is_finite()&&options.volume_tolerance>=0.0&&options.volume_tolerance<options.volume_fraction,"invalid volume tolerance");
-    assert!(options.change_tolerance.is_finite()&&options.change_tolerance>=0.0&&options.max_backtracks<=64,"invalid stopping/backtracking policy");
+    assert_oc_inputs(study, loads, rho0, options);
     let mut report=MultiLoadOcReport {rho:rho0.to_vec(),projected_rho:Vec::new(),displacements:Vec::new(),history:Vec::new(),
         termination:MultiLoadOcTermination::IterationBudget,evaluation_stop:None,work:control.work()};
     let mut accepted_scales=study.operator.scales().to_vec();

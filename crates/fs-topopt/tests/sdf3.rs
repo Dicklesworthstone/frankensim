@@ -9,6 +9,9 @@ use fs_topopt::{EvaluationStop, MultiLoadOcOptions, MultiLoadOcTermination, Simp
 use fs_topopt::pipeline::LoadCase;
 use fs_topopt::sdf3::{CutDensityStudy3, controlled_sdf3_optimality_criteria};
 
+#[path = "sdf3/continuation.rs"]
+mod continuation;
+
 struct Slab;
 impl CutSdf3 for Slab {
     fn value(&self,p:[f64;3])->f64 {p[2]-0.73}
