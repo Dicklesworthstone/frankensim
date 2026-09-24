@@ -50,6 +50,16 @@ pub enum ApertureObservation {
     /// terminal reflection still drives the mechanics; no additional radiation
     /// reaction is silently applied or claimed to match that terminal load.
     TubeBaffled(CircularOutletReceiver),
+    /// Exterior observation of flow into a degree-one passive network terminal.
+    /// The adjacent section supplies the actual outlet radius. Its existing load
+    /// determines reaction; observation does not add a second load or assume that
+    /// an arbitrary supplied impedance represents this baffled mouth.
+    NetworkBaffled {
+        /// Degree-one passive terminal, not a junction, shunt, series node or inlet.
+        node: usize,
+        /// Position/quadrature relative to that outlet's outward-facing baffle.
+        receiver: CircularOutletReceiver,
+    },
 }
 
 /// Finite window and bounded offline pressure compilation.
@@ -124,6 +134,18 @@ impl AperturePerformance {
                         density: a.spec().density_kg_m3, sound_speed: m.spec().sound_speed_m_s,
                     }).map_err(|e| GestureCompileError::Render(receiver_error(e)))?)
             }
+            (CoupledAperture::Network(m), ApertureObservation::NetworkBaffled {node,receiver}) => {
+                use super::network::NetworkNode;
+                if !matches!(m.spec().nodes.get(node), Some(NetworkNode::Termination {..}
+                    | NetworkNode::Impedance {..} | NetworkNode::Relaxation {..})) {
+                    return Err(invalid("baffled network observation requires a degree-one passive terminal"));
+                }
+                let section=m.spec().sections.iter().find(|s|s.nodes.contains(&node))
+                    .ok_or_else(||invalid("baffled network terminal has no physical section"))?;
+                Some(BaffledPressure::circular_outlet(section.radius_m,config.sample_rate_hz,receiver,
+                    RayleighMedium {density:a.spec().density_kg_m3,sound_speed:m.spec().sound_speed_m_s})
+                    .map_err(|e|GestureCompileError::Render(receiver_error(e)))?)
+            }
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),
         };
         let [track] = schedule.tracks() else {
@@ -195,6 +217,12 @@ impl AperturePerformance {
                     ApertureObservation::Inlet => f.aperture.bore_pressure_pa,
                     ApertureObservation::NetworkNode(n) => m.node_frame(n)
                         .expect("admitted node remains in the owned topology").pressure_pa,
+                    ApertureObservation::NetworkBaffled {node,..} => {
+                        let flow=m.node_frame(node).expect("admitted terminal remains in owned topology")
+                            .net_flow_into_node_m3_s;
+                        self.receiver.as_mut().expect("admitted network outlet receiver")
+                            .step(&[flow]).map_err(receiver_error)?
+                    }
                     _ => unreachable!("observer admitted against the exclusively owned system"),
                 })
             }

@@ -7,6 +7,9 @@
 /// Finite pressure phrases on existing coupled valve/tube systems.
 pub mod performance;
 
+/// Geometry-derived passive radiation loads for characteristic outlets.
+pub mod radiation;
+
 /// Geometry/material-derived plate modes driving the same nonlinear slit.
 pub mod plate;
 

@@ -198,7 +198,7 @@ fn receiver_location_changes_exterior_sound_without_changing_mechanics_and_a_clo
     assert!(distant.baffled_receiver().unwrap().delay_samples.0>close.baffled_receiver().unwrap().delay_samples.1);
     let mut different=false;
     for _ in 0..32 {
-        let mut a=[0.0;37];let mut b=[0.0;37];close.block(&mut a).unwrap();distant.block(&mut b).unwrap();
+        let(mut a,mut b)=([0.0;37],[0.0;37]);close.block(&mut a).unwrap();distant.block(&mut b).unwrap();
         different|=bits(&a)!=bits(&b);
         assert_eq!(close.system().aperture().state(),distant.system().aperture().state());
         assert_eq!(close.system().aperture().relaxation().unwrap().memory_sqrt_j(),
@@ -252,3 +252,6 @@ fn invalid_baffled_geometry_cannot_relabel_an_internal_pressure_trace() {
     }).unwrap();
     assert!(AperturePerformance::new(CoupledAperture::Network(network),ApertureObservation::TubeBaffled(receiver_location()),phrase(),config(37)).is_err());
 }
+
+#[path = "radiation.rs"]
+mod radiation;
