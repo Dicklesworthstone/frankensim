@@ -18,6 +18,8 @@ use super::{PassiveWaveguide, WaveguideError, WaveguideSpec};
 use core::mem::size_of;
 use crate::impedance::{ImpedanceState, SeriesImpedanceSpec};
 use crate::relaxation::RelaxationImpedanceSpec;
+/// Passive parallel RC admittances with typed pressure histories.
+pub mod admittance;
 mod load;
 mod interior;
 use load::{TerminalFrame, TerminalLoad};
@@ -41,6 +43,9 @@ pub enum NetworkNode {
     /// Requires at least two sections; section flows sum to the solved load flow.
     /// No propagation delay is inserted. Use an empty relaxation list for R-L-C.
     Shunt { load: RelaxationImpedanceSpec },
+    /// Passive parallel RC admittance at a common-pressure interior junction.
+    /// Requires at least two sections; every branch sees the SAME solved pressure.
+    ShuntAdmittance { load: admittance::RelaxationAdmittanceSpec },
     /// Passive inline load between exactly two sections. Positive load flow goes
     /// from the first to second section in the caller's declared section order.
     /// Port pressures may differ; their difference is the load pressure.
@@ -230,7 +235,7 @@ impl WaveguideNetwork {
                 NetworkNode::Junction if degree >= 2 => {},
                 NetworkNode::Impedance { load } if degree == 1 => { load.validate()?; },
                 NetworkNode::Relaxation { .. } if degree == 1 => {},
-                NetworkNode::Shunt { .. } if degree >= 2 => {},
+                NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } if degree >= 2 => {},
                 NetworkNode::Series { .. } if degree == 2 => {},
                 NetworkNode::Termination { reflection }
                     if degree == 1 && reflection.is_finite() && reflection.abs() <= 1.0 => {},
@@ -345,7 +350,7 @@ impl WaveguideNetwork {
     /// Relaxation histories are available separately through `terminal_relaxation_flows`.
     #[must_use]
     pub fn terminal_state(&self, node: usize) -> Option<ImpedanceState> {
-        self.loads.get(node).and_then(Option::as_ref).map(TerminalLoad::state)
+        self.loads.get(node).and_then(Option::as_ref).and_then(TerminalLoad::state)
     }
 
     /// Accepted internal relaxation flows [m^3/s]; None for other node kinds.
@@ -353,6 +358,12 @@ impl WaveguideNetwork {
     #[must_use]
     pub fn terminal_relaxation_flows(&self, node: usize) -> Option<&[f64]> {
         self.loads.get(node).and_then(Option::as_ref).and_then(TerminalLoad::relaxation_flows)
+    }
+
+    /// Accepted RC branch pressures [Pa], only for admittance shunts.
+    #[must_use]
+    pub fn shunt_relaxation_pressures(&self, node: usize) -> Option<&[f64]> {
+        self.loads.get(node).and_then(Option::as_ref).and_then(TerminalLoad::relaxation_pressures)
     }
 
     /// Last accepted node observation; a preview never replaces this value.
@@ -395,7 +406,7 @@ impl WaveguideNetwork {
         let mut junction_residual = 0.0;
         let mut load_stored = 0.0;
         for n in 0..self.nodes.len() {
-            if matches!(self.nodes[n], NetworkNode::Shunt { .. } | NetworkNode::Series { .. }) {
+            if matches!(self.nodes[n], NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } | NetworkNode::Series { .. }) {
                 let residual = self.preview_interior(n)?;
                 let trial = self.load_candidate[n].port();
                 interior_loss += trial.dissipated_energy_j;
@@ -406,7 +417,7 @@ impl WaveguideNetwork {
             let range = self.offsets[n]..self.offsets[n + 1];
             let first = self.ports[range.start];
             let pressure = match self.nodes[n] {
-                NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
+                NetworkNode::Series { .. } | NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => unreachable!("interior handled above"),
                 NetworkNode::Inlet => outgoing + self.arriving(first),
                 NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => {
                     let a = self.arriving(first);
@@ -433,7 +444,7 @@ impl WaveguideNetwork {
                 let port = self.ports[index];
                 let a = self.arriving(port);
                 let b = match self.nodes[n] {
-                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
+                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => unreachable!("interior handled above"),
                     NetworkNode::Inlet => outgoing,
                     NetworkNode::Termination { reflection } => reflection * a,
                     NetworkNode::Impedance { .. } | NetworkNode::Relaxation { .. } => self.load_candidate[n].port().reflected_pressure_pa,
@@ -446,7 +457,7 @@ impl WaveguideNetwork {
                 }
                 observation.net_flow_into_node_m3_s += flow;
                 match self.nodes[n] {
-                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } => unreachable!("interior handled above"),
+                    NetworkNode::Series { .. } | NetworkNode::Shunt { .. } | NetworkNode::ShuntAdmittance { .. } => unreachable!("interior handled above"),
                     NetworkNode::Termination { reflection } => {
                         observation.absorbed_energy_j = line.wave_energy(a)
                             * (1.0 - reflection) * (1.0 + reflection);

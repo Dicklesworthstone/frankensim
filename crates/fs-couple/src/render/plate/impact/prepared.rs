@@ -135,6 +135,13 @@ impl PreparedImpactSystem {
         self.workspace.linear_solve_counts()
     }
 
+    /// Scalar J-R products in analytic Jacobian assembly for the most recent
+    /// solver call. Excludes residuals, Hessian actions, and LU. For internal
+    /// substeps this is the last attempt, not an aggregate for the output tick.
+    pub fn newton_flow_product_count(&self) -> usize {
+        self.workspace.jacobian_flow_product_count()
+    }
+
     /// Resume reference execution without resetting motion, memory or time.
     #[must_use]
     pub fn into_reference(self) -> ImpactSystem { self.inner }

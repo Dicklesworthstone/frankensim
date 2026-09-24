@@ -46,6 +46,10 @@
 
 use fs_la::factor::lu;
 
+/// Prepared collective lossless exchange of normalized coordinate banks.
+pub mod port_exchange;
+pub use port_exchange::{PortExchangeBudget, PortExchangeRecord, PreparedPortExchange};
+
 mod prepared;
 pub use prepared::{PreparedStepError, PreparedStepRecord, StepWorkspace};
 use fs_math::c64::C64;

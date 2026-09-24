@@ -13,6 +13,8 @@ pub enum LuWorkspaceError {
     Capacity,
     /// An input or intermediate is not finite.
     NonFinite,
+    /// No successful factorization is available (including after a failed replacement).
+    Unfactored,
     /// No nonzero pivot exists in the indicated column.
     Singular {
         /// Zero-based pivot column.
@@ -39,6 +41,8 @@ pub struct LuWorkspace {
     n: usize,
     factors: Vec<f64>,
     rhs: Vec<f64>,
+    pivots: Vec<usize>,
+    factored: bool,
 }
 
 fn zeroed(len: usize) -> Result<Vec<f64>, LuWorkspaceError> {
@@ -55,32 +59,29 @@ impl LuWorkspace {
     /// Returns [`LuWorkspaceError::Capacity`] on extent overflow or allocation failure.
     pub fn new(n: usize) -> Result<Self, LuWorkspaceError> {
         let entries = n.checked_mul(n).ok_or(LuWorkspaceError::Capacity)?;
-        Ok(Self { n, factors: zeroed(entries)?, rhs: zeroed(n)? })
+        let mut pivots = Vec::new();
+        pivots.try_reserve_exact(n).map_err(|_| LuWorkspaceError::Capacity)?;
+        pivots.resize(n, 0);
+        Ok(Self { n, factors: zeroed(entries)?, rhs: zeroed(n)?, pivots, factored: false })
     }
 
     /// Fixed matrix dimension.
     #[must_use]
     pub const fn dimension(&self) -> usize { self.n }
 
-    /// Factor a fresh matrix and solve `a * x = b` into caller-owned storage.
-    /// No allocation, deallocation, resizing, locks or I/O occurs in this method.
+    /// Factor a fresh matrix and retain its row permutation for repeated RHSs.
+    /// No allocation occurs. A failed replacement invalidates the old factor;
+    /// it cannot accidentally solve a new physical system with stale coefficients.
     ///
     /// # Errors
-    /// Refuses bad lengths, nonfinite data/intermediates and singular pivots.
-    /// `out` remains bit-for-bit unchanged on every refusal.
-    #[allow(clippy::needless_range_loop)] // preserve row-major algebra and FMA order
-    pub fn solve_into(&mut self, a: &[f64], b: &[f64], out: &mut [f64])
-        -> Result<(), LuWorkspaceError>
-    {
+    /// Bad extent, nonfinite data/intermediates, or an exactly zero pivot.
+    #[allow(clippy::needless_range_loop)]
+    pub fn factor(&mut self, a: &[f64]) -> Result<(), LuWorkspaceError> {
+        self.factored = false;
         let n = self.n;
-        if a.len() != self.factors.len() || b.len() != n || out.len() != n {
-            return Err(LuWorkspaceError::Dimension);
-        }
-        if a.iter().chain(b).any(|v| !v.is_finite()) {
-            return Err(LuWorkspaceError::NonFinite);
-        }
+        if a.len() != self.factors.len() { return Err(LuWorkspaceError::Dimension); }
+        if a.iter().any(|v| !v.is_finite()) { return Err(LuWorkspaceError::NonFinite); }
         self.factors.copy_from_slice(a);
-        self.rhs.copy_from_slice(b);
         let m = &mut self.factors;
         for k in 0..n {
             let mut pivot_row = k;
@@ -91,9 +92,9 @@ impl LuWorkspace {
             }
             if !pivot_abs.is_finite() { return Err(LuWorkspaceError::NonFinite); }
             if pivot_abs == 0.0 { return Err(LuWorkspaceError::Singular { index: k }); }
+            self.pivots[k] = pivot_row;
             if pivot_row != k {
                 for col in 0..n { m.swap(k * n + col, pivot_row * n + col); }
-                self.rhs.swap(k, pivot_row);
             }
             let pivot = m[k * n + k];
             for row in k + 1..n {
@@ -106,6 +107,27 @@ impl LuWorkspace {
             }
         }
         if m.iter().any(|v| !v.is_finite()) { return Err(LuWorkspaceError::NonFinite); }
+        self.factored = true;
+        Ok(())
+    }
+
+    /// Solve against the last successful factorization, without refactoring.
+    /// All RHSs see the same pivots. Failed RHS admission/substitution leaves
+    /// both the caller's output and the retained factor unchanged.
+    ///
+    /// # Errors
+    /// Missing valid factor, bad extent, or nonfinite data/solution.
+    #[allow(clippy::needless_range_loop)]
+    pub fn solve_factored_into(&mut self, b: &[f64], out: &mut [f64])
+        -> Result<(), LuWorkspaceError>
+    {
+        let n = self.n;
+        if b.len() != n || out.len() != n { return Err(LuWorkspaceError::Dimension); }
+        if !self.factored { return Err(LuWorkspaceError::Unfactored); }
+        if b.iter().any(|v| !v.is_finite()) { return Err(LuWorkspaceError::NonFinite); }
+        self.rhs.copy_from_slice(b);
+        for k in 0..n { self.rhs.swap(k, self.pivots[k]); }
+        let m = &self.factors;
         for row in 0..n {
             let mut value = self.rhs[row];
             for col in 0..row { value = (-m[row * n + col]).mul_add(self.rhs[col], value); }
@@ -120,4 +142,22 @@ impl LuWorkspace {
         out.copy_from_slice(&self.rhs);
         Ok(())
     }
+
+    /// Factor a fresh matrix and solve `a * x = b` into caller-owned storage.
+    /// No allocation, deallocation, resizing, locks or I/O occurs. Arithmetic
+    /// and lowest-row pivot tie breaking retain the original one-shot path.
+    ///
+    /// # Errors
+    /// Refuses bad lengths, nonfinite data/intermediates and singular pivots.
+    /// `out` remains bit-for-bit unchanged on every refusal.
+    pub fn solve_into(&mut self, a: &[f64], b: &[f64], out: &mut [f64])
+        -> Result<(), LuWorkspaceError>
+    {
+        if b.len() != self.n || out.len() != self.n {
+            return Err(LuWorkspaceError::Dimension);
+        }
+        self.factor(a)?;
+        self.solve_factored_into(b, out)
+    }
+
 }

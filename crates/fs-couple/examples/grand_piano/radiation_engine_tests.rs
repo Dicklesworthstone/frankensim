@@ -60,3 +60,39 @@ fn no_load_and_zero_coupling_keep_the_original_trajectory_and_admission_is_atomi
     assert_eq!(a.bank.q,b.bank.q);assert_eq!(a.bank.v,b.bank.v);
     assert_eq!(a.accounting.radiation_loss_j,0.);assert_eq!(a.radiation_energy_j(),0.);
 }
+
+#[test]
+fn equivalent_acoustic_realizations_keep_the_same_hammer_note_and_board_trace() {
+    let mut a=piano();let mut b=piano();let ports=a.bank.board_count;
+    assert_eq!(ports,4);
+    // Equal poles may be mixed by any orthogonal matrix without changing Z(s).
+    // This changes actual port rows, not only their order. Pairwise rotations
+    // introduce basis-dependent splitting here; a collective flow must not.
+    let rows=[vec![5000.,-4000.,3000.,-1000.],vec![1000.,6000.,-2000.,2000.]];
+    let pole=|coupling|radiation::Pole {omega:std::f64::consts::TAU*300.,zeta:0.25,coupling};
+    let original=radiation::Model {ports,poles:rows.iter().cloned().map(pole).collect()};
+    let rotated=radiation::Model {ports,poles:vec![
+        pole((0..ports).map(|j|0.6*rows[0][j]-0.8*rows[1][j]).collect()),
+        pole((0..ports).map(|j|0.8*rows[0][j]+0.6*rows[1][j]).collect()),
+    ]};
+    for w in [100.,1000.,3000.] {
+        let za=original.impedance(w).unwrap();let zb=rotated.impedance(w).unwrap();
+        for (x,y) in za.iter().zip(zb) {assert!((*x-y).abs()<1e-10*(1.+x.abs()));}
+    }
+    a.configure_radiation(&original).unwrap();b.configure_radiation(&rotated).unwrap();
+    a.note_on(69,0.5).unwrap();b.note_on(69,0.5).unwrap();
+    let mut ta=vec![0.;a.board_trace_len()];let mut tb=ta.clone();let mut peak=0.0_f64;
+    for _ in 0..720 {
+        a.step_with_board_trace(&mut ta).unwrap();b.step_with_board_trace(&mut tb).unwrap();
+        for (x,y) in ta.iter().zip(&tb) {assert!((x-y).abs()<1e-11,"equivalent air bases changed board velocity");}
+        for (x,y) in a.bank.q.iter().zip(&b.bank.q) {assert!((x-y).abs()<1e-12);}
+        for (x,y) in a.bank.v.iter().zip(&b.bank.v) {assert!((x-y).abs()<1e-10);}
+        assert!((a.radiation_energy_j()-b.radiation_energy_j()).abs()<1e-12);
+        assert!((a.accounting.radiation_loss_j-b.accounting.radiation_loss_j).abs()<1e-12);
+        peak=peak.max(a.radiation_energy_j());
+    }
+    assert!(peak>1e-15);assert!(a.accounting.felt_loss_j>0.);
+    for p in [&a,&b] {
+        assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
+    }
+}

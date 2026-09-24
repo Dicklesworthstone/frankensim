@@ -104,6 +104,7 @@ pub struct StepWorkspace {
     flow: FlowPattern,
     condensation: Option<condensed::Condensation>,
     linear_solves: (usize, usize),
+    jacobian_flow_products: usize,
 }
 
 fn dimensions(what: &'static str) -> PhsError { PhsError::Dimension { what } }
@@ -167,7 +168,7 @@ impl StepWorkspace {
             delta: zeroed(n)?, jacobian: zeroed(square)?, output: zeroed(m)?,
             lu: LuWorkspace::new(n).map_err(|_| dimensions("prepared LU capacity"))?,
             flow: FlowPattern::new(n)?,
-            condensation: None, linear_solves: (0, 0),
+            condensation: None, linear_solves: (0, 0), jacobian_flow_products: 0,
         })
     }
 
@@ -187,6 +188,7 @@ impl StepWorkspace {
     pub fn set_condensed_pairs(&mut self, pairs: &[[usize; 2]]) -> Result<(), PhsError> {
         let next=if pairs.is_empty() { None }
             else { Some(condensed::Condensation::new(self.n,pairs)?) };
+        self.flow.set_column_traversal(next.is_some())?;
         self.condensation=next;
         Ok(())
     }
@@ -202,6 +204,12 @@ impl StepWorkspace {
     /// Full solves include safe fallbacks from an unsuitable elimination plan.
     #[must_use]
     pub fn linear_solve_counts(&self) -> (usize, usize) { self.linear_solves }
+
+    /// Scalar J-R products used in analytic Jacobian assembly during the most
+    /// recent solver call, including rejected Newton attempts. Excludes Hessian
+    /// work, residuals, LU and finite-difference probes; saturates at usize::MAX.
+    /// This is a work count, not an elapsed-time or real-time qualification.
+    pub fn jacobian_flow_product_count(&self) -> usize { self.jacobian_flow_products }
 
     /// Set a bounded Newton-update budget (at most the reference path's budget).
     /// Zero permits only a state already satisfying the step equation.
@@ -304,6 +312,7 @@ impl StepWorkspace {
         dissipation: Option<Dissipation<'_>>, mut cancelled: F,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
         self.linear_solves=(0, 0);
+        self.jacobian_flow_products=0;
         let mut poll = || {
             if cancelled() { Err(PreparedStepError::Cancelled) } else { Ok(()) }
         };
@@ -323,7 +332,7 @@ impl StepWorkspace {
         norm(&sys.j)?; norm(&sys.r)?; norm(&sys.g)?;
         // Inspect structure once per step, not once per Newton residual probe.
         // Refresh even on workspace reuse with another same-dimension system.
-        self.flow.refresh(sys)?;
+        self.flow.refresh_for(sys,hessian.is_some() && self.condensation.is_some())?;
         let h0 = sys.hamiltonian(x0);
         if !h0.is_finite() { return Err(dimensions("nonfinite initial Hamiltonian").into()); }
         self.forcing.fill(0.0);
