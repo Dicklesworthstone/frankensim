@@ -1,4 +1,88 @@
-# FrankenSim Reality Check — refreshed 2026-09-04
+# FrankenSim Reality Check — refreshed 2026-09-24
+
+## Refresh — 2026-09-24 (source `6c33d6a18`)
+
+### Answer
+
+**Velocity is high; convergence is zero.** Since the 09-04 refresh about 1,120 commits
+added about 239k crate lines, and there are still no stubs. But the product answer has
+not moved: re-executed today, Journey A returns `temperature-max = 293.363 K` against a
+353.15 K limit (nominal margin 59.79 K), verdict **indeterminate**, with **8 of 8 budget
+terms NO-DATA**, as on 09-03. The new work went into breadth on side surfaces, much of it
+committed uncompiled:
+
+- the `cooling-network` JSON lab, about 270 of about 300 cooling commits;
+- 2-D study variants;
+- percussion and grand-piano synthesis, about a third of all insertions.
+
+It also went in outside the tracker, which has had no writes since 09-19; only 9.8% of
+commits cite a bead.
+
+### Executed today
+
+The release binary was built from `6c33d6a18` on rch worker vmi1227854 (31 min; remote
+source hashes matched local). Runs were native on that worker.
+
+| Check | Result |
+|---|---|
+| Build `frankensim` at the previous HEAD `018246530` | **Failed**: `fs-session` referenced a non-existent `fs_la::GemmRunReport` (fixed upstream in `b8d4e25c1`) |
+| `cargo check --workspace --all-targets --keep-going` at `6c33d6a18` | **Exit 101, 15 targets do not compile**. These include the fs-conduction and fs-couple lib-test targets (both whole unit suites hidden), 5 fs-cli cooling test targets (malformed format strings), and the product binary `fs-marquee-elasticity-robust`. Full list in `q61wp.67` |
+| `scripts/e2e/cooling_01.sh --run` (Journey A, reference project) | 66/66 checks, 7/7 stages, 22 s, reproducible run identity. QoI verdict indeterminate, 8/8 NO-DATA. The receipt recorded the worker's stale `.git` HEAD (`fae92f51`), not the synced source (see `q61wp.78`) |
+| `study thermal-2d.fsim` | 8 iterations. Trace hash `c69dc6f4…` is bit-identical to the 09-05 run |
+| `study bracket-2d.fsim` (free-boundary level-set elasticity) | First observed native run: 8 iterations, 1.6 s, compliance 16.3267 J. **Ends infeasible** (area 0.6745 against volume fraction 0.45) while reporting `completed` |
+| `study bracket-projected-stress-2d.fsim` | 2 iterations, exit 0. Stress limit is `1e12 Pa`, so the constraint cannot bind |
+| `cooling-network-uq` example | 8 real coupled child solves in 0.73 s. `P(compliance) = 0.375` from n = 8 with no interval. The unknown-dependence case refuses correctly |
+| GitHub workflows (not authoritative) | Percussion 0/79, Piano 0/39, Topology 0/14, UQ 0/5 successes. UQ dies at sibling bootstrap (`franken_numpy` dirty/case-fold) |
+
+### Findings (code at 6c33d6a18; details in the new beads)
+
+1. **Verification collapsed.** 86 commits (09-19..23) say "not executed… Cargo/rustc
+   absent". The binary broke at one HEAD and 15 targets break at the next. Nothing in the
+   process catches this. → `.67`, `.68`, owner decision `.69`.
+2. **Two cooling products.**
+   - The `.fsim` pipeline has geometry import, a ledger and report/package, but no
+     radiation, transient physics or UQ.
+   - `cooling-network` has all of those, on hand-written 12- or 42-tet solids, with no
+     import and no ledger.
+   - Two separate adaptive implementations exist.
+   - None of the lab's physics reaches the product QoI. → owner decision `.70`; `.74`.
+3. **Journey A budget.**
+   - The discretization loop exists (66e9c2486) but runs only without conjugate or
+     interface coupling, so the heatsink stops after one solve (`unresolved`).
+   - Sampling exists only in the lab; `.fsim` cannot declare uncertainty.
+   - The algebraic and roundoff terms are cheap from the adjoint that already exists.
+   - The guaranteed flux bound (`.11`) is still absent; the QoI must be Estimated.
+   - → `.71`, `.72`, `.73`.
+4. **Marquee.**
+   - A real 2-D level-set elasticity study now exists and runs.
+   - Still missing: an error estimate in the loop, adaptivity, a per-iteration FD gate,
+     an independent elasticity oracle, and 3-D in the CLI.
+   - The surface proliferated: 5 marquee bins, about 10 fs-topols optimizers, and 12+
+     schema ids. → `.75`, `.76`.
+5. **Music.**
+   - fs-couple (58.8k src lines) became an instrument engine (piano, percussion, BEM
+     radiation to WAV).
+   - Its music root was closed 09-03, and 0 of 193 commits cite a bead.
+   - The registry has been frozen since 09-03, there are no percussion rows, and there
+     are no listening verdicts.
+   - The planned fs-couple coupling runtime does not exist. → owner decision `.77`.
+6. **Truth.**
+   - `q61wp.7` (Journey A L3) was closed on a child that is open; it is now reopened.
+   - The L3 receipt fails the maturity ancestry gate. → `.78`.
+   - The README has been frozen since 09-04 and has true contradictions; the website
+     claims merge gates and a certified verifier that do not exist. See comments on
+     `q61wp.4` and `.33`.
+7. **Dormant:** Wright Flyer (08-27), Euler disc, G1 (09-07), new domains (audit
+   snapshot is from July). The material data is real, sourced and consumed by `solve`.
+   The core substrate (fs-la, fs-sparse, fs-solver) is intact but untouched.
+
+### Would finishing the open beads finish the vision?
+
+**No.** The three hottest streams had no owning open bead: percussion/piano, the
+cooling-network lab, and QMC. The 94 in_progress claims are orphaned (owners idle since
+09-13/19). `bv`'s top picks are work nobody is doing. And no bead existed for the compile
+gate or for moving lab physics into the product. `.67`–`.78` cover these. The deferred
+1,180 beads (un-park 12-01) and the retired epics remain out of scope by owner decision.
 
 ## Implementation follow-through — September 4, focused checks passed
 

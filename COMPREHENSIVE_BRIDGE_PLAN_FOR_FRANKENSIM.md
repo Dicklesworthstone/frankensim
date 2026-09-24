@@ -1,12 +1,52 @@
 # Comprehensive Bridge Plan for FrankenSim
 
-**Status:** refreshed 2026-09-04 against `34f9fc0a8d2dc1e03b5d215db13aae76436d889a`. The current execution delta below supersedes the dated September 1–3 status statements; earlier measurements remain historical evidence.
+**Status:** refreshed 2026-09-24 against `6c33d6a18` (delta below); previously refreshed 2026-09-04 against `34f9fc0a8d2dc1e03b5d215db13aae76436d889a`. The current execution delta below supersedes the dated September 1–3 status statements; earlier measurements remain historical evidence.
 **Inputs:** `docs/REALITY_CHECK_2026-09-01.md` (Phase 1: where the code really is), the steering epic `frankensim-rc-root-q61wp` (.1–.43, label `reality-check-2026-09`), the five owner decisions of 2026-09-01, and the landings of 2026-09-01/02: the report stage and `run`; the finned heatsink solving seven stages; the fs-mesh facet-recovery fix; the A8 gap-table truth fix.
 **Purpose:** the Phase 2 document of the reality check — a plan that closes **every** gap between `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md` (plus its addendum) and the code, granular enough that each item becomes a self-contained bead and no reader needs this document afterwards. The plan is the measuring stick; the code is the ground truth; every item names the code it starts from.
 
 ---
 
-## Current execution delta — 2026-09-04
+## Current execution delta — 2026-09-24 (supersedes the 2026-09-04 delta below)
+
+Phase 1 evidence: `docs/REALITY_CHECK_2026-09-01.md`, section "Refresh — 2026-09-24".
+New beads: `frankensim-rc-root-q61wp.67`–`.78` (label `reality-check-2026-09-24`).
+
+**Reading of the gap.** In three weeks, ~1,120 commits added about 239k crate lines. Most of it is
+breadth on side surfaces: the `cooling-network` JSON lab, 2-D study variants, and
+percussion/grand-piano synthesis. Much of it was committed without being compiled.
+Meanwhile the product answer has not moved. The Journey A QoI still reads
+`293.363 K, margin 59.79 K, indeterminate, 8 of 8 budget terms NO-DATA`, the same as
+on 09-03. The next month's rule is **convergence before breadth**: every change must
+either restore verification or turn a NO-DATA budget term into a number on the
+product path.
+
+| Order | Bead | What | Why it is first |
+|---|---|---|---|
+| 0 | .67 | Make the 15 non-compiling targets compile; run the suites they hid | Proof is absent while tests do not build (fs-conduction and fs-couple lib tests, 5 cooling test targets, 1 marquee product bin) |
+| 0 | .69 (owner) | Verification lane for the no-Cargo remote committer | Stops the recurrence; `.67` alone would be undone within days |
+| 0 | .70 (owner) | One cooling product: `.fsim` pipeline (recommended) vs cooling-network lab | Dictates where `.72`/`.74` land |
+| 1 | .68 | Native execution sweep of everything landed unexecuted since 09-13 | The code exists but has no evidence yet |
+| 1 | .71 (completes .44) | Discretization term: goal-error adaptivity on the conjugate/interface heatsink; tolerance on the temperature rise | NO-DATA to Estimated number |
+| 1 | .73 | Algebraic term = exactly `zᵀr_k` from the existing adjoint; roundoff from an interval residual | Two NO-DATA terms become measured at almost no cost |
+| 1 | .72 (extends f85xj.6.7) | Parameters term: `.fsim` uncertainty through real solves; adjoint control variates for the mean; `BernoulliMixtureCs` anytime-valid P(compliance) | Replaces "P = 0.375 from n = 8" with a decision-grade statement |
+| 1 | .75 | Marquee convergence: feasible terminal design, binding stress limit, per-iteration FD gate, independent body-fitted elasticity oracle | The 2-D level-set study runs but ends infeasible and reports `completed` |
+| 1 | .78 | Re-retain the L3 receipt from a real checkout; refuse receipts from rch-synced or dirty trees | The only L3 fails its own ancestry gate |
+| 1 | .77 (owner) | Percussion/piano: sanction, freeze, or move out of fs-couple | A third of recent insertions sit outside tracker, registry, CI and listening |
+| 2 | .74 | Port radiation into `.fsim` (the first lab-to-product port) | Physics exists only in the lab |
+| 3 | .76 | Consolidate study surfaces (5 bins, ~10 optimizers, 12+ schemas) | Only after `.75` |
+| next | .11 (open) | Equilibrated-flux guaranteed bound | Last term before a Verified discretization colour |
+
+**Still not coverable by code:** the `geometry` and `model-form` terms need as-built
+and experimental data. They remain honest NO-DATA until the owner supplies measurements.
+With the six terms above filled, the QoI verdict becomes a real, if Estimated, decision.
+
+**Frozen until the P0/P1 rows land (recommendation):** new cooling-network features, new
+study variants and schemas, and new instrument features. Owner decisions `.70`/`.77`
+formalize this.
+
+---
+
+## Execution delta — 2026-09-04 (historical)
 
 The immediate goal is two usable engineering journeys: a cooling decision whose
 uncertainty is honestly quantified, and an admitted design study that actually
