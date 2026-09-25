@@ -4,6 +4,8 @@
 //! For y=sum(phi*q_relative)+x/L*b, the extra chord slope contributes 2*b²/L²
 //! to that channel. Pull forces back through q_relative=z-beta*b. Omitting
 //! either term would make bridge work inconsistent with the string geometry.
+//! The two transverse polarizations of ONE physical segment share the SUM of
+//! their quadratic strains, hence one tension and one quartic storage term.
 //! No new time propagator, retuned frequencies, or endpoint force lag.
 use std::{collections::BTreeMap, io::Read};
 use fs_nlmodal::{KcStringParams, kirchhoff_carrier_string};
@@ -76,11 +78,13 @@ pub struct Observation {
     pub additional_strain:f64,
     pub tension_n:f64,
     pub slope_bound:f64,
-    /// Already included in the bank's total energy.
+    /// ONE physical segment's total, already included in bank energy. Querying
+    /// either polarization returns this same quantity; do not sum it twice.
     pub stretching_energy_j:f64,
 }
 struct Channel {
     string:usize,
+    second:Option<usize>,
     coefficient:f64,
     diagonal:Vec<f64>,
     chord:f64,
@@ -89,8 +93,8 @@ struct Channel {
     material:Material,
 }
 impl Channel {
-    fn values(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->(f64,f64,f64) {
-        let s=&strings[self.string];let b=s.bridge.iter().zip(&q[modes.len()..]).map(|(g,x)|g*x).sum::<f64>();
+    fn plane_values(&self,si:usize,q:&[f64],strings:&[StringPort],modes:&[StringMode])->(f64,f64,f64) {
+        let s=&strings[si];let b=s.bridge.iter().zip(&q[modes.len()..]).map(|(g,x)|g*x).sum::<f64>();
         let mut strain= self.chord*b*b;let mut slope=b.abs()/self.length;
         for (k,e) in s.modes.clone().zip(&self.diagonal) {
             let relative=q[k]-modes[k].beta*b;
@@ -98,8 +102,16 @@ impl Channel {
         }
         (strain,b,slope)
     }
+    fn values(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->(f64,f64) {
+        let (mut strain,_,mut slope)=self.plane_values(self.string,q,strings,modes);
+        if let Some(si)=self.second {
+            let (extra,_,bound)=self.plane_values(si,q,strings,modes);
+            strain+=extra;slope=slope.hypot(bound);
+        }
+        (strain,slope)
+    }
     fn observe(&self,q:&[f64],strings:&[StringPort],modes:&[StringMode])->Observation {
-        let (s,_,slope_bound)=self.values(q,strings,modes);
+        let (s,slope_bound)=self.values(q,strings,modes);
         Observation {additional_strain:0.25*s,tension_n:self.rest_tension+0.25*self.material.axial_rigidity_n*s,
             slope_bound,stretching_energy_j:0.25*self.coefficient*s*s}
     }
@@ -115,15 +127,22 @@ pub(super) struct Prepared {
 impl Prepared {
     fn new(bank:&Bank,courses:&[Course],spec:&Specification)->Result<Self,String> {
         spec.validate(courses)?;let mut channels=Vec::new();
-        let mut member=vec![0usize;courses.len()];
         for (si,s) in bank.strings.iter().enumerate() {
+            if s.polarization!=0 {continue;} // this segment's second direction shares its first channel
             let c=courses.get(s.course).ok_or("missing original string course")?;
-            let duplex=s.contact.is_none();
-            if !duplex {member[s.course]+=1;}
             let Some(material)=spec.courses[&c.midi] else {continue;};
-            let length=if duplex{c.duplex_length_m}else{c.length_m};
-            let cents=(member[s.course] as f64-1.-0.5*(c.unison-1) as f64)*c.detune_cents;
+            let length=if s.duplex{c.duplex_length_m}else{c.length_m};
+            let cents=(s.member as f64-0.5*(c.unison-1) as f64)*c.detune_cents;
             let tension=c.tension_at_cents(cents)?;
+            let second=bank.strings.iter().position(|p|p.course==s.course && p.member==s.member
+                && p.duplex==s.duplex && p.polarization==1);
+            if let Some(j)=second {
+                let p=&bank.strings[j];
+                if p.modes.len()!=s.modes.len() || s.modes.clone().zip(p.modes.clone()).any(|(a,b)|
+                    bank.modes[a].omega!=bank.modes[b].omega || bank.modes[a].beta!=bank.modes[b].beta) {
+                    return Err("physical string polarizations have incompatible span/material coordinates".into());
+                }
+            }
             // A zero-retained-mode duplex still has chord strain and endpoint
             // mass. Obtain the same n-independent coefficient without adding
             // an oscillator or deleting the segment from the physical model.
@@ -141,7 +160,7 @@ impl Prepared {
                 || diagonal.iter().any(|x|!x.is_finite()||*x<=0.) {
                 return Err("derived string extension channel is unrepresentable".into());
             }
-            channels.push(Channel {string:si,coefficient:ch.coefficient,diagonal,chord,length,
+            channels.push(Channel {string:si,second,coefficient:ch.coefficient,diagonal,chord,length,
                 rest_tension:tension,material});
         }
         Ok(Self {channels,force:vec![0.;bank.q.len()],required:vec![0.;bank.q.len()],
@@ -151,22 +170,27 @@ impl Prepared {
         self.channels.iter().map(|c|c.observe(q,strings,modes).stretching_energy_j).sum()
     }
     fn begin(&mut self) {self.force.fill(0.);self.residual=f64::INFINITY;self.relaxation=1.;}
-    /// Exact discrete gradient of c/4*(q^T E q)^2, pulled through the same
-    /// moving-boundary coordinate transform as its storage. No endpoint lag.
+    /// Exact discrete gradient of c/4*(q^T E q)^2, pulled through BOTH moving-
+    /// boundary directions. Its scalar tension uses the total geometric strain.
     fn evaluate(&mut self,a:&[f64],b:&[f64],strings:&[StringPort],modes:&[StringMode])->Result<(),&'static str> {
         if a.len()!=self.force.len()||b.len()!=a.len()||a.iter().chain(b).any(|v|!v.is_finite()) {
             return Err("string stretching requires complete finite mechanical coordinates");
         }
         self.required.fill(0.);
         for c in &self.channels {
-            let s=&strings[c.string];let (sa,ba,_) =c.values(a,strings,modes);let (sb,bb,_) =c.values(b,strings,modes);
-            let scalar=c.coefficient*f64::midpoint(sa,sb);let bridge=f64::midpoint(ba,bb);
-            let mut reaction=scalar*c.chord*bridge;
-            for (k,e) in s.modes.clone().zip(&c.diagonal) {
-                let relative=f64::midpoint(a[k]-modes[k].beta*ba,b[k]-modes[k].beta*bb);
-                let g=scalar*e*relative;self.required[k]-=g;reaction-=modes[k].beta*g;
+            let (sa,_) =c.values(a,strings,modes);let (sb,_) =c.values(b,strings,modes);
+            let scalar=c.coefficient*f64::midpoint(sa,sb);
+            for si in std::iter::once(c.string).chain(c.second) {
+                let s=&strings[si];
+                let (_,ba,_)=c.plane_values(si,a,strings,modes);let (_,bb,_)=c.plane_values(si,b,strings,modes);
+                let bridge=f64::midpoint(ba,bb);
+                let mut reaction=scalar*c.chord*bridge;
+                for (k,e) in s.modes.clone().zip(&c.diagonal) {
+                    let relative=f64::midpoint(a[k]-modes[k].beta*ba,b[k]-modes[k].beta*bb);
+                    let g=scalar*e*relative;self.required[k]-=g;reaction-=modes[k].beta*g;
+                }
+                for (g,out) in s.bridge.iter().zip(&mut self.required[modes.len()..]) {*out-=g*reaction;}
             }
-            for (g,out) in s.bridge.iter().zip(&mut self.required[modes.len()..]) {*out-=g*reaction;}
         }
         if self.required.iter().any(|x|!x.is_finite()){return Err("string stretching force overflow");}
         Ok(())
@@ -216,7 +240,8 @@ impl Bank {
     pub fn has_string_stretching(&self)->bool {self.stretching.is_some()}
     pub fn string_stretching_observation(&self,string:usize)->Option<Observation> {
         let p=self.stretching.as_ref()?;
-        p.channels.iter().find(|c|c.string==string).map(|c|c.observe(&self.q,&self.strings,&self.modes))
+        p.channels.iter().find(|c|c.string==string || c.second==Some(string))
+            .map(|c|c.observe(&self.q,&self.strings,&self.modes))
     }
     /// Reset trial scratch once per mechanical tick, including after refusal.
     pub fn begin_string_stretching_step(&mut self) {
