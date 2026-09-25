@@ -481,5 +481,6 @@ impl<'m> ConductivityDesign<'m> {
 pub mod robin;
 
 pub use robin::goal::{
-    DiscreteGoalComparison, RobinGoalFeedback, RobinGoalLinearization, compare_discrete_goal,
+    DiscreteGoalComparison, LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer,
+    RobinGoalFeedback, RobinGoalLinearization, analyze_linear_goal, compare_discrete_goal,
 };
