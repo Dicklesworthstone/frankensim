@@ -312,7 +312,10 @@ conduction by name (`cli-solve-conduction-undeclared`); one that omits a
 its verdict stays indeterminate while any budget term is NO-DATA. A project
 that declares `(solver :fidelity "ladder")` gets a measured discretization
 term from a three-rung uniform h-ladder (Richardson/GCI, or the Eça–Hoekstra
-data-range fallback when no order is observable).
+data-range fallback when no order is observable). `(solver :fidelity
+"adaptive")` runs goal-oriented refinement (including the conjugate airflow
+case) and, when it meets its tolerance, supplies the term as twice the larger
+enrichment change (Richardson at an assumed order of at least one).
 When the project declares an operating envelope and one temperature-maximum
 requirement, the conduction stage also propagates the declared INTERVAL inputs
 by re-solving at their vertices on the base mesh: inlet/reference temperature
@@ -322,7 +325,7 @@ derived coefficient (model form), and a 100x tighter solver tolerance (solver
 algebraic); measurement is negligible because no observation data enter. On
 the tracked finned heatsink this measures five of eight terms (boundary
 conditions about 20.0 K, model form about 1.34 K, discretization about 0.001 K
-with the ladder); roundoff, geometry and material parameters stay NO-DATA, so
+with the ladder, about 0.0016 K adaptively); roundoff, geometry and material parameters stay NO-DATA, so
 the verdict is still indeterminate. Every term is Estimated, not a certificate.
 
 | Command | Purpose |

@@ -119,7 +119,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 18 retains declared-input propagation in the conduction receipt,
 /// admits refined meshes by dihedral floor alone (radius-edge is disclosed),
 /// and measures boundary, model-form, solver and measurement budget terms.
-pub const SOLVE_DRIVER_VERSION: u32 = 18;
+/// Version 19 measures adaptive accuracy on the temperature rise above the
+/// coolest declared reference and lets a tolerance-met study supply the
+/// Discretization term.
+pub const SOLVE_DRIVER_VERSION: u32 = 19;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1557,6 +1560,7 @@ fn adaptive_study(
     mut solved: RungSolved,
     region: Option<u32>,
     accuracy_rel: f64,
+    reference_k: Option<f64>,
     max_tets: usize,
     deadline: Option<(std::time::Instant, f64)>,
     solve_rung: impl Fn(&fs_mesh::LabeledTetComplex) -> Result<RungSolved, SolveRefusal>,
@@ -1599,7 +1603,11 @@ fn adaptive_study(
             &solved.solution.temperature,
             Some(region),
         );
-        let tolerance_k = accuracy_rel * coarse_max.abs();
+        // Accuracy is relative to the temperature RISE above the coolest
+        // declared reference (inlet, fluid or Dirichlet temperature): a
+        // 1% tolerance on absolute kelvin is ~3 K near room temperature,
+        // coarser than the whole rise of a lightly loaded part.
+        let tolerance_k = accuracy_rel * reference_k.map_or(coarse_max.abs(), |reference| (coarse_max - reference).abs());
         tolerance = Some(number(tolerance_k)?);
         if solves >= ADAPTIVE_MAX_SOLVES {
             stop = "solve-count-limit";
@@ -1760,7 +1768,7 @@ fn adaptive_study(
         "{{\"status\":{},\"stop\":{},\"method\":\"enriched-discrete-dual-marked-edge-stars\",\
          \"solved_meshes\":{},\"solve_limit\":{},\"peak_solved_tets\":{},\"tet_limit\":{},\
          \"uniform_quality_fallbacks\":{},\
-         \"accuracy_rel\":{},\"tolerance_k\":{},\"last_estimated_change_k\":{},\
+         \"accuracy_rel\":{},\"tolerance_basis\":{},\"reference_k\":{},\"tolerance_k\":{},\"last_estimated_change_k\":{},\
          \"history\":[{}],\"continuum_error_bound\":false,\
          \"deadline_policy\":\"between-numerical-operations\",\"no_claim\":{}}}",
         json_string(status),
@@ -1771,6 +1779,8 @@ fn adaptive_study(
         max_tets,
         uniform_quality_fallbacks,
         number(accuracy_rel)?,
+        json_string(if reference_k.is_some() { "temperature-rise-above-coolest-declared-reference" } else { "absolute-maximum" }),
+        match reference_k { Some(value) => number(value)?, None => "null".to_string() },
         tolerance.as_deref().unwrap_or("null"),
         achieved.as_deref().unwrap_or("null"),
         history.join(","),
@@ -1789,6 +1799,23 @@ fn adaptive_study(
         rungs: solves,
     });
     Ok((complex, solved, receipt, discretization))
+}
+
+/// The coolest declared boundary temperature (fluid reference, airflow inlet
+/// or Dirichlet value): the base the adaptive tolerance's rise is measured
+/// from. `None` when the project declares no temperature on any boundary.
+fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
+    setup
+        .boundaries
+        .iter()
+        .filter_map(|boundary| match &boundary.condition {
+            ThermalBoundaryCondition::Convection { reference_temperature, .. } => Some(reference_temperature.value),
+            ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => Some(inlet_temperature.value),
+            ThermalBoundaryCondition::FixedTemperature { temperature } => Some(temperature.value),
+            _ => None,
+        })
+        .filter(|value| value.is_finite())
+        .reduce(f64::min)
 }
 
 /// Richardson factor 1/(1 - 2^-p) at an assumed order p = 1 for one ratio-2
@@ -5975,7 +6002,8 @@ fn conduction_solve_receipt(
         let adaptive_fragment = if adaptive_requested {
             let budgets = spec.budgets.as_ref().expect("admitted solve budgets");
             let (adaptive_complex, adaptive_solved, receipt, estimate) = adaptive_study(
-                &cx, complex, solved, ladder_region, budgets.accuracy_rel, max_tets, deadline, &solve_rung,
+                &cx, complex, solved, ladder_region, budgets.accuracy_rel,
+                coolest_declared_temperature(setup), max_tets, deadline, &solve_rung,
             )?;
             complex = adaptive_complex;
             solved = adaptive_solved;

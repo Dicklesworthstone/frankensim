@@ -1080,7 +1080,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 18,
+        SOLVE_DRIVER_VERSION, 19,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -4883,7 +4883,9 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         conduction.contains("\"status\":\"observed-tolerance-met\""),
         "{conduction}"
     );
-    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (6 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":6,"), "{conduction}");
     assert!(
         conduction.contains("\"maximum_remainder_k\":"),
         "{conduction}"
@@ -4913,7 +4915,17 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         "the checked dual and both explicit remainders reproduce the independently solved maximum change"
     );
     assert!(conduction.contains("\"uses_nonlinear_jacobian\":false"));
-    let estimated = number("\"estimated_change_k\":");
+    // The term belongs to the PUBLISHED mesh: the last history row.
+    let last = |key: &str| -> f64 {
+        conduction
+            .rsplit(key)
+            .next()
+            .and_then(|rest| rest.split(|c| c == ',' || c == '}').next())
+            .and_then(|text| text.parse::<f64>().ok())
+            .expect("last history row value")
+    };
+    let estimated = last("\"estimated_change_k\":");
+    let last_measured = last("\"measured_change_k\":");
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
     // A tolerance-met adaptive study now supplies the Discretization term:
     // 2 x the larger enrichment change (Richardson at an assumed order >= 1),
@@ -4925,7 +4937,7 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         .and_then(|rest| rest.split(',').next())
         .and_then(|text| text.parse::<f64>().ok())
         .expect("measured adaptive discretization term");
-    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(measured.abs())).to_bits(), "{qoi}");
+    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(last_measured.abs())).to_bits(), "{qoi}");
     assert!(qoi.contains("\"method\":\"adaptive-enrichment-order-one\""), "{qoi}");
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
     let html = String::from_utf8(artifact_bytes(
@@ -5028,7 +5040,9 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
         conduction.contains("\"status\":\"observed-tolerance-met\""),
         "{conduction}"
     );
-    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (10 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":10,"), "{conduction}");
     assert!(!conduction.contains("unsupported-coupled-adjoint"));
     assert!(conduction.contains("analytic-air-solid-transpose-iqn-ils"));
     let history = conduction.split("\"history\":[").nth(1).unwrap();
