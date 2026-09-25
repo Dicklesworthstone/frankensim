@@ -18,6 +18,9 @@ use crate::projected::{ProjectedOptimizer, ProjectedProgress, ProjectedSettings,
 use crate::volume::VolumeProjectionSettings;
 use crate::{EvaluatedFinalState, SampledStressEvaluation, SampledStressLimit, evaluate_sampled_stress};
 
+/// Finer-grid mechanics and sampled-stress admission on the unchanged geometry.
+pub mod resolution;
+
 mod lifecycle;
 pub use lifecycle::ProjectedStressSetupStage;
 
