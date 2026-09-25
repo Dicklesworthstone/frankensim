@@ -29,11 +29,12 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(MultiLoadProjectedStage)) -> Result<Outcome>
 {
     if ledger.in_transaction() { return Err(malformed("multi-load study requires its own ledger transaction")); }
-    let policy = spec.projected.as_ref().ok_or_else(|| malformed("missing constrained policy"))?;
+    let policy = stress_controls(spec)?;
     let family = policy.family.as_ref().ok_or_else(|| malformed("missing independent load family"))?;
     let cases = family.cases(spec)?;
     let start = Instant::now();
-    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
+        projected: None, volume: None };
     let mut report = OptimizeReport::default();
     let mut consumed = 0.0;
     let mut predecessor = prior.map(|old| old.hash);
@@ -51,7 +52,8 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
         let (phi, decoded) = decode(spec, &old.value, &design, &iterations)?;
         report = decoded;
         let mut retained = ConstraintEvidence::read(binding.get("constraints")
-            .ok_or_else(|| malformed("missing multi-load constraints"))?, &report, policy)?;
+            .ok_or_else(|| malformed("missing multi-load constraints"))?, &report,
+            spec.projected.as_ref().expect("admitted stress policy"))?;
         if retained.current().snapshot != snapshot(&phi) { return Err(malformed("multi-load field and stress differ")); }
         let expected_repairs = restoration::updates(&retained.baseline, &retained.accepted, policy);
         if old.value.str_field("status") == Some("completed") && !restoration::feasible(retained.current(), policy) {

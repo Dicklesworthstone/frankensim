@@ -150,7 +150,7 @@ fn region_source(rectangles: &str) -> String {
 
 fn prepared(spec: &ElasticitySpec) -> fs_topols::design_regions::PreparedDesignRegions {
     let ControlFlow::Continue(prepared) = regions::prepare(spec,
-        &spec.projected.as_ref().unwrap().regions, |_| ControlFlow::<()>::Continue(())).unwrap()
+        &stress_controls(spec).unwrap().regions, |_| ControlFlow::<()>::Continue(())).unwrap()
     else { panic!("uninterrupted region preparation") };
     prepared
 }
@@ -168,7 +168,7 @@ fn g0_native_design_regions_are_explicit_bounded_and_part_of_study_identity() {
     assert_eq!(declared.canonical, again.canonical);
     assert_eq!(declared.id, again.id);
     assert_ne!(declared.id, spec().id);
-    assert_eq!(declared.projected.as_ref().unwrap().regions.len(), 2);
+    assert_eq!(stress_controls(&declared).unwrap().regions.len(), 2);
     assert!(!spec().canonical.contains("design-regions"));
     for bad in [
         REGIONS.replace(":phase void", ":phase unknown"),
@@ -271,8 +271,8 @@ fn g0_recovery_rejects_changed_region_evidence_and_same_sign_prescription_drift(
     let (_, JsonValue::Object(constraints)) = binding.iter_mut().find(|(k, _)| k == "constraints").unwrap()
         else { panic!("constraints") };
     constraints.retain(|(k, _)| k != "design_regions");
-    let policy = spec.projected.as_ref().unwrap();
-    assert!(ConstraintEvidence::read(constrained(&receipt), &rows, policy).is_err());
+    assert!(ConstraintEvidence::read(constrained(&receipt), &rows, spec.projected.as_ref().unwrap()).is_err());
+    let policy = stress_controls(&spec).unwrap();
     let prescribed = prepared(&spec);
     let &(index, original) = prescribed.fixed_nodes.iter()
         .find(|(i, _)| i % (phi.n() + 1) != 0 && i % (phi.n() + 1) != phi.n()).unwrap();

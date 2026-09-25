@@ -16,7 +16,10 @@ mod regions;
 mod multi_load;
 use multi_load::restoration;
 
-pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality and a declared deterministic sampled von Mises limit. Explicit restoration may retain overstressed designs only while reducing measured worst stress excess; these are not stress-feasible results. Compliance improvement starts at the first stress-feasible design under identical loads. Every accepted state is independently re-solved and durably retained. Candidate CG and stress-cell boundaries are cancellable; the load-family report states startup/recovery limitations. Assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, stress-adjoint/KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
+#[path = "projected/volume.rs"]
+pub(super) mod volume;
+
+pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality. A deterministic sampled von Mises limit is imposed only by the explicitly selected projected-stress mode; projected-volume does not evaluate or certify stress. Explicit stress restoration may retain overstressed designs only while reducing measured worst stress excess; these are not stress-feasible results. Compliance improvement is measured from a feasible baseline under identical loads. Every accepted state is independently re-solved and durably retained. Candidate CG and requested stress-cell boundaries are cancellable; the load-family report states startup/recovery limitations. Assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, stress-adjoint/KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
 
 #[derive(Debug, Clone)]
 pub(crate) struct Controls {
@@ -32,7 +35,7 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
         matches!(&pair[0].kind, NodeKind::Keyword(key) if key == "constraint-mode"));
     let Some(mode) = mode else { return Ok(None) };
     if !matches!(&mode[1].kind, NodeKind::Symbol(value) if value == "projected-stress") {
-        return Err(malformed("constraint-mode must be projected-stress"));
+        return Err(malformed("constraint-mode must be projected-volume or projected-stress"));
     }
     let real = |key| super::super::number(field(fields, key)?, key);
     let count = |key| integer_node(field(fields, key)?, key);
@@ -178,7 +181,9 @@ impl ConstraintEvidence {
             restoration::json_field(&self.baseline, &self.accepted, &self.policy))
     }
 
-    fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
+    fn read(value: &JsonValue, report: &OptimizeReport, requested: &ProjectedControls) -> Result<Self> {
+        let ProjectedControls::Stress(policy) = requested
+            else { return Err(malformed("stress evidence cannot be substituted for a volume-only policy")); };
         if value.str_field("mode") != Some("projected-stress-v1")
             || value.str_field("baseline_scope") != Some(restoration::baseline_scope(policy))
         { return Err(malformed("missing projected-stress baseline identity")); }
@@ -241,7 +246,7 @@ fn constraints_stop(status: &'static str, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
-    if spec.projected.as_ref().is_some_and(|policy| policy.family.is_some()) {
+    if stress_controls(spec)?.family.is_some() {
         return multi_load::drive(spec, ledger, cap, gate, prior);
     }
     drive_observed(spec, ledger, cap, gate, prior, |_| {})
@@ -250,9 +255,10 @@ pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
 fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(Stage)) -> Result<Outcome> {
     if ledger.in_transaction() { return Err(malformed("constrained study requires its own ledger transaction")); }
-    let policy = spec.projected.as_ref().ok_or_else(|| malformed("missing projected controls"))?;
+    let policy = stress_controls(spec)?;
     let start = Instant::now();
-    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
+        projected: None, volume: None };
     let mut predecessor = prior.map(|old| old.hash);
     let mut last = None;
     let mut consumed = 0.0;
@@ -270,7 +276,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         let (phi, decoded) = decode(spec, &old.value, &design, &iterations)?;
         report = decoded;
         let retained = ConstraintEvidence::read(binding.get("constraints")
-            .ok_or_else(|| malformed("missing retained constrained history"))?, &report, policy)?;
+            .ok_or_else(|| malformed("missing retained constrained history"))?, &report,
+            spec.projected.as_ref().expect("admitted stress policy"))?;
         if snapshot(&phi) != retained.current().snapshot {
             return Err(malformed("retained stress and geometry differ"));
         }

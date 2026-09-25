@@ -15,7 +15,11 @@ const CG_POLL_ITERS: usize = 32;
 
 #[path = "continuation/projected.rs"]
 mod projected;
-pub(super) use projected::{Controls as ProjectedControls, PROJECTED_SCOPE, parse_controls};
+#[path = "continuation/controls.rs"]
+mod controls;
+pub(super) use controls::{ProjectedControls, parse_controls};
+use controls::stress_controls;
+pub(super) use projected::PROJECTED_SCOPE;
 
 fn stop_status(cancelled: bool, consumed_wall: f64, wall_limit: f64) -> Option<&'static str> {
     if cancelled { Some("cancelled") }
@@ -48,6 +52,14 @@ pub(super) struct Evidence {
     updates: usize,
     legacy_replayed: usize,
     projected: Option<projected::ConstraintEvidence>,
+    volume: Option<projected::volume::VolumeEvidence>,
+}
+
+/// Reporting projection shared by genuinely measured volume-only and
+/// stress-constrained baselines. It has no invented stress or solver fields.
+pub(super) struct CurrentDesign {
+    pub(super) compliance: f64,
+    pub(super) volume: f64,
 }
 
 impl Evidence {
@@ -60,16 +72,29 @@ impl Evidence {
 
 impl Evidence {
     pub(super) fn constraint_fields(&self) -> String {
-        self.projected.as_ref().map_or_else(String::new,
-            |state| format!(",\"constraints\":{}", state.json()))
+        if let Some(state) = &self.volume {
+            format!(",\"constraints\":{}", state.json())
+        } else {
+            self.projected.as_ref().map_or_else(String::new,
+                |state| format!(",\"constraints\":{}", state.json()))
+        }
     }
 
-    pub(super) fn projected_current(&self) -> Option<&fs_topols::SampledStressEvaluation> {
-        self.projected.as_ref().map(projected::ConstraintEvidence::current)
+    pub(super) fn projected_current(&self) -> Option<CurrentDesign> {
+        if let Some(state) = &self.volume {
+            let current = state.current();
+            Some(CurrentDesign { compliance: current.compliance, volume: current.volume })
+        } else {
+            self.projected.as_ref().map(|state| {
+                let current = state.current();
+                CurrentDesign { compliance: current.compliance, volume: current.volume }
+            })
+        }
     }
 
     pub(super) fn constraint_html(&self) -> String {
-        self.projected.as_ref().map_or_else(String::new, |state| state.html())
+        if let Some(state) = &self.volume { state.html() }
+        else { self.projected.as_ref().map_or_else(String::new, |state| state.html()) }
     }
 }
 
@@ -212,10 +237,10 @@ fn retained_error(mut error: Failure, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
-    if spec.projected.is_some() {
-        projected::drive(spec, ledger, cap, gate, prior)
-    } else {
-        drive_observed(spec, ledger, cap, gate, prior, |_, _| {})
+    match spec.projected.as_ref() {
+        Some(ProjectedControls::Volume(_)) => projected::volume::drive(spec, ledger, cap, gate, prior),
+        Some(ProjectedControls::Stress(_)) => projected::drive(spec, ledger, cap, gate, prior),
+        None => drive_observed(spec, ledger, cap, gate, prior, |_, _| {}),
     }
 }
 
@@ -228,7 +253,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         return Err(fail("cli-study-elasticity-transaction", "study requires its own ledger transaction"));
     }
     let start = Instant::now();
-    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
+        projected: None, volume: None };
     let mut predecessor = prior.map(|loaded| loaded.hash);
     let mut retained_wall = 0.0;
     let mut last = None;
