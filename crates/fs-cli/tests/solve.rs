@@ -3626,8 +3626,8 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
     assert_eq!(
         twin.matches("\"state\": \"no-data\"").count(),
-        8,
-        "all eight NO-DATA terms are carried into the twin"
+        5,
+        "the five NO-DATA terms are carried into the twin"
     );
     let package_text = String::from_utf8(artifact_bytes(
         &ledger,
@@ -5037,7 +5037,10 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert!(number("linearization_remainder_k").abs() < 1e-8,
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 8, "{qoi}");
+    // The adaptive estimate is not a discretization receipt; propagation
+    // measures boundary, card model-form and solver terms, and measurement
+    // is negligible, so four sources stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
 }
 
 #[test]

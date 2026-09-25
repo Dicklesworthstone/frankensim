@@ -1385,7 +1385,7 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
         &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
     )
     .expect("assign");
-    assert_eq!(assigned.receipts().len(), 5);
+    assert_eq!(assigned.receipts().len(), 6);
     assert_eq!(assigned.provenance(), ProvenanceClass::MatdbReceipts);
     let problem = ConductionProblem {
         element_materials: None,
