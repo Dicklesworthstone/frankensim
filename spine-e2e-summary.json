@@ -6,30 +6,32 @@
     "profile": "full",
     "through": "report",
     "project": "data/reference-project/cooling-reference.fsim",
-    "executed_at": "2026-09-03T19:54:12Z",
+    "executed_at": "2026-09-25T00:16:52Z",
     "host_fingerprint": "Darwin 25.2.0 arm64, 14 cpus",
-    "binary_md5_16": "27ba60afc1e960a9",
-    "head_sha": "51acb4b0ce10ea5145237643593b68fde23e8744"
+    "binary_md5_16": "3d5979599ff1dfd5",
+    "head_sha": "b98d4c1ff116e17bef76724121ff4c721b92baa7",
+    "stage_wall_s_total": 0.144686,
+    "timing_no_claim": "per-stage solver wall-clock on this host and binary; it is not a user's end-to-end turnaround and does not include import, export, or any human step"
   },
   "stages": [
-    { "stage": "import-verify", "capability": null, "status": "executed" },
-    { "stage": "assign", "capability": null, "status": "executed" },
-    { "stage": "material-resolve", "capability": null, "status": "executed" },
-    { "stage": "flow-network", "capability": null, "status": "executed" },
-    { "stage": "conduction", "capability": "thermal.conduction-solve", "status": "executed" },
-    { "stage": "qoi", "capability": null, "status": "executed" },
-    { "stage": "report", "capability": null, "status": "executed" }
+    {"stage": "import-verify", "capability": null, "status": "executed", "wall_s": 0.074153792},
+    {"stage": "assign", "capability": null, "status": "executed", "wall_s": 0.000005624999999995217},
+    {"stage": "material-resolve", "capability": null, "status": "executed", "wall_s": 0.00012466699999999498},
+    {"stage": "flow-network", "capability": null, "status": "executed", "wall_s": 0.00016470900000001287},
+    {"stage": "conduction", "capability": "thermal.conduction-solve", "status": "executed", "wall_s": 0.044862542000000005},
+    {"stage": "qoi", "capability": null, "status": "executed", "wall_s": 0.00019229099999998334},
+    {"stage": "report", "capability": null, "status": "executed", "wall_s": 0.025182749999999976}
   ],
   "summary": {
-    "schema": "frankensim.ci.solve-e2e-summary.v1",
-    "profile": "full",
-    "through": "report",
-    "checks": 66,
-    "failures": 0,
-    "stages_executing": 7,
-    "stages_total": 7,
-    "first_gap": "none",
-    "first_gap_owner": "",
-    "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
-  }
+  "schema": "frankensim.ci.solve-e2e-summary.v1",
+  "profile": "full",
+  "through": "report",
+  "checks": 66,
+  "failures": 0,
+  "stages_executing": 7,
+  "stages_total": 7,
+  "first_gap": "none",
+  "first_gap_owner": "",
+  "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
+}
 }

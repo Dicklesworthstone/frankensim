@@ -10,6 +10,14 @@
       "date": "2026-09-01",
       "bead": "frankensim-rc-root-q61wp.2",
       "reason": "The cited cooling_01 lane stops at the conduction gap; no retained receipt records the thermal conduction stage as executed. Journey A (frankensim-rc-root-q61wp.13) owns an honest lane and any later re-promotion."
+    },
+    {
+      "capability": "thermal.conduction-solve",
+      "from": "L2",
+      "to": "L3",
+      "date": "2026-09-24",
+      "bead": "frankensim-rc-root-q61wp.78",
+      "reason": "Records the re-promotion (performed 2026-09-02 under q61wp.13 without an event) and re-backs it: scripts/e2e/cooling_01.sh --retain from a clean local checkout at b98d4c1ff (66/66 checks, 7/7 stages); the lane now refuses to retain when the tracked source differs from HEAD, and xtask check-maturity reports the L3 executed receipt at that HEAD."
     }
   ],
   "capabilities": [
