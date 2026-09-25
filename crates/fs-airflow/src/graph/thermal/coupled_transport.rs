@@ -146,6 +146,12 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
     }).collect();
     let mut reference = initial_references_k.to_vec();
     let mut last_change = 0.0_f64;
+    // The temperature step alone cannot bound watts: at a large h*A a step
+    // inside the kelvin tolerance can still leave the interface unclosed. Such
+    // a response is not an answer yet, but it is not a failure either; the
+    // fixed point keeps iterating and the balance refusal is final only when
+    // the budget runs out or the state no longer moves.
+    let mut unclosed = None;
     for iteration in 0..config.max_iterations {
         checkpoint(cx, iteration, &reference)?;
         let response = solid(cx, &reference)
@@ -159,6 +165,7 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             .map_err(|error| at_iteration(error, iteration, &reference))?;
         let next = &transport.reference_temperatures_k;
         let mut accepted = true;
+        unclosed = None;
         let mut balances = Vec::with_capacity(reference.len());
         let mut omegas = Vec::with_capacity(active.len());
         last_change = 0.0;
@@ -171,6 +178,10 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             match solve_conjugate_from(cx, &path, &probe_config, &reference[range.clone()], |_, _| Ok(states.to_vec())) {
                 Ok(probe) => balances.extend(probe.balance.regions),
                 Err(AirflowError::ConjugateNotConverged { .. }) => accepted = false,
+                Err(error @ AirflowError::ConjugateBalanceUnclosed { .. }) => {
+                    accepted = false;
+                    unclosed = Some(error);
+                }
                 Err(error) => return Err(at_iteration(TransportError::Airflow(error), iteration, &reference)),
             }
             let total_area = checked_sum("transport branch wetted area", path.segments().iter().map(|segment| segment.area_m2()))?;
@@ -188,6 +199,10 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
             omegas.push(omega);
         }
         checkpoint(cx, iteration, &reference)?;
+        if let Some(error) = unclosed.take_if(|_| last_change == 0.0) {
+            // An exact fixed point repeats this response bit for bit.
+            return Err(error.into());
+        }
         if accepted {
             // Publish the references actually used by this solid response,
             // not the next proposed vector. No unaudited final solve is needed.
@@ -229,6 +244,7 @@ where F: FnMut(&Cx<'_>, &[f64]) -> Result<Vec<SolidRegionState>, AirflowError>,
         checkpoint(cx, iteration, &reference)?;
         reference = relaxed;
     }
+    if let Some(error) = unclosed { return Err(error.into()); }
     Err(AirflowError::ConjugateNotConverged {
         iterations: config.max_iterations, max_change_bits: last_change.to_bits(),
         tolerance_bits: config.temperature_tolerance_k.to_bits(),
