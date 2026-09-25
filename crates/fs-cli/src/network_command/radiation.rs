@@ -18,7 +18,8 @@
 //! Fixed-grid trajectory adjoints retain each model's complete feedback.
 use super::*;
 use fs_conduction::{ConductionSolution, SurfaceEmissivity, STEFAN_BOLTZMANN_W_M2_K4,
-    SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS};
+    SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS, AmbientRadiationPatch,
+    AmbientRadiationConfig, solve_with_ambient_radiation};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, SelectionPolicy, UncertaintyModel};
@@ -36,17 +37,13 @@ struct Patch {
 }
 
 impl Patch {
+    fn model(&self) -> Result<AmbientRadiationPatch> {
+        AmbientRadiationPatch::new(&self.surface, self.emissivity.clone(), self.ambient_k)
+            .map_err(producer)
+    }
+
     fn coefficient(&self, temperature: f64) -> Result<f64> {
-        if !(temperature.is_finite() && temperature > 0.0) {
-            return Err(producer("radiation requires positive absolute surface temperature"));
-        }
-        let ambient = self.ambient_k;
-        let value = self.emissivity.value() * STEFAN_BOLTZMANN_W_M2_K4
-            * (temperature + ambient) * (temperature * temperature + ambient * ambient);
-        if !(value.is_finite() && value > 0.0) {
-            return Err(producer("radiation secant coefficient is not finite and positive"));
-        }
-        Ok(value)
+        self.model()?.secant_coefficient_w_m2_k(temperature).map_err(producer)
     }
 }
 
@@ -126,90 +123,72 @@ impl Policy {
     fn solid(&self, request: &Request, cx: &Cx<'_>, names: &[&str], references: &[f64],
         htc: &BTreeMap<String, f64>, want_gradient: bool) -> Result<Inner>
     {
-        if names.len() != references.len() { return Err(bad("radiation air-reference arity mismatch")); }
-        let mut driving = references.to_vec();
+        if names.is_empty() || names.len() != references.len() {
+            return Err(bad("radiation requires nonempty matching air-reference rows"));
+        }
+        let boundary = request.boundary(names, references, htc)?;
         let material = fs_conduction::ConductivityModel::isotropic_declared(request.conductivity).map_err(producer)?;
         let uniform = ScalarField::Uniform(request.source);
         let source = request.solid_data.nodal_source.as_ref().unwrap_or(&uniform);
-        let mut initial = InitialGuess::Uniform(references.iter().sum::<f64>() / references.len() as f64);
-        for iteration in 0..self.max_iterations {
-            poll(cx)?;
+        let mut config = SolveConfig::default();
+        config.initial = InitialGuess::Uniform(references.iter().sum::<f64>() / references.len() as f64);
+        config.linear.tolerance = request.limits.relative;
+        config.linear.max_iterations = self.limits_linear(request);
+        config.stop.residual_rtol = request.limits.relative;
+        config.stop.step_atol = 0.0;
+        let patches = self.patches.values().map(Patch::model).collect::<Result<Vec<_>>>()?;
+        let problem = ConductionProblem { mesh: &request.mesh, boundary: &boundary,
+            material: &material, element_materials: request.solid_data.element_materials.as_ref(), source };
+        // The canonical .fsim producer and this lab use exactly the same
+        // radiation/contact/material solve, heat split and convergence gates.
+        let result = solve_with_ambient_radiation(cx, problem,
+            request.contacts.as_ref().map(|contact| &contact.interfaces), &patches, config,
+            AmbientRadiationConfig { max_iterations: self.max_iterations,
+                temperature_tolerance_k: self.tolerance_k, balance_tolerance_w: request.limits.heat,
+                balance_relative_tolerance: 0.0, relaxation: self.relaxation },
+        ).map_err(|error| match error {
+            fs_conduction::ConductionError::AmbientRadiationNotConverged { .. } => Failure {
+                code: "cooling-network-radiation-budget", message: error.to_string(),
+            },
+            other => producer(other),
+        })?;
+        poll(cx)?;
+        let convective = names.iter().map(|name| {
+            result.convective_robin_fluxes.iter().find(|flux| flux.region == *name)
+                .map(SolidRegionState::from_robin_flux)
+                .ok_or_else(|| bad(format!("radiation solid response lacks {name}")))
+        }).collect::<Result<Vec<_>>>()?;
+        let heats = result.radiation.patches.iter().map(|row| {
+            Ok(PatchHeat { surface: row.patch.region().to_string(),
+                mean_k: row.mean_surface_temperature_k,
+                secant_h: row.patch.secant_coefficient_w_m2_k(row.mean_surface_temperature_k).map_err(producer)?,
+                applied_w: row.applied_heat_w, nonlinear_w: row.nonlinear_heat_w })
+        }).collect::<Result<Vec<_>>>()?;
+        let binding = if want_gradient {
             let mut combined_h = htc.clone();
             let mut combined_ref = references.to_vec();
+            let mut driving = references.to_vec();
             let mut applied_h = vec![0.0; names.len()];
-            for (i, &name) in names.iter().enumerate() {
-                if let Some(patch) = self.patches.get(name) {
-                    let h_rad = patch.coefficient(driving[i])?;
-                    let h_air = htc[name];
-                    let h = finite(h_air + h_rad, "combined radiation/convection coefficient")?;
-                    combined_ref[i] = finite((h_air / h) * references[i]
-                        + (h_rad / h) * patch.ambient_k, "combined Robin reference")?;
-                    combined_h.insert(name.to_string(), h);
-                    applied_h[i] = h_rad;
+            for (index, &name) in names.iter().enumerate() {
+                let slot = result.combined_boundary.region_names().iter().position(|region| region == name)
+                    .ok_or_else(|| bad("missing accepted radiation boundary"))?;
+                let ThermalBc::Robin { htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference) }
+                    = &result.combined_boundary.conditions()[slot]
+                else { return Err(bad("accepted radiation boundary is not uniform Robin")); };
+                combined_h.insert(name.to_string(), *h);
+                combined_ref[index] = *reference;
+                if let Some(row) = result.radiation.patches.iter().find(|row| row.patch.region() == name) {
+                    driving[index] = row.driving_temperature_k;
+                    applied_h[index] = row.applied_coefficient_w_m2_k;
                 }
             }
-            let boundary = request.boundary(names, &combined_ref, &combined_h)?;
-            let mut config = SolveConfig::default();
-            config.initial = initial;
-            config.linear.tolerance = request.limits.relative;
-            config.linear.max_iterations = self.limits_linear(request);
-            config.stop.residual_rtol = request.limits.relative;
-            config.stop.step_atol = 0.0;
-            let binding = want_gradient.then(|| sensitivity::Binding {
-                htc: combined_h.clone(), references: combined_ref.clone(), driving: driving.clone(),
-                radiative_htc: applied_h.clone(), config: config.clone(),
-            });
-            let problem = ConductionProblem { mesh: &request.mesh, boundary: &boundary,
-                material: &material, element_materials: request.solid_data.element_materials.as_ref(), source };
-            let conduction = match &request.contacts {
-                Some(contact) => fs_conduction::solve::solve_with_interfaces(cx, problem, &contact.interfaces, config),
-                None => fs_conduction::solve::solve(cx, problem, config),
-            }.map_err(producer)?;
-            poll(cx)?;
-            let mut convective = Vec::with_capacity(names.len());
-            let mut heats = Vec::with_capacity(self.patches.len());
-            let mut max_change = 0.0_f64;
-            let mut max_mismatch = 0.0_f64;
-            let mut combined_total = 0.0;
-            for (i, &name) in names.iter().enumerate() {
-                let flux = conduction.report.robin_fluxes.iter().find(|f| f.region == name)
-                    .ok_or_else(|| bad(format!("radiation solid response lacks {name}")))?;
-                let mean = flux.mean_wall_temperature_k;
-                if !(mean.is_finite() && mean > 0.0) {
-                    return Err(producer("radiation solid solve returned a nonpositive surface temperature"));
-                }
-                let q_air = finite(htc[name] * flux.area_m2 * (mean - references[i]), "convective heat")?;
-                let mut q_applied = 0.0;
-                if let Some(patch) = self.patches.get(name) {
-                    let h = patch.coefficient(mean)?;
-                    let q = finite(h * flux.area_m2 * (mean - patch.ambient_k), "nonlinear radiative heat")?;
-                    q_applied = finite(applied_h[i] * flux.area_m2 * (mean - patch.ambient_k), "applied radiative heat")?;
-                    max_change = max_change.max(finite(mean - driving[i], "radiation temperature residual")?.abs());
-                    max_mismatch = max_mismatch.max(finite(q - q_applied, "radiation heat residual")?.abs());
-                    heats.push(PatchHeat { surface: name.to_string(), mean_k: mean,
-                        secant_h: h, applied_w: q_applied, nonlinear_w: q });
-                    driving[i] = finite((1.0 - self.relaxation) * driving[i] + self.relaxation * mean,
-                        "relaxed radiation temperature")?;
-                }
-                if finite(flux.heat_rate_w - q_air - q_applied, "Robin heat split")?.abs() > request.limits.heat {
-                    return Err(producer("radiation/convection split disagrees with assembled Robin heat"));
-                }
-                combined_total = finite(combined_total + q_air + q_applied, "combined boundary heat")?;
-                convective.push(SolidRegionState { region: name.to_string(), area_m2: flux.area_m2,
-                    mean_wall_temperature_k: mean, heat_rate_w: q_air,
-                    mean_reference_temperature_k: Some(references[i]) });
-            }
-            if finite(combined_total - conduction.report.energy.robin_out_w, "Robin decomposition")?.abs() > request.limits.heat {
-                return Err(producer("radiative solid boundary decomposition failed"));
-            }
-            if max_change <= self.tolerance_k && max_mismatch <= request.limits.heat {
-                return Ok(Inner { conduction, convective, heats, iterations: iteration + 1,
-                    max_change_k: max_change, max_mismatch_w: max_mismatch, binding });
-            }
-            initial = InitialGuess::Free(conduction.temperature);
-        }
-        Err(Failure { code: "cooling-network-radiation-budget", message: format!(
-            "radiation did not satisfy both temperature and nonlinear watt gates within {} solid solves at the current air reference; no partial result published", self.max_iterations) })
+            Some(sensitivity::Binding { htc: combined_h, references: combined_ref, driving,
+                radiative_htc: applied_h, config: result.final_solve_config })
+        } else { None };
+        Ok(Inner { conduction: result.conduction, convective, heats,
+            iterations: result.radiation.iterations,
+            max_change_k: result.radiation.max_temperature_change_k,
+            max_mismatch_w: result.radiation.max_heat_mismatch_w, binding })
     }
 
     fn limits_linear(&self, request: &Request) -> usize { request.limits.linear }
