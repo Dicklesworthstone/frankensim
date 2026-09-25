@@ -130,10 +130,12 @@ channel. Kelvin/material history remains private and is not reinterpreted as
 shaft motion. Full requested beam slices and original mode/pad budgets remain
 mandatory; oversized compositions refuse rather than discard modes.
 
-A flexible shaft and a finite-area felt mallet cannot select the **same hand**:
-the current mallet model supplies a separate head inertia, and merging it into
-a flexible shaft needs an explicit joint mass/face model. Opposite-hand mallets
-and moving mutes remain composable within existing limits. `drum-modal` keeps
+A flexible shaft and finite-area felt head can select the **same hand** using
+an explicit v2 physical-head card: [LOADED_MALLETS.md](LOADED_MALLETS.md). Its
+mass and rotary inertia enter the original beam pencil, and each felt site
+applies force and moment through that loaded basis. A v1 effective-mass mallet
+still refuses on the same shaft to prevent double-counting inertia.
+Opposite-hand mallets and moving mutes retain their existing limits. `drum-modal` keeps
 its declared linear modal realization with the actual elastic shaft bodies.
 For snare commands, selecting a shaft enables the nonlinear-capable composition
 so that `--analytic-newton` and impact substeps can be used without discarding

@@ -127,11 +127,12 @@ fn splash_with_shafts(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Optio
     let second_coordinate=1+reduction.mode_count();let structural=second_coordinate+usize::from(second.is_some());
     let attachment=mute.map(|spec|spec.shell(&reduction,&shell.mesh.nodes,&shell.mesh.tris,structural)).transpose()?;
     let base=structural+attachment.as_ref().map_or(0,|a|a.bodies.len());
-    let mut shaft=shafts.build(base,second_coordinate,stroke,second,dt_s)?;
+    let mut shaft=shafts.build_with_mallets(base,second_coordinate,stroke,second,dt_s,mallets)?;
     let n=shaft.total;
     let mut mallet_pads=Vec::new();
     let (stick,stick_weight)=match &mallets.first {
         Some(spec)=>{let tip=spec.compile_shell(&reduction,&shell,stroke,0,1,n)?;
+                let tip=spec.bind_shaft(tip,0,&mut shaft)?;
             mallet_pads.extend(tip.pads);(tip.body,tip.port.inverse_sqrt_mass)},
         None=>match shaft.bodies[0].take() {
             Some(body)=>body,None=>stick_with_speed(stroke.speed_m_s)?,
@@ -140,6 +141,7 @@ fn splash_with_shafts(steps:u64,dt_s:f64,audio:bool,stroke:Stroke,supplied:Optio
     let second=second.map(|stroke|->Result<_,Error>{
         match &mallets.second {
             Some(spec)=>{let tip=spec.compile_shell(&reduction,&shell,stroke,second_coordinate,1,n)?;
+                let tip=spec.bind_shaft(tip,1,&mut shaft)?;
                 mallet_pads.extend(tip.pads);
                 Ok((tip.body,None,sticks::Port{coordinate:second_coordinate,weight:tip.port.inverse_sqrt_mass}))},
             None=>{
@@ -288,11 +290,12 @@ fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     let attachment=mute.map(|spec|spec.head(&films,&mode_sets,structural)).transpose()?;
     let base=structural+attachment.as_ref().map_or(0,|a|a.bodies.len());
     let second_coordinate=1+mode_sets.iter().map(Vec::len).sum::<usize>();
-    let mut shaft=shafts.build(base,second_coordinate,stroke,second,dt_s)?;
+    let mut shaft=shafts.build_with_mallets(base,second_coordinate,stroke,second,dt_s,mallets)?;
     let n=shaft.total;
     let mut mallet_pads=Vec::new();
     let (stick,stick_weight)=match &mallets.first {
         Some(spec)=>{let tip=spec.compile(&films[0],&mode_sets[0],stroke,0,n)?;
+                let tip=spec.bind_shaft(tip,0,&mut shaft)?;
             mallet_pads.extend(tip.pads);(tip.body,tip.port.inverse_sqrt_mass)},
         None=>match shaft.bodies[0].take() {
             Some(body)=>body,None=>stick_with_speed(stroke.speed_m_s)?,
@@ -343,6 +346,7 @@ fn drum_with_shafts(steps:u64,dt_s:f64,audio:bool,prepared:bool,snares:Option<sn
     let second_stick=if let Some(stroke)=second {
         let port=match &mallets.second {
             Some(spec)=>{let tip=spec.compile(&films[0],&mode_sets[0],stroke,offset,n)?;
+                let tip=spec.bind_shaft(tip,1,&mut shaft)?;
                 let port=sticks::Port {coordinate:offset,weight:tip.port.inverse_sqrt_mass};
                 bodies.push(tip.body);mallet_pads.extend(tip.pads);port},
             None=>{

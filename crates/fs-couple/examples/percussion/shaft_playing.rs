@@ -21,13 +21,25 @@ impl Selection {
         if self.second.is_some() && second.is_none() {
             return Err("--second-flexible-stick requires --second-stick-position-m X Y".into());
         }
-        // A felt face currently supplies its own independent head inertia.
-        // Do not discard it or count two tip masses on one flexible shaft.
-        if self.first.is_some() && mallets.first.is_some()
-            || self.second.is_some() && mallets.second.is_some() {
-            return Err("a flexible shaft and felt mallet cannot select the same hand; their inertias and finite-face coupling need a joint model".into());
+        for (shaft,mallet) in [self.first.as_ref(),self.second.as_ref()].into_iter()
+            .zip([mallets.first.as_ref(),mallets.second.as_ref()]) {
+            if let Some(mallet)=mallet {mallet.admit_shaft(shaft.is_some())?;}
         }
         Ok(())
+    }
+    pub fn build_with_mallets(&self, base:usize, second_coordinate:usize, first:Stroke,
+        second:Option<Stroke>, dt_s:f64, mallets:&mallets::Selection) -> Result<Built,Error> {
+        let load=|shaft:Option<&FlexibleStriker>,mallet:Option<&mallets::Spec>| -> Result<Option<FlexibleStriker>,Error> {
+            match (shaft,mallet) {
+                (Some(s),Some(m))=>Ok(Some(m.attach_inertia(s)?)),
+                (Some(s),None)=>Ok(Some(s.clone())),
+                (None,Some(m))=>{m.admit_shaft(false)?;Ok(None)},
+                (None,None)=>Ok(None),
+            }
+        };
+        let loaded=Self {first:load(self.first.as_ref(),mallets.first.as_ref())?,
+            second:load(self.second.as_ref(),mallets.second.as_ref())?};
+        loaded.build(base,second_coordinate,first,second,dt_s)
     }
     /// Append flexure AFTER every original solid coordinate, including wires
     /// and mute jaws. No head, shell, second rigid stick or carrier is moved.
@@ -46,7 +58,7 @@ impl Selection {
             .ok_or("flexible shaft layout overflow")?;
         let total = base.checked_add(extra).ok_or("flexible shaft layout overflow")?;
         let mut built = Built { total, rigid: [0,second_coordinate], bodies: [None,None],
-            elastic: Vec::new(), ports: [None,None] };
+            elastic: Vec::new(), ports: [None,None], loaded:[false;2] };
         let mut offset = base;
         for (hand,shaft) in [self.first.as_ref(),self.second.as_ref()].into_iter().enumerate() {
             if let Some(shaft) = shaft {
@@ -56,6 +68,7 @@ impl Selection {
                 built.bodies[hand] = Some((launch.body,launch.weight));
                 built.elastic.push(launch.elastic.ok_or("missing admitted shaft flexure")?);
                 built.ports[hand] = launch.ports;
+                built.loaded[hand] = shaft.has_tip_inertia();
                 offset += shaft.elastic_modes();
             }
         }
@@ -69,6 +82,7 @@ pub struct Built {
     pub bodies: [Option<(ImpactBody,f64)>;2],
     pub elastic: Vec<ImpactBody>,
     pub ports: [Option<StrikerPorts>;2],
+    pub loaded: [bool;2],
 }
 impl Built {
     pub fn tip_row(&self, hand: usize, rigid_weight: f64) -> Result<Vec<f64>, Error> {
