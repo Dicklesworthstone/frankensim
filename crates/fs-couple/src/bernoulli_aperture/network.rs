@@ -11,6 +11,9 @@ use super::dynamic::{ApertureDrive, ApertureFrame, ApertureProgress, ApertureTer
 use super::tube::{TubeDrive, UniformTubeSpec};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_exec::CancelGate;
+use fs_material::gas::GasState;
+/// Prescribed piecewise gas states on the existing acoustic graph.
+pub mod regional;
 use fs_vfit::waveguide::network::{NetworkFrame, NetworkSegment, WaveguideNetwork};
 pub use fs_vfit::waveguide::network::{NetworkNode, NodeFrame};
 
@@ -66,7 +69,7 @@ pub struct TubeNetworkSpec {
     pub nodes: Vec<NetworkNode>,
     /// Fixed topology and requested cylindrical geometry, in reduction order.
     pub sections: Vec<TubeSection>,
-    /// Common sound speed in the aperture's fluid [m/s].
+    /// Common sound speed [m/s], or the inlet speed with explicit section gases.
     pub sound_speed_m_s: f64,
     /// Network payload and geometry-lowering scratch allowance. Excludes caller
     /// input vectors, aperture allocations, allocator overhead and process RSS.
@@ -133,7 +136,7 @@ impl ApertureNetworkFrame {
     /// Total balance diagnostic; neither junction nor solver error is removed.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j - self.upstream_work_j - self.body_work_j
+        self.storage_change_j + self.dissipated_energy_j - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j
     }
 }
 
@@ -145,6 +148,7 @@ pub struct ApertureNetwork {
     network: WaveguideNetwork,
     spec: TubeNetworkSpec,
     represented: Vec<SectionRealization>,
+    section_gases: Option<Vec<GasState>>,
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -158,16 +162,29 @@ impl ApertureNetwork {
     /// # Errors
     /// Clock/load mismatch, geometry/tolerance, topology, memory or allocation.
     pub fn new(aperture: DynamicAperture, spec: TubeNetworkSpec) -> Result<Self, AcousticRealizeError> {
+        Self::build(aperture, spec, None)
+    }
+
+    fn build(aperture: DynamicAperture, spec: TubeNetworkSpec, section_gases: Option<Vec<GasState>>)
+        -> Result<Self, AcousticRealizeError>
+    {
         if aperture.accepted_steps() != 0 {
             return Err(invalid("quiescent network coupling requires an unadvanced aperture"));
         }
         let a = aperture.spec();
-        let z = spec.inlet_impedance(a.density_kg_m3)?;
+        let z = if let Some(gases) = &section_gases {
+            let z = spec.inlet_impedance_with_gases(gases)?;
+            if gases[spec.inlet_section_index()?].density.to_bits() != a.density_kg_m3.to_bits() {
+                return Err(invalid("aperture flow density must equal the inlet section gas density"));
+            }
+            z
+        } else { spec.inlet_impedance(a.density_kg_m3)? };
         if z.to_bits() != a.impedance_pa_s_m3.to_bits() {
             return Err(invalid("aperture load must equal the physical network inlet impedance"));
         }
         let lower_bytes = spec.sections.len().checked_mul(
-            core::mem::size_of::<NetworkSegment>() + core::mem::size_of::<SectionRealization>())
+            core::mem::size_of::<NetworkSegment>() + core::mem::size_of::<SectionRealization>()
+                + if section_gases.is_some() { core::mem::size_of::<GasState>() } else { 0 })
             .ok_or_else(|| invalid("network geometry allocation size overflow"))?;
         let network_budget = spec.max_wave_memory_bytes.checked_sub(lower_bytes)
             .ok_or_else(|| invalid("network geometry payload exceeds memory allowance"))?;
@@ -177,8 +194,11 @@ impl ApertureNetwork {
             .map_err(|_| invalid("network geometry allocation failed"))?;
         segments.try_reserve_exact(spec.sections.len())
             .map_err(|_| invalid("network geometry allocation failed"))?;
-        for section in &spec.sections {
-            let realized = section.realize(spec.sound_speed_m_s, a.density_kg_m3, a.time_step_s)?;
+        for (index, section) in spec.sections.iter().enumerate() {
+            let (density, speed) = section_gases.as_ref().map_or(
+                (a.density_kg_m3, spec.sound_speed_m_s),
+                |gases| (gases[index].density, gases[index].sound_speed));
+            let realized = section.realize(speed, density, a.time_step_s)?;
             represented.push(realized);
             segments.push(NetworkSegment { nodes: section.nodes,
                 one_way_samples: realized.one_way_samples,
@@ -186,7 +206,7 @@ impl ApertureNetwork {
         }
         let network = WaveguideNetwork::new(&spec.nodes, &segments, a.time_step_s, network_budget)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        Ok(Self { aperture, network, spec, represented })
+        Ok(Self { aperture, network, spec, represented, section_gases })
     }
 
     /// Immutable accepted mechanical state, contact law and sample count.
@@ -245,11 +265,24 @@ impl ApertureNetwork {
     /// Input, budget, nonlinear solve, propagation or finite-set refusal. Private
     /// network scratch may change, but accepted waves/state/clock do not.
     pub fn step(&mut self, drive: TubeDrive) -> Result<ApertureNetworkFrame, AcousticRealizeError> {
-        let trial = self.aperture.preview_step(ApertureDrive {
+        self.step_with_force(drive, 0.0)
+    }
+
+    /// Advance fluid and valve with an independent opening-coordinate force [N].
+    /// The nested aperture frame reports its mechanical work; the complete
+    /// balance includes that supply exactly once. No waves or material/contact
+    /// history are reset when the force changes or returns to zero.
+    ///
+    /// # Errors
+    /// Nonfinite force or the same atomic physical refusal as [`Self::step`].
+    pub fn step_with_force(&mut self, drive: TubeDrive, force_n: f64)
+        -> Result<ApertureNetworkFrame, AcousticRealizeError>
+    {
+        let trial = self.aperture.preview_step_with_force(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,
             incoming_pressure_pa: self.network.incoming_pressure_pa(),
             body_flow_m3_s: drive.body_flow_m3_s,
-        })?;
+        }, force_n)?;
         let aperture = trial.frame;
         let network = self.network.preview_step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;

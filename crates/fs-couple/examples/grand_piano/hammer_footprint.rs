@@ -126,8 +126,18 @@ impl Bank {
     pub fn new_with_hammer_footprints(courses: &[Course], board: &[super::BoardMode],
         rate: u32, band_hz: f64, max_modes: usize, damping: bool,
         spec: &Specification) -> Result<Self, String> {
+        Self::new_with_hammer_footprints_and_transverse_bridge(courses,board,rate,band_hz,
+            max_modes,damping,spec,None)
+    }
+
+    /// Project the same primary-plane face after completing both directional
+    /// string mass forms. The extra polarization has no duplicate felt sites.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_hammer_footprints_and_transverse_bridge(courses: &[Course], board: &[super::BoardMode],
+        rate: u32, band_hz: f64, max_modes: usize, damping: bool,
+        spec: &Specification, secondary: Option<&[Vec<f64>]>) -> Result<Self, String> {
         spec.validate(courses)?;
-        let mut bank = Self::new(courses, board, rate, band_hz, max_modes, damping)?;
+        let mut bank = Self::new_with_transverse_bridge(courses,board,rate,band_hz,max_modes,damping,secondary)?;
         bank.configure_hammer_footprints(spec, courses)?;
         Ok(bank)
     }

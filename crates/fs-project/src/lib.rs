@@ -27,15 +27,13 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// The current `.fsim` project schema version. Readers admit exactly this version;
 /// older envelopes must pass through [`migration::migrate_envelope`].
 ///
-/// Version 4 adds the optional `(airflow-convection ...)` conduction boundary
-/// law (bead frankensim-s93ej.3, conjugate exchange): a boundary whose
-/// coefficient and reference temperature are DERIVED at solve time from the
-/// solved flow-network branch and a named `fs-convection` card. Version-3
-/// documents carry no such law and are valid version-4 documents unchanged,
-/// so the migration is a receipted envelope rewrite. Version 3 added the
-/// optional `(conduction ...)` cooling subsection and version 2 the optional
-/// `(fan-system ...)` subsection (bead frn2i.1), under the same rule.
-pub const FSIM_VERSION: u32 = 4;
+/// Version 5 adds optional ambient radiation on convective exterior surfaces
+/// (bead q61wp.74), with an immutable emissivity card, explicit reservoir and
+/// query temperatures, and declared coupling controls. Version-4 documents
+/// carry no radiation declaration and migrate with a receipted envelope and
+/// schema rewrite; no radiative exchange is inferred. Version 4 added
+/// airflow-convection, version 3 conduction, and version 2 fan-system inputs.
+pub const FSIM_VERSION: u32 = 5;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -62,22 +60,21 @@ pub use migration::{
     parse_sexpr_migrating,
 };
 pub use spec::{
-    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
-    DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan, FanCurveDecl, FanCurvePoint,
-    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState,
-    MaterialBinding, Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
-    RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
-    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
-    requirement_source_reviews,
-};
-pub use wire::{
-    CanonicalizationReceipt, DecodedProject, ProjectError, canonical_hash, lower, parse_json,
-    parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr, recognize,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
+    FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata, OutputRequest,
+    PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, RequirementSourceReview,
+    SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
+    ThermalLimit, UnitsDoctrine, Vent, Versions, requirement_source_reviews,
 };
 pub use study::{
     StudyBudgets, StudyConstraints, StudyDomain, StudyHole, StudyObjective, StudyOptimizer,
     StudyPhysics, StudyScenario, StudySpec, canonical_study_hash, parse_study_json,
     parse_study_sexpr, print_study_json, print_study_sexpr,
 };
-
+pub use wire::{
+    CanonicalizationReceipt, DecodedProject, ProjectError, canonical_hash, lower, parse_json,
+    parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr, recognize,
+};

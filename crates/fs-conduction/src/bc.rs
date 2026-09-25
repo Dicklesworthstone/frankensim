@@ -339,6 +339,33 @@ impl ThermalBoundary {
             .any(|c| matches!(c, ThermalBc::Robin { .. }))
     }
 
+    /// Preserve the exact partition and prescribed vertices while replacing
+    /// admitted uniform Robin rows. The ambient-radiation producer uses this
+    /// for one combined convection/radiation secant solve; it never changes
+    /// ownership, overlays an interface, or converts another boundary law.
+    pub(crate) fn with_uniform_robin_replacements(
+        &self,
+        rows: &[(usize, f64, f64)],
+    ) -> Result<ThermalBoundary, ConductionError> {
+        let mut out = self.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for &(region, coefficient, reference) in rows {
+            if !seen.insert(region)
+                || !matches!(self.conditions.get(region), Some(ThermalBc::Robin {
+                    htc: ScalarField::Uniform(_), t_ref: ScalarField::Uniform(_),
+                }))
+            {
+                return Err(ConductionError::Radiation {
+                    surface: self.names.get(region).cloned().unwrap_or_else(|| "<unknown>".into()),
+                    what: "ambient radiation requires one unique existing uniform Robin region".into(),
+                    fix: "bind each patch to a distinct named uniform convective boundary".into(),
+                });
+            }
+            out.conditions[region] = ThermalBc::robin(coefficient, reference)?;
+        }
+        Ok(out)
+    }
+
     /// Clone this partition and replace selected faces from its explicit
     /// adiabatic remainder with uniform outward-flux rows.  Radiation uses
     /// this as one frozen outer-fixed-point iterate. Existing physical rows

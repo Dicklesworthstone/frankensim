@@ -563,12 +563,13 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
     assert!(output.stdout.contains("\"status\":\"ok\""));
     assert!(output.stdout.contains("\"finding_count\":0"));
-    // Frozen canonical hashes: any fixture-byte drift fails right here
-    // instead of rotting quietly. Regenerate with the real verb and commit
-    // fixture + hash in the same commit.
+    // Frozen current-schema canonical hashes: the real verb migrates these
+    // historical fixtures before hashing. Physical fixture drift still fails
+    // here; an intentional schema migration updates these pins using the
+    // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"1f135da400dec2bed1bba833b033026ce37bc93c113c79c25f6c6fb4e730780b\""
+            "\"project_hash\":\"8cb6eb4bce279480696d38d25905ab9cb5b7dd16050040b1a2da6721d8b3c8e9\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -578,7 +579,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"4e2d71ab877ec805b7aa617d5d8bd2ca70f6ea38ca5afd8f0742b23ae60d7135\""
+            "\"project_hash\":\"110b4a1027e75f5d5e4b96041d8870def93f04f9a257a4238bf1da90032b9689\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -1180,7 +1181,9 @@ fn ja_005_level_a_energy_balance_brackets_the_retained_maximum() {
 
     // Inputs from the project itself.
     let source = std::fs::read_to_string(&fsim).expect("reference project reads");
-    let decoded = fs_project::parse_sexpr(&source).expect("reference project parses");
+    let decoded = fs_project::parse_sexpr_migrating(&source)
+        .expect("historical reference project migrates")
+        .decoded;
     let power = decoded.spec.power.as_ref().expect("power declared");
     assert_eq!(power.len(), 1, "one dissipating region");
     let q_w = power[0].watts.value * power[0].duty;

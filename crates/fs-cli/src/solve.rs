@@ -119,10 +119,12 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 18 retains declared-input propagation in the conduction receipt,
 /// admits refined meshes by dihedral floor alone (radius-edge is disclosed),
 /// and measures boundary, model-form, solver and measurement budget terms.
-/// Version 19 measures adaptive accuracy on the temperature rise above the
+/// Version 19 solves declared card-backed ambient radiation alongside the
+/// conventional boundary, preserving separate convective and radiative power.
+/// Version 20 measures adaptive accuracy on the temperature rise above the
 /// coolest declared reference and lets a tolerance-met study supply the
 /// Discretization term.
-pub const SOLVE_DRIVER_VERSION: u32 = 19;
+pub const SOLVE_DRIVER_VERSION: u32 = 20;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -156,11 +158,12 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v6";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v7";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
 mod conjugate;
+mod radiation;
 mod report_stage;
 pub(crate) use report_stage::{CompletedRunExport, load_completed_run};
 use report_stage::{ReportStageProduct, report_receipt};
@@ -182,6 +185,8 @@ const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh wit
     Dirichlet, Neumann, and Robin laws, exact matching-P1 finite contact resistance, and audits \
     algebraic residual and energy closure; it does not authenticate source geometry or material \
     claims, establish mesh convergence, or support nonmatching or temperature-varying contact; \
+    declared surface radiation closes an area-mean gray patch law against a black reservoir \
+    with card-backed fixed emissivity, and carries its own physical and derivative limits; \
     when a declared airflow-convection law is present it closes ONE branch's solid/air fixed \
     point over card-derived Robin rows with frozen dry-air properties and a 1-D stream-wise air \
     chain, disclosing rather than propagating the flow bracket, and claims no experimental \
@@ -1246,6 +1251,8 @@ struct QoiStageInputs {
     discretization: Option<LadderDiscretization>,
     /// Declared-input propagation, when the project declares an envelope.
     propagation: Option<InputPropagation>,
+    /// Paired model comparison; this is never used as an error bound.
+    radiation_sensitivity: Option<radiation::RadiationSensitivity>,
 }
 
 #[derive(Debug)]
@@ -1288,6 +1295,7 @@ struct RungSolved {
     interface_pair_count: usize,
     interface_evidence: Option<Vec<u8>>,
     conjugate_fragment: Option<String>,
+    radiation_fragment: Option<String>,
     adjoint_data: Option<RungAdjointData>,
 }
 
@@ -4636,6 +4644,8 @@ fn qoi_receipt(
         .witness
         .primary_vertex
         .expect("junction maximum has a witness");
+    let radiation_sensitivity = inputs.radiation_sensitivity.as_ref()
+        .map(radiation::RadiationSensitivity::json).transpose()?.unwrap_or_else(|| "null".to_string());
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":\"indeterminate\",\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":\"unknown\"}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
         json_string(QOI_RECEIPT_SCHEMA),
@@ -4661,6 +4671,11 @@ fn qoi_receipt(
         json_string(&composed.receipt_hash.to_hex()),
         json_string(&no_claim),
     );
+    let mut receipt = receipt;
+    if inputs.radiation_sensitivity.is_some() {
+        receipt.pop();
+        receipt.push_str(&format!(",\"model_form_sensitivity\":{{\"radiation\":{radiation_sensitivity}}}}}"));
+    }
     work.charge(u64::try_from(receipt.len()).map_err(|_| {
         invocation_work_refusal(
             Some(run),
@@ -5574,6 +5589,9 @@ fn conduction_solve_receipt(
                 "declare region seeds and thermal boundary laws under cooling.conduction",
             )
         })?;
+    // This patch-mean radiation model has its own nonlinear closure. Until
+    // that complete residual has a total tangent, it cannot enter a DWR goal.
+    let radiation = radiation::lower(spec, setup, cards)?;
     let geometry = spec.geometry.as_deref().unwrap_or(&[]);
     if geometry.len() != context.verified_imports.len()
         || geometry.len() != context.import_sources.len()
@@ -5799,7 +5817,7 @@ fn conduction_solve_receipt(
         // converged references so the published field is exactly the one
         // the balance audit describes.
         let solve_once = |derived: &BTreeMap<String, (f64, f64)>| -> Result<
-            fs_conduction::ConductionSolution,
+            radiation::SolidSolution,
             SolveRefusal,
         > {
             let lowering = conduction_boundary(
@@ -5848,12 +5866,7 @@ fn conduction_solve_receipt(
                 element_materials: Some(&element_materials),
                 source: &source,
             };
-            match interfaces.as_ref() {
-                Some(interfaces) => {
-                    fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config)
-                }
-                None => fs_conduction::solve(&cx, problem, config),
-            }
+            radiation::solve(&cx, problem, interfaces.as_ref(), config, radiation.as_ref())
             .map_err(|error| match error {
                 fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
                 other => conduction_error(
@@ -5864,7 +5877,7 @@ fn conduction_solve_receipt(
             })
         };
         let laws = conjugate::airflow_laws(setup)?;
-        let (solution, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty() {
+        let (solid, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty() {
             (solve_once(&BTreeMap::new())?, None, BTreeMap::new(), Vec::new())
         } else {
             let handoff = flow_override.or(context.flow_network.as_ref()).ok_or_else(|| {
@@ -5904,13 +5917,12 @@ fn conduction_solve_receipt(
                 .iter()
                 .map(|segment| segment.target.as_str())
                 .collect();
-            let states_of = |solution: &fs_conduction::ConductionSolution| {
+            let states_of = |solution: &radiation::SolidSolution| {
                 path.segments
                     .iter()
                     .map(|segment| {
                         solution
-                            .report
-                            .robin_fluxes
+                            .convective_robin_fluxes()
                             .iter()
                             .find(|flux| flux.region == segment.target)
                             .map(fs_airflow::conjugate::SolidRegionState::from_robin_flux)
@@ -5949,20 +5961,21 @@ fn conduction_solve_receipt(
                 .collect();
             let solution = solve_once(&converged)?;
             let off_path_w: f64 = solution
-                .report
-                .robin_fluxes
+                .convective_robin_fluxes()
                 .iter()
                 .filter(|flux| !path_targets.contains(flux.region.as_str()))
                 .map(|flux| flux.heat_rate_w)
                 .sum();
             let outcome = conjugate::cross_check_decomposition(
                 outcome,
-                solution.report.energy.robin_out_w,
+                solution.convective_out_w(),
                 off_path_w,
             )?;
             let fragment = conjugate::receipt_fragment(&path, &outcome)?;
             (solution, Some(fragment), converged, path.air_paths())
         };
+        let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;
+        let solution = solid.conduction;
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
@@ -5987,6 +6000,7 @@ fn conduction_solve_receipt(
             interface_pair_count: interface_resolution.pairs.len(),
             interface_evidence,
             conjugate_fragment,
+            radiation_fragment,
             adjoint_data,
         })
         };
@@ -6084,6 +6098,7 @@ fn conduction_solve_receipt(
         interface_pair_count,
         interface_evidence,
         conjugate_fragment,
+        radiation_fragment,
         adjoint_data: _,
     } = solved;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
@@ -6223,7 +6238,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -6263,6 +6278,7 @@ fn conduction_solve_receipt(
         ladder_estimate_json,
         adaptive_fragment.as_deref().unwrap_or("null"),
         conjugate_fragment.as_deref().unwrap_or("null"),
+        radiation_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
     );
@@ -6307,6 +6323,7 @@ fn conduction_solve_receipt(
             solution_artifact,
             discretization,
             propagation: None,
+            radiation_sensitivity: None,
         },
     })
 }
@@ -6401,7 +6418,7 @@ impl InputPropagation {
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the model-form term covers only the card allowance on the derived coefficient (omitted physics such as radiation is not covered); material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6763,6 +6780,16 @@ fn conduction_receipt(
         product.receipt.push_str(&propagation.json()?);
         product.receipt.push('}');
         product.qoi_inputs.propagation = Some(propagation);
+    }
+    if let Some(sensitivity) = radiation::measure_sensitivity(
+        ledger, spec, cards, context, run, work, resume, available_wall_s,
+        product.qoi_inputs.propagation.as_ref().map(|propagation| propagation.nominal_k),
+    )? {
+        product.receipt.pop();
+        product.receipt.push_str(&format!(
+            ",\"model_form_sensitivity\":{{\"radiation\":{}}}}}", sensitivity.json()?,
+        ));
+        product.qoi_inputs.radiation_sensitivity = Some(sensitivity);
     }
     Ok(product)
 }

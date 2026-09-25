@@ -18,7 +18,7 @@ complexes, with anisotropic and temperature-dependent conductivity from
 `fs-matdb` cards whose query receipts travel with the solve. Layer: **L3**
 (FLUX).
 
-Surface radiation has two explicit entry points. A linearized
+Surface radiation has three explicit entry points. A linearized
 surface-to-ambient model supplies
 `h_rad = 4 ε σ T_mean³` over a caller-declared temperature-departure budget and
 reports its pointwise discrepancy against `ε σ (T_s⁴ - T_a⁴)`; the departure
@@ -29,9 +29,21 @@ gray-diffuse enclosure solves
 fixed point. Emissivity comes from an `fs-matdb` material card; this crate
 generates exactly one closed-form analytic view-factor geometry, the
 two-surface concentric-sphere enclosure. Other view factors are caller-supplied
-and admitted with analytic or external-QMC evidence. Both radiation rungs
+and admitted with analytic or external-QMC evidence. These radiation rungs
 retain and enforce the selected emissivity claim's temperature-validity
 interval.
+
+`solve_with_ambient_radiation` adds the nonlinear area-mean patch law
+`epsilon sigma A (T_mean^4 - T_ambient^4)` to existing named uniform Robin
+convection. It combines positive radiative secants with the original Robin
+rows and solves through the existing material/contact producer until both
+unrelaxed temperature updates and applied/nonlinear watt differences close.
+Its conduction report retains the combined boundary actually solved; separate
+original-convection rows and totals are the only heat carried to air. The
+exact final boundary/configuration, card receipts, signed radiative heat and
+cumulative solid/Krylov work remain available. Surface temperatures obey the
+emissivity claim's validity; the external reservoir is not a surface-material
+query. `SurfaceEmissivity::from_card_pinned` preserves exact claim selection.
 
 An optional contact operator couples two duplicated, exactly coincident P1
 traces without identifying their temperature degrees of freedom. For an
@@ -112,6 +124,7 @@ diameter.
 | `ViewFactorMatrix` / `ViewFactorEvidence` | an admitted closed-enclosure matrix whose row sums, area-weighted reciprocity, tolerances, evidence tag, and content identity are checked and retained; `concentric_spheres` supplies one closed-form two-surface geometry |
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
+| `AmbientRadiationPatch` / `AmbientRadiationConfig` / `AmbientRadiationSolution` | nonlinear ambient patch radiation sharing the original uniform Robin trace, with separate convection/radiation accounting, heterogeneous material and finite contact preserved, independent temperature/watt gates and exact final binding |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them. `from_claims_pinned` samples one explicit claim pin at every knot and still refuses invalid or out-of-domain use |
 | `LumpedThermalTransport` | reduced-body transport: explicitly provenance-free declared constants, sourced conductivity/emissivity, or sourced conductivity with radiation explicitly disabled; every active property receipt is retained, sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
@@ -684,6 +697,17 @@ authority.
   The report retains input emissivity uncertainty and measures the linearized
   point discrepancy, but it does not propagate a nonlinear radiosity or
   coupled-solution uncertainty certificate. No radiation adjoint is exposed.
+- AMBIENT PATCH RADIATION uses a constant emissivity sampled under an explicit
+  card query, and the fourth power of each trace's area mean. The inner Robin
+  flux varies linearly with local P1 temperature; it is neither a uniform
+  applied flux nor an integration of pointwise T^4. Only existing uniform
+  Robin regions are admitted, with a black isothermal reservoir and unit view
+  factor. No enclosure reflection, occlusion, spatial emissivity variation,
+  radiative tangent/adjoint or continuum/uncertainty bound is inferred.
+  `tests/ambient_radiation.rs` checks the independent scalar slab heat balance,
+  hot-reservoir heat signs, changed emissivity, exact reconstruction, joint
+  heterogeneous/contact resistance, claim pins, cancellation and both outer
+  convergence gates.
 - NO CONVECTION PHYSICS. The Robin row is a convective BOUNDARY COUPLING: `h`
   is an input. This crate computes no correlation, solves no boundary layer, and
   has no fluid side. Conjugate coupling is a separate bead.

@@ -15,7 +15,7 @@ fn experiment(frames:u64)->Experiment {
     let mut body=ImpactBody::free_mass(1.,0.,0.0001).unwrap().0;
     body.potential=BodyPotential::Linear(vec![1000.]);
     let s=ImpactSystem::new(vec![body],vec![],vec![],vec![],crate::config(frames*SUBSTEPS as u64,MECHANICAL_DT)).unwrap();
-    Experiment{mute:None,system:Mechanics::Reference(s),force:vec![0.],stick_weight:1.,second_stick:None,
+    Experiment{flexible_sticks:[None,None],mute:None,system:Mechanics::Reference(s),force:vec![0.],stick_weight:1.,second_stick:None,
         observer_a:vec![100.],observer_b:vec![0.],pressure:None,acoustics:Some(boundary()),air:None}
 }
 fn energy(s:&Mechanics)->f64 {

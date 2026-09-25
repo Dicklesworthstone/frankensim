@@ -13,8 +13,8 @@ impl ImpactSystem {
     /// Construction is cold. The film's ports must cover every mechanical mode,
     /// including exact zeros for unrelated bodies. At most four islands.
     pub fn with_squeeze_film(mut self, film: ResistiveFilm) -> Result<Self, ImpactError> {
-        if film.port_count() != self.modes || self.squeeze_films.len() >= 4 {
-            return Err(invalid("squeeze film mode count or four-island ceiling failed"));
+        if self.gas_film.is_some() || film.port_count() != self.modes || self.squeeze_films.len() >= 4 {
+            return Err(invalid("squeeze film mode count, duplicate gas image or four-island ceiling failed"));
         }
         let mut q = [0.0; MAX_IMPACT_MODES];
         for i in 0..self.modes { q[i] = self.x[2*i]; }
@@ -27,12 +27,13 @@ impl ImpactSystem {
     }
 
     pub(super) fn has_nonlinear_dissipation(&self) -> bool {
-        self.contact_loss || !self.squeeze_films.is_empty()
+        self.contact_loss || !self.squeeze_films.is_empty() || self.gas_film.is_some()
     }
 
     // Endpoint admission is necessary too: an admissible midpoint must not
     // publish collapsed/trapped fluid at the end of an otherwise accepted tick.
     pub(super) fn validate_squeeze_configuration(&self, x: &[f64]) -> Result<(), ImpactError> {
+        if let Some(gas)=&self.gas_film {gas.observe(x)?;}
         if self.squeeze_films.is_empty() { return Ok(()); }
         if x.len() < 2*self.modes { return Err(invalid("invalid squeeze state prefix")); }
         let mut q = [0.0; MAX_IMPACT_MODES]; let zero = [0.0; MAX_IMPACT_MODES];
@@ -50,6 +51,7 @@ impl ImpactSystem {
         // The contact owner validates shapes and fills all entries, preserving
         // its existing Hunt--Crossley reaction and zeros on memory coordinates.
         if !self.contact.dissipative_flow_into(x,e,out) { return false; }
+        if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow(x,e,out)) {return false;}
         if self.squeeze_films.is_empty() { return true; }
         let mut q=[0.0; MAX_IMPACT_MODES]; let mut v=[0.0; MAX_IMPACT_MODES];
         let mut f=[0.0; MAX_IMPACT_MODES]; let mut p=[0.0; MAX_CELLS];
@@ -66,6 +68,7 @@ impl ImpactSystem {
         dx: &[f64], de: &[f64], out: &mut [f64]) -> bool
     {
         if !self.contact.dissipative_flow_tangent_into(x,e,dx,de,out) { return false; }
+        if self.gas_film.as_ref().is_some_and(|gas|!gas.add_flow_tangent(x,e,dx,de,out)) {return false;}
         if self.squeeze_films.is_empty() { return true; }
         let mut q=[0.0; MAX_IMPACT_MODES]; let mut v=[0.0; MAX_IMPACT_MODES];
         let mut dq=[0.0; MAX_IMPACT_MODES]; let mut dv=[0.0; MAX_IMPACT_MODES];

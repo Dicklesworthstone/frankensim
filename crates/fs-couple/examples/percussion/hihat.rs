@@ -12,6 +12,8 @@ mod play;
 pub use play::{is_command,run};
 #[path="hihat_squeeze.rs"]
 mod squeeze;
+use super::flexible_sticks as flexible;
+use fs_couple::render::plate::impact::striker::flexible::{FlexibleStriker,StrikerPorts};
 
 // One independently prepared physical shell and its exact inner-skin chart.
 struct Shell {
@@ -44,6 +46,7 @@ struct Pair {
     collision:Obstacle,
     upper_modes:std::ops::Range<usize>,
     lower_modes:std::ops::Range<usize>,
+    flexible_sticks:[Option<StrikerPorts>;2],
 }
 
 // Mounts are opposed compression-only washers, not an imposed shell position.
@@ -93,6 +96,15 @@ fn build(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:S
 #[allow(clippy::too_many_arguments)]
 fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
     second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>)->Result<Pair,Error> {
+    build_with_strikers(spec,upper,lower,stroke,second,steps,dt,audio,film,[None,None])
+}
+#[allow(clippy::too_many_arguments)]
+fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Specimen,stroke:Stroke,
+    second:Option<Stroke>,steps:u64,dt:f64,audio:bool,film:Option<&squeeze::Config>,
+    flexible:[Option<&FlexibleStriker>;2])->Result<Pair,Error> {
+    if flexible[1].is_some() && second.is_none() {
+        return Err("a flexible second stick requires its own strike position".into());
+    }
     spec.validate()?;
     let upper=Shell::new(upper,dt)?;let lower=Shell::new(lower,dt)?;
     // Conservative reference separation for the ENTIRE finite skins, not just
@@ -104,7 +116,11 @@ fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     let hi=1..1+upper.reduction.mode_count();
     let lo=hi.end..hi.end+lower.reduction.mode_count();
     let pedal_coord=lo.end;let second_coord=pedal_coord+1;
-    let total=second_coord+usize::from(second.is_some());
+    // Append shaft modes after the entire unchanged shell/pedal/stick prefix.
+    // Neither skin source addresses nor existing rigid force coordinates move.
+    let elastic_first=second_coord+usize::from(second.is_some());
+    let elastic_second=elastic_first+flexible[0].map_or(0,|s|s.elastic_modes());
+    let total=elastic_second+flexible[1].map_or(0,|s|s.elastic_modes());
     if total>fs_couple::render::plate::impact::MAX_IMPACT_MODES {
         return Err("paired cymbals exceed the original complete-state mode ceiling".into());
     }
@@ -119,17 +135,19 @@ fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     pads.extend(washers(&lower,&spec.mounts[1],lo.start,total,None)?);
     let position=stroke.position_m.unwrap_or(spec.strike);
     let p=upper.port(position,ShellFace::Positive)?;
-    let (stick,stick_weight)=stick_with_speed(stroke.speed_m_s)?;
-    let mut hit=vec![0.;total];hit[0]=stick_weight;
+    let first=flexible::Launch::new(flexible[0],0,elastic_first,total,dt,stroke.speed_m_s)?;
+    let stick_weight=first.weight;
+    let mut hit=first.tip_row(0,total)?;
     for (k,w) in p.weights.iter().enumerate(){hit[hi.start+k]=*w;}
     let inter=collision(spec,&upper,&lower,lo.start,total)?;
     let mut contacts=vec![elastic_contact(hit)?,inter.clone()];
     let second=second.map(|stroke|->Result<_,Error>{
         let p=upper.port(stroke.position_m.ok_or("second hi-hat stick requires a station")?,ShellFace::Positive)?;
-        let (body,weight)=stick_with_speed(stroke.speed_m_s)?;
-        let mut b=vec![0.;total];b[second_coord]=weight;
+        let launch=flexible::Launch::new(flexible[1],second_coord,elastic_second,total,dt,stroke.speed_m_s)?;
+        let mut b=launch.tip_row(second_coord,total)?;
         for (k,w) in p.weights.iter().enumerate(){b[hi.start+k]=*w;}
-        Ok((body,elastic_contact(b)?,sticks::Port{coordinate:second_coord,weight}))
+        let port=sticks::Port{coordinate:second_coord,weight:launch.weight};
+        Ok((launch,elastic_contact(b)?,port))
     }).transpose()?;
     let acoustics=if audio {Some(acoustics::Boundary::shell_pair(&upper.skin,hi.start,
         &lower.skin,lo.start,spec.separation)?)}else{None};
@@ -139,21 +157,41 @@ fn build_with_squeeze(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spec
     for (k,w) in p.weights.iter().enumerate(){b[lo.start+k]=*w;}
     // Compile before moving either basis; cell/face gaps use both real skins.
     // Stick and pedal columns are zero: pressure loads the shells reciprocally.
+    let gas=film.and_then(squeeze::Config::gas);
     let film=film.map(|f|f.compile(spec,&upper,&lower,hi.start,lo.start,total)).transpose()?;
     let upper_omega=upper.reduction.omegas().to_vec();let lower_omega=lower.reduction.omegas().to_vec();
     let mut up=zero_body(BodyPotential::Shell(upper.reduction),&upper_omega);
     let mut down=zero_body(BodyPotential::Shell(lower.reduction),&lower_omega);
     up.damping_per_s=upper_omega.iter().map(|w|2.*spec.damping[0]*w).collect();
     down.damping_per_s=lower_omega.iter().map(|w|2.*spec.damping[1]*w).collect();
-    let mut bodies=vec![stick,up,down,carriage];
-    let second_stick=second.map(|(body,contact,port)|{bodies.push(body);contacts.push(contact);port});
+    let mut bodies=vec![first.body,up,down,carriage];
+    let mut second_elastic=None;let mut second_ports=None;
+    let second_stick=second.map(|(launch,contact,port)|{
+        bodies.push(launch.body);contacts.push(contact);
+        second_elastic=launch.elastic;second_ports=launch.ports;port
+    });
+    if let Some(body)=first.elastic {bodies.push(body);}
+    if let Some(body)=second_elastic {bodies.push(body);}
+    let flexible_sticks=[first.ports,second_ports];
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
-    let system=match film {Some(film)=>system.with_squeeze_film(film)?,None=>system};
-    Ok(Pair{experiment:Experiment{mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
+    let system=match (film,gas) {
+        (Some(film),Some(gas))=>system.with_compressible_squeeze_film(film,gas)?,
+        (Some(film),None)=>system.with_squeeze_film(film)?,
+        (None,_)=>system,
+    };
+    Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
-        pedal,collision:inter,upper_modes:hi,lower_modes:lo})
+        pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
 }
 
 #[cfg(test)]
 #[path="hihat_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="hihat_flexible_tests.rs"]
+mod flexible_tests;
+
+#[cfg(test)]
+#[path="hihat_gas_tests.rs"]
+mod gas_tests;

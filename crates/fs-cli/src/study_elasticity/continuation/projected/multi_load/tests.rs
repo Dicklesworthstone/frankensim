@@ -27,7 +27,7 @@ fn restored(ledger: &Ledger, out: &Outcome, spec: &ElasticitySpec) -> (GridSdf, 
 #[test]
 fn independent_load_declarations_are_complete_bounded_and_do_not_change_legacy_sources() {
     let legacy = study_spec(BASE).unwrap();
-    assert!(legacy.projected.as_ref().unwrap().family.is_none());
+    assert!(stress_controls(&legacy).unwrap().family.is_none());
     assert!(!legacy.canonical.contains("load-family"));
     let original = spec();
     assert_eq!(study_spec(&original.canonical).unwrap().id, original.id);
@@ -76,7 +76,7 @@ fn multi_load_updates_preserve_regions_and_resume_without_refunding_study_work()
     assert_eq!(first.status, "budget-exhausted", "{}", first.receipt);
     assert_eq!(integer(&json(&first), "iterations_completed").unwrap(), 1, "non-vacuous accepted update");
     let (phi, evidence) = restored(&ledger, &first, &spec);
-    let policy = spec.projected.as_ref().unwrap();
+    let policy = stress_controls(&spec).unwrap();
     let ControlFlow::Continue(prepared) = regions::prepare(&spec, &policy.regions,
         |_| ControlFlow::<()>::Continue(())).unwrap() else { panic!("region preparation interrupted") };
     for &(node, expected) in &prepared.fixed_nodes { assert_eq!(phi.nodes()[node].to_bits(), expected.to_bits()); }

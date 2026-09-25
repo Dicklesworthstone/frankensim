@@ -15,6 +15,9 @@ use std::io::Read;
 
 #[path = "drive_score.rs"]
 mod score;
+#[path = "drive_spatial.rs"]
+mod spatial;
+pub use spatial::SpatialInput;
 
 const MAX_KNOTS: usize = 65_536;
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -165,6 +168,7 @@ pub struct Input {
 /// can consume a scheduled force while the other hand's contact step refuses.
 pub struct StickDrive {
     inputs: Vec<Input>,
+    spatial_inputs: Vec<SpatialInput>,
     dt_s: f64,
     steps: u64,
     accepted: u64,
@@ -186,7 +190,7 @@ impl StickDrive {
             }
             input.program.admit(dt_s, steps, input.tip_weight)?;
         }
-        Ok(Self { inputs, dt_s, steps, accepted: 0, force: vec![0.0; modes] })
+        Ok(Self { inputs, spatial_inputs: Vec::new(), dt_s, steps, accepted: 0, force: vec![0.0; modes] })
     }
 
     pub fn forces(&mut self, external: &[f64]) -> Result<&[f64], ImpactError> {
@@ -208,6 +212,17 @@ impl StickDrive {
             self.force[input.coordinate] += input.tip_weight * input.program.average(begin, end);
             if !self.force[input.coordinate].is_finite() {
                 return Err(ImpactError::Invalid("stick drive force overflow"));
+            }
+        }
+        // One physical hand force acts through its signed geometry-derived
+        // row. No per-mode player clocks, normalization, or allocations here.
+        for input in &self.spatial_inputs {
+            let force = input.program.average(begin, end);
+            for (f, weight) in self.force.iter_mut().zip(&input.weights) {
+                if *weight != 0.0 { *f += weight * force; }
+                if !f.is_finite() {
+                    return Err(ImpactError::Invalid("spatial player force overflow"));
+                }
             }
         }
         Ok(&self.force)

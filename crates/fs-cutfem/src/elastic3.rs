@@ -82,6 +82,9 @@ struct GhostPoint3 {
 pub struct CutElasticity3 {
     nodes: Vec<[f64; 3]>,
     fixed: Vec<bool>,
+    // The same reference tensor used by bulk assembly, retained for physical
+    // stress observations and their exact transpose. Scales remain separate.
+    lame: [f64; 2],
     cells: Vec<Cell3>,
     ghosts: Vec<GhostPoint3>,
     scales: Vec<f64>,
@@ -253,7 +256,7 @@ impl CutElasticity3 {
         }
         control.poll()?;
         let scales = vec![1.0;cells.len()];
-        Ok(Self { nodes, fixed, cells, ghosts, scales, volume_bounds, embedded: None })
+        Ok(Self { nodes, fixed, lame: [lambda, mu], cells, ghosts, scales, volume_bounds, embedded: None })
     }
 
     /// Active node positions, in deterministic lattice-key order.
@@ -464,6 +467,9 @@ pub mod adaptive;
 
 /// Oriented reference-surface traction and pressure loads.
 pub mod surface;
+
+/// Bulk quadrature stress observations and exact state/material pullbacks.
+pub mod stress;
 
 /// Weak prescribed displacement on selected zero-level surface patches.
 pub mod dirichlet;

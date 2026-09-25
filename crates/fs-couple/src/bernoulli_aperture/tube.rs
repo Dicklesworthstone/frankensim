@@ -92,7 +92,7 @@ impl TubeFrame {
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
         self.storage_change_j + self.dissipated_energy_j
-            - self.upstream_work_j - self.body_work_j
+            - self.upstream_work_j - self.body_work_j - self.aperture.mechanical_work_j
     }
 }
 
@@ -187,11 +187,24 @@ impl ApertureTube {
     /// Input, budget, solver, propagation or combined observation refusal. No
     /// participant advances until all candidate observations are finite.
     pub fn step(&mut self, drive: TubeDrive) -> Result<TubeFrame, AcousticRealizeError> {
-        let trial = self.aperture.preview_step(ApertureDrive {
+        self.step_with_force(drive, 0.0)
+    }
+
+    /// Advance fluid and valve with an independent opening-coordinate force [N].
+    /// The nested aperture frame reports its mechanical work; the complete
+    /// balance includes that supply exactly once. No waves or material/contact
+    /// history are reset when the force changes or returns to zero.
+    ///
+    /// # Errors
+    /// Nonfinite force or the same atomic physical refusal as [`Self::step`].
+    pub fn step_with_force(&mut self, drive: TubeDrive, force_n: f64)
+        -> Result<TubeFrame, AcousticRealizeError>
+    {
+        let trial = self.aperture.preview_step_with_force(ApertureDrive {
             upstream_pressure_pa: drive.upstream_pressure_pa,
             incoming_pressure_pa: self.line.incoming_pressure_pa(),
             body_flow_m3_s: drive.body_flow_m3_s,
-        })?;
+        }, force_n)?;
         let aperture = trial.frame;
         let waveguide = self.line.preview_step(aperture.outgoing_pressure_pa)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;

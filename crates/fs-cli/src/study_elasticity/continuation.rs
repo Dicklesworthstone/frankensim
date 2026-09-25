@@ -15,7 +15,11 @@ const CG_POLL_ITERS: usize = 32;
 
 #[path = "continuation/projected.rs"]
 mod projected;
-pub(super) use projected::{Controls as ProjectedControls, PROJECTED_SCOPE, parse_controls};
+#[path = "continuation/controls.rs"]
+mod controls;
+pub(super) use controls::{ProjectedControls, parse_controls};
+use controls::stress_controls;
+pub(super) use projected::PROJECTED_SCOPE;
 
 fn stop_status(cancelled: bool, consumed_wall: f64, wall_limit: f64) -> Option<&'static str> {
     if cancelled { Some("cancelled") }
@@ -23,11 +27,39 @@ fn stop_status(cancelled: bool, consumed_wall: f64, wall_limit: f64) -> Option<&
     else { None }
 }
 
+/// Finishing the requested updates does not establish material feasibility.
+/// Use the SAME numerical area and tolerance as the retained engineering report.
+/// Neither this test nor iteration completion asserts stationarity or optimality.
+fn iteration_terminal(spec: &ElasticitySpec, report: &OptimizeReport) -> Result<&'static str> {
+    if report.rows.len() != spec.steps || report.volume.len() != spec.steps {
+        return Err(malformed("completion requires every requested, evaluated material-area row"));
+    }
+    let volume = report.volume.last().copied()
+        .ok_or_else(|| malformed("completion has no evaluated material area"))?;
+    let (lo, hi) = spec.base.domain.as_ref().expect("admitted domain").bounds;
+    let box_area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
+    let target = spec.base.constraints.as_ref().expect("admitted constraints").volume_fraction * box_area;
+    let tolerance = VOLUME_TOLERANCE_FRACTION_OF_BOX * box_area;
+    if !volume.is_finite() || volume <= 0.0 || !box_area.is_finite() || box_area <= 0.0
+        || !target.is_finite() || !tolerance.is_finite() {
+        return Err(malformed("completion requires a finite positive material area and target"));
+    }
+    Ok(if (volume - target).abs() <= tolerance { "completed" } else { "constraint-unmet" })
+}
+
 pub(super) struct Evidence {
     producer: ContentHash,
     updates: usize,
     legacy_replayed: usize,
     projected: Option<projected::ConstraintEvidence>,
+    volume: Option<projected::volume::VolumeEvidence>,
+}
+
+/// Reporting projection shared by genuinely measured volume-only and
+/// stress-constrained baselines. It has no invented stress or solver fields.
+pub(super) struct CurrentDesign {
+    pub(super) compliance: f64,
+    pub(super) volume: f64,
 }
 
 impl Evidence {
@@ -40,16 +72,29 @@ impl Evidence {
 
 impl Evidence {
     pub(super) fn constraint_fields(&self) -> String {
-        self.projected.as_ref().map_or_else(String::new,
-            |state| format!(",\"constraints\":{}", state.json()))
+        if let Some(state) = &self.volume {
+            format!(",\"constraints\":{}", state.json())
+        } else {
+            self.projected.as_ref().map_or_else(String::new,
+                |state| format!(",\"constraints\":{}", state.json()))
+        }
     }
 
-    pub(super) fn projected_current(&self) -> Option<&fs_topols::SampledStressEvaluation> {
-        self.projected.as_ref().map(projected::ConstraintEvidence::current)
+    pub(super) fn projected_current(&self) -> Option<CurrentDesign> {
+        if let Some(state) = &self.volume {
+            let current = state.current();
+            Some(CurrentDesign { compliance: current.compliance, volume: current.volume })
+        } else {
+            self.projected.as_ref().map(|state| {
+                let current = state.current();
+                CurrentDesign { compliance: current.compliance, volume: current.volume }
+            })
+        }
     }
 
     pub(super) fn constraint_html(&self) -> String {
-        self.projected.as_ref().map_or_else(String::new, |state| state.html())
+        if let Some(state) = &self.volume { state.html() }
+        else { self.projected.as_ref().map_or_else(String::new, |state| state.html()) }
     }
 }
 
@@ -103,7 +148,7 @@ fn decode(spec: &ElasticitySpec, receipt: &JsonValue, design: &JsonValue,
     iterations: &JsonValue) -> Result<(GridSdf, OptimizeReport)> {
     let count = integer(receipt, "iterations_completed")?;
     if count > spec.steps || integer(receipt, "target_iterations")? != spec.steps
-        || (receipt.str_field("status") == Some("completed") && count != spec.steps) {
+        || (matches!(receipt.str_field("status"), Some("completed" | "constraint-unmet")) && count != spec.steps) {
         return Err(malformed("retained iteration count disagrees with the study"));
     }
     if iterations.str_field("schema") != Some("elasticity-study-iterations-v1")
@@ -164,6 +209,11 @@ fn decode(spec: &ElasticitySpec, receipt: &JsonValue, design: &JsonValue,
         .any(|(a, b)| a.to_bits() != b.to_bits()) {
         return Err(malformed("zero-update geometry differs from the declared initial design"));
     }
+    if spec.projected.is_none()
+        && let Some(status @ ("completed" | "constraint-unmet")) = receipt.str_field("status")
+        && iteration_terminal(spec, &report)? != status {
+        return Err(malformed("retained completion status contradicts the evaluated material constraint"));
+    }
     Ok((phi, report))
 }
 
@@ -187,10 +237,10 @@ fn retained_error(mut error: Failure, last: Option<&Outcome>) -> Failure {
 
 pub(super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>) -> Result<Outcome> {
-    if spec.projected.is_some() {
-        projected::drive(spec, ledger, cap, gate, prior)
-    } else {
-        drive_observed(spec, ledger, cap, gate, prior, |_, _| {})
+    match spec.projected.as_ref() {
+        Some(ProjectedControls::Volume(_)) => projected::volume::drive(spec, ledger, cap, gate, prior),
+        Some(ProjectedControls::Stress(_)) => projected::drive(spec, ledger, cap, gate, prior),
+        None => drive_observed(spec, ledger, cap, gate, prior, |_, _| {}),
     }
 }
 
@@ -203,7 +253,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         return Err(fail("cli-study-elasticity-transaction", "study requires its own ledger transaction"));
     }
     let start = Instant::now();
-    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0, projected: None };
+    let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
+        projected: None, volume: None };
     let mut predecessor = prior.map(|loaded| loaded.hash);
     let mut retained_wall = 0.0;
     let mut last = None;
@@ -241,6 +292,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             }
             let status = match loaded.value.str_field("status") {
                 Some("completed") => "completed",
+                Some("constraint-unmet") => "constraint-unmet",
                 Some("cancelled") => "cancelled",
                 Some("budget-exhausted") => "budget-exhausted",
                 Some("running") => "running",
@@ -252,8 +304,9 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         }
     };
     let completed = report.rows.len();
-    if completed == spec.steps && last.as_ref().is_some_and(|out| out.status == "completed") {
-        return last.ok_or_else(|| malformed("complete study has no retained receipt"));
+    if completed == spec.steps && last.as_ref().is_some_and(|out|
+        matches!(out.status, "completed" | "constraint-unmet")) {
+        return last.ok_or_else(|| malformed("finished study has no retained receipt"));
     }
     if retained_wall >= spec.wall_s {
         return Err(retained_error(Failure { code: "cli-study-elasticity-resume-budget",
@@ -275,7 +328,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         let status = if gate.is_requested() { "cancelled" }
             else if retained_wall + start.elapsed().as_secs_f64() >= spec.wall_s { "budget-exhausted" }
             else if state.next_iteration() == target {
-                if state.is_complete() { "completed" } else { "budget-exhausted" }
+                if state.is_complete() { iteration_terminal(spec, &report)? } else { "budget-exhausted" }
             } else { "running" };
         if status != "running" {
             return persist(spec, ledger, state.geometry(), &report, status,
