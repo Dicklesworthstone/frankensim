@@ -11,6 +11,9 @@ use crate::robust_descent::{MultiLoadProjectedOptimizer, MultiLoadProjectedState
 use crate::{GridSdf, optimize::material_volume};
 use fs_cutfem::{CutFemError, Quadtree};
 
+/// Cancellable single-load volume-only handoff through the same projected owner.
+pub mod projected;
+
 /// Prolongated field and prescribed nodes on the next dyadic lattice.
 #[derive(Debug, Clone)]
 pub struct RefinedLevelSet {

@@ -6,6 +6,8 @@ use fs_topols::projected::ProjectedSetupStage;
 
 #[path = "volume/mesh.rs"]
 mod mesh;
+#[path = "volume/origin.rs"]
+mod origin;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Controls {
@@ -13,6 +15,7 @@ pub(crate) struct Controls {
     search: ProjectedSettings,
     regions: Vec<DesignRegion>,
     resolution: Option<mesh::ResolutionPolicy>,
+    refine_from: Option<ContentHash>,
 }
 
 impl Controls {
@@ -32,6 +35,7 @@ impl Controls {
             },
             regions: regions::parse_regions(fields)?,
             resolution: mesh::parse(fields)?,
+            refine_from: origin::parse_ref(fields)?,
         };
         let a = policy.area;
         let s = policy.search;
@@ -55,10 +59,13 @@ impl Controls {
         let _ = writeln!(out, "    :max-candidates {}", self.search.max_candidates);
         let _ = writeln!(out, "    :contraction {}", canonical_float(self.search.contraction));
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
-        if self.regions.is_empty() && self.resolution.is_none() {
+        if self.regions.is_empty() && self.resolution.is_none() && self.refine_from.is_none() {
             let _ = writeln!(out, "    :cg-poll-iters {})", self.search.poll_iters);
         } else {
             let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
+            if let Some(hash) = self.refine_from {
+                let _ = writeln!(out, "    :refine-from \"study-{}\"", hash.to_hex());
+            }
             if let Some(policy) = self.resolution { mesh::canonical(policy, out); }
             if self.regions.is_empty() { let _ = writeln!(out, "  )"); }
             else { regions::canonical(&self.regions, out); }
@@ -112,6 +119,7 @@ pub(crate) struct VolumeEvidence {
     attempts: Vec<usize>,
     refusals: Vec<String>,
     mesh: Option<mesh::LastCheck>,
+    origin: Option<origin::Origin>,
 }
 impl VolumeEvidence {
     pub(crate) fn current(&self) -> Measured {
@@ -131,13 +139,15 @@ impl VolumeEvidence {
             self.baseline.json(), self.accepted.iter().map(|state| state.json()).collect::<Vec<_>>().join(","),
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.refusals.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","), reduction,
-            regions::json_field(&self.policy.regions) + &mesh::field(self.policy.resolution, self.mesh.as_ref()))
+            regions::json_field(&self.policy.regions) + &mesh::field(self.policy.resolution, self.mesh.as_ref())
+                + &self.origin.as_ref().map_or_else(String::new, origin::Origin::json_field))
     }
     pub(crate) fn html(&self) -> String {
         format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Independently solved same-material, same-load baseline: {:.8e} J; current compliance: {:.8e} J. Baseline area projection is feasibility preparation, not an optimization improvement. No stress limit or stress evaluation was requested. Prescribed material/void regions: {}. The area is numerical cut quadrature; iteration completion is not convergence or optimality.</p>",
             self.policy.area.target, self.policy.area.tolerance, self.baseline.compliance,
             self.current().compliance, self.policy.regions.len())
             + &mesh::html(self.policy.resolution, self.mesh.as_ref())
+            + &self.origin.as_ref().map_or_else(String::new, origin::Origin::html)
     }
     fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
         if value.str_field("mode") != Some("projected-volume-v1")
@@ -187,7 +197,8 @@ impl VolumeEvidence {
         let previous = accepted.get(accepted.len().saturating_sub(2)).copied()
             .filter(|_| accepted.len() >= 2).unwrap_or(baseline);
         let mesh = mesh::read(value, policy, previous, current, accepted.len())?;
-        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, mesh };
+        let origin = origin::read(value, policy)?;
+        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, mesh, origin };
         // Recompute rather than trusting the retained headline improvement.
         let expected = document(evidence.json().as_bytes())?;
         if value.get("relative_reduction") != expected.get("relative_reduction") {
@@ -203,6 +214,7 @@ enum VolumeStage {
     Setup(ProjectedSetupStage),
     Update(ProjectedStage),
     Mesh(mesh::MeshCheckStage),
+    Origin(origin::Stage),
 }
 fn stopped(gate: &CancelGate, start: Instant, consumed: f64, spec: &ElasticitySpec) -> Option<&'static str> {
     stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
@@ -250,6 +262,10 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             check.baseline.rungs[0].level != settings(spec, spec.steps).level) {
             return Err(malformed("retained mesh-check levels differ from the study"));
         }
+        if retained.origin.as_ref().is_some_and(|origin|
+            origin.fine_level != settings(spec, spec.steps).level) {
+            return Err(malformed("retained refinement level differs from the study"));
+        }
         let status = match old.value.str_field("status") {
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
@@ -267,21 +283,24 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         if let Some(status) = stopped(gate, start, consumed, spec) {
             return Err(constraints_stop(status, last.as_ref()));
         }
-        let prepared = regions::prepare(spec, &policy.regions, |stage| {
-            observe(VolumeStage::Regions(stage));
+        let fixed = origin::fixed(spec, ledger, |stage| {
+            match stage {
+                origin::Stage::Regions(stage) => observe(VolumeStage::Regions(stage)),
+                stage => observe(VolumeStage::Origin(stage)),
+            }
             match stopped(gate, start, consumed, spec) {
                 Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
             }
         })?;
-        let prepared = match prepared {
-            ControlFlow::Continue(prepared) => prepared,
+        let fixed = match fixed {
+            ControlFlow::Continue(fixed) => fixed,
             ControlFlow::Break(status) => return persist(spec, ledger, &phi, &report, status,
                 consumed + start.elapsed().as_secs_f64(), predecessor, &evidence),
         };
         let checkpoint = OptimizeCheckpoint::restore(phi, fixture(spec), settings(spec, spec.steps),
             report.rows.len(), report.ell.last().copied().unwrap_or(spec.ell0))
             .map_err(|error| malformed(&error.to_string()))?;
-        let restored = ProjectedOptimizer::from_checkpoint_controlled(&checkpoint, prepared.fixed_nodes,
+        let restored = ProjectedOptimizer::from_checkpoint_controlled(&checkpoint, fixed,
             policy.area, policy.search, |stage| {
                 observe(VolumeStage::Setup(stage));
                 match stopped(gate, start, consumed, spec) {
@@ -304,6 +323,20 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 return Err(retained_error(malformed(&error.to_string()), Some(&charged)));
             }
         }
+    } else if policy.refine_from.is_some() {
+        let prepared = origin::start(spec, ledger, |stage| {
+            observe(VolumeStage::Origin(stage));
+            match stopped(gate, start, 0.0, spec) {
+                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+            }
+        })?;
+        let (state, origin) = match prepared {
+            ControlFlow::Continue(prepared) => prepared,
+            ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
+        };
+        evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None, origin: Some(origin) });
+        state
     } else {
         let prepared = regions::prepare(spec, &policy.regions, |stage| {
             observe(VolumeStage::Regions(stage));
@@ -327,12 +360,17 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None, origin: None });
         state
     };
     let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
     let stop = stopped(gate, start, consumed, spec);
     if last.is_none() && stop.is_some() { return Err(constraints_stop(stop.unwrap(), None)); }
+    if last.is_none() {
+        if let Some(origin) = evidence.volume.as_ref().and_then(|state| state.origin.as_ref()) {
+            origin::retain_source(spec, ledger, origin)?;
+        }
+    }
     // Retain the feasible baseline and charge recovery before another update.
     let admitted = persist(spec, ledger, state.checkpoint().geometry(), &report, stop.unwrap_or("running"),
         consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
@@ -427,3 +465,6 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
 #[cfg(test)]
 #[path = "volume/tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "volume/origin_tests.rs"]
+mod origin_tests;
