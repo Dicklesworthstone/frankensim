@@ -1,10 +1,10 @@
-# Physical shaft bending during a hi-hat performance
+# Physical shaft bending during a percussion performance
 
 `--flexible-stick INPUT.fst` and `--second-flexible-stick INPUT.fst` replace the
 selected rigid effective stick with its geometry-derived pin-supported shaft.
 Both flags work with `hihat`, `hihat-wav` and `hihat-mic`. The second requires
 `--second-stick-position-m X Y`; either stick can remain on the original rigid
-path. These flags are not yet admitted by the single-drum/splash commands.
+path. Single-cymbal, drum and snare compositions are described below.
 
 Tip contact now acts on the shaft's rigid rotation **and every retained bending
 mode**, with the same reciprocal reaction on the upper cymbal. A strike can
@@ -85,3 +85,77 @@ Native regressions cover signed hand work and retry, two-shaft mode/source
 addresses, rigid-only launch, and actual contact excitation with shared energy.
 Native execution, measured force/response comparison and throughput remain
 required before instrument-fidelity or real-time claims.
+
+
+## Single cymbals, drums and snares
+
+The same `--flexible-stick INPUT.fst` and `--second-flexible-stick INPUT.fst`
+now work on `splash`, `drum`, `drum-stretch`, `drum-modal`, `snare` and
+`snare-off`, including their `-wav` and `-mic` forms. Each hand is independent:
+one may remain the original rigid effective mass while the other has supplied
+shaft geometry. The second hand always needs `--second-stick-position-m X Y`.
+The format and beam/contact limitations above are unchanged.
+
+```sh
+# Two independently flexible sticks on the same stretching drumheads.
+# Change the authored shaft card rather than choosing a synthetic timbre.
+cargo run --release -p fs-couple --example percussion -- \
+  drum-stretch 256 \
+  --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
+  --second-stick-position-m -0.05 0.02 --second-stick-speed-m-s 0.6 \
+  --second-flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
+  --analytic-newton --impact-substeps 8 511
+
+# The actual curved shell, same stand histories and unchanged acoustic source.
+cargo run --release -p fs-couple --example percussion -- \
+  splash-mic 4800 20 \
+  --flexible-stick crates/fs-couple/examples/percussion/estimated-flexible-stick.fst \
+  --analytic-newton --impact-substeps 8 511 > flexible-splash.wav
+```
+
+These illustrate admitted commands, not completed renders or listening results.
+Either existing force-file/score option drives the corresponding physical hand
+station when its shaft is selected. Purely spatial hand performances require no
+dummy pedal or zero-force input. Both hands, an optional snare carrier, and mute
+jaws share the existing maximum of four player programs and one accepted clock.
+A refused step changes neither the mechanics nor any playing cursor.
+
+Shaft elastic coordinates follow the original solid prefix. Head/shell modes,
+second rigid stick, snare strands/carrier and mute jaws retain their addresses.
+The cavity is then built after the enlarged solid prefix, and all neck/acoustic
+addresses are obtained from that actual coupling. No shaft coordinate directly
+compresses the gas or radiates through the source bank. Its sound contribution
+comes from contact reactions on the existing heads or shell, not an added audio
+channel. Kelvin/material history remains private and is not reinterpreted as
+shaft motion. Full requested beam slices and original mode/pad budgets remain
+mandatory; oversized compositions refuse rather than discard modes.
+
+A flexible shaft and a finite-area felt mallet cannot select the **same hand**:
+the current mallet model supplies a separate head inertia, and merging it into
+a flexible shaft needs an explicit joint mass/face model. Opposite-hand mallets
+and moving mutes remain composable within existing limits. `drum-modal` keeps
+its declared linear modal realization with the actual elastic shaft bodies.
+For snare commands, selecting a shaft enables the nonlinear-capable composition
+so that `--analytic-newton` and impact substeps can be used without discarding
+the wires or their contact loss. This does not enable head or wire stretching
+unless separately requested.
+
+CSV tip motion now includes shaft flexure rather than just the rigid launch
+coordinate. Selected shafts also report hand motion and elastic kinetic plus
+bending energy (already included in total mechanical energy). No-flag commands
+retain their original models, source maps, force semantics and output columns.
+
+Focused native checks:
+
+```sh
+cargo test --release -p fs-couple --example percussion shaft_playing -- --test-threads=1
+cargo test --release -p fs-couple --example percussion spatial -- --test-threads=1
+cargo test --release -p fs-couple --example percussion flexible -- --test-threads=1
+```
+
+The new fixtures exercise real drum/cymbal contact excitation, shared energy,
+spatial-only force replay and refusal, complete carrier/wire/cavity layouts,
+source preservation, mixed mallet/mute inertia, and the explicit linear image.
+They do not certify a measured specimen, full acoustic bandwidth or real-time
+performance. Local Rust execution was unavailable during this change; the
+existing percussion workflow is requested for native validation.

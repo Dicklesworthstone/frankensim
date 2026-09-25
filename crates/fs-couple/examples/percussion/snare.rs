@@ -60,7 +60,10 @@ impl SnareSet {
         first_wire: usize, total_modes: usize,
     ) -> Result<(Vec<ImpactBody>, Vec<Obstacle>), Error> {
         let extra = self.mode_count()?;
-        if first_wire.checked_add(extra) != Some(total_modes) || receiver.end > first_wire
+        let wire_end=first_wire.checked_add(extra).ok_or("snare coordinate range overflow")?;
+        // Other physical bodies may follow the bank (for example shaft
+        // flexure). Their contact coefficients remain exactly zero.
+        if wire_end > total_modes || receiver.end > first_wire
             || receiver.start >= receiver.end || receiver.len() != modes.len()
         { return Err("snare body and receiver coordinate ranges are inconsistent".into()); }
         let mu = self.coil.linear_density_kg_m()?;

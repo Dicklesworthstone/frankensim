@@ -12,8 +12,7 @@ mod play;
 pub use play::{is_command,run};
 #[path="hihat_squeeze.rs"]
 mod squeeze;
-#[path="hihat_sticks.rs"]
-mod flexible;
+use super::flexible_sticks as flexible;
 use fs_couple::render::plate::impact::striker::flexible::{FlexibleStriker,StrikerPorts};
 
 // One independently prepared physical shell and its exact inner-skin chart.
@@ -175,7 +174,7 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     let flexible_sticks=[first.ports,second_ports];
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
     let system=match film {Some(film)=>system.with_squeeze_film(film)?,None=>system};
-    Ok(Pair{experiment:Experiment{mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
+    Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
 }
