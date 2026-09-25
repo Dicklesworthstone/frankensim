@@ -2,6 +2,7 @@
 //! The background adapts; the declared implicit boundary remains fixed.
 use super::*;
 use std::ops::ControlFlow;
+use std::cell::Cell;
 
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{
@@ -18,15 +19,19 @@ use fs_solver::op::two_level::{TwoLevelBudget, TwoLevelError};
 use fs_topopt::sdf3::CutDensityStudy3;
 use fs_topopt::sdf3::adaptive_continuation::{
     AdaptiveContinuationError3, AdaptiveContinuationOptions3, AdaptiveContinuationReport3,
-    controlled_adaptive_sdf3_continuation,
+    controlled_adaptive_sdf3_continuation_observed,
 };
 use fs_topopt::sdf3_goal::{
     GoalPreconditioner3, GoalReferenceLoad3, GoalRefinementError3, GoalRefinementOptions3,
 };
 use fs_topopt::{
     ContinuationTermination, EvaluationStop, MultiLoadOcOptions, SimpParams, SolveBudget,
-    SolveControl,
+    SolveControl, SolveWork,
 };
+
+#[path = "sdf3/checkpoint.rs"]
+mod checkpoint;
+use checkpoint::Spent;
 
 #[path = "sdf3/output.rs"]
 mod output;
@@ -34,7 +39,7 @@ mod output;
 mod spec;
 use spec::Spec;
 
-const SCOPE: &str = "Estimated 3-D linear-elastic SIMP compliance on a fixed raw implicit height field. The octree background is refined by numerical two-grid goal residuals; raw densities are transferred, physical-volume feasibility restored, and compliance/volume directional derivatives checked before every stage. These are discrete numerical comparisons, not continuum error enclosures, moving-boundary optimization, mesh-independent optima, manufacturing guarantees or physical validation. Compliance descent applies within each stage. Memory admission is an envelope, not measured RSS. Cancellation and wall time are checked at cooperative quadrature/solver boundaries; individual kernels and ledger I/O are indivisible. A result is durably retained at the end of this invocation; exact optimizer resume is not implemented.";
+const SCOPE: &str = "Estimated 3-D linear-elastic SIMP compliance on a fixed raw implicit height field. The octree background is refined by numerical two-grid goal residuals; raw densities are transferred, physical-volume feasibility restored, and compliance/volume directional derivatives checked before every stage. These are discrete numerical comparisons, not continuum error enclosures, moving-boundary optimization, mesh-independent optima, manufacturing guarantees or physical validation. Compliance descent applies within each stage. Memory admission is an envelope, not measured RSS. Cancellation and wall time are checked at cooperative quadrature/solver boundaries; individual kernels and ledger I/O are indivisible. Every completed stage is durably retained before more physics. Resume verifies the retained stage prefix by replay under the same executable; replay spends the original wall, Krylov and geometry allowances. This is not direct optimizer-state restoration. Failed replay or a process crash preserves previous checkpoints but cannot durably charge later uncheckpointed work. The final ledger write is outside its own recorded wall measurement.";
 
 struct Domain {
     height: f64,
@@ -66,10 +71,31 @@ impl CutSdf3 for Domain {
 struct Computation {
     study: CutDensityStudy3<AdaptiveSolveSpace3>,
     report: AdaptiveContinuationReport3,
-    geometry: QuadratureWork3,
-    background_cells: usize,
-    wall_s: f64,
+    tree: Octree3,
+    spent: Spent,
+    completed_stages: usize,
+    requested_stages: usize,
     status: &'static str,
+}
+
+/// A borrowed accepted state avoids copying the operator just to persist it.
+struct View<'a> {
+    study: &'a CutDensityStudy3<AdaptiveSolveSpace3>,
+    report: &'a AdaptiveContinuationReport3,
+    tree: &'a Octree3,
+    spent: Spent,
+    completed_stages: usize,
+    requested_stages: usize,
+    status: &'static str,
+}
+impl Computation {
+    fn view(&self) -> View<'_> {
+        View {
+            study: &self.study, report: &self.report, tree: &self.tree,
+            spent: self.spent, completed_stages: self.completed_stages,
+            requested_stages: self.requested_stages, status: self.status,
+        }
+    }
 }
 
 fn geometry_budget(error: &GoalRefinementError3) -> bool {
@@ -94,10 +120,25 @@ fn refinement_budget(error: &AdaptiveContinuationError3) -> bool {
     }
 }
 
+#[cfg(test)]
 fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
+    compute_observed(spec, gate, Spent::default(), spec.schedule.len(), |_| Ok(()))
+}
+
+fn compute_observed(
+    spec: &Spec,
+    gate: &CancelGate,
+    prior: Spent,
+    requested_stages: usize,
+    mut accepted: impl FnMut(&View<'_>) -> Result<()>,
+) -> Result<Computation> {
+    if requested_stages == 0 || requested_stages > spec.schedule.len() {
+        return Err(fail("cli-study-sdf3-stage-budget", "invalid stage prefix"));
+    }
+    prior.validate(spec)?;
     let start = Instant::now();
     let poll = || {
-        if gate.is_requested() || start.elapsed().as_secs_f64() >= spec.wall_s {
+        if gate.is_requested() || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -128,13 +169,13 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
         .map_err(|e| fail("cli-study-sdf3-domain", e.to_string()))?;
     let material = IsotropicElastic::new(spec.youngs, spec.poisson, 1.0)
         .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))?;
-    let mut geometry = QuadratureWork3::default();
+    let geometry = Cell::new(QuadratureWork3::default());
     let mut build = |tree: &Octree3,
                      checkpoint: &mut dyn FnMut() -> ControlFlow<()>|
      -> std::result::Result<AdaptiveSolveSpace3, GoalRefinementError3> {
         let limits = QuadratureOptions3 {
-            max_boxes: spec.boxes - geometry.boxes,
-            max_points: spec.points - geometry.points,
+            max_boxes: spec.boxes - prior.geometry.boxes - geometry.get().boxes,
+            max_points: spec.points - prior.geometry.points - geometry.get().points,
             ..Default::default()
         };
         let mut gate = |_| {
@@ -160,16 +201,21 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
             &mut quadrature,
         );
         let spent = quadrature.work();
-        geometry.boxes += spent.boxes;
-        geometry.points += spent.points;
-        geometry.field_evaluations += spent.field_evaluations;
+        let old = geometry.get();
+        let add = |a: usize, b: usize| a.checked_add(b)
+            .ok_or(GoalRefinementError3::Invalid("geometry work counter overflow"));
+        geometry.set(QuadratureWork3 {
+            boxes: add(old.boxes, spent.boxes)?,
+            points: add(old.points, spent.points)?,
+            field_evaluations: add(old.field_evaluations, spent.field_evaluations)?,
+        });
         Ok(AdaptiveSolveSpace3::jacobi(result?, 100_000_000))
     };
     let operator = build(&tree, &mut || ControlFlow::Continue(()))
         .map_err(|e| Failure {
             code: "cli-study-sdf3-geometry",
             exit: if gate.is_requested() { exit::CANCELLED }
-                else if geometry_budget(&e) || start.elapsed().as_secs_f64() >= spec.wall_s { exit::BUDGET }
+                else if geometry_budget(&e) || prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s { exit::BUDGET }
                 else { exit::REFUSED },
             message: format!("initial 3-D geometry could not complete: {e}; no displacement or optimized design is available"),
         })?;
@@ -193,17 +239,18 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
     let mut checkpoint = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
-            total_iterations: spec.linear,
+            total_iterations: spec.linear - prior.linear.linear_iterations,
             per_solve_iterations: spec.per_solve,
         },
         &mut checkpoint,
     );
-    let report = controlled_adaptive_sdf3_continuation(
+    let mut completed_stages = 0;
+    let report = controlled_adaptive_sdf3_continuation_observed(
         &mut study,
         &mut tree,
         &loads,
         &raw,
-        &spec.schedule,
+        &spec.schedule[..requested_stages],
         AdaptiveContinuationOptions3 {
             optimization: MultiLoadOcOptions {
                 volume_fraction: spec.volume,
@@ -228,13 +275,24 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
         },
         &mut control,
         &mut build,
-    );
+        |study, tree, report| {
+            completed_stages = report.continuation.stages.len();
+            let status = if completed_stages == spec.schedule.len() { "completed" }
+                else if completed_stages == requested_stages { "budget-exhausted" }
+                else { "checkpointed" };
+            accepted(&View {
+                study, tree, report,
+                spent: prior.add(report.continuation.work, geometry.get(), start.elapsed().as_secs_f64())?,
+                completed_stages, requested_stages, status,
+            })
+        },
+    )?;
     let result = &report.continuation;
     let status = if result.termination == ContinuationTermination::ScheduleComplete {
-        "completed"
+        if completed_stages == spec.schedule.len() { "completed" } else { "budget-exhausted" }
     } else if gate.is_requested() {
         "cancelled"
-    } else if start.elapsed().as_secs_f64() >= spec.wall_s
+    } else if prior.wall_s + start.elapsed().as_secs_f64() >= spec.wall_s
         || matches!(
             result.evaluation_stop,
             Some(EvaluationStop::LinearBudget { .. } | EvaluationStop::TotalBudget { .. })
@@ -249,12 +307,8 @@ fn compute(spec: &Spec, gate: &CancelGate) -> Result<Computation> {
         "numerical-failure"
     };
     Ok(Computation {
-        study,
-        report,
-        geometry,
-        background_cells: tree.leaves().len(),
-        wall_s: start.elapsed().as_secs_f64(),
-        status,
+        spent: prior.add(report.continuation.work, geometry.get(), start.elapsed().as_secs_f64())?,
+        study, report, tree, completed_stages, requested_stages, status,
     })
 }
 
@@ -264,20 +318,28 @@ pub(super) fn study(
     override_text: Option<&str>,
     gate: &CancelGate,
 ) -> Result<Outcome> {
-    if override_text.is_some() {
-        return Err(fail(
-            "cli-study-sdf3-budget-override",
-            "3-D studies use the explicit per-stage, cumulative Krylov, geometry and wall budgets in their input; --budget is not supported",
-        ));
-    }
+    let cap = budget(override_text)?;
     let spec = spec::parse(source)?;
     let ledger = Ledger::open(
         ledger_path
             .to_str()
             .ok_or_else(|| fail("cli-study-sdf3-ledger", "ledger path is not UTF-8"))?,
     )?;
-    let result = compute(&spec, gate)?;
-    output::persist(&spec, &ledger, &result)
+    checkpoint::drive(&spec, &ledger, cap, gate, None, checkpoint::announce)
+}
+
+pub(super) fn resume(
+    ledger: &Ledger,
+    old: &Loaded,
+    override_text: Option<&str>,
+    gate: &CancelGate,
+) -> Result<Outcome> {
+    let cap = budget(override_text)?;
+    let source = linked(ledger, &old.value, "source", "study-source")?;
+    let source = std::str::from_utf8(&source)
+        .map_err(|error| fail("cli-study-sdf3-receipt", error.to_string()))?;
+    let spec = spec::parse(source)?;
+    checkpoint::drive(&spec, ledger, cap, gate, Some(old), checkpoint::announce)
 }
 
 #[cfg(test)]
