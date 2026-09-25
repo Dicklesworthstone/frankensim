@@ -33,7 +33,7 @@ fn periodic_contact_cycle_retains_residual_and_nonzero_storage() {
     let gate=run.get("periodic").unwrap();
     assert!(gate.f64_field("full_field_residual_k").unwrap()<=1e-4);
     assert_eq!(gate.f64_field("consecutive_cycles_met"),Some(2.0));
-    close(run.f64_field("sampled_peak_objective_k").unwrap(),311.672519334,1e-3);
+    close(run.f64_field("sampled_peak_objective_k").unwrap(),310.0425873765466,1e-3);
     close(run.f64_field("input_energy_j").unwrap(),31200.0,1e-6);
     close(run.f64_field("total_accepted_steps").unwrap(),3900.0,0.0);
     let cycles=run.get("cycles").unwrap().as_array().unwrap();
@@ -82,7 +82,7 @@ fn periodic_power_sizing_waits_for_cycle_closure_in_each_candidate() {
     let design=doc.get("transient_power_design").unwrap();
     let multiplier=design.f64_field("selected_power_multiplier").unwrap();
     // Reference is the direct affine fixed point of the independent FEM cycle.
-    close(multiplier,8.0/(311.672953063822-300.0),0.001);
+    close(multiplier,8.0/(310.0425873765466-300.0),0.001);
     let cycles=run.f64_field("cycles_completed").unwrap();
     assert!(cycles>2.0);
     close(run.f64_field("input_energy_j").unwrap(),600.0*multiplier*cycles,1e-5);

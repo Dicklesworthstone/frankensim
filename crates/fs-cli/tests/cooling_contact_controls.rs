@@ -147,8 +147,10 @@ fn fixed_contact_uncertainty_matches_real_steady_and_transient_observables() {
         assert_eq!(number(&report, &["samples_evaluated"]), 2.0);
         assert_eq!(nominal.get("contact_sensitivities"), Some(&J::Null));
         if transient {
-            close(expected, 306.1651033635, 3e-5);
-            assert_eq!(number(&report, &["empirical_probability_of_compliance"]), 0.0);
+            // Lumped capacity (05db922bf): the degenerate peak sits under the
+            // 305 K limit, so every identical sample complies.
+            close(expected, 304.0634747779944, 3e-5);
+            assert_eq!(number(&report, &["empirical_probability_of_compliance"]), 1.0);
         }
     }
 }

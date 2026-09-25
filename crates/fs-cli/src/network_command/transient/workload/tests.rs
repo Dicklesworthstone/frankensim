@@ -24,12 +24,12 @@ fn independent_workloads_move_the_hotspot_and_preserve_window_energy() {
     let history = result.get("history").unwrap().as_array().unwrap();
     assert_eq!(history[15].f64_field("active_vertex"), Some(4.0));
     assert_eq!(history[30].f64_field("active_vertex"), Some(13.0));
-    close(result.f64_field("sampled_peak_objective_k").unwrap(), 319.64214982390683, 5e-5);
+    close(result.f64_field("sampled_peak_objective_k").unwrap(), 310.4916199387785, 5e-5);
     close(result.f64_field("sampled_peak_time_s").unwrap(), 60.0, 1e-12);
-    close(doc.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 306.1403198316319, 5e-5);
+    close(doc.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 305.7727254325046, 5e-5);
     close(result.f64_field("input_energy_j").unwrap(), 1200.0, 1e-6);
-    close(result.f64_field("stored_energy_change_j").unwrap(), 1031.9367850480319, 5e-5);
-    close(result.f64_field("air_energy_gain_j").unwrap(), 168.06321495197105, 5e-5);
+    close(result.f64_field("stored_energy_change_j").unwrap(), 1027.9643694287352, 5e-5);
+    close(result.f64_field("air_energy_gain_j").unwrap(), 172.03563082139772, 5e-5);
     assert!(result.f64_field("energy_residual_j").unwrap().abs() <= r.limits.heat * 150.0);
     assert_eq!(history[16].get("power_scale"), Some(&J::Null));
     assert_eq!(history[16].path(&["component_powers_w", "gpu"]).unwrap().as_f64(), Some(20.0));
@@ -47,8 +47,8 @@ fn identical_total_power_does_not_erase_component_location() {
     gpu.transient.as_mut().unwrap().intervals[0].workload = named(0.0, 20.0);
     let a = run(&cpu);
     let b = run(&gpu);
-    close(a.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 306.3431585002163, 5e-5);
-    close(b.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 318.4159743270675, 5e-5);
+    close(a.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 304.11663335714235, 5e-5);
+    close(b.path(&["objective", "value_k"]).unwrap().as_f64().unwrap(), 309.86828057433263, 5e-5);
     close(a.path(&["transient", "input_energy_j"]).unwrap().as_f64().unwrap(),
         b.path(&["transient", "input_energy_j"]).unwrap().as_f64().unwrap(), 1e-6);
     // gpu starts at zero nominal watts; rebuilding from its footprint must

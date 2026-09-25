@@ -39,7 +39,7 @@ fn a_cooler_memory_limit_restricts_an_otherwise_passing_global_peak() {
     let dir=Scratch::new();let base=J::parse(BASE).unwrap();let spec=J::parse(MULTI).unwrap();
     let result=success(&dir.allocate(&base,&spec));verify_limits(&dir,&result);
     assert_eq!(result.path(&["thermal_constraints","active_constraint"]).unwrap().as_str(),Some("memory-limit"));
-    near(selected(&result,"chip"),10.1236293473,0.0011);
+    near(selected(&result,"chip"),10.994856562915485,0.0011);
     assert_eq!(selected(&result,"standby"),3.0);assert_eq!(selected(&result,"memory"),6.0);
     assert!(n(&result,"selected_sampled_peak_k")<302.0);
     assert!(n(limit(&result,"memory-limit"),"sampled_peak_k")<n(&result,"selected_sampled_peak_k"));
@@ -51,7 +51,7 @@ fn a_cooler_memory_limit_restricts_an_otherwise_passing_global_peak() {
     let mut memory=unchecked.get("resolved_request").unwrap().clone();
     put(&mut memory,"objective",limit(&result,"memory-limit").get("objective").unwrap().clone());
     let memory=dir.cooling(&memory);
-    assert!(n(phase(&memory),"sampled_peak_objective_k")>301.4);
+    assert!(n(phase(&memory),"sampled_peak_objective_k")>300.67);
     let mut reordered=spec;rows(member(&mut reordered,"thermal_constraints")).reverse();
     let reordered=success(&dir.allocate(&base,&reordered));
     assert_eq!(result.get("selected"),reordered.get("selected"));
@@ -67,11 +67,11 @@ fn derivative_free_and_changed_active_constraints_still_require_every_limit() {
     for row in limit_rows(&no_adjoint) {
         assert!(row.get("dpeak_dcontrolled_power_w_k_per_w").unwrap().as_array().unwrap().iter().all(|v|v==&J::Null));
     }
-    near(selected(&no_adjoint,"chip"),10.1236293473,0.0011);
-    put(&mut rows(member(&mut spec,"thermal_constraints"))[0],"temperature_limit_k",number(301.5));
+    near(selected(&no_adjoint,"chip"),10.994856562915485,0.0011);
+    put(&mut rows(member(&mut spec,"thermal_constraints"))[0],"temperature_limit_k",number(300.8));
     let base=J::parse(BASE).unwrap();let changed=success(&dir.allocate(&base,&spec));verify_limits(&dir,&changed);
     assert_eq!(changed.path(&["thermal_constraints","active_constraint"]).unwrap().as_str(),Some("chip-limit"));
-    near(selected(&changed,"chip"),8.259831758,0.0011);
+    near(selected(&changed,"chip"),7.39617182427922,0.0011);
     assert!(selected(&changed,"chip")<selected(&no_adjoint,"chip")-1.0);
 }
 

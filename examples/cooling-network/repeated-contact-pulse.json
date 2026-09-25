@@ -160,7 +160,7 @@
     ],
     "max_step_s": 2,
     "max_steps": 1000,
-    "temperature_limit_k": 308,
+    "temperature_limit_k": 306.0,
     "intervals": [
       { "duration_s": 30, "power_scale": 1, "fan_speed_ratio": 1 },
       { "duration_s": 120, "power_scale": 0, "fan_speed_ratio": 1.5 }

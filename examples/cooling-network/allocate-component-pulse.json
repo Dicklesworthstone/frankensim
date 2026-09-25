@@ -1,7 +1,7 @@
 {
   "schema": "frankensim.cooling-component-design.v1",
   "units": "SI",
-  "temperature_limit_k": 302.5,
+  "temperature_limit_k": 301.5,
   "power_tolerance_w": 0.001,
   "temperature_tolerance_k": 0.0005,
   "max_evaluations": 128,

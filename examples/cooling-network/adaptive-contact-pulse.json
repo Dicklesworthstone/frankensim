@@ -192,7 +192,7 @@
     ],
     "max_step_s": 30,
     "max_steps": 1000,
-    "temperature_limit_k": 305.0,
+    "temperature_limit_k": 303.25,
     "intervals": [
       {
         "duration_s": 30,

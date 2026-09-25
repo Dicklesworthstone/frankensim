@@ -58,12 +58,15 @@ fn minimum_bracket_budget_producer_and_cancellation_are_not_confused() {
 fn fixed_grid_design_replays_the_same_cold_initial_field_and_reports_actual_speeds() {
     let mut r=Request::parse(FIXTURE).unwrap();
     r.transient.as_mut().unwrap().adaptive=None;
+    // Fixed steps sample a lower peak than the adaptive fixture limit admits
+    // at the slowest fan, so this design declares its own binding limit.
+    r.transient.as_mut().unwrap().limit=Some(319.5);
     let designed=doc(&r);
     let d=designed.get("transient_fan_speed_design").unwrap();
     let multiplier=d.f64_field("selected_speed_multiplier").unwrap();
-    close(multiplier,0.68603515625,0.001);
-    assert!(d.f64_field("sampled_peak_objective_k").unwrap()<=320.85);
-    assert!(d.path(&["failed_lower","sampled_peak_objective_k"]).unwrap().as_f64().unwrap()>320.85);
+    close(multiplier,0.6258544921875,0.001);
+    assert!(d.f64_field("sampled_peak_objective_k").unwrap()<=319.5);
+    assert!(d.path(&["failed_lower","sampled_peak_objective_k"]).unwrap().as_f64().unwrap()>319.5);
     let schedule=r.transient.as_ref().unwrap();
     assert_eq!(schedule.intervals[0].speed,Some(1.0));
     assert_eq!(schedule.intervals[1].speed,Some(1.5));
@@ -71,7 +74,7 @@ fn fixed_grid_design_replays_the_same_cold_initial_field_and_reports_actual_spee
     assert_eq!(values(&designed),values(&J::parse(&fresh.output).unwrap()));
     let history=designed.path(&["transient","history"]).unwrap().as_array().unwrap();
     for sample in &history[1..] {
-        assert!(sample.f64_field("objective_temperature_k").unwrap()<=320.85);
+        assert!(sample.f64_field("objective_temperature_k").unwrap()<=319.5);
         let base=if sample.f64_field("interval")==Some(0.0){1.0}else{1.5};
         close(sample.f64_field("fan_speed_ratio").unwrap(),base*multiplier,0.0);
     }
@@ -86,12 +89,12 @@ fn adaptive_design_checks_all_accepted_samples_including_initial_and_midpoints()
     let r=Request::parse(FIXTURE).unwrap();
     let result=doc(&r);
     let d=result.get("transient_fan_speed_design").unwrap();
-    close(d.f64_field("selected_speed_multiplier").unwrap(),1.1083984375,0.002);
+    close(d.f64_field("selected_speed_multiplier").unwrap(),0.6622802734374998,0.002);
     let run=result.get("transient").unwrap();
     let recorded=run.get("history").unwrap().as_array().unwrap();
     let peak=recorded.iter().map(|s|s.f64_field("objective_temperature_k").unwrap()).fold(f64::NEG_INFINITY,f64::max);
     close(peak,run.f64_field("sampled_peak_objective_k").unwrap(),0.0);
-    assert!(peak<=320.85 && 320.85-peak<=1e-5);
+    assert!(peak<=319.7 && 319.7-peak<=1e-5);
     assert_eq!(run.get("first_sampled_violation_s"),Some(&J::Null));
     assert!(run.path(&["adaptive","rejected_trials"]).unwrap().as_f64().unwrap()>0.0);
     assert!(run.path(&["adaptive","largest_accepted_error_ratio"]).unwrap().as_f64().unwrap()<=1.0);
@@ -109,7 +112,7 @@ fn all_schedule_speed_bounds_and_target_are_admitted_before_physics() {
         ("\"min_speed_multiplier\": 0.5","\"min_speed_multiplier\": 0.25"),
         ("\"max_evaluations\": 64","\"max_evaluations\": 0"),
         ("\"speed_multiplier_tolerance\": 0.0001","\"speed_multiplier_tolerance\": 0"),
-        ("\"temperature_limit_k\": 320.85,",""),
+        ("\"temperature_limit_k\": 319.7,",""),
     ] {
         assert!(FIXTURE.contains(from),"missing fixture mutation {from}");
         assert!(Request::parse(&FIXTURE.replace(from,to)).is_err(),"accepted {to}");
