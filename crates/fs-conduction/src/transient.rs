@@ -1,5 +1,5 @@
 //! Transient conduction by the method of lines: a declared volumetric heat
-//! capacity, the exact P1 capacitance matrix, and theta-method stepping over
+//! capacity, the row-sum-lumped P1 capacitance, and theta-method stepping over
 //! the crate's existing steady operator.
 //!
 //! Bead `frankensim-extreal-program-f85xj.5.11`, the first item staged by
@@ -16,9 +16,14 @@
 //! ```
 //!
 //! with `K` and `b` exactly the operator and load the steady path assembles,
-//! and `C` the capacitance matrix built from the same P1 mass matrix the
-//! source load already uses, `∫ λ_a λ_b dV = V(1+δ_ab)/20`, scaled by the
-//! declared volumetric heat capacity `rho·c_p`. Reusing the steady assembly
+//! and `C` the row-sum lumping of the P1 mass matrix `V(1+δ_ab)/20`, i.e.
+//! `rho·c_p·V/4` on each tet vertex. The consistent matrix has an inverse with
+//! negative entries, so `C dT/dt = −K T + b` was non-monotone at every time
+//! step. On the radiative contact pulse, a cold radiative sink raised the
+//! sampled peak by +0.0036 K as dt → 0; with lumping it lowers it, as the
+//! comparison principle requires. Lumping keeps the heat content of a uniform
+//! field exact (`rho c_p V T`, since the row sums are unchanged). Reusing the
+//! steady assembly
 //! is the point: a transient run cannot drift from the steady physics,
 //! because it IS the steady physics with one extra term.
 //!
@@ -115,11 +120,13 @@ impl VolumetricHeatCapacity {
     }
 }
 
-/// Assemble the P1 capacitance matrix `C_ab = ∫ rho c_p λ_a λ_b dV`.
+/// Assemble the lumped P1 capacitance `C_aa = Σ_b ∫ rho c_p λ_a λ_b dV`.
 ///
-/// Uses the same exact tet mass matrix `V(1+δ_ab)/20` the source load uses,
-/// so the discrete heat content of a uniform temperature field is exactly
-/// `rho c_p V T` — the property the uniform-heating test pins.
+/// Row-sum lumping of the tet mass matrix `V(1+δ_ab)/20` puts `rho c_p V/4`
+/// on each vertex. The discrete heat content of a uniform temperature field is
+/// still exactly `rho c_p V T` (the property the uniform-heating test pins),
+/// and the diagonal keeps the semi-discrete system from raising a distant
+/// maximum when heat is removed elsewhere.
 ///
 /// # Errors
 /// [`ConductionError::Cancelled`] at a tile boundary.
@@ -148,20 +155,16 @@ fn assemble_capacitance_from(
         }
         let volume = mesh.element_volume(element);
         let volumetric = capacity(element);
-        let vertices = mesh.complex().tets[element];
-        for (a, &va) in vertices.iter().enumerate() {
-            for (b, &vb) in vertices.iter().enumerate() {
-                let kronecker = if a == b { 1.0 } else { 0.0 };
-                let entry = volumetric * volume * (1.0 + kronecker) / 20.0;
-                crate::require_finite("capacitance entry", entry)?;
-                if entry <= 0.0 {
-                    return Err(ConductionError::Config {
-                        parameter: "capacitance",
-                        what: "positive capacity entry is not representable".to_string(),
-                    });
-                }
-                coo.push(va as usize, vb as usize, entry);
-            }
+        let entry = volumetric * volume / 4.0;
+        crate::require_finite("capacitance entry", entry)?;
+        if entry <= 0.0 {
+            return Err(ConductionError::Config {
+                parameter: "capacitance",
+                what: "positive capacity entry is not representable".to_string(),
+            });
+        }
+        for &vertex in &mesh.complex().tets[element] {
+            coo.push(vertex as usize, vertex as usize, entry);
         }
     }
     Ok(coo.assemble())
