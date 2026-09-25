@@ -1560,8 +1560,11 @@ fn adaptive_study(
     max_tets: usize,
     deadline: Option<(std::time::Instant, f64)>,
     solve_rung: impl Fn(&fs_mesh::LabeledTetComplex) -> Result<RungSolved, SolveRefusal>,
-) -> Result<(fs_mesh::LabeledTetComplex, RungSolved, String), SolveRefusal> {
+) -> Result<(fs_mesh::LabeledTetComplex, RungSolved, String, Option<LadderDiscretization>), SolveRefusal> {
     let mut solves = 1usize;
+    // Largest |estimated| or |measured| enrichment change of the PUBLISHED
+    // mesh, recorded only when the loop stops on its own tolerance test.
+    let mut resolved_change_k: Option<f64> = None;
     let mut peak_tets = complex.tets().len();
     let mut uniform_quality_fallbacks = 0usize;
     let mut history = Vec::new();
@@ -1679,6 +1682,7 @@ fn adaptive_study(
             number(probe.scores.iter().sum())?,
         ));
         if probe.estimated_change_k <= tolerance_k && probe.measured_change_k.abs() <= tolerance_k {
+            resolved_change_k = Some(probe.estimated_change_k.abs().max(probe.measured_change_k.abs()));
             status = "observed-tolerance-met";
             stop = "enriched-maximum-comparison";
             break;
@@ -1774,8 +1778,22 @@ fn adaptive_study(
             "same-model nodal-maximum comparison against a globally enriched mesh; the actual residual/Jacobian retains fixed contact, nonlinear conductivity, and independent-branch air feedback at fixed mass flows and coefficients, with explicit linearization and maximum remainders; incidence-distributed absolute contributions only mark cells; no continuum error, asymptotic order, equal-accuracy efficiency, physical validation, or complete uncertainty claim; output mesh counts do not certify allocator peak memory"
         ),
     );
-    Ok((complex, solved, receipt))
+    // The published mesh was just compared with its uniform ratio-2
+    // enrichment. If the pointwise order is at least 1, its error is at most
+    // change / (1 - 2^-1) = 2 x change (Richardson); that ASSUMED order is
+    // the whole justification, so the term is Estimated, never a bound.
+    let discretization = resolved_change_k.map(|change| LadderDiscretization {
+        half_width_k: ADAPTIVE_ORDER_ONE_FACTOR * change,
+        status: "adaptive-enrichment",
+        order: None,
+        rungs: solves,
+    });
+    Ok((complex, solved, receipt, discretization))
 }
+
+/// Richardson factor 1/(1 - 2^-p) at an assumed order p = 1 for one ratio-2
+/// enrichment comparison.
+const ADAPTIVE_ORDER_ONE_FACTOR: f64 = 2.0;
 
 /// One row of the conduction receipt's `ladder.rungs`.
 #[derive(Debug, Clone, Copy)]
@@ -4319,6 +4337,10 @@ fn qoi_receipt(
                             ladder.order.unwrap_or(f64::NAN),
                             ladder.rungs
                         ),
+                        "adaptive-enrichment" => format!(
+                            "goal-oriented adaptive refinement met its tolerance after {} solved meshes; half-width = 2 x the larger of the dual-weighted estimate and the measured change against the published mesh's uniform ratio-2 enrichment (Richardson at an ASSUMED pointwise order >= 1)",
+                            ladder.rungs
+                        ),
                         "converged-exactly" => format!(
                             "the last three of {} uniform h-ladder rungs agree bit-for-bit",
                             ladder.rungs
@@ -4490,6 +4512,7 @@ fn qoi_receipt(
                 measured_terms += 1;
                 let (method, factor) = match ladder.status {
                     "observed-order" => ("richardson-gci", LADDER_SAFETY_FACTOR),
+                    "adaptive-enrichment" => ("adaptive-enrichment-order-one", ADAPTIVE_ORDER_ONE_FACTOR),
                     "converged-exactly" => ("bitwise-agreement", 0.0),
                     _ => ("eca-hoekstra-data-range", LADDER_DATA_RANGE_FACTOR),
                 };
@@ -5948,13 +5971,15 @@ fn conduction_solve_receipt(
         // finite contact, boundary laws and source ownership survive refinement.
         let mut complex = audited.labeled().clone();
         let mut solved = solve_rung(&complex)?;
+        let mut adaptive_discretization: Option<LadderDiscretization> = None;
         let adaptive_fragment = if adaptive_requested {
             let budgets = spec.budgets.as_ref().expect("admitted solve budgets");
-            let (adaptive_complex, adaptive_solved, receipt) = adaptive_study(
+            let (adaptive_complex, adaptive_solved, receipt, estimate) = adaptive_study(
                 &cx, complex, solved, ladder_region, budgets.accuracy_rel, max_tets, deadline, &solve_rung,
             )?;
             complex = adaptive_complex;
             solved = adaptive_solved;
+            adaptive_discretization = estimate;
             Some(receipt)
         } else { None };
         let mut rungs = vec![ladder_row(0, &complex, &solved, ladder_region)];
@@ -6020,9 +6045,9 @@ fn conduction_solve_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment))
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment) = result;
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization) = result;
     let RungSolved {
         census,
         mesh,
@@ -6145,6 +6170,8 @@ fn conduction_solve_receipt(
         optional("ladder.half_width_k", ladder_estimate.half_width_k)?,
         json_string(&ladder_estimate.detail),
     );
+    // The ladder and adaptive fidelities are exclusive; either may supply
+    // the Discretization term, and neither is a continuum bound.
     let discretization = ladder_estimate
         .half_width_k
         .map(|half_width_k| LadderDiscretization {
@@ -6152,7 +6179,8 @@ fn conduction_solve_receipt(
             status: ladder_estimate.status,
             order: ladder_estimate.order,
             rungs: ladder_estimate.rungs,
-        });
+        })
+        .or(adaptive_discretization);
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\

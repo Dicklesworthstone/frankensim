@@ -559,7 +559,11 @@ pub(super) fn report_receipt(
                 .and_then(|d| d.str_field("ladder_status"))
                 .unwrap_or("");
             let rungs = derivation.and_then(|d| d.f64_field("rungs")).unwrap_or(0.0);
-            let reason = if kind == "discretization" {
+            let reason = if kind == "discretization" && status == "adaptive-enrichment" {
+                format!(
+                    "half-width in kelvin from goal-oriented adaptive refinement ({rungs} solved meshes): {method}, Richardson at an assumed order >= 1 against a uniform enrichment"
+                )
+            } else if kind == "discretization" {
                 format!(
                     "half-width in kelvin from the conduction stage's uniform h-ladder: {method} ({status}) over {rungs} rungs"
                 )

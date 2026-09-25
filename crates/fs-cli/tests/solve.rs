@@ -4913,10 +4913,20 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         "the checked dual and both explicit remainders reproduce the independently solved maximum change"
     );
     assert!(conduction.contains("\"uses_nonlinear_jacobian\":false"));
+    let estimated = number("\"estimated_change_k\":");
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
-    // The adaptive estimate is not a discretization receipt; the propagated
-    // boundary/solver terms and negligible measurement are measured.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 5, "{qoi}");
+    // A tolerance-met adaptive study now supplies the Discretization term:
+    // 2 x the larger enrichment change (Richardson at an assumed order >= 1),
+    // so four sources stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    let upper = qoi
+        .split("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0,\"upper_kelvin\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|text| text.parse::<f64>().ok())
+        .expect("measured adaptive discretization term");
+    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(measured.abs())).to_bits(), "{qoi}");
+    assert!(qoi.contains("\"method\":\"adaptive-enrichment-order-one\""), "{qoi}");
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
     let html = String::from_utf8(artifact_bytes(
         &ledger,
@@ -5037,10 +5047,10 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert!(number("linearization_remainder_k").abs() < 1e-8,
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
-    // The adaptive estimate is not a discretization receipt; propagation
-    // measures boundary, card model-form and solver terms, and measurement
-    // is negligible, so four sources stay NO-DATA.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    // The tolerance-met conjugate adaptive study supplies Discretization;
+    // propagation measures boundary, card model-form and solver terms, and
+    // measurement is negligible, so roundoff, geometry and parameters remain.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
 }
 
 #[test]
