@@ -373,7 +373,7 @@ fn oracle_options(method: OptimizeMethod) -> MinimizeOptions<'static> {
         tol: Some(ORACLE_TOLERANCE),
         maxiter: Some(ORACLE_MAX_ITERATIONS),
         maxfev: None,
-        gradient_eps: ORACLE_GRADIENT_EPSILON,
+        gradient_eps: Some(ORACLE_GRADIENT_EPSILON),
         callback: None,
         gradient: None,
         hessp: None,
