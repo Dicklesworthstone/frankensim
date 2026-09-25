@@ -60,6 +60,8 @@ pub mod optimize;
 pub mod projected;
 pub mod projected_stress;
 pub mod refinement;
+/// Measured finer-grid assessment and pre-publication projected-descent gates.
+pub mod resolution;
 pub mod robust;
 // Load under the physical name so nested modules resolve in robust_descent_v2/.
 // Keep the established public path without compiling a second implementation.
