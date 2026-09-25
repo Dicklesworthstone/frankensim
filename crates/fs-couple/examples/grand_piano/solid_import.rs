@@ -10,17 +10,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const HEADER: &str = "frankensim-board-skins-v1";
 
+#[path = "skin_pairing.rs"]
+mod pairing;
+#[cfg(test)]
+#[path = "solid_playback_tests.rs"]
+mod playback_tests;
+
 struct Skins {
     lower: String,
     pairs: BTreeMap<usize, usize>,
     thickness: [f64; 2],
+    projected: Option<f64>,
 }
 impl Skins {
     fn read(text: &str) -> Result<Self, String> {
         if text.len() > MAX_SPEC_BYTES { return Err("skin correspondence exceeds 8 MiB".into()); }
         let mut rows = text.lines().map(str::trim).filter(|s| !s.is_empty() && !s.starts_with('#'));
         if rows.next() != Some(HEADER) { return Err(format!("expected {HEADER}")); }
-        let mut s = Self { lower: String::new(), pairs: BTreeMap::new(), thickness: [0.; 2] };
+        let mut s = Self { lower: String::new(), pairs: BTreeMap::new(), thickness: [0.; 2], projected: None };
         let mut seen = BTreeSet::new();
         let mut used_lower = BTreeSet::new();
         for row in rows {
@@ -33,6 +40,13 @@ impl Skins {
                 ["lower", label] if !label.is_empty() => s.lower = (*label).into(),
                 ["thickness", "geometry"] => {},
                 ["thickness-range", lo, hi] => s.thickness = [number(lo)?, number(hi)?],
+                ["pairing", "projected", tolerance] => {
+                    let tolerance = number(tolerance)?;
+                    if !(1e-12..=1e-4).contains(&tolerance) {
+                        return Err("projected pairing tolerance must be 1e-12..1e-4 metres".into());
+                    }
+                    s.projected = Some(tolerance);
+                }
                 ["pair", upper, lower] => {
                     let (a, b) = (index(upper)?, index(lower)?);
                     if s.pairs.len() >= MAX_NODES || s.pairs.insert(a, b).is_some()
@@ -43,10 +57,13 @@ impl Skins {
                 _ => return Err(format!("unknown skin row or wrong field count: {}", f[0])),
             }
         }
-        if s.lower.is_empty() || s.pairs.is_empty() || !seen.contains("thickness")
+        if s.projected.is_some() && !s.pairs.is_empty() {
+            return Err("projected pairing and explicit pair rows are mutually exclusive".into());
+        }
+        if s.lower.is_empty() || (s.pairs.is_empty() && s.projected.is_none()) || !seen.contains("thickness")
             || !(1e-5..=0.1).contains(&s.thickness[0])
             || !(s.thickness[0]..=0.1).contains(&s.thickness[1]) {
-            return Err("require lower part, pairs, thickness,geometry and an SI thickness-range within 1e-5..0.1 m".into());
+            return Err("require lower part, explicit/projected pairs, thickness,geometry and an SI thickness-range within 1e-5..0.1 m".into());
         }
         Ok(s)
     }
@@ -84,7 +101,7 @@ fn unit_triangle(p: [[f64; 3]; 3]) -> Result<[f64; 3], String> {
 }
 
 /// Upper part/material/support/beam identities come from the existing FSPI.
-/// FSPS supplies the lower part and one-based upper->lower vertex pairs.
+/// FSPS supplies the lower part and explicit or projected upper->lower pairs.
 /// `thickness,geometry` explicitly replaces each material's nominal thickness
 /// with mean normal separation at that triangle's three paired vertices.
 /// Taper is piecewise constant per element, not an exact variable-section solid.
@@ -93,11 +110,14 @@ fn unit_triangle(p: [[f64; 3]; 3]) -> Result<[f64; 3], String> {
 pub fn import(obj: &str, specification: &str, correspondence: &str) -> Result<Imported, String> {
     if obj.len() > MAX_OBJ_BYTES { return Err("OBJ exceeds 32 MiB".into()); }
     let mut spec = Spec::read(specification)?;
-    let skins = Skins::read(correspondence)?;
+    let mut skins = Skins::read(correspondence)?;
     if skins.lower == spec.part { return Err("upper and lower skin labels must differ".into()); }
     let mut doc = read_obj_document(obj).map_err(|e| e.to_string())?;
     let (upper_faces, upper_nodes) = selected(&doc, &spec.part)?;
     let (lower_faces, lower_nodes) = selected(&doc, &skins.lower)?;
+    if let Some(tolerance) = skins.projected {
+        skins.pairs = pairing::projected(&doc, &spec, &upper_nodes, &lower_nodes, tolerance)?;
+    }
     if !upper_nodes.is_disjoint(&lower_nodes)
         || skins.pairs.keys().copied().collect::<BTreeSet<_>>() != upper_nodes
         || skins.pairs.values().copied().collect::<BTreeSet<_>>() != lower_nodes {

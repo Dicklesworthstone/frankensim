@@ -37,12 +37,24 @@ frankensim-board-skins-v1
 lower,soundboard_underside
 thickness,geometry
 thickness-range,0.002,0.020
-pair,1,101
-pair,2,102
-# ... exactly one pair for EVERY upper and EVERY lower vertex ...
+pairing,projected,1e-7
 ```
 
-Indices are one-based source OBJ vertices. The upper and lower sets must be
+For registered skins, `pairing,projected,TOLERANCE` finds each upper vertex's
+unique lower counterpart in the declared frame's XY plane. The tolerance is in
+**metres after the source-unit transform**, bounded to 1e-12..1e-4 m. This mode
+handles arbitrary OBJ vertex ordering, not differently tessellated surfaces.
+Matching uses a bounded spatial grid, not all-to-all search. Every vertex must
+have exactly one candidate: ambiguous matches, missing matches, reused lower
+vertices, unresolvable grids and excessive candidate work refuse. No nearest
+candidate is silently preferred and no nodes are welded.
+
+For skins whose paired vertices are offset in XY, omit the `pairing` row and
+supply `pair,UPPER_INDEX,LOWER_INDEX` for every vertex instead. Indices are
+one-based source OBJ vertices. Automatic and explicit modes cannot be mixed.
+For example, `pair,1,101` maps upper vertex 1 to lower vertex 101.
+
+The upper and lower sets must be
 disjoint and their paired triangle connectivity identical. Side walls are
 excluded explicitly with object/group labels. Missing faces, duplicate faces,
 missing/duplicate pairs, overlapping selections and incompatible topology
@@ -96,12 +108,18 @@ https://blendswap.com/blend/28847 . This source was inspected, not downloaded.
 ## Focused native regressions
 
 ```sh
-cargo test --release -p fs-couple --example piano_solid_import mesh_import::crowned::solid::tests
+cargo test --release -p fs-couple --example piano_solid_import mesh_import::crowned::solid
 cargo test --release -p fs-couple --example piano_solid_import cli_tests
 ```
 
 Tests exercise supplied crown, geometry-controlled mass, independence from
-nominal FSPI thickness, thickness-driven shell modes and rejection of invalid
-correspondence/materials. They are authored native tests; the editing environment
+nominal FSPI thickness, thickness-driven shell modes, automatic pairing under
+vertex permutation and rotated millimetre frames, and invalid-input refusal.
+End-to-end regressions run imported geometry through the existing source Model
+D strings, felt and shanks to receiver pressure and PCM WAV, checking physical
+response changes, energy accounting and exact block-splitting determinism.
+Another regression preserves all 88 Model D bridge stations, supports and
+bonded rib paths. The existing piano workflow's `piano_board_import` test target
+also includes these shared tests. They are authored native tests; the editing environment
 has no Rust compiler, so this change does not claim a native test pass or an
 audibly validated Steinway digital twin.

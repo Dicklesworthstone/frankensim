@@ -21,7 +21,8 @@ use std::io::{Read, Write};
 const USAGE: &str = "piano_solid_import INPUT.obj MATERIALS.fspi SKINS.fsps OUTPUT.fss
 
 Select the UPPER skin with the existing FSPI part row. SKINS.fsps declares the
-lower part, complete one-based vertex correspondence and thickness,geometry.
+lower part and thickness,geometry. Supply complete one-based vertex pairs or
+pairing,projected,TOLERANCE_IN_METRES for uniquely registered XY skin vertices.
 Actual midpoint heights and mean normal separations replace a hand-authored
 midsurface and nominal panel thickness. Material tensors, grain, supports,
 bridges and beams remain explicit. No MTL parameters become physical constants.
