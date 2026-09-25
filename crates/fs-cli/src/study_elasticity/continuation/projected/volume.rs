@@ -4,11 +4,15 @@ use super::*;
 use fs_topols::EvaluatedFinalState;
 use fs_topols::projected::ProjectedSetupStage;
 
+#[path = "volume/mesh.rs"]
+mod mesh;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Controls {
     area: VolumeProjectionSettings,
     search: ProjectedSettings,
     regions: Vec<DesignRegion>,
+    resolution: Option<mesh::ResolutionPolicy>,
 }
 
 impl Controls {
@@ -27,6 +31,7 @@ impl Controls {
                 poll_iters: count("cg-poll-iters")?,
             },
             regions: regions::parse_regions(fields)?,
+            resolution: mesh::parse(fields)?,
         };
         let a = policy.area;
         let s = policy.search;
@@ -50,11 +55,13 @@ impl Controls {
         let _ = writeln!(out, "    :max-candidates {}", self.search.max_candidates);
         let _ = writeln!(out, "    :contraction {}", canonical_float(self.search.contraction));
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
-        if self.regions.is_empty() {
+        if self.regions.is_empty() && self.resolution.is_none() {
             let _ = writeln!(out, "    :cg-poll-iters {})", self.search.poll_iters);
         } else {
             let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
-            regions::canonical(&self.regions, out);
+            if let Some(policy) = self.resolution { mesh::canonical(policy, out); }
+            if self.regions.is_empty() { let _ = writeln!(out, "  )"); }
+            else { regions::canonical(&self.regions, out); }
         }
     }
 }
@@ -104,6 +111,7 @@ pub(crate) struct VolumeEvidence {
     accepted: Vec<Measured>,
     attempts: Vec<usize>,
     refusals: Vec<String>,
+    mesh: Option<mesh::LastCheck>,
 }
 impl VolumeEvidence {
     pub(crate) fn current(&self) -> Measured {
@@ -123,12 +131,13 @@ impl VolumeEvidence {
             self.baseline.json(), self.accepted.iter().map(|state| state.json()).collect::<Vec<_>>().join(","),
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.refusals.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","), reduction,
-            regions::json_field(&self.policy.regions))
+            regions::json_field(&self.policy.regions) + &mesh::field(self.policy.resolution, self.mesh.as_ref()))
     }
     pub(crate) fn html(&self) -> String {
         format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Independently solved same-material, same-load baseline: {:.8e} J; current compliance: {:.8e} J. Baseline area projection is feasibility preparation, not an optimization improvement. No stress limit or stress evaluation was requested. Prescribed material/void regions: {}. The area is numerical cut quadrature; iteration completion is not convergence or optimality.</p>",
             self.policy.area.target, self.policy.area.tolerance, self.baseline.compliance,
             self.current().compliance, self.policy.regions.len())
+            + &mesh::html(self.policy.resolution, self.mesh.as_ref())
     }
     fn read(value: &JsonValue, report: &OptimizeReport, policy: &Controls) -> Result<Self> {
         if value.str_field("mode") != Some("projected-volume-v1")
@@ -174,7 +183,11 @@ impl VolumeEvidence {
         }
         let refusals = refusals.iter().map(|v| v.as_str().map(str::to_string)
             .ok_or_else(|| malformed("invalid projected-volume refusal"))).collect::<Result<Vec<_>>>()?;
-        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals };
+        let current = accepted.last().copied().unwrap_or(baseline);
+        let previous = accepted.get(accepted.len().saturating_sub(2)).copied()
+            .filter(|_| accepted.len() >= 2).unwrap_or(baseline);
+        let mesh = mesh::read(value, policy, previous, current, accepted.len())?;
+        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, mesh };
         // Recompute rather than trusting the retained headline improvement.
         let expected = document(evidence.json().as_bytes())?;
         if value.get("relative_reduction") != expected.get("relative_reduction") {
@@ -189,6 +202,7 @@ enum VolumeStage {
     Regions(DesignRegionStage),
     Setup(ProjectedSetupStage),
     Update(ProjectedStage),
+    Mesh(mesh::MeshCheckStage),
 }
 fn stopped(gate: &CancelGate, start: Instant, consumed: f64, spec: &ElasticitySpec) -> Option<&'static str> {
     stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
@@ -204,6 +218,9 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     if ledger.in_transaction() { return Err(malformed("projected-volume requires its own ledger transaction")); }
     let Some(ProjectedControls::Volume(policy)) = spec.projected.as_ref()
         else { return Err(malformed("missing explicit projected-volume policy")); };
+    if let Some(policy) = policy.resolution {
+        policy.validate(settings(spec, spec.steps).level).map_err(|e| malformed(&e.to_string()))?;
+    }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None };
@@ -229,17 +246,22 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         if retained.current().snapshot != snapshot(&phi) {
             return Err(malformed("projected-volume field and evaluated state disagree"));
         }
+        if retained.mesh.as_ref().is_some_and(|check|
+            check.baseline.rungs[0].level != settings(spec, spec.steps).level) {
+            return Err(malformed("retained mesh-check levels differ from the study"));
+        }
         let status = match old.value.str_field("status") {
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
             Some("no-feasible-descent") => "no-feasible-descent",
+            Some("mesh-unresolved") if retained.mesh.as_ref().is_some_and(|c| c.outcome == "baseline-unresolved") => "mesh-unresolved",
             _ => return Err(malformed("unknown projected-volume terminal")),
         };
         consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| malformed("invalid retained projected-volume wall charge"))?;
         evidence.volume = Some(retained);
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
-        if matches!(status, "completed" | "no-feasible-descent") {
+        if matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved") {
             return last.ok_or_else(|| malformed("terminal volume-only state has no receipt"));
         }
         if let Some(status) = stopped(gate, start, consumed, spec) {
@@ -305,7 +327,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new() });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None });
         state
     };
     let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
@@ -327,17 +349,45 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
-        let progress = state.advance_one_controlled(|stage| {
-            observe(VolumeStage::Update(stage));
-            match stopped(gate, start, consumed, spec) {
-                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+        let progress = if let Some(resolution) = policy.resolution {
+            let checked = state.advance_one_resolution_controlled(resolution, |stage| {
+                observe(VolumeStage::Mesh(stage));
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+            match checked {
+                ControlFlow::Break(status) => ControlFlow::Break(status),
+                ControlFlow::Continue(checked) => {
+                    let (progress, check) = mesh::LastCheck::capture(checked)?;
+                    let retained = evidence.volume.as_mut().expect("admitted volume-only state");
+                    if let Some(reason) = &check.reason { retained.refusals = vec![reason.clone()]; }
+                    retained.mesh = Some(check);
+                    ControlFlow::Continue(progress)
+                }
             }
-        }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+        } else {
+            match state.advance_one_controlled(|stage| {
+                observe(VolumeStage::Update(stage));
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))? {
+                ControlFlow::Break(status) => ControlFlow::Break(status),
+                ControlFlow::Continue(progress) => ControlFlow::Continue(Some(progress)),
+            }
+        };
         let progress = match progress {
-            ControlFlow::Continue(progress) => progress,
-            ControlFlow::Break(status) => return persist(spec, ledger, state.checkpoint().geometry(), &report,
-                status, consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
-                .map_err(|error| retained_error(error, last.as_ref())),
+            ControlFlow::Continue(Some(progress)) => progress,
+            stopped => {
+                let status = match stopped {
+                    ControlFlow::Break(status) => status,
+                    _ => "mesh-unresolved",
+                };
+                return persist(spec, ledger, state.checkpoint().geometry(), &report,
+                    status, consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                    .map_err(|error| retained_error(error, last.as_ref()));
+            }
         };
         let retained = evidence.volume.as_mut().expect("admitted volume-only state");
         match progress {
