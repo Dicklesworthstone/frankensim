@@ -135,6 +135,34 @@ same certified cuts; its constitutive parameters come from
 - `condition_estimate` → `CondReport`: full-spectrum (Jacobi
   rotations) conditioning of fixture-sized systems, gated at n ≤ 4096.
 
+## Three-dimensional bulk stress observations
+
+`elastic3::stress` evaluates the retained Cartesian or adaptive Q1 bulk
+quadrature points with the same reference Lamé tensor as stiffness assembly.
+Each `BulkStressPoint3` names its active cell, position, positive reference
+volume weight, reference-material stress and current scaled physical stress.
+Voigt order is `[xx, yy, zz, xy, yz, xz]` with physical shear components.
+Ghost/Nitsche stabilization influences the solved displacement but is not
+reported as material stress.
+
+`bulk_stress_pullback` accepts one six-component cotangent per original point,
+without inserting quadrature weights, and returns the exact partial derivatives
+with respect to displacement and current cell scales. The separate
+`reference_bulk_stress_pullback` differentiates the unscaled reference-material
+stress. An equilibrium derivative additionally needs the solve adjoint and
+`scale_bilinear_forms`, whose canonical bulk/Nitsche/ghost contraction is shared
+by both backgrounds. Adaptive observations use the original hanging-node map
+and its transpose; there is no nodal stress recovery, remeshing or new assembly.
+
+Output point allowances are checked before allocating the stress array. State,
+cotangents and arithmetic must be finite, and observation/pullback work polls
+at each point and before publication. Errors return no partial result and leave
+operator scales unchanged. The `stress3` tests cover analytical affine and
+hydrostatic fields, rigid rotation, state/material directional derivatives,
+constrained transpose identities, finite budgets and cancellation. These are
+discrete stress samples and derivatives, not continuum peak-stress bounds,
+material-failure guarantees or geometry derivatives.
+
 ## Invariants
 
 1. CLASSIFICATION IS CERTIFIED: a cell is Inside/Outside only when the
