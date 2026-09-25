@@ -2,6 +2,8 @@
 //! for the stored-system goal analyzer. No continuum bound is inferred.
 
 mod support;
+#[path = "algebraic_goal/controlled.rs"]
+mod controlled;
 
 use fs_conduction::adjoint::{
     LinearGoalAnalysisConfig, LinearGoalAnalyzer, analyze_linear_goal,

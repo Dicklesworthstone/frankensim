@@ -12,6 +12,9 @@ use super::{
     invalid, poll, reduce, temperature_dependent, vector,
 };
 
+mod solve;
+pub use solve::{LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop};
+
 /// Additional work admitted for a discrete thermal goal analysis. The dual
 /// separately uses the caller's existing [`LinearConfig`] iteration budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,13 +34,15 @@ pub struct LinearGoalAnalysisConfig {
 pub struct LinearGoalAnalysis {
     /// Outward arithmetic, dual-error and checked inverse evidence.
     pub enclosure: GoalResidualReport,
-    /// Recomputed residual of the actual transposed dual solve.
+    /// Recomputed relative residual of the physical transposed solve. It may
+    /// exceed the requested Krylov target when the explicit budget ends; the
+    /// actual dual defect is retained in the full goal enclosure.
     pub dual_relative_residual: f64,
     /// Inner Krylov work used for the dual.
     pub dual_iterations: usize,
     /// Inner Krylov work actually spent proposing a stability scaling.
     pub stability_iterations: usize,
-    /// Measured proposal residual, when the proposal completed its gate.
+    /// Recomputed proposal residual, which need not meet its loose target.
     pub stability_relative_residual: Option<f64>,
     /// The positive proposal checked against the exact retained matrix, in
     /// free-dof order. Presence alone does not establish an inverse bound.
@@ -56,6 +61,30 @@ impl LinearGoalAnalysis {
                 bound.magnitude_upper() <= tolerance
             })
     }
+}
+
+// A finite inexact dual is useful: its omitted term is bounded separately.
+// Requiring an over-solved dual would defeat goal-oriented primal stopping.
+fn bounded_solve(
+    cx: &Cx<'_>, matrix: &fs_sparse::Csr, rhs: &[f64],
+    linear: LinearConfig, transpose: bool,
+) -> Result<(Vec<f64>, f64, usize), ConductionError> {
+    use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg};
+    poll(cx, 0)?;
+    // Retain the ACTUAL stored transpose, including assembly roundoff
+    // asymmetry; an approximately symmetric matrix is not its own transpose.
+    let matrix = if transpose { fs_sparse::ops::transpose(matrix) } else { matrix.clone() };
+    let op = CsrOp::symmetric(matrix);
+    let pre = crate::solve::spd_preconditioner(op.matrix());
+    poll(cx, 0)?;
+    let result = checked_cg(&op, &pre, rhs, CheckedCgConfig {
+        tolerance: linear.tolerance, max_iterations: linear.max_iterations,
+        max_corrections: 0,
+    }, |iteration| poll(cx, iteration)).map_err(|error| match error {
+        CheckedCgError::InvalidInput(what) => invalid(what),
+        CheckedCgError::Interrupted(error) => error,
+    })?;
+    Ok((result.x, result.report.rel_residual, result.report.iters))
 }
 
 fn map_enclosure(error: GoalResidualError) -> ConductionError {
@@ -116,7 +145,7 @@ fn validate_field(
 }
 
 impl<'m> LinearGoalAnalyzer<'m> {
-    /// Prepare actual production assembly and the transposed thermal dual.
+    /// Prepare actual production assembly and a bounded transposed dual solve.
     ///
     /// Supports heterogeneous constant tensors, the nonzero Dirichlet lift,
     /// fixed Robin boundaries and matching-P1 contact. An unconverged
@@ -125,15 +154,16 @@ impl<'m> LinearGoalAnalyzer<'m> {
     /// If unscaled dominance cannot prove an inverse bound, the optional
     /// extra solve `A w = 1` proposes a positive scaling. Its loose 1% residual
     /// target only controls proposal cost. Outward verification of EVERY row,
-    /// not that target, establishes the inverse bound. A failed/insufficient
+    /// not that target, establishes the inverse bound. An insufficient
     /// proposal leaves the full bound absent. No stability constant is supplied
     /// by the caller or invented from a residual tolerance.
     ///
     /// # Errors
     /// Refuses malformed inputs, changed prescribed temperatures, nonlinear
-    /// conductivity, material extrapolation, assembly/dual failure, exhausted
-    /// structural limits, nonfinite arithmetic and cancellation. A failed
-    /// stability proposal is only a no-bound state; cancellation is an error.
+    /// conductivity, material extrapolation, assembly failure, exhausted
+    /// structural limits, nonfinite arithmetic and cancellation. A finite
+    /// inexact dual is retained with its error term, not upgraded to an exact
+    /// dual. An insufficient stability proposal is only a no-bound state.
     pub fn new(
         cx: &Cx<'_>,
         problem: ConductionProblem<'m>,
@@ -171,7 +201,7 @@ impl<'m> LinearGoalAnalyzer<'m> {
         }
         let free_temperature = dofs.gather(reference_temperature);
         let weights = dofs.gather(full_nodal_weights);
-        let mut response = RobinResponse {
+        let response = RobinResponse {
             temperature: reference_temperature.to_vec(),
             robin_fluxes: Vec::new(),
             matrix,
@@ -180,9 +210,8 @@ impl<'m> LinearGoalAnalyzer<'m> {
             linear,
             nonlinear: None,
         };
-        let (dual, dual_relative_residual, dual_iterations) =
-            response.solve_rhs(cx, full_nodal_weights, true)?;
-        let free_dual = response.dofs.gather(&dual);
+        let (free_dual, dual_relative_residual, dual_iterations) =
+            bounded_solve(cx, &response.matrix, &weights, linear, true)?;
         let evaluate = |response: &RobinResponse, scaling: Option<&[f64]>| {
             enclose_goal_error(
                 &response.matrix, &rhs, &free_temperature, &weights, &free_dual,
@@ -194,31 +223,21 @@ impl<'m> LinearGoalAnalyzer<'m> {
         let mut stability_relative_residual = None;
         let mut stability_scaling = None;
         if enclosure.goal_error().is_none() && config.max_stability_iterations > 0 {
-            let mut one = vec![0.0; n];
-            for (index, &vertex) in response.dofs.free().iter().enumerate() {
-                if index % 512 == 0 { poll(cx, index)?; }
-                one[vertex] = 1.0;
+            let one = vec![1.0; response.dofs.n()];
+            let proposal_config = LinearConfig {
+                tolerance: 0.01, max_iterations: config.max_stability_iterations,
+                restart: linear.restart,
+            };
+            let (scaling, residual, iterations) =
+                bounded_solve(cx, &response.matrix, &one, proposal_config, false)?;
+            stability_iterations = iterations;
+            stability_relative_residual = Some(residual);
+            if scaling.iter().all(|w| w.is_finite() && *w > 0.0) {
+                // Neither positivity nor a small proposal residual is enough.
+                // Check the stored rows now and again on every assessed field.
+                let _ = evaluate(&response, Some(&scaling))?;
+                stability_scaling = Some(scaling);
             }
-            response.linear.max_iterations = config.max_stability_iterations;
-            response.linear.tolerance = 0.01;
-            match response.solve_rhs(cx, &one, false) {
-                Ok((proposal, residual, iterations)) => {
-                    stability_iterations = iterations;
-                    stability_relative_residual = Some(residual);
-                    let scaling = response.dofs.gather(&proposal);
-                    if scaling.iter().all(|w| w.is_finite() && *w > 0.0) {
-                        // Check now as well as on later iterates. A positive
-                        // vector by itself never establishes inverse authority.
-                        let _ = evaluate(&response, Some(&scaling))?;
-                        stability_scaling = Some(scaling);
-                    }
-                }
-                Err(ConductionError::LinearSolveFailed { krylov_iterations, .. }) => {
-                    stability_iterations = krylov_iterations;
-                }
-                Err(error) => return Err(error),
-            }
-            response.linear = linear;
         }
         poll(cx, dual_iterations.saturating_add(stability_iterations))?;
         Ok(Self {

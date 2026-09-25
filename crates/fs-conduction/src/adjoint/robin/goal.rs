@@ -9,7 +9,8 @@ use super::{
 
 mod algebraic;
 pub use algebraic::{
-    LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer, analyze_linear_goal,
+    LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer, LinearGoalSolve,
+    LinearGoalSolveConfig, LinearGoalStop, analyze_linear_goal,
 };
 
 mod feedback;
