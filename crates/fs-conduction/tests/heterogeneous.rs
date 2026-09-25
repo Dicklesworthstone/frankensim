@@ -1395,7 +1395,7 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
         source: &source,
     };
     let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
-    assert_eq!(solution.report.material_receipts, 5);
+    assert_eq!(solution.report.material_receipts, 6);
     assert_eq!(
         solution.report.material_provenance,
         ProvenanceClass::MatdbReceipts
