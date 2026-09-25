@@ -90,7 +90,9 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
     const RETENTION_DOMAIN: &str = "org.frankensim.fs-cli.tests.multi-region-retention.v1";
     let project_path = format!("{DATA}/multi-region-interface.fsim");
     let src = std::fs::read_to_string(&project_path).expect("fixture present");
-    let decoded = fs_project::parse_sexpr(&src).expect("parse");
+    let decoded = fs_project::parse_sexpr_migrating(&src)
+        .expect("historical fixture migrates")
+        .decoded;
     let artifacts = decoded.spec.geometry.clone().expect("geometry rows");
 
     let mut raw = Vec::new();
@@ -262,7 +264,9 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens_for_conduction() {
     // -- project parses through the real wire grammar --------------------
     let project_path = format!("{DATA}/multi-region-interface.fsim");
     let src = std::fs::read_to_string(&project_path).expect("committed fixture present");
-    let decoded = fs_project::parse_sexpr(&src).expect("canonical parse");
+    let decoded = fs_project::parse_sexpr_migrating(&src)
+        .expect("historical fixture migrates canonically")
+        .decoded;
     let artifacts = decoded
         .spec
         .geometry

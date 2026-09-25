@@ -6,7 +6,8 @@
 //!
 //! Version 1 is the first real schema version. The registry retains the
 //! synthetic proof rule from version 0 plus the released v1→v2 fan-system and
-//! v2→v3 conduction accretions. Both released migrations preserve the payload
+//! v2→v3 conduction, v3→v4 airflow-convection, and v4→v5 ambient radiation
+//! accretions. Released migrations preserve the payload
 //! and rewrite only the envelope and internal schema declarations because the
 //! added subsections are optional; no physical input is invented.
 
@@ -24,23 +25,27 @@ pub enum MigrationRule {
     SyntheticV0EnvelopeRewrite,
     /// Version 1 to current: schema v2 adds optional `(fan-system ...)`,
     /// schema v3 adds optional `(conduction ...)`, and schema v4 adds the
-    /// optional `(airflow-convection ...)` boundary law. A version-1 document
+    /// optional `(airflow-convection ...)` boundary law; schema v5 adds optional
+    /// ambient radiation. A version-1 document
     /// is valid through every accretion unchanged, so this composite rule
     /// rewrites only the envelope/schema declarations and records the
     /// semantic steps; no fan system, seed, boundary law, or channel geometry
     /// is invented.
-    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4,
+    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5,
     /// Version 2 to current: the cooling section gained the optional
     /// `(conduction ...)` subsection at v3 (bead frankensim-s93ej.3) and the
-    /// optional `(airflow-convection ...)` boundary law at v4. Existing
+    /// optional `(airflow-convection ...)` boundary law at v4 and radiation at v5. Existing
     /// version-2 documents carry no implicit conduction inputs and remain
     /// semantically unchanged after the receipted envelope rewrite.
-    CoolingConductionV3ThenAirflowConvectionV4,
-    /// Version 3 to 4: the conduction boundary grammar gains the optional
+    CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5,
+    /// Version 3 to current: the conduction boundary grammar gains the optional
     /// `(airflow-convection ...)` law (bead frankensim-s93ej.3, conjugate
     /// exchange). A version-3 document names no such boundary, so no branch,
-    /// inlet, channel geometry, or correlation is invented by the rewrite.
-    ConductionAirflowConvectionV4,
+    /// inlet, channel geometry, correlation, or v5 radiation is invented by the rewrite.
+    ConductionAirflowConvectionV4ThenAmbientRadiationV5,
+    /// Version 4 to 5 adds optional ambient surface radiation. Existing files
+    /// carry no emissivity or radiative reservoir; neither is inferred.
+    ConductionAmbientRadiationV5,
 }
 
 impl MigrationRule {
@@ -49,13 +54,16 @@ impl MigrationRule {
     pub const fn label(self) -> &'static str {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
-            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4 => {
-                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4"
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5 => {
+                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
             }
-            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4 => {
-                "cooling-conduction-v3-then-airflow-convection-v4"
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5 => {
+                "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
             }
-            MigrationRule::ConductionAirflowConvectionV4 => "conduction-airflow-convection-v4",
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5 => {
+                "conduction-airflow-convection-v4-then-ambient-radiation-v5"
+            }
+            MigrationRule::ConductionAmbientRadiationV5 => "conduction-ambient-radiation-v5",
         }
     }
 
@@ -64,9 +72,10 @@ impl MigrationRule {
     pub const fn source_version(self) -> u32 {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => 0,
-            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4 => 1,
-            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4 => 2,
-            MigrationRule::ConductionAirflowConvectionV4 => 3,
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5 => 1,
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5 => 2,
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5 => 3,
+            MigrationRule::ConductionAmbientRadiationV5 => 4,
         }
     }
 }
@@ -167,9 +176,10 @@ pub fn migrate_envelope(
 ) -> Result<MigratedProject, ProjectError> {
     let rule = match declared_version {
         0 => MigrationRule::SyntheticV0EnvelopeRewrite,
-        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4,
-        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4,
-        3 => MigrationRule::ConductionAirflowConvectionV4,
+        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5,
+        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5,
+        3 => MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5,
+        4 => MigrationRule::ConductionAmbientRadiationV5,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -201,9 +211,10 @@ pub fn migrate_envelope(
     let envelope_rewritten = format!("{new_prefix}{rest}");
     let migrated = match rule {
         MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
-        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4
-        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4
-        | MigrationRule::ConductionAirflowConvectionV4 => {
+        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5
+        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5
+        | MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5
+        | MigrationRule::ConductionAmbientRadiationV5 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -224,6 +235,21 @@ pub fn migrate_envelope(
         }
     };
     let decoded = parse_sexpr(&migrated)?;
+    if declared_version > 0
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .and_then(|conduction| conduction.radiation.as_ref())
+            .is_some()
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates ambient radiation but its payload declares radiation"),
+            hint: "declare new radiation inputs explicitly in a current-version project; migration only preserves historical physical intent".to_string(),
+        });
+    }
     let receipt = ProjectMigrationReceipt {
         source_version: declared_version,
         target_version: FSIM_VERSION,

@@ -309,6 +309,9 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     &["adaptive", "last_estimated_change_k"][..],
                 ),
                 ("adaptive_scope", &["adaptive", "no_claim"][..]),
+                ("radiative_out_w", &["radiation", "radiative_out_w"][..]),
+                ("convective_out_w", &["radiation", "convective_out_w"][..]),
+                ("radiative_magnitude_share", &["radiation", "radiative_magnitude_share"][..]),
                 ("authority", &["authority"][..]),
             ] {
                 push_summary(&mut summary, receipt, label, path);
@@ -545,13 +548,24 @@ pub(super) fn report_receipt(
     let mut budget_items = Vec::with_capacity(terms.len());
     let mut measured_terms = 0usize;
     let mut discretization_half_width: Option<f64> = None;
+    let radiation_sensitivity = qoi.value.path(&["model_form_sensitivity", "radiation"])
+        .map(|sensitivity| -> Result<String, SolveRefusal> {
+            if sensitivity.str_field("state") == Some("measured") {
+                let on = required_f64(qoi_stage, sensitivity, "radiation_on_k")?;
+                let off = required_f64(qoi_stage, sensitivity, "radiation_off_k")?;
+                let delta = required_f64(qoi_stage, sensitivity, "delta_on_minus_off_k")?;
+                Ok(format!("Radiation model-form sensitivity (Estimated): base-mesh radiation-on maximum {on} K versus radiation-off {off} K; on minus off {delta} K. This paired-model difference is not a bound on model-form error or experimental validation."))
+            } else {
+                Ok(format!("Radiation model-form sensitivity is unavailable: {}", required_str(qoi_stage, sensitivity, "reason")?))
+            }
+        }).transpose()?;
     for term in terms {
         let kind = required_str(qoi_stage, term, "kind")?;
         let term_state = required_str(qoi_stage, term, "state")?;
         // An `interval` term (QoI receipt v2) is a certified half-width: its
         // magnitude is the upper bound and its reason is the derivation the
         // producer recorded; every other state carries `value`/`reason`.
-        let (value, reason) = if term_state == "interval" {
+        let (value, mut reason) = if term_state == "interval" {
             let upper = term.f64_field("upper_kelvin");
             let derivation = term.get("derivation");
             let method = derivation.and_then(|d| d.str_field("method")).unwrap_or("");
@@ -577,6 +591,10 @@ pub(super) fn report_receipt(
                 term.str_field("reason").unwrap_or("").to_string(),
             )
         };
+        if kind == "model-form" && let Some(sensitivity) = &radiation_sensitivity {
+            reason.push_str("; ");
+            reason.push_str(sensitivity);
+        }
         if term_state != "no-data" && value.is_none() {
             return Err(shape_error(
                 qoi_stage,
@@ -663,6 +681,15 @@ pub(super) fn report_receipt(
     }
     for item in budget_items {
         report = report.with_budget_term(item);
+    }
+    if let Some(no_claim) = conduction.value.path(&["radiation", "no_claim"])
+        .and_then(JsonValue::as_str)
+    {
+        report = report.with_no_claim(NoClaimItem {
+            component: "surface radiation".to_string(),
+            status: "Estimated".to_string(),
+            statement: no_claim.to_string(),
+        });
     }
     for receipt in &loaded {
         report = report.with_stage(StageReceiptItem {

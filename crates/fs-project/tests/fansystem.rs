@@ -542,7 +542,7 @@ mod wire_surface {
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(
             migrated.receipt.rule.label(),
-            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4"
+            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
         );
         let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
         assert!(

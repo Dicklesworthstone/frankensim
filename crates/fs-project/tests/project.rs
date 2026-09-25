@@ -13,15 +13,16 @@ use fs_evidence::uncertainty::{
 };
 use fs_package::{EvidencePackage, Provenance, VerifiedPackage};
 use fs_project::{
-    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
-    DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan, FanCurveDecl, FanCurvePoint,
-    FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide, InterfaceCardBinding,
-    InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest, PerfectContactBinding,
-    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
-    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions, canonical_hash,
-    migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr,
-    project_decision_authorities, project_decision_authority, requirement_source_reviews,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan, FanCurveDecl,
+    FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest,
+    PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent,
+    Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient,
+    parse_sexpr_migrating, print_json, print_sexpr, project_decision_authorities,
+    project_decision_authority, requirement_source_reviews,
 };
 use fs_qty::QtyAny;
 use fs_scenario::EntityDeclaration;
@@ -291,6 +292,7 @@ fn reference_project() -> ProjectSpec {
                     },
                 ],
                 adiabatic_remainder: false,
+                radiation: None,
             }),
         }),
         envelope: Some(Envelope {
@@ -829,12 +831,12 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
     );
 }
 
 #[test]
-fn v3_envelopes_migrate_to_v4_without_inventing_airflow_convection() {
+fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     // A version-3 document names only fixed-temperature / heat-flux /
     // convection laws; the v4 rewrite must not conjure an airflow branch,
     // inlet, channel geometry, or correlation onto any of them.
@@ -882,8 +884,223 @@ fn v3_envelopes_migrate_to_v4_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5"
     );
+}
+
+#[test]
+fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v4 = current
+        .replacen("(fsim-project :version 5", "(fsim-project :version 4", 1)
+        .replacen("(versions :schema 5", "(versions :schema 4", 1);
+    assert_ne!(v4, current);
+    assert_eq!(
+        parse_sexpr(&v4)
+            .expect_err("strict current reader refuses v4")
+            .code,
+        "fsim-unsupported-version"
+    );
+    let parsed = parse_sexpr_migrating(&v4).expect("v4 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    assert_eq!(parsed.decoded.canonical, current);
+    let receipt = parsed.migration.expect("v4 migration is receipted");
+    assert_eq!(receipt.source_version, 4);
+    assert_eq!(receipt.target_version, 5);
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5");
+    assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
+    assert!(
+        parsed
+            .decoded
+            .spec
+            .cooling
+            .as_ref()
+            .expect("cooling")
+            .conduction
+            .as_ref()
+            .expect("conduction")
+            .radiation
+            .is_none()
+    );
+    assert!(
+        parse_sexpr_migrating(&current)
+            .expect("native v5")
+            .migration
+            .is_none()
+    );
+}
+
+fn radiation_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction");
+    conduction.boundaries[0].condition = ThermalBoundaryCondition::Convection {
+        coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+        reference_temperature: kelvin(293.15),
+    };
+    conduction.radiation = Some(ConductionRadiation {
+        surfaces: vec![RadiatingSurface {
+            name: "black-anodized-sink".to_string(),
+            target: "sink-base".to_string(),
+            card: "ab".repeat(32),
+            claim: Some("cd".repeat(32)),
+            query_temperature: kelvin(320.0),
+            reservoir_temperature: kelvin(293.15),
+        }],
+        max_iterations: 200,
+        temperature_tolerance: kelvin(1.0e-6),
+        heat_tolerance: watts(1.0e-6),
+        relaxation: 0.5,
+    });
+    spec
+}
+
+#[test]
+fn radiation_round_trip_retains_explicit_physics_in_both_spellings() {
+    let spec = radiation_project();
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let canonical = print_sexpr(&spec).expect("radiation renders");
+    assert!(canonical.contains(":radiation (radiation :surfaces (surfaces (surface"));
+    let decoded = parse_sexpr(&canonical).expect("strict radiation parses");
+    assert_eq!(decoded.spec, spec);
+    assert!(decoded.defaults.is_empty());
+    let json = print_json(&spec).expect("JSON radiation renders");
+    let json_decoded = parse_json(&json).expect("JSON radiation parses");
+    assert_eq!(json_decoded.spec, spec);
+    assert_eq!(json_decoded.canonical, canonical);
+    let mut changed = spec.clone();
+    changed
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation")
+        .surfaces[0]
+        .reservoir_temperature = kelvin(300.0);
+    assert_ne!(
+        canonical_hash(canonical.as_bytes()),
+        canonical_hash(print_sexpr(&changed).expect("changed project").as_bytes())
+    );
+
+    // A new physical declaration cannot masquerade as an old-schema file.
+    let false_v4 = canonical
+        .replacen("(fsim-project :version 5", "(fsim-project :version 4", 1)
+        .replacen("(versions :schema 5", "(versions :schema 4", 1);
+    assert_eq!(
+        parse_sexpr_migrating(&false_v4)
+            .expect_err("v4 never carried radiation")
+            .code,
+        "fsim-migration-payload"
+    );
+}
+
+#[test]
+fn radiation_refuses_invalid_controls_cards_and_duplicate_surfaces() {
+    let mut invalid = radiation_project();
+    let radiation = invalid
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation");
+    radiation.max_iterations = 0;
+    radiation.relaxation = 1.01;
+    radiation.temperature_tolerance = watts(1.0e-6);
+    radiation.heat_tolerance = watts(0.0);
+    radiation.surfaces[0].card = "unresolved-card-name".to_string();
+    radiation.surfaces[0].claim = Some("ambiguous".to_string());
+    radiation.surfaces[0].query_temperature = kelvin(0.0);
+    radiation.surfaces[0].reservoir_temperature = kelvin(f64::NAN);
+    radiation.surfaces.push(radiation.surfaces[0].clone());
+    let findings = invalid.validate();
+    for expected in [
+        "project-radiation-iterations",
+        "project-radiation-relaxation",
+        "project-radiation-dims",
+        "project-radiation-tolerance",
+        "project-radiation-card",
+        "project-radiation-claim",
+        "project-radiation-temperature",
+        "project-radiation-surface-name",
+        "project-radiation-target-duplicate",
+    ] {
+        assert!(
+            findings.iter().any(|finding| finding.code == expected),
+            "missing {expected}: {findings:?}"
+        );
+    }
+    assert!(
+        findings
+            .iter()
+            .all(|finding| !finding.fix.trim().is_empty())
+    );
+    let mut unsupported = radiation_project();
+    let radiation = unsupported
+        .cooling
+        .as_mut()
+        .expect("cooling")
+        .conduction
+        .as_mut()
+        .expect("conduction")
+        .radiation
+        .as_mut()
+        .expect("radiation");
+    radiation.surfaces[0].target = "cpu".to_string();
+    assert!(
+        unsupported
+            .validate()
+            .iter()
+            .any(|finding| finding.code == "project-radiation-target-boundary")
+    );
+}
+
+#[test]
+fn radiation_wire_never_defaults_missing_controls_or_accepts_typos() {
+    let canonical = print_sexpr(&radiation_project()).expect("radiation renders");
+    for malformed in [
+        canonical.replacen(" :max-iterations 200", "", 1),
+        canonical.replacen(":max-iterations 200", ":max-iterations -1", 1),
+        canonical.replacen(":max-iterations 200", ":max-iterations 4294967296", 1),
+        canonical.replacen(":reservoir-temperature", ":reservior-temperature", 1),
+        canonical.replacen(" :relaxation 0.5", "", 1),
+    ] {
+        assert_ne!(
+            malformed, canonical,
+            "the intended field mutation must occur"
+        );
+        match parse_sexpr_lenient(&malformed) {
+            Ok(decoded) => {
+                assert!(!decoded.recognition.is_empty());
+                assert!(
+                    decoded.defaults.is_empty(),
+                    "physical radiation inputs are never defaulted"
+                );
+            }
+            Err(error) => {
+                // Missing quantities/scalars cannot be rendered as canonical
+                // physical inputs; their typed lower-layer refusal propagates.
+                assert!(matches!(error.code, "fsim-quantity" | "fsim-syntax"));
+            }
+        }
+        assert!(
+            parse_sexpr(&malformed).is_err(),
+            "strict parse refuses changed intent"
+        );
+    }
 }
 
 /// One admissible airflow-convection law on the reference project's vent.

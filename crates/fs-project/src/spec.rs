@@ -610,6 +610,45 @@ pub struct ThermalBoundary {
     pub condition: ThermalBoundaryCondition,
 }
 
+/// One exterior surface radiating to a declared isothermal reservoir.
+///
+/// The immutable material card owns the manufactured surface state and the
+/// emissivity claim. A query temperature selects that claim; it is not the
+/// solved surface temperature, which drives the radiative heat exchange.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadiatingSurface {
+    /// Unique surface name retained in radiation results and material receipts.
+    pub name: String,
+    /// Existing convection or airflow-convection geometry-assignment target.
+    pub target: String,
+    /// Full hexadecimal content hash of the surface-finish material card.
+    pub card: String,
+    /// Optional exact emissivity claim pin; conflicts without a pin refuse.
+    pub claim: Option<String>,
+    /// Explicit material-card query temperature (K).
+    pub query_temperature: QtyAny,
+    /// Absolute temperature of the surrounding radiative reservoir (K).
+    pub reservoir_temperature: QtyAny,
+}
+
+/// Explicit controls for ambient surface-radiation coupling (schema v5).
+///
+/// Each declared surface sees its own isothermal reservoir with view factor
+/// one. This declaration does not model mutual irradiation or occlusion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionRadiation {
+    /// Nonempty, uniquely named exterior surface declarations.
+    pub surfaces: Vec<RadiatingSurface>,
+    /// Positive, finite outer-iteration budget.
+    pub max_iterations: u32,
+    /// Positive absolute surface-temperature convergence tolerance (K).
+    pub temperature_tolerance: QtyAny,
+    /// Positive absolute radiative-heat convergence tolerance (W).
+    pub heat_tolerance: QtyAny,
+    /// Temperature under-relaxation in `(0, 1]`.
+    pub relaxation: f64,
+}
+
 /// Explicit inputs required to lower project geometry into a conduction
 /// problem without inventing an interior point or a thermal boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -621,6 +660,10 @@ pub struct ConductionSetup {
     /// Whether exterior faces not selected above are deliberately adiabatic.
     /// When false, the execution stage must refuse any uncovered face.
     pub adiabatic_remainder: bool,
+    /// Optional surface radiation added to declared convective boundaries.
+    /// Absence preserves the non-radiating model; no emissivity or ambient
+    /// reservoir is inferred from a bulk conductivity card or the envelope.
+    pub radiation: Option<ConductionRadiation>,
 }
 
 /// The cooling section: declared-empty lists are facts, not omissions.
@@ -1718,9 +1761,133 @@ impl ProjectSpec {
                         "declare at least one fixed-temperature or convection boundary so the steady operator is nonsingular",
                     ));
                 }
+                if let Some(radiation) = &conduction.radiation {
+                    Self::check_radiation(conduction, radiation, out);
+                }
             }
         }
         self.check_range_quantities(out);
+    }
+
+    fn check_radiation(
+        conduction: &ConductionSetup,
+        radiation: &ConductionRadiation,
+        out: &mut Vec<Violation>,
+    ) {
+        if radiation.surfaces.is_empty() {
+            out.push(violation(
+                "project-radiation-surfaces-empty",
+                "cooling.conduction.radiation declares no surfaces",
+                "declare a radiating exterior surface or omit the radiation block",
+            ));
+        }
+        if radiation.max_iterations == 0 {
+            out.push(violation(
+                "project-radiation-iterations",
+                "radiation max-iterations is zero",
+                "declare a positive outer-iteration budget fitting u32",
+            ));
+        }
+        if !(radiation.relaxation.is_finite()
+            && radiation.relaxation > 0.0
+            && radiation.relaxation <= 1.0)
+        {
+            out.push(violation(
+                "project-radiation-relaxation",
+                format!("radiation relaxation is {}", radiation.relaxation),
+                "declare a finite relaxation factor in (0, 1]",
+            ));
+        }
+        for (name, value, expected) in [
+            (
+                "temperature-tolerance",
+                radiation.temperature_tolerance,
+                dims::TEMPERATURE,
+            ),
+            ("heat-tolerance", radiation.heat_tolerance, dims::POWER),
+        ] {
+            check_dims(out, "project-radiation-dims", name, value, expected);
+            if !(value.value.is_finite() && value.value > 0.0) {
+                out.push(violation(
+                    "project-radiation-tolerance",
+                    format!("radiation {name} is {}", value.value),
+                    "declare a finite positive convergence tolerance with its physical unit",
+                ));
+            }
+        }
+        let mut names = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for surface in &radiation.surfaces {
+            if !is_canonical_binding_text(&surface.name) || !names.insert(&surface.name) {
+                out.push(violation(
+                    "project-radiation-surface-name",
+                    format!("radiating surface name `{}` is invalid or repeated", surface.name),
+                    "give each surface a unique nonempty, trim-canonical name without control characters",
+                ));
+            }
+            if !targets.insert(&surface.target) {
+                out.push(violation(
+                    "project-radiation-target-duplicate",
+                    format!(
+                        "radiation target `{}` is declared more than once",
+                        surface.target
+                    ),
+                    "declare at most one radiating surface per exterior assignment target",
+                ));
+            }
+            if !conduction.boundaries.iter().any(|boundary| {
+                boundary.target == surface.target
+                    && matches!(
+                        boundary.condition,
+                        ThermalBoundaryCondition::Convection { .. }
+                            | ThermalBoundaryCondition::AirflowConvection { .. }
+                    )
+            }) {
+                out.push(violation(
+                    "project-radiation-target-boundary",
+                    format!(
+                        "radiating surface `{}` targets `{}` without a convection or airflow-convection law",
+                        surface.name, surface.target
+                    ),
+                    "add radiation to a declared convective exterior target; fixed-temperature and heat-flux targets are unsupported",
+                ));
+            }
+            if !is_hex_digest(&surface.card) {
+                out.push(violation(
+                    "project-radiation-card",
+                    format!("surface `{}` has an invalid material-card hash", surface.name),
+                    "reference the immutable surface-finish material card by its full 64-hex content hash",
+                ));
+            }
+            if let Some(claim) = &surface.claim
+                && !is_hex_digest(claim)
+            {
+                out.push(violation(
+                    "project-radiation-claim",
+                    format!("surface `{}` has an invalid emissivity claim pin", surface.name),
+                    "pin the exact claim by its full 64-hex content hash, or omit the pin when no conflict exists",
+                ));
+            }
+            for (name, value) in [
+                ("query-temperature", surface.query_temperature),
+                ("reservoir-temperature", surface.reservoir_temperature),
+            ] {
+                check_dims(
+                    out,
+                    "project-radiation-dims",
+                    name,
+                    value,
+                    dims::TEMPERATURE,
+                );
+                if !(value.value.is_finite() && value.value > 0.0) {
+                    out.push(violation(
+                        "project-radiation-temperature",
+                        format!("surface `{}` {name} is {}", surface.name, value.value),
+                        "declare a finite absolute temperature greater than zero kelvin",
+                    ));
+                }
+            }
+        }
     }
 
     fn check_fan_curve(out: &mut Vec<Violation>, fan: &str, curve: &FanCurveDecl) {

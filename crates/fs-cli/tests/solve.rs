@@ -33,6 +33,9 @@ use fs_project::{
 };
 use fs_qty::QtyAny;
 
+#[path = "solve/radiation_product.rs"]
+mod radiation_product;
+
 const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -550,6 +553,7 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
             },
         }],
         adiabatic_remainder: false,
+        radiation: None,
     });
     spec
 }
@@ -557,8 +561,9 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
 fn multi_region_contact_project() -> ProjectSpec {
     let source = std::fs::read_to_string(format!("{REFERENCE_DATA}/multi-region-interface.fsim"))
         .expect("committed multi-region project");
-    let mut spec = fs_project::parse_sexpr(&source)
-        .expect("multi-region project parses")
+    let mut spec = fs_project::parse_sexpr_migrating(&source)
+        .expect("historical multi-region project migrates")
+        .decoded
         .spec;
     let (material_card, material_state) = fixture_card_identity();
     spec.materials = Some(
@@ -627,6 +632,7 @@ fn multi_region_contact_project() -> ProjectSpec {
         // duplicated joint traces. They must therefore remain in the explicit
         // adiabatic remainder until ThermalInterfaces binds them.
         adiabatic_remainder: true,
+        radiation: None,
     });
     spec
 }
@@ -1080,7 +1086,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 18,
+        SOLVE_DRIVER_VERSION, 19,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3250,6 +3256,10 @@ fn g0_the_tracked_reference_project_is_exactly_what_its_generator_produces() {
     let dir = reference_project_dir();
     let tracked = std::fs::read_to_string(dir.join("cooling-reference.fsim"))
         .expect("the tracked reference project exists");
+    let tracked = fs_project::parse_sexpr_migrating(&tracked)
+        .expect("historical tracked project migrates without changing physics")
+        .decoded
+        .canonical;
     let generated =
         print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
     assert_eq!(
@@ -3272,10 +3282,11 @@ fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings()
     let source = std::fs::read_to_string(reference_project_dir().join("cooling-reference.fsim"))
         .expect("the tracked reference project exists");
 
-    // parse_sexpr enforces canonical form (wire.rs:811 require_canonical),
-    // so a successful parse IS the round-trip proof -- a non-canonical
-    // tracked file could not get here.
-    let decoded = fs_project::parse_sexpr(&source).expect("the tracked project parses canonically");
+    // The migrating reader checks canonical form after its receipted version
+    // rewrite; noncanonical historical bytes still refuse.
+    let decoded = fs_project::parse_sexpr_migrating(&source)
+        .expect("the tracked historical project migrates canonically")
+        .decoded;
     assert!(
         decoded.findings().is_empty(),
         "the reference project must admit clean: {:?}",
@@ -3287,7 +3298,7 @@ fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings()
     let mut slack = source.clone();
     slack.insert(slack.len() - 1, ' ');
     assert!(
-        fs_project::parse_sexpr(&slack).is_err(),
+        fs_project::parse_sexpr_migrating(&slack).is_err(),
         "a non-canonical spelling of the reference project must refuse"
     );
 
@@ -3485,7 +3496,7 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
     assert!(
         receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
             && receipt.contains("\"stop\":\"fidelity-single-rung\"")
@@ -3785,7 +3796,7 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
     // The exchange is in the receipt: the branch, the card, the derived
     // coefficient, the marched air, and the two independent watt gates.
     assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
@@ -3911,7 +3922,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
     // The production volumetricizer's facet recovery inserts a Steiner
     // point at the joint centroid and re-triangulates the shared unit
     // face into a deterministic four-triangle fan, so the declared
@@ -5200,7 +5211,7 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
     let conduction =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&conduction);
-    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v7"));
     assert!(
         conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
         "{conduction}"
