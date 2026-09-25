@@ -61,15 +61,17 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
     let radius=boundary.triangles.iter().flatten().map(|p|p.iter().map(|x|x*x).sum::<f64>().sqrt())
         .fold(0.0_f64,f64::max);
     let medium=Medium::air();let dt=1.0/f64::from(OUTPUT_RATE);
-    // Admit EVERY receiver before any boundary solve or mechanical step.
-    let mut baked=Vec::with_capacity(receivers.len());
-    for &receiver in receivers {
-        let range_m=receiver.position().iter().map(|x|x*x).sum::<f64>().sqrt();
-        let (propagation_delay_s,pressure_gain)=receiver.propagation(radius,medium,dt)?;
-        baked.push(Bake {filters:Vec::with_capacity(count),range_m,medium,propagation_delay_s,pressure_gain});
-    }
     let refined=curved_aperture::uniform_refinement(boundary,spec.subdivisions,spec.max_panels,gate)?;
     let surface=SpherePanels::from_triangles(refined.triangles.clone())?;
+    // Admit EVERY receiver against the actual boundary before a source solve.
+    // Legacy finite/far fields retain their original formulas and timing.
+    let observations=receivers::Scene::new(&surface,receivers,radius,medium,dt,gate)?;
+    let mut baked=Vec::with_capacity(receivers.len());
+    for (channel,&receiver) in receivers.iter().enumerate() {
+        let range_m=receiver.position().iter().map(|x|x*x).sum::<f64>().sqrt();
+        baked.push(Bake {filters:Vec::with_capacity(count),range_m,medium,
+            propagation_delay_s:observations.delay(channel),pressure_gain:observations.gain(channel)});
+    }
     let omega=spec.frequencies()?;
     let mut values=vec![vec![vec![C64::new(0.0,0.0);omega.len()];count];receivers.len()];
     let mut impedances=if load {vec![vec![C64::ZERO;count*count];omega.len()]}else{Vec::new()};
@@ -85,6 +87,8 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
     for index in (0..omega.len()).rev() {
         if gate.is_requested() {return Err("radiation preparation cancelled".into());}
         let w=omega[index];let k=w/medium.sound_speed;
+        // Independent bounded receiver quadrature, prepared ONCE per frequency.
+        let observation=observations.prepare(k,gate)?;
         let fields=acceleration_fields(&refined.weights,w);
         let field_refs:Vec<&[C64]>=fields.iter().map(Vec::as_slice).collect();
         // Geometry, factorization and all source-mode solves are independent of
@@ -99,9 +103,8 @@ fn bake_scene_with_spec(boundary:&Boundary,receivers:&[Receiver],spec:radiation_
                 return Err("BEM reports invalid diagnostics or negative radiation power beyond roundoff; refine the acoustic solve".into());
             }
             ppw=ppw.min(solution.panels_per_wavelength);condition=condition.max(solution.condition_lower_bound);
-            for (channel,&receiver) in receivers.iter().enumerate() {
-                values[channel][input][index]=receiver_response(&surface,solution,medium,receiver,
-                    radius,baked[channel].propagation_delay_s)?;
+            for channel in 0..receivers.len() {
+                values[channel][input][index]=observation.response(channel,solution)?;
             }
         }
         if load {impedances[index]=feedback::project(&surface,&refined.weights,&solutions,w)?;}
@@ -198,7 +201,7 @@ fn render_baked_with_gate(experiment:&mut Experiment,frames:usize,full_scale_pa:
     let peak=pressure.iter().map(|p|p.abs()).fold(0.0_f64,f64::max);
     eprintln!("pressure WAV: frames={frames}, channels={channels}, rate_hz={OUTPUT_RATE}, full_scale_pa={full_scale_pa}, clips={clips}, peak_pa={peak}, decimator_delay_frames={}; no channel normalization; acceleration is step-average tagged at step end",decimator.delay_output_frames());
     for (channel,bake) in baked.iter().enumerate() {
-        eprintln!("receiver {channel} observer_flight_s={}",bake.range_m/bake.medium.sound_speed);
+        eprintln!("receiver {channel} origin_range_m={}, explicit_delay_s={}; other propagation remains in the fitted transfer",bake.range_m,bake.propagation_delay_s);
     }
     Ok(wav)
 }
