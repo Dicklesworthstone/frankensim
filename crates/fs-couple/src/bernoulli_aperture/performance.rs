@@ -2,12 +2,14 @@
 //!
 //! This adapter owns the existing system, not a replacement voice. Plate shape,
 //! spatial closure, material memory, wall/load state and traveling waves remain
-//! in their physical owners. Only pressure assignments are scheduled. The output
+//! in their physical owners. Pressure and explicit mechanical forces are scheduled. The output
 //! is either a named internal pressure or an explicitly selected one-way baffled
 //! outlet receiver. The latter observes actual terminal FLOW, not bore pressure.
 
 /// Supplied mesh, closure, material memory and canonical pressure sources.
 pub mod file;
+/// Physical force programs on the original plate, independent of blowing pressure.
+pub mod force;
 
 use super::dynamic::DynamicAperture;
 use crate::acoustic_realize::AcousticRealizeError;
@@ -77,7 +79,7 @@ pub struct AperturePerformanceConfig {
     pub max_controls: usize,
 }
 
-/// Pressure playback preserving one complete physical state and source clock.
+/// Pressure and optional mechanical-force playback retaining one physical clock.
 ///
 /// Starts with an unadvanced system, which may have nonzero physical initial
 /// motion/contact/material energy. The supplied track owns the pressure history;
@@ -97,6 +99,8 @@ pub struct AperturePerformance {
     next: usize,
     held_pressure_pa: f64,
     poisoned: bool,
+    forces: Option<force::ForceSchedule>,
+    mechanical_work_j: f64,
 }
 fn receiver_error(error: String) -> RenderError {
     RenderError::Voice(AcousticRealizeError::Nonlinear(error))
@@ -170,7 +174,7 @@ impl AperturePerformance {
             track: track.id.clone(), voice: 0,
         }], config.sample_rate_hz, config.samples, config.max_compile_work)?;
         Ok(Self { system, observation, receiver, config, schedule, controls, next: 0,
-            held_pressure_pa: 0.0, poisoned: false })
+            held_pressure_pa: 0.0, poisoned: false, forces: None, mechanical_work_j: 0.0 })
     }
 
     /// Read-only physical system; callers cannot step it behind the sample clock.
@@ -200,23 +204,24 @@ impl AperturePerformance {
     #[must_use]
     pub fn remaining_samples(&self) -> u64 { self.config.samples - self.samples_rendered() }
 
-    fn step_pressure(&mut self, pressure_pa: f64) -> Result<f64, RenderError> {
+    fn step_pressure(&mut self, pressure_pa: f64, force_n: f64) -> Result<(f64, f64), RenderError> {
         let drive = TubeDrive { upstream_pressure_pa: pressure_pa, body_flow_m3_s: 0.0 };
         match &mut self.system {
             CoupledAperture::Tube(m) => {
-                let f = m.step(drive).map_err(RenderError::Voice)?;
-                Ok(match self.observation {
+                let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
+                let pressure = match self.observation {
                     ApertureObservation::Inlet => f.aperture.bore_pressure_pa,
                     ApertureObservation::TubeTerminal => f.waveguide.terminal_pressure_pa,
                     ApertureObservation::TubeBaffled(_) => self.receiver.as_mut()
                         .expect("baffled observation constructed its complete receiver")
                         .step(&[f.waveguide.terminal_flow_m3_s]).map_err(receiver_error)?,
                     _ => unreachable!("observer admitted against the exclusively owned system"),
-                })
+                };
+                Ok((pressure, f.aperture.mechanical_work_j))
             }
             CoupledAperture::Network(m) => {
-                let f = m.step(drive).map_err(RenderError::Voice)?;
-                Ok(match self.observation {
+                let f = m.step_with_force(drive, force_n).map_err(RenderError::Voice)?;
+                let pressure = match self.observation {
                     ApertureObservation::Inlet => f.aperture.bore_pressure_pa,
                     ApertureObservation::NetworkNode(n) => m.node_frame(n)
                         .expect("admitted node remains in the owned topology").pressure_pa,
@@ -227,7 +232,8 @@ impl AperturePerformance {
                             .step(&[flow]).map_err(receiver_error)?
                     }
                     _ => unreachable!("observer admitted against the exclusively owned system"),
-                })
+                };
+                Ok((pressure, f.aperture.mechanical_work_j))
             }
         }
     }
@@ -259,8 +265,14 @@ impl PressureRenderer for AperturePerformance {
                 } else { unreachable!("existing compiler emits only pressure assignments"); }
                 next += 1;
             }
-            match self.step_pressure(pressure) {
-                Ok(value) => { *slot = value; self.next = next; self.held_pressure_pa = pressure; }
+            let sample = self.samples_rendered();
+            let force_n = self.forces.as_ref().map_or(0.0, |f| f.candidate(sample));
+            match self.step_pressure(pressure, force_n) {
+                Ok((value, work)) => {
+                    *slot = value; self.next = next; self.held_pressure_pa = pressure;
+                    if let Some(forces) = &mut self.forces { forces.accept(sample); }
+                    self.mechanical_work_j = work;
+                }
                 Err(error) => { self.poisoned = true; return Err(error); }
             }
         }

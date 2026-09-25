@@ -11,7 +11,8 @@ fn impedance(load:SeriesImpedanceSpec)->String {
 }
 
 pub(super) fn provenance(p:&PlateValvePerformance)->String {
-    let CoupledAperture::Network(n)=p.renderer().system() else {return String::new()};
+    let force_json = force_provenance(p);
+    let CoupledAperture::Network(n)=p.renderer().system() else {return force_json};
     let i=p.info();
     // Name the node even in a one-section graph: node zero need not be the inlet.
     // The numeric-reflection legacy tube never enters this graph path.
@@ -63,6 +64,24 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
     }).collect();
     let loss_json=if loss_sections.is_empty() {String::new()} else {format!(
         ",\"viscothermal\":{{\"model\":\"wide-tube-zk-passive-rl-rc-v1\",\"source_sections\":[{}],\"extra_inviscid_inertia_compliance\":false,\"scope\":\"sampled finite-band first-order boundary layers; not DC, Poiseuille or thermal evolution\"}}",loss_sections.join(","))};
-    format!(",\"duct_network\":{{\"node_count\":{},\"section_count\":{},\"radiation_terminal_count\":{},\"observed_node\":{selected},\"total_represented_section_length_m\":{:e},\"nodes\":[{}],\"sections\":[{}]{loss_json},\"scope\":\"one coupled graph; lossless propagating sections and explicit local loads; exterior output selects one outlet, not a sum or mutual exterior radiation model\"}}",
+    format!("{force_json},\"duct_network\":{{\"node_count\":{},\"section_count\":{},\"radiation_terminal_count\":{},\"observed_node\":{selected},\"total_represented_section_length_m\":{:e},\"nodes\":[{}],\"sections\":[{}]{loss_json},\"scope\":\"one coupled graph; lossless propagating sections and explicit local loads; exterior output selects one outlet, not a sum or mutual exterior radiation model\"}}",
         i.duct_nodes,i.duct_sections,i.radiation_terminals,i.represented_tube_length_m,nodes.join(","),sections.join(","))
+}
+
+// Both standalone and ensemble output call this source-description seam.
+fn force_provenance(p: &PlateValvePerformance) -> String {
+    use fs_couple::bernoulli_aperture::dynamic::force::PlateForceFootprint;
+    if p.info().force_ports == 0 { return String::new(); }
+    let ports: Vec<_> = p.renderer().force_ports().iter().map(|port| {
+        let site = match port.footprint() {
+            PlateForceFootprint::Node(node) => format!("\"node\":{node}"),
+            PlateForceFootprint::Patch(triangles) => format!("\"triangles\":{:?}",triangles),
+        };
+        format!("{{{site},\"force_velocity_projection\":{:e}}}",port.coefficient())
+    }).collect();
+    let internal = p.info().radiation_load.is_none() && !matches!(p.renderer().observation(),
+        ApertureObservation::TubeBaffled(_) | ApertureObservation::NetworkBaffled {..});
+    let scope = if internal { ",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\"" } else { "" };
+    format!("{scope},\"mechanical_forces\":{{\"ports\":[{}],\"events\":{},\"clock\":\"mechanical-sample-before-step\",\"initial_force_n\":0,\"scope\":\"prescribed total transverse forces on original plate; not lip-body or moving-lay dynamics\"}}",
+        ports.join(","),p.info().force_controls)
 }

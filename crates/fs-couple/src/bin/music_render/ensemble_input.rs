@@ -146,7 +146,7 @@ fn load(input: &Input, block: usize) -> Result<(Box<dyn PressureRenderer>, Sourc
             (Box::new(p.into_renderer()) as Box<dyn PressureRenderer>, SourceInfo {
                 kind: input.kind, schema: PLATE_VALVE_PERFORMANCE_SCHEMA, hash:i.input_hash,
                 rate:i.sample_rate_hz,samples:i.samples,source_full_scale_pa:i.full_scale_pa,
-                components:1,modes:1,controls:i.compiled_controls,exterior_json,
+                components:1,modes:1,controls:i.compiled_controls+i.force_controls,exterior_json,
             })
         }
         Kind::Reed => {
