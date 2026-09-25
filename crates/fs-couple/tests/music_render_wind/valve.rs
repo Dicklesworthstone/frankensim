@@ -147,3 +147,6 @@ mod duct_graph;
 
 #[path = "viscothermal.rs"]
 mod viscothermal;
+
+#[path = "regional_gas.rs"]
+mod regional_gas;

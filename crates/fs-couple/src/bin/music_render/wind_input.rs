@@ -48,11 +48,12 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
             load.maximum_frequency_hz(),term.resistance_pa_s_m3,term.rate_per_s,
             load.max_complex_relative_error(),load.max_resistance_relative_error())
     } else {String::new()};
-    let (c,radius,speed)=match (p.observation(),p.system()) {
-        (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.spec().sound_speed_m_s),
+    let (c,radius,density,speed)=match (p.observation(),p.system()) {
+        (ApertureObservation::TubeBaffled(c),CoupledAperture::Tube(t))=>(c,t.spec().radius_m,t.aperture().spec().density_kg_m3,t.spec().sound_speed_m_s),
         (ApertureObservation::NetworkBaffled {node,receiver},CoupledAperture::Network(n))=> {
-            let section=n.spec().sections.iter().find(|s|s.nodes.contains(&node)).expect("admitted physical outlet section");
-            (receiver,section.radius_m,n.spec().sound_speed_m_s)
+            let (index,section)=n.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node)).expect("admitted physical outlet section");
+            let (density,speed)=n.section_medium(index).expect("admitted outlet medium");
+            (receiver,section.radius_m,density,speed)
         }
         _=>return if radiation.is_some() {
             format!(",\"observation_scope\":\"internal coupled tube pressure; not an exterior microphone\"{load_json}")
@@ -66,7 +67,7 @@ pub(super) fn outlet_provenance(p: &AperturePerformance, radiation: Option<Baffl
     };
     format!(",\"observation_scope\":\"{scope}\",\"outlet_receiver\":{{\"position_m\":[{:e},{:e},{:e}],\"radius_m\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"radial_rings\":{},\"angular_points\":{},\"maximum_frequency_hz\":{:e},\"propagation_delay_mechanical_samples\":[{},{}],\"radiation_feedback_added\":{}}}{load_json}",
         c.position_m[0],c.position_m[1],c.position_m[2],radius,
-        p.system().aperture().spec().density_kg_m3,speed,
+        density,speed,
         c.radial_rings,c.angular_points,c.maximum_frequency_hz,mic.delay_samples.0,mic.delay_samples.1,radiation.is_some())
 }
 

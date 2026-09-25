@@ -44,9 +44,16 @@ pub(super) fn provenance(p:&PlateValvePerformance)->String {
             .map_or_else(String::new,|(_,load)|format!(",\"baffled_radiation_band_hz\":{:e}",load.maximum_frequency_hz()));
         format!("{{\"node\":{index},\"kind\":\"{kind}\"{extra}{radiation}}}")
     }).collect();
-    let sections:Vec<_>=n.spec().sections.iter().zip(n.represented_sections()).map(|(s,r)|format!(
-        "{{\"nodes\":[{},{}],\"radius_m\":{:e},\"requested_length_m\":{:e},\"represented_length_m\":{:e},\"one_way_mechanical_samples\":{},\"impedance_pa_s_m3\":{:e}}}",
-        s.nodes[0],s.nodes[1],s.radius_m,s.length_m,r.represented_length_m,r.one_way_samples,r.impedance_pa_s_m3)).collect();
+    let sections:Vec<_>=n.spec().sections.iter().zip(n.represented_sections()).enumerate().map(|(index,(s,r))| {
+        let gas=n.section_gases().map_or_else(String::new, |gases| {
+            let g=gases[index];
+            format!(",\"gas\":{{\"temperature_k\":{:e},\"static_pressure_pa\":{:e},\"density_kg_m3\":{:e},\"sound_speed_m_s\":{:e},\"dynamic_viscosity_pa_s\":{:e},\"thermal_conductivity_w_m_k\":{:e},\"gamma\":{:e},\"prandtl\":{:e},\"water_mole_fraction\":{:e}}}",
+                g.temperature,g.pressure,g.density,g.sound_speed,g.dynamic_viscosity,g.thermal_conductivity,
+                g.gamma,g.prandtl,g.water_mole_fraction)
+        });
+        format!("{{\"nodes\":[{},{}],\"radius_m\":{:e},\"requested_length_m\":{:e},\"represented_length_m\":{:e},\"one_way_mechanical_samples\":{},\"impedance_pa_s_m3\":{:e}{gas}}}",
+            s.nodes[0],s.nodes[1],s.radius_m,s.length_m,r.represented_length_m,r.one_way_samples,r.impedance_pa_s_m3)
+    }).collect();
     let loss_sections:Vec<_>=p.viscothermal_losses().iter().map(|r| {
         format!("{{\"source_section\":{},\"source_nodes\":[{},{}],\"source_length_m\":{:e},\"source_radius_m\":{:e},\"minimum_frequency_hz\":{:e},\"maximum_frequency_hz\":{:e},\"cells\":{},\"arms_per_load\":8,\"original_one_way_samples\":{},\"represented_length_m\":{:e},\"checked_max_complex_relative_error\":{:e},\"checked_max_loss_relative_error\":{:e},\"checked_max_scattering_error\":{:e},\"loss_node_range\":[{},{}],\"propagation_section_range\":[{},{}]}}",
             r.source.section,r.original_nodes[0],r.original_nodes[1],r.requested_length_m,r.loss.radius_m(),

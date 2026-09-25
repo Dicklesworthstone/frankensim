@@ -126,9 +126,10 @@ impl PlateValvePerformance {
         let parsed = Parsed::read(bytes,max_block,gate)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // Derive each declared physical load once, from its actual adjacent
-        // section and shared gas. No receiver changes the network's mechanics.
+        // section gas. No receiver changes the network's mechanics.
         let duct=parsed.duct.prepare(&parsed.air,dt,parsed.observation,gate)?;
-        let z=duct.inlet_impedance(parsed.air.density)?;
+        let inlet_density=duct.inlet_density(parsed.air.density)?;
+        let z=duct.inlet_impedance(inlet_density)?;
         let observation=duct.observation;
         let radiation_load=duct.observed_radiation();
         let radiation_loads=duct.radiation.clone();
@@ -138,7 +139,7 @@ impl PlateValvePerformance {
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
             return Err(bad(0,"retained plate mode exceeds the declared mechanical angular-step allowance"));
         }
-        let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,parsed.air.density,z,
+        let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,inlet_density,z,
             dt,parsed.config.samples,parsed.initial).map_err(PlateValveInputError::Physics)?;
         if let Some((material,initial))=parsed.relaxation {
             valve=valve.with_plate_relaxation(material,initial).map_err(PlateValveInputError::Physics)?;
