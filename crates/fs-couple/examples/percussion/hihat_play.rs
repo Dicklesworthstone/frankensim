@@ -16,13 +16,15 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let first_force=mechanics::drive::option(&mut args)?;
     let second_force=mechanics::drive::second_option(&mut args)?;
     let squeeze=squeeze::option(&mut args)?;
+    let first_flexible=flexible::option(&mut args,"--flexible-stick")?;
+    let second_flexible=flexible::option(&mut args,"--second-flexible-stick")?;
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
     acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
     if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
-        ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||second_force.is_some()&&second.is_none() {
+        ||(!mic&&right.is_some())||(!audio&&radiation.is_some())||(second_force.is_some()||second_flexible.is_some())&&second.is_none() {
         return Err("hi-hat received incompatible output, receiver or second-stick controls".into());
     }
     let count=if args.len()>=3 {args[2].parse::<u64>()?}else{if audio{48000}else{4096}};
@@ -35,10 +37,13 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         [args[4].parse()?,args[5].parse()?,args[6].parse()?]
     }else{[0.08,0.05,0.35]})}else{acoustics::Receiver::FarField([1.5,0.7,1.5])};
     let spec=Spec::load(Path::new(&args[1]))?;let [upper,lower]=spec.shells()?;
-    let pair=match squeeze.as_ref() {
+    let pair=if first_flexible.is_some()||second_flexible.is_some() {
+        build_with_strikers(&spec,&upper,&lower,stroke,second,steps,dt,audio,squeeze.as_ref(),
+            [first_flexible.as_ref(),second_flexible.as_ref()])?
+    }else{match squeeze.as_ref() {
         Some(film)=>build_with_squeeze(&spec,&upper,&lower,stroke,second,steps,dt,audio,Some(film))?,
         None=>build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?,
-    };
+    }};
     let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
     let (mut e,loaded)=if feedback {
         let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
@@ -48,10 +53,24 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     if let Some(b)=substeps{e.system=e.system.with_impact_substeps(b)?;}
     let mut inputs=vec![mechanics::drive::Input{program:mechanics::drive::Program::parse(&spec.pedal)?,
         coordinate:pair.pedal.coordinate,tip_weight:pair.pedal.weight}];
-    if let Some(program)=first_force{inputs.push(mechanics::drive::Input{program,coordinate:0,tip_weight:e.stick_weight});}
-    if let Some(program)=second_force{let p=e.second_stick.ok_or("missing hi-hat second stick")?;
-        inputs.push(mechanics::drive::Input{program,coordinate:p.coordinate,tip_weight:p.weight});}
+    let mut hands=Vec::new();
+    for (hand,program) in [first_force,second_force].into_iter().enumerate() {
+        if let Some(program)=program {
+            match &pair.flexible_sticks[hand] {
+                Some(p)=>hands.push(mechanics::drive::SpatialInput{program,weights:p.hand_row(e.force.len())?}),
+                None=>{let p=if hand==0{sticks::Port{coordinate:0,weight:e.stick_weight}}
+                    else{e.second_stick.ok_or("missing hi-hat second stick")?};
+                    inputs.push(mechanics::drive::Input{program,coordinate:p.coordinate,tip_weight:p.weight});}
+            }
+        }
+    }
     e.system=e.system.with_stick_drives(inputs,dt,steps,e.force.len())?;
+    if let Mechanics::Driven{drive,..}=&mut e.system {
+        for hand in hands {drive.add_spatial_input(hand)?;}
+    }else{return Err("missing shared player clock for flexible shafts".into());}
+    for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
+        if let Some(p)=ports {eprintln!("physical shaft {}: {} elastic modes; contact at tip, external force at supplied hand station; no added acoustic source",hand+1,p.elastic_modes());}
+    }
     eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
         if squeeze.is_some(){"quasistatic incompressible Reynolds, declared validity limits"}else{"none"});
@@ -64,7 +83,11 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         };
         out.write_all(&wav)?;out.flush()?;return Ok(());
     }
-    writeln!(out,"time_s,upper_down_m,lower_down_m,pedal_down_m,pedal_speed_m_s,min_contact_gap_m,active_sites,total_energy_j,loss_j,player_work_j,balance_j")?;
+    write!(out,"time_s,upper_down_m,lower_down_m,pedal_down_m,pedal_speed_m_s,min_contact_gap_m,active_sites,total_energy_j,loss_j,player_work_j,balance_j")?;
+    for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
+        if ports.is_some(){write!(out,",stick{}_tip_down_m,stick{}_tip_speed_m_s,stick{}_hand_down_m,stick{}_hand_speed_m_s,stick{}_bending_j",hand+1,hand+1,hand+1,hand+1,hand+1)?;}
+    }
+    writeln!(out)?;
     for _ in 0..steps {
         let f=e.system.step(&e.force,&gate)?;let x=e.system.state();
         let displacement=|row:&[f64]|row.iter().enumerate().map(|(i,b)|b*x[2*i]).sum::<f64>();
@@ -72,10 +95,16 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         for (row,&clearance) in pair.collision.collocation().chunks(e.force.len()).zip(pair.collision.gaps()) {
             let g=clearance-displacement(row);gap=gap.min(g);active+=usize::from(g<0.);
         }
-        writeln!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e},{:.17e},{:.17e},{:.17e}",
+        write!(out,"{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{},{:.17e},{:.17e},{:.17e},{:.17e}",
             f.time_s,displacement(&e.observer_a),displacement(&e.observer_b),x[2*pair.pedal.coordinate]*pair.pedal.weight,
             x[2*pair.pedal.coordinate+1]*pair.pedal.weight,gap,active,f.stored_energy_j,f.dissipated_energy_j,
             f.supplied_work_j,f.balance_residual_j)?;
+        for ports in pair.flexible_sticks.iter().flatten() {
+            let o=ports.observe(x)?;
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",o.tip_displacement_m,o.tip_velocity_m_s,
+                o.hand_displacement_m,o.hand_velocity_m_s,o.flexural_energy_j)?;
+        }
+        writeln!(out)?;
     }
     out.flush()?;Ok(())
 }
