@@ -125,3 +125,38 @@ fn malformed_and_cancelled_steps_return_no_field() {
         assert!(matches!(engine.advance(cx,p,None,&vec![300.0;mesh.vertex_count()],1.0,config()), Err(ConductionError::Cancelled{..})));
     });
 }
+
+#[test]
+fn checked_correction_keeps_a_hard_iteration_cap_and_retryable_history() {
+    let mesh = mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder("cooling", ThermalBc::robin(80.0, 300.0).unwrap()).unwrap().finish().unwrap();
+    let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+    let source = ScalarField::Uniform(2000.0);
+    let mut old = vec![300.0; mesh.vertex_count()]; old[0] = 350.0;
+    let saved = old.clone();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let engine = BackwardEuler::uniform(cx, &mesh, VolumetricHeatCapacity::declared(2e6).unwrap()).unwrap();
+        let p = ConductionProblem {mesh: &mesh, boundary: &boundary, material: &material,
+            source: &source, element_materials: None};
+        let mut policy = config(); policy.linear.tolerance = 1e-12;
+        let mut short = policy; short.linear.max_iterations = 1;
+        match engine.advance(cx, p, None, &old, 3.0, short) {
+            Err(ConductionError::LinearSolveFailed {krylov_iterations, true_relative_residual, tolerance, ..}) => {
+                assert_eq!(krylov_iterations, 1);
+                assert_eq!(tolerance, policy.linear.tolerance);
+                assert!(true_relative_residual >= tolerance);
+            }
+            other => panic!("expected the unchanged work cap to refuse: {other:?}"),
+        }
+        assert_eq!(old, saved);
+        let retry = engine.advance(cx, p, None, &old, 3.0, policy).unwrap();
+        let fresh = engine.advance(cx, p, None, &old, 3.0, policy).unwrap();
+        assert_eq!(retry.temperature, fresh.temperature);
+        assert_eq!(retry.krylov_iterations, fresh.krylov_iterations);
+        assert!(retry.krylov_iterations <= policy.linear.max_iterations);
+        assert!(retry.relative_residual < policy.linear.tolerance);
+        assert!(retry.energy_residual_j.abs() <= policy.energy_tolerance_j);
+        assert_eq!(old, saved);
+    });
+}

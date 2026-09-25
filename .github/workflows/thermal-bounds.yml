@@ -5,6 +5,8 @@ on:
     paths:
       - 'crates/fs-verify/**'
       - 'crates/fs-conduction/**'
+      - 'crates/fs-solver/**'
+      - 'crates/fs-cli/src/network_command/transient/**'
       - '.github/workflows/thermal-bounds.yml'
   workflow_dispatch:
 permissions:
@@ -40,6 +42,12 @@ jobs:
             git -C ../franken_numpy cat-file blob "$expected" > "../franken_numpy/$file"
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test checked CG and immutable-history cooling
+        run: |
+          cargo test --release -p fs-solver --lib checked_cg::
+          cargo test --release -p fs-conduction --lib transient::backward_euler::tests
+      - name: Test actual transient fan-sizing trajectories
+        run: cargo test --release -p fs-cli --lib network_command::transient::sizing::tests
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::

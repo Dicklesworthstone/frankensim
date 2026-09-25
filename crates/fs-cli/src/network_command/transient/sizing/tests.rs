@@ -126,3 +126,35 @@ fn all_schedule_speed_bounds_and_target_are_admitted_before_physics() {
     let run=with_cx(|cx|simulate(&initial_hot,cx,initial_hot.transient.as_ref().unwrap(),1.0).unwrap());
     assert!(run.peak_k>=330.0,"initial violation must not disappear after cooling");
 }
+
+#[test]
+fn adaptive_fan_sizing_repairs_the_319_6_k_residual_gap_without_changing_the_design_limit() {
+    // 45af6da3 retained this failing product case: a normalized true residual
+    // of 1.0000028e-12 after four CG iterations was refused at the unchanged
+    // 1e-12 tolerance despite ample remaining work. Do not re-tune the limit
+    // or the accuracy budgets to make the fixture avoid that search point.
+    let mut r = Request::parse(FIXTURE).unwrap();
+    r.transient.as_mut().unwrap().limit = Some(319.6);
+    let initial = r.transient.as_ref().unwrap().initial.clone();
+    let result = doc(&r);
+    let design = result.get("transient_fan_speed_design").unwrap();
+    let multiplier = design.f64_field("selected_speed_multiplier").unwrap();
+    let peak = design.f64_field("sampled_peak_objective_k").unwrap();
+    assert!(peak <= 319.6 && 319.6 - peak <= config().temperature_tolerance_k);
+    assert!(design.path(&["failed_lower", "sampled_peak_objective_k"]).unwrap().as_f64().unwrap() > 319.6);
+    let trials = design.get("history").unwrap().as_array().unwrap();
+    assert!(trials.len() <= config().max_evaluations);
+    let transient = result.get("transient").unwrap();
+    let samples = transient.get("history").unwrap().as_array().unwrap();
+    let measured = samples.iter().map(|s| s.f64_field("objective_temperature_k").unwrap())
+        .fold(f64::NEG_INFINITY, f64::max);
+    close(peak, measured, 0.0);
+    assert_eq!(transient.get("first_sampled_violation_s"), Some(&J::Null));
+    close(transient.f64_field("input_energy_j").unwrap(), 600.0, 1e-7);
+    let schedule = r.transient.as_ref().unwrap();
+    let replay = with_cx(|cx| simulate(&r, cx, schedule, multiplier).unwrap());
+    assert_eq!(values(&result), values(&J::parse(&replay.output).unwrap()));
+    close(replay.peak_k, peak, 0.0);
+    assert_eq!(schedule.initial, initial);
+    assert_eq!(schedule.limit, Some(319.6));
+}
