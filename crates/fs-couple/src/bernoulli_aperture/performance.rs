@@ -140,10 +140,13 @@ impl AperturePerformance {
                     | NetworkNode::Impedance {..} | NetworkNode::Relaxation {..})) {
                     return Err(invalid("baffled network observation requires a degree-one passive terminal"));
                 }
-                let section=m.spec().sections.iter().find(|s|s.nodes.contains(&node))
+                let (index, section)=m.spec().sections.iter().enumerate().find(|(_,s)|s.nodes.contains(&node))
                     .ok_or_else(||invalid("baffled network terminal has no physical section"))?;
+                let (density, sound_speed)=m.section_medium(index).expect("existing outlet section");
+                // The exterior is a homogeneous extension of this outlet gas,
+                // not of the inlet region. No cross-medium refraction is implied.
                 Some(BaffledPressure::circular_outlet(section.radius_m,config.sample_rate_hz,receiver,
-                    RayleighMedium {density:a.spec().density_kg_m3,sound_speed:m.spec().sound_speed_m_s})
+                    RayleighMedium {density,sound_speed})
                     .map_err(|e|GestureCompileError::Render(receiver_error(e)))?)
             }
             _ => return Err(invalid("pressure observation is not a node or terminal of the supplied system")),

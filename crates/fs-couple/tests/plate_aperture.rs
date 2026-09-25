@@ -142,3 +142,7 @@ mod file;
 
 #[path = "plate_aperture/viscothermal.rs"]
 mod viscothermal;
+
+
+#[path = "plate_aperture/regional_gas.rs"]
+mod regional_gas;
