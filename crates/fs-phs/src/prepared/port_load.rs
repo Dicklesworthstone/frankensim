@@ -1,7 +1,34 @@
 //! Parallel impedance loading through the existing lossless port interconnection.
-use crate::{PhsError, PortHamiltonian, interconnect};
+use crate::{PhsError, PortHamiltonian, Storage, interconnect};
 
 impl PortHamiltonian {
+    /// Cold-append storage coordinates without moving any original state or
+    /// external port. Their structure rows begin at zero; a caller-supplied
+    /// dissipative port may evolve them inside the SAME discrete-gradient step.
+    /// The wrapper receives the owned original storage and its exact extent.
+    /// It must preserve that prefix's law and supply the complete new gradient.
+    /// This is a composition seam, not a certificate for the caller's storage.
+    ///
+    /// Matrices are copied only during construction. Callers own state/work caps;
+    /// dimensions and the original skew/PSD structure are re-admitted unchanged.
+    pub fn with_appended_storage(self, additional_states: usize,
+        wrap: impl FnOnce(Box<dyn Storage>, usize) -> Box<dyn Storage>)
+        -> Result<Self, PhsError>
+    {
+        let error=||PhsError::Dimension{what:"appended storage dimensions"};
+        if additional_states==0 {return Err(error());}
+        let n=self.n.checked_add(additional_states).ok_or_else(error)?;
+        let square=n.checked_mul(n).ok_or_else(error)?;
+        let ports=n.checked_mul(self.m).ok_or_else(error)?;
+        let mut j=vec![0.0;square];let mut r=vec![0.0;square];let mut g=vec![0.0;ports];
+        for i in 0..self.n {
+            j[i*n..i*n+self.n].copy_from_slice(&self.j[i*self.n..(i+1)*self.n]);
+            r[i*n..i*n+self.n].copy_from_slice(&self.r[i*self.n..(i+1)*self.n]);
+        }
+        g[..self.g.len()].copy_from_slice(&self.g);
+        Self::new(n,self.m,j,r,g,wrap(self.storage,self.n))
+    }
+
     /// Attach an admitted load while retaining every original external drive port.
     ///
     /// `load_port_to_drive[j]` selects the original port whose flow drives load
