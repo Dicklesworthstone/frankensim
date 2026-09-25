@@ -17,7 +17,7 @@ use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use fs_topopt::marquee::{
     DWR_CUT_BAND_MASS_GATE, DWR_CUT_BAND_POLICY_VERSION, DensityDesign, DwrBandDecision,
-    refine_dwr_cut_band, run_marquee,
+    in_dwr_refinement_band, refine_dwr_cut_band, run_marquee,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -232,8 +232,8 @@ fn tm_003_dwr_splits_concentrate_at_the_boundary() {
             iteration.iter
         );
         assert!(
-            dwr.cut_mass >= 0.0 && dwr.cut_mass <= dwr.total_mass,
-            "cut mass is a nonnegative subset of total mass"
+            dwr.cut_mass >= 0.0 && dwr.cut_mass <= dwr.band_mass && dwr.band_mass <= dwr.total_mass,
+            "cut mass is a subset of band mass, which is a subset of total mass"
         );
         assert_eq!(
             dwr.leaves_after - dwr.leaves_before,
@@ -253,7 +253,9 @@ fn tm_003_dwr_splits_concentrate_at_the_boundary() {
         );
         let expected_decision = if dwr.total_mass == 0.0 {
             DwrBandDecision::ZeroMass
-        } else if dwr.cut_mass <= DWR_CUT_BAND_MASS_GATE * dwr.total_mass {
+        } else if dwr.band_mass <= DWR_CUT_BAND_MASS_GATE * dwr.total_mass
+            || dwr.band_mass * dwr.total_area <= dwr.band_area * dwr.total_mass
+        {
             DwrBandDecision::GateNotMet
         } else if dwr.previous_level >= max_level {
             DwrBandDecision::LevelHeadroomExhausted
@@ -286,7 +288,8 @@ fn tm_003_dwr_splits_concentrate_at_the_boundary() {
              \"analysis_compliance\":{:.10e},\"analysis_volume\":{:.8},\
              \"target_volume\":{:.8},\"analysis_voids\":{},\"target_voids\":{},\
              \"policy_version\":{},\
-             \"cut_mass\":{:.10e},\"total_mass\":{:.10e},\
+             \"cut_mass\":{:.10e},\"band_mass\":{:.10e},\"total_mass\":{:.10e},\
+             \"band_area_fraction\":{:.8},\
              \"cut_fraction\":{cut_fraction:.8},\"decision\":\"{:?}\",\
              \"advanced\":{},\
              \"level_before\":{},\"level_after\":{},\"leaves_before\":{},\
@@ -303,7 +306,9 @@ fn tm_003_dwr_splits_concentrate_at_the_boundary() {
             iteration.target_voids,
             dwr.policy_version,
             dwr.cut_mass,
+            dwr.band_mass,
             dwr.total_mass,
+            dwr.band_area / dwr.total_area,
             dwr.decision,
             dwr.decision.is_advanced(),
             dwr.previous_level,
@@ -474,13 +479,13 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     // compliance DWR can supply the same CellKey map, but this test does not
     // claim a graded vector re-solve: it exercises one planning decision only.
     let design = seeded_design();
-    let make_grid = || Quadtree::with_room(2, 4);
+    let make_grid = || Quadtree::with_room(3, 5);
     let seed_grid = make_grid();
     let indicators: BTreeMap<_, _> = seed_grid
         .leaves()
         .map(|cell| {
             let (lo, hi) = seed_grid.rect(cell);
-            let eta = if design.enclose(lo, hi).contains_zero() {
+            let eta = if in_dwr_refinement_band(&design, lo, hi) {
                 1.0
             } else {
                 1.0 / 64.0
@@ -491,8 +496,8 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
 
     let mut grid_a = make_grid();
     let mut grid_b = make_grid();
-    let mut level_a = 2;
-    let mut level_b = 2;
+    let mut level_a = 3;
+    let mut level_b = 3;
     let decision_a = refine_dwr_cut_band(&mut grid_a, &design, &indicators, &mut level_a, true)
         .expect("valid shared policy input");
     let decision_b = refine_dwr_cut_band(&mut grid_b, &design, &indicators, &mut level_b, true)
@@ -508,21 +513,21 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     assert_eq!(
         decision_a.decision,
         DwrBandDecision::Advanced,
-        "cut-band indicator mass passes the gate"
+        "refinement-band indicator mass passes the gate"
     );
     assert!(
         decision_a.splits > 0,
         "one planning step performs actual splits"
     );
-    assert_eq!(decision_a.previous_level, 2);
-    assert_eq!(decision_a.band_level, 3);
+    assert_eq!(decision_a.previous_level, 3);
+    assert_eq!(decision_a.band_level, 4);
     assert_eq!(decision_a.policy_version, DWR_CUT_BAND_POLICY_VERSION);
     assert_eq!(
         decision_a.leaves_after - decision_a.leaves_before,
         3 * decision_a.splits
     );
 
-    // G3: this policy uses absolute aggregate partition mass, not signs,
+    // G3: this policy uses absolute aggregate band-partition mass, not signs,
     // insertion history, or within-partition magnitude ranking. Negation,
     // exact power-of-two scaling, reverse insertion, and mass-preserving
     // redistribution preserve the authorization and target topology.
@@ -543,7 +548,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     let mut off_cut_cells = Vec::new();
     for &cell in indicators.keys() {
         let (lo, hi) = seed_grid.rect(cell);
-        if design.enclose(lo, hi).contains_zero() {
+        if in_dwr_refinement_band(&design, lo, hi) {
             cut_cells.push(cell);
         } else {
             off_cut_cells.push(cell);
@@ -568,7 +573,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
         ("within-partition-redistributed", redistributed, 1.0),
     ] {
         let mut variant_grid = make_grid();
-        let mut variant_level = 2;
+        let mut variant_level = 3;
         let variant_decision = refine_dwr_cut_band(
             &mut variant_grid,
             &design,
@@ -585,9 +590,9 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
         assert_eq!(variant_decision.band_level, decision_a.band_level, "{name}");
         assert_eq!(variant_decision.splits, decision_a.splits, "{name}");
         assert_eq!(
-            variant_decision.cut_mass.to_bits(),
-            (mass_scale * decision_a.cut_mass).to_bits(),
-            "{name} cut mass"
+            variant_decision.band_mass.to_bits(),
+            (mass_scale * decision_a.band_mass).to_bits(),
+            "{name} band mass"
         );
         assert_eq!(
             variant_decision.total_mass.to_bits(),
@@ -603,7 +608,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
 
     let mut disabled_grid = make_grid();
     let disabled_leaf_count = disabled_grid.leaf_count();
-    let mut disabled_level = 2;
+    let mut disabled_level = 3;
     let disabled = refine_dwr_cut_band(
         &mut disabled_grid,
         &design,
@@ -619,7 +624,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     );
     assert_eq!(disabled.splits, 0);
     assert_eq!(disabled_grid.leaf_count(), disabled_leaf_count);
-    assert_eq!(disabled_level, 2);
+    assert_eq!(disabled_level, 3);
 
     let mut zero_grid = make_grid();
     let zero_before: Vec<_> = zero_grid.leaves().collect();
@@ -628,7 +633,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
         .copied()
         .map(|cell| (cell, 0.0))
         .collect();
-    let mut zero_level = 2;
+    let mut zero_level = 3;
     let zero = refine_dwr_cut_band(
         &mut zero_grid,
         &design,
@@ -639,7 +644,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     .expect("zero mass is a valid deterministic no-op");
     assert_eq!(zero.decision, DwrBandDecision::ZeroMass);
     assert_eq!(zero.splits, 0);
-    assert_grid_and_level_unchanged(&zero_grid, &zero_before, zero_level, 2);
+    assert_grid_and_level_unchanged(&zero_grid, &zero_before, zero_level, 3);
 
     let mut threshold_grid = make_grid();
     let threshold_before: Vec<_> = threshold_grid.leaves().collect();
@@ -647,7 +652,7 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
         (cut_cells[0], DWR_CUT_BAND_MASS_GATE),
         (off_cut_cells[0], 1.0 - DWR_CUT_BAND_MASS_GATE),
     ]);
-    let mut threshold_level = 2;
+    let mut threshold_level = 3;
     let threshold = refine_dwr_cut_band(
         &mut threshold_grid,
         &design,
@@ -657,17 +662,60 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     )
     .expect("exact threshold is a valid deterministic no-op");
     assert_eq!(
-        threshold.cut_mass.to_bits(),
+        threshold.band_mass.to_bits(),
         (DWR_CUT_BAND_MASS_GATE * threshold.total_mass).to_bits(),
         "the fixture lands bit-exactly on the policy threshold"
     );
     assert_eq!(threshold.decision, DwrBandDecision::GateNotMet);
     assert_eq!(threshold.splits, 0);
-    assert_grid_and_level_unchanged(&threshold_grid, &threshold_before, threshold_level, 2);
+    assert_grid_and_level_unchanged(&threshold_grid, &threshold_before, threshold_level, 3);
 
-    let mut exhausted_grid = Quadtree::with_room(2, 2);
+    // Concentration clause: mass spread exactly in proportion to area gives
+    // the band far more than the 0.15 share, yet no concentration, so the
+    // band is not refined. One extra unit on a band leaf flips it.
+    let area_proportional: BTreeMap<_, _> = seed_grid
+        .leaves()
+        .map(|cell| {
+            let (lo, hi) = seed_grid.rect(cell);
+            (cell, (hi[0] - lo[0]) * (hi[1] - lo[1]))
+        })
+        .collect();
+    let mut uniform_grid = make_grid();
+    let uniform_before: Vec<_> = uniform_grid.leaves().collect();
+    let mut uniform_level = 3;
+    let uniform = refine_dwr_cut_band(
+        &mut uniform_grid,
+        &design,
+        &area_proportional,
+        &mut uniform_level,
+        true,
+    )
+    .expect("area-proportional mass is valid");
+    assert!(
+        uniform.band_mass > DWR_CUT_BAND_MASS_GATE * uniform.total_mass,
+        "the share clause alone would pass: {} of {}",
+        uniform.band_mass,
+        uniform.total_mass
+    );
+    assert_eq!(uniform.decision, DwrBandDecision::GateNotMet);
+    assert_grid_and_level_unchanged(&uniform_grid, &uniform_before, uniform_level, 3);
+    let mut concentrated = area_proportional.clone();
+    *concentrated.get_mut(&cut_cells[0]).expect("band leaf") += 1.0;
+    let mut concentrated_grid = make_grid();
+    let mut concentrated_level = 3;
+    let tilted = refine_dwr_cut_band(
+        &mut concentrated_grid,
+        &design,
+        &concentrated,
+        &mut concentrated_level,
+        true,
+    )
+    .expect("concentrated mass is valid");
+    assert_eq!(tilted.decision, DwrBandDecision::Advanced);
+
+    let mut exhausted_grid = Quadtree::with_room(3, 3);
     let exhausted_before: Vec<_> = exhausted_grid.leaves().collect();
-    let mut exhausted_level = 2;
+    let mut exhausted_level = 3;
     let exhausted = refine_dwr_cut_band(
         &mut exhausted_grid,
         &design,
@@ -677,9 +725,9 @@ fn tm_006_synthetic_indicators_drive_shared_band_policy_once() {
     )
     .expect("exhausted headroom is a valid deterministic no-op");
     assert_eq!(exhausted.decision, DwrBandDecision::LevelHeadroomExhausted);
-    assert_eq!(exhausted.analysis_max_level, 2);
+    assert_eq!(exhausted.analysis_max_level, 3);
     assert_eq!(exhausted.splits, 0);
-    assert_grid_and_level_unchanged(&exhausted_grid, &exhausted_before, exhausted_level, 2);
+    assert_grid_and_level_unchanged(&exhausted_grid, &exhausted_before, exhausted_level, 3);
 
     println!(
         "{{\"metric\":\"dwr-shared-band-policy\",\"cut_mass\":{:.3},\
@@ -867,10 +915,13 @@ fn tm_008_real_vector_dwr_advances_and_resolves_twice_on_graded_trees() {
             estimate.eta_abs.to_bits(),
             "the helper consumes the estimator's exact marking mass"
         );
-        let cut_mass_fraction = decision.cut_mass / decision.total_mass;
+        let band_mass_fraction = decision.band_mass / decision.total_mass;
+        let band_area_fraction = decision.band_area / decision.total_area;
         assert!(
-            cut_mass_fraction.is_finite() && cut_mass_fraction > DWR_CUT_BAND_MASS_GATE,
-            "cycle {cycle} authentic boundary-dominated indicators must pass the shared gate: {cut_mass_fraction:.6}"
+            band_mass_fraction.is_finite()
+                && band_mass_fraction > DWR_CUT_BAND_MASS_GATE
+                && band_mass_fraction > band_area_fraction,
+            "cycle {cycle} authentic boundary-dominated indicators must pass the shared gate: {band_mass_fraction:.6} of mass on {band_area_fraction:.6} of area"
         );
         assert_eq!(decision.policy_version, DWR_CUT_BAND_POLICY_VERSION);
         assert_eq!(
@@ -943,7 +994,7 @@ fn tm_008_real_vector_dwr_advances_and_resolves_twice_on_graded_trees() {
         let active_min_level = *active_levels.first().expect("nonempty active levels");
         let active_max_level = *active_levels.last().expect("nonempty active levels");
         println!(
-            "{{\"metric\":\"real-vector-dwr-graded-resolve-cycle\",\"cycle\":{cycle},\"j_h\":{:.10e},\"j_h2\":{:.10e},\"eta_signed\":{:.10e},\"eta_abs\":{:.10e},\"eta_over_enriched_delta\":{eta_over_enriched_delta:.8},\"cut_mass_fraction\":{cut_mass_fraction:.8},\"splits\":{},\"band_level\":{},\"adapted_dofs\":{},\"adapted_compliance\":{:.10e},\"active_min_level\":{active_min_level},\"active_max_level\":{active_max_level}}}",
+            "{{\"metric\":\"real-vector-dwr-graded-resolve-cycle\",\"cycle\":{cycle},\"j_h\":{:.10e},\"j_h2\":{:.10e},\"eta_signed\":{:.10e},\"eta_abs\":{:.10e},\"eta_over_enriched_delta\":{eta_over_enriched_delta:.8},\"band_mass_fraction\":{band_mass_fraction:.8},\"band_area_fraction\":{band_area_fraction:.8},\"splits\":{},\"band_level\":{},\"adapted_dofs\":{},\"adapted_compliance\":{:.10e},\"active_min_level\":{active_min_level},\"active_max_level\":{active_max_level}}}",
             estimate.j_primal,
             estimate.j_enriched,
             estimate.eta_signed,
