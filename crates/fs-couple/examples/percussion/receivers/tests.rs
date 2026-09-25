@@ -46,7 +46,11 @@ fn prepared_receiver_matches_actual_integrated_fields_without_changing_source_lo
         let w=core::f64::consts::TAU*hz;let k=w/medium.sound_speed;
         let fields=acceleration_fields(&b.weights,w);
         let solutions=solve_radiation_batch(&surface,k,medium,&[&fields[0]],Formulation::PlainCbie).unwrap();
-        let before=super::super::stereo::feedback::project(&surface,&b.weights,&solutions,w).unwrap();
+        // Independently integrate the unchanged surface work; no receiver
+        // projection or public visibility change to the loading owner is needed.
+        let project=||solutions[0].pressure.iter().zip(surface.areas()).zip(&b.weights[0])
+            .fold(C64::ZERO,|sum,((p,a),b)|sum+p.scale(a*b))*C64::new(0.0,-w);
+        let before=project();
         let frequency=scene.prepare(k,&gate).unwrap();
         let direct=Geometry::new(&surface,&[point],0.001).unwrap()
             .prepare_velocity(k,medium,options()).unwrap().evaluate_velocity(&solutions[0]).unwrap();
@@ -56,7 +60,7 @@ fn prepared_receiver_matches_actual_integrated_fields_without_changing_source_lo
         let want=FirstOrder::new(0.5,[0.0,0.0,-1.0]).unwrap()
             .observe(p,direct.particle_velocity_m_s[0],medium).unwrap();
         assert!((front-want).abs()<1e-12*want.abs().max(1e-20));
-        let after=super::super::stereo::feedback::project(&surface,&b.weights,&solutions,w).unwrap();
+        let after=project();
         assert_eq!(before,after);
     }
 }

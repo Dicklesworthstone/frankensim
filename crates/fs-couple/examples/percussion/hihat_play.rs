@@ -10,6 +10,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let substeps=mechanics::substeps_option(&mut args)?;
     let prepared=mechanics::prepared_option(&mut args)?||analytic||substeps.is_some();
     let right=acoustics::stereo::option(&mut args)?;
+    let microphone_spec=acoustics::receivers::input::option(&mut args)?;
     let radiation=radiation_spec::option(&mut args)?;
     let feedback=acoustics::stereo::feedback::option(&mut args)?;
     let second=sticks::option(&mut args)?;
@@ -21,6 +22,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
+    if let Some(spec)=&microphone_spec {spec.admit_command(command.unwrap(),args.len()>4,right.is_some())?;}
     acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
     if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
@@ -44,7 +46,10 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         Some(film)=>build_with_squeeze(&spec,&upper,&lower,stroke,second,steps,dt,audio,Some(film))?,
         None=>build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?,
     }};
-    let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
+    let receivers=match microphone_spec {
+        Some(spec)=>spec.into_receivers(),
+        None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
+    };
     let (mut e,loaded)=if feedback {
         let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
             &receivers,radiation.unwrap_or_default(),&CancelGate::new_clock_free())?;(e,Some(bake))

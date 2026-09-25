@@ -6,6 +6,9 @@ use super::{Error, Receiver, Medium, RadiationSolution, SpherePanels, C64,
 use fs_bem::near_field::{FirstOrder, Geometry, Options, Prepared};
 use fs_exec::CancelGate;
 
+#[path="microphone_spec.rs"]
+pub mod input;
+
 /// Explicit near-field accuracy/work and physical microphone selection. This
 /// is an ideal pressure/particle-velocity observer, not a measured capsule.
 #[derive(Clone, Copy, Debug)]
