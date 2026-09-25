@@ -30,8 +30,12 @@ fn native_chunks_restore_exact_design_and_trace_without_prefix_replay() {
     let spec = spec();
     let full_ledger = Ledger::open(":memory:").unwrap();
     let full = drive(&spec, &full_ledger, None, &gate(), None).unwrap();
-    assert_eq!(full.status, "completed");
+    assert_eq!(full.status, "constraint-unmet");
     let full_json = json(&full);
+    let summary = document(&linked(&full_ledger, &full_json, "report_json", "study-report-json").unwrap()).unwrap();
+    assert_eq!(summary.get("volume_constraint_satisfied"), Some(&JsonValue::Bool(false)));
+    assert!(summary.f64_field("volume_violation_m2").unwrap()
+        > summary.f64_field("volume_tolerance_m2").unwrap());
     assert_eq!(full_json.path(&["continuation", "updates_this_invocation"]).and_then(JsonValue::as_f64), Some(3.0));
 
     let ledger = Ledger::open(":memory:").unwrap();
@@ -41,7 +45,7 @@ fn native_chunks_restore_exact_design_and_trace_without_prefix_replay() {
     let untouched = artifact_bytes(&ledger, &prefix_json, "design");
     let loaded = load(&ledger, &prefix.pointer).unwrap();
     let resumed = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap();
-    assert_eq!(resumed.status, "completed");
+    assert_eq!(resumed.status, "constraint-unmet");
     let resumed_json = json(&resumed);
     assert_eq!(resumed_json.path(&["continuation", "updates_this_invocation"]).and_then(JsonValue::as_f64), Some(2.0));
     assert_eq!(resumed_json.path(&["continuation", "legacy_prefix_updates_replayed"]).and_then(JsonValue::as_f64), Some(0.0));
@@ -87,7 +91,7 @@ fn final_accepted_checkpoint_can_finalize_without_another_geometry_update() {
     assert_eq!(accepted.value.str_field("status"), Some("running"));
     assert_eq!(integer(&accepted.value, "iterations_completed").unwrap(), spec.steps);
     let finalized = drive(&spec, &ledger, None, &gate(), Some(&accepted)).unwrap();
-    assert_eq!(finalized.status, "completed");
+    assert_eq!(finalized.status, "constraint-unmet");
     assert_eq!(json(&finalized).path(&["continuation", "updates_this_invocation"]).and_then(JsonValue::as_f64), Some(0.0));
     assert_eq!(artifact_bytes(&ledger, &receipt, "design"), artifact_bytes(&ledger, &json(&finalized), "design"));
     let complete = load(&ledger, &finalized.pointer).unwrap();
@@ -171,4 +175,39 @@ fn resume_does_not_reset_an_exhausted_lifetime_wall_budget() {
     assert_eq!(error.exit, exit::BUDGET);
     assert!(error.message.contains(&first.pointer));
     assert_eq!(integer(&load(&ledger, &first.pointer).unwrap().value, "iterations_completed").unwrap(), 1);
+}
+
+#[test]
+fn completion_requires_measured_area_not_only_an_iteration_count() {
+    let spec = spec();
+    let mut report = OptimizeReport::default();
+    report.rows = vec![String::new(); spec.steps];
+    for (area, expected) in [(0.45, "completed"), (0.455, "completed"),
+        (0.40, "constraint-unmet"), (0.70, "constraint-unmet")] {
+        report.volume = vec![area; spec.steps];
+        assert_eq!(iteration_terminal(&spec, &report).unwrap(), expected);
+    }
+    for area in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+        report.volume = vec![area; spec.steps];
+        assert!(iteration_terminal(&spec, &report).is_err());
+    }
+    report.volume.clear();
+    assert!(iteration_terminal(&spec, &report).is_err());
+}
+
+#[test]
+fn false_completed_status_cannot_be_resumed_as_success() {
+    let spec = spec();
+    let ledger = Ledger::open(":memory:").unwrap();
+    let output = drive(&spec, &ledger, None, &gate(), None).unwrap();
+    assert_eq!(output.status, "constraint-unmet");
+    let mut loaded = load(&ledger, &output.pointer).unwrap();
+    set(&mut loaded.value, "status", JsonValue::Str("completed".into()));
+    let before = ledger.table_count("ops").unwrap();
+    let error = drive(&spec, &ledger, None, &gate(), Some(&loaded)).unwrap_err();
+    assert!(error.message.contains("material constraint"));
+    assert_eq!(ledger.table_count("ops").unwrap(), before);
+    let rendered = render(output, OutputMode::Json);
+    assert_eq!(rendered.exit_code, exit::BUDGET);
+    assert_eq!(JsonValue::parse(&rendered.stdout).unwrap().str_field("status"), Some("constraint-unmet"));
 }

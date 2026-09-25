@@ -39,7 +39,7 @@ fn interrupted_then_resumed(stop: impl Fn(CheckpointStage) -> bool) {
         >= prefix.value.f64_field("consumed_wall_s").unwrap());
 
     let resumed = drive(&spec, &ledger, None, &CancelGate::new_clock_free(), Some(&cancelled)).unwrap();
-    assert_eq!(resumed.status, "completed");
+    assert_eq!(resumed.status, "constraint-unmet");
     let resumed = load(&ledger, &resumed.pointer).unwrap();
     let oracle_ledger = Ledger::open(":memory:").unwrap();
     let oracle = drive(&spec, &oracle_ledger, None, &CancelGate::new_clock_free(), None).unwrap();
@@ -48,6 +48,7 @@ fn interrupted_then_resumed(stop: impl Fn(CheckpointStage) -> bool) {
         assert_eq!(linked(&ledger, &resumed.value, key, kind).unwrap(),
             linked(&oracle_ledger, &oracle.value, key, kind).unwrap());
     }
+    assert_eq!(resumed.value.str_field("status"), oracle.value.str_field("status"));
     assert_eq!(resumed.value.str_field("trace_hash"), oracle.value.str_field("trace_hash"));
     assert_eq!(linked(&ledger, &prefix.value, "design", "study-design").unwrap(), geometry);
 }

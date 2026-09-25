@@ -64,8 +64,8 @@ fn native_study_chunks_keep_identical_geometry_and_rows_then_export_without_solv
     let source = source(&dir);
     let whole_db = dir.join("whole.db");
     let chunk_db = dir.join("chunk.db");
-    let whole = document(&command("study").arg(&source).arg(&whole_db).output().unwrap(), fs_cli::exit::SUCCESS);
-    assert_eq!(whole.str_field("status"), Some("completed"));
+    let whole = document(&command("study").arg(&source).arg(&whole_db).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(whole.str_field("status"), Some("constraint-unmet"));
     assert_eq!(updates(&whole), 3.0);
     let first = document(&command("study").arg(&source).arg(&chunk_db)
         .args(["--budget", "1"]).output().unwrap(), fs_cli::exit::BUDGET);
@@ -73,7 +73,8 @@ fn native_study_chunks_keep_identical_geometry_and_rows_then_export_without_solv
     assert_eq!(updates(&first), 1.0);
     let first_design = retained(&chunk_db, &first, "design");
     let resumed = document(&command("study").arg("--resume").arg(run_id(&first)).arg(&chunk_db)
-        .args(["--budget", "2"]).output().unwrap(), fs_cli::exit::SUCCESS);
+        .args(["--budget", "2"]).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(resumed.str_field("status"), Some("constraint-unmet"));
     assert_eq!(updates(&resumed), 2.0);
     assert_eq!(resumed.path(&["receipt", "continuation", "legacy_prefix_updates_replayed"]).and_then(J::as_f64), Some(0.0));
     for key in ["design", "iterations"] {
@@ -85,24 +86,24 @@ fn native_study_chunks_keep_identical_geometry_and_rows_then_export_without_solv
         let exported = document(&command(verb).arg(run_id(&resumed)).arg(&chunk_db)
             .output().unwrap(), fs_cli::exit::SUCCESS);
         assert_eq!(exported.str_field("status"), Some("ok"));
-        assert_eq!(exported.str_field("study_status"), Some("completed"));
+        assert_eq!(exported.str_field("study_status"), Some("constraint-unmet"));
     }
     let again = document(&command("study").arg("--resume").arg(run_id(&resumed)).arg(&chunk_db)
-        .output().unwrap(), fs_cli::exit::SUCCESS);
-    assert_eq!(again, resumed, "a completed receipt is returned unchanged");
+        .output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(again, resumed, "a terminal receipt is returned unchanged, including its unmet constraint");
 }
 
 #[test]
-fn completed_study_states_whether_its_area_target_was_met() {
-    // "completed" means every requested update ran; three short updates from
-    // two 0.12-radius holes cannot move the area from ~0.91 to the 0.45
-    // target, and the report must say so instead of implying feasibility.
+fn infeasible_material_target_cannot_report_a_successful_study() {
+    // Three short updates from two 0.12-radius holes cannot move the area
+    // from ~0.91 to 0.45. Both the public status/exit and retained report
+    // must distinguish iteration completion from material feasibility.
     let dir = scratch("feasibility");
     let source = source(&dir);
     let database = dir.join("study.db");
     let result = document(&command("study").arg(&source).arg(&database)
-        .output().unwrap(), fs_cli::exit::SUCCESS);
-    assert_eq!(result.str_field("status"), Some("completed"));
+        .output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(result.str_field("status"), Some("constraint-unmet"));
     let report = J::parse(std::str::from_utf8(&retained(&database, &result, "report_json")).unwrap()).unwrap();
     let area = report.path(&["final_material_area_m2"]).and_then(J::as_f64).unwrap();
     let target = report.path(&["volume_target_m2"]).and_then(J::as_f64).unwrap();
@@ -113,6 +114,10 @@ fn completed_study_states_whether_its_area_target_was_met() {
     assert_eq!(tolerance, 0.01);
     assert!(violation > tolerance, "fixture must end infeasible: area {area}");
     assert_eq!(report.path(&["volume_constraint_satisfied"]), Some(&J::Bool(false)));
+    assert_eq!(report.str_field("status"), Some("constraint-unmet"));
+    assert_eq!(report.f64_field("iterations_completed"), Some(3.0));
+    let html = String::from_utf8(retained(&database, &result, "report_html")).unwrap();
+    assert!(html.contains("CONSTRAINT NOT SATISFIED") && html.contains("constraint-unmet"));
 }
 
 #[test]
@@ -121,13 +126,13 @@ fn public_resume_finalizes_a_committed_final_design_without_repeating_an_update(
     let source = source(&dir);
     let database = dir.join("study.db");
     let complete = document(&command("study").arg(&source).arg(&database)
-        .output().unwrap(), fs_cli::exit::SUCCESS);
+        .output().unwrap(), fs_cli::exit::BUDGET);
     let predecessor = complete.path(&["receipt", "predecessor"]).and_then(J::as_str).unwrap();
     let pointer = format!("study-{predecessor}");
     let recovered = document(&command("study").arg("--resume").arg(&pointer).arg(&database)
-        .output().unwrap(), fs_cli::exit::SUCCESS);
+        .output().unwrap(), fs_cli::exit::BUDGET);
     assert_eq!(updates(&recovered), 0.0);
-    assert_eq!(recovered.str_field("status"), Some("completed"));
+    assert_eq!(recovered.str_field("status"), Some("constraint-unmet"));
     for key in ["design", "iterations"] {
         assert_eq!(retained(&database, &complete, key), retained(&database, &recovered, key));
     }
