@@ -124,7 +124,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 20 measures adaptive accuracy on the temperature rise above the
 /// coolest declared reference and lets a tolerance-met study supply the
 /// Discretization term.
-pub const SOLVE_DRIVER_VERSION: u32 = 20;
+/// Version 21 moves declared radiative-reservoir temperatures with the
+/// envelope in the boundary-condition propagation vertices.
+pub const SOLVE_DRIVER_VERSION: u32 = 21;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6418,7 +6420,7 @@ impl InputPropagation {
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6522,10 +6524,16 @@ fn base_fidelity(spec: &ProjectSpec) -> ProjectSpec {
     base
 }
 
-/// Set every inlet/reference temperature to `temperature_k`.
+/// Set every inlet, fluid-reference and radiative-reservoir temperature to
+/// `temperature_k`: all of them are the declared ambient.
 fn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {
     let mut perturbed = spec.clone();
     if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {
+        if let Some(radiation) = setup.radiation.as_mut() {
+            for surface in &mut radiation.surfaces {
+                surface.reservoir_temperature.value = temperature_k;
+            }
+        }
         for boundary in &mut setup.boundaries {
             match &mut boundary.condition {
                 ThermalBoundaryCondition::Convection { reference_temperature, .. } => {
@@ -6637,7 +6645,7 @@ fn propagate_declared_inputs(
             half_width_k: deviation(&boundary_values),
             method: "interval-vertex-resolve",
             detail: format!(
-                "inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)"
+                "inlet, fluid-reference and radiative-reservoir temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)"
             ),
             vertices: boundary_values.clone(),
         },
@@ -12969,6 +12977,35 @@ impl<'a> JsonCursor<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn envelope_vertices_move_inlet_reference_and_radiative_reservoirs_together() {
+        let source = include_str!("../../../data/reference-project/cooling-radiation.fsim");
+        let spec = fs_project::parse_sexpr_migrating(source).expect("radiation reference").decoded.spec;
+        let moved = super::with_inlet_temperature(&spec, 313.15);
+        let setup = moved.cooling.as_ref().and_then(|c| c.conduction.as_ref()).expect("conduction");
+        let mut fluid_rows = 0;
+        for boundary in &setup.boundaries {
+            match &boundary.condition {
+                fs_project::spec::ThermalBoundaryCondition::Convection { reference_temperature, .. } => {
+                    fluid_rows += 1;
+                    assert_eq!(reference_temperature.value, 313.15);
+                }
+                fs_project::spec::ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {
+                    fluid_rows += 1;
+                    assert_eq!(inlet_temperature.value, 313.15);
+                }
+                _ => {}
+            }
+        }
+        assert!(fluid_rows > 0, "the fixture declares a fluid boundary");
+        let surfaces = &setup.radiation.as_ref().expect("declared radiation").surfaces;
+        assert!(!surfaces.is_empty());
+        assert!(surfaces.iter().all(|surface| surface.reservoir_temperature.value == 313.15));
+        // The input project is untouched.
+        let original = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()).unwrap();
+        assert!(original.radiation.as_ref().unwrap().surfaces.iter().all(|surface| surface.reservoir_temperature.value == 293.15));
+    }
     use super::{
         CONDUCTION_MIN_DIHEDRAL_DEG, EVIDENCE_POLL_BYTES, EvidenceReadError, EvidenceUtf8Error,
         EvidenceWork, InvocationWorkExceeded, InvocationWorkLedger, JsonCursor,
