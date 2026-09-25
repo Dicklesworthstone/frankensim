@@ -1086,7 +1086,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 21,
+        SOLVE_DRIVER_VERSION, 22,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3473,9 +3473,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         "\"qoi_count\":1",
         "\"verdict\":\"indeterminate\"",
         // Declared-input propagation measures boundary conditions and the
-        // solver term; measurement is negligible; five terms stay NO-DATA.
+        // solver term; the published solve bounds roundoff; measurement is
+        // negligible; four terms stay NO-DATA.
         "\"weakest_term\":\"some-no-data\"",
-        "\"budget_terms_measured\":3",
+        "\"budget_terms_measured\":4",
         "\"budget_terms_total\":8",
     ] {
         assert!(
@@ -3563,14 +3564,16 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         "the project limit is already effective and must not be safety-factored twice"
     );
     assert!(qoi_receipt.contains(&format!("\"conduction_solution\":\"{solution_hash}\"")));
-    // Propagation measures boundary conditions and the solver term, and
-    // measurement is negligible; the other five sources stay explicit NO-DATA.
-    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 5);
+    // Propagation measures boundary conditions and the solver term, the
+    // published solve bounds roundoff, and measurement is negligible; the
+    // other four sources stay explicit NO-DATA.
+    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 4);
     for kind in EngineeringUncertaintyKind::ALL {
         let measured = matches!(
             kind,
             EngineeringUncertaintyKind::BoundaryConditions
                 | EngineeringUncertaintyKind::SolverAlgebraic
+                | EngineeringUncertaintyKind::Roundoff
                 | EngineeringUncertaintyKind::Measurement
         );
         let needle = format!("\"kind\":\"{}\",\"state\":\"no-data\"", kind.name());
@@ -3605,7 +3608,7 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(report_receipt.contains("frankensim.cli.solve-report.v1"));
     assert!(report_receipt.contains("\"stage\":\"report\""));
     assert!(report_receipt.contains("\"verdict\":\"indeterminate\""));
-    assert!(report_receipt.contains("\"budget_terms_measured\":3"));
+    assert!(report_receipt.contains("\"budget_terms_measured\":4"));
     assert!(report_receipt.contains(&format!("\"qoi_receipt\":\"{}\"", receipts[5])));
     assert!(report_receipt.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])));
     let html = String::from_utf8(artifact_bytes(
@@ -3637,8 +3640,8 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
     assert_eq!(
         twin.matches("\"state\": \"no-data\"").count(),
-        5,
-        "the five NO-DATA terms are carried into the twin"
+        4,
+        "the four NO-DATA terms are carried into the twin"
     );
     let package_text = String::from_utf8(artifact_bytes(
         &ledger,
@@ -4940,8 +4943,8 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
     // A tolerance-met adaptive study now supplies the Discretization term:
     // 2 x the larger enrichment change (Richardson at an assumed order >= 1),
-    // so four sources stay NO-DATA.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    // and the published solve bounds roundoff, so three sources stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
     let upper = qoi
         .split("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0,\"upper_kelvin\":")
         .nth(1)
@@ -5073,9 +5076,10 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
     // The tolerance-met conjugate adaptive study supplies Discretization;
-    // propagation measures boundary, card model-form and solver terms, and
-    // measurement is negligible, so roundoff, geometry and parameters remain.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
+    // propagation measures boundary, card model-form and solver terms, the
+    // published solve bounds roundoff, and measurement is negligible, so
+    // geometry and parameters remain.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
 }
 
 #[test]
@@ -5302,11 +5306,11 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         qoi.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])),
         "{qoi}"
     );
-    // Ladder discretization + propagated boundary/solver + negligible
-    // measurement are measured; the other four stay NO-DATA.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    // Ladder discretization + propagated boundary/solver + the roundoff bound
+    // + negligible measurement are measured; the other three stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
     assert!(
-        qoi.contains("4 of eight engineering uncertainty terms are explicit NO-DATA"),
+        qoi.contains("3 of eight engineering uncertainty terms are explicit NO-DATA"),
         "{qoi}"
     );
     let qoi_progress = progress
@@ -5315,7 +5319,7 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         .expect("QoI progress row");
     for expected in [
         "\"weakest_term\":\"some-no-data\"",
-        "\"budget_terms_measured\":4",
+        "\"budget_terms_measured\":5",
         "\"budget_terms_total\":8",
         "\"verdict\":\"indeterminate\"",
     ] {

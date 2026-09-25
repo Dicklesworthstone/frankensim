@@ -182,10 +182,11 @@ ladder_solve_completes() {
 }
 check "ladder solve completes every stage (three uniform rungs; minutes in a debug build)" ladder_solve_completes
 check "ladder solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/ls.json"
-# Five measured terms: the ladder's discretization half-width, the declared-
-# input propagation's boundary-condition, model-form and solver terms, and a
-# negligible measurement term. Roundoff, geometry and parameters stay NO-DATA.
-check "QoI stage measured exactly five budget terms" grep -q '"budget_terms_measured":5' "${WORK}/ls.err"
+# Six measured terms: the ladder's discretization half-width, the declared-
+# input propagation's boundary-condition, model-form and solver terms, the
+# componentwise adjoint roundoff bound, and a negligible measurement term.
+# Geometry and parameters stay NO-DATA.
+check "QoI stage measured exactly six budget terms" grep -q '"budget_terms_measured":6' "${WORK}/ls.err"
 check "some budget terms remain NO-DATA" grep -q '"weakest_term":"some-no-data"' "${WORK}/ls.err"
 LADDER_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ls.json" | head -1 | cut -d'"' -f4)"
 ladder_report_ok() {

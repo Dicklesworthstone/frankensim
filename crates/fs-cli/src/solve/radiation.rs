@@ -133,6 +133,9 @@ pub(super) struct SolidSolution {
     convective_fluxes: Option<Vec<RobinFlux>>,
     convective_out: Option<f64>,
     radiation: Option<AmbientRadiationReport>,
+    /// The exact combined convective + radiative Robin partition behind a
+    /// radiating field; the roundoff bound must see this operator.
+    pub(super) combined_boundary: Option<fs_conduction::ThermalBoundary>,
 }
 
 impl SolidSolution {
@@ -345,6 +348,7 @@ pub(super) fn solve(
             convective_fluxes: Some(solved.convective_robin_fluxes),
             convective_out: Some(solved.convective_out_w),
             radiation: Some(solved.radiation),
+            combined_boundary: Some(solved.combined_boundary),
         })
     } else {
         let conduction = match interfaces {
@@ -358,6 +362,7 @@ pub(super) fn solve(
             convective_fluxes: None,
             convective_out: None,
             radiation: None,
+            combined_boundary: None,
         })
     }
 }

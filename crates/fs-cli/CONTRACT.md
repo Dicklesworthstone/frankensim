@@ -459,7 +459,13 @@ the largest deviation of the region maximum from the base-fidelity nominal;
 monotone response per input is assumed and disclosed. A refused vertex, or a
 declared (non-card) coefficient, keeps its term NO-DATA under a specific
 reason. Measurement is always negligible (the pipeline ingests no observation
-data). Roundoff, geometry and material parameters remain NO-DATA; while any
+data). The Roundoff term is fs-conduction's componentwise bound
+`γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
+operator behind the field (including a radiating solve's combined partition),
+with λ the adjoint at the hottest vertex of the requirement region. It
+excludes air-network arithmetic and tracks only assembled magnitudes, not
+element-level cancellation, so it is Estimated. Propagation re-solves skip it.
+Geometry and material parameters remain NO-DATA; while any
 term is NO-DATA the verdict stays Estimated / indeterminate and the `no_claim`
 text counts the NO-DATA terms. The
 report projects the interval term's magnitude into the uncertainty table and

@@ -322,11 +322,15 @@ by re-solving at their vertices on the base mesh: inlet/reference temperature
 across the envelope crossed with the fan-curve pressure tolerance (the
 boundary-conditions term), the convection card's discrepancy allowance on the
 derived coefficient (model form), and a 100x tighter solver tolerance (solver
-algebraic); measurement is negligible because no observation data enter. On
-the tracked finned heatsink this measures five of eight terms (boundary
-conditions about 20.0 K, model form about 1.34 K, discretization about 0.001 K
-with the ladder, about 0.0016 K adaptively); roundoff, geometry and material parameters stay NO-DATA, so
-the verdict is still indeterminate. Every term is Estimated, not a certificate.
+algebraic); measurement is negligible because no observation data enter. The
+published solve also bounds its maximum's roundoff: a componentwise
+`γ_k (|b| + |A||T|)` row bound on the assembled solid operator, mapped through
+the adjoint at the hottest region vertex. On the tracked finned heatsink this
+measures six of eight terms: boundary conditions about 20.0 K, model form about
+1.34 K, discretization about 0.001 K with the ladder (about 0.0016 K
+adaptively), and roundoff about 9e-6 K. Geometry and material parameters stay
+NO-DATA, so the verdict is still indeterminate. Every term is Estimated, not a
+certificate.
 
 | Command | Purpose |
 |---------|---------|

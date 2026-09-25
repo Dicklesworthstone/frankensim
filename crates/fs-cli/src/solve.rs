@@ -126,7 +126,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Discretization term.
 /// Version 21 moves declared radiative-reservoir temperatures with the
 /// envelope in the boundary-condition propagation vertices.
-pub const SOLVE_DRIVER_VERSION: u32 = 21;
+/// Version 22 retains a componentwise adjoint roundoff bound on the published
+/// temperature maximum and publishes it as the Roundoff budget term.
+pub const SOLVE_DRIVER_VERSION: u32 = 22;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1253,6 +1255,8 @@ struct QoiStageInputs {
     discretization: Option<LadderDiscretization>,
     /// Declared-input propagation, when the project declares an envelope.
     propagation: Option<InputPropagation>,
+    /// Roundoff bound on the published maximum, when one is requested.
+    roundoff: Option<PropagatedTerm>,
     /// Paired model comparison; this is never used as an error bound.
     radiation_sensitivity: Option<radiation::RadiationSensitivity>,
 }
@@ -1309,6 +1313,8 @@ struct RungAdjointData {
     fallback: fs_conduction::ConductivityModel,
     linear: fs_conduction::LinearConfig,
     air_paths: Vec<fs_airflow::conjugate::AirPath>,
+    /// The combined convective + radiative partition of a radiating solve.
+    radiating_boundary: Option<fs_conduction::ThermalBoundary>,
 }
 
 /// A two-space observation of the actual nodal maximum. Absolute nodal dual
@@ -4399,7 +4405,11 @@ fn qoi_receipt(
             })
         })
         .transpose()?;
-    let term_receipts = propagation_term_receipts(inputs.propagation.as_ref(), conduction_receipt)?;
+    let term_receipts = propagation_term_receipts(
+        inputs.propagation.as_ref(),
+        inputs.roundoff.as_ref(),
+        conduction_receipt,
+    )?;
     let query = OutputQuery::scalar_with_region(&requested[0].name, &requirement.region);
     let severity = match requirement.severity {
         RequirementSeverity::ReliabilityDerating => "reliability-derating",
@@ -5730,6 +5740,9 @@ fn conduction_solve_receipt(
             ),
         })?;
         let ladder_region = ladder_target_region(spec, &region_ids);
+        // The published solve bounds its maximum's roundoff; the propagation's
+        // perturbed re-solves (which arrive with a flow override) do not.
+        let roundoff_wanted = flow_override.is_none() && temperature_maximum_region(spec).is_some();
         // One solid solve on one rung of the h-ladder. Everything below the
         // volumetric audit depends on the rung's complex (element materials,
         // the region-owned mesh, source lumping, interface lowering, boundary
@@ -5977,11 +5990,12 @@ fn conduction_solve_receipt(
             (solution, Some(fragment), converged, path.air_paths())
         };
         let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;
+        let radiating_boundary = solid.combined_boundary;
         let solution = solid.conduction;
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
-        let adjoint_data = if adaptive_requested {
+        let adjoint_data = if adaptive_requested || roundoff_wanted {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary)?.boundary;
             let interfaces = lower_thermal_interfaces(
@@ -5991,7 +6005,10 @@ fn conduction_solve_receipt(
             if let Some(solver) = &spec.solver {
                 linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
-            Some(RungAdjointData { boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths })
+            Some(RungAdjointData {
+                boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,
+                radiating_boundary,
+            })
         } else { None };
         adaptive_deadline(deadline)?;
         Ok(RungSolved {
@@ -6089,9 +6106,14 @@ fn conduction_solve_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization))
+        let roundoff = match temperature_maximum_region(spec) {
+            Some(region) if roundoff_wanted => Some(roundoff_term(&cx, &solved, region, &region_ids, work)?),
+            _ => None,
+        };
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization) = result;
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =
+        result;
     let RungSolved {
         census,
         mesh,
@@ -6325,9 +6347,74 @@ fn conduction_solve_receipt(
             solution_artifact,
             discretization,
             propagation: None,
+            roundoff,
             radiation_sensitivity: None,
         },
     })
+}
+
+/// Roundoff of the published nodal maximum: fs-conduction's componentwise
+/// bound through the adjoint of the exact operator behind the published
+/// field (bead frankensim-rc-root-q61wp.73). Only the solid discrete system at
+/// the converged state is covered; air-network arithmetic is not.
+fn roundoff_term(
+    cx: &fs_exec::Cx<'_>,
+    solved: &RungSolved,
+    region: &str,
+    region_ids: &BTreeMap<String, u32>,
+    work: EvidenceWork<'_>,
+) -> Result<PropagatedTerm, SolveRefusal> {
+    let unmeasured = |reason: &str| Ok(PropagatedTerm::Unmeasured { reason: reason.to_string() });
+    let Some(data) = &solved.adjoint_data else {
+        return unmeasured("the published rung retained no final-state operator");
+    };
+    let Some(&region_id) = region_ids.get(region) else {
+        return unmeasured("the temperature-maximum region has no element label");
+    };
+    let (vertices, _) = trace_qoi_region_vertices(
+        &solved.labels,
+        &solved.mesh.complex().tets,
+        solved.mesh.vertex_count(),
+        region_id,
+        work,
+    )
+    .map_err(|_| {
+        conduction_error(
+            "cli-solve-conduction-roundoff",
+            "the roundoff region trace was cancelled or overflowed",
+            "rerun the solve",
+        )
+    })?;
+    let temperature = &solved.solution.temperature;
+    let Some(&vertex) = vertices.iter().max_by(|&&a, &&b| temperature[a].total_cmp(&temperature[b])) else {
+        return unmeasured("the temperature-maximum region has no vertices");
+    };
+    let problem = fs_conduction::ConductionProblem {
+        mesh: &solved.mesh,
+        boundary: data.radiating_boundary.as_ref().unwrap_or(&data.boundary),
+        material: &data.fallback,
+        element_materials: Some(&data.materials),
+        source: &data.source,
+    };
+    match fs_conduction::roundoff::nodal_roundoff_bound(
+        cx, problem, data.interfaces.as_ref(), temperature, vertex, data.linear,
+    ) {
+        Ok(bound) => Ok(PropagatedTerm::Measured {
+            half_width_k: bound.half_width_k,
+            method: "componentwise-adjoint-roundoff-bound",
+            detail: format!(
+                "gamma_k (|b| + |A||T|) per row of the assembled solid operator at the published state, mapped through its adjoint at the hottest region vertex; gamma {:e}, k {}, adjoint residual {:e}; assembled magnitudes only, air-network arithmetic excluded; Estimated",
+                bound.gamma, bound.operations, bound.adjoint_relative_residual
+            ),
+            vertices: Vec::new(),
+        }),
+        Err(fs_conduction::ConductionError::Cancelled { .. }) => Err(conduction_error(
+            "cli-solve-cancelled",
+            "the roundoff adjoint was cancelled",
+            "rerun the solve",
+        )),
+        Err(error) => Ok(PropagatedTerm::Unmeasured { reason: format!("roundoff bound refused: {error}") }),
+    }
 }
 
 /// Declared-input propagation for the temperature-maximum budget (bead
@@ -6420,7 +6507,7 @@ impl InputPropagation {
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material, geometry and roundoff uncertainty are not propagated; Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material and geometry uncertainty are not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6428,6 +6515,7 @@ const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fid
 /// observation or comparison data.
 fn propagation_term_receipts(
     propagation: Option<&InputPropagation>,
+    roundoff: Option<&PropagatedTerm>,
     conduction_receipt: ContentHash,
 ) -> Result<Vec<QoiTermReceipt>, SolveRefusal> {
     let refused = |error: fs_airflow::qoi::QoiError| {
@@ -6449,24 +6537,29 @@ fn propagation_term_receipts(
         cite("design-stage prediction without measured inputs"),
     )
     .map_err(refused)?];
+    let mut terms: Vec<(EngineeringUncertaintyKind, &PropagatedTerm)> = Vec::new();
     if let Some(propagation) = propagation {
-        for (kind, term) in [
+        terms.extend([
             (EngineeringUncertaintyKind::BoundaryConditions, &propagation.boundary),
             (EngineeringUncertaintyKind::ModelForm, &propagation.model_form),
             (EngineeringUncertaintyKind::SolverAlgebraic, &propagation.solver_algebraic),
-        ] {
-            receipts.push(
-                match term {
-                    PropagatedTerm::Measured { half_width_k, method, detail, .. } => {
-                        QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}")))
-                    }
-                    PropagatedTerm::Unmeasured { reason } => {
-                        QoiTermReceipt::gap(kind, reason.clone(), cite("declared-input propagation gap"))
-                    }
+        ]);
+    }
+    if let Some(roundoff) = roundoff {
+        terms.push((EngineeringUncertaintyKind::Roundoff, roundoff));
+    }
+    for (kind, term) in terms {
+        receipts.push(
+            match term {
+                PropagatedTerm::Measured { half_width_k, method, detail, .. } => {
+                    QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}")))
                 }
-                .map_err(refused)?,
-            );
-        }
+                PropagatedTerm::Unmeasured { reason } => {
+                    QoiTermReceipt::gap(kind, reason.clone(), cite("declared-input propagation gap"))
+                }
+            }
+            .map_err(refused)?,
+        );
     }
     Ok(receipts)
 }
@@ -6788,6 +6881,13 @@ fn conduction_receipt(
         product.receipt.push_str(&propagation.json()?);
         product.receipt.push('}');
         product.qoi_inputs.propagation = Some(propagation);
+    }
+    if let Some(roundoff) = &product.qoi_inputs.roundoff {
+        let closing = product.receipt.pop();
+        debug_assert_eq!(closing, Some('}'), "a conduction receipt is one JSON object");
+        product.receipt.push_str(",\"roundoff\":");
+        product.receipt.push_str(&roundoff.json()?);
+        product.receipt.push('}');
     }
     if let Some(sensitivity) = radiation::measure_sensitivity(
         ledger, spec, cards, context, run, work, resume, available_wall_s,
