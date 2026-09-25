@@ -30,7 +30,7 @@ jobs:
           retention-days: 3
       - name: Test the dependency-free Reynolds pressure and gas-storage kernels
         run: |
-          printf '#[path = "%s/crates/fs-tribo/src/resistive_film.rs"] mod film;\nuse film::*;\n#[path = "%s/crates/fs-flux/src/gas_film/resistive/tests.rs"] mod tests;\n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/film-tests.rs"
+          printf '#[path = "%s/crates/fs-tribo/src"] mod owner { pub mod resistive_film; }\nuse owner::resistive_film::*;\n#[path = "%s/crates/fs-flux/src/gas_film/resistive/tests.rs"] mod tests;\n' "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/film-tests.rs"
           rustc --edition=2024 --test "$RUNNER_TEMP/film-tests.rs" -o "$RUNNER_TEMP/film-tests"
           "$RUNNER_TEMP/film-tests"
       - name: Materialize the repository's pinned dependencies
