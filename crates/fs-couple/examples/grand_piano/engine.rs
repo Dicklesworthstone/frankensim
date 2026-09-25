@@ -75,6 +75,8 @@ pub struct Instrument {
     contact_areas:Vec<f64>,
     contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
+    /// Supplied lateral/vertical viscous drag ratio for each complete course.
+    transverse_damper_ratio:Option<Vec<f64>>,
     radiation:Option<radiation::Prepared>,
     output_rate:u32,substeps:usize,sustain:f64,sostenuto:bool,una_corda:bool,
     /// Point-image controls only. A spatial specification owns its pad/free
@@ -150,6 +152,27 @@ impl Instrument {
     pub fn new_with_contact_geometry(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
         modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
         shank_geometry:Option<ShankGeometry>,footprints:Option<&hammer_footprint::Specification>)->Result<Self,String> {
+        Self::new_with_transverse_contact_geometry(courses,board,rate,substeps,modes_per_string,damping,
+            materials,shank_geometry,footprints,None)
+    }
+
+    /// Two transverse directions on one board and one hammer per key. The
+    /// optional pair contains complete bare-board lateral bridge rows and
+    /// explicit lateral/vertical damper ratios in [0,10], course order.
+    /// The source geometry owns direction/orthogonality; no bridge ratio or
+    /// lateral drag is inferred from the vertical mode or a material name.
+    /// Finite hammer faces still apply ONLY vertical normal contact, with the
+    /// original total area and shank mass. None retains the one-plane image.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_transverse_contact_geometry(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
+        shank_geometry:Option<ShankGeometry>,footprints:Option<&hammer_footprint::Specification>,
+        secondary:Option<(&[Vec<f64>],&[f64])>)->Result<Self,String> {
+        if secondary.is_some_and(|(_,ratios)| ratios.len()!=courses.len()
+            || ratios.iter().any(|r|!r.is_finite() || !(0.0..=10.0).contains(r))) {
+            return Err("two-plane piano needs explicit finite lateral damper ratios for every course".into());
+        }
+        let transverse_damper_ratio=secondary.map(|(_,ratios)|ratios.to_vec());
         if !(8_000..=192_000).contains(&rate)||!(1..=16).contains(&substeps){return Err("invalid rate/substep budget".into());}
         if materials.len()!=courses.len() {return Err("one felt/Prony card is required for every course".into());}
         let mut laws=Vec::with_capacity(materials.len());
@@ -163,9 +186,10 @@ impl Instrument {
         }
         let mechanics_rate=rate.checked_mul(substeps as u32).ok_or("mechanics rate overflow")?;
         let bank=match footprints {
-            Some(spec)=>Bank::new_with_hammer_footprints(&courses,board,mechanics_rate,
-                0.45*f64::from(rate),modes_per_string,damping,spec)?,
-            None=>Bank::new(&courses,board,mechanics_rate,0.45*f64::from(rate),modes_per_string,damping)?,
+            Some(spec)=>Bank::new_with_hammer_footprints_and_transverse_bridge(&courses,board,mechanics_rate,
+                0.45*f64::from(rate),modes_per_string,damping,spec,secondary.map(|s|s.0))?,
+            None=>Bank::new_with_transverse_bridge(&courses,board,mechanics_rate,0.45*f64::from(rate),
+                modes_per_string,damping,secondary.map(|s|s.0))?,
         };
         let contact_solver=contact_solver::Prepared::new(&bank,&courses)?;
         let nc=bank.contact_strings.len();let dt=1.0/f64::from(mechanics_rate);
@@ -200,7 +224,7 @@ impl Instrument {
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
-            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_solver,spatial_dampers:None,radiation:None,output_rate:rate,substeps,sustain:0.0,
+            bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_solver,spatial_dampers:None,transverse_damper_ratio,radiation:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
             active:Vec::with_capacity(nc)})
@@ -228,7 +252,8 @@ impl Instrument {
     /// admission; configuring a viscous law neither stores energy nor resets
     /// ongoing string, board, hammer or felt history. This is not a hot control.
     pub fn configure_dampers(&mut self,spec:&dampers::Specification)->Result<(),String>{
-        let prepared=dampers::Prepared::new(spec,&self.courses,&self.bank)?;
+        let prepared=dampers::Prepared::new_with_transverse_drag(spec,&self.courses,&self.bank,
+            self.transverse_damper_ratio.as_deref())?;
         self.spatial_dampers=Some(prepared);Ok(())
     }
     /// None is the original point image; Some counts actual retained string
@@ -333,8 +358,12 @@ impl Instrument {
         let mut loss=0.0;
         for si in 0..self.bank.strings.len(){
             let ci=self.bank.strings[si].course;let h=self.hammers[ci];
-            if self.bank.strings[si].contact.is_some()&&!h.held&&!h.latched&&self.courses[ci].midi<=self.last_damped_midi {
-                let drag=self.damper_drag_ns_m*(1.0-self.sustain).powi(2);
+            if !self.bank.strings[si].duplex&&!h.held&&!h.latched&&self.courses[ci].midi<=self.last_damped_midi {
+                let ratio=if self.bank.strings[si].polarization==0 {1.} else {
+                    *self.transverse_damper_ratio.as_ref().and_then(|r|r.get(ci)).ok_or(Error::InvalidControl)?
+                };
+                let drag=self.damper_drag_ns_m*(1.0-self.sustain).powi(2)*ratio;
+                if !drag.is_finite() {return Err(Error::InvalidControl);}
                 loss+=self.bank.damp_string(si,drag,dt);
             }
         }
@@ -583,7 +612,7 @@ mod tests {
             assert!(p.contacts.iter().any(|c|c.state.eps_max>0.0));
             assert_eq!(p.hammers[0].jack.peak_n,0.0);
             assert!(p.accounting.input_work_j>0.0);assert!(p.accounting.shank_loss_j>0.0);
-            assert!((p.accounting.input_work_j-p.accounting.dissipated_j()-p.energy_j()).abs()<1e-7);
+            assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs()<1e-7);
         }
         assert!(instrument().jack_on(69,70.0,0.007).is_err());
     }
@@ -614,3 +643,7 @@ mod tests {
         assert_eq!(p.bank.q,q);assert_eq!(p.bank.v,v);assert_eq!(p.energy_j(),energy);
     }
 }
+
+#[cfg(test)]
+#[path="polarization_engine_tests.rs"]
+mod polarization_tests;
