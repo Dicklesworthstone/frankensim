@@ -47,7 +47,7 @@ jobs:
           cargo test --release -p fs-solver --lib checked_cg::
           cargo test --release -p fs-conduction --lib transient::backward_euler::tests
       - name: Test actual transient fan-sizing trajectories
-        run: cargo test --release -p fs-cli --lib network_command::transient::sizing::tests
+        run: cargo test --release -p fs-cli --bin frankensim network_command::transient::sizing::tests
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::

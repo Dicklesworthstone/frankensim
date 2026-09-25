@@ -58,8 +58,9 @@ pub struct StepSolution {
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, joules; checked independently.
     pub energy_residual_j: f64,
-    /// Recomputed relative residual of the normalized correction solve (or
-    /// the worst such inner residual over nonlinear Newton corrections).
+    /// Recomputed relative residual of the returned physical correction for
+    /// the linear path, or the worst normalized inner residual over nonlinear
+    /// Newton corrections. The linear gate includes correction rescaling.
     /// Final absolute-temperature rounding is checked by the separate energy gate.
     pub relative_residual: f64,
     /// Total Krylov iterations for this solid response.
@@ -206,15 +207,16 @@ fn solve(cx: &Cx<'_>, matrix: &Csr, rhs: &[f64], config: LinearConfig)
     -> Result<(Vec<f64>, f64, usize), ConductionError>
 {
     poll(cx, 0)?;
-    let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
-    let normalized: Vec<f64> = rhs.iter().map(|v| v/scale).collect();
+    if rhs.iter().all(|&v| v == 0.0) { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
     let op = CsrOp::symmetric(matrix.clone());
     let pre = spd_preconditioner(matrix);
     // A recursive CG stop can miss the recomputed gate by roundoff even
     // with work left (the 319.6 K transient-fan sizing regression). Repair
     // that actual defect, rather than accepting it or weakening the tolerance.
-    let checked = checked_cg(&op, &pre, &normalized, CheckedCgConfig {
+    // The driver scales internally, then checks the RETURNED correction in
+    // this original system. Checking only an intermediate normalized vector
+    // would miss rounding introduced by its final physical rescaling.
+    let checked = checked_cg(&op, &pre, rhs, CheckedCgConfig {
         tolerance: config.tolerance,
         max_iterations: config.max_iterations,
         max_corrections: 2,
@@ -228,9 +230,8 @@ fn solve(cx: &Cx<'_>, matrix: &Csr, rhs: &[f64], config: LinearConfig)
         return Err(ConductionError::LinearSolveFailed { iteration: 0, krylov_iterations: iterations,
             true_relative_residual: relative, tolerance: config.tolerance });
     }
-    let solution = checked.x.iter().map(|v| finite(v*scale)).collect::<Result<_,_>>()?;
     poll(cx, iterations)?;
-    Ok((solution, relative, iterations))
+    Ok((checked.x, relative, iterations))
 }
 fn sum(values: impl IntoIterator<Item=f64>) -> Result<f64, ConductionError> {
     values.into_iter().try_fold(0.0, |s,v| finite(s+v))

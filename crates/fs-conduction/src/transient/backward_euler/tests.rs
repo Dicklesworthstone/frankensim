@@ -160,3 +160,28 @@ fn checked_correction_keeps_a_hard_iteration_cap_and_retryable_history() {
         assert_eq!(old, saved);
     });
 }
+
+#[test]
+fn linear_correction_residual_measures_the_rescaled_vector() {
+    let mesh = mesh();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let engine = BackwardEuler::uniform(cx, &mesh, VolumetricHeatCapacity::declared(2e6).unwrap()).unwrap();
+        let policy = LinearConfig::default();
+        // Use the real assembled capacity operator and loads whose raw
+        // squared norms underflow/overflow. Neither scale nor a normalized
+        // intermediate is permitted to hide the returned vector's defect.
+        for scale in [1e-200, 1e200] {
+            let rhs: Vec<_> = (0..mesh.vertex_count()).map(|v| (v as f64 + 0.25) * scale).collect();
+            let (correction, reported, iterations) = solve(cx, &engine.capacity, &rhs, policy).unwrap();
+            let mut applied = vec![0.0; rhs.len()];
+            engine.capacity.spmv(&correction, &mut applied);
+            let maximum = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            let residual: Vec<_> = rhs.iter().zip(applied).map(|(&b, a)| (b - a) / maximum).collect();
+            let normalized: Vec<_> = rhs.iter().map(|v| v / maximum).collect();
+            let measured = norm2(&residual) / norm2(&normalized);
+            assert!(measured < policy.tolerance, "returned correction residual {measured}");
+            close(reported, measured, 32.0 * f64::EPSILON * measured.max(f64::MIN_POSITIVE));
+            assert!(iterations <= policy.max_iterations);
+        }
+    });
+}
