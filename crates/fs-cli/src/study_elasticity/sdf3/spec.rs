@@ -13,6 +13,9 @@ pub(super) struct Spec {
     pub per_solve: usize,
     pub boxes: usize,
     pub points: usize,
+    pub physical: bool,
+    pub bounds: ([f64; 3], [f64; 3]),
+    pub fixed: FixedFace,
     pub height: f64,
     pub curvature: f64,
     pub level: u32,
@@ -142,13 +145,12 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         "domain",
         &["type", "bounds", "height-m", "curvature-per-m"],
     )?;
-    word(domain[0], "curved-height-sdf")?;
+    let physical = matches!(&domain[0].kind,
+        NodeKind::Symbol(s) | NodeKind::Str(s) if s == "physical-curved-height-sdf");
+    if !physical { word(domain[0], "curved-height-sdf")?; }
     let bounds = super::super::list(domain[1], "bounds")?;
-    if bounds.len() != 2 || vector(&bounds[0])? != [0.0; 3] || vector(&bounds[1])? != [1.0; 3] {
-        return Err(invalid(
-            "the admitted domain is the explicit one-metre cube",
-        ));
-    }
+    if bounds.len() != 2 { return Err(invalid("bounds require lower and upper SI vectors")); }
+    let bounds = (vector(&bounds[0])?, vector(&bounds[1])?);
     let physics = fields(
         &items[9],
         "physics",
@@ -163,7 +165,17 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
     )?;
     word(physics[0], "elasticity-3d")?;
     let scenario = fields(&items[10], "scenario", &["fixed-boundary", "body-loads"])?;
-    word(scenario[0], "left")?;
+    let fixed = match &scenario[0].kind {
+        NodeKind::Symbol(s) | NodeKind::Str(s) => match s.as_str() {
+            "left" => FixedFace::Left,
+            "right" => FixedFace::Right,
+            "front" => FixedFace::Front,
+            "back" => FixedFace::Back,
+            "bottom" => FixedFace::Bottom,
+            _ => return Err(invalid("fixed-boundary requires left, right, front, back or bottom")),
+        },
+        _ => return Err(invalid("fixed-boundary must name a box face")),
+    };
     let load_nodes = super::super::list(scenario[1], "body loads")?;
     if load_nodes.is_empty() || load_nodes.len() > 4 {
         return Err(invalid("declare 1..=4 independent body loads"));
@@ -230,6 +242,9 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         per_solve: count(budgets[3])?,
         boxes: count(budgets[4])?,
         points: count(budgets[5])?,
+        physical,
+        bounds,
+        fixed,
         height: scalar(domain[2])?,
         curvature: scalar(domain[3])?,
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
@@ -283,9 +298,8 @@ impl Spec {
                 "declared memory is too small for the requested geometry/field envelope",
             ));
         }
-        if !(0.1..=0.8).contains(&self.height)
-            || !(0.0..=0.4).contains(&self.curvature)
-            || !(1e-6..=1e15).contains(&self.youngs)
+        geometry::validate(self)?;
+        if !(1e-6..=1e15).contains(&self.youngs)
             || !(0.0..=1.0 / 3.0).contains(&self.poisson)
         {
             return Err(invalid(
@@ -303,7 +317,6 @@ impl Spec {
         }
         if !(0.01..=0.99).contains(&self.density)
             || !(0.01..=0.99).contains(&self.volume)
-            || !(0.001..=1.0).contains(&self.radius)
             || !(1..=16).contains(&self.updates)
             || !(0.001..=0.5).contains(&self.move_limit)
             || !(0.0 < self.marking && self.marking <= 1.0)

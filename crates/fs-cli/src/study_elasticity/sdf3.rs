@@ -33,6 +33,10 @@ use fs_topopt::{
 mod checkpoint;
 use checkpoint::Spent;
 
+#[path = "sdf3/geometry.rs"]
+mod geometry;
+use geometry::{FixedFace, PhysicalDomain};
+
 #[path = "sdf3/output.rs"]
 mod output;
 #[path = "sdf3/spec.rs"]
@@ -161,11 +165,15 @@ fn compute_observed(
     }
     let mut tree = Octree3::uniform(spec.level as u8, spec.max_level as u8, spec.leaves)
         .map_err(|e| fail("cli-study-sdf3-background", e.to_string()))?;
-    let domain = Domain {
+    let legacy_domain = Domain {
         height: spec.height,
         curvature: spec.curvature,
     };
-    let bounds = HexCell::try_new([0.0; 3], [1.0; 3])
+    let physical_domain = PhysicalDomain {
+        bounds: spec.bounds, height: spec.height, curvature: spec.curvature,
+    };
+    let domain: &dyn CutSdf3 = if spec.physical { &physical_domain } else { &legacy_domain };
+    let bounds = HexCell::try_new(spec.bounds.0, spec.bounds.1)
         .map_err(|e| fail("cli-study-sdf3-domain", e.to_string()))?;
     let material = IsotropicElastic::new(spec.youngs, spec.poisson, 1.0)
         .map_err(|e| fail("cli-study-sdf3-material", e.to_string()))?;
@@ -190,9 +198,9 @@ fn compute_observed(
         let result = AdaptiveElasticity3::build(
             bounds,
             tree,
-            &domain,
+            domain,
             &material,
-            &|p| p[0] == 0.0,
+            &|p| spec.fixed.contains(p, spec.bounds),
             ElasticityOptions3 {
                 max_cells: spec.leaves,
                 max_dofs: 50_000,
