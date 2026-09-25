@@ -168,7 +168,8 @@ fn mute_jaws_and_opposite_hand_mallet_keep_their_own_inertia_and_history() {
     let e=splash_with_shafts(256,2e-6,true,first(),Some(shell()),&[],Some(second()),Some(&mute),&selected,&s).unwrap();
     let p=e.flexible_sticks[1].as_ref().unwrap();let jaws=e.mute.as_ref().unwrap();
     assert!(e.flexible_sticks[0].is_none());assert_eq!(p.elastic_start(),jaws.ports[0].coordinate+1);
-    assert_eq!(jaws.first_pad,10,"six stand plus four independent mallet patches");
+    // The public felt histories below check all six stand, four mallet and
+    // two jaw sites without exposing the attachment's private pad offset.
     let sources=e.acoustics.as_ref().unwrap().state_modes();
     assert!(sources.iter().all(|k|*k<e.second_stick.unwrap().coordinate));
     // All finite-area felt histories remain private trailing states. Bending
