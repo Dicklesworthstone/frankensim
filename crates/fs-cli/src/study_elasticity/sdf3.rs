@@ -33,6 +33,9 @@ use fs_topopt::{
 mod checkpoint;
 use checkpoint::Spent;
 
+#[path = "sdf3/loading.rs"]
+mod loading;
+
 #[path = "sdf3/geometry.rs"]
 mod geometry;
 use geometry::{FixedFace, PhysicalDomain};
@@ -195,19 +198,7 @@ fn compute_observed(
         };
         let mut quadrature =
             QuadratureControl3::new(limits, &mut gate).map_err(ElasticityError3::from)?;
-        let result = AdaptiveElasticity3::build(
-            bounds,
-            tree,
-            domain,
-            &material,
-            &|p| spec.fixed.contains(p, spec.bounds),
-            ElasticityOptions3 {
-                max_cells: spec.leaves,
-                max_dofs: 50_000,
-                ..Default::default()
-            },
-            &mut quadrature,
-        );
+        let result = loading::build_operator(spec, bounds, tree, domain, &material, &mut quadrature);
         let spent = quadrature.work();
         let old = geometry.get();
         let add = |a: usize, b: usize| a.checked_add(b)
@@ -229,21 +220,6 @@ fn compute_observed(
         })?;
     let mut study = CutDensityStudy3::new(operator, spec.radius, spec.schedule[0]);
     let raw = vec![spec.density; study.cells()];
-    // Independent constant reference body densities. Reintegrating these laws
-    // on each background preserves physical forcing without nodal transfer.
-    let laws: Vec<_> = spec
-        .loads
-        .iter()
-        .map(|(force, _)| move |_: [f64; 3]| *force)
-        .collect();
-    let loads: Vec<_> = laws
-        .iter()
-        .zip(&spec.loads)
-        .map(|(law, (_, weight))| GoalReferenceLoad3 {
-            load: ReferenceLoad3::body(law),
-            weight: *weight,
-        })
-        .collect();
     let mut checkpoint = |_| poll();
     let mut control = SolveControl::new(
         SolveBudget {
@@ -253,10 +229,10 @@ fn compute_observed(
         &mut checkpoint,
     );
     let mut completed_stages = 0;
-    let report = controlled_adaptive_sdf3_continuation_observed(
+    let report = loading::with_laws(spec, |loads| controlled_adaptive_sdf3_continuation_observed(
         &mut study,
         &mut tree,
-        &loads,
+        loads,
         &raw,
         &spec.schedule[..requested_stages],
         AdaptiveContinuationOptions3 {
@@ -294,7 +270,7 @@ fn compute_observed(
                 completed_stages, requested_stages, status,
             })
         },
-    )?;
+    ))?;
     let result = &report.continuation;
     let status = if result.termination == ContinuationTermination::ScheduleComplete {
         if completed_stages == spec.schedule.len() { "completed" } else { "budget-exhausted" }
