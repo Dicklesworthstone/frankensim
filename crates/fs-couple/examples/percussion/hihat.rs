@@ -157,6 +157,7 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     for (k,w) in p.weights.iter().enumerate(){b[lo.start+k]=*w;}
     // Compile before moving either basis; cell/face gaps use both real skins.
     // Stick and pedal columns are zero: pressure loads the shells reciprocally.
+    let gas=film.and_then(squeeze::Config::gas);
     let film=film.map(|f|f.compile(spec,&upper,&lower,hi.start,lo.start,total)).transpose()?;
     let upper_omega=upper.reduction.omegas().to_vec();let lower_omega=lower.reduction.omegas().to_vec();
     let mut up=zero_body(BodyPotential::Shell(upper.reduction),&upper_omega);
@@ -173,7 +174,11 @@ fn build_with_strikers(spec:&Spec,upper:&specimen::Specimen,lower:&specimen::Spe
     if let Some(body)=second_elastic {bodies.push(body);}
     let flexible_sticks=[first.ports,second_ports];
     let system=ImpactSystem::new(bodies,contacts,pads,vec![],config(steps,dt))?;
-    let system=match film {Some(film)=>system.with_squeeze_film(film)?,None=>system};
+    let system=match (film,gas) {
+        (Some(film),Some(gas))=>system.with_compressible_squeeze_film(film,gas)?,
+        (Some(film),None)=>system.with_squeeze_film(film)?,
+        (None,_)=>system,
+    };
     Ok(Pair{experiment:Experiment{flexible_sticks:flexible_sticks.clone(),mute:None,system:Mechanics::Reference(system),force:vec![0.;total],
         stick_weight,second_stick,observer_a:a,observer_b:b,pressure:None,acoustics,air:None},
         pedal,collision:inter,upper_modes:hi,lower_modes:lo,flexible_sticks})
@@ -186,3 +191,7 @@ mod tests;
 #[cfg(test)]
 #[path="hihat_flexible_tests.rs"]
 mod flexible_tests;
+
+#[cfg(test)]
+#[path="hihat_gas_tests.rs"]
+mod gas_tests;

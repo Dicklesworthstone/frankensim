@@ -73,7 +73,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }
     eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
-        if squeeze.is_some(){"quasistatic incompressible Reynolds, declared validity limits"}else{"none"});
+        squeeze.as_ref().map_or("none",squeeze::Config::label));
     let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
         let wav=match loaded {
@@ -87,6 +87,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
         if ports.is_some(){write!(out,",stick{}_tip_down_m,stick{}_tip_speed_m_s,stick{}_hand_down_m,stick{}_hand_speed_m_s,stick{}_bending_j",hand+1,hand+1,hand+1,hand+1,hand+1)?;}
     }
+    let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
+    if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=e.system.step(&e.force,&gate)?;let x=e.system.state();
@@ -104,7 +106,25 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
             write!(out,",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",o.tip_displacement_m,o.tip_velocity_m_s,
                 o.hand_displacement_m,o.hand_velocity_m_s,o.flexural_energy_j)?;
         }
+        if gas {
+            let o=gas_observation(&e.system)?.ok_or("missing selected gas state")?;
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",o.minimum_pressure_pa,o.maximum_pressure_pa,
+                o.mass_kg,o.free_energy_j)?;
+        }
         writeln!(out)?;
     }
     out.flush()?;Ok(())
+}
+
+// Observation follows wrappers but never advances an independent gas clock.
+pub(super) fn gas_observation(system:&Mechanics)
+    ->Result<Option<fs_couple::render::plate::impact::gas_film::GasObservation>,Error>
+{
+    Ok(match system {
+        Mechanics::Reference(s)=>s.gas_film_observation()?,
+        Mechanics::Nonlinear(s)=>s.gas_film_observation()?,
+        Mechanics::Substepped(s)=>s.gas_film_observation()?,
+        Mechanics::Driven{inner,..}=>gas_observation(inner)?,
+        Mechanics::Prepared(_)=>None,
+    })
 }

@@ -1,10 +1,11 @@
 //! Physical thin-gap air loading; no oscillator, output filter, or second clock.
 //! This adapter samples the two actual inner skins and compiles a polar pressure
-//! graph for fs-flux. The shared impact owner supplies motion and pressure work.
+//! graph for fs-tribo. The shared impact owner supplies motion and pressure work.
 use super::{Error, Shell, ShellFace, Spec};
 use fs_couple::render::plate::impact::squeeze::{
     FilmCell, FilmChannel, FilmLimits, GapPort, ResistiveFilm,
 };
+use fs_couple::render::plate::impact::gas_film::AmbientGas;
 use std::io::Read;
 use std::path::Path;
 
@@ -19,6 +20,7 @@ pub(super) struct Config {
     inner_open: bool,
     outer_open: bool,
     limits: FilmLimits,
+    gas: Option<AmbientGas>,
 }
 
 pub(super) fn option(args: &mut Vec<String>) -> Result<Option<Config>, Error> {
@@ -36,10 +38,11 @@ pub(super) fn option(args: &mut Vec<String>) -> Result<Option<Config>, Error> {
 }
 
 impl Config {
-    fn parse(text: &str) -> Result<Self, Error> {
+    pub(super) fn parse(text: &str) -> Result<Self, Error> {
         if text.len() > MAX_BYTES { return Err("squeeze-film input exceeds 8 KiB".into()); }
         let (mut header, mut annulus, mut viscosity, mut limits, mut boundary) =
             (false, None, None, None, None);
+        let mut gas=None;
         for (line, raw) in text.lines().enumerate() {
             let row = raw.split('#').next().unwrap_or("").trim();
             if row.is_empty() { continue; }
@@ -65,6 +68,9 @@ impl Config {
                 "limits" if f.len() == 4 && limits.is_none() => limits = Some(FilmLimits {
                     minimum_cell_gap_m: number(1)?, maximum_gap_m: number(2)?, maximum_pressure_pa: number(3)?,
                 }),
+                "isothermal" if f.len() == 4 && gas.is_none() => gas=Some(AmbientGas {
+                    pressure_pa:number(1)?,temperature_k:number(2)?,specific_gas_constant_j_kg_k:number(3)?,
+                }),
                 "boundary" if f.len() == 3 && boundary.is_none() => {
                     let open = |s: &str| match s { "open" => Ok(true), "sealed" => Ok(false), _ => Err(bad()) };
                     boundary = Some((open(f[1])?, open(f[2])?));
@@ -75,7 +81,7 @@ impl Config {
         let (inner_m, outer_m, radial, azimuths) = annulus.ok_or("missing film annulus")?;
         let (inner_open, outer_open) = boundary.ok_or("missing inner/outer film boundary conditions")?;
         let out = Self { inner_m, outer_m, radial, azimuths, inner_open, outer_open,
-            viscosity_pa_s: viscosity.ok_or("missing film viscosity")?, limits: limits.ok_or("missing film limits")? };
+            viscosity_pa_s: viscosity.ok_or("missing film viscosity")?, limits: limits.ok_or("missing film limits")?, gas };
         out.validate()?;
         Ok(out)
     }
@@ -88,9 +94,21 @@ impl Config {
             || !self.limits.minimum_cell_gap_m.is_finite() || self.limits.minimum_cell_gap_m <= 0.0
             || !self.limits.maximum_gap_m.is_finite() || self.limits.maximum_gap_m <= self.limits.minimum_cell_gap_m
             || !self.limits.maximum_pressure_pa.is_finite() || self.limits.maximum_pressure_pa <= 0.0
-            || !(self.inner_open || self.outer_open)
-        { return Err("film needs an ordered annulus, 1..64 cells, >=3 azimuths, positive SI limits and an ambient drain".into()); }
+            || !(self.inner_open || self.outer_open) && self.gas.is_none()
+        { return Err("film needs an ordered annulus, 1..64 cells, >=3 azimuths, positive SI limits and either a drain or explicit compressible gas".into()); }
+        if let Some(g)=self.gas {
+            let rt=g.temperature_k*g.specific_gas_constant_j_kg_k;
+            if [g.pressure_pa,g.temperature_k,g.specific_gas_constant_j_kg_k,rt].iter()
+                .any(|x|!x.is_finite()||*x<=0.0) || !g.pressure_pa.powi(2).is_finite() {
+                return Err("isothermal film needs finite positive absolute pressure, temperature and specific gas constant".into());
+            }
+        }
         Ok(())
+    }
+    pub(super) fn gas(&self)->Option<AmbientGas> {self.gas}
+    pub(super) fn label(&self)->&'static str {
+        if self.gas.is_some(){"compressible isothermal Reynolds with retained gas mass"}
+        else{"quasistatic incompressible Reynolds, declared validity limits"}
     }
 
     pub(super) fn compile(&self, spec: &Spec, upper: &Shell, lower: &Shell,
