@@ -2,6 +2,9 @@
 //! strictly dominant. The supplied columns are numerical proposals, never
 //! inverse authority: every entry of `I - A R` is enclosed independently.
 
+/// Sparse whole-spectrum fallback beyond the dense inverse envelope.
+pub mod spectral;
+
 use super::arithmetic::{add_up, down, mul_up, up};
 use super::{
     GoalBoundStatus, GoalResidualError, GoalResidualLimits, GoalResidualReport, ScalarEnclosure,
