@@ -63,6 +63,10 @@ FEM calculation on the declared mesh predicts a first-cycle peak of about
 306.343159 K, but 310.748442 K in the tenth cycle, at 1380 seconds. A 308 K limit
 passes the first pulse and fails in the third. The total input is 6000 J;
 the final solid still reaches only about 304.948465 K after cooling.
+FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) gives a first-cycle peak of 304.1166 K
+and 309.1035042 K in the tenth cycle, at 1380 seconds. The example's limit is
+now 306 K: the first two cycles pass (304.12 and 305.63 K), and the third first
+exceeds it at 326 seconds. The final solid reaches 305.5585429 K.
 
 These are independent mathematical references, not executed Rust measurements.
 The focused Rust tests cover state carryover, energy totals, single-cycle parity,
@@ -133,3 +137,6 @@ is not the same as the accepted cycle-map residual. Power sizing against a
 308 K limit selects a multiplier near 0.6853, reducing the 20 W pulse to about
 13.71 W. A first cold pulse alone would have accepted the original 20 W.
 These numbers remain independent mathematical references, not Rust executions.
+FrankenSim with lumped capacity (measured 2026-09-25) accepts cycle peaks near
+310.0425874 K, and power sizing against 308 K selects a multiplier near 0.79657,
+about 15.93 W.
