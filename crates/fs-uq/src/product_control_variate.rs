@@ -11,6 +11,8 @@
 //! Standard errors here are descriptive fixed-sample estimates, not confidence
 //! sequences, physical error bounds, or an assertion of variance reduction.
 
+mod checkpoint;
+
 use core::fmt;
 
 use crate::product_execution::sample_parameters;
@@ -56,9 +58,9 @@ impl std::error::Error for UqControlError {}
 /// Even a late-created fresh execution cannot legitimize such data-dependent
 /// selection. The constructor's early-freeze check is not a proof of independence.
 ///
-/// To recover, keep the original frozen control alongside the trusted model
-/// inputs. Existing UqExecution checkpoints retain the RAW responses; assessment
-/// deterministically regenerates their parameters without rerunning physics.
+/// To recover, use [`Self::checkpoint`] and [`Self::restore`] to retain the
+/// frozen coefficients and RAW responses together. Assessment deterministically
+/// regenerates their parameters without rerunning either nominal or sample physics.
 #[derive(Debug, Clone)]
 pub struct LinearControlVariate {
     plan: UqPlan,
