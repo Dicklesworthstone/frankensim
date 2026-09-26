@@ -69,6 +69,7 @@ fn gap(
             json_string(SCOPE),
         )),
         primal_iterations: 0,
+        linear_work: None,
     })
 }
 
@@ -221,6 +222,7 @@ pub(super) fn maximum_evidence(
         term: Some(term),
         control_json: Some(control_json),
         primal_iterations: 0,
+        linear_work: None,
     })
 }
 

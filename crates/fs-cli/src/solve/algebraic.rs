@@ -7,7 +7,10 @@ use super::{
     canonical_f64, conduction_error, json_string, trace_qoi_region_vertices,
 };
 
+mod balance;
 mod coupled;
+
+pub(super) use balance::{finish_discretization_balance, maximum_bound, retarget_linear_maximum};
 
 /// Each mesh solve uses a tenth of the requested primary-QoI accuracy for
 /// algebraic error. This is an allocation, not a discretization observation.
@@ -18,6 +21,7 @@ pub(super) struct MaximumEvidence {
     pub(super) term: Option<PropagatedTerm>,
     pub(super) control_json: Option<String>,
     pub(super) primal_iterations: usize,
+    pub(super) linear_work: Option<balance::LinearWork>,
 }
 
 fn unavailable(status: &str, reason: String, estimate_fallback: bool) -> MaximumEvidence {
@@ -30,6 +34,7 @@ fn unavailable(status: &str, reason: String, estimate_fallback: bool) -> Maximum
         )),
         term: (!estimate_fallback).then_some(PropagatedTerm::Unmeasured { reason }),
         primal_iterations: 0,
+        linear_work: None,
     }
 }
 
@@ -129,7 +134,8 @@ pub(super) fn maximum_term(
             requested_k,
         );
     }
-    let (analysis, control_json, primal_iterations, control_summary) = if requested_k.is_finite()
+    let (analysis, control_json, primal_iterations, control_summary, linear_work) = if requested_k
+        .is_finite()
         && requested_k > 0.0
     {
         let control = fs_conduction::adjoint::LinearGoalSolveConfig {
@@ -183,8 +189,16 @@ pub(super) fn maximum_term(
         );
         // This field has independently passed the original physical residual
         // gate, and all energy/contact/Robin outputs have been recomputed.
+        let linear_work =
+            balance::LinearWork::from_polish(&polished, control.max_primal_iterations);
         solved.solution = polished.solution;
-        (polished.analysis, receipt, iterations, summary)
+        (
+            polished.analysis,
+            receipt,
+            iterations,
+            summary,
+            Some(linear_work),
+        )
     } else {
         let analysis = match fs_conduction::adjoint::analyze_linear_maximum(
             cx,
@@ -203,6 +217,7 @@ pub(super) fn maximum_term(
                 ));
             }
         };
+        let linear_work = balance::LinearWork::from_analysis(&analysis, data.linear.max_iterations);
         // Zero rise or an unrepresentable allocation admits no positive K
         // target. Preserve the measured bound and disclose the missing goal.
         (
@@ -217,12 +232,14 @@ pub(super) fn maximum_term(
             0,
             "no finite positive algebraic accuracy allocation; no goal completion claimed"
                 .to_string(),
+            Some(linear_work),
         )
     };
     Ok(MaximumEvidence {
         term: Some(analysis_term(&analysis, vertices.len(), &control_summary)),
         control_json: Some(control_json),
         primal_iterations,
+        linear_work,
     })
 }
 

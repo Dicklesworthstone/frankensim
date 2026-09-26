@@ -140,7 +140,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Geometry budget term by same-topology bound re-solves.
 /// Version 28 verifies bounded approximate-inverse proposals when comparison
 /// dominance cannot establish a linear maximum-error bound.
-pub const SOLVE_DRIVER_VERSION: u32 = 28;
+/// Version 29 balances coarse and enriched linear maximum errors against the
+/// measured adaptive discretization estimate, re-probing every changed field.
+pub const SOLVE_DRIVER_VERSION: u32 = 29;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -178,6 +180,7 @@ const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
+mod adaptive_balance;
 mod algebraic;
 mod conjugate;
 mod radiation;
@@ -1595,6 +1598,8 @@ fn adaptive_study(
     accuracy_rel: f64,
     reference_k: Option<f64>,
     max_tets: usize,
+    memory_bytes: u64,
+    work: EvidenceWork<'_>,
     deadline: Option<(std::time::Instant, f64)>,
     solve_rung: impl Fn(&fs_mesh::LabeledTetComplex) -> Result<RungSolved, SolveRefusal>,
 ) -> Result<(fs_mesh::LabeledTetComplex, RungSolved, String, Option<LadderDiscretization>), SolveRefusal> {
@@ -1663,14 +1668,25 @@ fn adaptive_study(
                 }
             };
         let enriched = complex.refine_uniform();
-        let fine = solve_rung(&enriched)?;
+        let mut fine = solve_rung(&enriched)?;
         solves += 1;
         peak_tets = peak_tets.max(enriched.tets().len());
-        let approximate = adaptive_prolongation(cx, &complex, &solved, &split, &fine)?;
+        let balanced = adaptive_balance::probe_pair(
+            cx, &complex, &split, &mut solved, &mut fine, region,
+            memory_bytes, work, deadline,
+        )?;
         drop(split);
-        adaptive_deadline(deadline)?;
-        let probe = adaptive_probe(cx, &solved, &fine, &approximate, region)?;
-        adaptive_deadline(deadline)?;
+        let probe = balanced.probe;
+        // Corrections may move the hottest node and change the physical rise.
+        // Publish and stop using the same current field as the new comparison.
+        let coarse_max = ladder_functional(
+            &solved.labels, &solved.mesh.complex().tets,
+            &solved.solution.temperature, Some(region),
+        );
+        let tolerance_k = accuracy_rel * reference_k.map_or(
+            coarse_max.abs(), |reference| (coarse_max - reference).abs(),
+        );
+        tolerance = Some(number(tolerance_k)?);
         let marks = adaptive_marks(&probe.scores);
         achieved = Some(number(probe.estimated_change_k)?);
         let coupled = match &probe.coupled_adjoint {
@@ -1692,7 +1708,7 @@ fn adaptive_study(
              \"signed_linear_change_k\":{},\"linearization_remainder_k\":{},\"maximum_remainder_k\":{},\
              \"estimated_change_k\":{},\"measured_change_k\":{},\"tolerance_k\":{},\
              \"primal_residual\":{},\"dual_residual\":{},\"dual_iterations\":{},\
-             \"uses_nonlinear_jacobian\":{},\"coupled_adjoint\":{},\"marked_cells\":{},\
+             \"uses_nonlinear_jacobian\":{},\"coupled_adjoint\":{},\"algebraic_balance\":{},\"marked_cells\":{},\
              \"absolute_contribution_sum_k\":{}}}",
             history.len(),
             complex.tets().len(),
@@ -1719,9 +1735,14 @@ fn adaptive_study(
             probe.dual_iterations,
             probe.uses_nonlinear_jacobian,
             coupled,
+            balanced.receipt,
             marks.len(),
             number(probe.scores.iter().sum())?,
         ));
+        if !balanced.may_use_comparison {
+            stop = "solver-algebraic-budget";
+            break;
+        }
         if probe.estimated_change_k <= tolerance_k && probe.measured_change_k.abs() <= tolerance_k {
             resolved_change_k = Some(probe.estimated_change_k.abs().max(probe.measured_change_k.abs()));
             status = "observed-tolerance-met";
@@ -6256,7 +6277,7 @@ fn conduction_solve_receipt(
             let budgets = spec.budgets.as_ref().expect("admitted solve budgets");
             let (adaptive_complex, adaptive_solved, receipt, estimate) = adaptive_study(
                 &cx, complex, solved, ladder_region, budgets.accuracy_rel,
-                coolest_declared_temperature(setup), max_tets, deadline, &solve_rung,
+                coolest_declared_temperature(setup), max_tets, memory_bytes, work, deadline, &solve_rung,
             )?;
             complex = adaptive_complex;
             solved = adaptive_solved;

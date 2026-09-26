@@ -529,6 +529,31 @@ and enriched Robin systems without assuming the proposed inverse is exact.
 The additional route admits at most 256 free unknowns and retains NO-DATA
 when its structural or verification conditions cannot be established.
 
+**Adaptive algebraic balance** (`solver_control`, driver version 29).
+Each supported fixed-linear coarse/enriched comparison now allocates one tenth
+of its current prospective Discretization term to the outward sum of both
+mesh solutions' maximum-error bounds. The term is still the existing Estimated
+`2 * max(abs(estimated_change), abs(measured_change))`, with its assumed
+order-one scope. The sum rounds upward and the allowance rounds downward.
+If necessary, either rung is corrected toward half the pair allowance.
+Every changed field is independently checked against its original physical
+residual gate, then prolonged and compared again before marking or stopping.
+Each pair permits at most four correction rounds; each rung shares its original
+primal-iteration cap across all corrections and permits at most four retarget
+calls, with cumulative stability preparation capped by five original allowances.
+History records the final bounds, pair allowance, correction rounds, physically
+accepted field updates and additional correction iterations. Small fixed-linear
+systems can establish a missing inverse using independently verified numerical
+inverse columns, with at most 256 free unknowns and explicit storage/traversal
+caps; all column solves share the existing stability-preparation allowance. The final `solver_control` uses `measured-adaptive-discretization` and
+keeps the last internal correction target separately from the final allowance.
+A covered pair with missing bounds, exhausted work or an unattainable allowance
+stops as `solver-algebraic-budget` and supplies no Discretization term. It retains
+the accepted physical field and its matching solver-error evidence. Unsupported
+coupled, nonlinear and radiating models retain their prior adaptive comparison
+with an explicit unsupported balance status; this change claims no continuum
+bound or new correction support for those models.
+
 The Roundoff term is fs-conduction's componentwise bound
 `γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
 operator behind the field (including a radiating solve's combined partition),

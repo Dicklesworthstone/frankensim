@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 28,
+        SOLVE_DRIVER_VERSION, 29,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -4094,7 +4094,9 @@ fn g1_contact_adaptive_probes_the_actual_hot_maximum_with_the_contact_operator()
 fn g1_contact_adaptive_refines_and_retains_the_last_probed_contact_field() {
     let mut spec = contact_refinement_project("adaptive");
     spec.budgets.as_mut().unwrap().accuracy_rel = 1e-10;
-    spec.budgets.as_mut().unwrap().memory_bytes = 2 * 1024 * 1024;
+    spec.budgets.as_mut().unwrap().memory_bytes = 64 * 1024 * 1024;
+    // Admit the enriched operator's verified inverse as well as its mesh;
+    // the separate low-memory test covers refusal and retained-field behavior.
     let receipt = contact_refinement_receipt(&spec, &contact_cards());
     assert!(
         receipt_number_field(&receipt, "solved_meshes") > 2.0,
@@ -5231,7 +5233,7 @@ fn g1_adaptive_fidelity_memory_limit_keeps_the_last_probed_mesh_unresolved() {
         "{conduction}"
     );
     assert!(
-        conduction.contains("\"stop\":\"memory-budget\""),
+        conduction.contains("\"stop\":\"solver-algebraic-budget\""),
         "{conduction}"
     );
     let first_number = |text: &str, key: &str| {
@@ -5417,6 +5419,60 @@ fn g1_maximum_goal_corrects_a_loose_physical_solve_before_publication() {
     let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
     assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), final_bound.to_bits(),
         "the reported uncertainty belongs to the corrected, published field");
+}
+
+#[test]
+fn g1_adaptive_balances_both_solver_errors_against_the_current_discretization_term() {
+    let mut spec = contact_refinement_project("adaptive");
+    // The starting physical tolerance leaves room for the measured comparison
+    // to demand extra algebraic work on this nontrivial contact system.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 0.75;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let outcome = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decoded, &contact_cards(), &mut Vec::new()).unwrap();
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let history = conduction.split("\"history\":[").nth(1).unwrap().split(']').next().unwrap();
+    let balances: Vec<&str> = history.split("\"algebraic_balance\":").skip(1).collect();
+    assert!(!balances.is_empty(), "{conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "correction_rounds") > 0.0),
+        "the observed discretization allowance must drive additional work: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "additional_correction_iterations") > 0.0),
+        "balancing must perform additional primal iterations: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "field_updates") > 0.0),
+        "balancing must physically accept and re-probe a changed field: {conduction}");
+    let last = balances.last().unwrap();
+    assert!(last.starts_with("{\"status\":\"balanced\""), "{conduction}");
+    let pair = receipt_number_field(last, "pair_bound_k");
+    let allowance = receipt_number_field(last, "pair_allowance_k");
+    let discretization = receipt_number_field(last, "discretization_half_width_k");
+    assert!(pair <= allowance && allowance <= discretization / 10.0, "{conduction}");
+    let last_number = |key: &str| -> f64 {
+        history.rsplit(&format!("\"{key}\":")).next().unwrap()
+            .split([',', '}']).next().unwrap().parse().unwrap()
+    };
+    assert_eq!(discretization.to_bits(),
+        (2.0 * last_number("estimated_change_k").abs().max(last_number("measured_change_k").abs())).to_bits());
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.contains("\"tolerance_basis\":\"measured-adaptive-discretization\""));
+    assert!(receipt_number_field(control, "primal_iterations")
+        <= receipt_number_field(control, "max_primal_iterations"));
+    assert!(receipt_number_field(control, "stability_iterations")
+        <= receipt_number_field(control, "max_stability_iterations"));
+    assert!(receipt_number_field(control, "retarget_calls") <= 4.0);
+    assert_eq!(receipt_number_field(control, "requested_tolerance_k").to_bits(), allowance.to_bits());
+    let bound = receipt_number_field(control, "final_bound_k");
+    assert_eq!(bound.to_bits(), receipt_number_field(last, "coarse_bound_k").to_bits());
+    let solver_term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(bound.to_bits(), receipt_number_field(solver_term, "upper_kelvin").to_bits());
+    assert_eq!(receipt_number_field(&qoi, "value").to_bits(), last_number("t_max_k").to_bits());
+    assert!(receipt_number_field(&conduction, "final_residual")
+        <= receipt_number_field(&conduction, "residual_threshold"));
 }
 
 /// Replay falsifier for the ladder path (bead q61wp.14 item 5, extended to
