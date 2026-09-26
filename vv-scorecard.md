@@ -3,11 +3,11 @@
 schema: 1
 corpus_schema: 3
 corpus_authority: seeded
-corpus_digest: 9632a61919fda101ed7c5a15be2a87583faa4ba0c3151eb6aa53fed4b03767c0
+corpus_digest: 1c8719c8f76df724248496126a7dcb42ec921789d4191607a6916b13fe6a13c3
 adversarial_registry: 275940f3404a8d22984bed11df014472b12b112d9d13cd01aa4892145858539d
-datasets: 34
-datasets_by_level: A=23 B=7 C=4 D=0 E=0
-datasets_by_axis: numerical-verification=23 cross-code-agreement=7 controlled-experimental-validation=4 blind-predictive-validation=0 field-monitoring=0 transferability-across-regimes=0 independent-reproduction=0
+datasets: 35
+datasets_by_level: A=24 B=7 C=4 D=0 E=0
+datasets_by_axis: numerical-verification=24 cross-code-agreement=7 controlled-experimental-validation=4 blind-predictive-validation=0 field-monitoring=0 transferability-across-regimes=0 independent-reproduction=0
 ledgered_run_records: 0
 executed_adversarial_challenges: 0/8
 false_acceptance_total: NO-DATA (0 executed challenges)
@@ -18,6 +18,7 @@ This scorecard is a deterministic projection of the registered validation corpus
 
 ## Known gaps
 
+- qoi=array-junction-temperature regime=reynolds-number in [1506.418951662363, 1506.418951662363] 1; length-over-hydraulic-diameter in [4, 4] 1 external_datasets=0
 - qoi=capsules-per-blade regime=geometry-uncertainty-m in [0.01, 0.01] m external_datasets=0
 - qoi=center-temperature-rise regime=slab-thickness-m in [0.1, 0.1] m external_datasets=0
 - qoi=component-peak-temperature regime=(no dataset registered) external_datasets=0
@@ -44,6 +45,7 @@ Axis order in the `axes` column: numerical-verification / cross-code-agreement /
 
 | qoi | regime | refs | axes | external | prediction error | envelope | coverage | false acceptance |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| array-junction-temperature | reynolds-number in [1506.418951662363, 1506.418951662363] 1; length-over-hydraulic-diameter in [4, 4] 1 | 1 | 1/0/0/0/0/0/0 | 0 | NO-DATA | NO-DATA | NO-DATA | NO-DATA |
 | average-nusselt-number | mass-flux in [500, 750] kg·m^-2·s^-1 | 1 | 0/0/1/0/0/0/0 | 1 | NO-DATA | NO-DATA | NO-DATA | NO-DATA |
 | average-nusselt-number | reynolds-number in [810, 3800] 1 | 1 | 0/0/1/0/0/0/0 | 1 | NO-DATA | NO-DATA | NO-DATA | NO-DATA |
 | capsules-per-blade | geometry-uncertainty-m in [0.01, 0.01] m | 1 | 1/0/0/0/0/0/0 | 0 | NO-DATA | NO-DATA | NO-DATA | NO-DATA |
@@ -78,6 +80,7 @@ Axis order in the `axes` column: numerical-verification / cross-code-agreement /
 
 ## Regime limitations
 
+- `array-junction-temperature` references apply only within reynolds-number in [1506.418951662363, 1506.418951662363] 1; length-over-hydraulic-diameter in [4, 4] 1; outside this declared context the corpus asserts no claim.
 - `average-nusselt-number` references apply only within mass-flux in [500, 750] kg·m^-2·s^-1; outside this declared context the corpus asserts no claim.
 - `average-nusselt-number` references apply only within reynolds-number in [810, 3800] 1; outside this declared context the corpus asserts no claim.
 - `capsules-per-blade` references apply only within geometry-uncertainty-m in [0.01, 0.01] m; outside this declared context the corpus asserts no claim.
@@ -127,4 +130,4 @@ false_acceptance_count: 0
 | recirculation-behind-strip-fins | forced-air-strip-fin-re-810-3800 | attached-flow | retained:pires-fonseca-2024-flat-strip-fins | NO-DATA | NO-DATA | Attached-flow correlations are not validated inside separated fin wakes; predict within the retained experimental envelope or demote for flow-topology uncertainty. |
 | uncertain-blockable-vent-leakage | sealed-to-leaky-enclosure-transition | known-vent-leakage | NO-DATA:frankensim-extreal-program-f85xj.4.5 | NO-DATA | NO-DATA | Nominal vent geometry cannot stand in for as-built leakage; unknown leakage area must remain a boundary-condition uncertainty. |
 
-identity: e84b7e0272108faa062ccc7d1a6155a4a7d933f3d67fbc530be18c6bd7af696f
+identity: 7de1a7e96e50e494b48326fb186d650d22b4ac988e8bcda38e6d15bc1a81c75e
