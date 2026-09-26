@@ -177,6 +177,56 @@ pub fn enclose_affine_feedback_error(
     responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
     limits: FeedbackResidualLimits, checkpoint: impl FnMut() -> bool,
 ) -> Result<FeedbackResidualReport, GoalResidualError> {
+    enclose_feedback(
+        matrix, rhs, primal, injection, feedback, offset, responses, scaling,
+        None, limits, checkpoint,
+    ).map(|(report, _)| report)
+}
+
+/// Assess the full coupled equation using a numerical solid-inverse proposal.
+/// `inverse_columns[j][i]` proposes `(A^-1)[i,j]`; no numerical inverse or
+/// caller-supplied norm is trusted. The existing outward `I-A R` checker
+/// verifies it against the SAME stored solid matrix, once per assessment.
+/// The resulting inverse bound includes errors in all response columns and
+/// feeds both the state-contraction and optional port-Schur checks.
+///
+/// The inverse check keeps its 256-row and dense-work caps. Its validation
+/// and verification also consume the SHARED `max_verification_entries`,
+/// before the optional Schur fallback. It is never repeated for each response
+/// column. No new solve is performed. Ordinary APIs and their results remain
+/// unchanged when no inverse proposal is supplied.
+///
+/// # Errors
+/// Existing shape, finite, allocation, cancellation and resource refusals,
+/// plus invalid inverse-column geometry. An inaccurate proposal cannot mint
+/// a bound; a valid solid inverse still does not establish a coupled inverse
+/// unless one of the complete feedback checks succeeds.
+#[allow(clippy::too_many_arguments)]
+pub fn enclose_affine_feedback_error_with_inverse(
+    matrix: &Csr, rhs: &[f64], primal: &[f64],
+    injection: &Csr, feedback: &Csr, offset: &[f64],
+    responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
+    inverse_columns: &[Vec<f64>], limits: FeedbackResidualLimits,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<FeedbackResidualReport, GoalResidualError> {
+    let (report, used) = enclose_feedback(
+        matrix, rhs, primal, injection, feedback, offset, responses, scaling,
+        Some(inverse_columns), limits, &mut checkpoint,
+    )?;
+    schur::finish_report(matrix, feedback, responses, limits, used, report, checkpoint)
+}
+
+// The inverse evidence is created here from this matrix, never injected as
+// a naked norm or a report that could belong to another system. The returned
+// structural work count prevents the Schur fallback from resetting its cap.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn enclose_feedback(
+    matrix: &Csr, rhs: &[f64], primal: &[f64],
+    injection: &Csr, feedback: &Csr, offset: &[f64],
+    responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
+    inverse_columns: Option<&[Vec<f64>]>, limits: FeedbackResidualLimits,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<(FeedbackResidualReport, usize), GoalResidualError> {
     let mut work = Work { checkpoint, left: 512 };
     work.poll()?;
     let n = matrix.nrows();
@@ -197,6 +247,16 @@ pub fn enclose_affine_feedback_error(
     } else { 1 };
     let visits = n.checked_add(matrix.nnz()).and_then(|v| v.checked_mul(passes))
         .ok_or(GoalResidualError::Allocation)?;
+    // Even a proposal not ultimately needed is validated by the inverse
+    // checker. Charge its n*n input and n*(n+nnz) verification up front.
+    let visits = if inverse_columns.is_some() {
+        let inverse_work = n.checked_mul(n)
+            .and_then(|dense| n.checked_add(matrix.nnz())
+                .and_then(|pass| n.checked_mul(pass))
+                .and_then(|verify| dense.checked_add(verify)))
+            .ok_or(GoalResidualError::Allocation)?;
+        visits.checked_add(inverse_work).ok_or(GoalResidualError::Allocation)?
+    } else { visits };
     limit("verification entries", visits, limits.max_verification_entries)?;
     vector("rhs", rhs, n, &mut work)?;
     vector("primal", primal, n, &mut work)?;
@@ -207,8 +267,14 @@ pub fn enclose_affine_feedback_error(
         for column in columns { vector("response column", column, n, &mut work)?; }
     }
     let zeros = scalar_vector(n, &mut work)?;
-    let solid = enclose_goal_error(matrix, rhs, primal, &zeros, &zeros, scaling,
-        limits.solid, || (work.checkpoint)())?;
+    let solid = match inverse_columns {
+        Some(columns) => super::enclose_goal_error_with_inverse(
+            matrix, rhs, primal, &zeros, &zeros, scaling, columns,
+            limits.solid, || (work.checkpoint)(),
+        )?,
+        None => enclose_goal_error(matrix, rhs, primal, &zeros, &zeros, scaling,
+            limits.solid, || (work.checkpoint)())?,
+    };
     let mut ports = scratch(p, &mut work)?;
     let mut c_norm = scalar_vector(p, &mut work)?;
     let mut gain_range = false;
@@ -317,5 +383,5 @@ pub fn enclose_affine_feedback_error(
         };
     }
     work.poll()?;
-    Ok(report)
+    Ok((report, visits))
 }
