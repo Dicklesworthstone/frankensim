@@ -7,6 +7,9 @@
 //! priority. They do not establish physical simultaneity. The scalar scanner's
 //! continuity and finite-scan limitations still apply.
 
+/// Resumable ODE/event/reset trajectories.
+pub mod run;
+
 use super::{
     AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, EventDirection,
     EventError, EventOccurrence, EventOptions, InitialEvent, PiController, Scan,
