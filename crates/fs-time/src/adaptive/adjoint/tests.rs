@@ -32,7 +32,7 @@ fn step_matches_production_and_independent_stability_polynomial() {
 }
 
 #[derive(Clone)]
-struct Nonlinear([f64; 3]);
+pub(super) struct Nonlinear(pub(super) [f64; 3]);
 impl OdeVjp for Nonlinear {
     fn dimension(&self) -> usize { 2 }
     fn parameter_count(&self) -> usize { 3 }
