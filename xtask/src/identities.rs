@@ -312,6 +312,10 @@ struct ExternalOwner {
     symbol: String,
     version: u32,
     domain: String,
+    /// Explicitly declared roots (for example `std`, or an imported type
+    /// name) whose paths the producer closure may reference. The closure
+    /// analysis refuses any undeclared extern-prelude or imported authority.
+    authorities: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9042,17 +9046,22 @@ fn rust_fragment_has_unproven_comparison(
     Ok(false)
 }
 
-fn rust_fragment_has_unresolved_receiver_method_call(
+/// The first method called on a receiver whose type cannot be inferred and
+/// whose name is not a declared authority (`<unparsed>` when the fragment's
+/// delimiters cannot be read). `None` means every method call is resolved.
+fn rust_fragment_unresolved_receiver_method_call(
     tokens: &[RustAuthorityToken<'_>],
     primitive_receivers: &BTreeMap<String, RustKnownReceiverType>,
-) -> bool {
+    declared_authorities: &BTreeSet<String>,
+) -> Option<String> {
     let Ok((_, delimiter_depth)) = rust_authority_delimiters(tokens) else {
-        return true;
+        return Some("<unparsed>".to_string());
     };
-    (0..tokens.len()).any(|dot| {
-        rust_method_call_after(tokens, &delimiter_depth, dot).is_some_and(|method| {
+    (0..tokens.len()).find_map(|dot| {
+        rust_method_call_after(tokens, &delimiter_depth, dot).filter(|method| {
             let receiver_index = dot.wrapping_sub(1);
-            !tokens.get(receiver_index).is_some_and(|receiver| {
+            !declared_authorities.contains(*method)
+                && !tokens.get(receiver_index).is_some_and(|receiver| {
                 let bare_binding = !tokens
                     .get(receiver_index.wrapping_sub(1))
                     .is_some_and(|previous| matches!(previous.text, "." | ":"));
@@ -9065,6 +9074,7 @@ fn rust_fragment_has_unresolved_receiver_method_call(
                             }))
             })
         })
+        .map(str::to_string)
     })
 }
 
@@ -10305,9 +10315,13 @@ fn reject_imported_function_dependencies(
             "{authority} uses an overloadable comparison whose operands are not both syntactically proven builtin scalars; imported type/trait/operator authority must be declared explicitly"
         ));
     }
-    if rust_fragment_has_unresolved_receiver_method_call(&semantic_tokens, &primitive_bindings) {
+    if let Some(method) = rust_fragment_unresolved_receiver_method_call(
+        &semantic_tokens,
+        &primitive_bindings,
+        declared_type_authorities,
+    ) {
         return Err(format!(
-            "{authority} uses method-call syntax on a receiver whose source type cannot be inferred; declare the helper as explicit authority"
+            "{authority} uses method-call syntax on a receiver whose source type cannot be inferred (`.{method}`); declare the helper as explicit authority"
         ));
     }
     let source_macro_rules = &index.source_macro_rules;
@@ -12452,15 +12466,45 @@ fn load_authority_manifest(root: &Path) -> Result<AuthorityManifest, Vec<Violati
         let context = format!("{AUTHORITY_FILE} external_owners row {}", index + 1);
         let parsed = (|| -> Result<ExternalOwner, String> {
             let row = strict_json_object(value, &context)?;
-            strict_json_keys(
-                row,
-                &["id", "path", "symbol", "version", "domain"],
-                &context,
-            )?;
+            if row.contains_key("authorities") {
+                strict_json_keys(
+                    row,
+                    &["id", "path", "symbol", "version", "domain", "authorities"],
+                    &context,
+                )?;
+            } else {
+                strict_json_keys(
+                    row,
+                    &["id", "path", "symbol", "version", "domain"],
+                    &context,
+                )?;
+            }
             let string = |key: &str| {
                 strict_json_field(row, key, &context)
                     .and_then(|value| strict_json_string(value, &format!("{context} {key}")))
             };
+            let mut authorities = BTreeSet::new();
+            if row.contains_key("authorities") {
+                let rows = strict_json_field(row, "authorities", &context)
+                    .and_then(|value| strict_json_array(value, &format!("{context} authorities")))?;
+                let mut previous: Option<&str> = None;
+                for value in rows {
+                    let name = strict_json_string(value, &format!("{context} authorities"))?;
+                    if name.is_empty()
+                        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        || previous.is_some_and(|last| last >= name)
+                    {
+                        return Err(format!(
+                            "{context} authorities must be sorted, unique identifiers; found {name:?}"
+                        ));
+                    }
+                    previous = Some(name);
+                    authorities.insert(name.to_string());
+                }
+                if authorities.is_empty() {
+                    return Err(format!("{context} declares an empty authorities list; omit it instead"));
+                }
+            }
             let id = string("id")?;
             let path = string("path")?;
             let symbol = string("symbol")?;
@@ -12486,6 +12530,7 @@ fn load_authority_manifest(root: &Path) -> Result<AuthorityManifest, Vec<Violati
                 symbol: symbol.to_string(),
                 version,
                 domain: domain.to_string(),
+                authorities,
             })
         })();
         match parsed {
@@ -13514,7 +13559,13 @@ fn external_owner_schema_fingerprint(
         (text.as_bytes().to_vec(), None)
     } else if is_rust {
         (
-            normalized_rust_function_closure(&text, [owner.symbol.clone()]).map_err(|detail| {
+            normalized_rust_function_closure_with_symbols(
+                &text,
+                [owner.symbol.clone()],
+                &owner.authorities,
+            )
+            .map(|(bytes, _)| bytes)
+            .map_err(|detail| {
                 format!(
                     "external owner {} target {}#{} has an invalid function closure: {detail}",
                     owner.id, owner.path, owner.symbol
@@ -18104,6 +18155,7 @@ impl Verifier for DenyAll {
             symbol: "<script>".to_string(),
             version: 1,
             domain: "org.frankensim.ci.top-level-proof.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         let candidates = discover_identity_candidates(&root);
         let manifest = AuthorityManifest {
@@ -18323,6 +18375,7 @@ impl Verifier for DenyAll {
             symbol: "producer".to_string(),
             version: 1,
             domain: "org.frankensim.ci.decorated.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         let blocks = super::primary_script_blocks(&owner.path, baseline_source, &owner.symbol)
             .expect("decorated producer resolves");
@@ -18414,6 +18467,7 @@ impl Verifier for DenyAll {
                 symbol: "<script>".to_string(),
                 version: 1,
                 domain: "org.frankensim.ci.decoy.v1".to_string(),
+                authorities: BTreeSet::new(),
             },
             ExternalOwner {
                 id: "rust:decoy".to_string(),
@@ -18421,6 +18475,7 @@ impl Verifier for DenyAll {
                 symbol: "decoy".to_string(),
                 version: 1,
                 domain: "org.frankensim.rust.decoy.v1".to_string(),
+                authorities: BTreeSet::new(),
             },
         ] {
             let manifest = AuthorityManifest {
@@ -18601,6 +18656,7 @@ impl Verifier for DenyAll {
                 symbol: "<script>".to_string(),
                 version: 1,
                 domain: "org.frankensim.ci.hidden.v1".to_string(),
+                authorities: BTreeSet::new(),
             }],
             exemptions: Vec::new(),
         };
@@ -18703,6 +18759,7 @@ impl Verifier for DenyAll {
                 symbol: "<script>".to_string(),
                 version: 1,
                 domain: "org.frankensim.ci.explicit-rch-source.v1".to_string(),
+                authorities: BTreeSet::new(),
             }],
             exemptions: Vec::new(),
         };
@@ -19149,6 +19206,7 @@ impl Verifier for DenyAll {
             symbol: "<script>".to_string(),
             version: 1,
             domain: "org.frankensim.ci.proof.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         let candidates = discover_identity_candidates(&root);
         let manifest = AuthorityManifest {
@@ -19176,6 +19234,7 @@ impl Verifier for DenyAll {
             symbol: "row".to_string(),
             version: 1,
             domain: "org.frankensim.ci.proof.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         std::fs::write(
             &path,
@@ -19213,6 +19272,7 @@ impl Verifier for DenyAll {
             symbol: "row".to_string(),
             version: 1,
             domain: "org.frankensim.ci.proof.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         let mut manifest = AuthorityManifest {
             required_ids: BTreeSet::from([owner.id.clone()]),
@@ -19376,6 +19436,7 @@ impl Verifier for DenyAll {
             symbol: "parent".to_string(),
             version: 1,
             domain: "org.frankensim.ci.proof.v1".to_string(),
+            authorities: BTreeSet::new(),
         };
         let exemption = IdentityExemption {
             path: owner.path.clone(),
@@ -24717,6 +24778,7 @@ def write_unrelated(payload):
                 symbol: "producer".to_string(),
                 version: 1,
                 domain: "org.frankensim.demo.producer.v1".to_string(),
+                authorities: BTreeSet::new(),
             }],
             exemptions: Vec::new(),
         };
@@ -24756,6 +24818,7 @@ fn child(payload: &[u8]) -> Digest {
                 symbol: "parent".to_string(),
                 version: 1,
                 domain: "org.frankensim.demo.parent.v1".to_string(),
+                authorities: BTreeSet::new(),
             }],
             exemptions: vec![IdentityExemption {
                 path: "crates/demo/src/lib.rs".to_string(),
