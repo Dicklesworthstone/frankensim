@@ -3,6 +3,8 @@
 //! and a RESUMABLE state machine — checkpoint = clone, and split runs
 //! are bitwise-equal to straight runs (the P7 obligation, tested).
 
+pub mod events;
+
 /// PI controller settings (standard exponents).
 #[derive(Debug, Clone)]
 pub struct PiController {
