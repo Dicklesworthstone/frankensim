@@ -1182,16 +1182,29 @@ pub(crate) fn export(
             let _ = write!(paths, ",{key:?}:{}", quoted(&dest.to_string_lossy()));
         }
         Ok(format!(
-            "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{paths}}}\n",
-            quoted(loaded.value.str_field("status").unwrap_or("unknown"))
+            "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{}{paths}}}\n",
+            quoted(loaded.value.str_field("status").unwrap_or("unknown")),
+            // The package was just re-checked above; say so, as the thermal
+            // study's export does.
+            if command == "package" {
+                ",\"checker\":\"pass\",\"checker_authority\":\"structural-integrity-only\""
+            } else {
+                ""
+            }
         ))
     })();
     match result {
         Ok(mut stdout) => {
             if matches!(mode, OutputMode::Text) {
+                let value = JsonValue::parse(&stdout).expect("generated export JSON");
                 stdout = format!(
                     "command={command}\nstatus=ok\nrun={pointer}\nauthority=projection-of-retained-estimates\n"
                 );
+                for field in ["study_status", "report_html", "report_json", "package", "checker", "checker_authority"] {
+                    if let Some(value) = value.str_field(field) {
+                        let _ = writeln!(stdout, "{field}={}", crate::escape_text(value));
+                    }
+                }
             }
             CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() }
         }
@@ -1208,8 +1221,10 @@ mod tests {
     #[test]
     fn canonical_fixture_is_explicit_and_admitted() {
         let spec = parse(FIXTURE).expect("canonical elasticity fixture");
-        // 32 steps: the tracked example ends inside the 1% area tolerance
-        // (measured 2026-09-24; 8 and 16 steps end infeasible).
+        // 32 steps: the tracked example happens to end inside the 1% area
+        // tolerance (measured 2026-09-24), but that endpoint sits inside the
+        // multiplier transient. 20, 24 and 28 steps end infeasible
+        // (q61wp.16.1).
         assert_eq!(spec.steps, 32);
         assert_eq!(spec.load_direction, [0.0, -1.0]);
         assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 4);
