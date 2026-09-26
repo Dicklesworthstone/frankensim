@@ -109,6 +109,12 @@ impl<'m> LinearGoalAnalyzer<'m> {
                 }
             }
         }
+        // Consistent contact/Robin mass can prevent every positive diagonal
+        // scaling from proving an inverse. A small, bounded approximate
+        // inverse can still prove the stored system's stability independently.
+        if analyzer.analyze(cx, temperature)?.enclosure.inverse_infinity_upper().is_none() {
+            analyzer.prepare_inverse_columns(cx, temperature)?;
+        }
         poll(cx, analyzer.stability_iterations)?;
         Ok(analyzer)
     }

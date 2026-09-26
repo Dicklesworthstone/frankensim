@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 27,
+        SOLVE_DRIVER_VERSION, 28,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -5455,12 +5455,11 @@ fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
         "QoI receipt bytes (interval term) reproduce"
     );
     let conduction = String::from_utf8(first.2).expect("utf-8");
-    // This all-free Robin ladder does not establish a verified inverse.
-    // Replay must preserve that unresolved evidence as faithfully as a bound.
+    // The bounded inverse proposal now covers this all-free Robin ladder;
+    // its verified error evidence must replay with the published endpoint.
+    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
     let control = conduction.split("\"solver_control\":").nth(1).unwrap();
-    assert!(control.starts_with("{\"status\":\"bound-unavailable\""), "{conduction}");
-    assert!(control.contains("\"goal_met\":false"), "{conduction}");
-    assert!(control.contains("\"final_bound_k\":null"), "{conduction}");
+    assert!(receipt_number_field(control, "final_bound_k").is_finite(), "{conduction}");
     assert!(!conduction.contains("tolerance-tightening-resolve"),
         "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
     assert!(

@@ -21,6 +21,8 @@ pub use feedback::{LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis, Robi
 mod maximum;
 pub use maximum::{LinearMaximumAnalysis, analyze_linear_maximum};
 
+mod inverse;
+
 /// Additional work admitted for a discrete thermal goal analysis. The dual
 /// separately uses the caller's existing [`LinearConfig`] iteration budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,8 +30,9 @@ pub struct LinearGoalAnalysisConfig {
     /// Limits for every outward residual pass, not a replacement for the
     /// assembly/runtime memory and work budgets.
     pub residual_limits: GoalResidualLimits,
-    /// Extra CG iterations allowed to propose a positive stability scaling.
-    /// Zero disables that proposal, not the inverse verification itself.
+    /// Total extra CG iterations for stability proposals: a positive scaling
+    /// and, for small maximum problems, approximate inverse columns.
+    /// Zero disables proposals, not inverse verification itself.
     pub max_stability_iterations: usize,
 }
 
@@ -46,7 +49,7 @@ pub struct LinearGoalAnalysis {
     pub dual_relative_residual: f64,
     /// Inner Krylov work used for the dual.
     pub dual_iterations: usize,
-    /// Inner Krylov work actually spent proposing a stability scaling.
+    /// Inner Krylov work spent on scaling and approximate-inverse proposals.
     pub stability_iterations: usize,
     /// Recomputed proposal residual, which need not meet its loose target.
     pub stability_relative_residual: Option<f64>,
@@ -122,6 +125,7 @@ pub struct LinearGoalAnalyzer<'m> {
     stability_iterations: usize,
     stability_relative_residual: Option<f64>,
     stability_scaling: Option<Vec<f64>>,
+    inverse_columns: Option<Vec<Vec<f64>>>,
 }
 
 fn validate_field(
@@ -249,7 +253,7 @@ impl<'m> LinearGoalAnalyzer<'m> {
         Ok(Self {
             problem, response, rhs, weights, free_dual, config,
             dual_relative_residual, dual_iterations, stability_iterations,
-            stability_relative_residual, stability_scaling,
+            stability_relative_residual, stability_scaling, inverse_columns: None,
         })
     }
 
@@ -272,6 +276,13 @@ impl<'m> LinearGoalAnalyzer<'m> {
         self.stability_scaling.as_deref()
     }
 
+    /// Approximate inverse columns retained for independently checked replay.
+    /// These are proposals, not exact inverses or caller-declared constants.
+    #[must_use]
+    pub fn inverse_columns(&self) -> Option<&[Vec<f64>]> {
+        self.inverse_columns.as_deref()
+    }
+
     /// Assess another admissible field on the SAME operator and fixed goal.
     /// No primal, dual, or witness solve is repeated. Prescribed temperatures
     /// and every material's temperature support are rechecked before use.
@@ -286,11 +297,18 @@ impl<'m> LinearGoalAnalyzer<'m> {
         poll(cx, 0)?;
         validate_field(cx, self.problem, &self.response.dofs, approximate_temperature)?;
         let free_temperature = self.response.dofs.gather(approximate_temperature);
-        let enclosure = enclose_goal_error(
-            &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
-            &self.free_dual, self.stability_scaling.as_deref(),
-            self.config.residual_limits, || cx.checkpoint().is_ok(),
-        ).map_err(map_enclosure)?;
+        let enclosure = match &self.inverse_columns {
+            Some(columns) => fs_solver::goal::inverse::enclose_goal_error_with_inverse(
+                &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
+                &self.free_dual, self.stability_scaling.as_deref(), columns,
+                self.config.residual_limits, || cx.checkpoint().is_ok(),
+            ),
+            None => enclose_goal_error(
+                &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
+                &self.free_dual, self.stability_scaling.as_deref(),
+                self.config.residual_limits, || cx.checkpoint().is_ok(),
+            ),
+        }.map_err(map_enclosure)?;
         poll(cx, 0)?;
         Ok(LinearGoalAnalysis {
             enclosure,

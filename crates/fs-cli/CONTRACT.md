@@ -520,6 +520,15 @@ exact exponential coefficients, nonlinear physics, hydraulic uncertainty,
 discretization and physical validation. Driver identity prevents old receipts
 from being resumed under these changed solver-error semantics.
 
+**Verified inverse proposals** (driver version 28). Fixed-linear maximum
+analysis can verify a numerical inverse when positive diagonal scaling cannot
+establish a bound. The outward `I - A R` check includes every proposed column's
+residual and rounding; storage, verification work and the single shared
+stability-iteration budget remain bounded. This enables consistent contact
+and enriched Robin systems without assuming the proposed inverse is exact.
+The additional route admits at most 256 free unknowns and retains NO-DATA
+when its structural or verification conditions cannot be established.
+
 The Roundoff term is fs-conduction's componentwise bound
 `γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
 operator behind the field (including a radiating solve's combined partition),

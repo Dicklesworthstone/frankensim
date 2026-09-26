@@ -252,6 +252,24 @@ no frozen-radiation or air-feedback guarantee is inferred. Focused tests in
 independent contact/Robin heat-balance oracle, missing inverse evidence,
 zero-work retention, false baseline summaries and cancellation.
 
+`LinearGoalAnalyzer::new_for_maximum` additionally supports a bounded inverse
+proposal when positive diagonal scaling cannot verify the stored operator.
+This covers consistent contact and Robin operators whose comparison matrices
+are not strictly dominant. At most 256 free unknowns are admitted, and both
+`n*n` stored proposal entries and `n*(n+nnz)` verification visits must fit the
+existing residual nonzero limit. Every column solve shares the remaining
+`max_stability_iterations` allowance with the original scaling proposal;
+`stability_iterations` reports their combined actual work. Each analysis
+rechecks `I - A R` against the same retained matrix before using the inverse.
+The proposal is never treated as exact, and exhausted work or insufficient
+verification leaves the bound unavailable. Existing finite inverse bounds and
+the ordinary linear-goal constructor keep their prior behavior. The current
+affine-feedback checker retains its separate solid-inverse verification route;
+this fallback establishes no additional coupled-error authority.
+`tests/algebraic_goal/inverse.rs` checks a strong consistent-contact operator
+against an independent dense solution, real maximum-goal correction, shared
+iteration limits and structural admission.
+
 ## Invariants
 
 1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +

@@ -138,7 +138,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// air-reference feedback, including the response solves' residual error.
 /// Version 27 propagates declared surface-offset bands (fsim v7) into the
 /// Geometry budget term by same-topology bound re-solves.
-pub const SOLVE_DRIVER_VERSION: u32 = 27;
+/// Version 28 verifies bounded approximate-inverse proposals when comparison
+/// dominance cannot establish a linear maximum-error bound.
+pub const SOLVE_DRIVER_VERSION: u32 = 28;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

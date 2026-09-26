@@ -175,6 +175,28 @@ diagnoses, never timeout mysteries).
 - `dot`/`norm2` — deterministic fixed-shape reductions (fs-tilelang
   combiner; shape depends on length only).
 
+### Residual-verified inverse proposals (`q61wp.73`)
+
+`goal::inverse::enclose_goal_error_with_inverse` extends the existing stored
+linear-system residual evaluator with independently checked inverse columns.
+The supplied column-major matrix `R` is a numerical proposal. Outward FMA
+arithmetic encloses `delta = ||I - A R||_infinity` and `||R||_infinity`; only
+`delta < 1` admits `||A^-1||_infinity <= ||R||_infinity / (1 - delta)`.
+The resulting goal interval retains the original weighted residual and adds
+the full dual-residual remainder. This check assumes neither symmetry nor
+positive definiteness and verifies the declared column orientation.
+Existing finite inverse evidence is preserved after validating proposal inputs.
+Inaccurate or singular proposals remain unbounded; nonfinite inputs, malformed
+columns, structural limits and cancellation have typed refusals.
+The dimension is at most 256. Both `n*n` proposal entries and `n*(n+nnz)`
+verification visits must fit `GoalResidualLimits.max_nonzeros`, in addition to
+the original row and sparse-entry caps. Verification allocates no dense scratch
+and polls within 512 entry visits and immediately before publication.
+`tests/goal_inverse.rs` covers an independent rational inverse and true goal,
+nonzero dual error, nonsymmetric orientation, bad/singular proposals, existing
+bound retention, range/structural limits and cancellation. The bound concerns
+the stored floating-point system, excluding assembly and physical uncertainty.
+
 ## Invariants
 
 - Checkpoint = `clone()`; split runs bitwise-equal at the stated

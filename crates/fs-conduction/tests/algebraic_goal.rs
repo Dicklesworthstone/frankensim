@@ -6,6 +6,8 @@ mod support;
 mod controlled;
 #[path = "algebraic_goal/polish.rs"]
 mod polish;
+#[path = "algebraic_goal/inverse.rs"]
+mod inverse;
 
 use fs_conduction::adjoint::{
     LinearGoalAnalysisConfig, LinearGoalAnalyzer, analyze_linear_goal,
