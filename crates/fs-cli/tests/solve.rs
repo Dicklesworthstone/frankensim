@@ -5127,12 +5127,14 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert!(number("linearization_remainder_k").abs() < 1e-8,
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
-    // The adaptive comparison supplies Discretization, but this mesh has no
-    // verified solid inverse for the coupled solver bound. Preserve that gap
-    // alongside geometry and parameters through the full QoI publication.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
-    assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"no-data\""), "{qoi}");
-    assert!(qoi.contains("SolidInverseUnavailable"), "{qoi}");
+    // The adaptive comparison supplies Discretization. Since the verified
+    // solid inverses (4852d019d, 1f5d7c13b) the coupled solver bound encloses
+    // this mesh too (state contraction; 7.7e-10 K measured 2026-09-26), so
+    // only geometry and parameters stay NO-DATA through the QoI publication.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
+    assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"interval\""), "{qoi}");
+    assert!(qoi.contains("outward-coupled-linear-maximum-enclosure"), "{qoi}");
+    assert!(qoi.contains("disposition Enclosed"), "{qoi}");
     assert!(!conduction.contains("tolerance-tightening-resolve"), "{conduction}");
 }
 

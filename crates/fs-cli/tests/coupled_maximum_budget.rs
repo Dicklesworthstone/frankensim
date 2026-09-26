@@ -68,7 +68,8 @@ fn fsim_coupled_budget_uses_published_feedback_and_sealed_reports_replay() {
     match control.f64_field("final_bound_k") {
         Some(bound) => {
             assert!(bound.is_finite() && bound >= 0.0);
-            assert_eq!(terms[0].str_field("state"), Some("measured"));
+            // Propagated half-widths publish as `interval` (QoiTermReceipt::interval).
+            assert_eq!(terms[0].str_field("state"), Some("interval"));
             assert_eq!(terms[0].f64_field("value"), Some(bound));
             assert!(terms[0].str_field("reason").unwrap().contains("coupled"));
         }

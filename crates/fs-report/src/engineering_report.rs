@@ -190,23 +190,34 @@ pub struct EngineeringReport {
     pub lineage: Vec<LineageItem>,
 }
 
+/// Below this magnitude a fixed-decimal rendering would print a nonzero bound
+/// or residual as zero (a 1e-7 K solver bound read `0.000000`, a false claim
+/// of exactness), so small nonzero values switch to exponent form.
+const FIXED_DECIMAL_FLOOR: f64 = 1e-3;
+
 /// Render a possibly-unavailable magnitude for HTML: finite values print with
-/// four decimals, anything else prints the literal `NO-DATA`.
+/// four decimals (four significant digits below 1e-3, never a false zero),
+/// anything else prints the literal `NO-DATA`.
 fn html_num(value: f64) -> String {
-    if value.is_finite() {
-        format!("{value:.4}")
-    } else {
+    if !value.is_finite() {
         "NO-DATA".to_string()
+    } else if value != 0.0 && value.abs() < FIXED_DECIMAL_FLOOR {
+        format!("{value:.3e}")
+    } else {
+        format!("{value:.4}")
     }
 }
 
 /// Render a possibly-unavailable magnitude for JSON: finite values print
-/// with six decimals, anything else prints `null` (JSON has no NaN).
+/// with six decimals (the shortest round-trip exponent form below 1e-3, never
+/// a false zero), anything else prints `null` (JSON has no NaN).
 fn json_num(value: f64) -> String {
-    if value.is_finite() {
-        format!("{value:.6}")
-    } else {
+    if !value.is_finite() {
         "null".to_string()
+    } else if value != 0.0 && value.abs() < FIXED_DECIMAL_FLOOR {
+        format!("{value:e}")
+    } else {
+        format!("{value:.6}")
     }
 }
 
@@ -1012,4 +1023,27 @@ fn escape_json(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::{html_num, json_num};
+
+    #[test]
+    fn small_nonzero_magnitudes_never_render_as_zero() {
+        // The heatsink's coupled solver bound (measured 2026-09-26).
+        let bound = 1.119_881_623_138_997_8e-7;
+        let json = json_num(bound);
+        assert_ne!(json, "0.000000");
+        assert_eq!(json.parse::<f64>().unwrap().to_bits(), bound.to_bits(), "{json}");
+        assert_eq!(html_num(bound), "1.120e-7");
+        assert_eq!(json_num(-2.5e-9), "-2.5e-9");
+        // Typical magnitudes and exact zero keep their fixed-decimal bytes.
+        assert_eq!(json_num(0.0), "0.000000");
+        assert_eq!(json_num(20.0), "20.000000");
+        assert_eq!(json_num(0.0012), "0.001200");
+        assert_eq!(html_num(301.995_778), "301.9958");
+        assert_eq!(json_num(f64::NAN), "null");
+        assert_eq!(html_num(f64::INFINITY), "NO-DATA");
+    }
 }
