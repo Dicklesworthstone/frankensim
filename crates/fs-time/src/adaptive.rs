@@ -3,6 +3,7 @@
 //! and a RESUMABLE state machine — checkpoint = clone, and split runs
 //! are bitwise-equal to straight runs (the P7 obligation, tested).
 
+pub mod adjoint;
 pub mod events;
 
 /// PI controller settings (standard exponents).
@@ -281,6 +282,12 @@ struct Trial {
     err: f64,
 }
 
+fn stage_time(time: f64, end: f64, h: f64, stage: usize) -> f64 {
+    if stage == 0 { time }
+    else if C[stage - 1] == 1.0 { end }
+    else { time + C[stage - 1] * h }
+}
+
 struct Workspace {
     k: Vec<Vec<f64>>,
     stage: Vec<f64>,
@@ -290,6 +297,53 @@ struct Workspace {
 impl Workspace {
     fn new(n: usize) -> Self {
         Self { k: vec![vec![0.0; n]; 7], stage: vec![0.0; n], next: vec![0.0; n] }
+    }
+
+    // Shared by the primal trial and the discrete-adjoint replay. Keep the
+    // stage summation order and endpoint-time convention identical.
+    fn stage_values(&mut self, initial: &[f64], h: f64, stage: usize) {
+        self.stage.copy_from_slice(initial);
+        if stage > 0 {
+            for (j, kj) in self.k.iter().enumerate().take(stage) {
+                let a = A[stage - 1][j];
+                if a != 0.0 {
+                    for (value, derivative) in self.stage.iter_mut().zip(kj) {
+                        *value = (h * a).mul_add(*derivative, *value);
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stages<F, Cancel>(
+        &mut self, initial: &[f64], time: f64, end: f64, h: f64,
+        rhs: &F, cancelled: &mut Cancel,
+    ) -> Result<bool, AdaptiveError>
+    where F: Fn(f64, &[f64], &mut [f64]), Cancel: FnMut() -> bool,
+    {
+        for stage in 0..7 {
+            if cancelled() {
+                return Ok(false);
+            }
+            self.stage_values(initial, h, stage);
+            for (component, value) in self.stage.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(AdaptiveError::NonFiniteState { stage, component });
+                }
+            }
+            let stage_t = stage_time(time, end, h, stage);
+            // Poison output to detect callbacks that forget a component, even
+            // on a later trial where old stage storage contains valid data.
+            self.k[stage].fill(f64::NAN);
+            rhs(stage_t, &self.stage, &mut self.k[stage]);
+            for (component, value) in self.k[stage].iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(AdaptiveError::NonFiniteRhs { stage, component });
+                }
+            }
+        }
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -314,38 +368,8 @@ impl Workspace {
         if !t.is_finite() || t <= state.t || h <= 0.0 {
             return Err(AdaptiveError::StepUnderflow);
         }
-        for stage in 0..7 {
-            if cancelled() {
-                return Ok(None);
-            }
-            self.stage.copy_from_slice(&state.u);
-            if stage > 0 {
-                for (j, kj) in self.k.iter().enumerate().take(stage) {
-                    let a = A[stage - 1][j];
-                    if a != 0.0 {
-                        for (value, derivative) in self.stage.iter_mut().zip(kj) {
-                            *value = (h * a).mul_add(*derivative, *value);
-                        }
-                    }
-                }
-            }
-            for (component, value) in self.stage.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(AdaptiveError::NonFiniteState { stage, component });
-                }
-            }
-            let stage_t = if stage == 0 { state.t }
-                else if C[stage - 1] == 1.0 { t }
-                else { state.t + C[stage - 1] * h };
-            // Poison output to detect callbacks that forget a component, even
-            // on a later trial where old stage storage contains valid data.
-            self.k[stage].fill(f64::NAN);
-            rhs(stage_t, &self.stage, &mut self.k[stage]);
-            for (component, value) in self.k[stage].iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(AdaptiveError::NonFiniteRhs { stage, component });
-                }
-            }
+        if !self.stages(&state.u, state.t, t, h, rhs, cancelled)? {
+            return Ok(None);
         }
         self.next.copy_from_slice(&state.u);
         let mut err = 0.0f64;

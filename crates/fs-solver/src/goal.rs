@@ -60,6 +60,8 @@ pub enum GoalResidualError {
     ArithmeticRange,
     /// Scratch storage could not be admitted or allocated.
     Allocation,
+    /// Cached inverse evidence belongs to a different exact stored matrix.
+    MatrixMismatch,
     /// The caller's checkpoint requested cancellation.
     Cancelled,
 }
