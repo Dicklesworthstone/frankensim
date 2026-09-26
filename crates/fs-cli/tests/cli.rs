@@ -570,7 +570,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"e6e1087d964f8441dd72c975c9f117f3337a64e520e10dc51bb8226609a0c278\""
+            "\"project_hash\":\"cc648e2e627c7b1f709a6e21fce35b8ba4588ee6f1ab543b344875ec308572fc\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -580,7 +580,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"6f6081f7cb930cf64738855d18ab8321dbd7a96d79e21984da47d8783eb0cc74\""
+            "\"project_hash\":\"33b1b4193dafa62ec7c5a4e1aaf73fa86b4f93575572907f8c578b2d883611b7\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );

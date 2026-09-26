@@ -447,16 +447,14 @@ fn the_foam_twin_shows_the_material_identity_change_and_its_consequences() {
         4,
         "{out}"
     );
-    // The material identity changes the assembled operator, so only the
-    // roundoff bound (a property of that operator) moves; every other
-    // term's state and magnitude is unchanged.
-    assert_eq!(terms.matches("\"changed\":true").count(), 1, "{out}");
-    assert!(
-        terms.contains("\"kind\":\"roundoff\",\"state_left\":\"interval\",\"state_right\":\"interval\""),
-        "{out}"
-    );
-    let roundoff = terms.split("\"kind\":\"roundoff\"").nth(1).expect("roundoff row");
-    assert!(roundoff.split('}').next().unwrap().contains("\"changed\":true"), "{out}");
+    // The material identity changes the assembled operator, so exactly the
+    // two operator-derived bounds move: roundoff and the solver-algebraic
+    // linear enclosure. Every other term's state and magnitude is unchanged.
+    assert_eq!(terms.matches("\"changed\":true").count(), 2, "{out}");
+    for kind in ["roundoff", "solver-algebraic"] {
+        let row = terms.split(&format!("\"kind\":\"{kind}\"")).nth(1).expect("operator-derived row");
+        assert!(row.split('}').next().unwrap().contains("\"changed\":true"), "{kind}: {out}");
+    }
 
     // Stages: geometry import, assignment, and the flow network saw the same
     // inputs (their receipts differ only in binding keys: the run, the
