@@ -7,6 +7,8 @@ use super::{
     canonical_f64, conduction_error, json_string, trace_qoi_region_vertices,
 };
 
+mod coupled;
+
 /// Each mesh solve uses a tenth of the requested primary-QoI accuracy for
 /// algebraic error. This is an allocation, not a discretization observation.
 const ALGEBRAIC_ACCURACY_FRACTION: f64 = 0.1;
@@ -54,10 +56,10 @@ pub(super) fn maximum_term(
         return gap("the published rung retained no final-state operator".to_string());
     };
     // The existing whole-model tolerance comparison remains available for
-    // these models. Do not silently hold their feedback variables constant.
-    if !data.air_paths.is_empty() || data.radiating_boundary.is_some() {
+    // radiation. Air feedback is assessed below as the complete coupled model.
+    if data.radiating_boundary.is_some() {
         return Ok(unavailable("unsupported-model",
-            "maximum-goal corrections do not cover air feedback or radiation; the whole-model tolerance estimate remains available".to_string(), true));
+            "maximum-goal corrections do not cover radiation; the whole-model tolerance estimate remains available".to_string(), true));
     }
     for element in 0..solved.labels.len() {
         if element % 1024 == 0 {
@@ -113,6 +115,12 @@ pub(super) fn maximum_term(
         .fold(f64::NEG_INFINITY, f64::max);
     let scale_k = reference_k.map_or(nominal_k.abs(), |reference| (nominal_k - reference).abs());
     let requested_k = ALGEBRAIC_ACCURACY_FRACTION * accuracy_rel * scale_k;
+    if !data.air_paths.is_empty() {
+        return coupled::maximum_evidence(
+            cx, problem, data.interfaces.as_ref(), &data.air_paths, data.linear,
+            &solved.solution.temperature, &vertices, memory_bytes, config, requested_k,
+        );
+    }
     let (analysis, control_json, primal_iterations, control_summary) = if requested_k.is_finite()
         && requested_k > 0.0
     {
