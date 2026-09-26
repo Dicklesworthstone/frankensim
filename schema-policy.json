@@ -819,6 +819,12 @@
       "reason": "query receipt returned through the API; retained by a caller, not exchanged as a promised file"
     },
     {
+      "constant": "TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-matdb/src/query.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for a usage receipt that retains typed validity coordinates"
+    },
+    {
       "constant": "COVERAGE_DECISION_IDENTITY_VERSION",
       "location": "crates/fs-package/src/coverage.rs",
       "reason_class": "identity-domain",
@@ -907,6 +913,12 @@
       "location": "crates/fs-project/src/fansystem.rs",
       "reason_class": "internal-wire",
       "reason": "declaration-struct version for the bead frn2i.1 fan system; the serialized promise is the .fsim envelope version (project.fsim v2), and this constant never appears on the wire"
+    },
+    {
+      "constant": "VERSION",
+      "location": "crates/fs-project/src/uncertainty.rs",
+      "reason_class": "internal-wire",
+      "reason": "in-flight native probability-study declaration (bead q61wp.72) with no registered maturity claim; versions 1 and 2 are both admitted, and it is not yet promised as a frozen file format"
     },
     {
       "constant": "DESIGN_EXTENSION_SCHEMA_VERSION",
