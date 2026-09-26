@@ -390,3 +390,146 @@ fn strain_at(
         true,
     )
 }
+
+#[cfg(test)]
+mod shape_derivative_gate {
+    //! Per-iteration check of the optimizer's shape derivative against central
+    //! differences of the discrete CutFEM compliance (bead q61wp.75 item 3).
+    use super::*;
+
+    /// Continuum prediction dJ/de for phi -> phi - e*s: the boundary moves out
+    /// of the material by e*s/|grad phi|, so dJ/de = -int_G 2 w s/|grad phi| ds,
+    /// with w = sigma:eps/2 sampled 0.75h inside, as the optimizer samples it.
+    fn predicted(kernel: &ComplianceKernel, state: &EvaluatedDesign, s: &[f64], sub: usize) -> f64 {
+        let phi = &state.phi;
+        let (n, h) = (phi.n(), phi.h());
+        let stride = n + 1;
+        let (lambda, mu) = (kernel.lambda, kernel.mu);
+        let nodal = |p: [f64; 2]| {
+            // Bilinear interpolation of the nodal velocity field.
+            let x = (p[0] / h).clamp(0.0, n as f64 - 1e-12);
+            let y = (p[1] / h).clamp(0.0, n as f64 - 1e-12);
+            let (i, j) = (x.floor() as usize, y.floor() as usize);
+            let (a, b) = (x - i as f64, y - j as f64);
+            let v = |i: usize, j: usize| s[i + j * stride];
+            v(i, j) * (1.0 - a) * (1.0 - b) + v(i + 1, j) * a * (1.0 - b) + v(i, j + 1) * (1.0 - a) * b + v(i + 1, j + 1) * a * b
+        };
+        let energy = |q: [f64; 2]| {
+            let g = phi.gradient_at(q);
+            let gn = g[0].hypot(g[1]).max(1e-12);
+            let r = [(q[0] - 0.75 * h * g[0] / gn).clamp(0.0, 1.0), (q[1] - 0.75 * h * g[1] / gn).clamp(0.0, 1.0)];
+            let (eps, ok) = strain_at(&kernel.grid, phi, &state.solution, r);
+            if !ok { return None; }
+            let sxx = (lambda + 2.0 * mu) * eps[0] + lambda * eps[1];
+            let syy = lambda * eps[0] + (lambda + 2.0 * mu) * eps[1];
+            let sxy = 2.0 * mu * eps[2];
+            Some((0.5 * (sxx * eps[0] + syy * eps[1] + 2.0 * sxy * eps[2]), gn))
+        };
+        let m = n * sub;
+        let d = 1.0 / m as f64;
+        let mut total = 0.0;
+        for j in 0..m {
+            for i in 0..m {
+                let c = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(|[a, b]| [a as f64 * d, b as f64 * d]);
+                let v = c.map(|p| phi.value_at(p));
+                let mut crossings = Vec::new();
+                for e in 0..4 {
+                    let (p, q, fp, fq) = (c[e], c[(e + 1) % 4], v[e], v[(e + 1) % 4]);
+                    if (fp < 0.0) != (fq < 0.0) {
+                        let t = fp / (fp - fq);
+                        crossings.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
+                    }
+                }
+                for pair in crossings.chunks_exact(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+                    // The loaded right edge and clamped left edge are not free boundary.
+                    if mid[0] < 1e-9 || mid[0] > 1.0 - 1e-9 { continue; }
+                    if let Some((w, gn)) = energy(mid) {
+                        total += -2.0 * w * nodal(mid) / gn * (b[0] - a[0]).hypot(b[1] - a[1]);
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    fn measured(kernel: &ComplianceKernel, phi: &GridSdf, s: &[f64], e: f64) -> f64 {
+        let shifted = |sign: f64| {
+            let mut p = phi.clone();
+            for (v, sk) in p.nodes_mut().iter_mut().zip(s) { *v -= sign * e * sk; }
+            kernel.evaluate(p).expect("perturbed design solves").compliance
+        };
+        (shifted(1.0) - shifted(-1.0)) / (2.0 * e)
+    }
+
+    fn start(level: u32, iterations: usize) -> (ComplianceKernel, EvaluatedDesign, OptimizeSettings) {
+        let n = 1usize << level;
+        let settings = OptimizeSettings { level, iterations, nucleation_period: 0, ..OptimizeSettings::default() };
+        let phi = GridSdf::from_fn(n, &|_, y| (y - 0.5).abs() - 0.35);
+        let kernel = ComplianceKernel::new(&phi, Cantilever { load: 1.0, band: 0.125 }, settings).unwrap();
+        let current = kernel.evaluate(phi).unwrap();
+        (kernel, current, settings)
+    }
+
+    /// (central difference, relative FD noise, continuum prediction) along the
+    /// optimizer's own smoothed velocity at this exact design.
+    fn gate(kernel: &ComplianceKernel, state: &EvaluatedDesign, s: &[f64]) -> (f64, f64, f64) {
+        let smax = s.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let e = 0.1 * state.phi.h() / smax;
+        let (coarse, fine) = (measured(kernel, &state.phi, s, e), measured(kernel, &state.phi, s, 0.5 * e));
+        (fine, ((coarse - fine) / fine).abs(), predicted(kernel, state, s, 4))
+    }
+
+    /// Consistency band of the discrete derivative against the continuum shape
+    /// derivative at level 5. Measured 2026-09-25 by the refinement test below:
+    /// ratio-1 = 0.468, 0.262, 0.164 at levels 4, 5, 6 (converging at about
+    /// h^0.75). The band is the level-5 value with 1.5x headroom.
+    const LEVEL5_CONSISTENCY: f64 = 0.4;
+    /// Measured FD noise between e and e/2 peaked at 4e-3; 1% leaves headroom.
+    const FD_NOISE: f64 = 0.01;
+
+    #[test]
+    fn shape_derivative_consistency_error_shrinks_under_refinement() {
+        let mut errors = Vec::new();
+        for level in [4u32, 5, 6] {
+            let (kernel, current, _) = start(level, 1);
+            let s = kernel.direction(&current, 0).unwrap().smooth;
+            let (fd, noise, pr) = gate(&kernel, &current, &s);
+            assert!(noise <= FD_NOISE, "level {level}: FD noise {noise:e}");
+            errors.push(fd / pr - 1.0);
+        }
+        println!("{{\"ratio_minus_one\":{errors:?}}}");
+        assert!(errors.iter().all(|&e| e > 0.0), "{errors:?}");
+        assert!(errors[1] < 0.75 * errors[0] && errors[2] < 0.75 * errors[1], "{errors:?}");
+    }
+
+    #[test]
+    fn every_sampled_iteration_moves_compliance_as_its_shape_derivative_predicts() {
+        let (kernel, mut current, settings) = start(5, 7);
+        let mut ell = settings.ell0;
+        let mut checked = 0;
+        for iteration in 0..settings.iterations {
+            let direction = kernel.direction(&current, iteration).unwrap();
+            if iteration % 3 == 0 {
+                let (fd, noise, pr) = gate(&kernel, &current, &direction.smooth);
+                println!("{{\"iteration\":{iteration},\"fd\":{fd:e},\"predicted\":{pr:e},\"noise\":{noise:e}}}");
+                assert!(fd < 0.0 && pr < 0.0, "iteration {iteration}: the velocity is not a descent direction");
+                assert!(noise <= FD_NOISE, "iteration {iteration}: FD noise {noise:e}");
+                assert!((fd / pr - 1.0).abs() <= LEVEL5_CONSISTENCY, "iteration {iteration}: ratio {}", fd / pr);
+                // Falsifier: the classic factor-of-two slip (w instead of
+                // sigma:eps) must fall outside the band.
+                assert!((fd / (0.5 * pr) - 1.0).abs() > LEVEL5_CONSISTENCY, "the band cannot see a factor-2 error");
+                checked += 1;
+            }
+            let trial = kernel.propose(&current, &direction, GeometryMove {
+                normal_multiplier: ell, hole_multiplier: ell, scale: 1.0, with_holes: true,
+            }).unwrap();
+            let candidate = kernel.evaluate(trial.phi).unwrap();
+            ell = (ell + settings.mu_al * direction.mean_energy.abs().max(1e-30)
+                * (candidate.volume - settings.volfrac) / settings.volfrac).max(0.0);
+            current = candidate;
+        }
+        assert_eq!(checked, 3);
+    }
+}
