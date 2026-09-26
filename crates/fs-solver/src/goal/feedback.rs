@@ -268,7 +268,7 @@ fn enclose_feedback(
     }
     let zeros = scalar_vector(n, &mut work)?;
     let solid = match inverse_columns {
-        Some(columns) => super::enclose_goal_error_with_inverse(
+        Some(columns) => super::inverse::enclose_goal_error_with_inverse(
             matrix, rhs, primal, &zeros, &zeros, scaling, columns,
             limits.solid, || (work.checkpoint)(),
         )?,

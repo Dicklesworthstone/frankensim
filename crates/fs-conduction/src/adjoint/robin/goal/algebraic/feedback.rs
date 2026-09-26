@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use fs_sparse::Csr;
 use fs_solver::goal::feedback::{
-    FeedbackResidualLimits, FeedbackResidualReport,
+    FeedbackResidualLimits, FeedbackResidualReport, enclose_affine_feedback_error_with_inverse,
     enclose_affine_feedback_error_with_schur as enclose_affine_feedback_error,
 };
 use super::{ConductionError, Cx, LinearGoalAnalyzer, bounded_solve, invalid, map_enclosure, poll};
@@ -158,6 +158,20 @@ impl<'m> LinearGoalAnalyzer<'m> {
         let passes = if config.max_response_iterations > 0 { p + 1 } else { 1 };
         let verify_work = n.checked_add(self.response.matrix.nnz()).and_then(|v| v.checked_mul(passes))
             .ok_or_else(|| invalid("affine Robin verification work overflow"))?;
+        // A prepared maximum may already own a checked-inverse proposal
+        // because consistent contact prevents comparison dominance. Retain
+        // it, and admit its verification before any new response work.
+        let verify_work = if self.inverse_columns.is_some() {
+            let dense = n.checked_mul(n).ok_or_else(|| invalid("solid inverse storage overflow"))?;
+            let inverse_work = n.checked_add(self.response.matrix.nnz())
+                .and_then(|pass| n.checked_mul(pass))
+                .ok_or_else(|| invalid("solid inverse verification overflow"))?;
+            if n > 256 || dense > config.residual.solid.max_nonzeros
+                || inverse_work > config.residual.solid.max_nonzeros
+            { return Err(invalid("affine Robin solid inverse limit exceeded")); }
+            verify_work.checked_add(dense).and_then(|work| work.checked_add(inverse_work))
+                .ok_or_else(|| invalid("affine Robin combined verification overflow"))?
+        } else { verify_work };
         if verify_work > config.residual.max_verification_entries {
             return Err(invalid("affine Robin verification work limit exceeded"));
         }
@@ -253,6 +267,14 @@ impl LinearRobinFeedbackAnalyzer<'_> {
     /// Work spent preparing all response columns together.
     #[must_use]
     pub const fn response_iterations(&self) -> usize { self.response_iterations }
+    /// Original solid stability work, including any inverse proposals.
+    /// Assessments never repeat the solves that produced these columns.
+    #[must_use]
+    pub const fn stability_iterations(&self) -> usize { self.solid.stability_iterations }
+    /// Borrowed solid inverse proposals, not unchecked inverse authority.
+    /// The complete coupled evaluator rechecks these against its own matrix.
+    #[must_use]
+    pub fn solid_inverse_columns(&self) -> Option<&[Vec<f64>]> { self.solid.inverse_columns() }
     /// Read-only stored transfer for independent numerical replay: A x = b+B(d+C x).
     #[must_use]
     pub fn stored_system(&self) -> (&Csr, &[f64], &Csr, &Csr, &[f64]) {
@@ -270,26 +292,29 @@ impl LinearRobinFeedbackAnalyzer<'_> {
     pub fn analyze_maximum(
         &self, cx: &Cx<'_>, temperature: &[f64], vertices: &[usize],
     ) -> Result<LinearRobinMaximumAnalysis, ConductionError> {
-        let baseline = self.solid.analyze_maximum(cx, temperature, vertices)?;
+        // Validate the region and field, but do not first certify a frozen
+        // solid. That would repeat dense inverse verification and discard its
+        // result. The complete coupled equation owns the ONE numerical pass.
+        let (fixed, moving, free_vertices) = selected_maximum(&self.solid, cx, temperature, vertices)?;
         let free = self.solid.dofs().gather(temperature);
-        let coupled = enclose_affine_feedback_error(
-            &self.solid.response.matrix, &self.solid.rhs, &free,
-            &self.injection, &self.feedback, &self.offset,
-            self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
-            self.config.residual, || cx.checkpoint().is_ok(),
-        ).map_err(map_enclosure)?;
-        let error = if baseline.free_vertices() == 0 { Some(0.0) } else { coupled.state_error_infinity_upper() };
-        let mut fixed = f64::NEG_INFINITY;
-        let mut moving = f64::NEG_INFINITY;
-        for (i, &vertex) in vertices.iter().enumerate() {
-            if i % 512 == 0 { poll(cx, i)?; }
-            let value = if temperature[vertex] == 0.0 { 0.0 } else { temperature[vertex] };
-            if self.solid.dofs().slot_of(vertex).is_some() { moving = moving.max(value); }
-            else { fixed = fixed.max(value); }
-        }
-        let nominal = baseline.nominal_k();
+        let coupled = match self.solid.inverse_columns() {
+            Some(columns) => enclose_affine_feedback_error_with_inverse(
+                &self.solid.response.matrix, &self.solid.rhs, &free,
+                &self.injection, &self.feedback, &self.offset,
+                self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                columns, self.config.residual, || cx.checkpoint().is_ok(),
+            ),
+            None => enclose_affine_feedback_error(
+                &self.solid.response.matrix, &self.solid.rhs, &free,
+                &self.injection, &self.feedback, &self.offset,
+                self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                self.config.residual, || cx.checkpoint().is_ok(),
+            ),
+        }.map_err(map_enclosure)?;
+        let error = if free_vertices == 0 { Some(0.0) } else { coupled.state_error_infinity_upper() };
+        let nominal = fixed.max(moving);
         let interval = error.and_then(|error| {
-            if baseline.free_vertices() == 0 || error == 0.0 { return Some([nominal, nominal]); }
+            if free_vertices == 0 || error == 0.0 { return Some([nominal, nominal]); }
             let lo = fixed.max(fs_math::next_down(moving - error));
             let hi = fixed.max(fs_math::next_up(moving + error));
             (lo.is_finite() && hi.is_finite()).then_some([lo, hi])
@@ -297,7 +322,42 @@ impl LinearRobinFeedbackAnalyzer<'_> {
         poll(cx, 0)?;
         Ok(LinearRobinMaximumAnalysis {
             nominal_k: nominal, interval_k: interval, half_width_k: interval.and(error),
-            free_vertices: baseline.free_vertices(), response_iterations: self.response_iterations, coupled,
+            free_vertices, response_iterations: self.response_iterations, coupled,
         })
     }
+}
+
+// Selection-only admission: no residual, inverse, primal or response solve.
+// Canonical mesh order and normalized zeros preserve set-valued max semantics.
+fn selected_maximum(
+    solid: &LinearGoalAnalyzer<'_>, cx: &Cx<'_>, temperature: &[f64], vertices: &[usize],
+) -> Result<(f64, f64, usize), ConductionError> {
+    poll(cx, 0)?;
+    let n = solid.problem.mesh.vertex_count();
+    if vertices.is_empty() || vertices.len() > n {
+        return Err(invalid("a regional maximum needs a nonempty vertex set within the mesh"));
+    }
+    let mut selected = Vec::new();
+    selected.try_reserve_exact(n).map_err(|_| invalid("regional maximum selection allocation refused"))?;
+    for i in 0..n { if i % 512 == 0 { poll(cx, i)?; } selected.push(false); }
+    for (i, &vertex) in vertices.iter().enumerate() {
+        if i % 512 == 0 { poll(cx, i)?; }
+        if vertex >= n || selected[vertex] {
+            return Err(invalid("regional maximum vertices must be distinct and in range"));
+        }
+        selected[vertex] = true;
+    }
+    super::validate_field(cx, solid.problem, solid.dofs(), temperature)?;
+    let (mut fixed, mut moving) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut free_vertices = 0;
+    for (vertex, included) in selected.into_iter().enumerate() {
+        if vertex % 512 == 0 { poll(cx, vertex)?; }
+        if !included { continue; }
+        let value = if temperature[vertex] == 0.0 { 0.0 } else { temperature[vertex] };
+        if solid.dofs().slot_of(vertex).is_some() {
+            moving = moving.max(value); free_vertices += 1;
+        } else { fixed = fixed.max(value); }
+    }
+    poll(cx, 0)?;
+    Ok((fixed, moving, free_vertices))
 }
