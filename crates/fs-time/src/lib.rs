@@ -18,6 +18,7 @@
 pub mod adaptive;
 pub mod galpha;
 pub mod hybrid;
+pub mod hybrid_sensitivity;
 pub mod lie;
 pub mod se3;
 #[cfg(feature = "time-slabs")]

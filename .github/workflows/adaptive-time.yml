@@ -26,3 +26,7 @@ jobs:
         run: cargo test --release -p fs-time --test time_battery
       - name: Run bounded impact and restart example
         run: cargo run --release -p fs-time --example rk45_impact
+      - name: Test hybrid trajectory sensitivities
+        run: "cargo test --release -p fs-time --lib hybrid_sensitivity::"
+      - name: Test thermal relay and gradient-driven impact fit
+        run: cargo test --release -p fs-time --example rk45_thermostat --example rk45_impact_fit
