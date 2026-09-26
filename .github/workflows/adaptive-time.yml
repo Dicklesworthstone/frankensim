@@ -21,7 +21,7 @@ jobs:
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
       - name: Test checked stepping and event localization
-        run: cargo test --release -p fs-time --lib adaptive::
+        run: "cargo test --release -p fs-time --lib adaptive::"
       - name: Test existing time-integration behavior
         run: cargo test --release -p fs-time --test time_battery
       - name: Run bounded impact and restart example
