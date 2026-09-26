@@ -224,6 +224,17 @@ pub(super) fn read(value: &JsonValue, policy: &Controls) -> Result<Option<Origin
 pub(super) fn retain_source(spec: &ElasticitySpec, ledger: &Ledger, origin: &Origin) -> Result<()> {
     ledger.begin()?;
     let result = (|| -> Result<()> {
+        // Identical source bytes already sealed by an op that consumed this
+        // coarse receipt: the lineage exists, and a second producer would
+        // violate the ledger's exclusive output seal (a fresh run on a
+        // ledger that already holds the refinement).
+        let source = ledger.put_artifact("study-source", spec.canonical.as_bytes(), None)?;
+        if let Some(existing) = ledger.artifact_output_seal(&source.hash)? {
+            if ledger.edge_exists(existing, &origin.receipt, EdgeRole::In)? {
+                return Ok(());
+            }
+            return Err(malformed("refinement source is already sealed by an op with a different coarse origin"));
+        }
         let seed = spec.base.seeds.as_ref().expect("admitted seed").root.to_le_bytes();
         let versions = format!("{{\"driver\":{DRIVER:?},\"crate\":{:?}}}", env!("CARGO_PKG_VERSION"));
         let budget = format!("{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{}}}",
@@ -234,11 +245,8 @@ pub(super) fn retain_source(spec: &ElasticitySpec, ledger: &Ledger, origin: &Ori
             &FiveExplicits { seed: &seed, versions: &versions, budget: &budget,
                 capability: "{\"ops\":[\"optimization.marquee-topopt\",\"geometry.sdf\",\"physics.cutfem\"]}" }, 0)?;
         ledger.link(op, &origin.receipt, EdgeRole::In)?;
-        let source = ledger.put_artifact("study-source", spec.canonical.as_bytes(), None)?;
         ledger.link(op, &source.hash, EdgeRole::Out)?;
-        if ledger.artifact_output_seal(&source.hash)?.is_none() {
-            ledger.seal_artifact_output(&source.hash, op)?;
-        }
+        ledger.seal_artifact_output(&source.hash, op)?;
         ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
         Ok(())
     })();
