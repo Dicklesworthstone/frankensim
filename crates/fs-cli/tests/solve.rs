@@ -435,6 +435,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
             temp_lo: kelvin(233.15),
             temp_hi: kelvin(398.15),
             source: "solve-fixture".to_string(),
+            conductivity_tolerance: None,
         }]),
         interface_cards: Some(Vec::new()),
         perfect_contacts: None,
@@ -577,6 +578,7 @@ fn multi_region_contact_project() -> ProjectSpec {
                 temp_lo: QtyAny::new(233.15, fs_project::spec::dims::TEMPERATURE),
                 temp_hi: QtyAny::new(398.15, fs_project::spec::dims::TEMPERATURE),
                 source: "solve-contact-fixture".to_string(),
+                conductivity_tolerance: None,
             })
             .collect(),
     );
@@ -1086,7 +1088,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 22,
+        SOLVE_DRIVER_VERSION, 23,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

@@ -24,11 +24,11 @@ use crate::spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata, OutputRequest,
-    PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
-    SolverSettings, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent,
-    Versions,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata,
+    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
+    ThermalLimit, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -361,6 +361,16 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
                 kw("source"),
                 text(&binding.source),
             ]);
+            if let Some(tolerance) = &binding.conductivity_tolerance {
+                row.extend([
+                    kw("conductivity-tolerance-rel"),
+                    float(tolerance.rel),
+                    kw("tolerance-basis"),
+                    text(&tolerance.basis),
+                    kw("tolerance-source"),
+                    text(&tolerance.source),
+                ]);
+            }
             items.push(list(row));
         }
         sections.push(list(items));
@@ -1998,10 +2008,40 @@ fn read_materials(body: &[Node], out: &mut Vec<Violation>) -> Vec<MaterialBindin
             inner,
             "binding",
             &[
-                "region", "card", "claim", "state", "temp-lo", "temp-hi", "source",
+                "region",
+                "card",
+                "claim",
+                "state",
+                "temp-lo",
+                "temp-hi",
+                "source",
+                "conductivity-tolerance-rel",
+                "tolerance-basis",
+                "tolerance-source",
             ],
             out,
         );
+        let tolerance_fields = [
+            field(&pairs, "conductivity-tolerance-rel"),
+            field(&pairs, "tolerance-basis"),
+            field(&pairs, "tolerance-source"),
+        ];
+        let conductivity_tolerance = match tolerance_fields {
+            [None, None, None] => None,
+            [Some(rel), Some(basis), Some(source)] => Some(MaterialTolerance {
+                rel: expect_float(Some(rel), "binding.conductivity-tolerance-rel", out),
+                basis: expect_str(Some(basis), "binding.tolerance-basis", out),
+                source: expect_str(Some(source), "binding.tolerance-source", out),
+            }),
+            _ => {
+                out.push(Violation {
+                    code: "project-malformed-clause",
+                    what: "a conductivity tolerance needs `:conductivity-tolerance-rel`, `:tolerance-basis` and `:tolerance-source` together".to_string(),
+                    fix: "declare all three keys, or none".to_string(),
+                });
+                None
+            }
+        };
         bindings.push(MaterialBinding {
             region: expect_str(field(&pairs, "region"), "binding.region", out),
             card: expect_str(field(&pairs, "card"), "binding.card", out),
@@ -2010,6 +2050,7 @@ fn read_materials(body: &[Node], out: &mut Vec<Violation>) -> Vec<MaterialBindin
             temp_lo: expect_qty(field(&pairs, "temp-lo"), "binding.temp-lo", out),
             temp_hi: expect_qty(field(&pairs, "temp-hi"), "binding.temp-hi", out),
             source: expect_str(field(&pairs, "source"), "binding.source", out),
+            conductivity_tolerance,
         });
     }
     bindings

@@ -424,6 +424,7 @@ mod wire_surface {
                 temp_lo: kelvin(233.15),
                 temp_hi: kelvin(398.15),
                 source: "matdb".to_string(),
+                conductivity_tolerance: None,
             }]),
             interface_cards: Some(vec![InterfaceCardBinding {
                 interface: "cpu-sink-tim".to_string(),
@@ -542,7 +543,7 @@ mod wire_surface {
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(
             migrated.receipt.rule.label(),
-            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
+            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
         );
         let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
         assert!(

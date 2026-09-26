@@ -326,10 +326,13 @@ algebraic); measurement is negligible because no observation data enter. The
 published solve also bounds its maximum's roundoff: a componentwise
 `γ_k (|b| + |A||T|)` row bound on the assembled solid operator, mapped through
 the adjoint at the hottest region vertex. On the tracked finned heatsink this
-measures six of eight terms: boundary conditions about 20.0 K, model form about
-1.34 K, discretization about 0.001 K with the ladder (about 0.0016 K
-adaptively), and roundoff about 9e-6 K. Geometry and material parameters stay
-NO-DATA, so the verdict is still indeterminate. Every term is Estimated, not a
+measures seven of eight terms: boundary conditions about 20.0 K, model form
+about 1.34 K, discretization about 0.001 K with the ladder (about 0.0016 K
+adaptively), material parameters about 0.0012 K (a declared +/-8% AA6061
+conductivity tolerance whose source is the gap between the fixture card and
+the in-repo NIST 6061-T6 fit; fsim v6 `:conductivity-tolerance-rel`), and
+roundoff about 9e-6 K. Geometry stays NO-DATA, so the verdict is still
+indeterminate. Every term is Estimated, not a
 certificate.
 
 | Command | Purpose |

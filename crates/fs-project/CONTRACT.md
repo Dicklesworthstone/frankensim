@@ -153,8 +153,14 @@ bindings; it runs no solves and admits no scenarios itself.
   recomputation and drift is `project-entity-id-mismatch` — a pin proves
   byte-equal derivation inputs, never physical sameness. Display names are
   outside identity, exactly as in fs-scenario.
+- A `MaterialBinding` may carry an optional `MaterialTolerance` (schema v6):
+  a relative conductivity half-width in (0,1) with a mandatory basis and
+  source, all three keys or none. It is an engineering declaration with
+  provenance, not a validated statistical bound. Absence means undeclared,
+  never zero, and the solve stage propagates a declared tolerance into the
+  Parameters budget term.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 5 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 6 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -167,11 +173,11 @@ bindings; it runs no solves and admits no scenarios itself.
 - Canonical bytes are the checked s-expression render; `canonical_hash`
   hashes them under `org.frankensim.fs-project.canonical.v1`. The JSON
   spelling parses to the same AST, so both spellings reach one hash.
-- `FSIM_VERSION = 5`. Readers refuse other versions
+- `FSIM_VERSION = 6`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The
-  registered rules preserve released v1–v4 inputs through named optional
+  registered rules preserve released v1–v5 inputs through named optional
   accretions; a synthetic version-0 proof rule also exercises the machinery.
 - The defaultable fields are exactly two, and every applied default is
   receipted: power-row `duty` (`1.0`, continuous dissipation is the

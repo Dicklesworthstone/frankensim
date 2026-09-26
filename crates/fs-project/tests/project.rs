@@ -217,6 +217,7 @@ fn reference_project() -> ProjectSpec {
             temp_lo: kelvin(233.15),
             temp_hi: kelvin(398.15),
             source: "matdb".to_string(),
+            conductivity_tolerance: None,
         }]),
         interface_cards: Some(vec![InterfaceCardBinding {
             interface: "cpu-sink-tim".to_string(),
@@ -831,7 +832,7 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
     );
 }
 
@@ -884,7 +885,7 @@ fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4-then-ambient-radiation-v5"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
     );
 }
 
@@ -893,8 +894,8 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     let historical = reference_project();
     let current = print_sexpr(&historical).expect("current project renders");
     let v4 = current
-        .replacen("(fsim-project :version 5", "(fsim-project :version 4", 1)
-        .replacen("(versions :schema 5", "(versions :schema 4", 1);
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 4", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 4", 1);
     assert_ne!(v4, current);
     assert_eq!(
         parse_sexpr(&v4)
@@ -907,8 +908,8 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     assert_eq!(parsed.decoded.canonical, current);
     let receipt = parsed.migration.expect("v4 migration is receipted");
     assert_eq!(receipt.source_version, 4);
-    assert_eq!(receipt.target_version, 5);
-    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5");
+    assert_eq!(receipt.target_version, FSIM_VERSION);
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6");
     assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
     assert!(
         parsed
@@ -925,9 +926,89 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     );
     assert!(
         parse_sexpr_migrating(&current)
-            .expect("native v5")
+            .expect("native current")
             .migration
             .is_none()
+    );
+}
+
+#[test]
+fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v5 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 5", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 5", 1);
+    assert_ne!(v5, current);
+    let parsed = parse_sexpr_migrating(&v5).expect("v5 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    assert_eq!(parsed.decoded.canonical, current);
+    let receipt = parsed.migration.expect("v5 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6");
+    assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
+    assert!(
+        parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
+        "undeclared stays undeclared"
+    );
+}
+
+fn tolerance_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.materials.as_mut().expect("materials")[0].conductivity_tolerance =
+        Some(fs_project::MaterialTolerance {
+            rel: 0.08,
+            basis: "source-discrepancy".to_string(),
+            source: "fixture card 167 W/m/K vs NIST 6061-T6 fit 154.35 W/m/K at 293 K".to_string(),
+        });
+    spec
+}
+
+#[test]
+fn material_tolerance_round_trips_in_both_spellings_and_moves_the_hash() {
+    let spec = tolerance_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains(":conductivity-tolerance-rel 0.08 :tolerance-basis \"source-discrepancy\""));
+    let decoded = parse_sexpr(&sexpr).expect("canonical s-expression");
+    assert_eq!(decoded.spec, spec);
+    let json = print_json(&spec).expect("json renders");
+    assert_eq!(parse_json(&json).expect("canonical json").spec, spec);
+    let plain = print_sexpr(&reference_project()).expect("renders");
+    assert_ne!(canonical_hash(plain.as_bytes()), canonical_hash(sexpr.as_bytes()));
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+}
+
+#[test]
+fn material_tolerance_refuses_partial_invalid_or_pre_v6_declarations() {
+    let sexpr = print_sexpr(&tolerance_project()).expect("renders");
+    // All three keys or none.
+    let partial = sexpr.replacen(" :tolerance-basis \"source-discrepancy\"", "", 1);
+    let partial = parse_sexpr_lenient(&partial).expect("syntax is fine");
+    assert!(
+        partial.findings().iter().any(|f| f.code == "project-malformed-clause"),
+        "{:?}",
+        partial.findings()
+    );
+    assert!(partial.spec.materials.as_ref().unwrap()[0].conductivity_tolerance.is_none());
+    for rel in [0.0, 1.0, -0.1, f64::NAN] {
+        let mut spec = tolerance_project();
+        spec.materials.as_mut().unwrap()[0].conductivity_tolerance.as_mut().unwrap().rel = rel;
+        assert!(
+            spec.validate().iter().any(|v| v.code == "project-material-tolerance-invalid"),
+            "rel {rel} admitted"
+        );
+    }
+    let mut unsourced = tolerance_project();
+    unsourced.materials.as_mut().unwrap()[0].conductivity_tolerance.as_mut().unwrap().source =
+        String::new();
+    assert!(unsourced.validate().iter().any(|v| v.code == "project-material-tolerance-source-invalid"));
+    // A tolerance cannot masquerade as a v5 document.
+    let false_v5 = sexpr
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 5", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 5", 1);
+    assert_eq!(
+        parse_sexpr_migrating(&false_v5).expect_err("v5 never carried a tolerance").code,
+        "fsim-migration-payload"
     );
 }
 
@@ -994,8 +1075,8 @@ fn radiation_round_trip_retains_explicit_physics_in_both_spellings() {
 
     // A new physical declaration cannot masquerade as an old-schema file.
     let false_v4 = canonical
-        .replacen("(fsim-project :version 5", "(fsim-project :version 4", 1)
-        .replacen("(versions :schema 5", "(versions :schema 4", 1);
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 4", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 4", 1);
     assert_eq!(
         parse_sexpr_migrating(&false_v4)
             .expect_err("v4 never carried radiation")

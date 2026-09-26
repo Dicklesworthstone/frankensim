@@ -288,6 +288,24 @@ pub struct MaterialBinding {
     /// Source channel the card came from. This is visible project provenance,
     /// not a substitute for the selected claim's own source authority.
     pub source: String,
+    /// Optional declared symmetric relative interval on the card's thermal
+    /// conductivity (schema v6). The solve stage propagates it by re-solving
+    /// at both bounds for the Parameters budget term. Absent means undeclared,
+    /// never zero uncertainty.
+    pub conductivity_tolerance: Option<MaterialTolerance>,
+}
+
+/// A declared symmetric relative interval on a bound card's property, with the
+/// basis and the source that justify it. The interval is an engineering
+/// declaration carried as provenance, not a validated statistical bound.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterialTolerance {
+    /// Relative half-width in (0, 1).
+    pub rel: f64,
+    /// Why the interval has this width (for example `source-discrepancy`).
+    pub basis: String,
+    /// Where the width comes from, specific enough to re-derive it.
+    pub source: String,
 }
 
 /// Class-specific manufactured state of a thermal interface.
@@ -2068,6 +2086,30 @@ impl ProjectSpec {
                         ),
                         "state the pack, registry, or custody channel that supplied the referenced card",
                     ));
+                }
+                if let Some(tolerance) = &binding.conductivity_tolerance {
+                    if !(tolerance.rel.is_finite() && tolerance.rel > 0.0 && tolerance.rel < 1.0) {
+                        out.push(violation(
+                            "project-material-tolerance-invalid",
+                            format!(
+                                "material binding for `{}` declares conductivity tolerance {} outside (0, 1)",
+                                binding.region, tolerance.rel
+                            ),
+                            "declare a finite relative half-width strictly between 0 and 1, or omit it",
+                        ));
+                    }
+                    if !is_canonical_binding_text(&tolerance.basis)
+                        || !is_canonical_binding_text(&tolerance.source)
+                    {
+                        out.push(violation(
+                            "project-material-tolerance-source-invalid",
+                            format!(
+                                "material binding for `{}` declares a conductivity tolerance without a canonical basis and source",
+                                binding.region
+                            ),
+                            "state why the interval has its width and where that width comes from",
+                        ));
+                    }
                 }
                 check_dims(
                     out,

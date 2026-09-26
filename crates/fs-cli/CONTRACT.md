@@ -465,7 +465,12 @@ operator behind the field (including a radiating solve's combined partition),
 with λ the adjoint at the hottest vertex of the requirement region. It
 excludes air-network arithmetic and tracks only assembled magnitudes, not
 element-level cancellation, so it is Estimated. Propagation re-solves skip it.
-Geometry and material parameters remain NO-DATA; while any
+The Parameters term moves every material binding's declared relative
+conductivity tolerance (fsim v6) to its lower and then its upper bound
+together, re-solving at base fidelity with the card's sampled knots scaled
+over the same temperature span. Its half-width is the larger deviation. With
+no declared tolerance it stays NO-DATA, because the bound cards state no
+conductivity uncertainty. Geometry remains NO-DATA; while any
 term is NO-DATA the verdict stays Estimated / indeterminate and the `no_claim`
 text counts the NO-DATA terms. The
 report projects the interval term's magnitude into the uncertainty table and

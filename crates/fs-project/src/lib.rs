@@ -33,7 +33,11 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// carry no radiation declaration and migrate with a receipted envelope and
 /// schema rewrite; no radiative exchange is inferred. Version 4 added
 /// airflow-convection, version 3 conduction, and version 2 fan-system inputs.
-pub const FSIM_VERSION: u32 = 5;
+/// Version 6 adds an optional declared relative conductivity tolerance on a
+/// material binding, with a mandatory basis and source (bead q61wp.72); the
+/// solve stage propagates it into the Parameters budget term. Version-5
+/// documents declare none and migrate without inventing one.
+pub const FSIM_VERSION: u32 = 6;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -63,11 +67,12 @@ pub use spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata, OutputRequest,
-    PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, RequirementSourceReview,
-    SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
-    ThermalLimit, UnitsDoctrine, Vent, Versions, requirement_source_reviews,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata,
+    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
+    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    requirement_source_reviews,
 };
 pub use study::{
     StudyBudgets, StudyConstraints, StudyDomain, StudyHole, StudyObjective, StudyOptimizer,

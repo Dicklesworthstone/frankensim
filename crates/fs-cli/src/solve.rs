@@ -128,7 +128,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// envelope in the boundary-condition propagation vertices.
 /// Version 22 retains a componentwise adjoint roundoff bound on the published
 /// temperature maximum and publishes it as the Roundoff budget term.
-pub const SOLVE_DRIVER_VERSION: u32 = 22;
+/// Version 23 propagates declared material conductivity tolerances (fsim v6)
+/// into the Parameters budget term by bound re-solves.
+pub const SOLVE_DRIVER_VERSION: u32 = 23;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -5011,6 +5013,7 @@ fn material_models(
     spec: &ProjectSpec,
     cards: &CardPackSet,
     region_ids: &BTreeMap<String, u32>,
+    conductivity_side: f64,
 ) -> Result<
     (
         fs_conduction::MaterialTable,
@@ -5067,6 +5070,15 @@ fn material_models(
                 "repair the card validity/claims or the project's admitted temperature range",
             )
         })?;
+        // A Parameters vertex re-solve moves every declared tolerance to one
+        // bound together (lower conductivity heats the part). The published
+        // solve (side 0) keeps the card's own sampled table and receipts.
+        let table = match &binding.conductivity_tolerance {
+            Some(tolerance) if conductivity_side != 0.0 => {
+                scaled_conductivity(&table, 1.0 + conductivity_side * tolerance.rel, name)?
+            }
+            _ => table,
+        };
         let model = fs_conduction::ConductivityModel::isotropic(table);
         let material_id = fs_conduction::MaterialId(region_id);
         fallback.get_or_insert_with(|| model.clone());
@@ -5085,6 +5097,29 @@ fn material_models(
         by_region,
         fallback.expect("a nonempty region map produced one model"),
     ))
+}
+
+/// The card's sampled conductivity scaled by one factor over the same knots,
+/// so the admitted temperature span is unchanged. Used only by Parameters
+/// vertex re-solves, whose fields are never published.
+fn scaled_conductivity(
+    table: &fs_conduction::ConductivityTable,
+    factor: f64,
+    region: &str,
+) -> Result<fs_conduction::ConductivityTable, SolveRefusal> {
+    let knots: Vec<(f64, f64)> = table.knots().iter().map(|&(t, k)| (t, k * factor)).collect();
+    let scaled = if knots.len() > 1 {
+        fs_conduction::ConductivityTable::declared_curve(knots)
+    } else {
+        fs_conduction::ConductivityTable::declared(knots.first().map_or(f64::NAN, |knot| knot.1))
+    };
+    scaled.map_err(|error| {
+        conduction_error(
+            "cli-solve-conduction-material",
+            format!("conductivity tolerance vertex for region `{region}` refused: {error}"),
+            "declare a relative conductivity tolerance that keeps conductivity positive",
+        )
+    })
 }
 
 fn parse_claim_id(pin: &str, target: &str) -> Result<ClaimId, SolveRefusal> {
@@ -5569,6 +5604,7 @@ fn conduction_solve_receipt(
     available_wall_s: f64,
     flow_override: Option<&FlowNetworkHandoff>,
     htc_scale: f64,
+    conductivity_side: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
@@ -5763,7 +5799,8 @@ fn conduction_solve_receipt(
             .iter()
             .map(|region| region.0)
             .collect();
-        let (table, region_to_material, fallback) = material_models(spec, cards, &region_ids)?;
+        let (table, region_to_material, fallback) =
+            material_models(spec, cards, &region_ids, conductivity_side)?;
         let element_materials =
             fs_conduction::ElementMaterials::from_region_ids(table, &labels, &region_to_material)
                 .map_err(|error| {
@@ -6437,6 +6474,7 @@ struct InputPropagation {
     boundary: PropagatedTerm,
     model_form: PropagatedTerm,
     solver_algebraic: PropagatedTerm,
+    parameters: PropagatedTerm,
     /// Deviation of the joint worst corner beyond the summed half-widths.
     interaction_excess_k: f64,
 }
@@ -6492,7 +6530,7 @@ impl PropagatedTerm {
 impl InputPropagation {
     fn json(&self) -> Result<String, SolveRefusal> {
         Ok(format!(
-            "{{\"nominal_base_k\":{},\"boundary_conditions\":{},\"model_form\":{},\"solver_algebraic\":{},\"interaction_excess_k\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+            "{{\"nominal_base_k\":{},\"boundary_conditions\":{},\"model_form\":{},\"solver_algebraic\":{},\"parameters\":{},\"interaction_excess_k\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
             canonical_f64(self.nominal_k).ok_or_else(|| conduction_error(
                 "cli-solve-conduction-propagation",
                 "the base nominal maximum is non-finite",
@@ -6501,13 +6539,14 @@ impl InputPropagation {
             self.boundary.json()?,
             self.model_form.json()?,
             self.solver_algebraic.json()?,
+            self.parameters.json()?,
             canonical_f64(self.interaction_excess_k).unwrap_or_else(|| "null".to_string()),
             json_string(PROPAGATION_NO_CLAIM),
         ))
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; material and geometry uncertainty are not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; geometry uncertainty is not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6543,6 +6582,7 @@ fn propagation_term_receipts(
             (EngineeringUncertaintyKind::BoundaryConditions, &propagation.boundary),
             (EngineeringUncertaintyKind::ModelForm, &propagation.model_form),
             (EngineeringUncertaintyKind::SolverAlgebraic, &propagation.solver_algebraic),
+            (EngineeringUncertaintyKind::Parameters, &propagation.parameters),
         ]);
     }
     if let Some(roundoff) = roundoff {
@@ -6686,15 +6726,15 @@ fn propagate_declared_inputs(
         return Ok(None);
     };
     let base = base_fidelity(spec);
-    let solve = |project: &ProjectSpec, htc_scale: f64| -> Result<Option<f64>, SolveRefusal> {
+    let solve = |project: &ProjectSpec, htc_scale: f64, conductivity_side: f64| -> Result<Option<f64>, SolveRefusal> {
         let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
         let product = conduction_solve_receipt(
             ledger, project, cards, context, run, work, resume, available_wall_s,
-            Some(&handoff), htc_scale,
+            Some(&handoff), htc_scale, conductivity_side,
         )?;
         region_maximum(&product.qoi_inputs, region, work)
     };
-    let Some(nominal) = solve(&base, 1.0)? else {
+    let Some(nominal) = solve(&base, 1.0, 0.0)? else {
         return Ok(None);
     };
     let deviation = |values: &[(String, f64)]| {
@@ -6702,13 +6742,16 @@ fn propagate_declared_inputs(
     };
     // A refused vertex (for example a fan curve that no longer reaches an
     // operating point) leaves its term NO-DATA with the refusal as reason.
-    let vertex = |label: String, project: &ProjectSpec, htc_scale: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
-        match solve(project, htc_scale) {
+    let vertex_with = |label: String, project: &ProjectSpec, htc_scale: f64, conductivity_side: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
+        match solve(project, htc_scale, conductivity_side) {
             Ok(Some(value)) => Ok(Ok((label, value))),
             Ok(None) => Ok(Err(format!("vertex `{label}` produced no region maximum"))),
             Err(error) if matches!(error.code, "cli-solve-cancelled" | "cli-solve-work-envelope") => Err(error),
             Err(error) => Ok(Err(format!("vertex `{label}` refused: {} ({})", error.what, error.code))),
         }
+    };
+    let vertex = |label: String, project: &ProjectSpec, htc_scale: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
+        vertex_with(label, project, htc_scale, 0.0)
     };
 
     // Boundary and operating conditions: inlet/reference temperature across
@@ -6846,11 +6889,52 @@ fn propagate_declared_inputs(
         }
     };
 
+    // Parameters: every declared material conductivity tolerance moved to its
+    // lower and then its upper bound together. Undeclared stays NO-DATA; the
+    // card claims themselves state no conductivity uncertainty.
+    let declared: Vec<String> = spec
+        .materials
+        .iter()
+        .flatten()
+        .filter_map(|binding| {
+            binding.conductivity_tolerance.as_ref().map(|t| {
+                format!("`{}` +/-{} ({}: {})", binding.region, t.rel, t.basis, t.source)
+            })
+        })
+        .collect();
+    let parameters = if declared.is_empty() {
+        PropagatedTerm::Unmeasured {
+            reason: "no material binding declares a conductivity tolerance and the bound cards state none".to_string(),
+        }
+    } else {
+        let mut values = Vec::new();
+        let mut refusal = None;
+        for side in [-1.0, 1.0] {
+            match vertex_with(format!("declared conductivity at its {} bound", if side < 0.0 { "lower" } else { "upper" }), &base, 1.0, side)? {
+                Ok(row) => values.push(row),
+                Err(reason) => refusal = refusal.or(Some(reason)),
+            }
+        }
+        match refusal {
+            Some(reason) => PropagatedTerm::Unmeasured { reason },
+            None => PropagatedTerm::Measured {
+                half_width_k: deviation(&values),
+                method: "interval-vertex-resolve",
+                detail: format!(
+                    "every declared relative conductivity tolerance moved to its bounds together: {}; an engineering declaration, not a validated statistical interval",
+                    declared.join("; ")
+                ),
+                vertices: values,
+            },
+        }
+    };
+
     Ok(Some(InputPropagation {
         nominal_k: nominal,
         boundary,
         model_form,
         solver_algebraic,
+        parameters,
         interaction_excess_k,
     }))
 }
@@ -6870,7 +6954,7 @@ fn conduction_receipt(
     available_wall_s: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     let mut product = conduction_solve_receipt(
-        ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0,
+        ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0, 0.0,
     )?;
     if let Some(propagation) =
         propagate_declared_inputs(ledger, spec, cards, context, run, work, resume, available_wall_s)?
