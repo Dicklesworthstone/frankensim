@@ -71,7 +71,7 @@ fn native_samples_change_only_bound_inputs_and_do_not_accumulate() {
     assert_eq!(first, bound.sample_project(&[4.5, 297.0]).unwrap());
     assert_eq!(crate::print_sexpr(&original), before);
     assert_eq!(bound.threshold_k(), 348.15);
-    let decoded = crate::parse_sexpr(&crate::print_sexpr(&first)).unwrap();
+    let decoded = crate::parse_sexpr(&crate::print_sexpr(&first).unwrap()).unwrap();
     assert!(decoded.findings().is_empty());
     assert_eq!(decoded.spec, first);
 }
