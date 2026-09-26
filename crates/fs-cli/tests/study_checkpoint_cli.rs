@@ -143,3 +143,48 @@ mod projected;
 
 #[path = "study_checkpoint_cli/multi_load.rs"]
 mod multi_load;
+
+#[test]
+fn elasticity_objective_twins_respond_to_the_load_and_the_material_budget() {
+    // q61wp.16 objective-sensitivity twins, run in the projected-volume mode:
+    // the plain augmented-Lagrangian mode does not converge its area
+    // (feasibility flips with the step count), so its endpoints are not
+    // comparable. Spreading the traction band (v1 admits only bands symmetric
+    // about y = 0.5) must change the accepted design. A larger material budget
+    // must end stiffer at its own area. A study that ignored its load or its
+    // volume constraint fails both.
+    const PROJECTED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/marquee/bracket-projected-volume-2d.fsim"));
+    let eight = PROJECTED.replace(":steps 2", ":steps 8").replace(":max-iterations 2", ":max-iterations 8");
+    assert!(eight.contains(":load-band (0.375 0.625)") && eight.contains(":volume-fraction 0.75"));
+    let dir = scratch("objective-twins");
+    // A twin may stop early with no-feasible-descent (an honest terminal
+    // status) but must have accepted updates at its own area.
+    let run = |name: &str, text: String| -> J {
+        let path = dir.join(format!("{name}.fsim"));
+        fs::write(&path, text).unwrap();
+        let output = command("study").arg(&path).arg(dir.join(format!("{name}.db"))).output().unwrap();
+        let result = J::parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+        assert!(
+            matches!(result.str_field("status"), Some("completed" | "no-feasible-descent")),
+            "{name}: {}", String::from_utf8_lossy(&output.stderr)
+        );
+        result
+    };
+    let last = |result: &J| -> (f64, f64) {
+        let accepted = result.path(&["receipt", "continuation", "constraints", "accepted"]).unwrap().as_array().unwrap();
+        let row = accepted.last().expect("accepted updates");
+        (row.f64_field("area_m2").unwrap(), row.f64_field("compliance_j").unwrap())
+    };
+    let design = |result: &J| result.path(&["receipt", "design"]).and_then(|v| v.as_str()).unwrap().to_string();
+    let base = run("base", eight.clone());
+    let wide = run("wide-band", eight.replace(":load-band (0.375 0.625)", ":load-band (0.25 0.75)"));
+    let richer = run("richer", eight.replace(":volume-fraction 0.75", ":volume-fraction 0.85"));
+    let ((base_area, base_j), (wide_area, _), (richer_area, richer_j)) = (last(&base), last(&wide), last(&richer));
+    for (area, target) in [(base_area, 0.75), (wide_area, 0.75), (richer_area, 0.85)] {
+        assert!((area - target).abs() <= 1e-3, "area {area} vs target {target}");
+    }
+    assert_ne!(design(&base), design(&wide), "a redistributed traction band must change the accepted design");
+    assert!(richer_j < base_j, "more material must end stiffer: {richer_j} vs {base_j}");
+    println!("{{\"base_j\":{base_j},\"richer_j\":{richer_j}}}");
+}
