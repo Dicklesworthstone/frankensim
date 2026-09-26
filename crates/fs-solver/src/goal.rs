@@ -25,6 +25,9 @@
 
 use fs_sparse::Csr;
 
+/// Error enclosures for sparse affine interface feedback, without freezing it.
+pub mod feedback;
+
 mod arithmetic;
 use arithmetic::{add_up, down, finite, mul_up, up};
 

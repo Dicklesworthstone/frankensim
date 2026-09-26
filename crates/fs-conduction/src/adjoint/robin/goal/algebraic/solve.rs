@@ -3,9 +3,12 @@
 
 use fs_solver::{CgState, CsrOp};
 
-use super::{ConductionError, Cx, LinearGoalAnalysis, LinearGoalAnalyzer, invalid, poll};
+use super::{
+    ConductionError, Cx, LinearGoalAnalysis, LinearGoalAnalyzer, LinearMaximumAnalysis,
+    invalid, poll,
+};
 
-/// Explicit accuracy and work policy for a fixed linear thermal goal.
+/// Explicit accuracy and work policy for a goal of a fixed linear thermal model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearGoalSolveConfig {
     /// Absolute error in the declared goal's units, finite and positive.
@@ -39,15 +42,16 @@ pub enum LinearGoalStop {
     DefectCorrectionBudget,
 }
 
-/// A field accepted ONLY for the named linear goal. This intentionally is
-/// not a ConductionSolution: small mean/selected-node error cannot stand in
-/// for whole-field convergence, energy balance or a moving maximum.
+/// A field accepted ONLY for the declared goal and analysis. The default
+/// analysis is a linear functional; [`LinearMaximumSolve`] uses a regional
+/// maximum. Neither implies whole-field convergence or energy balance, and
+/// a mean/selected-node result cannot stand in for a moving maximum.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinearGoalSolve {
+pub struct LinearGoalSolve<Analysis = LinearGoalAnalysis> {
     /// Best checked physical temperature field; prescribed values unchanged.
     pub temperature: Vec<f64>,
     /// The enclosure of this exact returned field, not of an inner correction.
-    pub analysis: LinearGoalAnalysis,
+    pub analysis: Analysis,
     /// Goal success or an explicit unresolved stopping reason.
     pub stop: LinearGoalStop,
     /// All primal iterations spent, including rejected candidates and retries.
@@ -57,6 +61,10 @@ pub struct LinearGoalSolve {
     /// Completed outward checks, including the initial field.
     pub goal_checks: usize,
 }
+
+/// A field whose regional maximum was checked against the requested absolute
+/// temperature tolerance, including changes of the maximizing vertex.
+pub type LinearMaximumSolve = LinearGoalSolve<LinearMaximumAnalysis>;
 
 impl LinearGoalAnalyzer<'_> {
     /// Improve an admissible field until its absolute algebraic GOAL error is
@@ -94,21 +102,85 @@ impl LinearGoalAnalyzer<'_> {
     ///
     /// # Errors
     /// The same refusals as [`Self::solve_to_goal`].
-    #[allow(clippy::too_many_lines)] // Keep the shared budget, recurrence lifetime and publication gate visible together.
     pub fn solve_to_goal_observed(
         &self,
         cx: &Cx<'_>,
         initial_temperature: &[f64],
         config: LinearGoalSolveConfig,
-        mut observe: impl FnMut(usize, &LinearGoalAnalysis),
+        observe: impl FnMut(usize, &LinearGoalAnalysis),
     ) -> Result<LinearGoalSolve, ConductionError> {
+        self.solve_controlled(
+            cx, initial_temperature, config,
+            |temperature| self.analyze(cx, temperature),
+            |analysis| analysis.enclosure.goal_error().map(|bound| bound.magnitude_upper()),
+            observe,
+        )
+    }
+
+    /// Improve the regional maximum until its full stored-system algebraic
+    /// error is at most `config.absolute_tolerance` K. The region may change
+    /// its hottest vertex; the bound covers every selected free node.
+    ///
+    /// Reuses the cached operator and checked inverse from
+    /// [`Self::new_for_maximum`], without another dual or stability solve.
+    /// A missing inverse cannot admit success. The best checked field and an
+    /// explicit stop reason survive iteration exhaustion or lack of progress.
+    /// This is not a continuum bound or a complete `ConductionSolution`.
+    ///
+    /// # Errors
+    /// The regional analysis and bounded correction driver's input, field,
+    /// arithmetic and cancellation refusals.
+    pub fn solve_maximum_to_goal(
+        &self,
+        cx: &Cx<'_>,
+        initial_temperature: &[f64],
+        region_vertices: &[usize],
+        config: LinearGoalSolveConfig,
+    ) -> Result<LinearMaximumSolve, ConductionError> {
+        self.solve_maximum_to_goal_observed(
+            cx, initial_temperature, region_vertices, config, |_, _| {},
+        )
+    }
+
+    /// Regional maximum control with progress after each complete candidate
+    /// enclosure. As for [`Self::solve_to_goal_observed`], cancellation after
+    /// the callback prevents publication even when that candidate passed.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::solve_maximum_to_goal`].
+    pub fn solve_maximum_to_goal_observed(
+        &self,
+        cx: &Cx<'_>,
+        initial_temperature: &[f64],
+        region_vertices: &[usize],
+        config: LinearGoalSolveConfig,
+        observe: impl FnMut(usize, &LinearMaximumAnalysis),
+    ) -> Result<LinearMaximumSolve, ConductionError> {
+        self.solve_controlled(
+            cx, initial_temperature, config,
+            |temperature| self.analyze_maximum(cx, temperature, region_vertices),
+            LinearMaximumAnalysis::algebraic_half_width_k,
+            observe,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One correction loop preserves budget and publication semantics for both goal types.
+    fn solve_controlled<Analysis>(
+        &self,
+        cx: &Cx<'_>,
+        initial_temperature: &[f64],
+        config: LinearGoalSolveConfig,
+        mut analyze: impl FnMut(&[f64]) -> Result<Analysis, ConductionError>,
+        error_bound: impl Fn(&Analysis) -> Option<f64>,
+        mut observe: impl FnMut(usize, &Analysis),
+    ) -> Result<LinearGoalSolve<Analysis>, ConductionError> {
         poll(cx, 0)?;
         if !(config.absolute_tolerance.is_finite() && config.absolute_tolerance > 0.0)
             || !(1..=32).contains(&config.check_every)
         {
             return Err(invalid("goal solve requires a finite positive absolute tolerance and check_every in 1..=32"));
         }
-        let analysis = self.analyze(cx, initial_temperature)?;
+        let analysis = analyze(initial_temperature)?;
         observe(0, &analysis);
         poll(cx, 0)?;
         let mut result = LinearGoalSolve {
@@ -116,12 +188,13 @@ impl LinearGoalAnalyzer<'_> {
             stop: LinearGoalStop::IterationBudget, primal_iterations: 0,
             defect_corrections: 0, goal_checks: 1,
         };
-        if result.analysis.meets_absolute_tolerance(config.absolute_tolerance) {
+        let initial_bound = error_bound(&result.analysis);
+        if initial_bound.is_some_and(|bound| bound <= config.absolute_tolerance) {
             result.stop = LinearGoalStop::GoalTolerance;
             poll(cx, 0)?;
             return Ok(result);
         }
-        let Some(bound) = result.analysis.enclosure.goal_error() else {
+        let Some(mut best_bound) = initial_bound else {
             result.stop = LinearGoalStop::BoundUnavailable;
             poll(cx, 0)?;
             return Ok(result);
@@ -130,7 +203,6 @@ impl LinearGoalAnalyzer<'_> {
             poll(cx, 0)?;
             return Ok(result);
         }
-        let mut best_bound = bound.magnitude_upper();
         let op = CsrOp::symmetric(self.response.matrix.clone());
         let pre = crate::solve::spd_preconditioner(&self.response.matrix);
         'attempt: loop {
@@ -176,18 +248,18 @@ impl LinearGoalAnalyzer<'_> {
                         if i % 512 == 0 { poll(cx, result.primal_iterations)?; }
                         candidate[vertex] = finite(scale.mul_add(state.x[i], base[i]))?;
                     }
-                    let checked = self.analyze(cx, &candidate)?;
+                    let checked = analyze(&candidate)?;
                     result.goal_checks = result.goal_checks.saturating_add(1);
                     observe(result.primal_iterations, &checked);
                     poll(cx, result.primal_iterations)?;
-                    if let Some(candidate_bound) = checked.enclosure.goal_error() {
-                        if candidate_bound.magnitude_upper() < best_bound {
-                            best_bound = candidate_bound.magnitude_upper();
+                    if let Some(candidate_bound) = error_bound(&checked) {
+                        if candidate_bound < best_bound {
+                            best_bound = candidate_bound;
                             result.temperature = candidate;
                             result.analysis = checked;
                         }
                     }
-                    if result.analysis.meets_absolute_tolerance(config.absolute_tolerance) {
+                    if best_bound <= config.absolute_tolerance {
                         result.stop = LinearGoalStop::GoalTolerance;
                         break 'attempt;
                     }

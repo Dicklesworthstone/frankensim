@@ -122,9 +122,10 @@ pub use reduced_slab::{
 };
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
-    EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
+    EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearMaximumPolish, LinearSolveEvidence,
+    MaximumPhysicalGateRefusal, Nonlinearity,
     RobinFlux, SolveConfig, StopReason, StopRule, element_heat_flux, element_heat_flux_assigned,
-    solve, solve_with_interfaces,
+    polish_linear_maximum, solve, solve_with_interfaces,
 };
 // Types reachable through public fields of `LinearSolveEvidence` must be
 // nameable from this crate without a direct fs-solver dependency (bead qvmwp).

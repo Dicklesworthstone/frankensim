@@ -12,6 +12,7 @@ mod compliance;
 mod design;
 mod qmc;
 mod sensitivity;
+mod mean_control;
 
 #[derive(Debug, Default)]
 pub(super) struct Options {
@@ -22,6 +23,7 @@ pub(super) struct Options {
     design: Option<DesignGrid>,
     qmc_replicates: Option<usize>,
     sobol_sensitivity: bool,
+    adjoint_mean_control: bool,
 }
 
 impl Options {
@@ -34,7 +36,10 @@ impl Options {
         while index < args.len() {
             let flag = &args[index];
             let value = args.get(index + 1).ok_or_else(|| bad("each UQ execution option requires a value"))?;
-            if flag == "--qmc-replicates" && options.qmc_replicates.is_none() {
+            if flag == "--mean-control" && !options.adjoint_mean_control {
+                if value != "adjoint" { return Err(bad("--mean-control supports only adjoint")); }
+                options.adjoint_mean_control = true;
+            } else if flag == "--qmc-replicates" && options.qmc_replicates.is_none() {
                 let count = count_option(value, "--qmc-replicates")?;
                 if !(2..=256).contains(&count) { return Err(bad("--qmc-replicates must be in 2..=256")); }
                 options.qmc_replicates = Some(count);
@@ -83,11 +88,21 @@ impl Options {
                 || options.design.is_some()) {
             return Err(bad("Sobol sensitivity requires a fixed design without QMC, sequential compliance or candidate-selection flags"));
         }
+        if options.adjoint_mean_control && (options.compliance.is_some()
+            || options.design.is_some() || options.qmc_replicates.is_some()
+            || options.sobol_sensitivity) {
+            return Err(bad("adjoint mean control requires a fixed-count Monte Carlo plan; no sequential decisions, QMC, sensitivity or candidate selection"));
+        }
         Ok(options)
     }
 
     fn checkpoint_binding(&self, config: &Config) -> Result<String> {
         let parameters = config.render_parameters()?;
+        // A raw run cannot silently acquire or lose its frozen-control mode.
+        // Keep every original non-control checkpoint binding byte unchanged.
+        if self.adjoint_mean_control {
+            return Ok(format!("frozen-adjoint-mean-v1\n{parameters}"));
+        }
         // The library plan binds the observable, while the file adapter binds
         // the complete base schedule. Preserve the fixed-count binding here.
         Ok(self.compliance.map_or_else(
@@ -140,17 +155,38 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         policy.validate_plan(&plan)?;
     }
     let mut execution = UqExecution::new(&plan).map_err(bad)?;
+    if options.adjoint_mean_control { mean_control::validate(&base, &config)?; }
+    let mut mean_control = None;
     let identity = if options.checkpoint.is_some() || options.resume.is_some() {
         Some(checkpoint::model_identity(base_text, &options.checkpoint_binding(&config)?)?)
     } else { None };
     if let Some(path) = &options.resume {
-        execution = checkpoint::restore(path, &plan, identity.expect("resume requested identity"))?;
+        if options.adjoint_mean_control {
+            let (restored, frozen) = checkpoint::restore_controlled(
+                path, &plan, identity.expect("resume requested identity"),
+            )?;
+            execution = restored;
+            mean_control = Some(frozen);
+        } else {
+            execution = checkpoint::restore(path, &plan, identity.expect("resume requested identity"))?;
+        }
     }
     // Restore/admit BEFORE reserving output. Existing paths, including the
     // resume source itself, are never overwritten by this invocation.
     let output = options.checkpoint.as_deref().map(checkpoint::Output::reserve).transpose()?;
+    // The initial nominal forward/adjoint shares this invocation's ORIGINAL
+    // evaluation-time allowance. A restored control never launches that solve.
+    let control_deadline = options.adjoint_mean_control
+        .then(|| Instant::now() + Duration::from_secs_f64(config.wall_seconds));
+    if let Some(deadline) = control_deadline {
+        if mean_control.is_none() {
+            mean_control = Some(mean_control::prepare(&base, &config, &execution, deadline)?);
+        }
+    }
+    // Retain the paid nominal even at ordinal zero, before any random sample.
+    // A persistence failure exits here, never after starting more physics.
     if let Some(output) = &output {
-        output.save(&execution, identity.expect("output requested identity"))?;
+        output.save_mc(&execution, identity.expect("output requested identity"), mean_control.as_ref())?;
     }
     let initial_count = execution.observations().len();
     let allowance = options.max_new_samples.unwrap_or(config.samples)
@@ -159,7 +195,8 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         .map(|policy| policy.assess(&execution)).transpose()?;
     // This is a fresh evaluation-time allowance per invocation. It does not
     // reset the immutable lifetime sample budget retained in the checkpoint.
-    let deadline = Instant::now() + Duration::from_secs_f64(config.wall_seconds);
+    let deadline = control_deadline.unwrap_or_else(||
+        Instant::now() + Duration::from_secs_f64(config.wall_seconds));
     for _ in 0..allowance {
         // A checkpoint already at its stopping ordinal must not launch another
         // child or alter the accepted prefix when resumed.
@@ -192,7 +229,7 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
             return Err(refusal);
         }
         if let Some(output) = &output {
-            output.save(&execution, identity.expect("output requested identity"))?;
+            output.save_mc(&execution, identity.expect("output requested identity"), mean_control.as_ref())?;
         }
         assessment = options.compliance
             .map(|policy| policy.assess(&execution)).transpose()?;
@@ -220,7 +257,14 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         return Ok(ExecutionOutput { stdout, exit_code });
     }
     if report.status == UqStatus::Complete {
-        return Ok(ExecutionOutput { stdout: render_result(&config, &base, &report)?, exit_code: exit::SUCCESS });
+        let mut stdout = render_result(&config, &base, &report)?;
+        if let Some(control) = &mean_control {
+            stdout = control.attach(stdout, &execution, deadline)?;
+        }
+        return Ok(ExecutionOutput { stdout, exit_code: exit::SUCCESS });
+    }
+    if mean_control.is_some() && options.checkpoint.is_none() {
+        return Err(budget(format!("adjoint mean control exhausted its shared wall allowance after {} samples and one retained nominal forward/adjoint; no partial estimate published; use --checkpoint to retain the frozen control and completed samples", report.samples_evaluated)));
     }
     let Some(path) = &options.checkpoint else {
         return Err(budget(format!("UQ wall-time budget exhausted after {} model evaluations; no partial distribution published; use --checkpoint to retain completed samples", report.samples_evaluated)));
@@ -230,11 +274,17 @@ pub(super) fn execute_with_options(base_text: &str, uq_text: &str, options: &Opt
         Qoi::Steady => String::new(),
         qoi => format!(",\"qoi\":{}", qoi.render(objective_kind(&base)?)),
     };
+    let control_work = if mean_control.is_some() {
+        let nominal_this_run = usize::from(options.resume.is_none());
+        format!(",\"mean_control_state\":\"frozen-adjoint-retained\",\"control_restored\":{},\"nominal_forward_adjoint_evaluations\":1,\"nominal_forward_adjoint_evaluations_this_run\":{},\"total_model_evaluations\":{},\"total_model_evaluations_this_run\":{}",
+            options.resume.is_some(), nominal_this_run, report.samples_evaluated + 1,
+            report.samples_evaluated - initial_count + nominal_this_run)
+    } else { String::new() };
     let stdout = format!(
-        "{{\"schema\":\"frankensim.cooling-network-uq.progress.v1\",\"status\":\"budget-truncated\",\"termination\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"samples_evaluated_this_run\":{},\"next_sample_ordinal\":{},\"checkpoint\":{}{},\"no_claim\":\"retained prefix only; no completed distribution or compliance decision; resume with the same base request, UQ plan and executable on the same deterministic runtime profile\"}}\n",
+        "{{\"schema\":\"frankensim.cooling-network-uq.progress.v1\",\"status\":\"budget-truncated\",\"termination\":{},\"samples_planned\":{},\"samples_evaluated\":{},\"samples_evaluated_this_run\":{},\"next_sample_ordinal\":{},\"checkpoint\":{}{}{},\"no_claim\":\"retained prefix only; no completed distribution or compliance decision; resume with the same base request, UQ plan and executable on the same deterministic runtime profile\"}}\n",
         quote(termination), config.samples, report.samples_evaluated,
         report.samples_evaluated - initial_count, report.samples_evaluated,
-        quote(&path.to_string_lossy()), observable,
+        quote(&path.to_string_lossy()), observable, control_work,
     );
     Ok(ExecutionOutput { stdout, exit_code: exit::BUDGET })
 }
@@ -307,6 +357,30 @@ mod options_tests {
         let mut duplicate = args(&complete);
         duplicate.extend(args(&["--confidence-alpha", "0.01"]));
         assert!(Options::parse(&duplicate).is_err());
+    }
+
+    #[test]
+    fn mean_control_requires_explicit_fixed_count_semantics() {
+        assert!(Options::parse(&args(&["--mean-control","adjoint"])).unwrap().adjoint_mean_control);
+        for extra in [
+            vec!["--mean-control","adjoint"], vec!["--qmc-replicates","2"],
+            vec!["--sensitivity","sobol"],
+            vec!["--compliance-probability","0.9","--confidence-alpha","0.05","--min-decision-samples","8"],
+        ] {
+            let mut values=args(&["--mean-control","adjoint"]); values.extend(args(&extra));
+            assert!(Options::parse(&values).is_err(),"accepted conflicting control options");
+        }
+        for extra in [
+            vec!["--checkpoint", "prefix.bin", "--max-new-samples", "0"],
+            vec!["--resume", "prefix.bin"],
+            vec!["--resume", "prefix.bin", "--checkpoint", "next.bin", "--max-new-samples", "3"],
+        ] {
+            let mut values = args(&["--mean-control", "adjoint"]); values.extend(args(&extra));
+            assert!(Options::parse(&values).unwrap().adjoint_mean_control);
+        }
+        assert!(Options::parse(&args(&["--mean-control", "adjoint", "--max-new-samples", "3"])).is_err());
+        assert!(Options::parse(&args(&["--mean-control","fit-after-sampling"])).is_err());
+        assert!(Options::parse(&args(&["--mean-control"])).is_err());
     }
 
     #[test]

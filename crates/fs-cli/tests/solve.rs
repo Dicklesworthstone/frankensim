@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 24,
+        SOLVE_DRIVER_VERSION, 26,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3501,6 +3501,20 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
     assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    assert!(receipt.contains("\"method\":\"outward-linear-maximum-enclosure\""), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"),
+        "a linear solve uses the published operator, without a second primal tolerance comparison");
+    assert!(receipt.contains("change of hottest node"), "{receipt}");
+    assert!(receipt.contains("verified inverse infinity upper"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"goal_met\":true"), "{receipt}");
+    assert_eq!(receipt_number_field(control, "allocation_fraction"), 0.1);
+    assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0,
+        "an already accurate physical solution performs no correction iterations");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let algebraic_width = receipt_number_field(algebraic, "half_width_k");
+    assert!(algebraic_width > 0.0 && algebraic_width < 1e-6, "{receipt}");
     assert!(
         receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
             && receipt.contains("\"stop\":\"fidelity-single-rung\"")
@@ -3561,6 +3575,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
     assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
     assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
+    let algebraic_term = qoi_receipt.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic_term, "upper_kelvin").to_bits(), algebraic_width.to_bits(),
+        "the actual bound is retained unchanged through the QoI/report handoff");
+    assert!(algebraic_term.contains("outward-linear-maximum-enclosure"));
     assert_eq!(
         receipt_number_field(&qoi_receipt, "effective_limit_kelvin"),
         353.15,
@@ -4131,6 +4149,12 @@ fn g1_contact_adaptive_uses_the_nonlinear_material_tangent_and_retains_its_remai
         binding.card = cards.materials()[0].card().to_hex();
     }
     let receipt = contact_refinement_receipt(&spec, &cards);
+    assert!(!receipt.contains("outward-linear-maximum-enclosure"),
+        "a frozen k(T) operator must not be reported as the full nonlinear maximum bound");
+    assert!(receipt.contains("tolerance-tightening-resolve"),
+        "the explicitly Estimated nonlinear tolerance comparison remains available: {receipt}");
+    assert!(receipt.contains("\"solver_control\":{\"status\":\"unsupported-model\""),
+        "the requested algebraic allocation has an explicit nonlinear limit: {receipt}");
     assert!(
         receipt.contains("\"status\":\"observed-tolerance-met\""),
         "{receipt}"
@@ -5333,6 +5357,43 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
     }
 }
 
+#[test]
+fn g1_maximum_goal_corrects_a_loose_physical_solve_before_publication() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    // The uniform initial field can satisfy this loose residual rule while
+    // its regional maximum is still too inaccurate for the requested QoI.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-5;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"candidate_accepted\":true"), "{receipt}");
+    let target = receipt_number_field(control, "requested_tolerance_k");
+    let initial = receipt_number_field(control, "initial_bound_k");
+    let final_bound = receipt_number_field(control, "final_bound_k");
+    assert!(initial > target && final_bound <= target, "{receipt}");
+    let iterations = receipt_number_field(control, "primal_iterations");
+    assert!(iterations > 0.0, "the declared goal must drive real solver work: {receipt}");
+    assert!(iterations <= receipt_number_field(control, "max_primal_iterations"));
+    assert_eq!(target.to_bits(), (0.1 * 1e-5 * receipt_number_field(control, "scale_k")).to_bits());
+    assert!(receipt_number_field(&receipt, "final_residual")
+        <= receipt_number_field(&receipt, "residual_threshold"));
+    assert!(receipt_number_field(&receipt, "relative_closure") < 1e-6, "{receipt}");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic, "half_width_k").to_bits(), final_bound.to_bits());
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), final_bound.to_bits(),
+        "the reported uncertainty belongs to the corrected, published field");
+}
+
 /// Replay falsifier for the ladder path (bead q61wp.14 item 5, extended to
 /// B2): two fresh runs of the ladder fidelity must retain byte-identical
 /// conduction and QoI receipts — the Richardson step's logarithm and power
@@ -5369,6 +5430,9 @@ fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
         "QoI receipt bytes (interval term) reproduce"
     );
     let conduction = String::from_utf8(first.2).expect("utf-8");
+    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"),
+        "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
     assert!(
         conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
         "{conduction}"

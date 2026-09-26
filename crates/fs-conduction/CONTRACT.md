@@ -219,6 +219,39 @@ estimate that drifts in the dangerous direction. This crate therefore RECOMPUTES
 producing solver's own typed claim is carried verbatim in
 `LinearSolveEvidence::reported` so the two are never confused.
 
+### Goal-controlled regional maximum solves (`q61wp.73`)
+
+`LinearGoalAnalyzer::solve_maximum_to_goal` uses the cached linear operator
+and checked inverse to improve a field until its regional maximum's full
+algebraic error meets an absolute Kelvin tolerance. The analyzer's zero-weight
+preparation goal cannot admit this stopping decision: every candidate is
+checked with `analyze_maximum`, including changes of the hottest vertex.
+The method shares the existing linear-goal defect-correction loop, its one
+primal iteration budget, bounded check cadence, best-field retention and
+post-observer cancellation gate. It returns `LinearMaximumSolve`, with an
+explicit missing-bound, exhausted-budget or no-progress outcome when needed.
+No dual or stability solve is repeated during correction. This is a
+stored-system goal solve, not a continuum accuracy or energy-balance claim;
+the returned field is not a `ConductionSolution`. The existing
+`tests/linear_maximum.rs` checks the zero-weight counterexample against a
+dense solve, budget limits, prescribed regions and cancellation/retry.
+
+`polish_linear_maximum` connects this correction to an existing physical
+`ConductionSolution`. It independently reassembles the baseline and requires
+its actual residual to meet the original report's finite threshold. A changed
+best candidate is adopted only if independent reassembly meets that same
+threshold; otherwise the baseline field and its maximum analysis survive with
+a physical-gate refusal. Even a budget-limited improvement may be accepted,
+while `goal_met` refers strictly to the returned field. Energy, Robin/contact
+fluxes and final residual are recomputed by the same report helper as the
+ordinary solve. Historical nonlinear iterations and linear evidence are
+preserved; correction work has separate counters. The threshold is declared
+caller policy, not authenticated provenance. Nonlinear conductivity refuses;
+no frozen-radiation or air-feedback guarantee is inferred. Focused tests in
+`tests/algebraic_goal/polish.rs` cover real residual-accepted correction, an
+independent contact/Robin heat-balance oracle, missing inverse evidence,
+zero-work retention, false baseline summaries and cancellation.
+
 ## Invariants
 
 1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +
