@@ -1063,9 +1063,12 @@ pub(crate) fn resume_path(
         )?;
         let old = load(&ledger, pointer)?;
         if old.value.str_field("driver") == Some(SDF3_DRIVER) {
+            #[cfg(feature = "sdf3-study")]
+            return sdf3::resume(&ledger, &old, override_text, &CancelGate::new());
+            #[cfg(not(feature = "sdf3-study"))]
             return Err(fail(
-                "cli-study-sdf3-resume-unsupported",
-                "3-D study receipts support retained report/package export; optimizer resume is not implemented",
+                "cli-study-sdf3-feature",
+                "resuming 3-D adaptive studies requires a binary built with --features sdf3-study",
             ));
         }
         let source = linked(&ledger, &old.value, "source", "study-source")?;

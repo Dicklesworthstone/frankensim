@@ -19,6 +19,9 @@ use multi_load::restoration;
 #[path = "projected/volume.rs"]
 pub(super) mod volume;
 
+#[path = "projected/stress_mesh.rs"]
+mod stress_mesh;
+
 pub(crate) const PROJECTED_SCOPE: &str = "2-D plane-strain CutFEM with numerical material-area equality. A deterministic sampled von Mises limit is imposed only by the explicitly selected projected-stress mode; projected-volume does not evaluate or certify stress. Explicit stress restoration may retain overstressed designs only while reducing measured worst stress excess; these are not stress-feasible results. Compliance improvement is measured from a feasible baseline under identical loads. Every accepted state is independently re-solved and durably retained. Candidate CG and requested stress-cell boundaries are cancellable; the load-family report states startup/recovery limitations. Assembly, area quadrature and ledger I/O remain indivisible. Iteration completion is not convergence. Drift and nucleation diagnostics describe proposals, not projected geometry. No physical validation, continuous stress/volume certificate, stress-adjoint/KKT/global optimum, 3-D result or guaranteed discretization-error bound is claimed.";
 
 #[derive(Debug, Clone)]
@@ -28,6 +31,7 @@ pub(crate) struct Controls {
     stress: SampledStressLimit,
     regions: Vec<DesignRegion>,
     family: Option<multi_load::LoadFamily>,
+    resolution: Option<stress_mesh::ResolutionPolicy>,
 }
 
 pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Controls>> {
@@ -54,7 +58,11 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
             .map_err(|error| malformed(&error.to_string()))?,
         regions: regions::parse_regions(fields)?,
         family: multi_load::parse(fields)?,
+        resolution: stress_mesh::parse(fields)?,
     };
+    if controls.resolution.is_some() && controls.family.is_some() {
+        return Err(malformed("stress mesh-check currently requires the single-load mode; independent-load/restoration checks cannot be silently omitted"));
+    }
     let a = controls.area;
     let s = controls.search;
     if !(a.tolerance > 0.0 && a.tolerance <= 0.01 && a.max_shift > 0.0)
@@ -81,10 +89,11 @@ impl Controls {
         let _ = writeln!(out, "    :min-relative-improvement {}", canonical_float(self.search.min_relative_improvement));
         let _ = writeln!(out, "    :cg-poll-iters {}", self.search.poll_iters);
         let _ = writeln!(out, "    :sampled-stress-limit-pa {}", canonical_float(self.stress.max_von_mises));
-        if self.regions.is_empty() && self.family.is_none() {
+        if self.regions.is_empty() && self.family.is_none() && self.resolution.is_none() {
             let _ = writeln!(out, "    :stress-tolerance-pa {})", canonical_float(self.stress.absolute_tolerance));
         } else {
             let _ = writeln!(out, "    :stress-tolerance-pa {}", canonical_float(self.stress.absolute_tolerance));
+            if let Some(resolution) = self.resolution { stress_mesh::canonical(resolution, out); }
             if let Some(family) = &self.family { family.canonical(out); }
             if self.regions.is_empty() {
                 let _ = writeln!(out, "  )");
@@ -100,7 +109,7 @@ fn stress_json(s: &SampledStressEvaluation) -> String {
         s.compliance, s.volume, s.sampled_max_von_mises, s.max_location[0], s.max_location[1], s.sample_count, s.snapshot)
 }
 
-fn read_stress(value: &JsonValue, policy: &Controls) -> Result<SampledStressEvaluation> {
+fn read_stress_measurement(value: &JsonValue) -> Result<SampledStressEvaluation> {
     let real = |key| number(value, key).map(|(number, _)| number);
     let state = SampledStressEvaluation {
         compliance: real("compliance_j")?, volume: real("area_m2")?,
@@ -112,8 +121,14 @@ fn read_stress(value: &JsonValue, policy: &Controls) -> Result<SampledStressEval
     if state.compliance < 0.0 || state.volume <= 0.0 || state.sample_count == 0
         || state.sample_count > 100_000_000
         || state.max_location.iter().any(|v| !(0.0..=1.0).contains(v))
-        || (state.volume - policy.area.target).abs() > policy.area.tolerance
         || state.sampled_max_von_mises < 0.0
+    { return Err(malformed("invalid retained stress measurement")); }
+    Ok(state)
+}
+
+fn read_stress(value: &JsonValue, policy: &Controls) -> Result<SampledStressEvaluation> {
+    let state = read_stress_measurement(value)?;
+    if (state.volume - policy.area.target).abs() > policy.area.tolerance
         || (restoration::reduction(policy).is_none()
             && state.sampled_max_von_mises > policy.stress.admitted_max())
     { return Err(malformed("retained projected stress state violates the declared constraints")); }
@@ -137,6 +152,7 @@ pub(super) struct ConstraintEvidence {
     attempts: Vec<usize>,
     refusals: Vec<String>,
     family: Option<multi_load::History>,
+    mesh: Option<stress_mesh::LastCheck>,
 }
 
 impl ConstraintEvidence {
@@ -159,6 +175,7 @@ impl ConstraintEvidence {
         if let (Some(family), Some(history)) = (&self.policy.family, &self.family) {
             html.push_str(&family.html(history));
         }
+        html.push_str(&stress_mesh::html(self.policy.resolution, self.mesh.as_ref()));
         html
     }
 
@@ -178,7 +195,8 @@ impl ConstraintEvidence {
             regions::json_field(&self.policy.regions),
             self.family.as_ref().zip(self.policy.family.as_ref())
                 .map_or_else(String::new, |(history, family)| history.json_field(family)),
-            restoration::json_field(&self.baseline, &self.accepted, &self.policy))
+            restoration::json_field(&self.baseline, &self.accepted, &self.policy)
+                + &stress_mesh::field(self.policy.resolution, self.mesh.as_ref()))
     }
 
     fn read(value: &JsonValue, report: &OptimizeReport, requested: &ProjectedControls) -> Result<Self> {
@@ -225,7 +243,8 @@ impl ConstraintEvidence {
             .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
         let family = multi_load::History::read(value, &baseline, &accepted, policy)?;
         restoration::check_retained(value, &baseline, &accepted, policy)?;
-        Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, family })
+        let mesh = stress_mesh::read(value, policy, &baseline, &accepted)?;
+        Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, family, mesh })
     }
 }
 
@@ -234,6 +253,7 @@ enum Stage {
     Regions(DesignRegionStage),
     Setup(ProjectedStressSetupStage),
     Update(ProjectedStage),
+    Mesh(stress_mesh::MeshCheckStage),
 }
 
 fn constraints_stop(status: &'static str, last: Option<&Outcome>) -> Failure {
@@ -256,6 +276,9 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(Stage)) -> Result<Outcome> {
     if ledger.in_transaction() { return Err(malformed("constrained study requires its own ledger transaction")); }
     let policy = stress_controls(spec)?;
+    if let Some(resolution) = policy.resolution {
+        resolution.validate(settings(spec, spec.steps).level).map_err(|e| malformed(&e.to_string()))?;
+    }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
         projected: None, volume: None };
@@ -285,11 +308,23 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
             Some("no-feasible-descent") => "no-feasible-descent",
+            Some("mesh-unresolved") if retained.mesh.as_ref().is_some_and(|m| m.outcome == "baseline-unresolved") => "mesh-unresolved",
             _ => return Err(malformed("unknown constrained study terminal")),
         };
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
         consumed = old.value.f64_field("consumed_wall_s").filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| malformed("invalid retained wall charge"))?;
+        if let Some(check) = &retained.mesh {
+            if check.baseline.rungs[0].level != settings(spec, spec.steps).level
+                || (status == "completed" && check.outcome != "accepted")
+                || (status == "no-feasible-descent" && check.outcome != "no-descent") {
+                return Err(malformed("stress mesh result disagrees with the study level or terminal"));
+            }
+        }
+        if policy.resolution.is_some() && matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved") {
+            if retained.mesh.is_none() { return Err(malformed("terminal stress study lacks its requested mesh check")); }
+            return last.ok_or_else(|| malformed("terminal stress mesh study has no receipt"));
+        }
         // Rebuild the ORIGINAL prescriptions. Re-authoring the saved endpoint
         // would conceal a changed fixed value or silently repair a violation.
         let prepared = regions::prepare(spec, &policy.regions, |stage| {
@@ -353,7 +388,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         let state = match state { ControlFlow::Continue(state) => state,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)) };
         evidence.projected = Some(ConstraintEvidence { policy: policy.clone(), baseline: state.current().clone(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), family: None });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), family: None, mesh: None });
         state
     };
     let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
@@ -375,12 +410,36 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
-        let update = state.advance_one_controlled(|stage| {
-            observe(Stage::Update(stage));
-            match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
-                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+        let update = if let Some(resolution) = policy.resolution {
+            let checked = state.advance_one_resolution_controlled(resolution, |stage| {
+                observe(Stage::Mesh(stage));
+                match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+            match checked {
+                ControlFlow::Break(status) => ControlFlow::Break(status),
+                ControlFlow::Continue(checked) => {
+                    let (update, check) = stress_mesh::LastCheck::capture(checked)?;
+                    let retained = evidence.projected.as_mut().expect("admitted stress state");
+                    if let Some(reason) = &check.reason { retained.refusals = vec![reason.clone()]; }
+                    retained.mesh = Some(check);
+                    match update {
+                        Some(update) => ControlFlow::Continue(update),
+                        None => return persist(spec, ledger, state.checkpoint().geometry(), &report,
+                            "mesh-unresolved", consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                            .map_err(|error| retained_error(error, last.as_ref())),
+                    }
+                }
             }
-        }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+        } else {
+            state.advance_one_controlled(|stage| {
+                observe(Stage::Update(stage));
+                match stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?
+        };
         let update = match update {
             ControlFlow::Continue(update) => update,
             ControlFlow::Break(status) => return persist(spec, ledger, state.checkpoint().geometry(), &report,

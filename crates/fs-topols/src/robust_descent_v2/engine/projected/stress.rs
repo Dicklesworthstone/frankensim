@@ -85,55 +85,65 @@ impl MultiLoadProjectedOptimizer {
     pub(super) fn sample_stress_controlled<B>(
         &self,
         state: &MultiState,
-        mut control: impl FnMut(usize, usize) -> ControlFlow<B>,
+        control: impl FnMut(usize, usize) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, RobustSampledStressEvaluation>, CutFemError> {
-        let count = self.kernel.load_cases.len();
-        if count == 0 || state.solutions.len() != count || state.compliances.len() != count {
-            return Err(invalid("sampled stress requires the complete matching displacement family"));
-        }
-        let mut maxima = Vec::with_capacity(count);
-        let mut locations = Vec::with_capacity(count);
-        let mut counts = Vec::with_capacity(count);
-        let mut worst_stress = f64::NEG_INFINITY;
-        let mut worst_case = 0;
-        let mut weighted_sum = 0.0;
-        let mut worst_weighted = 0.0_f64;
-        for (case, solution) in state.solutions.iter().enumerate() {
-            let (maximum, location, samples) = match sample_nodal_solution_controlled(
-                &self.kernel.grid, &state.phi, solution, self.kernel.lambda, self.kernel.mu,
-                |cell| control(case, cell),
-            )? {
-                ControlFlow::Continue(samples) => samples,
-                ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
-            };
-            let weighted = self.kernel.load_cases[case].weight() * state.compliances[case];
-            weighted_sum += weighted;
-            worst_weighted = worst_weighted.max(weighted);
-            if maximum > worst_stress {
-                worst_stress = maximum;
-                worst_case = case;
-            }
-            maxima.push(maximum);
-            locations.push(location);
-            counts.push(samples);
-        }
-        if !(weighted_sum.is_finite() && worst_weighted.is_finite() && worst_stress.is_finite()) {
-            return Err(invalid("sampled stress family produced a non-finite aggregate"));
-        }
-        Ok(ControlFlow::Continue(RobustSampledStressEvaluation {
-            case_compliances: state.compliances.clone(),
-            case_sampled_max_von_mises: maxima,
-            case_max_locations: locations,
-            case_sample_counts: counts,
-            weighted_sum_compliance: weighted_sum,
-            worst_weighted_compliance: worst_weighted,
-            objective: state.objective,
-            worst_sampled_von_mises: worst_stress,
-            worst_stress_case: worst_case,
-            volume: state.volume,
-            snapshot: fnv(&state.phi),
-        }))
+        sample_state_controlled(&self.kernel, state, control)
     }
+}
+
+// Shared sampler for cached coarse fields and freshly solved finer fields.
+// Never interpolate displacements or create a second stress implementation.
+pub(super) fn sample_state_controlled<B>(
+    kernel: &Kernel,
+    state: &MultiState,
+    mut control: impl FnMut(usize, usize) -> ControlFlow<B>,
+) -> Result<ControlFlow<B, RobustSampledStressEvaluation>, CutFemError> {
+    let count = kernel.load_cases.len();
+    if count == 0 || state.solutions.len() != count || state.compliances.len() != count {
+        return Err(invalid("sampled stress requires the complete matching displacement family"));
+    }
+    let mut maxima = Vec::with_capacity(count);
+    let mut locations = Vec::with_capacity(count);
+    let mut counts = Vec::with_capacity(count);
+    let mut worst_stress = f64::NEG_INFINITY;
+    let mut worst_case = 0;
+    let mut weighted_sum = 0.0;
+    let mut worst_weighted = 0.0_f64;
+    for (case, solution) in state.solutions.iter().enumerate() {
+        let (maximum, location, samples) = match sample_nodal_solution_controlled(
+            &kernel.grid, &state.phi, solution, kernel.lambda, kernel.mu,
+            |cell| control(case, cell),
+        )? {
+            ControlFlow::Continue(samples) => samples,
+            ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+        };
+        let weighted = kernel.load_cases[case].weight() * state.compliances[case];
+        weighted_sum += weighted;
+        worst_weighted = worst_weighted.max(weighted);
+        if maximum > worst_stress {
+            worst_stress = maximum;
+            worst_case = case;
+        }
+        maxima.push(maximum);
+        locations.push(location);
+        counts.push(samples);
+    }
+    if !(weighted_sum.is_finite() && worst_weighted.is_finite() && worst_stress.is_finite()) {
+        return Err(invalid("sampled stress family produced a non-finite aggregate"));
+    }
+    Ok(ControlFlow::Continue(RobustSampledStressEvaluation {
+        case_compliances: state.compliances.clone(),
+        case_sampled_max_von_mises: maxima,
+        case_max_locations: locations,
+        case_sample_counts: counts,
+        weighted_sum_compliance: weighted_sum,
+        worst_weighted_compliance: worst_weighted,
+        objective: state.objective,
+        worst_sampled_von_mises: worst_stress,
+        worst_stress_case: worst_case,
+        volume: state.volume,
+        snapshot: fnv(&state.phi),
+    }))
 }
 
 #[cfg(test)]

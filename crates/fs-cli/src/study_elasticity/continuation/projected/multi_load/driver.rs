@@ -160,7 +160,7 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
             return Err(malformed("native family summary disagrees with the numerical objective"));
         }
         evidence.projected = Some(ConstraintEvidence {
-            policy: policy.clone(), baseline: combined, accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(),
+            policy: policy.clone(), baseline: combined, accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
             family: Some(History { cases, baseline, accepted: Vec::new(), checkpoint: Vec::new(),
                 solves: owner.solves_started(), recovery_solves: 0 }),
         });

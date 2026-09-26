@@ -225,8 +225,13 @@ fn g4_sdf3_leaf_budget_retains_the_exact_solved_coarse_endpoint() {
         .arg(&partial_db)
         .output()
         .unwrap();
-    assert_eq!(refused.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("cli-study-sdf3-resume-unsupported"));
+    let resumed = document(&refused, 6);
+    for key in ["design", "iterations", "checkpoint"] {
+        assert_eq!(retained(&partial_db, &partial, key), retained(&partial_db, &resumed, key));
+    }
+    assert!(resumed.path(&["receipt", "work", "linear_iterations"]).and_then(J::as_f64).unwrap()
+        > partial.path(&["receipt", "work", "linear_iterations"]).and_then(J::as_f64).unwrap());
+    assert_eq!(resumed.path(&["receipt", "stages_replayed"]).and_then(J::as_f64), Some(1.0));
     assert_eq!(
         retained(&coarse_db, &baseline, "design"),
         retained(&partial_db, &partial, "design")
@@ -265,3 +270,6 @@ fn g4_sdf3_exhausted_initial_solve_exports_no_unassessed_design() {
         Some(1.0)
     );
 }
+
+#[path = "study_sdf3_cli/checkpoint.rs"]
+mod checkpoint;

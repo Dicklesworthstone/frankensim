@@ -16,7 +16,7 @@ mod adjoint;
 pub use adjoint::StepLinearization;
 
 use fs_exec::Cx;
-use fs_solver::{CgState, CsrOp, norm2};
+use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};
 use fs_sparse::Csr;
 
 use crate::assemble::{AssembledSystem, assemble_operator_scaled_with_interfaces, reduce_matrix_and_lift, DofMap};
@@ -30,6 +30,8 @@ use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, Volumetri
 pub struct StepConfig {
     /// Krylov tolerance/budget. For the nonlinear entry point the iteration
     /// cap covers ALL Newton corrections, not each correction separately.
+    /// The linear path permits at most two residual-defect repairs within
+    /// this same iteration cap; neither the tolerance nor the energy gate widens.
     pub linear: LinearConfig,
     /// Maximum absolute storage-minus-net-input mismatch in joules.
     pub energy_tolerance_j: f64,
@@ -56,8 +58,9 @@ pub struct StepSolution {
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, joules; checked independently.
     pub energy_residual_j: f64,
-    /// Recomputed relative residual of the normalized correction solve (or
-    /// the worst such inner residual over nonlinear Newton corrections).
+    /// Recomputed relative residual of the returned physical correction for
+    /// the linear path, or the worst normalized inner residual over nonlinear
+    /// Newton corrections. The linear gate includes correction rescaling.
     /// Final absolute-temperature rounding is checked by the separate energy gate.
     pub relative_residual: f64,
     /// Total Krylov iterations for this solid response.
@@ -204,30 +207,31 @@ fn solve(cx: &Cx<'_>, matrix: &Csr, rhs: &[f64], config: LinearConfig)
     -> Result<(Vec<f64>, f64, usize), ConductionError>
 {
     poll(cx, 0)?;
-    let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
-    let normalized: Vec<f64> = rhs.iter().map(|v| v/scale).collect();
+    if rhs.iter().all(|&v| v == 0.0) { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
     let op = CsrOp::symmetric(matrix.clone());
     let pre = spd_preconditioner(matrix);
-    let mut state = CgState::new(&op, &pre, &normalized);
-    while state.rel_residual() >= config.tolerance && state.iters < config.max_iterations {
-        poll(cx, state.iters)?;
-        let before = state.iters;
-        state.run(&op, &pre, config.tolerance, (config.max_iterations-before).min(16));
-        if state.iters == before { break; }
-    }
-    poll(cx, state.iters)?;
-    let mut applied = vec![0.0; rhs.len()];
-    matrix.spmv(&state.x, &mut applied);
-    let residual: Vec<f64> = normalized.iter().zip(applied).map(|(b,a)| finite(b-a)).collect::<Result<_,_>>()?;
-    let relative = finite(norm2(&residual) / norm2(&normalized))?;
-    if relative >= config.tolerance {
-        return Err(ConductionError::LinearSolveFailed { iteration: 0, krylov_iterations: state.iters,
+    // A recursive CG stop can miss the recomputed gate by roundoff even
+    // with work left (the 319.6 K transient-fan sizing regression). Repair
+    // that actual defect, rather than accepting it or weakening the tolerance.
+    // The driver scales internally, then checks the RETURNED correction in
+    // this original system. Checking only an intermediate normalized vector
+    // would miss rounding introduced by its final physical rescaling.
+    let checked = checked_cg(&op, &pre, rhs, CheckedCgConfig {
+        tolerance: config.tolerance,
+        max_iterations: config.max_iterations,
+        max_corrections: 2,
+    }, |iterations| poll(cx, iterations)).map_err(|error| match error {
+        CheckedCgError::Interrupted(reason) => reason,
+        CheckedCgError::InvalidInput(what) => invalid(what),
+    })?;
+    let relative = finite(checked.report.rel_residual)?;
+    let iterations = checked.report.iters;
+    if !checked.report.converged_euclidean() {
+        return Err(ConductionError::LinearSolveFailed { iteration: 0, krylov_iterations: iterations,
             true_relative_residual: relative, tolerance: config.tolerance });
     }
-    let solution = state.x.iter().map(|v| finite(v*scale)).collect::<Result<_,_>>()?;
-    poll(cx, state.iters)?;
-    Ok((solution, relative, state.iters))
+    poll(cx, iterations)?;
+    Ok((checked.x, relative, iterations))
 }
 fn sum(values: impl IntoIterator<Item=f64>) -> Result<f64, ConductionError> {
     values.into_iter().try_fold(0.0, |s,v| finite(s+v))

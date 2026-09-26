@@ -125,3 +125,63 @@ fn malformed_and_cancelled_steps_return_no_field() {
         assert!(matches!(engine.advance(cx,p,None,&vec![300.0;mesh.vertex_count()],1.0,config()), Err(ConductionError::Cancelled{..})));
     });
 }
+
+#[test]
+fn checked_correction_keeps_a_hard_iteration_cap_and_retryable_history() {
+    let mesh = mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder("cooling", ThermalBc::robin(80.0, 300.0).unwrap()).unwrap().finish().unwrap();
+    let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+    let source = ScalarField::Uniform(2000.0);
+    let mut old = vec![300.0; mesh.vertex_count()]; old[0] = 350.0;
+    let saved = old.clone();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let engine = BackwardEuler::uniform(cx, &mesh, VolumetricHeatCapacity::declared(2e6).unwrap()).unwrap();
+        let p = ConductionProblem {mesh: &mesh, boundary: &boundary, material: &material,
+            source: &source, element_materials: None};
+        let mut policy = config(); policy.linear.tolerance = 1e-12;
+        let mut short = policy; short.linear.max_iterations = 1;
+        match engine.advance(cx, p, None, &old, 3.0, short) {
+            Err(ConductionError::LinearSolveFailed {krylov_iterations, true_relative_residual, tolerance, ..}) => {
+                assert_eq!(krylov_iterations, 1);
+                assert_eq!(tolerance, policy.linear.tolerance);
+                assert!(true_relative_residual >= tolerance);
+            }
+            other => panic!("expected the unchanged work cap to refuse: {other:?}"),
+        }
+        assert_eq!(old, saved);
+        let retry = engine.advance(cx, p, None, &old, 3.0, policy).unwrap();
+        let fresh = engine.advance(cx, p, None, &old, 3.0, policy).unwrap();
+        assert_eq!(retry.temperature, fresh.temperature);
+        assert_eq!(retry.krylov_iterations, fresh.krylov_iterations);
+        assert!(retry.krylov_iterations <= policy.linear.max_iterations);
+        assert!(retry.relative_residual < policy.linear.tolerance);
+        assert!(retry.energy_residual_j.abs() <= policy.energy_tolerance_j);
+        assert_eq!(old, saved);
+    });
+}
+
+#[test]
+fn linear_correction_residual_measures_the_rescaled_vector() {
+    let mesh = mesh();
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let engine = BackwardEuler::uniform(cx, &mesh, VolumetricHeatCapacity::declared(2e6).unwrap()).unwrap();
+        let policy = LinearConfig::default();
+        // Use the real assembled capacity operator and loads whose raw
+        // squared norms underflow/overflow. Neither scale nor a normalized
+        // intermediate is permitted to hide the returned vector's defect.
+        for scale in [1e-200, 1e200] {
+            let rhs: Vec<_> = (0..mesh.vertex_count()).map(|v| (v as f64 + 0.25) * scale).collect();
+            let (correction, reported, iterations) = solve(cx, &engine.capacity, &rhs, policy).unwrap();
+            let mut applied = vec![0.0; rhs.len()];
+            engine.capacity.spmv(&correction, &mut applied);
+            let maximum = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            let residual: Vec<_> = rhs.iter().zip(applied).map(|(&b, a)| (b - a) / maximum).collect();
+            let normalized: Vec<_> = rhs.iter().map(|v| v / maximum).collect();
+            let measured = norm2(&residual) / norm2(&normalized);
+            assert!(measured < policy.tolerance, "returned correction residual {measured}");
+            close(reported, measured, 32.0 * f64::EPSILON * measured.max(f64::MIN_POSITIVE));
+            assert!(iterations <= policy.max_iterations);
+        }
+    });
+}

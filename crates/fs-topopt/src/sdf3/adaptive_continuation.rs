@@ -217,11 +217,54 @@ pub fn controlled_adaptive_sdf3_continuation<O: AdaptiveSdf3Elasticity>(
     schedule: &[SimpParams],
     options: AdaptiveContinuationOptions3,
     control: &mut SolveControl<'_>,
-    mut build: impl FnMut(
+    build: impl FnMut(
         &Octree3,
         &mut dyn FnMut() -> ControlFlow<()>,
     ) -> Result<O, GoalRefinementError3>,
 ) -> AdaptiveContinuationReport3 {
+    match controlled_adaptive_sdf3_continuation_observed(
+        study, tree, loads, rho0, schedule, options, control, build,
+        |_, _, _| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(report) => report,
+        Err(never) => match never {},
+    }
+}
+
+/// Run the same numerical driver with a fallible accepted-stage observer.
+///
+/// The observer receives the installed study, complete background and matching
+/// report AFTER each whole stage succeeds, and BEFORE any work on the next
+/// stage. It is never called for an unassessed baseline or a rejected proposal.
+/// The report's work counters include all work through that boundary. A caller
+/// can commit a durable checkpoint here without cloning the finite-element
+/// operator or publishing fields from a different mesh.
+///
+/// An observer error returns immediately and unchanged: no later geometry,
+/// solve, or observer is run. Persistence is the caller's responsibility; an
+/// observer failure does not roll back the already accepted in-memory study.
+/// Physics/budget/cancellation stops still return `Ok(report)` with their typed
+/// stop cause. A prefix of the schedule may be supplied for bounded execution;
+/// the caller must distinguish completing that prefix from the full schedule.
+#[allow(clippy::too_many_arguments)]
+pub fn controlled_adaptive_sdf3_continuation_observed<O: AdaptiveSdf3Elasticity, E>(
+    study: &mut CutDensityStudy3<O>,
+    tree: &mut Octree3,
+    loads: &[GoalReferenceLoad3<'_>],
+    rho0: &[f64],
+    schedule: &[SimpParams],
+    options: AdaptiveContinuationOptions3,
+    control: &mut SolveControl<'_>,
+    mut build: impl FnMut(
+        &Octree3,
+        &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<O, GoalRefinementError3>,
+    mut accepted: impl FnMut(
+        &CutDensityStudy3<O>,
+        &Octree3,
+        &AdaptiveContinuationReport3,
+    ) -> Result<(), E>,
+) -> Result<AdaptiveContinuationReport3, E> {
     assert!(
         !schedule.is_empty(),
         "continuation requires at least one stage"
@@ -382,6 +425,8 @@ pub fn controlled_adaptive_sdf3_continuation<O: AdaptiveSdf3Elasticity>(
                     report.continuation.rejected_gradient_check = next.rejected_gradient_check;
                     break;
                 }
+                report.continuation.work = control.work();
+                accepted(study, tree, &report)?;
             }
             Err(error) => {
                 report.continuation.termination = ContinuationTermination::EvaluationStopped;
@@ -397,5 +442,9 @@ pub fn controlled_adaptive_sdf3_continuation<O: AdaptiveSdf3Elasticity>(
         }
     }
     report.continuation.work = control.work();
-    report
+    Ok(report)
 }
+
+#[cfg(test)]
+#[path = "adaptive_continuation/checkpoint_tests.rs"]
+mod checkpoint_tests;

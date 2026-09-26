@@ -63,6 +63,8 @@ pub mod refinement;
 /// Measured finer-grid assessment and pre-publication projected-descent gates.
 pub mod resolution;
 pub mod robust;
+/// All-load finer-grid stress and compliance admission under the existing solve budget.
+pub mod robust_resolution;
 // Load under the physical name so nested modules resolve in robust_descent_v2/.
 // Keep the established public path without compiling a second implementation.
 #[doc(hidden)]
