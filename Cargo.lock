@@ -2708,6 +2708,7 @@ dependencies = [
  "fs-ivl",
  "fs-material",
  "fs-obs",
+ "fs-solid",
  "fs-sparse",
  "fs-topo",
 ]

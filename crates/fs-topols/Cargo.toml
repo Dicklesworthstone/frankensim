@@ -19,6 +19,7 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-obs = { path = "../fs-obs" }
+fs-solid = { path = "../fs-solid" }
 fs-topo = { path = "../fs-topo" }
 
 [lints]
