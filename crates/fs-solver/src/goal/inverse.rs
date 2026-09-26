@@ -9,6 +9,9 @@ use super::{
 };
 use fs_sparse::Csr;
 
+/// Sparse interval-factor inverse evidence for systems beyond the dense cap.
+pub mod sparse;
+
 /// Enclose a discrete goal error, optionally proving an inverse bound from
 /// column-major `columns[j][i] = R_ij`. The ordinary residual checker runs
 /// first. Its established bound is preserved after validating the proposal.
