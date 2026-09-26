@@ -3,6 +3,8 @@
 use super::*;
 use fs_uq::{LinearControlVariate, UqControlError};
 
+mod recovery;
+
 #[derive(Debug)]
 enum Target {
     Inlet(usize),
@@ -11,6 +13,7 @@ enum Target {
     ContactResistance(String),
 }
 
+#[derive(Debug)]
 pub(super) struct MeanControl {
     frozen: LinearControlVariate,
     nominal_temperature: f64,
@@ -31,26 +34,13 @@ pub(super) fn prepare(base: &J, config: &Config, execution: &UqExecution,
 fn prepare_with(base: &J, config: &Config, execution: &UqExecution,
     evaluate: impl FnOnce(&str) -> Result<J>) -> Result<MeanControl>
 {
-    if config.qoi != Qoi::Steady
-        || ["transient", "radiation", "recirculation", "mesh_convergence"].iter()
-            .any(|key| base.get(key).is_some()) {
-        return Err(bad("adjoint mean control requires steady cooling without radiation, recirculation or mesh studies; unsupported derivative paths are not assigned zero"));
-    }
-    if config.samples >= MAX_PRODUCT_SAMPLES {
-        return Err(bad("nominal forward/adjoint plus Monte Carlo samples must fit the total 10000-model-call cap"));
-    }
+    let targets = admitted_targets(base, config)?;
     if execution.evaluations_attempted() != 0 || !execution.observations().is_empty() {
         return Err(bad("freeze the nominal control before sampling"));
     }
     if execution.plan() != &config.plan() {
         return Err(bad("nominal control and sample execution must share the same complete plan"));
     }
-    // Reuse the adapter's canonical target declarations rather than maintain a
-    // second uncertainty grammar or guess the physical meaning from plan names.
-    let encoded = J::parse(&format!("[{}]", config.render_parameters()?))
-        .map_err(|error| bad(error.to_string()))?;
-    let targets = array(&encoded, "control parameters", 256)?.iter()
-        .map(|row| Target::parse(field(row, "target")?)).collect::<Result<Vec<_>>>()?;
     let means = execution.parameter_means();
     if targets.len() != means.len() { return Err(bad("control parameter arity mismatch")); }
     let mut nominal_base = base.clone();
@@ -66,6 +56,32 @@ fn prepare_with(base: &J, config: &Config, execution: &UqExecution,
         target.derivative(&document, mean)).collect::<Result<Vec<_>>>()?;
     let frozen = execution.freeze_linear_control_variate(&gradient).map_err(control_error)?;
     Ok(MeanControl { frozen, nominal_temperature, adjoint_residual })
+}
+
+pub(super) fn validate(base: &J, config: &Config) -> Result<()> {
+    admitted_targets(base, config).map(|_| ())
+}
+
+fn admitted_targets(base: &J, config: &Config) -> Result<Vec<Target>> {
+    if config.qoi != Qoi::Steady
+        || ["transient", "radiation", "recirculation", "mesh_convergence"].iter()
+            .any(|key| base.get(key).is_some()) {
+        return Err(bad("adjoint mean control requires steady cooling without radiation, recirculation or mesh studies; unsupported derivative paths are not assigned zero"));
+    }
+    if config.samples >= MAX_PRODUCT_SAMPLES {
+        return Err(bad("nominal forward/adjoint plus Monte Carlo samples must fit the total 10000-model-call cap"));
+    }
+    // Reuse the adapter's canonical target declarations rather than maintain a
+    // second uncertainty grammar or guess the physical meaning from plan names.
+    let encoded = J::parse(&format!("[{}]", config.render_parameters()?))
+        .map_err(|error| bad(error.to_string()))?;
+    let targets = array(&encoded, "control parameters", 256)?.iter()
+        .map(|row| Target::parse(field(row, "target")?)).collect::<Result<Vec<_>>>()?;
+    // Refuse malformed nominal intent even on recovery, before any output
+    // reservation or model call. This does not evaluate the nominal model.
+    let mut nominal = base.clone();
+    enable_gradient(&mut nominal)?;
+    Ok(targets)
 }
 
 impl Target {
@@ -169,7 +185,7 @@ impl MeanControl {
                 .collect::<Result<Vec<_>>>()?.join(",")))
         };
         let controlled = format!(
-            "{{\"method\":\"frozen-nominal-coupled-adjoint\",\"authority\":\"estimated-fixed-sample-mean\",\"nominal_forward_adjoint_evaluations\":1,\"sample_model_evaluations\":{},\"total_model_evaluations\":{},\"nominal_objective_k\":{},\"nominal_adjoint_residual\":{},\"parameter_means\":{},\"gradient_k_per_parameter_unit\":{},\"raw_mean_k\":{},\"mean_k\":{},\"adjusted_std_dev_k\":{},\"sampling_standard_error_k\":{},\"adjusted_to_raw_variance_ratio\":{},\"scope\":\"mean of the declared numerical model only; coefficients fixed before sampling, analytic marginal centering; raw quantiles, bounds and compliance indicators unchanged; standard errors are descriptive, not optional-stopping bounds; no guaranteed variance reduction or native .fsim integration\"}}",
+            "{{\"method\":\"frozen-nominal-coupled-adjoint\",\"authority\":\"estimated-fixed-sample-mean\",\"nominal_forward_adjoint_evaluations\":1,\"sample_model_evaluations\":{},\"total_model_evaluations\":{},\"nominal_objective_k\":{},\"nominal_adjoint_residual\":{},\"parameter_means\":{},\"gradient_k_per_parameter_unit\":{},\"raw_mean_k\":{},\"mean_k\":{},\"adjusted_std_dev_k\":{},\"sampling_standard_error_k\":{},\"adjusted_to_raw_variance_ratio\":{},\"scope\":\"mean of the declared numerical model only; coefficients fixed before sampling, analytic marginal centering; raw quantiles, bounds and compliance indicators unchanged; standard errors are descriptive, not optional-stopping bounds; evaluation counts are lifetime completed calls, excluding interrupted/unsaved attempts; no guaranteed variance reduction or native .fsim integration\"}}",
             estimate.n, estimate.n + 1, number_json(self.nominal_temperature)?,
             number_json(self.adjoint_residual)?, values(self.frozen.parameter_means())?,
             values(self.frozen.gradient())?, number_json(estimate.raw_mean)?, number_json(estimate.mean)?,

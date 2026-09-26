@@ -87,8 +87,8 @@ fn fan_control_uses_the_actual_total_adjoint_in_declared_parameter_order() {
 
 #[test]
 fn unsupported_modes_refuse_before_reading_or_running_a_model() {
-    for extra in [vec!["--checkpoint","must-not-be-created.bin"],vec!["--resume","missing.bin"],
-        vec!["--qmc-replicates","2"],vec!["--sensitivity","sobol"]] {
+    for extra in [vec!["--qmc-replicates","2"],vec!["--sensitivity","sobol"],
+        vec!["--compliance-probability", "0.9", "--confidence-alpha", "0.05", "--min-decision-samples", "8"]] {
         let dir=directory();
         let mut args:Vec<OsString>=vec!["cooling-network-uq".into(),dir.join("missing-base.json").into_os_string(),
             dir.join("missing-plan.json").into_os_string(),"--mean-control".into(),"adjoint".into()];
@@ -101,4 +101,110 @@ fn unsupported_modes_refuse_before_reading_or_running_a_model() {
         assert!(output.stdout.is_empty());
         assert!(!dir.join("must-not-be-created.bin").exists());
     }
+}
+
+fn recoverable_command(dir: &Path, extra: &[&str]) -> Output {
+    let mut args: Vec<OsString> = vec!["cooling-network-uq".into(),
+        dir.join("base.json").into_os_string(), dir.join("plan.json").into_os_string(),
+        "--mean-control".into(), "adjoint".into()];
+    for &arg in extra {
+        args.push(if arg.ends_with(".bin") { dir.join(arg).into_os_string() } else { arg.into() });
+    }
+    command(args)
+}
+fn recovery_inputs(dir: &Path) -> String {
+    let p = plan(r#"{"target":{"kind":"inlet-temperature","index":0},"distribution":{"kind":"uniform","lo":308,"hi":312}}"#);
+    std::fs::write(dir.join("base.json"), BASE).unwrap();
+    std::fs::write(dir.join("plan.json"), &p).unwrap();
+    p
+}
+fn progress(output: Output) -> J {
+    assert_eq!(output.status.code(), Some(6), "{}", String::from_utf8_lossy(&output.stderr));
+    let result = J::parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+    assert!(result.get("mean_control_variate").is_none(), "a partial prefix must not masquerade as a completed mean estimate");
+    assert_eq!(result.str_field("mean_control_state"), Some("frozen-adjoint-retained"));
+    result
+}
+
+#[test]
+fn actual_adjoint_and_samples_survive_zero_chunk_multichunk_and_terminal_recovery() {
+    let dir = directory();
+    recovery_inputs(&dir);
+    let zero = progress(recoverable_command(&dir, &["--checkpoint", "zero.bin", "--max-new-samples", "0"]));
+    assert_eq!(number(&zero, "samples_evaluated"), 0.0);
+    assert_eq!(number(&zero, "total_model_evaluations_this_run"), 1.0);
+    assert_eq!(number(&zero, "nominal_forward_adjoint_evaluations_this_run"), 1.0);
+    let zero_bytes = std::fs::read(dir.join("zero.bin")).unwrap();
+    let partial = progress(recoverable_command(&dir, &["--resume", "zero.bin", "--checkpoint", "part.bin", "--max-new-samples", "5"]));
+    assert_eq!(number(&partial, "samples_evaluated"), 5.0);
+    assert_eq!(number(&partial, "total_model_evaluations"), 6.0);
+    assert_eq!(number(&partial, "total_model_evaluations_this_run"), 5.0);
+    assert_eq!(number(&partial, "nominal_forward_adjoint_evaluations_this_run"), 0.0);
+    assert_eq!(partial.get("control_restored"), Some(&J::Bool(true)));
+    assert_eq!(std::fs::read(dir.join("zero.bin")).unwrap(), zero_bytes);
+    let part_bytes = std::fs::read(dir.join("part.bin")).unwrap();
+    let resumed = document(recoverable_command(&dir, &["--resume", "part.bin", "--checkpoint", "complete.bin"]));
+    assert_eq!(std::fs::read(dir.join("part.bin")).unwrap(), part_bytes);
+    let whole = document(recoverable_command(&dir, &["--checkpoint", "whole.bin"]));
+    assert_eq!(resumed, whole, "same raw samples, nominal record and complete controlled estimate");
+    assert_eq!(std::fs::read(dir.join("complete.bin")).unwrap(), std::fs::read(dir.join("whole.bin")).unwrap());
+    let terminal = document(recoverable_command(&dir, &["--resume", "complete.bin"]));
+    assert_eq!(terminal, whole);
+    assert_eq!(number(terminal.get("mean_control_variate").unwrap(), "total_model_evaluations"), 17.0);
+}
+
+#[test]
+fn corrupted_or_rebound_adjoint_prefixes_refuse_before_creating_an_output() {
+    let dir = directory();
+    let p = recovery_inputs(&dir);
+    progress(recoverable_command(&dir, &["--checkpoint", "zero.bin", "--max-new-samples", "0"]));
+    let original = std::fs::read(dir.join("zero.bin")).unwrap();
+    for (ordinal, offset) in [8, 16, 40, original.len() - 1].into_iter().enumerate() {
+        let mut changed = original.clone(); changed[offset] ^= 1;
+        let input = format!("bad-{ordinal}.bin");
+        let output = format!("not-created-{ordinal}.bin");
+        std::fs::write(dir.join(&input), changed).unwrap();
+        let rejected = recoverable_command(&dir, &["--resume", &input, "--checkpoint", &output]);
+        assert_eq!(rejected.status.code(), Some(4), "{}", String::from_utf8_lossy(&rejected.stderr));
+        assert!(rejected.stdout.is_empty());
+        assert!(!dir.join(output).exists());
+    }
+    // The same core plan does not legitimize a different fixed model input.
+    let changed_base = replace_once(BASE, "\"temperature_k\": 300", "\"temperature_k\": 301");
+    std::fs::write(dir.join("base.json"), changed_base).unwrap();
+    assert_eq!(recoverable_command(&dir, &["--resume", "zero.bin", "--checkpoint", "different.bin"]).status.code(), Some(4));
+    assert!(!dir.join("different.bin").exists());
+    std::fs::write(dir.join("base.json"), BASE).unwrap();
+    let changed_plan = replace_once(&p, "\"samples\":16", "\"samples\":17");
+    std::fs::write(dir.join("plan.json"), changed_plan).unwrap();
+    assert_eq!(recoverable_command(&dir, &["--resume", "zero.bin", "--checkpoint", "budget-changed.bin"]).status.code(), Some(4));
+    assert!(!dir.join("budget-changed.bin").exists());
+    // A per-invocation wall allowance can change without altering the sampled law.
+    std::fs::write(dir.join("plan.json"), replace_once(&p, "\"wall_seconds\":120", "\"wall_seconds\":240")).unwrap();
+    let copied = progress(recoverable_command(&dir, &["--resume", "zero.bin", "--checkpoint", "copied.bin", "--max-new-samples", "0"]));
+    assert_eq!(number(&copied, "total_model_evaluations_this_run"), 0.0);
+    assert_eq!(std::fs::read(dir.join("copied.bin")).unwrap(), original);
+}
+
+#[test]
+fn controlled_recovery_never_overwrites_input_or_silently_changes_execution_mode() {
+    let dir = directory(); recovery_inputs(&dir);
+    progress(recoverable_command(&dir, &["--checkpoint", "zero.bin", "--max-new-samples", "0"]));
+    let original = std::fs::read(dir.join("zero.bin")).unwrap();
+    assert_eq!(recoverable_command(&dir, &["--resume", "zero.bin", "--checkpoint", "zero.bin"]).status.code(), Some(4));
+    assert_eq!(std::fs::read(dir.join("zero.bin")).unwrap(), original);
+    let raw = command(vec!["cooling-network-uq".into(), dir.join("base.json").into_os_string(),
+        dir.join("plan.json").into_os_string(), "--resume".into(), dir.join("zero.bin").into_os_string(),
+        "--checkpoint".into(), dir.join("raw-output.bin").into_os_string()]);
+    assert_eq!(raw.status.code(), Some(4));
+    assert!(!dir.join("raw-output.bin").exists());
+    let raw_zero = command(vec!["cooling-network-uq".into(), dir.join("base.json").into_os_string(),
+        dir.join("plan.json").into_os_string(), "--checkpoint".into(), dir.join("raw.bin").into_os_string(),
+        "--max-new-samples".into(), "0".into()]);
+    assert_eq!(raw_zero.status.code(), Some(6));
+    assert_eq!(recoverable_command(&dir, &["--resume", "raw.bin", "--checkpoint", "late-control.bin"]).status.code(), Some(4));
+    assert!(!dir.join("late-control.bin").exists());
+    std::fs::write(dir.join("occupied.bin"), b"existing user data").unwrap();
+    assert_eq!(recoverable_command(&dir, &["--checkpoint", "occupied.bin"]).status.code(), Some(4));
+    assert_eq!(std::fs::read(dir.join("occupied.bin")).unwrap(), b"existing user data".to_vec());
 }

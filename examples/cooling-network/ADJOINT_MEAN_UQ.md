@@ -36,13 +36,65 @@ and one additional nominal forward/adjoint evaluation: 33 model calls. They shar
 one wall-time allowance; the nominal solve is not a random observation. The total
 model-call cap is 10000, including the nominal call.
 
-This initial command adapter requires one complete fixed-count Monte Carlo run.
-It refuses sequential decision, candidate-selection, QMC, sensitivity and
-checkpoint/resume options, as well as transient, radiation, recirculation and
-mesh-study bases, before any nominal solve. No partial adjusted distribution is
-published. The reusable `fs_uq` assessment itself supports raw-checkpoint recovery
-with the original frozen control and cancellation without rerunning physics;
-a durable control binding for this command remains separate work.
+The command requires a fixed-count Monte Carlo **plan**, but it can now execute
+that plan in durable chunks. It still refuses sequential decision,
+candidate-selection, QMC and sensitivity combinations, and transient, radiation,
+recirculation and mesh-study bases before any nominal solve. Partial prefixes
+are progress records, never completed adjusted distributions.
+
+## Durable interruption and recovery
+
+The existing `--checkpoint`, `--resume` and `--max-new-samples` options retain the
+actual nominal objective, adjoint residual, frozen coefficients and ordered raw
+observations in **one** versioned file. The nominal is published before the first
+random sample. In particular, `--max-new-samples 0` pays for and saves the nominal
+adjoint without starting any Monte Carlo solve. On recovery, the original adjoint
+is read, not recomputed or refitted, and only the missing sample ordinals run.
+
+```sh
+# These names must be fresh: an existing checkpoint is never overwritten.
+mkdir -p target/uq-adjoint
+cargo run --release -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-adjoint-mean.json \
+  --mean-control adjoint \
+  --checkpoint target/uq-adjoint/first.bin --max-new-samples 8
+# Exit 6 means the valid prefix is retained, not that a completed estimate exists.
+
+cargo run --release -p fs-cli --bin frankensim -- --json cooling-network-uq \
+  examples/cooling-network/fan-correlated-hotspot.json \
+  examples/cooling-network/uq-adjoint-mean.json \
+  --mean-control adjoint \
+  --resume target/uq-adjoint/first.bin --checkpoint target/uq-adjoint/complete.bin
+```
+
+Use the same executable, fixed base bytes, parameter bindings, seed, full sample
+budget and deterministic runtime profile. A different per-invocation
+`wall_seconds` or chunk length is allowed; it does not change the sampled law or
+reset the lifetime sample budget. Within each invocation the nominal (when new),
+samples and final mean assessment share one evaluation-time allowance. Complete
+checkpoints export the same result without nominal or sample physics.
+
+Ordinary raw-only checkpoints cannot acquire a control after sampling, and a
+controlled checkpoint cannot silently become an ordinary run. Changes to nominal
+diagnostics, coefficients, model identity or plan are refused before reserving a
+new output. Actual sample failures invalidate the current output rather than
+filtering inconvenient observations. Storage errors stop before another sample.
+The existing atomic write/sync path publishes the entire state together; there
+is no separately updated coefficient sidecar.
+
+Progress records include whether the control was restored and completed model
+counts both over the retained lifetime and for the current invocation. Complete
+results retain lifetime counts: 32 samples plus one nominal remain 33 completed
+model calls regardless of chunking. Interrupted attempts, or work lost in a
+crash before a checkpoint is durable, are not counted and may need repeating.
+This is not an exactly-once or cross-invocation wall-budget guarantee. If a final
+assessment exhausts its allowance, a complete saved checkpoint can be resumed
+with a new allowance without repeating physics.
+
+The checksum detects corruption and binds all these values; it is not an
+authentication mechanism, proof of physical validity or proof of statistical
+independence. Resume only checkpoints from a trusted source.
 
 These are descriptive fixed-sample mean estimates for the declared numerical
 model, not confidence sequences or physical safety bounds. Adjusted samples are
@@ -53,8 +105,8 @@ variance-reduction claim is added.
 
 This implements the reusable mean-control part of `frankensim-rc-root-q61wp.72`
 and its first real cooling consumer. It does **not** close that bead: distribution
-sections, native `.fsim` solve/report/ledger integration and its durable nominal
-adjoint binding are still required. The canonical product remains `.fsim`; this
+sections and native `.fsim` solve/report/ledger integration are still required.
+The durable nominal binding described here belongs to the experimental command. The canonical product remains `.fsim`; this
 command is the existing experimental cooling-network surface, not a new product.
 
 Focused native checks:

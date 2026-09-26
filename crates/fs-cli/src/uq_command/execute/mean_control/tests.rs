@@ -102,3 +102,97 @@ fn nominal_work_is_admitted_inside_the_total_model_call_cap() {
     assert!(prepare_with(&base,&config,&run,|_| {calls+=1;Ok(document())}).is_err());
     assert_eq!(calls,0);
 }
+
+#[test]
+fn retained_nominal_and_prefix_recover_without_a_second_adjoint_or_refit() {
+    use fs_blake3::ContentHash;
+    let identity = ContentHash([47; 32]);
+    let base = J::parse(BASE).unwrap();
+    let config = Config::parse(PLAN, &base).unwrap();
+    let mut run = UqExecution::new(&config.plan()).unwrap();
+    let mut nominal_calls = 0;
+    let control = prepare_with(&base, &config, &run, |_| {
+        nominal_calls += 1;
+        Ok(document())
+    }).unwrap();
+    // Persist before the first random observation, not just after some samples.
+    let zero = control.checkpoint_bytes(&run, identity).unwrap();
+    let (empty, saved) = MeanControl::restore_bytes(&config.plan(), identity, &zero).unwrap();
+    assert_eq!(empty.evaluations_attempted(), 0);
+    assert_eq!(saved.nominal_temperature.to_bits(), control.nominal_temperature.to_bits());
+    assert_eq!(saved.adjoint_residual.to_bits(), control.adjoint_residual.to_bits());
+    assert_eq!(saved.frozen.gradient(), control.frozen.gradient());
+    assert_eq!(saved.checkpoint_bytes(&empty, identity).unwrap(), zero);
+    run.advance(3, || false, |p| Ok::<_, &str>(p[0] + 5.0));
+    let bytes = control.checkpoint_bytes(&run, identity).unwrap();
+    let raw_before = run.checkpoint(identity).unwrap();
+    let (mut restored, frozen) = MeanControl::restore_bytes(&config.plan(), identity, &bytes).unwrap();
+    assert_eq!(restored.checkpoint(identity).unwrap(), raw_before);
+    let mut sample_calls = 0;
+    restored.advance(usize::MAX, || false, |p| { sample_calls += 1; Ok::<_, &str>(p[0] + 5.0) });
+    assert_eq!(sample_calls, 5);
+    assert_eq!(nominal_calls, 1);
+    run.advance(usize::MAX, || false, |p| Ok::<_, &str>(p[0] + 5.0));
+    let raw = "{\"raw\":true}\n".to_string();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    assert_eq!(frozen.attach(raw.clone(), &restored, deadline).unwrap(), control.attach(raw, &run, deadline).unwrap());
+    assert_eq!(frozen.checkpoint_bytes(&restored, identity).unwrap(), control.checkpoint_bytes(&run, identity).unwrap());
+    // A completed recovered run retains the same work count and raw data.
+    let complete = frozen.checkpoint_bytes(&restored, identity).unwrap();
+    let (mut terminal, retained) = MeanControl::restore_bytes(&config.plan(), identity, &complete).unwrap();
+    terminal.advance(usize::MAX, || false, |_| -> std::result::Result<f64, &str> {
+        panic!("terminal controlled execution must not run more physics")
+    });
+    assert_eq!(retained.checkpoint_bytes(&terminal, identity).unwrap(), complete);
+}
+
+#[test]
+fn nominal_diagnostics_coefficients_and_control_mode_are_bound_to_the_checkpoint() {
+    use fs_blake3::ContentHash;
+    let identity = ContentHash([48; 32]);
+    let base = J::parse(BASE).unwrap();
+    let config = Config::parse(PLAN, &base).unwrap();
+    let mut run = UqExecution::new(&config.plan()).unwrap();
+    let control = prepare_with(&base, &config, &run, |_| Ok(document())).unwrap();
+    run.advance(3, || false, |p| Ok::<_, &str>(p[0] + 5.0));
+    let bytes = control.checkpoint_bytes(&run, identity).unwrap();
+    for (offset, value) in [(8, 316.0), (16, 2e-14), (16, -1.0), (8, f64::NAN), (40, 2.0)] {
+        let mut changed = bytes.clone();
+        changed[offset..offset + 8].copy_from_slice(&value.to_bits().to_le_bytes());
+        let error = MeanControl::restore_bytes(&config.plan(), identity, &changed).err().unwrap();
+        assert_eq!(error.code, "cooling-network-uq-checkpoint");
+    }
+    for end in [0, 7, 8, 16, 23, 24, bytes.len() - 1] {
+        assert!(MeanControl::restore_bytes(&config.plan(), identity, &bytes[..end]).is_err());
+    }
+    let mut changed_plan = config.plan(); changed_plan.budget_max_samples += 1;
+    assert!(MeanControl::restore_bytes(&changed_plan, identity, &bytes).is_err());
+    assert!(MeanControl::restore_bytes(&config.plan(), ContentHash([49; 32]), &bytes).is_err());
+    assert!(MeanControl::restore_bytes(&config.plan(), identity, &run.checkpoint(identity).unwrap()).is_err());
+    assert!(UqExecution::restore(&config.plan(), identity, &bytes).is_err());
+    let raw_options = Options::default();
+    let controlled_options = Options { adjoint_mean_control: true, ..Options::default() };
+    assert_ne!(raw_options.checkpoint_binding(&config).unwrap(), controlled_options.checkpoint_binding(&config).unwrap());
+    // Invocation work allowances do not replace the original plan/model binding.
+    let longer = Config::parse(&PLAN.replace("\"wall_seconds\":60", "\"wall_seconds\":120"), &base).unwrap();
+    assert_eq!(controlled_options.checkpoint_binding(&config).unwrap(), controlled_options.checkpoint_binding(&longer).unwrap());
+    assert_eq!(config.plan(), longer.plan());
+}
+
+#[test]
+fn failed_samples_and_cancelled_assessments_do_not_replace_the_retained_control() {
+    use fs_blake3::ContentHash;
+    let identity = ContentHash([50; 32]);
+    let base = J::parse(BASE).unwrap();
+    let config = Config::parse(PLAN, &base).unwrap();
+    let mut run = UqExecution::new(&config.plan()).unwrap();
+    let control = prepare_with(&base, &config, &run, |_| Ok(document())).unwrap();
+    run.advance(8, || false, |p| Ok::<_, &str>(p[0] + 5.0));
+    let bytes = control.checkpoint_bytes(&run, identity).unwrap();
+    assert!(control.attach("{}\n".into(), &run, Instant::now()).is_err());
+    assert_eq!(control.checkpoint_bytes(&run, identity).unwrap(), bytes);
+    let (mut failed, frozen) = MeanControl::restore_bytes(&config.plan(), identity,
+        &control.checkpoint_bytes(&UqExecution::new(&config.plan()).unwrap(), identity).unwrap()).unwrap();
+    failed.advance(1, || false, |_| Err::<f64, _>("sample-refusal"));
+    assert!(frozen.checkpoint_bytes(&failed, identity).is_err());
+}

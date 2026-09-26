@@ -2,15 +2,17 @@
 //! A checksum detects corruption, not authenticity; resume only trusted files.
 
 use super::{Failure, MAX_PRODUCT_SAMPLES, Result};
+use super::mean_control::MeanControl;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_uq::{QmcConfig, QmcExecution, SobolExecution, UqExecution, UqPlan};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-// The library envelope is 81 bytes plus eight bytes per observation. Keep a
-// small forward-compatible read allowance, never an unbounded read_to_end.
-const MAX_CHECKPOINT_BYTES: u64 = 1024 + 8 * MAX_PRODUCT_SAMPLES as u64;
+// Raw observations use eight bytes each. The 4 KiB framing allowance also
+// covers the frozen adjoint and all 256 admitted parameter coefficients.
+// Reads remain bounded; each owner checks its exact version and payload length.
+const MAX_CHECKPOINT_BYTES: u64 = 4096 + 8 * MAX_PRODUCT_SAMPLES as u64;
 
 fn failure(message: impl Into<String>) -> Failure {
     Failure { code: "cooling-network-uq-checkpoint", message: message.into() }
@@ -43,6 +45,13 @@ pub(super) fn model_identity(base_text: &str, bindings: &str) -> Result<ContentH
 
 pub(super) fn restore(path: &Path, plan: &UqPlan, identity: ContentHash) -> Result<UqExecution> {
     UqExecution::restore(plan, identity, &read(path)?)
+        .map_err(|error| failure(format!("{}: {error}", path.display())))
+}
+
+pub(super) fn restore_controlled(
+    path: &Path, plan: &UqPlan, identity: ContentHash,
+) -> Result<(UqExecution, MeanControl)> {
+    MeanControl::restore_bytes(plan, identity, &read(path)?)
         .map_err(|error| failure(format!("{}: {error}", path.display())))
 }
 
@@ -102,6 +111,15 @@ impl Output {
     pub(super) fn save(&self, execution: &UqExecution, identity: ContentHash) -> Result<()> {
         let bytes = execution.checkpoint(identity).map_err(|error| failure(error.to_string()))?;
         self.publish(&bytes)
+    }
+
+    pub(super) fn save_mc(
+        &self, execution: &UqExecution, identity: ContentHash, control: Option<&MeanControl>,
+    ) -> Result<()> {
+        match control {
+            Some(control) => self.publish(&control.checkpoint_bytes(execution, identity)?),
+            None => self.save(execution, identity),
+        }
     }
 
     pub(super) fn save_qmc(&self, execution: &QmcExecution, identity: ContentHash) -> Result<()> {
