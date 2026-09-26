@@ -1,7 +1,7 @@
 //! Canonical `frankensim study` routing.
 //!
-//! Thermal and free-boundary elasticity studies share one receipt envelope and
-//! user-facing command while retaining distinct numerical producers and claims.
+//! Thermal, free-boundary elasticity and native uncertainty studies share one
+//! command while retaining distinct numerical producers and authority claims.
 
 use std::path::Path;
 
@@ -11,6 +11,8 @@ use crate::{CommandOutput, OutputMode};
 mod elasticity;
 #[path = "study_thermal.rs"]
 mod thermal;
+#[path = "study_uncertainty.rs"]
+mod uncertainty;
 
 /// Shared retained-study receipt envelope. Numerical producer identity remains
 /// an explicit `driver` field inside every receipt.
@@ -22,7 +24,9 @@ pub(crate) fn study_path(
     override_text: Option<&str>,
     mode: OutputMode,
 ) -> CommandOutput {
-    if elasticity::looks_like(path) {
+    if uncertainty::looks_like(path) {
+        uncertainty::study_path(path, ledger_path, override_text, mode)
+    } else if elasticity::looks_like(path) {
         elasticity::study_path(path, ledger_path, override_text, mode)
     } else {
         thermal::study_path(path, ledger_path, override_text, mode)
@@ -35,7 +39,9 @@ pub(crate) fn resume_path(
     override_text: Option<&str>,
     mode: OutputMode,
 ) -> CommandOutput {
-    if elasticity::owns_run(pointer, path) {
+    if uncertainty::owns_run(pointer) {
+        uncertainty::resume_path(pointer, path, override_text, mode)
+    } else if elasticity::owns_run(pointer, path) {
         elasticity::resume_path(pointer, path, override_text, mode)
     } else {
         thermal::resume_path(pointer, path, override_text, mode)
@@ -48,7 +54,9 @@ pub(crate) fn export(
     path: Option<&Path>,
     mode: OutputMode,
 ) -> CommandOutput {
-    if path.is_some_and(|ledger| elasticity::owns_run(pointer, ledger)) {
+    if uncertainty::owns_run(pointer) {
+        uncertainty::export(command, pointer, path, mode)
+    } else if path.is_some_and(|ledger| elasticity::owns_run(pointer, ledger)) {
         elasticity::export(command, pointer, path, mode)
     } else {
         thermal::export(command, pointer, path, mode)
