@@ -127,6 +127,15 @@ the final 960-endpoint trajectory peaked at 307.070667 K at 180 seconds, with
 0.020148 K common-field change and 0.009422 K peak change. All six trajectories
 performed 1,890 accepted endpoints in this independent calculation.
 
+Measured 2026-09-26 with the release binary, which uses lumped (row-sum) P1
+capacitance rather than the consistent mass of the NumPy reference above,
+`time-convergence-radiative-pulse.json` meets the 0.05 K tolerance at level 3
+after two consecutive passes. The level 2 and level 3 field changes are
+0.043941 K and 0.023033 K. The final 240-step trajectory peaks at
+305.245907 K at 180 seconds, with 402.879680 J of radiative loss over
+300 seconds. The runs took 38,529 solid solves across four trajectories.
+The first sampled violation of the 305 K limit is at 177.5 seconds.
+
 A separate hot-initial mean-wall case had unchanged 350 K sampled peaks but
 0.077093 K full-field change. Ten constant-material controls compared backward
 Euler against independent matrix-exponential solutions of the SAME fixed-mesh

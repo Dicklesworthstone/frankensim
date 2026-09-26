@@ -14,11 +14,11 @@ cargo test -p fs-cli --test cooling_network
 > results are unchanged. Several examples' temperature limits were re-tuned to
 > keep their role; see 45af6da3d. TRANSIENT_COOLING, ADAPTIVE_COOLING,
 > NONLINEAR_TRANSIENT_COOLING, REPEATED_COOLING, TRANSIENT_DESIGN,
-> ENCLOSURE_RADIATION, COMPONENT_POWER_ALLOCATION and MULTI_LIMIT_ALLOCATION now
-> state FrankenSim's measured lumped values next to their consistent-mass
-> references. Other documents' transient figures (for example
-> TIME_CONVERGENCE, ADAPTIVE_MESH_COOLING, RADIATIVE_MESH_STUDIES and
-> TRANSIENT_RADIATION) are consistent-mass references until re-measured.
+> ENCLOSURE_RADIATION, COMPONENT_POWER_ALLOCATION, MULTI_LIMIT_ALLOCATION,
+> TIME_CONVERGENCE and TRANSIENT_RADIATION (the last two re-measured
+> 2026-09-26) now state FrankenSim's measured lumped values next to their
+> consistent-mass references. ADAPTIVE_MESH_COOLING and RADIATIVE_MESH_STUDIES
+> cover steady problems, so they are unaffected.
 
 This **experimental binary command** accepts a JSON request containing an actual
 linear tetrahedral solid, named exterior cooling faces, a quadratic hydraulic

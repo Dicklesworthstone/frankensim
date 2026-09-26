@@ -129,3 +129,12 @@ splits into approximately 365.260990 J stored, 35.939220 J air gain and
 198.799790 J radiative loss. Two repeated cycles peak at 307.020212 K at
 180 seconds and retain 402.705557 J of signed radiative loss over 300 seconds.
 None of these values is an experimental validation or continuum error bound.
+
+Measured 2026-09-26 with the release binary, after the transient storage matrix
+became lumped (row-sum) P1 capacitance, the declared pulse peaks at
+304.032158 K at 30 seconds, versus 304.063475 K without radiation. The 600 J
+input splits into 360.980295 J stored, 40.053789 J air gain and 198.965916 J
+radiative loss, with an energy residual of -3.96e-7 J. The reference values
+above were computed with consistent mass and are not expected to match these
+lumped values. Lumping cools the sampled peak by about 2.1 K and leaves the
+radiative loss almost unchanged.
