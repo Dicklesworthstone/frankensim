@@ -15,6 +15,9 @@ use super::{
 mod solve;
 pub use solve::{LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop};
 
+mod maximum;
+pub use maximum::{LinearMaximumAnalysis, analyze_linear_maximum};
+
 /// Additional work admitted for a discrete thermal goal analysis. The dual
 /// separately uses the caller's existing [`LinearConfig`] iteration budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
