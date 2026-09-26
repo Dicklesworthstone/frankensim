@@ -2,7 +2,7 @@
 name = "fs-io"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "The world boundary: hardened mesh and bounded STEP interchange with quarantine receipts, deterministic exports, and schema-validated catalogs."

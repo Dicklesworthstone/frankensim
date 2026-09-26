@@ -2,7 +2,7 @@
 name = "fs-ascent"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "The gradient-based optimizer stack: L-BFGS with strong-Wolfe search, trust-region Newton-Krylov (Steihaug), augmented-Lagrangian constraints with KKT certificates, Riemannian variants, and the stopping-condition algebra."

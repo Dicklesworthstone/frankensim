@@ -2,7 +2,7 @@
 name = "fs-time"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Structure-preserving time integration: symplectic, Lie-group, generalized-alpha, IMEX, exponential, adaptive."

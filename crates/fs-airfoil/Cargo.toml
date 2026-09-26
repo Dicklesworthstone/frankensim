@@ -2,7 +2,7 @@
 name = "fs-airfoil"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Generic airfoil section models: analytic baselines, provenance-bound tables, constrained residuals, uncertainty, applicability-domain refusals."

@@ -2,7 +2,7 @@
 name = "fs-vvreg"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Gauntlet G1/G2 benchmark and V&V registry: pinned editions, licenses, deck hashes, QoIs, and acceptance envelopes with fail-closed citation."

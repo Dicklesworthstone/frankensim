@@ -2,7 +2,7 @@
 name = "fs-vessel"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Flagship 3 (plan 15.3): the laminar-pour vessel - Chebyshev vessel-of-revolution profiles, Orr-Sommerfeld thin-film stability objectives along the pour path, free-surface LBM validation under tilt schedules with contact-line bracketing, CVaR robustification over the fluid band with e-raced candidates, and the pour rendered from the simulation's own bytes. Smoke tier."

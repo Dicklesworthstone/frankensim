@@ -2,7 +2,7 @@
 name = "fs-oed-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "SensorForge: checked optimal-experimental-design campaign that greedily places instrument-bound Kalman sensor updates by decision-theoretic value of information, stops when modeled EVPI reaches its threshold, and allocates a first-order measurement-precision budget. Posterior and stop claims remain input-bound Estimated evidence until independently certified."

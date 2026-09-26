@@ -2,7 +2,7 @@
 name = "fs-simd"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "SIMD tiers: scalar baseline, NEON/AVX-512 capsules behind safe facades."

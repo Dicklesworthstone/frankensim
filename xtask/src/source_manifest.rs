@@ -1656,7 +1656,7 @@ fn render_spdx(model: &ManifestModel, source_manifest_identity: &str) -> Result<
     output.push_str("}, \"licenseConcluded\": \"NOASSERTION\", \"licenseDeclared\": \"NOASSERTION\", \"licenseComments\": ");
     json_string(
         &mut output,
-        "No legal normalization is claimed: Cargo metadata declares MIT OR Apache-2.0 while the repository LICENSE text includes an additional rider.",
+        "No legal normalization is claimed: Cargo metadata points at the repository LICENSE file (MIT with an OpenAI/Anthropic rider), which is not an SPDX expression.",
     );
     output.push_str(", \"copyrightText\": \"NOASSERTION\", \"sourceInfo\": ");
     json_string(

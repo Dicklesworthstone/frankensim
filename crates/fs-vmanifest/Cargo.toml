@@ -2,7 +2,7 @@
 name = "fs-vmanifest"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Typed, sealed, content-addressed VerificationManifest schema, authored leapfrog G1 drafts for I01 through I15, and the CP, EM, PD, and RL portfolio aggregates."

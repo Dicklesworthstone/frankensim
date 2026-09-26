@@ -2,7 +2,7 @@
 name = "fs-xform"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Design parameterizations: FFD, RBF morphs, level-set velocity, SIMP densities — with exact Jacobian actions and composition."

@@ -2,7 +2,7 @@
 name = "fs-rep-sdf"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Signed-distance-field charts: dense tiled grids (f32 store/f64 eval, C1 interpolation), FrankenVDB sparse tree, adaptive octree SDF, narrow-band evolution."

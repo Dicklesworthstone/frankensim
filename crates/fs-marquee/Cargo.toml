@@ -2,7 +2,7 @@
 name = "fs-marquee"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "The P2 marquee demo: shape/topology optimization on a raw SDF with no mesh in the loop — CutFEM physics, self-adjoint shape gradients, a composed per-iteration error certificate, sphere-traced renders, and a replayable golden ledger."

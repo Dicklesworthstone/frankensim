@@ -2,7 +2,7 @@
 name = "fs-topopt"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Density-based topology optimization: SIMP with Helmholtz filtering, Heaviside projection, exact chain-rule sensitivities, and optimality-criteria/AL drivers."

@@ -2,7 +2,7 @@
 name = "fs-voi"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Value-of-information and active validation (fs-voi): the strategic layer deciding what information to acquire next — spend compute where it can CHANGE A DECISION, not merely where an estimator is uncertain. Computes ranking-change probabilities and the expected value of sampling/computation/testing over Evidence-carrying estimates, and beats uncertainty-proportional allocation on decision-quality-per-cost."

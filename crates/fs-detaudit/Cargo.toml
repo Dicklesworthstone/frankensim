@@ -2,7 +2,7 @@
 name = "fs-detaudit"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "G5 determinism-audit harness: worker-matrix bit-identity audits with first-divergence localization over staged hash traces, cross-ISA divergence classification reports, and measured ExecMode fast/deterministic deltas."

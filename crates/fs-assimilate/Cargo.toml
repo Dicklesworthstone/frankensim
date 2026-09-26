@@ -2,7 +2,7 @@
 name = "fs-assimilate"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Data assimilation: checked linear-Gaussian belief updates from instrument observations, with registration-free point sensors and honestly estimated, content-addressed posterior candidates for external validation."

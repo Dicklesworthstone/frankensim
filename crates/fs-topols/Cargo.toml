@@ -2,7 +2,7 @@
 name = "fs-topols"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Level-set topology optimization: WENO narrow-band advection, fast-iterative-method redistancing, normal velocity extension, topological-derivative hole nucleation, CutFEM-coupled compliance descent."

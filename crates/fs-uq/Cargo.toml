@@ -2,7 +2,7 @@
 name = "fs-uq"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Uncertainty quantification: Karhunen-Loeve random fields with captured-variance evidence, polynomial chaos by regression, QMC propagation, and multilevel Monte Carlo with audited telescoping."

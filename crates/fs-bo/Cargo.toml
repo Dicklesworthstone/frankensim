@@ -2,7 +2,7 @@
 name = "fs-bo"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Bayesian optimization: Matern-family Gaussian processes with QMC-multistart hyperparameter fitting, EI/q-EI acquisitions, and deterministic BO loops."

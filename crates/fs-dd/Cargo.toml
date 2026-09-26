@@ -2,7 +2,7 @@
 name = "fs-dd"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Domain decomposition: BDDC substructuring with nodal rho scaling, corners-primal and sheaf-harmonic coarse spaces, subdomain-aligned coefficient-jump evidence, and CCD-locality metrics."

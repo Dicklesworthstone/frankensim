@@ -2,7 +2,7 @@
 name = "fs-solid"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Elasticity core: small-strain and finite-strain hyperelasticity (via fs-material), locking-free B-bar, body-fitted and CutFEM frontends, Newton with globalization."

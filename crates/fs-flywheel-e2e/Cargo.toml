@@ -2,7 +2,7 @@
 name = "fs-flywheel-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "FLYWHEEL CLOSES: the whole-loop e2e harness proving 9->2->10->E compound (super-additive speedup, colors end-to-end, G4 storm + G5 determinism across the loop)."

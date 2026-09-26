@@ -2,7 +2,7 @@
 name = "fs-geocon"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Geometric constraint primitives: min-thickness, draft, symmetry-by-quotient, envelopes, certified volume — each with derivatives or certificates and its ASCENT constraint mapping."

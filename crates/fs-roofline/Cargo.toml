@@ -2,7 +2,7 @@
 name = "fs-roofline"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Roofline harness: measured machine axes, kernel attainment vs falsifiable targets, ledgered with fingerprints."

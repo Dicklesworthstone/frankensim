@@ -2,7 +2,7 @@
 name = "fs-adjoint"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Gradient truth: IFT discrete adjoints through solvers, time-dependent adjoints under revolve checkpointing, Hadamard shape gradients, density chain rules, Sobolev gradient smoothing, and the gradient-verification gate."

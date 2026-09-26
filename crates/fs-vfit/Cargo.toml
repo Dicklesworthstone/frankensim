@@ -2,7 +2,7 @@
 name = "fs-vfit"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Passive rational approximation of tabulated frequency responses: relaxed vector fitting + Loewner cross-check, Hamiltonian passivity certification with convex residue repair, and prewarped bilinear discretization to state-space/biquad runtime filters."

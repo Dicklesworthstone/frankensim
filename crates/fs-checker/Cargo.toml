@@ -2,7 +2,7 @@
 name = "fs-checker"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "The standalone evidence-package checker (addendum Proposal 12): an independently distributable verifier that re-verifies a package's completeness, content address, and signature and renders the budget pie WITHOUT the solver stack or any license in its build graph."

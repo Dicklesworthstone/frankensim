@@ -2,7 +2,7 @@
 name = "fs-matdb-store"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "FrankenSQLite-backed queryable index over compiled fs-matdb material packs: discovery through SQL, evaluation through the canonical hash-verified pack bytes, staleness fail-closed."

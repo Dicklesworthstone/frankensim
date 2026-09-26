@@ -2,7 +2,7 @@
 name = "fs-airflow"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Typed fan curves, uncertain loss networks, certified operating-point roots, and convection handoffs."

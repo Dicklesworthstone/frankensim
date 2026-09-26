@@ -2,7 +2,7 @@
 name = "fs-dimine"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Dimensional knowledge mining (addendum Proposal 9): fit closed-form power-law scaling laws over a certified corpus in dimensionless-group (pi) space by pure-Rust log-linear least squares, tagged estimated-color with a pi-space validity envelope, promoted only by fit significance."

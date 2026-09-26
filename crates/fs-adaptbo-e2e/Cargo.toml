@@ -2,7 +2,7 @@
 name = "fs-adaptbo-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "AnytimeBO: Bayesian optimization with anytime-valid evidence against a declared stall-rate null. A Gaussian-process/Expected-Improvement loop is monitored by a betting e-process; peeking after each iteration preserves the null's type-I guarantee. The observed incumbent and GP remain estimated, and the trace diagnostic is not mislabeled as a global-optimum enclosure."

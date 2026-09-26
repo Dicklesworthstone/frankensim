@@ -2,7 +2,7 @@
 name = "fs-mbd"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Deterministic safe-Rust rigid-body and articulated dynamics"

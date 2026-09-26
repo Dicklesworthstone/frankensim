@@ -2,7 +2,7 @@
 name = "fs-conduction"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Steady heat conduction on tet complexes: FEEC 0-form weak-form assembly, anisotropic and temperature-dependent k(T) from fs-matdb with retained query receipts, Dirichlet/Neumann/Robin thermal boundary rows, and declared-globalization nonlinear solves."

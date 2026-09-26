@@ -2,7 +2,7 @@
 name = "fs-flowcert-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "FlowCert: a certified CREDIBILITY MAP for a lattice-Boltzmann channel flow. It illuminates the (Reynolds x resolution) operating space and certifies at every point BOTH that the simulation matches the analytic Poiseuille solution within tolerance (a manufactured-solution accuracy certificate) AND that the lattice scaling is stable (positive viscosity, low Mach, via the LBM scaling planner). Composes fs-lbm (LBM + analytic solution + scaling planner/regime certificate) x fs-archive (MAP-Elites illumination) x fs-evidence (Verified). Groundbreaking: instead of one CFD run you trust on faith, an illuminated atlas of exactly WHERE the solver is provably trustworthy."

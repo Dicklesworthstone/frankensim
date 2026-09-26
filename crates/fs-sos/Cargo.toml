@@ -2,7 +2,7 @@
 name = "fs-sos"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Proof-carrying optimization (fs-sos): sum-of-squares decomposition diagnostics, exact-global and radius-scoped certified value bounds, quadratic certificate construction, PSD feasibility, and linear Lyapunov verification."

@@ -2,7 +2,7 @@
 name = "fs-tropical"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Tropical (max-plus) critical-path analytics (fs-tropical): task-DAG timing in the max-plus semiring — the critical path and makespan by CPM longest-path, the pipelined steady-state throughput as the tropical eigenvalue (max cycle mean, Karp), and actionable tune-next / slack recommendations with a promotion audit. Scheduling theory as an online instrument."

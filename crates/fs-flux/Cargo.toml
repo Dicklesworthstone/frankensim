@@ -2,7 +2,7 @@
 name = "fs-flux"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Incompressible Navier-Stokes, FEEC-native: H(div)-conforming RT0 velocities (exactly divergence-free, pressure-robust), interior-penalty viscous DG, upwind convection, coupled steady and IMEX transient solves, discrete adjoints."

@@ -2,7 +2,7 @@
 name = "fs-frame"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Flagship 2 (plan 15.2): the seismic-minimal building frame - outward-certified ground-structure layout, code-checked sizing, fiber-hinge nonlinear time history under Kanai-Tajimi ensembles, anytime-valid e-stopped fragility, and CVaR-constrained mass minimization. Smoke tier."

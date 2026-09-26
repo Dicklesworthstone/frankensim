@@ -2,7 +2,7 @@
 name = "fs-material"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Constitutive-law and identifiability-authority kernel with consistent tangents, material cards, multi-case source closure, and evidence-bound assessments."

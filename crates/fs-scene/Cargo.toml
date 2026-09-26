@@ -2,7 +2,7 @@
 name = "fs-scene"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Static environment for robot experiments: keep-out and support bodies with exact interpenetration queries, robot-agnostic."

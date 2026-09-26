@@ -2,7 +2,7 @@
 name = "fs-fft"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Stockham FFTs, real transforms and DCT, cache-blocked 3D pencils."

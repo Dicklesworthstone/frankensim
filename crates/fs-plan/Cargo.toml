@@ -2,7 +2,7 @@
 name = "fs-plan"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Per-operator cost/error models, Error Ledger and Time Ledger attribution, Rep Router cost oracle."

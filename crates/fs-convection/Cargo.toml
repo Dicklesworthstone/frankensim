@@ -2,7 +2,7 @@
 name = "fs-convection"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Regime-bounded heat-transfer correlations with model cards, typed coefficients, and evidence-preserving refusals."

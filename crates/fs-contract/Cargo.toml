@@ -2,7 +2,7 @@
 name = "fs-contract"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Assume-guarantee component contracts (addendum Proposal E): certified design motifs whose (environment envelope => guaranteed behavior, certificate) compose into system claims via interval-box envelope containment, never tighter than the weakest member's certificate."

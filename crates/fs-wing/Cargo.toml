@@ -2,7 +2,7 @@
 name = "fs-wing"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Coupled multisurface lifting-surface aerodynamics for the Wright Flyer: Weissinger-L machinery, nonlinear section closure."

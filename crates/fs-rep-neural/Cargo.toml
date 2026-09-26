@@ -2,7 +2,7 @@
 name = "fs-rep-neural"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Neural implicit charts (fs-rep-neural): small coordinate MLPs as shapes (DeepSDF-style) with SPECTRAL-NORM/Lipschitz-constrained layers, so a certified global Lipschitz constant is always available — the property that keeps neural shapes inside the certificate regime (sphere tracing with provable step safety, interval evaluation via layer-wise bound propagation). Neural charts propose geometry; certification never comes from the loss curve."
