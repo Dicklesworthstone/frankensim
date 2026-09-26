@@ -165,3 +165,39 @@ fn native_region_example_keeps_exact_prescriptions_after_source_independent_disk
     assert!(html.contains("protected material/void regions"));
     assert!(html.contains("not a certified physical clearance"));
 }
+
+#[test]
+fn a_binding_stress_limit_changes_the_trajectory_exactly_where_the_loose_study_exceeds_it() {
+    // The tracked example's 1e12 Pa limit never binds (q61wp.75 item 2). At
+    // 1.626 Pa over six updates the loose study's fifth accepted design reaches
+    // 1.6269 Pa (measured 2026-09-25). The constrained study must match it
+    // until then, refuse that candidate, and keep every accepted design under
+    // the limit. At 1.61 Pa no update is admissible and the study says so.
+    let dir = scratch("projected-binding");
+    let six = CONSTRAINED.replace(":steps 2", ":steps 6").replace(":max-iterations 2", ":max-iterations 6");
+    assert_ne!(six, CONSTRAINED);
+    let run = |limit: &str, name: &str| -> J {
+        let text = six.replace(":sampled-stress-limit-pa 1000000000000.0", &format!(":sampled-stress-limit-pa {limit}"));
+        let path = dir.join(format!("{name}.fsim"));
+        fs::write(&path, text).unwrap();
+        let output = command("study").arg(&path).arg(dir.join(format!("{name}.db"))).output().unwrap();
+        J::parse(std::str::from_utf8(&output.stdout).unwrap()).unwrap()
+    };
+    let stress = |result: &J| -> Vec<f64> {
+        constraints(result).get("accepted").unwrap().as_array().unwrap().iter()
+            .map(|row| row.f64_field("sampled_von_mises_pa").unwrap()).collect()
+    };
+    let loose = run("1000000000000.0", "loose");
+    let bound = run("1.626", "bound");
+    assert_eq!(bound.str_field("status"), Some("completed"));
+    let (loose_vm, bound_vm) = (stress(&loose), stress(&bound));
+    assert_eq!(bound_vm.len(), 6);
+    let first_excess = loose_vm.iter().position(|&vm| vm > 1.626).expect("the loose study exceeds the limit");
+    assert!(first_excess > 0, "some updates are admissible under the limit");
+    assert_eq!(&loose_vm[..first_excess], &bound_vm[..first_excess], "identical prefix before the limit binds");
+    assert_ne!(loose_vm[first_excess], bound_vm[first_excess], "the binding limit changes the accepted design");
+    assert!(bound_vm.iter().all(|&vm| vm <= 1.626), "{bound_vm:?}");
+    let tight = run("1.61", "tight");
+    assert_eq!(tight.str_field("status"), Some("no-feasible-descent"));
+    assert!(stress(&tight).is_empty());
+}
