@@ -13,6 +13,8 @@
 
 use super::{A, B5, AdaptiveError, Workspace, stage_time};
 
+pub mod trajectory;
+
 /// A fixed model/parameter point and its RHS vector-Jacobian product (VJP).
 /// Callbacks must overwrite EVERY output component, including exact zeros.
 /// A VJP computes f_x^T * seed and f_p^T * seed at fixed time; it must not
