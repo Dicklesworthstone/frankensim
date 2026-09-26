@@ -697,6 +697,45 @@ at invocation completion; optimizer resume and the generic `--budget` override
 are explicitly refused. A binary without the feature refuses this producer
 with an actionable feature message.
 
+### Native cooling probability study
+
+`study <study.fsim> <ledger.db> [--budget N]` recognizes
+`fsim-uncertainty-study :version 1` and executes the
+`native-cooling-uncertainty-v1` producer. The example is
+`examples/native-uncertainty/study.fsim`. It binds 1..=32 explicitly independent
+uniform inputs to an admitted native cooling project, with 2..=256 fixed-count
+Monte Carlo samples and an explicit sampling seed and total wall allowance.
+Every accepted observation comes from an ordinary geometry import, material
+resolution, staged solve and retained `temperature-max` QoI. Probability support
+does not widen the base's operating envelope or card domains, change its solver
+policy, or convert an engineering interval into a probability distribution.
+
+Each observation retains its ordinal, parameter values, child run, project hash,
+QoI receipt and kelvin value. Only a completed fixed-count study publishes its
+mean, sample standard deviation, descriptive standard error, empirical quantiles
+and pass fraction against the requirement's limit minus its explicit margin.
+Partial, cancelled and refused runs retain accepted observations with
+`statistics: null`. A refused physical sample terminates the study at that
+ordinal; it is never clipped, counted as a pass, replaced or skipped.
+
+`--budget N` caps additional samples in this invocation; zero admits and retains
+the model without evaluating it. `study --resume study-<receipt-hash> <ledger.db>`
+loads the bounded statistical checkpoint, verifies accepted child QoIs, and uses
+retained project, geometry and card bytes without reopening the source paths.
+The original total sample and cooperative wall allowances continue across
+resume. Completed and refused terminal receipts return unchanged. Study outputs
+are committed together at invocation completion; completed child solve evidence
+has its own normal solve-stage durability. Input bytes obey an explicit fraction
+of the base memory budget; this is an admission cap, not measured peak RSS.
+
+The existing `report` and `package` verbs export retained study artifacts.
+Replay on the same numerical implementation reproduces the completed report;
+invocation wall use and checkpoint ancestry remain separate receipt data.
+All statistics are Estimated, advisory descriptions of the declared numerical
+input model. They do not supply confidence sequences, optional-stopping
+decisions, physical validation, continuum-error certificates or compliance
+signoff, and they do not replace the child's engineering uncertainty budget.
+
 ### Normalized thermal study
 
 `study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing

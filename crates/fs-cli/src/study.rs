@@ -39,7 +39,7 @@ pub(crate) fn resume_path(
     override_text: Option<&str>,
     mode: OutputMode,
 ) -> CommandOutput {
-    if uncertainty::owns_run(pointer) {
+    if uncertainty::owns_run(pointer, path) {
         uncertainty::resume_path(pointer, path, override_text, mode)
     } else if elasticity::owns_run(pointer, path) {
         elasticity::resume_path(pointer, path, override_text, mode)
@@ -54,7 +54,7 @@ pub(crate) fn export(
     path: Option<&Path>,
     mode: OutputMode,
 ) -> CommandOutput {
-    if uncertainty::owns_run(pointer) {
+    if path.is_some_and(|ledger| uncertainty::owns_run(pointer, ledger)) {
         uncertainty::export(command, pointer, path, mode)
     } else if path.is_some_and(|ledger| elasticity::owns_run(pointer, ledger)) {
         elasticity::export(command, pointer, path, mode)

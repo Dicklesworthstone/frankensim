@@ -218,7 +218,9 @@ pub(crate) fn sample_parameters(
             }
             UncertaintyKind::AleatoryUniform { lo, hi } => {
                 let u = stream.next_f64();
-                (1.0 - u) * lo + u * hi
+                // Keep consuming the draw so later parameters retain their
+                // stream positions, but a singleton law must remain exact.
+                if lo == hi { lo } else { (1.0 - u) * lo + u * hi }
             }
             _ => unreachable!("admission requires an implemented probability measure"),
         };
