@@ -1,6 +1,6 @@
-//! Algebraic error of the published region maximum. Only the complete fixed
-//! linear solid model enters the outward analyzer; a frozen coupled or
-//! nonlinear operator cannot certify the original equations.
+//! Algebraic error of the published region maximum. Linear solid/air models
+//! retain the complete reference feedback; nonlinear conductivity and radiation
+//! require their existing whole-model estimate.
 
 use super::{
     BTreeMap, EvidenceWork, PropagatedTerm, QoiRegionTraceError, RungSolved, SolveRefusal,
@@ -55,11 +55,11 @@ pub(super) fn maximum_term(
     let Some(data) = &solved.adjoint_data else {
         return gap("the published rung retained no final-state operator".to_string());
     };
-    // The existing whole-model tolerance comparison remains available for
-    // radiation. Air feedback is assessed below as the complete coupled model.
+    // Radiation remains a nonlinear whole-model tolerance comparison. Air
+    // feedback has its own complete affine analyzer below the material gate.
     if data.radiating_boundary.is_some() {
         return Ok(unavailable("unsupported-model",
-            "maximum-goal corrections do not cover radiation; the whole-model tolerance estimate remains available".to_string(), true));
+            "maximum-goal analysis does not cover radiation; the whole-model tolerance estimate remains available".to_string(), true));
     }
     for element in 0..solved.labels.len() {
         if element % 1024 == 0 {
@@ -117,8 +117,16 @@ pub(super) fn maximum_term(
     let requested_k = ALGEBRAIC_ACCURACY_FRACTION * accuracy_rel * scale_k;
     if !data.air_paths.is_empty() {
         return coupled::maximum_evidence(
-            cx, problem, data.interfaces.as_ref(), &data.air_paths, data.linear,
-            &solved.solution.temperature, &vertices, memory_bytes, config, requested_k,
+            cx,
+            problem,
+            data.interfaces.as_ref(),
+            &data.air_paths,
+            data.linear,
+            &solved.solution.temperature,
+            &vertices,
+            memory_bytes,
+            config,
+            requested_k,
         );
     }
     let (analysis, control_json, primal_iterations, control_summary) = if requested_k.is_finite()

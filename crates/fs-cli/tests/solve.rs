@@ -1088,7 +1088,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 25,
+        SOLVE_DRIVER_VERSION, 26,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3855,6 +3855,29 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     assert!((solid_w - air_w).abs() <= tolerance, "{solid_w} vs {air_w}");
     assert!(solid_w > 0.0);
 
+    // Solver error now covers the full air-reference feedback on this same
+    // field. Preparing response columns must not masquerade as correcting it.
+    assert!(receipt.contains("outward-coupled-linear-maximum-enclosure"), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"schema\":\"frankensim.cli.coupled-maximum-evidence.v1\""), "{receipt}");
+    assert!(control.contains("\"correction_supported\":false"), "{receipt}");
+    assert!(control.contains("\"candidate_accepted\":false"), "{receipt}");
+    assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0);
+    assert!(receipt_number_field(control, "response_iterations")
+        <= receipt_number_field(control, "max_response_iterations"));
+    let gain = receipt_number_field(control, "feedback_gain_infinity_upper");
+    assert!(gain > 0.0 && gain < 1.0, "{receipt}");
+    assert!(receipt_number_field(control, "coupled_inverse_infinity_upper")
+        >= receipt_number_field(control, "solid_inverse_infinity_upper"));
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let bound = receipt_number_field(algebraic, "half_width_k");
+    assert!(bound.is_finite() && bound > 0.0, "{receipt}");
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), bound.to_bits(),
+        "the full coupled bound must reach the published QoI budget unchanged");
+
     // A channel too short for the card's developed-flow floor (L/Dh = 5
     // against Gnielinski's [10, 1e6]) refuses by name; executed on the rch
     // fleet 2026-09-02 before the fixture was lengthened.
@@ -5101,11 +5124,13 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert!(number("linearization_remainder_k").abs() < 1e-8,
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
-    // The tolerance-met conjugate adaptive study supplies Discretization;
-    // propagation measures boundary, card model-form and solver terms, the
-    // published solve bounds roundoff, and measurement is negligible, so
-    // geometry and parameters remain.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
+    // The adaptive comparison supplies Discretization, but this mesh has no
+    // verified solid inverse for the coupled solver bound. Preserve that gap
+    // alongside geometry and parameters through the full QoI publication.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
+    assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"no-data\""), "{qoi}");
+    assert!(qoi.contains("SolidInverseUnavailable"), "{qoi}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"), "{conduction}");
 }
 
 #[test]
@@ -5429,7 +5454,12 @@ fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
         "QoI receipt bytes (interval term) reproduce"
     );
     let conduction = String::from_utf8(first.2).expect("utf-8");
-    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
+    // This all-free Robin ladder does not establish a verified inverse.
+    // Replay must preserve that unresolved evidence as faithfully as a bound.
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"bound-unavailable\""), "{conduction}");
+    assert!(control.contains("\"goal_met\":false"), "{conduction}");
+    assert!(control.contains("\"final_bound_k\":null"), "{conduction}");
     assert!(!conduction.contains("tolerance-tightening-resolve"),
         "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
     assert!(

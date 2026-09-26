@@ -474,12 +474,12 @@ residual's evaluation roundoff is already included, not a second independent
 uncertainty contribution. This encloses the stored floating-point linear
 system only; the engineering term remains Estimated and establishes no
 assembly, continuum, material or physical-validation claim. Nonlinear
-conductivity, ambient radiation and air feedback retain the explicitly named
+conductivity and ambient radiation retain the explicitly named
 100x tighter base-solve comparison as an estimate, without a linear enclosure
 claim. Old driver checkpoints cannot resume into the changed analysis.
 
 **Maximum-goal corrections** (`solver_control`, driver version 25). Each
-supported linear mesh solve allocates 10% of `budgets.accuracy_rel` times its
+supported fixed-reference linear mesh solve allocates 10% of `budgets.accuracy_rel` times its
 pre-correction temperature rise above the coolest declared reference to
 algebraic error. With no declared reference, the basis is explicitly the
 pre-correction absolute temperature. This is a frozen requested-accuracy
@@ -493,8 +493,32 @@ energy, Robin and contact fluxes are recomputed from it. Adaptive comparisons,
 ladder rows, roundoff and QoI all consume this accepted field. A rejected
 physical candidate preserves the original field and records the failed gate.
 Missing inverse evidence, exhausted work, zero/unrepresentable accuracy scales
-and unsupported nonlinear/coupled models never report goal completion. The
+and unsupported nonlinear models never report goal completion. The
 original physical solve still runs; this correction path makes no speedup claim.
+
+**Coupled solid/air maximum error** (`solver_control`, driver version 26).
+For temperature-independent conductivity with fixed flow, geometry and heat
+transfer coefficients, the actual ordered air paths lower to their full affine
+reference law. The published field is checked against `(A - B C) T = b + B d`,
+including the contribution of prescribed temperatures and matching contact.
+The Solver-algebraic term uses `outward-coupled-linear-maximum-enclosure`; its bound
+and inverse include both the complete feedback residual and response-solve
+errors. The verified coupled inverse may use whole-state contraction or the
+port Schur check. Missing inverse evidence stays NO-DATA with its specific
+reason; it never selects a frozen-solid enclosure or a tolerance
+comparison. Port, transfer, response-storage, lowering and verification work
+are capped, and all response columns share one linear-iteration allowance.
+This path analyzes the field already accepted by the physical conjugate solve.
+Its `assessment-only` receipt separates response preparation from zero
+primal correction work and discloses whether the field meets the requested
+accuracy allocation; coupled goal corrections remain unsupported. Preparation
+refusals retain unknown response work as `null`, while evaluation refusals keep
+work already spent. Missing-bound reasons fit the QoI uncertainty contract,
+with full numeric diagnostics retained in `solver_control`. The bound
+concerns the stored affine coefficients, excluding their assembly rounding,
+exact exponential coefficients, nonlinear physics, hydraulic uncertainty,
+discretization and physical validation. Driver identity prevents old receipts
+from being resumed under these changed solver-error semantics.
 
 The Roundoff term is fs-conduction's componentwise bound
 `γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
