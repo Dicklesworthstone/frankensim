@@ -9,6 +9,9 @@
 
 use std::{collections::BTreeSet, fmt};
 
+/// Stored-system maximum bounds with all air-reference feedback retained.
+pub mod maximum;
+
 use fs_conduction::adjoint::{DiscreteGoalComparison, RobinGoalFeedback, RobinGoalLinearization};
 use fs_conduction::{ConductionError, ConductionProblem, LinearConfig, ThermalInterfaces};
 use fs_couple::iqn_ils::{IqnIls, IqnIlsConfig, IqnIlsError};
