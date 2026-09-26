@@ -4,6 +4,8 @@
 mod support;
 #[path = "algebraic_goal/controlled.rs"]
 mod controlled;
+#[path = "algebraic_goal/polish.rs"]
+mod polish;
 
 use fs_conduction::adjoint::{
     LinearGoalAnalysisConfig, LinearGoalAnalyzer, analyze_linear_goal,

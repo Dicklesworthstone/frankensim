@@ -236,6 +236,22 @@ the returned field is not a `ConductionSolution`. The existing
 `tests/linear_maximum.rs` checks the zero-weight counterexample against a
 dense solve, budget limits, prescribed regions and cancellation/retry.
 
+`polish_linear_maximum` connects this correction to an existing physical
+`ConductionSolution`. It independently reassembles the baseline and requires
+its actual residual to meet the original report's finite threshold. A changed
+best candidate is adopted only if independent reassembly meets that same
+threshold; otherwise the baseline field and its maximum analysis survive with
+a physical-gate refusal. Even a budget-limited improvement may be accepted,
+while `goal_met` refers strictly to the returned field. Energy, Robin/contact
+fluxes and final residual are recomputed by the same report helper as the
+ordinary solve. Historical nonlinear iterations and linear evidence are
+preserved; correction work has separate counters. The threshold is declared
+caller policy, not authenticated provenance. Nonlinear conductivity refuses;
+no frozen-radiation or air-feedback guarantee is inferred. Focused tests in
+`tests/algebraic_goal/polish.rs` cover real residual-accepted correction, an
+independent contact/Robin heat-balance oracle, missing inverse evidence,
+zero-work retention, false baseline summaries and cancellation.
+
 ## Invariants
 
 1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +

@@ -60,6 +60,9 @@ use crate::interface::{InterfaceFlux, ThermalInterfaces};
 use crate::material::{ConductivityModel, ElementMaterials, ProvenanceClass};
 use crate::mesh::ConductionMesh;
 
+mod maximum;
+pub use maximum::{LinearMaximumPolish, MaximumPhysicalGateRefusal, polish_linear_maximum};
+
 /// The pieces a conduction solve needs, borrowed together.
 #[derive(Debug, Clone, Copy)]
 pub struct ConductionProblem<'m> {
@@ -558,6 +561,33 @@ struct Evaluated {
     full: Vec<f64>,
 }
 
+/// All report values that must be recomputed when a temperature field changes.
+struct PhysicalReport {
+    final_residual: f64,
+    energy: EnergyBalance,
+    interface_fluxes: Vec<InterfaceFlux>,
+    robin_fluxes: Vec<RobinFlux>,
+}
+
+fn physical_report(
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    system: &AssembledSystem,
+    dofs: &DofMap,
+    temperature: &[f64],
+) -> Result<PhysicalReport, ConductionError> {
+    let (energy, robin_fluxes) = energy_balance(
+        problem.mesh, problem.boundary, problem.source, system, dofs, temperature,
+    );
+    Ok(PhysicalReport {
+        final_residual: norm2(&residual(system, dofs, temperature)),
+        energy,
+        interface_fluxes: interfaces.map(|value| value.fluxes(temperature))
+            .transpose()?.unwrap_or_default(),
+        robin_fluxes,
+    })
+}
+
 /// The resumable steady-conduction solver.
 pub struct ConductionSolver<'m> {
     problem: ConductionProblem<'m>,
@@ -1006,32 +1036,21 @@ impl<'m> ConductionSolver<'m> {
             .as_ref()
             .expect("a converged step caches its assembled system");
         let temperature = self.dofs.scatter(&self.state.free_temperature);
-        let (energy, robin_fluxes) = energy_balance(
-            self.problem.mesh,
-            self.problem.boundary,
-            self.problem.source,
-            system,
-            &self.dofs,
-            &temperature,
-        );
-        let final_residual = norm2(&residual(system, &self.dofs, &temperature));
-        let interface_fluxes = self
-            .interfaces
-            .map(|interfaces| interfaces.fluxes(&temperature))
-            .transpose()?
-            .unwrap_or_default();
+        let physical = physical_report(
+            self.problem, self.interfaces, system, &self.dofs, &temperature,
+        )?;
         Ok(ConductionSolution {
             temperature,
             report: ConductionReport {
                 iterations: self.state.iteration,
                 residual_history: self.state.residual_history.clone(),
-                final_residual,
+                final_residual: physical.final_residual,
                 residual_threshold: self.final_threshold,
                 stop_reason: self
                     .stop_reason
                     .expect("a converged run records its stop reason"),
                 linear: self.linear.clone(),
-                energy,
+                energy: physical.energy,
                 material_provenance: self.element_materials.map_or_else(
                     || self.problem.material.provenance(),
                     ElementMaterials::provenance,
@@ -1041,8 +1060,8 @@ impl<'m> ConductionSolver<'m> {
                     |assigned| assigned.receipts().len(),
                 ),
                 element_material_identity: self.element_materials.map(ElementMaterials::identity),
-                interface_fluxes,
-                robin_fluxes,
+                interface_fluxes: physical.interface_fluxes,
+                robin_fluxes: physical.robin_fluxes,
                 free_dofs: self.dofs.n(),
                 elements: self.problem.mesh.element_count(),
             },
