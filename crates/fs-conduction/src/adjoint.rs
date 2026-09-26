@@ -483,6 +483,7 @@ pub mod robin;
 pub use robin::goal::{
     DiscreteGoalComparison, LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer,
     LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis, LinearMaximumSolve,
+    LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis, RobinFeedbackAnalysisConfig,
     RobinGoalFeedback, RobinGoalLinearization, analyze_linear_goal, analyze_linear_maximum,
     compare_discrete_goal,
 };

@@ -11,6 +11,7 @@ mod algebraic;
 pub use algebraic::{
     LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer, LinearGoalSolve,
     LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis, LinearMaximumSolve,
+    LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis, RobinFeedbackAnalysisConfig,
     analyze_linear_goal, analyze_linear_maximum,
 };
 
