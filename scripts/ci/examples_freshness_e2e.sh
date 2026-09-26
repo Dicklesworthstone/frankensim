@@ -188,6 +188,10 @@ check "ladder solve reports seven completed stages" grep -q '"stages_completed":
 # +/-0.05 mm surface offset) terms, the componentwise adjoint roundoff bound,
 # and a negligible measurement term. The conservative sum (about 21.4 K)
 # clears the 5 K margin, so the verdict is an Estimated `satisfied`.
+# KNOWN RED since 3c6a26889 (checked 2026-09-26 at 49313c65a): solver-algebraic
+# needs a verified coupled enclosure and the 43,840-tet finest rung cannot yet
+# prove its solid inverse, so these three checks fail until q61wp.73 lands a
+# verified eigenvalue bound. They are left as the target, not relaxed.
 check "QoI stage measured all eight budget terms" grep -q '"budget_terms_measured":8' "${WORK}/ls.err"
 check "no budget term remains NO-DATA" grep -q '"weakest_term":"none-no-data"' "${WORK}/ls.err"
 LADDER_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ls.json" | head -1 | cut -d'"' -f4)"
