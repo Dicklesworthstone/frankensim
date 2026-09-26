@@ -219,6 +219,23 @@ estimate that drifts in the dangerous direction. This crate therefore RECOMPUTES
 producing solver's own typed claim is carried verbatim in
 `LinearSolveEvidence::reported` so the two are never confused.
 
+### Goal-controlled regional maximum solves (`q61wp.73`)
+
+`LinearGoalAnalyzer::solve_maximum_to_goal` uses the cached linear operator
+and checked inverse to improve a field until its regional maximum's full
+algebraic error meets an absolute Kelvin tolerance. The analyzer's zero-weight
+preparation goal cannot admit this stopping decision: every candidate is
+checked with `analyze_maximum`, including changes of the hottest vertex.
+The method shares the existing linear-goal defect-correction loop, its one
+primal iteration budget, bounded check cadence, best-field retention and
+post-observer cancellation gate. It returns `LinearMaximumSolve`, with an
+explicit missing-bound, exhausted-budget or no-progress outcome when needed.
+No dual or stability solve is repeated during correction. This is a
+stored-system goal solve, not a continuum accuracy or energy-balance claim;
+the returned field is not a `ConductionSolution`. The existing
+`tests/linear_maximum.rs` checks the zero-weight counterexample against a
+dense solve, budget limits, prescribed regions and cancellation/retry.
+
 ## Invariants
 
 1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +

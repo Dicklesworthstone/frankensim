@@ -13,7 +13,7 @@ use super::{
 };
 
 mod solve;
-pub use solve::{LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop};
+pub use solve::{LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop, LinearMaximumSolve};
 
 mod maximum;
 pub use maximum::{LinearMaximumAnalysis, analyze_linear_maximum};

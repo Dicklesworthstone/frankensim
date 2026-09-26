@@ -10,7 +10,7 @@ use super::{
 mod algebraic;
 pub use algebraic::{
     LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer, LinearGoalSolve,
-    LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis,
+    LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis, LinearMaximumSolve,
     analyze_linear_goal, analyze_linear_maximum,
 };
 
