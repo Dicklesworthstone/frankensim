@@ -19,6 +19,8 @@ use super::STUDY_RUN_RECEIPT_SCHEMA;
 use crate::json_read::JsonValue as J;
 use crate::{CommandOutput, Diagnostic, OutputMode, exit, push_json_string, refusal};
 
+#[path = "study_uncertainty/compliance.rs"]
+mod compliance;
 #[path = "study_uncertainty/legacy.rs"]
 mod legacy;
 #[path = "study_uncertainty/model.rs"]
@@ -233,7 +235,7 @@ struct Outcome {
 }
 fn render(out: Outcome, mode: OutputMode) -> CommandOutput {
     let exit_code = match out.status.as_str() {
-        "completed" => exit::SUCCESS,
+        "completed" | "decision-reached" => exit::SUCCESS,
         "refused" => exit::REFUSED,
         "cancelled" => exit::CANCELLED,
         _ => exit::BUDGET,
@@ -289,8 +291,17 @@ fn persist(
     }
     let id = model.identity();
     let report = execution.report();
+    let compliance = compliance::assess(model, execution)?;
+    let scope = if compliance.is_some() {
+        compliance::SCOPE
+    } else {
+        NO_CLAIM
+    };
+    let compliance_field = compliance.as_ref().map_or_else(String::new, |assessment| {
+        format!(",\"compliance\":{}", assessment.json())
+    });
     let samples = rows_json(rows);
-    let statistics = if status == "completed" {
+    let statistics = if status == "completed" && compliance.is_none() {
         let quantiles = report.percentiles.map_or_else(
             || "null".into(),
             |v| format!("[{},{},{}]", v[0], v[1], v[2]),
@@ -312,7 +323,7 @@ fn persist(
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":\"monte-carlo\",\"correlation\":\"independent\",\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":\"monte-carlo\",\"correlation\":\"independent\",\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -320,7 +331,7 @@ fn persist(
         model.bound.study().samples(),
         execution.evaluations_attempted(),
         model.bound.threshold_k(),
-        quoted(NO_CLAIM)
+        quoted(scope)
     );
     let mut table = String::new();
     for (i, row) in rows.iter().enumerate() {
@@ -332,8 +343,11 @@ fn persist(
             row.run
         );
     }
+    let compliance_html = compliance
+        .as_ref()
+        .map_or_else(String::new, |assessment| assessment.html());
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p><p>Mean: {} K; sample standard deviation: {} K; empirical pass fraction: {}.</p><p>{NO_CLAIM}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p><p>Mean: {} K; sample standard deviation: {} K; empirical pass fraction: {}.</p>{compliance_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
         model.bound.study().samples(),
         if status == "completed" {
             optional(report.mean)
@@ -360,6 +374,12 @@ fn persist(
             format!("{} K across {n} completed native solves; descriptive Monte Carlo standard error {} K. Result {}. {NO_CLAIM}",
                 optional(report.mean), report.sampling_error, hash_bytes(summary.as_bytes()).to_hex()),
             "fixed-count-native-monte-carlo-descriptive-standard-error", report.sampling_error));
+    }
+    if let Some(claim) = compliance
+        .as_ref()
+        .and_then(|assessment| assessment.claim(hash_bytes(summary.as_bytes())))
+    {
+        package = package.with_claim(claim);
     }
     let package = package
         .to_json()
@@ -634,10 +654,20 @@ fn drive(
     loop {
         let used = used_before + started.elapsed().as_secs_f64();
         let report = execution.report();
+        let compliance = compliance::assess(model, &execution)?;
         let (status, termination) = if report.status == UqStatus::Refused {
             ("refused", "child-refused")
+        } else if compliance
+            .as_ref()
+            .is_some_and(|assessment| assessment.resolved())
+        {
+            ("decision-reached", "probability-target")
         } else if report.status == UqStatus::Complete {
-            ("completed", "fixed-sample-count")
+            if compliance.is_some() {
+                ("budget-exhausted", "lifetime-sample-budget")
+            } else {
+                ("completed", "fixed-sample-count")
+            }
         } else if used >= model.bound.study().wall_seconds() {
             ("budget-exhausted", "wall-budget")
         } else if gate.is_requested() {
@@ -781,7 +811,10 @@ pub(crate) fn resume_path(
             .value
             .str_field("status")
             .ok_or_else(|| fail("cli-uncertainty-run", "missing status"))?;
-        if matches!(status, "completed" | "refused") {
+        if matches!(status, "completed" | "refused" | "decision-reached")
+            || (status == "budget-exhausted"
+                && old.value.str_field("termination") == Some("lifetime-sample-budget"))
+        {
             return Ok(Outcome {
                 pointer: pointer.into(),
                 receipt: String::from_utf8(old.bytes)

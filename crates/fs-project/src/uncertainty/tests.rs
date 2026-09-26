@@ -19,6 +19,7 @@ fn probability_study_roundtrips_through_existing_typed_ast() {
     let study = UncertaintyStudy::parse(STUDY).unwrap();
     assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
     assert_eq!(study.samples(), 8);
+    assert_eq!(study.compliance(), None);
     assert_eq!(study.seed(), 29);
     assert_eq!(study.parameters()[0].target.unit(), "W");
     assert_eq!(study.parameters()[0].low, 4.0);
@@ -29,7 +30,7 @@ fn probability_study_roundtrips_through_existing_typed_ast() {
 #[test]
 fn unknown_repeated_implicit_and_out_of_range_declarations_refuse() {
     for (from, to) in [
-        (":version 1", ":version 2"),
+        (":version 1", ":version 3"),
         (":samples 8", ":samples 1"),
         (":samples 8", ":samples 257"),
         (":seed 29", ":seed -1"),
@@ -71,7 +72,7 @@ fn native_samples_change_only_bound_inputs_and_do_not_accumulate() {
     assert_eq!(first, bound.sample_project(&[4.5, 297.0]).unwrap());
     assert_eq!(crate::print_sexpr(&original), before);
     assert_eq!(bound.threshold_k(), 348.15);
-    let decoded = crate::parse_sexpr(&crate::print_sexpr(&first)).unwrap();
+    let decoded = crate::parse_sexpr(&crate::print_sexpr(&first).unwrap()).unwrap();
     assert!(decoded.findings().is_empty());
     assert_eq!(decoded.spec, first);
 }

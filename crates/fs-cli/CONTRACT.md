@@ -731,10 +731,29 @@ of the base memory budget; this is an admission cap, not measured peak RSS.
 The existing `report` and `package` verbs export retained study artifacts.
 Replay on the same numerical implementation reproduces the completed report;
 invocation wall use and checkpoint ancestry remain separate receipt data.
-All statistics are Estimated, advisory descriptions of the declared numerical
+All version-1 statistics are Estimated, advisory descriptions of the declared numerical
 input model. They do not supply confidence sequences, optional-stopping
 decisions, physical validation, continuum-error certificates or compliance
 signoff, and they do not replace the child's engineering uncertainty budget.
+
+Version 2 requires a predeclared `bernoulli-mixture` compliance policy with
+required probability, alpha and minimum sample count. The model's raw
+`temperature-max <= limit - margin` indicators enter fs-eproc's fixed
+Beta(1/2,1/2) likelihood mixture. At or above the declared minimum, a lower
+confidence bound at least the target means `meets-probability-target`; an upper
+bound strictly below it means `below-probability-target`. Either stops with
+`decision-reached`, termination `probability-target`, and exit 0. An unresolved
+lifetime sample cap returns `budget-exhausted`, termination
+`lifetime-sample-budget`, and exit 6. Resume cannot change the retained policy
+or add to the declared lifetime cap. Version-1 bytes and semantics are unchanged.
+
+The version-2 `compliance` report contains both probability-confidence endpoints,
+the empirical frequency, policy, count and decision; `statistics` stays null.
+All-pass or all-fail samples retain nonzero probability uncertainty. Mathematical
+time-uniform coverage requires the declared Bernoulli model; deterministic
+floating-point inversion is Estimated and is not an outward-rounded proof.
+No mean control variate, QMC-point confidence claim, replacement of failed
+samples, physical-error bound or safety-signoff authority is introduced.
 
 ### Normalized thermal study
 

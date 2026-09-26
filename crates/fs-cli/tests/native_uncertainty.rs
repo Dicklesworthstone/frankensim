@@ -1,6 +1,8 @@
 //! G1/G3/G4/G5 product checks for probability studies of native `.fsim` cooling
 //! projects: real imported geometry, real material cards, and retained child QoIs.
 
+#[path = "native_uncertainty/compliance.rs"]
+mod compliance;
 #[path = "../src/json_read.rs"]
 mod json_read;
 
@@ -229,6 +231,10 @@ fn g1_native_study_matches_independent_project_solves_and_retains_each_qoi() {
     let result = fixture.study(None, fs_cli::exit::SUCCESS);
     assert_eq!(result.str_field("status"), Some("completed"));
     let (_, report) = fixture.report(&result);
+    assert!(
+        report.get("compliance").is_none(),
+        "version 1 retains its fixed-count report schema"
+    );
     assert_eq!(report.f64_field("samples_evaluated"), Some(4.0));
     assert_eq!(rows(&report).len(), 4);
     let mut values = Vec::new();
