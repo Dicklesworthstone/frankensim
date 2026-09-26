@@ -2,7 +2,9 @@
 //! physical-model grammar. Every sample changes only explicit project inputs;
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
-//! Version 1 admits fixed-count independent uniform inputs. An engineering
+//! Version 1 admits fixed-count independent uniform inputs. Version 2 requires
+//! an explicit Bernoulli-mixture policy for sequential probability decisions.
+//! An engineering
 //! interval or card tolerance is never silently interpreted as a probability
 //! law. The study inherits units, capabilities, physics seed, versions, memory
 //! and per-solve budgets from its validated base project; its own sampling seed
@@ -16,9 +18,9 @@ use fs_qty::{Dims, QtyAny};
 use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
-/// Independent schema version; existing project and optimization-study bytes
-/// do not change merely because probability studies are now executable.
-pub const VERSION: u32 = 1;
+/// Latest native probability-study schema. Version 1 remains admitted with
+/// its original fixed-count semantics and no implicit stopping policy.
+pub const VERSION: u32 = 2;
 /// Bounded native-study source size, before parsing.
 pub const MAX_SOURCE_BYTES: usize = 65_536;
 /// Full native import/solve pipelines per study, not scalar callback evaluations.
@@ -89,6 +91,19 @@ pub struct MeshSource {
     pub max_hole_edges: usize,
 }
 
+/// Predeclared stopping policy for the probability of the native numerical
+/// event `temperature-max <= requirement limit - margin`. This does not
+/// change the project's engineering verdict or confer physical validation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompliancePolicy {
+    /// Probability target strictly inside (0, 1).
+    pub required_probability: f64,
+    /// Error level strictly inside (0, 1), fixed before any samples.
+    pub alpha: f64,
+    /// Earliest decision ordinal, between two and the original sample cap.
+    pub min_samples: usize,
+}
+
 /// Strictly parsed study. Private fields prevent edits that detach semantics
 /// from the retained canonical declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +118,7 @@ pub struct UncertaintyStudy {
     materials: Vec<String>,
     interfaces: Vec<String>,
     parameters: Vec<UniformParameter>,
+    compliance: Option<CompliancePolicy>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -116,21 +132,25 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare a version-1 fsim-uncertainty-study with explicit independent uniform inputs on the existing cooling project".into() }
+        hint: "declare independent uniform inputs on the native cooling project; version 1 is fixed-count and version 2 requires an explicit Bernoulli-mixture compliance policy".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
 }
 fn fields<'a>(nodes: &'a [Node], keys: &[&str]) -> Result<BTreeMap<&'a str, &'a Node>> {
+    fields_with_optional(nodes, keys, &[])
+}
+fn fields_with_optional<'a>(nodes: &'a [Node], keys: &[&str], optional: &[&str]) -> Result<BTreeMap<&'a str, &'a Node>> {
     if nodes.len() % 2 != 0 { return Err(error("every field requires a value")); }
     let mut result = BTreeMap::new();
     for pair in nodes.chunks_exact(2) {
         let NodeKind::Keyword(key) = &pair[0].kind else { return Err(error("expected a keyword")); };
-        if !keys.contains(&key.as_str()) || result.insert(key.as_str(), &pair[1]).is_some() {
+        if (!keys.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+            || result.insert(key.as_str(), &pair[1]).is_some() {
             return Err(error(format!("unknown or repeated field :{key}")));
         }
     }
-    if result.len() != keys.len() { return Err(error(format!("required fields: {}", keys.join(", ")))); }
+    if keys.iter().any(|key| !result.contains_key(key)) { return Err(error(format!("required fields: {}", keys.join(", ")))); }
     Ok(result)
 }
 fn text(node: &Node) -> Result<String> {
@@ -156,6 +176,23 @@ fn quantity(node: &Node, dims: Dims) -> Result<f64> {
         _ => Err(error(format!("expected an explicit finite {} quantity", dims.unit_string()))),
     }
 }
+fn probability(node: &Node) -> Result<f64> {
+    match node.kind {
+        NodeKind::Float(value) if value.is_finite() && value > 0.0 && value < 1.0 => Ok(value),
+        _ => Err(error("probability and alpha require dimensionless numbers strictly inside (0, 1)")),
+    }
+}
+fn compliance_policy(node: &Node, samples: usize) -> Result<CompliancePolicy> {
+    let nodes = list(node)?;
+    symbol(nodes.first().ok_or_else(|| error("empty compliance policy"))?, "bernoulli-mixture")?;
+    let f = fields(&nodes[1..], &["required-probability", "alpha", "min-samples"])?;
+    let required_probability = probability(f["required-probability"])?;
+    let alpha = probability(f["alpha"])?;
+    if !alpha.recip().is_finite() { return Err(error("compliance alpha reciprocal exceeds the finite range")); }
+    let min_samples = usize::try_from(integer(f["min-samples"])?).map_err(|_| error("minimum sample count overflow"))?;
+    if !(2..=samples).contains(&min_samples) { return Err(error("compliance min-samples must be in 2..=samples")); }
+    Ok(CompliancePolicy { required_probability, alpha, min_samples })
+}
 fn paths(node: &Node) -> Result<Vec<String>> {
     let nodes = list(node)?;
     if nodes.len() > 32 { return Err(error("at most 32 paths per asset family")); }
@@ -173,13 +210,18 @@ impl UncertaintyStudy {
         let root = fs_ir::sexpr::parse(source).map_err(|e| error(e.to_string()))?;
         let nodes = list(&root)?;
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
-        let f = fields(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
-            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"])?;
-        if integer(f["version"])? != u64::from(VERSION) { return Err(error("unsupported study version")); }
+        let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
+            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance"])?;
+        let version = integer(f["version"])?;
+        if version != 1 && version != u64::from(VERSION) { return Err(error("unsupported study version")); }
+        if (version == 1) == f.contains_key("compliance") {
+            return Err(error("version 1 forbids a compliance policy; version 2 requires one"));
+        }
         symbol(f["method"], "monte-carlo")?;
         symbol(f["correlation"], "independent")?;
         let samples = usize::try_from(integer(f["samples"])?).map_err(|_| error("sample count overflow"))?;
         if !(2..=MAX_SAMPLES).contains(&samples) { return Err(error("samples must be in 2..=256")); }
+        let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
         let wall_seconds = quantity(f["wall-time"], crate::spec::dims::TIME)?;
         if !(wall_seconds > 0.0 && wall_seconds <= 86_400.0) { return Err(error("wall-time must be in (0, 86400] seconds")); }
         let geometry_nodes = list(f["geometry"])?;
@@ -234,13 +276,13 @@ impl UncertaintyStudy {
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
-            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters })
+            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters, compliance })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
     /// Referenced native project path.
     #[must_use] pub fn project_path(&self) -> &str { &self.project }
-    /// Original fixed sample budget.
+    /// Original lifetime sample budget, including sequential decision studies.
     #[must_use] pub const fn samples(&self) -> usize { self.samples }
     /// Statistical sampler seed, separate from the base project's physics seed.
     #[must_use] pub const fn seed(&self) -> u64 { self.seed }
@@ -250,6 +292,8 @@ impl UncertaintyStudy {
     #[must_use] pub fn qoi(&self) -> &str { &self.qoi }
     /// Ordered probability laws.
     #[must_use] pub fn parameters(&self) -> &[UniformParameter] { &self.parameters }
+    /// Predeclared Bernoulli stopping policy; absent for version-1 fixed-count studies.
+    #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.

@@ -9,11 +9,11 @@ use fs_sparse::Csr;
 use super::{
     FeedbackBoundStatus, FeedbackInverseMethod, FeedbackResidualLimits,
     FeedbackResidualReport, GoalResidualError, ScalarEnclosure, Work,
-    enclose_affine_feedback_error, scalar_vector,
+    enclose_feedback, scalar_vector,
 };
 use super::super::arithmetic::{add_up, down, mul_up, up};
 
-/// Assess the same coupled system as [`enclose_affine_feedback_error`], with
+/// Assess the same coupled system as [`super::enclose_affine_feedback_error`], with
 /// an optional port-Schur fallback when its whole-state contraction check
 /// cannot establish a bound. Already enclosed results are returned unchanged.
 ///
@@ -47,10 +47,25 @@ pub fn enclose_affine_feedback_error_with_schur(
     limits: FeedbackResidualLimits,
     mut checkpoint: impl FnMut() -> bool,
 ) -> Result<FeedbackResidualReport, GoalResidualError> {
-    let mut report = enclose_affine_feedback_error(
+    let (report, used) = enclose_feedback(
         matrix, rhs, primal, injection, feedback, offset, responses, scaling,
-        limits, &mut checkpoint,
+        None, limits, &mut checkpoint,
     )?;
+    finish_report(matrix, feedback, responses, limits, used, report, checkpoint)
+}
+
+// Accept only a private, already checked report from the common evaluator.
+// `used` includes inverse-proposal work when that route was selected, so
+// the optional Schur calculation cannot spend that same allowance twice.
+pub(super) fn finish_report(
+    matrix: &Csr,
+    feedback: &Csr,
+    responses: Option<&[Vec<f64>]>,
+    limits: FeedbackResidualLimits,
+    used: usize,
+    mut report: FeedbackResidualReport,
+    checkpoint: impl FnMut() -> bool,
+) -> Result<FeedbackResidualReport, GoalResidualError> {
     if report.status() == FeedbackBoundStatus::Enclosed {
         return Ok(report);
     }
@@ -64,12 +79,11 @@ pub fn enclose_affine_feedback_error_with_schur(
     // evaluator. Include recomputed C norms, each interval Schur entry, the
     // response norm and per-port error/margin scratch work before allocation.
     let total = (|| {
-        let base = n.checked_add(matrix.nnz())?.checked_mul(p.checked_add(1)?)?;
         let extra = p.checked_add(1)?.checked_mul(feedback.nnz())?
             .checked_add(n.checked_mul(p)?)?
             .checked_add(p.checked_mul(p)?)?
             .checked_add(p.checked_mul(3)?)?;
-        base.checked_add(extra)
+        used.checked_add(extra)
     })();
     if total.is_none_or(|needed| needed > limits.max_verification_entries) {
         return Ok(report);

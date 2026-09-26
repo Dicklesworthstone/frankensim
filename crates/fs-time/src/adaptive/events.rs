@@ -7,6 +7,9 @@
 //! scanning cannot guarantee detection of tangencies or multiple crossings
 //! between adjacent samples. Set `max_step` and `scan_substeps` for the model.
 
+/// Competing guards with explicit numerical event-order policy.
+pub mod multiple;
+
 use super::{AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, PiController,
             Trial, Workspace, commit, validate};
 
