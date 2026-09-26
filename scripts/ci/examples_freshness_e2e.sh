@@ -182,12 +182,14 @@ ladder_solve_completes() {
 }
 check "ladder solve completes every stage (three uniform rungs; minutes in a debug build)" ladder_solve_completes
 check "ladder solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/ls.json"
-# Seven measured terms: the ladder's discretization half-width, the declared-
-# input propagation's boundary-condition, model-form, solver and parameters
-# (declared AA6061 conductivity tolerance) terms, the componentwise adjoint
-# roundoff bound, and a negligible measurement term. Geometry stays NO-DATA.
-check "QoI stage measured exactly seven budget terms" grep -q '"budget_terms_measured":7' "${WORK}/ls.err"
-check "some budget terms remain NO-DATA" grep -q '"weakest_term":"some-no-data"' "${WORK}/ls.err"
+# All eight terms measured: the ladder's discretization half-width, the
+# declared-input propagation's boundary-condition, model-form, solver,
+# parameters (declared AA6061 conductivity tolerance) and geometry (declared
+# +/-0.05 mm surface offset) terms, the componentwise adjoint roundoff bound,
+# and a negligible measurement term. The conservative sum (about 21.4 K)
+# clears the 5 K margin, so the verdict is an Estimated `satisfied`.
+check "QoI stage measured all eight budget terms" grep -q '"budget_terms_measured":8' "${WORK}/ls.err"
+check "no budget term remains NO-DATA" grep -q '"weakest_term":"none-no-data"' "${WORK}/ls.err"
 LADDER_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ls.json" | head -1 | cut -d'"' -f4)"
 ladder_report_ok() {
   (cd "${WORK}" && "${BINARY}" --json report "${LADDER_RUN}" "${WORK}/ladder.db" > "${WORK}/lrep.json" 2> "${WORK}/lrep.err")
@@ -198,7 +200,7 @@ check "report JSON twin carries the interval discretization term" \
 check "report JSON twin names the grid-refinement method" \
   grep -Eq 'richardson-gci|eca-hoekstra-data-range|bitwise-agreement' "${WORK}/${LADDER_RUN}.report.json"
 check "report JSON twin has a convergence section" grep -q '"convergence"' "${WORK}/${LADDER_RUN}.report.json"
-check "ladder verdict stays the honest Estimated/indeterminate one" grep -q '"verdict":"indeterminate"' "${WORK}/lrep.json"
+check "ladder verdict is the Estimated satisfied decision of the complete budget" grep -q '"verdict":"satisfied"' "${WORK}/lrep.json"
 
 # ---- 9. the rotated twin: rotation invariance of the whole product path -----
 # The same shell rotated 35 deg about z and 21 deg about x and translated

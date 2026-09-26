@@ -159,8 +159,12 @@ bindings; it runs no solves and admits no scenarios itself.
   provenance, not a validated statistical bound. Absence means undeclared,
   never zero, and the solve stage propagates a declared tolerance into the
   Parameters budget term.
+- A `GeometryArtifact` may carry an optional `SurfaceOffset` (schema v7): a
+  uniform normal-offset half-width in metres with a mandatory basis and
+  source, all three keys or none. The solve stage propagates it into the
+  Geometry budget term.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 6 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 7 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -173,11 +177,11 @@ bindings; it runs no solves and admits no scenarios itself.
 - Canonical bytes are the checked s-expression render; `canonical_hash`
   hashes them under `org.frankensim.fs-project.canonical.v1`. The JSON
   spelling parses to the same AST, so both spellings reach one hash.
-- `FSIM_VERSION = 6`. Readers refuse other versions
+- `FSIM_VERSION = 7`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
   `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The
-  registered rules preserve released v1–v5 inputs through named optional
+  registered rules preserve released v1–v6 inputs through named optional
   accretions; a synthetic version-0 proof rule also exercises the machinery.
 - The defaultable fields are exactly two, and every applied default is
   receipted: power-row `duty` (`1.0`, continuous dissipation is the

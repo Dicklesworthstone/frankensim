@@ -37,7 +37,11 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// material binding, with a mandatory basis and source (bead q61wp.72); the
 /// solve stage propagates it into the Parameters budget term. Version-5
 /// documents declare none and migrate without inventing one.
-pub const FSIM_VERSION: u32 = 6;
+/// Version 7 adds an optional declared surface-offset band per geometry
+/// artifact, with a mandatory basis and source (bead q61wp.79); the solve stage
+/// propagates it into the Geometry budget term. Version-6 documents declare
+/// none and migrate without inventing one.
+pub const FSIM_VERSION: u32 = 7;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -67,7 +71,7 @@ pub use spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,

@@ -78,6 +78,7 @@ fn artifact() -> GeometryArtifact {
         format: "stl".to_string(),
         source_hash: 0x0123_4567_89ab_cdef,
         parser_version: "fs-io/stl/v1".to_string(),
+        surface_offset: None,
     }
 }
 
@@ -249,6 +250,7 @@ fn two_trace_conduction_fixture() -> (
         format: "fixture".to_string(),
         source_hash: 0x17_03,
         parser_version: "fixture/v1".to_string(),
+        surface_offset: None,
     };
     let spec = ProjectSpec {
         geometry: Some(vec![artifact.clone()]),

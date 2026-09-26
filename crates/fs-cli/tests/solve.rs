@@ -393,6 +393,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
             format: "stl".to_string(),
             source_hash,
             parser_version: parser_version.to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![GeometryAssignment {
             artifact: "enclosure".to_string(),
@@ -1088,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 23,
+        SOLVE_DRIVER_VERSION, 24,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

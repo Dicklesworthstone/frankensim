@@ -178,6 +178,7 @@ fn reference_project() -> ProjectSpec {
             format: "stl".to_string(),
             source_hash: 0x00ab_cdef_0123_4567,
             parser_version: "0.0.1".to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![
             GeometryAssignment {
@@ -778,7 +779,7 @@ fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
         "fsim-migration-not-needed"
     );
     assert_eq!(
-        migrate_envelope(&v0, 7)
+        migrate_envelope(&v0, FSIM_VERSION + 1)
             .expect_err("unknown version refused")
             .code,
         "fsim-migration-unknown-version"
@@ -832,7 +833,7 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
     );
 }
 
@@ -885,7 +886,7 @@ fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
     );
 }
 
@@ -909,7 +910,7 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     let receipt = parsed.migration.expect("v4 migration is receipted");
     assert_eq!(receipt.source_version, 4);
     assert_eq!(receipt.target_version, FSIM_VERSION);
-    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6");
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7");
     assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
     assert!(
         parsed
@@ -945,12 +946,61 @@ fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
     assert_eq!(parsed.decoded.canonical, current);
     let receipt = parsed.migration.expect("v5 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "material-tolerance-v6");
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7");
     assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
     assert!(
         parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
         "undeclared stays undeclared"
     );
+}
+
+#[test]
+fn v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset() {
+    let historical = tolerance_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v6 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 6", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 6", 1);
+    assert_ne!(v6, current);
+    let parsed = parse_sexpr_migrating(&v6).expect("v6 with a material tolerance migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v6 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (6, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7");
+    assert!(receipt.verifies(v6.as_bytes(), current.as_bytes()));
+    assert!(parsed.decoded.spec.geometry.iter().flatten().all(|a| a.surface_offset.is_none()));
+}
+
+fn offset_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.geometry.as_mut().expect("geometry")[0].surface_offset = Some(fs_project::SurfaceOffset {
+        offset_m: 5e-5,
+        basis: "drawing-general-tolerance".to_string(),
+        source: "illustrative ISO 2768-f class band for a machined part".to_string(),
+    });
+    spec
+}
+
+#[test]
+fn surface_offset_round_trips_and_refuses_partial_invalid_or_pre_v7_declarations() {
+    let spec = offset_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains(":surface-offset-m 5e-5 :offset-basis \"drawing-general-tolerance\""), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let partial = parse_sexpr_lenient(&sexpr.replacen(" :offset-basis \"drawing-general-tolerance\"", "", 1))
+        .expect("syntax is fine");
+    assert!(partial.findings().iter().any(|f| f.code == "project-malformed-clause"));
+    for offset in [0.0, -1e-4, 1.5, f64::NAN] {
+        let mut bad = offset_project();
+        bad.geometry.as_mut().unwrap()[0].surface_offset.as_mut().unwrap().offset_m = offset;
+        assert!(bad.validate().iter().any(|v| v.code == "project-geometry-offset-invalid"), "{offset}");
+    }
+    let false_v6 = sexpr
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 6", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 6", 1);
+    assert_eq!(parse_sexpr_migrating(&false_v6).expect_err("v6 never carried an offset").code, "fsim-migration-payload");
 }
 
 fn tolerance_project() -> ProjectSpec {

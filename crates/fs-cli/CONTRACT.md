@@ -470,7 +470,13 @@ conductivity tolerance (fsim v6) to its lower and then its upper bound
 together, re-solving at base fidelity with the card's sampled knots scaled
 over the same temperature span. Its half-width is the larger deviation. With
 no declared tolerance it stays NO-DATA, because the bound cards state no
-conductivity uncertainty. Geometry remains NO-DATA; while any
+conductivity uncertainty. The Geometry term moves every exterior boundary
+vertex of regions assigned from an artifact that declares a surface offset
+(fsim v7) by +/- the offset along its area-weighted outward normal, keeping
+the same topology. The nominal lowering therefore stays valid, while the
+solve, the source (watts conserved over the perturbed volume) and the
+airflow wetted areas use the perturbed geometry. A tet collapsing below a
+tenth of its volume refuses, and contact-coupled bodies refuse. While any
 term is NO-DATA the verdict stays Estimated / indeterminate and the `no_claim`
 text counts the NO-DATA terms. The
 report projects the interval term's magnitude into the uncertainty table and

@@ -54,7 +54,7 @@ use fs_airflow::requirement_composition::{
 use fs_blake3::identity::ContentId;
 use fs_blake3::{DomainHasher, hash_bytes, hash_domain};
 use fs_evidence::ColorRank;
-use fs_evidence::uncertainty::{EngineeringUncertaintyKind, TermValue};
+use fs_evidence::uncertainty::{BudgetTotal, EngineeringUncertaintyKind, TermValue};
 use fs_exec::CancelGate;
 use fs_exec::solver::{
     LegacySnapshotExpectationV1, LegacySnapshotLimitsV1, LegacySnapshotV1Adapter,
@@ -130,7 +130,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// temperature maximum and publishes it as the Roundoff budget term.
 /// Version 23 propagates declared material conductivity tolerances (fsim v6)
 /// into the Parameters budget term by bound re-solves.
-pub const SOLVE_DRIVER_VERSION: u32 = 23;
+/// Version 24 propagates declared surface-offset bands (fsim v7) into the
+/// Geometry budget term by same-topology bound re-solves.
+pub const SOLVE_DRIVER_VERSION: u32 = 24;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -4660,8 +4662,17 @@ fn qoi_receipt(
         .expect("junction maximum has a witness");
     let radiation_sensitivity = inputs.radiation_sensitivity.as_ref()
         .map(radiation::RadiationSensitivity::json).transpose()?.unwrap_or_else(|| "null".to_string());
+    // The receipt states the composition's actual outcome and budget total;
+    // both were once hard-coded, which became false as soon as every term was
+    // measured.
+    let budget_total = match row.uncertainty.total() {
+        BudgetTotal::Bounded { conservative_half_width } => {
+            kelvin("budget conservative half-width", conservative_half_width)?
+        }
+        _ => json_string("unknown"),
+    };
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":\"indeterminate\",\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":\"unknown\"}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
         json_string(QOI_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         json_string(&row.query_name),
@@ -4674,11 +4685,13 @@ fn qoi_receipt(
         limit,
         required_margin,
         nominal_margin,
+        json_string(evaluation.outcome.as_str()),
         json_string(&evaluation.identity_hash.to_hex()),
         json_string(&row.uncertainty.content_id().to_hex()),
         json_string(row.uncertainty.qoi()),
         json_string(row.uncertainty.unit()),
         terms.join(","),
+        budget_total,
         json_string(&project_hash.to_hex()),
         json_string(&conduction_receipt.to_hex()),
         json_string(&inputs.solution_artifact.to_hex()),
@@ -5122,6 +5135,113 @@ fn scaled_conductivity(
     })
 }
 
+/// The same tet complex with every exterior boundary vertex of a region
+/// assigned from an offset-declaring artifact moved by `side * offset` along
+/// its area-weighted outward normal. Interior vertices stay put. A tet whose
+/// signed volume falls below a tenth of its nominal value refuses: a thin
+/// feature cannot take the declared band on this mesh, and it is never
+/// approximated.
+fn offset_mesh(
+    spec: &ProjectSpec,
+    mesh: &fs_conduction::ConductionMesh,
+    labels: &[u32],
+    region_ids: &BTreeMap<String, u32>,
+    side: f64,
+) -> Result<fs_conduction::ConductionMesh, SolveRefusal> {
+    let offsets: BTreeMap<&str, f64> = spec
+        .geometry
+        .iter()
+        .flatten()
+        .filter_map(|artifact| artifact.surface_offset.as_ref().map(|o| (artifact.role.as_str(), o.offset_m)))
+        .collect();
+    let mut region_offset: BTreeMap<u32, f64> = BTreeMap::new();
+    for assignment in spec.assignments.iter().flatten() {
+        if let (Some(&offset), Some(&region)) =
+            (offsets.get(assignment.artifact.as_str()), region_ids.get(&assignment.target))
+        {
+            let entry = region_offset.entry(region).or_insert(offset);
+            *entry = entry.max(offset);
+        }
+    }
+    let positions = mesh.positions();
+    let mut normal = vec![[0.0f64; 3]; positions.len()];
+    let mut offset = vec![0.0f64; positions.len()];
+    for face in mesh.boundary() {
+        let Some(&d) = region_offset.get(&labels[face.element]) else { continue };
+        for &vertex in &face.vertices {
+            let v = vertex as usize;
+            for c in 0..3 {
+                normal[v][c] += face.area * face.outward_normal[c];
+            }
+            offset[v] = offset[v].max(d);
+        }
+    }
+    let moved: Vec<[f64; 3]> = positions
+        .iter()
+        .zip(normal.iter().zip(&offset))
+        .map(|(p, (n, &d))| {
+            let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if d == 0.0 || length == 0.0 {
+                *p
+            } else {
+                [0, 1, 2].map(|c| p[c] + side * d * n[c] / length)
+            }
+        })
+        .collect();
+    let tets = mesh.complex().tets.clone();
+    let volume = |x: &[[f64; 3]], t: &[u32; 4]| {
+        let [a, b, c, d] = t.map(|v| x[v as usize]);
+        let (u, v, w) = ([0, 1, 2].map(|k| b[k] - a[k]), [0, 1, 2].map(|k| c[k] - a[k]), [0, 1, 2].map(|k| d[k] - a[k]));
+        u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0]) + u[2] * (v[0] * w[1] - v[1] * w[0])
+    };
+    for (index, tet) in tets.iter().enumerate() {
+        let (before, after) = (volume(positions, tet), volume(&moved, tet));
+        if !(after.is_finite() && after.signum() == before.signum() && after.abs() >= 0.1 * before.abs()) {
+            return Err(conduction_error(
+                "cli-solve-geometry-offset-inverts",
+                format!("the declared surface offset collapses tet {index} below a tenth of its volume"),
+                "declare a smaller surface offset, or refine the mesh near thin features",
+            ));
+        }
+    }
+    fs_conduction::ConductionMesh::new_region_owned(
+        TetComplex::from_tets(moved.len(), tets),
+        moved,
+        labels,
+    )
+    .map_err(|error| {
+        conduction_error(
+            "cli-solve-geometry-offset-mesh",
+            format!("the surface-offset mesh was refused: {error}"),
+            "declare a smaller surface offset",
+        )
+    })
+}
+
+/// Each target's wetted area measured on the perturbed faces it owns; a target
+/// the lowered boundary does not name keeps its nominal area.
+fn perturbed_target_areas(
+    moved: &fs_conduction::ConductionMesh,
+    boundary: &fs_conduction::ThermalBoundary,
+    nominal: &BTreeMap<String, f64>,
+) -> BTreeMap<String, f64> {
+    nominal
+        .iter()
+        .map(|(target, &area)| {
+            let area = boundary.region_names().iter().position(|name| name == target).map_or(area, |index| {
+                moved
+                    .boundary()
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, _)| boundary.region_for(*slot) == Some(index))
+                    .map(|(_, face)| face.area)
+                    .sum()
+            });
+            (target.clone(), area)
+        })
+        .collect()
+}
+
 fn parse_claim_id(pin: &str, target: &str) -> Result<ClaimId, SolveRefusal> {
     ContentHash::from_hex(pin).map(ClaimId).ok_or_else(|| {
         conduction_error(
@@ -5138,6 +5258,7 @@ fn conduction_source(
     labels: &[u32],
     region_ids: &BTreeMap<String, u32>,
     audited: &fs_mesh::AuditedLabeledTetComplex,
+    perturbed: bool,
 ) -> Result<fs_conduction::ScalarField, SolveRefusal> {
     let cooling = spec
         .cooling
@@ -5153,12 +5274,22 @@ fn conduction_source(
             "set leakage to zero or model the loss explicitly as regional power or boundary flux",
         ));
     }
-    let volumes: BTreeMap<u32, f64> = audited
-        .witness()
-        .per_region_auditor
-        .iter()
-        .map(|(region, volume)| (region.0, *volume))
-        .collect();
+    // Declared watts are conserved: a surface-offset vertex divides them by
+    // the PERTURBED region volume. The nominal solve keeps the audited volume.
+    let volumes: BTreeMap<u32, f64> = if perturbed {
+        let mut volumes = BTreeMap::new();
+        for (element, &label) in labels.iter().enumerate() {
+            *volumes.entry(label).or_insert(0.0) += mesh.element_volume(element);
+        }
+        volumes
+    } else {
+        audited
+            .witness()
+            .per_region_auditor
+            .iter()
+            .map(|(region, volume)| (region.0, *volume))
+            .collect()
+    };
     let mut watts = BTreeMap::<u32, f64>::new();
     for &id in region_ids.values() {
         watts.insert(id, 0.0);
@@ -5605,6 +5736,7 @@ fn conduction_solve_receipt(
     flow_override: Option<&FlowNetworkHandoff>,
     htc_scale: f64,
     conductivity_side: f64,
+    geometry_side: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
@@ -5829,7 +5961,18 @@ fn conduction_solve_receipt(
                 "report the inconsistent region-owned mesh lowering",
             )
         })?;
-        let source = conduction_source(spec, &mesh, &labels, &region_ids, &audited)?;
+        // A Geometry vertex re-solve moves every declared surface offset to one
+        // bound on the SAME topology, so the nominal lowering (coordinate
+        // keyed) stays valid while the solve, the source and the wetted
+        // areas see the perturbed geometry.
+        let perturbed = if geometry_side == 0.0 {
+            None
+        } else {
+            Some(offset_mesh(spec, &mesh, &labels, &region_ids, geometry_side)?)
+        };
+        let solve_mesh = perturbed.as_ref().unwrap_or(&mesh);
+        let source =
+            conduction_source(spec, solve_mesh, &labels, &region_ids, &audited, perturbed.is_some())?;
         let interface_resolution = resolve_conduction_interface_pairs(
             spec,
             &library,
@@ -5855,6 +5998,13 @@ fn conduction_solve_receipt(
                     first.what
                 ),
                 first.fix.clone(),
+            ));
+        }
+        if perturbed.is_some() && !interface_resolution.pairs.is_empty() {
+            return Err(conduction_error(
+                "cli-solve-geometry-offset-interfaces",
+                "a surface-offset vertex cannot yet move a body that carries contact interfaces",
+                "declare no surface offset on contact-coupled artifacts until interface geometry is perturbed consistently",
             ));
         }
         let interface_faces = interface_resolution
@@ -5912,7 +6062,7 @@ fn conduction_solve_receipt(
                 );
             }
             let problem = fs_conduction::ConductionProblem {
-                mesh: &mesh,
+                mesh: solve_mesh,
                 boundary: &boundary,
                 material: &fallback,
                 element_materials: Some(&element_materials),
@@ -5946,7 +6096,7 @@ fn conduction_solve_receipt(
                 .iter()
                 .map(|law| (law.target.clone(), (1.0, law.inlet_temperature_k)))
                 .collect();
-            let areas = conduction_boundary(
+            let placeholder_lowering = conduction_boundary(
                 setup,
                 &mesh,
                 labeled,
@@ -5954,8 +6104,15 @@ fn conduction_solve_receipt(
                 &regions,
                 &interface_faces,
                 &placeholder,
-            )?
-            .target_area_m2;
+            )?;
+            let areas = match &perturbed {
+                None => placeholder_lowering.target_area_m2,
+                Some(moved) => perturbed_target_areas(
+                    moved,
+                    &placeholder_lowering.boundary,
+                    &placeholder_lowering.target_area_m2,
+                ),
+            };
             let path = conjugate::derive_air_path(
                 &laws,
                 &handoff.operating,
@@ -6475,6 +6632,7 @@ struct InputPropagation {
     model_form: PropagatedTerm,
     solver_algebraic: PropagatedTerm,
     parameters: PropagatedTerm,
+    geometry: PropagatedTerm,
     /// Deviation of the joint worst corner beyond the summed half-widths.
     interaction_excess_k: f64,
 }
@@ -6530,7 +6688,7 @@ impl PropagatedTerm {
 impl InputPropagation {
     fn json(&self) -> Result<String, SolveRefusal> {
         Ok(format!(
-            "{{\"nominal_base_k\":{},\"boundary_conditions\":{},\"model_form\":{},\"solver_algebraic\":{},\"parameters\":{},\"interaction_excess_k\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
+            "{{\"nominal_base_k\":{},\"boundary_conditions\":{},\"model_form\":{},\"solver_algebraic\":{},\"parameters\":{},\"geometry\":{},\"interaction_excess_k\":{},\"authority\":\"Estimated\",\"no_claim\":{}}}",
             canonical_f64(self.nominal_k).ok_or_else(|| conduction_error(
                 "cli-solve-conduction-propagation",
                 "the base nominal maximum is non-finite",
@@ -6540,13 +6698,14 @@ impl InputPropagation {
             self.model_form.json()?,
             self.solver_algebraic.json()?,
             self.parameters.json()?,
+            self.geometry.json()?,
             canonical_f64(self.interaction_excess_k).unwrap_or_else(|| "null".to_string()),
             json_string(PROPAGATION_NO_CLAIM),
         ))
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; geometry uncertainty is not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; declared surface-offset bands move the exterior surface together to each bound on the same topology for the Geometry term (roundoff is bounded separately on the published solve); Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6583,6 +6742,7 @@ fn propagation_term_receipts(
             (EngineeringUncertaintyKind::ModelForm, &propagation.model_form),
             (EngineeringUncertaintyKind::SolverAlgebraic, &propagation.solver_algebraic),
             (EngineeringUncertaintyKind::Parameters, &propagation.parameters),
+            (EngineeringUncertaintyKind::Geometry, &propagation.geometry),
         ]);
     }
     if let Some(roundoff) = roundoff {
@@ -6591,8 +6751,16 @@ fn propagation_term_receipts(
     for (kind, term) in terms {
         receipts.push(
             match term {
-                PropagatedTerm::Measured { half_width_k, method, detail, .. } => {
-                    QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}")))
+                PropagatedTerm::Measured { half_width_k, method, detail, vertices } => {
+                    // The re-solved region maxima travel with the derivation, so a
+                    // reader can see each bound's direction, not only the width.
+                    let solved = vertices
+                        .iter()
+                        .map(|(label, value)| format!("{label} = {value} K"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let solved = if solved.is_empty() { String::new() } else { format!("; re-solved maxima: {solved}") };
+                    QoiTermReceipt::interval(kind, *half_width_k, cite(&format!("{method}: {detail}{solved}")))
                 }
                 PropagatedTerm::Unmeasured { reason } => {
                     QoiTermReceipt::gap(kind, reason.clone(), cite("declared-input propagation gap"))
@@ -6726,15 +6894,15 @@ fn propagate_declared_inputs(
         return Ok(None);
     };
     let base = base_fidelity(spec);
-    let solve = |project: &ProjectSpec, htc_scale: f64, conductivity_side: f64| -> Result<Option<f64>, SolveRefusal> {
+    let solve = |project: &ProjectSpec, htc_scale: f64, conductivity_side: f64, geometry_side: f64| -> Result<Option<f64>, SolveRefusal> {
         let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
         let product = conduction_solve_receipt(
             ledger, project, cards, context, run, work, resume, available_wall_s,
-            Some(&handoff), htc_scale, conductivity_side,
+            Some(&handoff), htc_scale, conductivity_side, geometry_side,
         )?;
         region_maximum(&product.qoi_inputs, region, work)
     };
-    let Some(nominal) = solve(&base, 1.0, 0.0)? else {
+    let Some(nominal) = solve(&base, 1.0, 0.0, 0.0)? else {
         return Ok(None);
     };
     let deviation = |values: &[(String, f64)]| {
@@ -6742,16 +6910,19 @@ fn propagate_declared_inputs(
     };
     // A refused vertex (for example a fan curve that no longer reaches an
     // operating point) leaves its term NO-DATA with the refusal as reason.
-    let vertex_with = |label: String, project: &ProjectSpec, htc_scale: f64, conductivity_side: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
-        match solve(project, htc_scale, conductivity_side) {
+    let vertex_at = |label: String, project: &ProjectSpec, htc_scale: f64, conductivity_side: f64, geometry_side: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
+        match solve(project, htc_scale, conductivity_side, geometry_side) {
             Ok(Some(value)) => Ok(Ok((label, value))),
             Ok(None) => Ok(Err(format!("vertex `{label}` produced no region maximum"))),
             Err(error) if matches!(error.code, "cli-solve-cancelled" | "cli-solve-work-envelope") => Err(error),
             Err(error) => Ok(Err(format!("vertex `{label}` refused: {} ({})", error.what, error.code))),
         }
     };
+    let vertex_with = |label: String, project: &ProjectSpec, htc_scale: f64, conductivity_side: f64| {
+        vertex_at(label, project, htc_scale, conductivity_side, 0.0)
+    };
     let vertex = |label: String, project: &ProjectSpec, htc_scale: f64| -> Result<Result<(String, f64), String>, SolveRefusal> {
-        vertex_with(label, project, htc_scale, 0.0)
+        vertex_at(label, project, htc_scale, 0.0, 0.0)
     };
 
     // Boundary and operating conditions: inlet/reference temperature across
@@ -6929,12 +7100,55 @@ fn propagate_declared_inputs(
         }
     };
 
+    // Geometry: every declared surface-offset band moved outward and then
+    // inward together, re-solved on the same topology. Undeclared stays
+    // NO-DATA; a refused vertex (for example a band a thin fin cannot take)
+    // keeps it NO-DATA with that reason.
+    let offsets: Vec<String> = spec
+        .geometry
+        .iter()
+        .flatten()
+        .filter_map(|artifact| {
+            artifact.surface_offset.as_ref().map(|o| {
+                format!("`{}` +/-{} m ({}: {})", artifact.role, o.offset_m, o.basis, o.source)
+            })
+        })
+        .collect();
+    let geometry = if offsets.is_empty() {
+        PropagatedTerm::Unmeasured {
+            reason: "no geometry artifact declares a surface-offset band".to_string(),
+        }
+    } else {
+        let mut values = Vec::new();
+        let mut refusal = None;
+        for side in [-1.0, 1.0] {
+            let label = format!("declared surface offset {}", if side < 0.0 { "inward" } else { "outward" });
+            match vertex_at(label, &base, 1.0, 0.0, side)? {
+                Ok(row) => values.push(row),
+                Err(reason) => refusal = refusal.or(Some(reason)),
+            }
+        }
+        match refusal {
+            Some(reason) => PropagatedTerm::Unmeasured { reason },
+            None => PropagatedTerm::Measured {
+                half_width_k: deviation(&values),
+                method: "interval-vertex-resolve",
+                detail: format!(
+                    "every declared uniform normal surface-offset band moved to its bounds together on the same mesh topology: {}; an engineering declaration, not a measured as-built deviation",
+                    offsets.join("; ")
+                ),
+                vertices: values,
+            },
+        }
+    };
+
     Ok(Some(InputPropagation {
         nominal_k: nominal,
         boundary,
         model_form,
         solver_algebraic,
         parameters,
+        geometry,
         interaction_excess_k,
     }))
 }
@@ -6954,7 +7168,7 @@ fn conduction_receipt(
     available_wall_s: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
     let mut product = conduction_solve_receipt(
-        ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0, 0.0,
+        ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0, 0.0, 0.0,
     )?;
     if let Some(propagation) =
         propagate_declared_inputs(ledger, spec, cards, context, run, work, resume, available_wall_s)?

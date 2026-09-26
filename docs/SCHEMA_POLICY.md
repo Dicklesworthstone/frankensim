@@ -21,7 +21,7 @@ deprecation horizon.
 
 | Id | Owner | Version constant | Current |
 |----|-------|------------------|---------|
-| `project.fsim` | `fs-project` | `FSIM_VERSION` | 6 |
+| `project.fsim` | `fs-project` | `FSIM_VERSION` | 7 |
 | `study.fsim` | `fs-project` | `STUDY_FSIM_VERSION` | 1 |
 | `package.format` | `fs-package` | `FORMAT_VERSION` | 9 |
 | `checker.protocol` | `fs-checker` | `CHECKER_PROTOCOL_VERSION` | 7 |

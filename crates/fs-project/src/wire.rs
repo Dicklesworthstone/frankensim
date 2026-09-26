@@ -24,7 +24,7 @@ use crate::spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
@@ -297,7 +297,7 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
     if let Some(geometry) = &spec.geometry {
         let mut items = vec![sym("geometry")];
         for artifact in geometry {
-            items.push(list(vec![
+            let mut row = vec![
                 sym("artifact"),
                 kw("role"),
                 text(&artifact.role),
@@ -307,7 +307,18 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
                 text(&format!("{:016x}", artifact.source_hash)),
                 kw("parser"),
                 text(&artifact.parser_version),
-            ]));
+            ];
+            if let Some(offset) = &artifact.surface_offset {
+                row.extend([
+                    kw("surface-offset-m"),
+                    float(offset.offset_m),
+                    kw("offset-basis"),
+                    text(&offset.basis),
+                    kw("offset-source"),
+                    text(&offset.source),
+                ]);
+            }
+            items.push(list(row));
         }
         sections.push(list(items));
     }
@@ -1696,9 +1707,37 @@ fn read_geometry(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryArtifac
         let pairs = read_pairs(
             inner,
             "artifact",
-            &["role", "format", "source-hash", "parser"],
+            &[
+                "role",
+                "format",
+                "source-hash",
+                "parser",
+                "surface-offset-m",
+                "offset-basis",
+                "offset-source",
+            ],
             out,
         );
+        let surface_offset = match [
+            field(&pairs, "surface-offset-m"),
+            field(&pairs, "offset-basis"),
+            field(&pairs, "offset-source"),
+        ] {
+            [None, None, None] => None,
+            [Some(offset), Some(basis), Some(source)] => Some(SurfaceOffset {
+                offset_m: expect_float(Some(offset), "artifact.surface-offset-m", out),
+                basis: expect_str(Some(basis), "artifact.offset-basis", out),
+                source: expect_str(Some(source), "artifact.offset-source", out),
+            }),
+            _ => {
+                out.push(Violation {
+                    code: "project-malformed-clause",
+                    what: "a surface offset needs `:surface-offset-m`, `:offset-basis` and `:offset-source` together".to_string(),
+                    fix: "declare all three keys, or none".to_string(),
+                });
+                None
+            }
+        };
         let source_hash = {
             let raw = expect_str(field(&pairs, "source-hash"), "artifact.source-hash", out);
             match u64::from_str_radix(&raw, 16) {
@@ -1719,6 +1758,7 @@ fn read_geometry(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryArtifac
             format: expect_str(field(&pairs, "format"), "artifact.format", out),
             source_hash,
             parser_version: expect_str(field(&pairs, "parser"), "artifact.parser", out),
+            surface_offset,
         });
     }
     artifacts

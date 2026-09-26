@@ -80,6 +80,7 @@ fn valid_project() -> ProjectSpec {
             format: "stl".to_string(),
             source_hash: 9,
             parser_version: "1".to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![GeometryAssignment {
             artifact: "plate".to_string(),
@@ -686,6 +687,9 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
         "stderr: {}",
         output.stderr
     );
+    // This single-rung project has no discretization estimate, so one term
+    // stays NO-DATA and the verdict stays Estimated/indeterminate. The ladder
+    // variant measures all eight (see scripts/ci/examples_freshness_e2e.sh).
     assert!(
         output.stdout.contains("\"verdict\":\"indeterminate\""),
         "stdout: {}",
@@ -712,6 +716,17 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
             .unwrap_or_else(|error| panic!("{} was not exported: {error}", path.display()));
         assert!(!bytes.is_empty(), "{} is empty", path.display());
     }
+    // The declared surface offset moves T_max the physical way: more wetted
+    // area and thicker fins (outward) cool the part at fixed watts, and the
+    // inward bound heats it.
+    let report = std::fs::read_to_string(dir.join(format!("{run_id}.report.json"))).unwrap();
+    let solved = |label: &str| -> f64 {
+        let key = format!("declared surface offset {label} = ");
+        let tail = &report[report.find(&key).unwrap_or_else(|| panic!("no {label} vertex in {report}")) + key.len()..];
+        tail[..tail.find(' ').unwrap()].parse().unwrap()
+    };
+    let (inward, outward) = (solved("inward"), solved("outward"));
+    assert!(outward < inward, "outward {outward} K must be cooler than inward {inward} K");
 }
 
 #[test]

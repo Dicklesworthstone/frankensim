@@ -405,6 +405,7 @@ mod wire_surface {
                 format: "stl".to_string(),
                 source_hash: 0x00ab_cdef_0123_4567,
                 parser_version: "0.0.1".to_string(),
+                surface_offset: None,
             }]),
             assignments: Some(vec![GeometryAssignment {
                 artifact: "enclosure".to_string(),
@@ -543,7 +544,7 @@ mod wire_surface {
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(
             migrated.receipt.rule.label(),
-            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6"
+            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
         );
         let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
         assert!(

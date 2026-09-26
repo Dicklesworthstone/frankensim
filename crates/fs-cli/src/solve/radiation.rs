@@ -286,6 +286,7 @@ pub(super) fn measure_sensitivity(
             None,
             1.0,
             0.0,
+            0.0,
         )?;
         super::region_maximum(&product.qoi_inputs, region, work)
     };

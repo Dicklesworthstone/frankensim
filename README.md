@@ -326,14 +326,19 @@ algebraic); measurement is negligible because no observation data enter. The
 published solve also bounds its maximum's roundoff: a componentwise
 `γ_k (|b| + |A||T|)` row bound on the assembled solid operator, mapped through
 the adjoint at the hottest region vertex. On the tracked finned heatsink this
-measures seven of eight terms: boundary conditions about 20.0 K, model form
-about 1.34 K, discretization about 0.001 K with the ladder (about 0.0016 K
-adaptively), material parameters about 0.0012 K (a declared +/-8% AA6061
-conductivity tolerance whose source is the gap between the fixture card and
-the in-repo NIST 6061-T6 fit; fsim v6 `:conductivity-tolerance-rel`), and
-roundoff about 9e-6 K. Geometry stays NO-DATA, so the verdict is still
-indeterminate. Every term is Estimated, not a
-certificate.
+measures all eight terms on the ladder variant: boundary conditions about
+20.0 K, model form about 1.34 K, geometry about 0.018 K, discretization about
+0.001 K with the ladder (about 0.0016 K adaptively), material parameters
+about 0.0012 K, and roundoff about 9e-6 K. The parameters term is a declared
++/-8% AA6061 conductivity tolerance, sourced from the gap between the fixture
+card and the in-repo NIST 6061-T6 fit (fsim v6 `:conductivity-tolerance-rel`).
+The geometry term is an illustrative +/-0.05 mm surface offset (fsim v7
+`:surface-offset-m`), re-solved on the same topology with watts conserved.
+The conservative total is about 21.4 K against a 51.2 K nominal margin and a
+5 K required margin, so the requirement reads `satisfied`. That is an Estimated
+decision from declared engineering intervals and an h-ladder half-width, not
+a certificate or validation. The single-rung `heatsink-fan.fsim` has no
+discretization estimate and stays indeterminate.
 
 | Command | Purpose |
 |---------|---------|

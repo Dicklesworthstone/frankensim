@@ -158,7 +158,7 @@ pub struct UnitsDoctrine {
 
 /// One imported geometry artifact, referenced through its quarantine
 /// receipt — geometry lives in artifacts, never inline in the project.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GeometryArtifact {
     /// Role in the assembly ("enclosure", "board", "heatsink", ...).
     pub role: String,
@@ -168,6 +168,24 @@ pub struct GeometryArtifact {
     pub source_hash: u64,
     /// Parser version that produced the receipt.
     pub parser_version: String,
+    /// Optional declared uniform surface-offset band (schema v7): the as-built
+    /// surface lies within +/- this distance of the declared one, along its
+    /// outward normal. The solve stage propagates it into the Geometry budget
+    /// term. Absent means undeclared, never exact.
+    pub surface_offset: Option<SurfaceOffset>,
+}
+
+/// A declared symmetric normal-offset band on an artifact's surface, with the
+/// basis and source that justify it; an engineering declaration, not a
+/// measured as-built deviation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceOffset {
+    /// Offset half-width, metres, strictly positive.
+    pub offset_m: f64,
+    /// Why the band has this width (for example `drawing-general-tolerance`).
+    pub basis: String,
+    /// Where the width comes from.
+    pub source: String,
 }
 
 /// One mesh-index-free assignment declared in the project file.
@@ -2062,6 +2080,33 @@ impl ProjectSpec {
             }
         }
         self.check_card_bindings(out);
+        self.check_surface_offsets(out);
+    }
+
+    fn check_surface_offsets(&self, out: &mut Vec<Violation>) {
+        for artifact in self.geometry.iter().flatten() {
+            let Some(offset) = &artifact.surface_offset else { continue };
+            if !(offset.offset_m.is_finite() && offset.offset_m > 0.0 && offset.offset_m < 1.0) {
+                out.push(violation(
+                    "project-geometry-offset-invalid",
+                    format!(
+                        "geometry artifact `{}` declares surface offset {} m outside (0, 1)",
+                        artifact.role, offset.offset_m
+                    ),
+                    "declare a finite positive offset half-width in metres, or omit it",
+                ));
+            }
+            if !is_canonical_binding_text(&offset.basis) || !is_canonical_binding_text(&offset.source) {
+                out.push(violation(
+                    "project-geometry-offset-source-invalid",
+                    format!(
+                        "geometry artifact `{}` declares a surface offset without a canonical basis and source",
+                        artifact.role
+                    ),
+                    "state why the band has its width and where that width comes from",
+                ));
+            }
+        }
     }
 
     fn check_card_bindings(&self, out: &mut Vec<Violation>) {
