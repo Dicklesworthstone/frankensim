@@ -14,6 +14,30 @@ use super::{
 };
 use super::arithmetic::{add_up, down, mul_up, up};
 
+mod schur;
+pub use schur::enclose_affine_feedback_error_with_schur;
+
+/// Independently checked sufficient condition used for the coupled inverse.
+/// Neither route proves dynamical or fixed-point-iteration stability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackInverseMethod {
+    /// A verified whole-state feedback norm strictly below one.
+    StateContraction,
+    /// The response-error-enclosed port Schur matrix is strictly row dominant.
+    PortSchurDominance,
+}
+
+impl FeedbackInverseMethod {
+    /// Stable receipt tag for the sufficient inverse check.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::StateContraction => "state-contraction",
+            Self::PortSchurDominance => "port-schur-dominance",
+        }
+    }
+}
+
 /// Structural limits for the coupled residual and optional response checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeedbackResidualLimits {
@@ -25,15 +49,17 @@ pub struct FeedbackResidualLimits {
     pub max_transfer_nonzeros: usize,
     /// Total scalar entries of caller-supplied response columns.
     pub max_response_entries: usize,
-    /// Solid row/entry visits across all response checks, including the
-    /// initial inverse check. Checked BEFORE repeated sparse traversal.
+    /// Structural row/entry visits across the initial inverse and response
+    /// checks. The optional port-Schur fallback spends only the remaining
+    /// allowance. Each phase checks its required work before allocation.
     pub max_verification_entries: usize,
 }
 
 /// Why a whole coupled-system error bound is present or absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackBoundStatus {
-    /// The solid inverse and a strict small-gain inequality were checked.
+    /// The solid inverse and a sufficient coupled inverse condition were checked.
+    /// Inspect `inverse_method`; a Schur enclosure need not have gain below one.
     Enclosed,
     /// The solid operator has no admitted inverse-infinity bound.
     SolidInverseUnavailable,
@@ -54,6 +80,8 @@ pub struct FeedbackResidualReport {
     coupled_inverse_infinity_upper: Option<f64>,
     state_error_infinity_upper: Option<f64>,
     response_residual_infinity_upper: Vec<f64>,
+    inverse_method: Option<FeedbackInverseMethod>,
+    schur_inverse_infinity_upper: Option<f64>,
 }
 
 impl FeedbackResidualReport {
@@ -67,9 +95,10 @@ impl FeedbackResidualReport {
     #[must_use]
     pub const fn solid_inverse_infinity_upper(&self) -> Option<f64> { self.solid_inverse_infinity_upper }
     /// Verified upper bound for ||A^-1 B C||_inf, when representable.
+    /// May be >= 1 when the port-Schur condition establishes an inverse.
     #[must_use]
     pub const fn gain_infinity_upper(&self) -> Option<f64> { self.gain_infinity_upper }
-    /// ||(A-B C)^-1||_inf, only after strict contraction was established.
+    /// ||(A-B C)^-1||_inf, after the named sufficient inverse check.
     #[must_use]
     pub const fn coupled_inverse_infinity_upper(&self) -> Option<f64> { self.coupled_inverse_infinity_upper }
     /// Whole-field error. A regional maximum has this same error allowance
@@ -80,6 +109,12 @@ impl FeedbackResidualReport {
     /// Empty when the norm-only route was used or no solid inverse exists.
     #[must_use]
     pub fn response_residual_infinity_upper(&self) -> &[f64] { &self.response_residual_infinity_upper }
+    /// Checked route supporting the published inverse; absent on no-bound results.
+    #[must_use]
+    pub const fn inverse_method(&self) -> Option<FeedbackInverseMethod> { self.inverse_method }
+    /// ||(I-C A^-1 B)^-1||_inf from outward port-Schur row dominance, if used.
+    #[must_use]
+    pub const fn schur_inverse_infinity_upper(&self) -> Option<f64> { self.schur_inverse_infinity_upper }
 }
 
 fn limit(field: &'static str, required: usize, allowed: usize) -> Result<(), GoalResidualError> {
@@ -219,6 +254,7 @@ pub fn enclose_affine_feedback_error(
         residual_infinity_upper: residual_inf, solid_inverse_infinity_upper: inverse,
         gain_infinity_upper: None, coupled_inverse_infinity_upper: None,
         state_error_infinity_upper: None, response_residual_infinity_upper: Vec::new(),
+        inverse_method: None, schur_inverse_infinity_upper: None,
     };
     if let Some(inverse) = inverse {
         let mut gain = if gain_range { None } else { mul_up(inverse, perturbation_inf).ok() };
@@ -272,6 +308,7 @@ pub fn enclose_affine_feedback_error(
                     Ok((coupled, error)) => {
                         report.coupled_inverse_infinity_upper = Some(coupled);
                         report.state_error_infinity_upper = Some(error);
+                        report.inverse_method = Some(FeedbackInverseMethod::StateContraction);
                         FeedbackBoundStatus::Enclosed
                     }
                     Err(_) => FeedbackBoundStatus::BoundNotRepresentable,

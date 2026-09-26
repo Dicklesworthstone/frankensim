@@ -85,11 +85,12 @@ pub(super) fn maximum_evidence(
         else if goal_met { "coupled-goal-tolerance" }
         else { "coupled-goal-unresolved" };
     let detail = format!(
-        "{SCHEMA}; published mesh and temperature field; {} independent air paths, {} ordered Robin ports, {} selected vertices ({} free); nominal {:e} K, interval {:?} K; full coupled residual infinity upper {:e}, solid inverse {:?}, feedback gain {:?}, coupled inverse {:?}, disposition {:?}; {} response iterations shared across all ports (cap {}); {} response residuals checked; no new primal solve or field mutation; requested allowance {:?} K, goal met {}; {SCOPE}",
+        "{SCHEMA}; published mesh and temperature field; {} independent air paths, {} ordered Robin ports, {} selected vertices ({} free); nominal {:e} K, interval {:?} K; full coupled residual infinity upper {:e}, solid inverse {:?}, feedback gain {:?}, coupled inverse {:?}, inverse route {:?}, port Schur inverse {:?}, disposition {:?}; {} response iterations shared across all ports (cap {}); {} response residuals checked; no new primal solve or field mutation; requested allowance {:?} K, goal met {}; {SCOPE}",
         paths.len(), analyzer.ports().len(), vertices.len(), analysis.free_vertices(),
         analysis.nominal_k(), analysis.interval_k(), coupled.residual_infinity_upper(),
         coupled.solid_inverse_infinity_upper(), coupled.gain_infinity_upper(),
-        coupled.coupled_inverse_infinity_upper(), coupled.status(), analysis.response_iterations(),
+        coupled.coupled_inverse_infinity_upper(), coupled.inverse_method(),
+        coupled.schur_inverse_infinity_upper(), coupled.status(), analysis.response_iterations(),
         config.max_response_iterations, coupled.response_residual_infinity_upper().len(),
         requested, goal_met,
     );
@@ -101,8 +102,10 @@ pub(super) fn maximum_evidence(
             "no finite coupled maximum bound was established; a failed sufficient check is not a singularity claim; no frozen-solid or tolerance fallback; {detail}"
         ) },
     };
+    let inverse_method = coupled.inverse_method()
+        .map(|method| json_string(method.tag())).unwrap_or_else(|| "null".to_string());
     let control_json = format!(
-        "{{\"schema\":{},\"status\":{},\"mode\":\"assessment-only\",\"goal_met\":{},\"candidate_accepted\":false,\"requested_tolerance_k\":{},\"initial_bound_k\":{},\"final_bound_k\":{},\"maximum_interval_k\":{},\"primal_iterations\":0,\"response_iterations\":{},\"max_response_iterations\":{},\"max_stability_iterations\":{},\"air_paths\":{},\"ports\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"bound_status\":{},\"scope\":{}}}",
+        "{{\"schema\":{},\"status\":{},\"mode\":\"assessment-only\",\"goal_met\":{},\"candidate_accepted\":false,\"requested_tolerance_k\":{},\"initial_bound_k\":{},\"final_bound_k\":{},\"maximum_interval_k\":{},\"primal_iterations\":0,\"response_iterations\":{},\"max_response_iterations\":{},\"max_stability_iterations\":{},\"air_paths\":{},\"ports\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"inverse_method\":{},\"schur_inverse_infinity_upper\":{},\"bound_status\":{},\"scope\":{}}}",
         json_string(SCHEMA), json_string(status), goal_met, optional_number(requested)?,
         optional_number(bound)?, optional_number(bound)?, interval,
         analysis.response_iterations(), config.max_response_iterations,
@@ -111,6 +114,8 @@ pub(super) fn maximum_evidence(
         optional_number(coupled.solid_inverse_infinity_upper())?,
         optional_number(coupled.gain_infinity_upper())?,
         optional_number(coupled.coupled_inverse_infinity_upper())?,
+        inverse_method,
+        optional_number(coupled.schur_inverse_infinity_upper())?,
         json_string(&format!("{:?}", coupled.status())), json_string(SCOPE),
     );
     cx.checkpoint().map_err(|_| cancelled())?;

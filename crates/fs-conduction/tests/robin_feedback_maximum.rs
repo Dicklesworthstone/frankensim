@@ -5,7 +5,7 @@ use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel, Linear
     ScalarField, ThermalBoundary, ThermalBoundaryBuilder, ThermalBc};
 use fs_conduction::fixtures::{unit_cube, on_box_face};
 use fs_solver::goal::{GoalResidualLimits};
-use fs_solver::goal::feedback::{FeedbackBoundStatus, FeedbackResidualLimits};
+use fs_solver::goal::feedback::{FeedbackBoundStatus, FeedbackInverseMethod, FeedbackResidualLimits};
 use fs_sparse::Csr;
 use support::{with_cx, with_cancelled_cx};
 
@@ -143,7 +143,8 @@ fn incomplete_response_work_cannot_be_mistaken_for_a_certificate() {
             if let Some(band)=r.interval_k() { assert!(band[0]<=330.0 && 330.0<=band[1]); }
             else { assert!(!r.meets_absolute_tolerance(1e9)); }
         }
-        let a=fixture.base(cx).with_robin_feedback(cx,&["air"],&[0.0],&[2.0],limits()).unwrap();
+        // Unit feedback leaves the uniform-temperature mode unconstrained.
+        let a=fixture.base(cx).with_robin_feedback(cx,&["air"],&[0.0],&[1.0],limits()).unwrap();
         let temperature=vec![300.0;fixture.mesh.vertex_count()];
         let vertices:Vec<_>=(0..temperature.len()).collect();
         let r=a.analyze_maximum(cx,&temperature,&vertices).unwrap();
@@ -169,5 +170,33 @@ fn malformed_feedback_limits_and_cancellation_refuse_without_publication() {
             assert!(matches!(prepared.analyze_maximum(cancelled,&temperature,&[0]),Err(fs_conduction::ConductionError::Cancelled{..})));
         });
         assert!(prepared.analyze_maximum(cx,&temperature,&[0]).unwrap().interval_k().is_some());
+    });
+}
+
+
+#[test]
+fn noncontractive_robin_feedback_uses_checked_port_schur_without_extra_solves() {
+    let fixture = Fixture::new(false);
+    with_cx(|cx| {
+        for slope in [-2.0, 2.0] {
+            // Synthetic affine law with the known uniform fixed point 330 K.
+            // Its iteration gain exceeds one; this is an inverse check, not
+            // a convergence or physically validated controller claim.
+            let analyzer = fixture.base(cx).with_robin_feedback(cx, &["air"],
+                &[330.0 * (1.0-slope)], &[slope], limits()).unwrap();
+            let temperature = vec![300.0; fixture.mesh.vertex_count()];
+            let vertices: Vec<_> = (0..temperature.len()).collect();
+            let result = analyzer.analyze_maximum(cx, &temperature, &vertices).unwrap();
+            assert_eq!(result.coupled().inverse_method(), Some(FeedbackInverseMethod::PortSchurDominance));
+            assert!(result.coupled().gain_infinity_upper().unwrap() >= 1.0);
+            let (a, rhs, b, c, d) = analyzer.stored_system();
+            let exact = solve_dense(a, rhs, b, c, d);
+            let maximum = exact.into_iter().fold(f64::NEG_INFINITY, f64::max);
+            assert!((maximum-330.0).abs() < 1e-8);
+            let [lo, hi] = result.interval_k().unwrap();
+            assert!(lo <= maximum && maximum <= hi);
+            assert_eq!(result, analyzer.analyze_maximum(cx, &temperature, &vertices).unwrap());
+            assert_eq!(result.response_iterations(), analyzer.response_iterations());
+        }
     });
 }

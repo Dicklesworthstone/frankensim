@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use fs_sparse::Csr;
 use fs_solver::goal::feedback::{
-    FeedbackResidualLimits, FeedbackResidualReport, enclose_affine_feedback_error,
+    FeedbackResidualLimits, FeedbackResidualReport,
+    enclose_affine_feedback_error_with_schur as enclose_affine_feedback_error,
 };
 use super::{ConductionError, Cx, LinearGoalAnalyzer, bounded_solve, invalid, map_enclosure, poll};
 use super::super::super::{RobinPort, bind_ports};
@@ -260,6 +261,9 @@ impl LinearRobinFeedbackAnalyzer<'_> {
     /// Assess the full coupled equation at another field without another solve.
     /// Region selection, material support and prescribed values use the existing
     /// maximum analyzer's admission. Active-node relocation is included.
+    /// If whole-state contraction is inconclusive, checked response errors may
+    /// establish port-Schur dominance within the same verification budget.
+    /// Neither condition is a claim about fixed-point or dynamical stability.
     ///
     /// # Errors
     /// Existing field/selection/refusal rules, numerical range and cancellation.
