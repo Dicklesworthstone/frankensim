@@ -19,6 +19,7 @@ pub mod fansystem;
 pub mod migration;
 pub mod spec;
 pub mod study;
+pub mod uncertainty;
 pub mod wire;
 
 /// The current `.fsim` study schema version.
