@@ -58,6 +58,11 @@ derivative at that peak: although the final cooldown has not happened yet,
 earlier occurrences of the same cooldown control changed the warm-up history.
 These are illustrative numerical model inputs, not measured or validated data.
 
+Measured 2026-09-26 with the release binary, which uses lumped (row-sum) P1
+capacitance rather than the reference's consistent mass, the repeated example
+peaks at 302.424129 K at global time 34 seconds. Its cooldown log-speed
+derivative is -1.05e-4 K, which is again nonzero.
+
 ## Returned controls
 
 For a single cycle, `transient.adjoint` reports the selected value, time, state

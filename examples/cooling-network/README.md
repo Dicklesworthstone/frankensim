@@ -15,8 +15,9 @@ cargo test -p fs-cli --test cooling_network
 > keep their role; see 45af6da3d. TRANSIENT_COOLING, ADAPTIVE_COOLING,
 > NONLINEAR_TRANSIENT_COOLING, REPEATED_COOLING, TRANSIENT_DESIGN,
 > ENCLOSURE_RADIATION, COMPONENT_POWER_ALLOCATION, MULTI_LIMIT_ALLOCATION,
-> TIME_CONVERGENCE and TRANSIENT_RADIATION (the last two re-measured
-> 2026-09-26) now state FrankenSim's measured lumped values next to their
+> TIME_CONVERGENCE, TRANSIENT_RADIATION, TRANSIENT_ADJOINT, ENCLOSURE_ADJOINTS
+> and RADIATIVE_TRAJECTORY_ADJOINTS (the last five re-measured 2026-09-26) now
+> state FrankenSim's measured lumped values next to their
 > consistent-mass references. ADAPTIVE_MESH_COOLING and RADIATIVE_MESH_STUDIES
 > cover steady problems, so they are unaffected.
 
