@@ -446,20 +446,39 @@ ladder status, order, rung count, refinement ratio, safety factor and the
 conduction receipt it was read from.
 
 **Declared-input propagation** (conduction receipt block `propagation`, driver
-version 16). When the project declares an envelope and exactly one
+version 24). When the project declares an envelope and exactly one
 temperature-maximum requirement, the conduction stage re-runs flow-network and
 conduction at base fidelity for each vertex of the declared interval inputs:
 inlet/reference temperature at the envelope bounds crossed with fan-curve
 pressure x (1 -/+ declared tolerance) for the Boundary-conditions term; every
 card-derived coefficient x (1 -/+ the card's discrepancy allowance), inside
 the conjugate fixed point, for the Model-form term; one joint worst corner
-whose excess over the summed half-widths is added to the boundary term; and a
-100x tighter solver tolerance for the Solver-algebraic term. Each half-width is
+whose excess over the summed half-widths is added to the boundary term. Each input half-width is
 the largest deviation of the region maximum from the base-fidelity nominal;
 monotone response per input is assumed and disclosed. A refused vertex, or a
 declared (non-card) coefficient, keeps its term NO-DATA under a specific
 reason. Measurement is always negligible (the pipeline ingests no observation
-data). The Roundoff term is fs-conduction's componentwise bound
+data).
+
+**Published linear solver error** (`solver_algebraic`, driver version 24).
+For fixed linear conductivity, Robin references and matching contact, the
+Solver-algebraic term now uses the actual published mesh and temperature field,
+including an adaptive or ladder endpoint. `fs-conduction` computes outward
+residuals and a verified inverse bound. Every competing region vertex is
+enclosed using the whole-field bound, so the maximum may relocate without
+inheriting an invalid selected-node claim. No second primal or selected-node
+dual solve is needed. The receipt retains the maximum interval, residual and
+inverse bounds, stability-proposal diagnostics and work counts. Missing inverse
+evidence or a finite-range/structural refusal leaves this term NO-DATA. The
+residual's evaluation roundoff is already included, not a second independent
+uncertainty contribution. This encloses the stored floating-point linear
+system only; the engineering term remains Estimated and establishes no
+assembly, continuum, material or physical-validation claim. Nonlinear
+conductivity, ambient radiation and air feedback retain the explicitly named
+100x tighter base-solve comparison as an estimate, without a linear enclosure
+claim. Old driver checkpoints cannot resume into the changed analysis.
+
+The Roundoff term is fs-conduction's componentwise bound
 `γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
 operator behind the field (including a radiating solve's combined partition),
 with λ the adjoint at the hottest vertex of the requirement region. It

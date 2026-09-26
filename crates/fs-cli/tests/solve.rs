@@ -1088,7 +1088,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 23,
+        SOLVE_DRIVER_VERSION, 24,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3500,6 +3500,14 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
     assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    assert!(receipt.contains("\"method\":\"outward-linear-maximum-enclosure\""), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"),
+        "a linear solve uses the published operator, without a second primal tolerance comparison");
+    assert!(receipt.contains("change of hottest node"), "{receipt}");
+    assert!(receipt.contains("verified inverse infinity upper"), "{receipt}");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let algebraic_width = receipt_number_field(algebraic, "half_width_k");
+    assert!(algebraic_width > 0.0 && algebraic_width < 1e-6, "{receipt}");
     assert!(
         receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
             && receipt.contains("\"stop\":\"fidelity-single-rung\"")
@@ -3560,6 +3568,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
     assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
     assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
+    let algebraic_term = qoi_receipt.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic_term, "upper_kelvin").to_bits(), algebraic_width.to_bits(),
+        "the actual bound is retained unchanged through the QoI/report handoff");
+    assert!(algebraic_term.contains("outward-linear-maximum-enclosure"));
     assert_eq!(
         receipt_number_field(&qoi_receipt, "effective_limit_kelvin"),
         353.15,
@@ -4130,6 +4142,10 @@ fn g1_contact_adaptive_uses_the_nonlinear_material_tangent_and_retains_its_remai
         binding.card = cards.materials()[0].card().to_hex();
     }
     let receipt = contact_refinement_receipt(&spec, &cards);
+    assert!(!receipt.contains("outward-linear-maximum-enclosure"),
+        "a frozen k(T) operator must not be reported as the full nonlinear maximum bound");
+    assert!(receipt.contains("tolerance-tightening-resolve"),
+        "the explicitly Estimated nonlinear tolerance comparison remains available: {receipt}");
     assert!(
         receipt.contains("\"status\":\"observed-tolerance-met\""),
         "{receipt}"
@@ -5368,6 +5384,9 @@ fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
         "QoI receipt bytes (interval term) reproduce"
     );
     let conduction = String::from_utf8(first.2).expect("utf-8");
+    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"),
+        "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
     assert!(
         conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
         "{conduction}"

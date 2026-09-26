@@ -102,6 +102,37 @@ fn oracle(f: &Fixture, cx: &fs_exec::Cx<'_>) -> Vec<f64> {
     dofs.scatter(&dense_solve(&matrix, &rhs))
 }
 
+// Exact dyadic comparison for this positive scalar fixture. Testing a rounded
+// b/a near 300 K after subtracting 300 K loses more precision than the goal
+// enclosure: instead check a*x + a*lower <= b <= a*x + a*upper as integers.
+fn assert_scalar_goal_enclosed(a: f64, b: f64, x: f64, lower: f64, upper: f64) {
+    assert!(a > 0.0);
+    let dyadic = |value: f64| {
+        assert!(value.is_finite() && value >= 0.0, "positive scalar fixture required");
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = u128::from(bits & ((1_u64 << 52) - 1));
+        if exponent == 0 { (fraction, -1074) }
+        else { (fraction | (1_u128 << 52), exponent - 1075) }
+    };
+    let product = |left, right| {
+        let (lm, le) = dyadic(left);
+        let (rm, re) = dyadic(right);
+        (lm.checked_mul(rm).expect("scalar significands fit u128"), le + re)
+    };
+    let terms = [product(a, x), product(a, lower), product(a, upper), dyadic(b)];
+    let exponent = terms.iter().filter(|(m, _)| *m != 0).map(|(_, e)| *e).min().unwrap();
+    let [ax, al, au, rhs] = terms.map(|(mantissa, e)| {
+        if mantissa == 0 { return 0; }
+        let shift = u32::try_from(e - exponent).unwrap();
+        let factor = 1_u128.checked_shl(shift).expect("scalar exponent span fits u128");
+        mantissa.checked_mul(factor).expect("aligned scalar dyadic fits u128")
+    });
+    let low = ax.checked_add(al).expect("scalar lower endpoint fits u128");
+    let high = ax.checked_add(au).expect("scalar upper endpoint fits u128");
+    assert!(low <= rhs && rhs <= high, "exact scalar enclosure failed: {low} <= {rhs} <= {high}");
+}
+
 #[test]
 fn scalar_thermal_goal_encloses_true_error_and_detects_residual_sign() {
     let f = Fixture::new(true, false);
@@ -116,8 +147,12 @@ fn scalar_thermal_goal_encloses_true_error_and_detects_residual_sign() {
         let error = exact[v] - initial[v];
         assert!(error > 0.01);
         let bound = report.enclosure.goal_error().unwrap();
-        assert!(bound.lower() <= error && error <= bound.upper(), "{error} {bound:?}");
         assert!(bound.lower() > 0.0, "residual sign reversal must be detected");
+        let system = assemble_operator(cx, &f.mesh, &f.boundary, &f.material, &f.source, &initial).unwrap();
+        let (matrix, rhs) = reduce(&system, analyzer.dofs());
+        assert_scalar_goal_enclosed(
+            matrix.get(0, 0), rhs[0], initial[v], bound.lower(), bound.upper(),
+        );
         assert!(bound.upper() - bound.lower() < 1e-8);
         assert!(report.enclosure.evaluation_roundoff_upper() > 0.0);
         assert!(report.enclosure.dual_error_upper().unwrap() < 1e-9);

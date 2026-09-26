@@ -130,7 +130,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// temperature maximum and publishes it as the Roundoff budget term.
 /// Version 23 propagates declared material conductivity tolerances (fsim v6)
 /// into the Parameters budget term by bound re-solves.
-pub const SOLVE_DRIVER_VERSION: u32 = 23;
+/// Version 24 bounds linear solver error on the published region maximum,
+/// including possible hot-node relocation, with outward residual/inverse analysis.
+pub const SOLVE_DRIVER_VERSION: u32 = 24;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -168,6 +170,7 @@ const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
+mod algebraic;
 mod conjugate;
 mod radiation;
 mod report_stage;
@@ -1259,6 +1262,9 @@ struct QoiStageInputs {
     propagation: Option<InputPropagation>,
     /// Roundoff bound on the published maximum, when one is requested.
     roundoff: Option<PropagatedTerm>,
+    /// Algebraic error of the actual published linear discrete maximum.
+    /// Unsupported nonlinear/coupled models retain the propagation estimate.
+    solver_algebraic: Option<PropagatedTerm>,
     /// Paired model comparison; this is never used as an error bound.
     radiation_sensitivity: Option<radiation::RadiationSensitivity>,
 }
@@ -4410,6 +4416,7 @@ fn qoi_receipt(
     let term_receipts = propagation_term_receipts(
         inputs.propagation.as_ref(),
         inputs.roundoff.as_ref(),
+        inputs.solver_algebraic.as_ref(),
         conduction_receipt,
     )?;
     let query = OutputQuery::scalar_with_region(&requested[0].name, &requirement.region);
@@ -4634,7 +4641,7 @@ fn qoi_receipt(
         "all eight engineering uncertainty terms carry Estimated evidence (see each term's derivation and the conduction receipt); the verdict is an Estimated decision, not a certificate".to_string()
     } else {
         format!(
-            "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA, so no binary compliance is claimed; measured terms are Estimated: a discretization term is an h-ladder half-width (not a DWR bound), boundary/model-form/solver terms are interval-vertex re-solves of declared inputs (see the conduction receipt's propagation), and measurement is negligible because no observation data enter; no validation, package, promotion, or conjugate-exchange claim"
+            "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA, so no binary compliance is claimed; measured terms are Estimated: discretization uses the retained mesh study, declared inputs use interval-vertex re-solves, and solver error uses the published linear system's outward maximum enclosure when available or an explicitly named tolerance comparison (see each derivation); measurement is negligible because no observation data enter; no validation, package, promotion, or conjugate-exchange claim"
         )
     };
     let nominal = canonical_f64(row.value).ok_or_else(|| {
@@ -6143,13 +6150,21 @@ fn conduction_solve_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
+        let solver_algebraic = match temperature_maximum_region(spec) {
+            Some(region) if roundoff_wanted => {
+                algebraic::maximum_term(&cx, &solved, region, &region_ids, memory_bytes, work)?
+            }
+            _ => None,
+        };
+        adaptive_deadline(deadline)?;
         let roundoff = match temperature_maximum_region(spec) {
             Some(region) if roundoff_wanted => Some(roundoff_term(&cx, &solved, region, &region_ids, work)?),
             _ => None,
         };
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))
+        adaptive_deadline(deadline)?;
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, solver_algebraic))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, solver_algebraic) =
         result;
     let RungSolved {
         census,
@@ -6385,6 +6400,7 @@ fn conduction_solve_receipt(
             discretization,
             propagation: None,
             roundoff,
+            solver_algebraic,
             radiation_sensitivity: None,
         },
     })
@@ -6469,7 +6485,8 @@ fn roundoff_term(
 /// cannot hide. Every value is Estimated.
 #[derive(Debug, Clone)]
 struct InputPropagation {
-    /// Base-fidelity nominal region maximum the deviations are taken from.
+    /// Base-fidelity nominal for input deviations. The solver term may instead
+    /// describe the published field; its own method/detail states that basis.
     nominal_k: f64,
     boundary: PropagatedTerm,
     model_form: PropagatedTerm,
@@ -6546,7 +6563,7 @@ impl InputPropagation {
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; geometry uncertainty is not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "input terms use interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; solver-algebraic uses its separately named published-field linear enclosure or base-field tolerance comparison; geometry uncertainty is not propagated (roundoff is bounded separately on the published solve); Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -6555,6 +6572,7 @@ const PROPAGATION_NO_CLAIM: &str = "interval vertex enumeration through base-fid
 fn propagation_term_receipts(
     propagation: Option<&InputPropagation>,
     roundoff: Option<&PropagatedTerm>,
+    solver_algebraic: Option<&PropagatedTerm>,
     conduction_receipt: ContentHash,
 ) -> Result<Vec<QoiTermReceipt>, SolveRefusal> {
     let refused = |error: fs_airflow::qoi::QoiError| {
@@ -6581,9 +6599,11 @@ fn propagation_term_receipts(
         terms.extend([
             (EngineeringUncertaintyKind::BoundaryConditions, &propagation.boundary),
             (EngineeringUncertaintyKind::ModelForm, &propagation.model_form),
-            (EngineeringUncertaintyKind::SolverAlgebraic, &propagation.solver_algebraic),
             (EngineeringUncertaintyKind::Parameters, &propagation.parameters),
         ]);
+    }
+    if let Some(term) = solver_algebraic.or_else(|| propagation.map(|p| &p.solver_algebraic)) {
+        terms.push((EngineeringUncertaintyKind::SolverAlgebraic, term));
     }
     if let Some(roundoff) = roundoff {
         terms.push((EngineeringUncertaintyKind::Roundoff, roundoff));
@@ -6720,6 +6740,7 @@ fn propagate_declared_inputs(
     work: EvidenceWork<'_>,
     resume: bool,
     available_wall_s: f64,
+    published_solver_algebraic: Option<&PropagatedTerm>,
 ) -> Result<Option<InputPropagation>, SolveRefusal> {
     let (Some(region), Some(envelope)) = (temperature_maximum_region(spec), spec.envelope.as_ref())
     else {
@@ -6867,24 +6888,33 @@ fn propagate_declared_inputs(
         other => other,
     };
 
-    // Solver/algebraic: re-solve the base nominal at a 100x tighter
-    // tolerance; the change bounds the retained tolerance's QoI effect.
+    // A linear enclosure belongs to the published mesh and actual field,
+    // including an adaptive/ladder endpoint. Do not replace it with a base
+    // mesh tolerance comparison or repeat a primal solve to estimate it.
+    // Unsupported nonlinear/coupled models keep the explicitly Estimated
+    // 100x tighter base-solve comparison, which is not an error bound.
     let mut tight = base.clone();
-    let solver_algebraic = match tight.solver.as_mut() {
-        None => PropagatedTerm::Unmeasured { reason: "no solver tolerance is declared".to_string() },
-        Some(solver) => {
-            let declared = solver.tolerance_rel;
-            solver.tolerance_rel = declared * 1e-2;
-            match vertex(format!("tolerance {declared} x 0.01"), &tight, 1.0)? {
-                Ok(row) => PropagatedTerm::Measured {
-                    half_width_k: (row.1 - nominal).abs(),
-                    method: "tolerance-tightening-resolve",
-                    detail: format!(
-                        "the base nominal re-solved with the declared relative tolerance {declared} tightened 100x; the change is the Estimated effect of stopping at the declared tolerance"
-                    ),
-                    vertices: vec![row],
-                },
-                Err(reason) => PropagatedTerm::Unmeasured { reason },
+    let solver_algebraic = if let Some(term) = published_solver_algebraic {
+        term.clone()
+    } else {
+        match tight.solver.as_mut() {
+            None => PropagatedTerm::Unmeasured {
+                reason: "no solver tolerance is declared".to_string(),
+            },
+            Some(solver) => {
+                let declared = solver.tolerance_rel;
+                solver.tolerance_rel = declared * 1e-2;
+                match vertex(format!("tolerance {declared} x 0.01"), &tight, 1.0)? {
+                    Ok(row) => PropagatedTerm::Measured {
+                        half_width_k: (row.1 - nominal).abs(),
+                        method: "tolerance-tightening-resolve",
+                        detail: format!(
+                            "the base nominal re-solved with the declared relative tolerance {declared} tightened 100x; the change is the Estimated effect of stopping at the declared tolerance"
+                        ),
+                        vertices: vec![row],
+                    },
+                    Err(reason) => PropagatedTerm::Unmeasured { reason },
+                }
             }
         }
     };
@@ -6957,7 +6987,10 @@ fn conduction_receipt(
         ledger, spec, cards, context, run, work, resume, available_wall_s, None, 1.0, 0.0,
     )?;
     if let Some(propagation) =
-        propagate_declared_inputs(ledger, spec, cards, context, run, work, resume, available_wall_s)?
+        propagate_declared_inputs(
+            ledger, spec, cards, context, run, work, resume, available_wall_s,
+            product.qoi_inputs.solver_algebraic.as_ref(),
+        )?
     {
         let closing = product.receipt.pop();
         debug_assert_eq!(closing, Some('}'), "a conduction receipt is one JSON object");
@@ -6965,6 +6998,12 @@ fn conduction_receipt(
         product.receipt.push_str(&propagation.json()?);
         product.receipt.push('}');
         product.qoi_inputs.propagation = Some(propagation);
+    }
+    if let Some(term) = &product.qoi_inputs.solver_algebraic {
+        product.receipt.pop();
+        product.receipt.push_str(",\"solver_algebraic\":");
+        product.receipt.push_str(&term.json()?);
+        product.receipt.push('}');
     }
     if let Some(roundoff) = &product.qoi_inputs.roundoff {
         let closing = product.receipt.pop();
