@@ -478,6 +478,24 @@ conductivity, ambient radiation and air feedback retain the explicitly named
 100x tighter base-solve comparison as an estimate, without a linear enclosure
 claim. Old driver checkpoints cannot resume into the changed analysis.
 
+**Maximum-goal corrections** (`solver_control`, driver version 25). Each
+supported linear mesh solve allocates 10% of `budgets.accuracy_rel` times its
+pre-correction temperature rise above the coolest declared reference to
+algebraic error. With no declared reference, the basis is explicitly the
+pre-correction absolute temperature. This is a frozen requested-accuracy
+allocation, not a measured discretization term. The maximum-controlled driver
+performs bounded corrections only when the field misses that Kelvin target.
+The correction budget is the existing linear iteration cap, with at most two
+defect retries and eight iterations between checks; all are retained alongside
+actual work, initial/final bounds, the allocation scale and the stop reason.
+Every adopted field independently passes the original physical residual gate;
+energy, Robin and contact fluxes are recomputed from it. Adaptive comparisons,
+ladder rows, roundoff and QoI all consume this accepted field. A rejected
+physical candidate preserves the original field and records the failed gate.
+Missing inverse evidence, exhausted work, zero/unrepresentable accuracy scales
+and unsupported nonlinear/coupled models never report goal completion. The
+original physical solve still runs; this correction path makes no speedup claim.
+
 The Roundoff term is fs-conduction's componentwise bound
 `γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
 operator behind the field (including a radiating solve's combined partition),

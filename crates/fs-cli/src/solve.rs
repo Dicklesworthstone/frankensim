@@ -132,7 +132,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// into the Parameters budget term by bound re-solves.
 /// Version 24 bounds linear solver error on the published region maximum,
 /// including possible hot-node relocation, with outward residual/inverse analysis.
-pub const SOLVE_DRIVER_VERSION: u32 = 24;
+/// Version 25 allocates requested QoI accuracy to bounded linear maximum
+/// corrections on each mesh, with independent physical residual revalidation.
+pub const SOLVE_DRIVER_VERSION: u32 = 25;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1311,6 +1313,7 @@ struct RungSolved {
     conjugate_fragment: Option<String>,
     radiation_fragment: Option<String>,
     adjoint_data: Option<RungAdjointData>,
+    algebraic: algebraic::MaximumEvidence,
 }
 
 struct RungAdjointData {
@@ -1960,7 +1963,8 @@ fn ladder_row(
             .linear
             .iter()
             .map(|linear| linear.iterations)
-            .sum(),
+            .sum::<usize>()
+            .saturating_add(solved.algebraic.primal_iterations),
     }
 }
 
@@ -6055,7 +6059,7 @@ fn conduction_solve_receipt(
             })
         } else { None };
         adaptive_deadline(deadline)?;
-        Ok(RungSolved {
+        let mut solved = RungSolved {
             census,
             mesh,
             solution,
@@ -6065,7 +6069,18 @@ fn conduction_solve_receipt(
             conjugate_fragment,
             radiation_fragment,
             adjoint_data,
-        })
+            algebraic: algebraic::MaximumEvidence::default(),
+        };
+        if roundoff_wanted && let Some(region) = temperature_maximum_region(spec) {
+            let evidence = algebraic::maximum_term(
+                &cx, &mut solved, region, &region_ids, memory_bytes,
+                spec.budgets.as_ref().expect("admitted solve budgets").accuracy_rel,
+                coolest_declared_temperature(setup), work,
+            )?;
+            solved.algebraic = evidence;
+        }
+        adaptive_deadline(deadline)?;
+        Ok(solved)
         };
         // The h-ladder: rung 0 is the audited base; every further rung is one
         // uniform 1->8 refinement (fs-mesh CONTRACT item 16), taken while the
@@ -6150,21 +6165,14 @@ fn conduction_solve_receipt(
             }
         }
         let estimate = richardson(&rungs, ladder_stop);
-        let solver_algebraic = match temperature_maximum_region(spec) {
-            Some(region) if roundoff_wanted => {
-                algebraic::maximum_term(&cx, &solved, region, &region_ids, memory_bytes, work)?
-            }
-            _ => None,
-        };
-        adaptive_deadline(deadline)?;
         let roundoff = match temperature_maximum_region(spec) {
             Some(region) if roundoff_wanted => Some(roundoff_term(&cx, &solved, region, &region_ids, work)?),
             _ => None,
         };
         adaptive_deadline(deadline)?;
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, solver_algebraic))
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, solver_algebraic) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =
         result;
     let RungSolved {
         census,
@@ -6176,7 +6184,9 @@ fn conduction_solve_receipt(
         conjugate_fragment,
         radiation_fragment,
         adjoint_data: _,
+        algebraic,
     } = solved;
+    let solver_algebraic = algebraic.term;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
 
@@ -6314,7 +6324,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -6355,6 +6365,7 @@ fn conduction_solve_receipt(
         adaptive_fragment.as_deref().unwrap_or("null"),
         conjugate_fragment.as_deref().unwrap_or("null"),
         radiation_fragment.as_deref().unwrap_or("null"),
+        algebraic.control_json.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
     );
