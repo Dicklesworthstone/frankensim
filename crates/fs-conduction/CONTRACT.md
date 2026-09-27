@@ -970,6 +970,16 @@ authority.
   P1 algebra, mixed sensible/latent exchange with an exact one-Newton solution,
   and immutable-history/cancellation refusals. These are numerical checks,
   not experimental material validation or interval error bounds.
+  `cargo run -p fs-conduction --example enthalpy_stefan -- 40 120` evolves a
+  melting front in a fixed tetrahedral slab from an initial similarity field
+  and time-dependent boundary flux. The future front is never imposed. The
+  example reports the computed 50% liquid contour, equivalent molten length,
+  nodal temperature RMS discrepancy and independently integrated whole-run
+  heat balance. Its material values are synthetic numerical-reference inputs.
+  `tests/enthalpy_stefan.rs` holds 480 time steps fixed and refines from 40 to
+  80 axial cells, checking improving front, molten-length and temperature
+  discrepancies plus energy closure. This finite comparison does not establish
+  a formal spatial or temporal order, or validate liquid-flow physics.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and
