@@ -5,6 +5,8 @@ on:
     paths:
       - 'crates/fs-couple/src/iqn_ils.rs'
       - 'crates/fs-couple/src/iqn_ils/**'
+      - 'crates/fs-airflow/examples/stored_air.rs'
+      - 'crates/fs-conduction/src/transient/**'
       - 'crates/fs-math/src/**'
       - '.github/workflows/partitioned-coupling.yml'
   workflow_dispatch:
@@ -40,3 +42,25 @@ jobs:
           "$RUNNER_TEMP/coupling-tests" --nocapture
           rustc --edition=2024 -O --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" -o "$RUNNER_TEMP/coupling-tests-opt"
           "$RUNNER_TEMP/coupling-tests-opt" --nocapture
+  stored-air-conduction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize the repository's pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test the real FEM solid and finite-capacity air consumer
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-airflow --example stored_air
+      - name: Execute the sealed-enclosure pulse and report its accepted trajectory
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 > "$RUNNER_TEMP/stored-air.csv"
+          head -n 2 "$RUNNER_TEMP/stored-air.csv"
+          tail -n 2 "$RUNNER_TEMP/stored-air.csv"
