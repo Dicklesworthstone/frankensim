@@ -13,6 +13,8 @@ use fs_time::adaptive::adjoint::trajectory::{
     samples::SampleObjective,
 };
 
+pub mod observations;
+
 /// One immutable parameter point, including its observation model and data.
 /// `OdeVjp` and `SampleObjective` partials use the SAME decision coordinates as
 /// the family's bounds. Apply physical-unit/parameter-transform chain rules in
