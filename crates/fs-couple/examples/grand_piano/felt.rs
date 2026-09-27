@@ -48,14 +48,43 @@ pub fn average(law: &WoolFelt, state: &State, start_m: f64, end_m: f64,
     (area_m2 * stress, area_m2 * slope / thickness_m)
 }
 
+/// RT-0425/M2AN Kelvin-Voigt hammer term: R_H * d(e^p)/dt. The discrete
+/// difference is passive because e^p is monotone, and the conservative force
+/// above remains the exact power-law energy difference. The unilateral branch
+/// drops a tensile release force; its unrecovered potential is counted as loss.
+pub fn average_with_rate(law: &WoolFelt, state: &State, start_m: f64, end_m: f64,
+    thickness_m: f64, area_m2: f64, rate_n_s_m_p: f64, dt_s: f64) -> (f64, f64) {
+    let (elastic, slope) = average(law, state, start_m, end_m, thickness_m, area_m2);
+    if rate_n_s_m_p == 0.0 { return (elastic, slope); }
+    let power = |e: f64| if e <= 0.0 { 0.0 } else { det::pow(e, law.p) };
+    let viscous = rate_n_s_m_p * (power(end_m) - power(start_m)) / dt_s;
+    let total = elastic + viscous;
+    if total <= 0.0 { return (0.0, 0.0); }
+    let tangent = if end_m > 0.0 {
+        rate_n_s_m_p * law.p * det::pow(end_m, law.p - 1.0) / dt_s
+    } else { 0.0 };
+    (total, slope + tangent)
+}
+
 /// Solve F = average(delta0, delta_free - compliance * F), retaining
 /// a bracket and accepting only a force/overlap residual in SI units.
 /// Returns a force; no material state is committed during trial iterations.
 pub fn solve(law: &WoolFelt, state: &State, start_m: f64, free_m: f64,
     compliance_m_n: f64, thickness_m: f64, area_m2: f64) -> Result<f64, &'static str> {
+    solve_with_rate(law, state, start_m, free_m, compliance_m_n,
+        thickness_m, area_m2, 0.0, 1.0)
+}
+
+pub fn solve_with_rate(law: &WoolFelt, state: &State, start_m: f64, free_m: f64,
+    compliance_m_n: f64, thickness_m: f64, area_m2: f64,
+    rate_n_s_m_p: f64, dt_s: f64) -> Result<f64, &'static str> {
+    if !rate_n_s_m_p.is_finite() || rate_n_s_m_p < 0.0 || !dt_s.is_finite() || dt_s <= 0.0 {
+        return Err("hammer rate coefficient and time step must be finite positive");
+    }
     let mut hi = free_m.min(thickness_m * law.eps_densify);
     let residual = |end: f64| {
-        let (f, df) = average(law, state, start_m, end, thickness_m, area_m2);
+        let (f, df) = average_with_rate(law, state, start_m, end,
+            thickness_m, area_m2, rate_n_s_m_p, dt_s);
         (end + compliance_m_n * f - free_m, 1.0 + compliance_m_n * df, f)
     };
     let (rhi, _, fhi) = residual(hi);
@@ -117,6 +146,27 @@ mod tests {
             assert!(f >= 0.0);
         }
         assert!(solve(&law, &state, 0.0, 0.1, 1e-10, 0.008, 1e-4).is_err());
+    }
+    #[test]
+    fn published_rate_term_is_passive_on_loading_and_unloading() {
+        let law = WoolFelt::new(2.0e6, 0.2, 2.5, 2.5, 0.0, 0.8).unwrap();
+        let state = law.update_state(0.3, &law.initial_state());
+        let (area, thickness, rate, dt) = (1e-4, 0.008, 6.47e5, 1.0/192_000.0);
+        for (start, end) in [(0.0,0.001), (0.001,0.0011), (0.0011,0.0009), (0.0009,0.0)] {
+            let (force, tangent) = average_with_rate(&law,&state,start,end,
+                thickness,area,rate,dt);
+            let elastic = average(&law,&state,start,end,thickness,area).0;
+            let viscous = rate*(end.max(0.0_f64).powf(law.p)-start.max(0.0_f64).powf(law.p))/dt;
+            assert!((force-(elastic+viscous).max(0.0)).abs()<1e-8);
+            assert!(force>=0.0 && tangent>=0.0);
+            let delta_u = area*thickness*(stored(&law,end/thickness,&state)
+                -stored(&law,start/thickness,&state));
+            assert!(force*(end-start)-delta_u >= -1e-10);
+        }
+        let force=solve_with_rate(&law,&state,0.0,0.001,2e-7,
+            thickness,area,rate,dt).unwrap();
+        let end=0.001-2e-7*force;
+        assert!((force-average_with_rate(&law,&state,0.0,end,thickness,area,rate,dt).0).abs()<1e-5);
     }
 }
 

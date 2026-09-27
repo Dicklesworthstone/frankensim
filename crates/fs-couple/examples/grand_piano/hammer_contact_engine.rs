@@ -40,8 +40,9 @@ impl Instrument {
         let material=&self.creep[i];let old=&self.contacts[i];
         let start=old.overlap-material.deformation(&old.memory);
         let free=self.gap[i]+diagonal*self.force[i]-material.free_deformation(&old.memory);
-        let next=felt::solve(&self.laws[ci],&old.state,start,free,
-            diagonal+material.compliance(),c.felt_thickness_m,self.contact_areas[i]).map_err(Error::Contact)?;
+        let next=felt::solve_with_rate(&self.laws[ci],&old.state,start,free,
+            diagonal+material.compliance(),c.felt_thickness_m,self.contact_areas[i],
+            self.source_rate_n_s_m_p[i],1.0/f64::from(self.bank.rate)).map_err(Error::Contact)?;
         let change=next-self.force[i];self.force[i]=next;
         for &j in &self.active {self.gap[j]-=self.contact_h[j*nc+i]*change;}
         Ok(())
@@ -54,13 +55,14 @@ impl Instrument {
         let mut sites=[Site {law:&self.laws[ci],history:&self.contacts[initial].state,
             start_m:0.,thickness_m:c.felt_thickness_m,area_m2:self.contact_areas[initial]};MAX_SITES];
         let mut a=[0.;MAX_SITES*MAX_SITES];let mut free=[0.;MAX_SITES];
-        let mut warm=[0.;MAX_SITES];let mut forces=[0.;MAX_SITES];
+        let mut warm=[0.;MAX_SITES];let mut forces=[0.;MAX_SITES];let mut rates=[0.;MAX_SITES];
         for row in 0..n {
             let i=self.active[first+row];let material=&self.creep[i];let old=&self.contacts[i];
             sites[row]=Site {law:&self.laws[ci],history:&old.state,
                 start_m:old.overlap-material.deformation(&old.memory),
                 thickness_m:c.felt_thickness_m,area_m2:self.contact_areas[i]};
             free[row]=self.gap[i]-material.free_deformation(&old.memory);warm[row]=self.force[i];
+            rates[row]=self.source_rate_n_s_m_p[i];
             for col in 0..n {
                 let j=self.active[first+col];let h=self.contact_h[i*nc+j];
                 free[row]+=h*self.force[j];a[row*n+col]=h;
@@ -70,7 +72,8 @@ impl Instrument {
             a[row*n+row]+=material.compliance();
         }
         self.contact_solver.as_mut().ok_or(Error::Contact("missing prepared hammer block"))?
-            .workspace.solve(&sites[..n],&a[..n*n],&free[..n],&warm[..n],&mut forces[..n])
+            .workspace.solve_with_rates(&sites[..n],&a[..n*n],&free[..n],&warm[..n],
+                &rates[..n],1.0/f64::from(self.bank.rate),&mut forces[..n])
             .map_err(Error::Contact)?;
         // Publish the block into NUMERICAL scratch only after it converges.
         // Every other hammer feels these same signed board reactions. Physical

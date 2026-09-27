@@ -19,6 +19,19 @@ fn verdict(case: &str, detail: &str) {
     );
 }
 
+#[test]
+fn conservative_wool_felt_limit_has_no_loading_cycle_loss() {
+    let law = WoolFelt::new(2.0e6, 0.2, 2.5, 2.5, 0.0, 0.8).unwrap();
+    let mut state = law.initial_state();
+    for strain in [0.05, 0.2, 0.4, 0.3, 0.1, 0.35, 0.0] {
+        let reference = law.envelope(strain).0;
+        assert!((law.stress(strain, &state) - reference).abs() < 1e-8);
+        state = law.update_state(strain, &state);
+    }
+    assert_eq!(law.eps_residual(&state), 0.0);
+    assert!(WoolFelt::new(2.0e6, 0.2, 2.5, 3.0, 0.0, 0.8).is_err());
+}
+
 fn lcg(seed: &mut u64) -> f64 {
     *seed = seed
         .wrapping_mul(6364136223846793005)

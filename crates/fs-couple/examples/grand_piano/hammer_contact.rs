@@ -28,6 +28,10 @@ impl Site<'_> {
     fn force(self, end_m: f64) -> (f64, f64) {
         average(self.law, self.history, self.start_m, end_m, self.thickness_m, self.area_m2)
     }
+    fn force_with_rate(self, end_m: f64, rate: f64, dt: f64) -> (f64, f64) {
+        super::average_with_rate(self.law, self.history, self.start_m, end_m,
+            self.thickness_m, self.area_m2, rate, dt)
+    }
     fn maximum(self) -> f64 { self.thickness_m * self.law.eps_densify }
 }
 
@@ -65,9 +69,19 @@ impl Workspace {
     pub fn solve(&mut self, sites: &[Site<'_>], a: &[f64], free: &[f64],
         initial_force: &[f64], output: &mut [f64]) -> Result<usize, &'static str>
     {
+        if sites.len() > MAX_SITES { return Err("simultaneous hammer site budget exceeded"); }
+        self.solve_with_rates(sites, a, free, initial_force,
+            &[0.0; MAX_SITES][..sites.len()], 1.0, output)
+    }
+
+    pub fn solve_with_rates(&mut self, sites: &[Site<'_>], a: &[f64], free: &[f64],
+        initial_force: &[f64], rates: &[f64], dt: f64,
+        output: &mut [f64]) -> Result<usize, &'static str> {
         let n = sites.len();
         if n == 0 || n > MAX_SITES || a.len() != n*n || free.len() != n
-            || initial_force.len() != n || output.len() != n
+            || initial_force.len() != n || output.len() != n || rates.len() != n
+            || !dt.is_finite() || dt <= 0.0
+            || rates.iter().any(|r| !r.is_finite() || *r < 0.0)
             || a.iter().chain(free).chain(initial_force).any(|v| !v.is_finite())
             || initial_force.iter().any(|f| *f < 0.)
             || (0..n).any(|i| a[i*n+i] <= 0.)
@@ -84,7 +98,7 @@ impl Workspace {
             self.end[i] = end.min(sites[i].maximum());
         }
         for iteration in 0..=MAX_UPDATES {
-            let rnorm = evaluate(sites, a, free, &self.end, &mut self.force,
+            let rnorm = evaluate(sites, a, free, rates, dt, &self.end, &mut self.force,
                 &mut self.derivative, &mut self.residual)?;
             let mut accepted = rnorm <= POSITION_TOL;
             for i in 0..n {
@@ -92,7 +106,7 @@ impl Workspace {
                 // not just at Newton's independent overlap variable.
                 let actual = free[i] - (0..n).map(|j| a[i*n+j]*self.force[j]).sum::<f64>();
                 if !actual.is_finite() || actual > sites[i].maximum() { accepted = false; continue; }
-                let expected = sites[i].force(actual).0;
+                let expected = sites[i].force_with_rate(actual, rates[i], dt).0;
                 if !expected.is_finite() || expected < 0.
                     || (self.force[i]-expected).abs() > FORCE_ABS + FORCE_REL*expected.abs() {
                     accepted = false;
@@ -116,7 +130,7 @@ impl Workspace {
                 let admissible = (0..n).all(|i| self.trial[i].is_finite()
                     && self.trial[i] <= sites[i].maximum());
                 if admissible {
-                    let candidate = evaluate(sites, a, free, &self.trial, &mut self.force,
+                    let candidate = evaluate(sites, a, free, rates, dt, &self.trial, &mut self.force,
                         &mut self.derivative, &mut self.residual)?;
                     if candidate <= (1. - 1e-4*fraction)*rnorm || candidate <= POSITION_TOL {
                         self.end[..n].copy_from_slice(&self.trial[..n]); decreased = true; break;
@@ -130,13 +144,14 @@ impl Workspace {
     }
 }
 
-fn evaluate(sites: &[Site<'_>], a: &[f64], free: &[f64], end: &[f64; MAX_SITES],
+fn evaluate(sites: &[Site<'_>], a: &[f64], free: &[f64], rates: &[f64], dt: f64,
+    end: &[f64; MAX_SITES],
     force: &mut [f64; MAX_SITES], derivative: &mut [f64; MAX_SITES],
     residual: &mut [f64; MAX_SITES]) -> Result<f64, &'static str>
 {
     let n = sites.len(); residual.fill(0.);
     for i in 0..n {
-        (force[i], derivative[i]) = sites[i].force(end[i]);
+        (force[i], derivative[i]) = sites[i].force_with_rate(end[i], rates[i], dt);
         if !force[i].is_finite() || force[i] < 0. || !derivative[i].is_finite() {
             return Err("simultaneous hammer contact has nonfinite or tensile felt force");
         }
