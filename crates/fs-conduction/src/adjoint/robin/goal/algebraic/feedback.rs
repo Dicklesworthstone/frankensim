@@ -8,6 +8,11 @@ use fs_sparse::Csr;
 use fs_solver::goal::feedback::{
     FeedbackResidualLimits, FeedbackResidualReport, enclose_affine_feedback_error_with_inverse,
     enclose_affine_feedback_error_with_schur as enclose_affine_feedback_error,
+    enclose_affine_feedback_error_with_spectral,
+    enclose_affine_feedback_error_with_spectral_inverse,
+};
+use fs_solver::goal::inverse::spectral::{
+    SpectralError, SpectralInverseLimits, SpectralPreparation, prepare_spectral_inverse,
 };
 use super::{ConductionError, Cx, LinearGoalAnalyzer, bounded_solve, invalid, map_enclosure, poll};
 use super::super::super::{RobinPort, bind_ports};
@@ -37,6 +42,7 @@ pub struct LinearRobinFeedbackAnalyzer<'m> {
     responses: Option<Vec<Vec<f64>>>,
     response_iterations: usize,
     config: RobinFeedbackAnalysisConfig,
+    spectral_preparation: Option<SpectralPreparation>,
 }
 
 /// Regional maximum bound for the stored *coupled* solid/reference system.
@@ -257,12 +263,57 @@ impl<'m> LinearGoalAnalyzer<'m> {
         poll(cx, response_iterations)?;
         Ok(LinearRobinFeedbackAnalyzer {
             solid: self, ports, injection, feedback, offset: offsets, responses,
-            response_iterations, config,
+            response_iterations, config, spectral_preparation: None,
         })
     }
 }
 
 impl LinearRobinFeedbackAnalyzer<'_> {
+    /// Prepare a sparse solid-inverse proof once for repeated field assessments.
+    ///
+    /// The factor is built and checked against this analyzer's immutable stored
+    /// operator, not a caller-supplied matrix or stability constant. Preparation
+    /// has its own explicit work/storage allowance; its system limits cannot
+    /// expand the original solid envelope. Later assessments spend only their
+    /// existing residual/response-verification allowance, never factor again.
+    /// Inspect `spectral_preparation()` for the actual paid work and stop reason.
+    /// A failed sufficient proof is retained without a certificate; ordinary
+    /// assessment then keeps its prior comparison/dense-inverse behavior.
+    /// Neither success nor failure changes the physical field or re-solves a
+    /// response column. This opt-in builder may be called once per analyzer.
+    ///
+    /// # Errors
+    /// Invalid proof inputs, original system limits, allocation and cancellation
+    /// refuse. Sparse work/storage exhaustion returns an analyzer with an
+    /// explicit unsuccessful preparation, not fabricated inverse authority.
+    pub fn with_spectral_inverse(
+        mut self, cx: &Cx<'_>, initial_shift: f64, mut limits: SpectralInverseLimits,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        if self.spectral_preparation.is_some() {
+            return Err(invalid("spectral preparation is already retained by this analyzer"));
+        }
+        limits.system.max_rows = limits.system.max_rows.min(self.config.residual.solid.max_rows);
+        limits.system.max_nonzeros = limits.system.max_nonzeros.min(self.config.residual.solid.max_nonzeros);
+        let preparation = prepare_spectral_inverse(
+            &self.solid.response.matrix, initial_shift, limits, || cx.checkpoint().is_ok(),
+        ).map_err(|error| match error {
+            SpectralError::Residual(error) => map_enclosure(error),
+            error => invalid(error.to_string()),
+        })?;
+        poll(cx, preparation.work_entries)?;
+        self.spectral_preparation = Some(preparation);
+        Ok(self)
+    }
+
+    /// One-time proof preparation, including failed attempts and consumed work.
+    /// The certificate, when present, owns its exact matrix and is read-only.
+    /// Per-assessment diagnostics separately report zero *new* preparation work.
+    #[must_use]
+    pub fn spectral_preparation(&self) -> Option<&SpectralPreparation> {
+        self.spectral_preparation.as_ref()
+    }
+
     /// Bound production Robin port geometry and coefficients, in declared order.
     #[must_use]
     pub fn ports(&self) -> &[RobinPort] { &self.ports }
@@ -294,25 +345,72 @@ impl LinearRobinFeedbackAnalyzer<'_> {
     pub fn analyze_maximum(
         &self, cx: &Cx<'_>, temperature: &[f64], vertices: &[usize],
     ) -> Result<LinearRobinMaximumAnalysis, ConductionError> {
+        self.analyze_maximum_inner(cx, temperature, vertices, None)
+    }
+
+    /// Assess the same complete feedback system with a bounded sparse checked
+    /// Gram-inverse fallback when comparison dominance and a retained dense
+    /// inverse are unavailable. No new primal/response solve is performed.
+    ///
+    /// The sparse limits bound fill and work, not measured peak RSS. Every
+    /// shift is independently checked; the complete feedback inverse must
+    /// still be established. Existing maximum assessment is unchanged unless
+    /// this explicit route is requested.
+    ///
+    /// # Errors
+    /// The usual field/selection errors plus sparse proof admission, resource,
+    /// arithmetic and cancellation refusals. Missing evidence is never zero.
+    pub fn analyze_maximum_with_spectral_fallback(
+        &self, cx: &Cx<'_>, temperature: &[f64], vertices: &[usize],
+        limits: SpectralInverseLimits,
+    ) -> Result<LinearRobinMaximumAnalysis, ConductionError> {
+        self.analyze_maximum_inner(cx, temperature, vertices, Some(limits))
+    }
+
+    fn analyze_maximum_inner(
+        &self, cx: &Cx<'_>, temperature: &[f64], vertices: &[usize],
+        spectral: Option<SpectralInverseLimits>,
+    ) -> Result<LinearRobinMaximumAnalysis, ConductionError> {
         // Validate the region and field, but do not first certify a frozen
         // solid. That would repeat dense inverse verification and discard its
         // result. The complete coupled equation owns the ONE numerical pass.
         let (fixed, moving, free_vertices) = selected_maximum(&self.solid, cx, temperature, vertices)?;
         let free = self.solid.dofs().gather(temperature);
-        let coupled = match self.solid.inverse_columns() {
+        let coupled = if let Some(certificate) = self.spectral_preparation.as_ref()
+            .and_then(|preparation| preparation.certificate.as_ref())
+        {
+            enclose_affine_feedback_error_with_spectral_inverse(
+                certificate, &self.solid.rhs, &free,
+                &self.injection, &self.feedback, &self.offset,
+                self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                self.config.residual, || cx.checkpoint().is_ok(),
+            )
+        } else { match self.solid.inverse_columns() {
             Some(columns) => enclose_affine_feedback_error_with_inverse(
                 &self.solid.response.matrix, &self.solid.rhs, &free,
                 &self.injection, &self.feedback, &self.offset,
                 self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
                 columns, self.config.residual, || cx.checkpoint().is_ok(),
             ),
-            None => enclose_affine_feedback_error(
-                &self.solid.response.matrix, &self.solid.rhs, &free,
-                &self.injection, &self.feedback, &self.offset,
-                self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
-                self.config.residual, || cx.checkpoint().is_ok(),
-            ),
-        }.map_err(map_enclosure)?;
+            None => match spectral {
+                Some(limits) => match enclose_affine_feedback_error_with_spectral(
+                    &self.solid.response.matrix, &self.solid.rhs, &free,
+                    &self.injection, &self.feedback, &self.offset,
+                    self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                    self.config.residual, limits, || cx.checkpoint().is_ok(),
+                ) {
+                    Ok(report) => Ok(report),
+                    Err(SpectralError::Residual(error)) => Err(error),
+                    Err(error) => return Err(invalid(error.to_string())),
+                },
+                None => enclose_affine_feedback_error(
+                    &self.solid.response.matrix, &self.solid.rhs, &free,
+                    &self.injection, &self.feedback, &self.offset,
+                    self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                    self.config.residual, || cx.checkpoint().is_ok(),
+                ),
+            },
+        } }.map_err(map_enclosure)?;
         let error = if free_vertices == 0 { Some(0.0) } else { coupled.state_error_infinity_upper() };
         let nominal = fixed.max(moving);
         let interval = error.and_then(|error| {
