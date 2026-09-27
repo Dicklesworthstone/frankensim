@@ -81,6 +81,20 @@ where claimed below.
   an independently preconditioned transposed FGMRES solve. Workspaces are
   conservatively capped, prior input history is borrowed, and failed solves,
   incomplete derivatives or cancellation return no partial result.
+- `galpha::initialization::{first_order_rate, second_order_acceleration}` solve
+  the initial mass equations `M rate = f-r(t,u)` and `M a = f-Cv-r(q)` with
+  bounded FGMRES and an explicit mass preconditioner. The corresponding
+  `first_order_rate_vjp` and `second_order_acceleration_vjp` solve the transposed
+  mass system and propagate the rate/acceleration seed into initial state,
+  velocity, model parameters and forcing. Parameter-dependent mass and damping
+  enter the same residual-parameter VJPs used by the step adjoints. These
+  routines provide the consistency chain needed when an inverse problem's
+  initial rate or acceleration changes with its parameters. They hold time
+  fixed, require a nonsingular mass model, return both residual reports, bound
+  scalar workspace, and publish no partial result on cancellation or refusal.
+  The caller supplies the force at the initial physical time and applies any
+  remaining state/velocity/forcing parameterization. They do not establish
+  uniqueness of a singular-mass model or solve constrained DAE initialization.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,

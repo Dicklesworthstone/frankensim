@@ -12,6 +12,8 @@ use std::fmt;
 
 #[path = "galpha/adjoint.rs"]
 pub mod adjoint;
+#[path = "galpha/initialization.rs"]
+pub mod initialization;
 #[path = "galpha/second_order_adjoint.rs"]
 pub mod second_order_adjoint;
 
