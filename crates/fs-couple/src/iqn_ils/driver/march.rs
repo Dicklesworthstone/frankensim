@@ -6,6 +6,9 @@
 //! This is not a disk checkpoint format, map-identity verifier or mid-iteration
 //! restart protocol. Failed steps are retried from their unchanged start state.
 
+/// Step-doubled error control and bounded shorter-step recovery.
+pub mod adaptive;
+
 use super::{
     CouplingControls, CouplingError, CouplingInputError,
     CouplingMethod, CouplingReport, CouplingTrial, IqnIls, IqnIlsError,
