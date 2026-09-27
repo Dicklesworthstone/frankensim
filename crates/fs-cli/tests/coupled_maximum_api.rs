@@ -1,4 +1,7 @@
 //! Public solid/air consumer path, with no mocked solver or precomputed output.
+#[path = "coupled_maximum_api/solve.rs"]
+mod goal_control;
+
 use fs_airflow::conjugate::{AirPath, AirSegment};
 use fs_airflow::conjugate::goal::maximum::{affine_reference_law, prepare_linear_maximum};
 use fs_conduction::adjoint::{LinearGoalAnalyzer, LinearGoalAnalysisConfig,

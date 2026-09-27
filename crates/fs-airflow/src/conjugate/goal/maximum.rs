@@ -16,6 +16,9 @@ use fs_exec::Cx;
 
 use super::{AirPath, BTreeSet, Result, admitted_exchange_terms, bad, finite, poll};
 
+mod solve;
+pub use solve::{LinearAirMaximumSolve, solve_linear_maximum};
+
 /// Immutable affine reference law in branch-major, stream-wise region order.
 /// Created only from admitted physical AirPath values, never from unit probes
 /// or a finite-difference Jacobian at one temperature field.
