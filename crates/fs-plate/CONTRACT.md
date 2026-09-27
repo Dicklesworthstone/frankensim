@@ -113,7 +113,10 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   Positive diagonal lumped mass is required; the exact mass preconditioner
   supports consistent acceleration and its initialization pullback. An
   effective-operator Jacobi preconditioner supports the explicit adjoint
-  solve. The shared primal Newton driver retains its current preconditioner.
+  solve. Forward Newton/FGMRES automatically uses the same physical diagonal
+  through the model hook, using the integrator's actual effective mass,
+  damping and tangent weights. This action allocates no scratch and refuses
+  nonpositive, nonfinite or noninvertible diagonals before a step is accepted.
   DOF, full support-map, stored-entry and load-parameter caps precede scanning
   or allocation. Admission/preconditioner construction polls cancellation;
   operator/load callback work is bounded by the admitted model and caller.
