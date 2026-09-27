@@ -174,3 +174,6 @@ pub fn prepare_linear_maximum<'m>(
     poll(cx)?;
     Ok(analyzer)
 }
+
+/// Physical residual, energy and independently marched-air acceptance of corrections.
+pub mod physical;
