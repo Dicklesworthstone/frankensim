@@ -64,3 +64,41 @@ jobs:
         run: |
           cargo test --release -p fs-ascent --features transient-design --test structural_calibration
           cargo run --release -p fs-ascent --features transient-design --example structural_calibration
+  sensor-lag-algebra:
+    # Compile the actual adapter and four actual algebra tests even when the
+    # unrelated constellation bootstrap blocks full workspace integration.
+    # This job is NOT a substitute for the complete tests above.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check sensor adapter source in debug and optimized builds
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path.cwd()
+          obs = root / 'crates/fs-ascent/src/transient/observations'
+          traits = (root / 'crates/fs-time/src/adaptive/adjoint.rs').read_text()
+          traits += obs.with_suffix('.rs').read_text()
+          source = '\n'.join(re.search(r'pub trait ' + name + r'\s*\{.*?\n\}', traits, re.S).group()
+                             for name in ['OdeVjp', 'SensorModel', 'SensorFamily'])
+          source += '\n#[path = ' + json.dumps(str(obs / 'lag.rs')) + '] mod lag;\nuse lag::*;\n'
+          tests = (obs / 'lag/tests.rs').read_text()
+          source += 'const BOUNDS:' + tests.split('const BOUNDS:', 1)[1].split('fn cfg(', 1)[0]
+          names = ['augmented_rhs_transpose_matches_state_and_parameter_differences',
+                   'equilibrium_initialization_propagates_direct_and_physical_dependencies',
+                   'channel_shadowing_passthrough_and_readout_bias_have_distinct_derivatives',
+                   'malformed_sensor_layouts_and_unknown_sources_refuse']
+          for name in names:
+              body = tests.split('fn ' + name + '(', 1)[1].split('\n}\n', 1)[0]
+              source += 'fn ' + name + '(' + body + '\n}\n'
+          source += 'fn main() { ' + '; '.join(name + '()' for name in names)
+          source += '; println!("4 sensor-lag source algebra checks passed"); }\n'
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'lag_source_check.rs').write_text(source)
+          PY
+          for opt in 0 3; do
+            rustc +stable --edition=2024 -C opt-level="$opt" "$RUNNER_TEMP/lag_source_check.rs" -o "$RUNNER_TEMP/lag-source-check-$opt"
+            "$RUNNER_TEMP/lag-source-check-$opt"
+          done
