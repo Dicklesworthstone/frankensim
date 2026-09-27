@@ -62,6 +62,56 @@ impl ObservationBlock {
         let mut lower = zeros(matrix)?; lower.copy_from_slice(noise_lower);
         Ok(Self { time, ids: owned_ids, values: owned_values, lower })
     }
+    /// Independent errors plus one common reference offset at THIS timestamp:
+    /// R_ij = sigma_i^2 * delta_ij + common_sigma^2. The offset is newly drawn
+    /// independently for each block, not a bias persistent across forecasts.
+    /// All inputs use the same signal unit. No covariance squares are formed.
+    ///
+    /// Scalar Gaussian conditioning builds its lower factor directly: the
+    /// remaining common-source standard deviation is updated after each row.
+    /// `max_components` covers construction's two m-by-m buffers and 2*m
+    /// retained values/IDs, excluding caller inputs and allocator metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shared_reference<C: FnMut() -> bool>(
+        time: f64, ids: &[u64], values: &[f64], independent_sigma: &[f64], common_sigma: f64,
+        max_observations: usize, max_components: usize, cancelled: &mut C,
+    ) -> Result<Self, EnsembleError> {
+        poll(cancelled)?;
+        let m = ids.len();
+        let matrix = m.checked_mul(m).ok_or(EnsembleError::Invalid("shared-reference extent overflow"))?;
+        let required = matrix.checked_add(m).and_then(|v| v.checked_mul(2))
+            .ok_or(EnsembleError::Invalid("shared-reference extent overflow"))?;
+        if required > max_components {
+            return Err(EnsembleError::WorkspaceLimit { required, limit: max_components });
+        }
+        if m == 0 || m > max_observations || values.len() != m || independent_sigma.len() != m
+            || !time.is_finite() || !common_sigma.is_finite() || common_sigma < 0.0
+            || values.iter().any(|v| !v.is_finite())
+            || independent_sigma.iter().any(|s| !s.is_finite() || *s <= 0.0)
+        { return Err(EnsembleError::Invalid("invalid shared-reference readings or noise scales")); }
+        if ids.windows(2).any(|p| p[0] >= p[1]) { return Err(EnsembleError::ObservationOrder); }
+        let mut lower = zeros(matrix)?;
+        let mut remaining = common_sigma;
+        for j in 0..m {
+            poll(cancelled)?;
+            let independent = independent_sigma[j];
+            let diagonal = finite(independent.hypot(remaining), "shared-reference diagonal")?;
+            lower[j*m+j] = diagonal;
+            let common = finite(remaining*(remaining/diagonal), "shared-reference loading")?;
+            for i in j+1..m {
+                if i % 256 == 0 { poll(cancelled)?; }
+                lower[i*m+j] = common;
+            }
+            // min * (max/hypot) avoids spurious zero from an underflowed ratio
+            // when the two positive scales are many orders of magnitude apart.
+            remaining = remaining.min(independent)*(remaining.max(independent)/diagonal);
+        }
+        poll(cancelled)?;
+        let block = Self::new(time, ids, values, &lower, max_observations, max_components)?;
+        poll(cancelled)?;
+        Ok(block)
+    }
+
     pub fn time(&self) -> f64 { self.time }
     pub fn ids(&self) -> &[u64] { &self.ids }
     pub fn values(&self) -> &[f64] { &self.values }

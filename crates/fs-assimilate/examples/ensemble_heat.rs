@@ -8,11 +8,15 @@
 //!
 //! Optional CSV: time_s,node,temperature_k,sigma_k (ordered times, zero-based
 //! interior node). Sigma denotes independent measurement standard deviation.
+//! --shared-sigma K adds a common reference error within each timestamp; these
+//! reference errors are independent between timestamps. No persistent bias is
+//! inferred. At most 32 distinct thermocouples share one timestamp in this mode.
 //! No input file uses labeled noiseless synthetic readings, not experimental
 //! data. Run: cargo run -p fs-assimilate --features ensemble --example ensemble_heat
 
 use fs_assimilate::nonlinear::ensemble::{Ensemble, EnsembleControl, EnsembleError, EnsembleObservation};
 use fs_assimilate::nonlinear::ensemble::forecast::ForecastStatus;
+use fs_assimilate::nonlinear::ensemble::correlated::ObservationBlock;
 use std::io::Read;
 
 const N: usize = 513;
@@ -104,17 +108,72 @@ fn estimate(rows:&[Reading], chunk:usize)->Result<(Ensemble,usize),EnsembleError
     }
     Ok((state,control.model_calls()))
 }
+/// Each timestamp is one independent reference-error block. This is not a
+/// persistent calibration-bias state, which would have to be forecast too.
+fn estimate_shared(rows:&[Reading], chunk:usize, common_sigma:f64)->Result<(Ensemble,usize),EnsembleError> {
+    const MAX_BLOCK: usize=32;
+    if chunk==0 || rows.is_empty() || rows.len()>MAX_ROWS || !common_sigma.is_finite() || common_sigma<0.0 {
+        return Err(EnsembleError::Invalid("invalid shared-reference campaign or forecast chunk"));
+    }
+    let mut state=prior()?;
+    let workspace=(2*N*MEMBERS+N).max(2*MEMBERS*(N+MAX_BLOCK)+MEMBERS+2*MAX_BLOCK);
+    let mut control=EnsembleControl::new(2*MEMBERS*MAX_ROWS,workspace);
+    let mut start=0;
+    while start<rows.len() {
+        let time=rows[start].time;
+        let mut end=start+1;
+        while end<rows.len() && rows[end].time==time {end+=1;}
+        let group=&rows[start..end];
+        if group.len()>MAX_BLOCK || group.iter().enumerate().any(|(i,r)|r.node>=N || group[..i].iter().any(|p|p.node==r.node)) {
+            return Err(EnsembleError::Invalid("at most 32 distinct thermocouples per timestamp required"));
+        }
+        let ids=(start..end).map(|i|i as u64).collect::<Vec<_>>();
+        let values=group.iter().map(|r|r.value).collect::<Vec<_>>();
+        let sigma=group.iter().map(|r|r.sigma).collect::<Vec<_>>();
+        let block=ObservationBlock::shared_reference(time,&ids,&values,&sigma,common_sigma,
+            MAX_BLOCK,2*MAX_BLOCK*MAX_BLOCK+2*MAX_BLOCK,&mut||false)?;
+        if time>state.time() {
+            let mut job=state.forecast(time,&control,&mut||false)?;
+            while job.advance(chunk,&mut heat_step,&mut control,&mut||false)?.status!=ForecastStatus::Complete {}
+            state=job.finish()?;
+        }
+        state.assimilate_correlated(&block,&mut|_,_,x,out,_|{
+            for (value,row) in out.iter_mut().zip(group) {*value=x[row.node];}Ok(())
+        },&mut control,&mut||false)?;
+        start=end;
+    }
+    Ok((state,control.model_calls()))
+}
+
+fn options(args:&[String])->Result<(Option<&str>,Option<f64>),String> {
+    let mut path=None;let mut shared=None;let mut i=0;
+    while i<args.len() {
+        if args[i]=="--shared-sigma" && shared.is_none() {
+            let sigma:f64=args.get(i+1).ok_or("--shared-sigma requires a scale in kelvin")?
+                .parse().map_err(|_|"invalid shared-reference scale")?;
+            if !sigma.is_finite() || sigma<0.0 {return Err("shared-reference scale must be finite and nonnegative".into());}
+            shared=Some(sigma);i+=2;
+        } else if path.is_none() && !args[i].starts_with("--") {path=Some(args[i].as_str());i+=1;}
+        else {return Err("usage: ensemble_heat [readings.csv] [--shared-sigma kelvin]".into());}
+    }
+    Ok((path,shared))
+}
+
 fn rmse(a:&[f64],b:&[f64])->f64 { (a.iter().zip(b).map(|(a,b)|(a-b)*(a-b)).sum::<f64>()/a.len() as f64).sqrt() }
 fn main()->Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_>=std::env::args().skip(1).collect();
-    if args.len()>1 {return Err("usage: ensemble_heat [readings.csv]".into());}
-    let (rows,truth,source)=if let Some(path)=args.first() {
+    let (path,shared_sigma)=options(&args)?;
+    let (rows,truth,source)=if let Some(path)=path {
         let mut text=String::new();std::fs::File::open(path)?.take(65_537).read_to_string(&mut text)?;
         (parse(&text)?,None,"csv")
     } else {let (rows,truth)=synthetic()?;(rows,Some(truth),"synthetic-noiseless")};
-    let (result,calls)=estimate(&rows,2)?;let control=EnsembleControl::new(0,2*N);
+    let (result,calls)=match shared_sigma {
+        Some(sigma)=>estimate_shared(&rows,2,sigma)?, None=>estimate(&rows,2)?,
+    };
+    let control=EnsembleControl::new(0,2*N);
     let moments=result.moments(&control,&mut || false)?;
     println!("source={source} state_nodes={N} members={MEMBERS} observations={} time_s={} model_calls={calls}",rows.len(),result.time());
+    if let Some(sigma)=shared_sigma {println!("noise=independent-plus-reference-per-timestamp shared_sigma_k={sigma}");}
     if let Some(truth)=truth {println!("synthetic_field_rmse_k={:.8}",rmse(&moments.mean,&truth));}
     println!("node,estimated_temperature_k,sample_std_k");
     for node in [0,102,257,410,N-1] {println!("{node},{:.8},{:.8}",moments.mean[node],moments.std[node]);}
@@ -143,5 +202,36 @@ mod tests {
         for data in ["", "0,513,310,0.2\n", "0,102,NaN,0.2\n", "0,102,310,0\n", "1,102,310,0.2\n0,102,310,0.2\n"] {
             assert!(parse(&format!("{header}{data}")).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+    #[test]
+    fn shared_reference_heat_uses_vector_predictions_and_replays_forecast_chunks() {
+        let (rows,truth)=synthetic().unwrap();
+        let (a,calls)=estimate_shared(&rows,MEMBERS,0.8).unwrap();let (b,split)=estimate_shared(&rows,2,0.8).unwrap();
+        assert_eq!(a,b);assert_eq!(calls,48);assert_eq!(split,calls);
+        let moments=a.moments(&EnsembleControl::new(0,2*N),&mut||false).unwrap();
+        assert!(rmse(&moments.mean,&truth)<0.15);
+        let (independent,_)=estimate(&rows,2).unwrap();
+        let diagonal=independent.moments(&EnsembleControl::new(0,2*N),&mut||false).unwrap();
+        assert!(moments.std.iter().sum::<f64>()>diagonal.std.iter().sum::<f64>());
+        let (zero,_)=estimate_shared(&rows,2,0.0).unwrap();
+        let zero=zero.moments(&EnsembleControl::new(0,2*N),&mut||false).unwrap();
+        assert!(rmse(&zero.mean,&diagonal.mean)<1e-9);
+    }
+    #[test]
+    fn shared_reference_options_and_repeated_sensors_refuse() {
+        for args in [vec!["--shared-sigma"],vec!["--shared-sigma","NaN"],vec!["--shared-sigma","-1"],
+            vec!["--shared-sigma","0.2","--shared-sigma","0.3"],vec!["--unknown"]] {
+            assert!(options(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        }
+        let args=vec!["data.csv".to_owned(),"--shared-sigma".to_owned(),"0.8".to_owned()];
+        assert_eq!(options(&args).unwrap(),(Some("data.csv"),Some(0.8)));
+        let row=Reading{time:0.0,node:2,value:301.0,sigma:0.2};
+        assert!(estimate_shared(&[row,row],2,0.5).is_err());
+        assert!(estimate_shared(&[row],0,0.5).is_err());
     }
 }

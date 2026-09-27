@@ -162,3 +162,47 @@ fn field_sized_block_uses_no_state_covariance_or_per_sensor_model_calls() {
     e.assimilate_correlated(&data,&mut|_,_,x,out,_|{out[0]=x[0];out[1]=x[n-1];Ok(())},&mut control,&mut||false).unwrap();
     assert_eq!(control.model_calls(),8);assert!(e.values().iter().all(|v|v.is_finite()));assert_eq!(e.dimension(),n);
 }
+
+#[test]
+fn shared_reference_factor_reconstructs_declared_covariance_without_jitter() {
+    let sigma=[0.2_f64,1.5,0.7,0.03];let common=0.8_f64;
+    let data=ObservationBlock::shared_reference(2.0,&[1,2,3,4],&[0.0;4],&sigma,common,4,40,&mut||false).unwrap();
+    for i in 0..4 {for j in 0..4 {
+        let r=(0..4).map(|k|data.lower[4*i+k]*data.lower[4*j+k]).sum::<f64>();
+        let expected=common*common+if i==j {sigma[i]*sigma[i]} else {0.0};
+        assert!((r-expected).abs()<1e-14);
+    }}
+    let diagonal=ObservationBlock::shared_reference(2.0,&[1,2,3,4],&[0.0;4],&sigma,0.0,4,40,&mut||false).unwrap();
+    for i in 0..4 {for j in 0..4 {assert_eq!(diagonal.lower[4*i+j],if i==j {sigma[i]} else {0.0});}}
+}
+
+#[test]
+fn many_common_reference_readings_retain_the_information_ceiling() {
+    let m=32;let ids=(0..m as u64).collect::<Vec<_>>();
+    let data=ObservationBlock::shared_reference(0.0,&ids,&vec![3.0;m],&vec![0.5;m],2.0,m,2*m*m+2*m,&mut||false).unwrap();
+    let mut e=Ensemble::new(0.0,1,&[-1.0,0.0,1.0],3).unwrap();
+    e.assimilate_correlated(&data,&mut|_,_,x,out,_|{out.fill(x[0]);Ok(())},&mut EnsembleControl::new(3,1000),&mut||false).unwrap();
+    let moments=e.moments(&EnsembleControl::new(0,2),&mut||false).unwrap();
+    let effective=4.0+0.25/m as f64;
+    assert!((moments.mean[0]-3.0/(1.0+effective)).abs()<1e-12);
+    assert!((moments.std[0]*moments.std[0]-effective/(1.0+effective)).abs()<1e-12);
+    assert!(moments.std[0]*moments.std[0]>0.8);
+}
+
+#[test]
+fn shared_reference_rejects_invalid_scales_and_cancels_construction() {
+    for bad in [f64::NAN,-1.0,f64::INFINITY] {
+        assert!(ObservationBlock::shared_reference(0.0,&[1,2],&[0.0;2],&[1.0;2],bad,2,12,&mut||false).is_err());
+    }
+    assert!(ObservationBlock::shared_reference(0.0,&[1,2],&[0.0;2],&[1.0,0.0],0.1,2,12,&mut||false).is_err());
+    assert_eq!(ObservationBlock::shared_reference(0.0,&[1,2],&[0.0;2],&[1.0;2],0.1,2,11,&mut||false),
+        Err(EnsembleError::WorkspaceLimit{required:12,limit:11}));
+    let mut polls=0;
+    assert_eq!(ObservationBlock::shared_reference(0.0,&[1,2],&[0.0;2],&[1.0;2],0.1,2,12,&mut||{polls+=1;polls==3}),Err(EnsembleError::Cancelled));
+    // Factor generation handles scales whose squares overflow or underflow.
+    for scale in [1e-200_f64,1e200] {
+        let b=ObservationBlock::shared_reference(0.0,&[1,2],&[0.0;2],&[scale;2],scale,2,12,&mut||false).unwrap();
+        assert!(b.noise_lower().iter().all(|x|x.is_finite()));
+        assert!((b.noise_lower()[0]/scale-2.0_f64.sqrt()).abs()<1e-14);
+    }
+}
