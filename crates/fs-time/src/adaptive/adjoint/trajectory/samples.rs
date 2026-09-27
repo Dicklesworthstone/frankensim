@@ -9,6 +9,9 @@
 
 use super::*;
 
+/// Objectives that couple observations at different times.
+pub mod joint;
+
 /// An additive scalar objective at one fixed observation time. `sample` indexes
 /// the original immutable time array, including repeated times. Write every
 /// state and direct-parameter partial, including zeros, holding time fixed.
@@ -90,9 +93,10 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
             let last = self.sample_times.partition_point(|t| *t <= time);
             self.observe_range(objective, first..last, state, bar, &mut value, &mut observations, cancelled)
         };
-        let mut bar = if self.records.is_empty() { bar } else {
+        let bar = if self.records.is_empty() { bar } else {
             self.segment(&self.initial, 0, self.records.len(), bar, 1, &mut progress, &mut observe, cancelled)?
         };
+        let mut bar = bar;
         let start = self.records.first().map_or(self.state.t, |r| r.start);
         let initial_samples = self.sample_times.partition_point(|t| *t <= start);
         self.observe_range(objective, 0..initial_samples, &self.initial, &mut bar,
