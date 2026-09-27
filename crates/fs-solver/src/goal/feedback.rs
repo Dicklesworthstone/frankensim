@@ -16,6 +16,9 @@ use super::arithmetic::{add_up, down, mul_up, up};
 
 mod schur;
 pub use schur::enclose_affine_feedback_error_with_schur;
+mod spectral;
+pub use spectral::{SpectralFeedbackDiagnostics, enclose_affine_feedback_error_with_spectral,
+    enclose_affine_feedback_error_with_spectral_inverse};
 
 /// Independently checked sufficient condition used for the coupled inverse.
 /// Neither route proves dynamical or fixed-point-iteration stability.
@@ -82,6 +85,7 @@ pub struct FeedbackResidualReport {
     response_residual_infinity_upper: Vec<f64>,
     inverse_method: Option<FeedbackInverseMethod>,
     schur_inverse_infinity_upper: Option<f64>,
+    solid_spectral: Option<SpectralFeedbackDiagnostics>,
 }
 
 impl FeedbackResidualReport {
@@ -115,6 +119,12 @@ impl FeedbackResidualReport {
     /// ||(I-C A^-1 B)^-1||_inf from outward port-Schur row dominance, if used.
     #[must_use]
     pub const fn schur_inverse_infinity_upper(&self) -> Option<f64> { self.schur_inverse_infinity_upper }
+    /// Sparse Gram-verification diagnostics, when that route supplied solid stability.
+    /// This diagnostic copy is not an independently reusable operator proof.
+    #[must_use]
+    pub const fn solid_spectral(&self) -> Option<&SpectralFeedbackDiagnostics> {
+        self.solid_spectral.as_ref()
+    }
 }
 
 fn limit(field: &'static str, required: usize, allowed: usize) -> Result<(), GoalResidualError> {
@@ -227,6 +237,19 @@ fn enclose_feedback(
     inverse_columns: Option<&[Vec<f64>]>, limits: FeedbackResidualLimits,
     checkpoint: impl FnMut() -> bool,
 ) -> Result<(FeedbackResidualReport, usize), GoalResidualError> {
+    enclose_feedback_inner(matrix, rhs, primal, injection, feedback, offset,
+        responses, scaling, inverse_columns, None, limits, checkpoint)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn enclose_feedback_inner(
+    matrix: &Csr, rhs: &[f64], primal: &[f64],
+    injection: &Csr, feedback: &Csr, offset: &[f64],
+    responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
+    inverse_columns: Option<&[Vec<f64>]>,
+    spectral: Option<&super::inverse::spectral::SpectralInverse>,
+    limits: FeedbackResidualLimits, checkpoint: impl FnMut() -> bool,
+) -> Result<(FeedbackResidualReport, usize), GoalResidualError> {
     let mut work = Work { checkpoint, left: 512 };
     work.poll()?;
     let n = matrix.nrows();
@@ -267,14 +290,21 @@ fn enclose_feedback(
         for column in columns { vector("response column", column, n, &mut work)?; }
     }
     let zeros = scalar_vector(n, &mut work)?;
-    let solid = match inverse_columns {
+    let solid = if let Some(proof) = spectral {
+        // Only the private spectral wrappers supply this branch, taking the
+        // operator directly from proof.matrix(); no naked stability scalar.
+        proof.enclose_goal_error(
+            rhs, primal, &zeros, &zeros, scaling,
+            limits.solid, || (work.checkpoint)(),
+        )?
+    } else { match inverse_columns {
         Some(columns) => super::inverse::enclose_goal_error_with_inverse(
             matrix, rhs, primal, &zeros, &zeros, scaling, columns,
             limits.solid, || (work.checkpoint)(),
         )?,
         None => enclose_goal_error(matrix, rhs, primal, &zeros, &zeros, scaling,
             limits.solid, || (work.checkpoint)())?,
-    };
+    } };
     let mut ports = scratch(p, &mut work)?;
     let mut c_norm = scalar_vector(p, &mut work)?;
     let mut gain_range = false;
@@ -321,6 +351,7 @@ fn enclose_feedback(
         gain_infinity_upper: None, coupled_inverse_infinity_upper: None,
         state_error_infinity_upper: None, response_residual_infinity_upper: Vec::new(),
         inverse_method: None, schur_inverse_infinity_upper: None,
+        solid_spectral: None,
     };
     if let Some(inverse) = inverse {
         let mut gain = if gain_range { None } else { mul_up(inverse, perturbation_inf).ok() };
