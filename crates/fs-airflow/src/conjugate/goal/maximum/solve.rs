@@ -80,7 +80,16 @@ pub(super) fn finish(
     initial_temperature: &[f64], region_vertices: &[usize], control: LinearGoalSolveConfig,
 ) -> Result<LinearAirMaximumSolve> {
     let solid = analyzer.solve_maximum_to_goal(cx, initial_temperature, region_vertices, control)?;
-    let wall_temperatures_k = analyzer.wall_mean_temperatures(cx, &solid.temperature)?;
+    let (wall_temperatures_k, air) = air_from_temperature(cx, analyzer, paths, &solid.temperature)?;
+    poll(cx)?;
+    Ok(LinearAirMaximumSolve { solid, wall_temperatures_k, air })
+}
+
+pub(super) fn air_from_temperature(
+    cx: &Cx<'_>, analyzer: &LinearRobinFeedbackAnalyzer<'_>, paths: &[AirPath],
+    temperature: &[f64],
+) -> Result<(Vec<f64>, Vec<AirMarch>)> {
+    let wall_temperatures_k = analyzer.wall_mean_temperatures(cx, temperature)?;
     let mut air = Vec::new();
     air.try_reserve_exact(paths.len()).map_err(|_| bad("air maximum result allocation refused"))?;
     let mut start = 0;
@@ -92,5 +101,5 @@ pub(super) fn finish(
         start = end;
     }
     poll(cx)?;
-    Ok(LinearAirMaximumSolve { solid, wall_temperatures_k, air })
+    Ok((wall_temperatures_k, air))
 }

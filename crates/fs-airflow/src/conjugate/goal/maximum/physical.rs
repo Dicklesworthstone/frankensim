@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use fs_conduction::{ConductionError, ConductionSolution, ThermalBoundary};
 use fs_conduction::adjoint::LinearGoalSolveConfig;
 use crate::conjugate::AirMarch;
-use super::{AirPath, ConductionProblem, Cx, LinearConfig, LinearGoalAnalysisConfig,
-    Result, RobinFeedbackAnalysisConfig, SpectralAirMaximumSolve, SpectralMaximumControl,
-    ThermalInterfaces, bad, finite, poll, solve_linear_maximum_with_spectral};
+use super::{AirPath, ConductionProblem, Cx, LinearAirMaximumSolve, LinearConfig,
+    LinearGoalAnalysisConfig, Result, RobinFeedbackAnalysisConfig, SpectralAirMaximumSolve,
+    SpectralMaximumControl, ThermalInterfaces, bad, finite, poll, solve, spectral};
 
 /// Explicit physical acceptance, in addition to the original solution's
 /// absolute residual threshold. No tolerance is inferred from the goal bound.
@@ -97,47 +97,56 @@ pub struct PhysicalAirMaximumPolish {
     pub correction: SpectralAirMaximumSolve,
     /// Present only after all physical gates and the final cancellation check.
     pub accepted: Option<AcceptedLinearCooling>,
-    /// Explicit rejection when no physical state was admitted.
+    /// Explicit rejection of the returned candidate when no state was admitted.
     pub physical_refusal: Option<PhysicalCoolingRefusal>,
+    /// Actual physical reassembly attempts, including rejected goal-eligible
+    /// fields and the final budget/stagnation candidate. At most goal_checks+1.
+    pub physical_checks: usize,
+    /// Failed physical attempts; a later accepted field does not erase this work.
+    pub physical_rejections: usize,
 }
 
-fn reject(cx: &Cx<'_>, mut out: PhysicalAirMaximumPolish, refusal: PhysicalCoolingRefusal)
-    -> Result<PhysicalAirMaximumPolish>
-{
+type CandidateAcceptance = std::result::Result<AcceptedLinearCooling, PhysicalCoolingRefusal>;
+
+fn refuse(cx: &Cx<'_>, refusal: PhysicalCoolingRefusal) -> Result<CandidateAcceptance> {
     poll(cx)?;
-    out.physical_refusal = Some(refusal);
-    Ok(out)
+    Ok(Err(refusal))
 }
 
-/// Correct and physically revalidate a fixed linear solid/air cooling model.
+/// Correct until the stored maximum goal AND physical publication gates pass.
 ///
-/// Run the existing cached-spectral/full-feedback correction, then rebuild the
-/// physical solid with the candidate's PRODUCTION exponential-law references.
-/// Recompute all residual/energy/contact/Robin fields, reintegrate walls from
-/// that report, and march each independent inlet again. Require the original
-/// watt-residual threshold, declared energy and reference gates, per-segment
-/// watt balance, branch enthalpy closure and full Robin decomposition. Static
-/// Robin boundaries not connected to air are retained in the decomposition.
+/// A goal-eligible field is rebuilt with its PRODUCTION exponential-law air
+/// references, then independently reassembled and checked against the original
+/// watt-residual threshold, energy/reference tolerances, per-segment heat balance,
+/// branch enthalpy and full Robin decomposition. A physical rejection continues
+/// the SAME full-feedback FGMRES loop; it does not reset iterations, tighten an
+/// unrelated tolerance, or repeat inverse/response preparation. In particular,
+/// a loose maximum goal no longer stops before physical residuals are acceptable.
 ///
-/// A goal-improving but physically rejected candidate never replaces a caller
-/// field. Its complete numerical work survives in the returned `correction`.
-/// A budget-limited candidate may be physically accepted while `stored_goal_met`
-/// remains false. No new physics solve is hidden in revalidation: one independent
-/// physical assembly/report pass follows the existing bounded correction work.
-/// Source, material, geometry and flow stay fixed; radiation and nonlinear
-/// conductivity are not admitted. No continuum or experimental validation follows.
+/// Only a field passing both requirements terminates with GoalTolerance. At
+/// budget/stagnation, the best numerical candidate is physically checked once
+/// more and may be returned as accepted with stored_goal_met=false. Rejected
+/// attempts are counted even when a later field passes. No caller state changes
+/// on refusal or cancellation; a gate callback's provisional output never
+/// escapes before the complete driver and final cancellation check succeed.
+///
+/// Each physical check uses one ordinary assembly/report pass, not a new solve.
+/// There are at most correction.solution.solid.goal_checks+1 physical attempts.
+/// Source, material, geometry and flow stay fixed; nonlinear conductivity and
+/// radiation are unsupported. Stored-affine bounds are not coefficient-lowering,
+/// continuum or experimental-validation evidence.
 ///
 /// # Errors
-/// Invalid controls/baseline threshold, ordinary solve or air-law failures,
-/// nonfinite arithmetic/allocation and cancellation. Candidate solid or balance
-/// failures are explicit result values; cancellation never returns a partial bundle.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Invalid controls/baseline, ordinary solve or air-law failures, nonfinite
+/// arithmetic/allocation and cancellation. Final physical refusal is a result
+/// value with all correction work retained; it is never numerical goal success.
+#[allow(clippy::too_many_arguments)]
 pub fn polish_linear_maximum_with_spectral(
     cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
     paths: &[AirPath], linear: LinearConfig, original: &ConductionSolution,
     vertices: &[usize], solid_config: LinearGoalAnalysisConfig,
     feedback_config: RobinFeedbackAnalysisConfig, control: LinearGoalSolveConfig,
-    spectral: SpectralMaximumControl, gates: PhysicalCoolingGates,
+    spectral_control: SpectralMaximumControl, gates: PhysicalCoolingGates,
 ) -> Result<PhysicalAirMaximumPolish> {
     poll(cx)?;
     gates.admit()?;
@@ -146,19 +155,70 @@ pub fn polish_linear_maximum_with_spectral(
         || original.report.elements != problem.mesh.element_count()
         || original.temperature.len() != problem.mesh.vertex_count()
     { return Err(bad("original physical solution has an invalid residual threshold or mesh shape")); }
-    let correction = solve_linear_maximum_with_spectral(cx, problem, interfaces, paths, linear,
-        &original.temperature, vertices, solid_config, feedback_config, control, spectral)?;
-    let out = PhysicalAirMaximumPolish { correction, accepted: None, physical_refusal: None };
-    let references: Vec<_> = out.correction.solution.air.iter().flat_map(|air| &air.segments)
+    let spectral::PreparedMaximum { analyzer, initial_analysis, preparation } = spectral::prepare(
+        cx, problem, interfaces, paths, linear, &original.temperature, vertices,
+        solid_config, feedback_config, control, spectral_control,
+    )?;
+    let mut accepted = None;
+    let mut physical_refusal = None;
+    let mut physical_checks = 0_usize;
+    let mut physical_rejections = 0_usize;
+    let solid = analyzer.solve_maximum_to_goal_admitted(
+        cx, &original.temperature, vertices, control, |temperature, analysis| -> Result<bool> {
+            let (_, candidate_air) = solve::air_from_temperature(cx, &analyzer, paths, temperature)?;
+            physical_checks = physical_checks.checked_add(1).ok_or_else(|| bad("physical check count overflow"))?;
+            match revalidate_candidate(cx, problem, interfaces, paths, original, temperature,
+                &candidate_air, analysis.meets_absolute_tolerance(control.absolute_tolerance), gates)?
+            {
+                Ok(candidate) => {
+                    accepted = Some(candidate);
+                    physical_refusal = None;
+                    Ok(true)
+                }
+                Err(refusal) => {
+                    physical_rejections += 1;
+                    physical_refusal = Some(refusal);
+                    Ok(false)
+                }
+            }
+        },
+    )?;
+    let (wall_temperatures_k, air) = solve::air_from_temperature(cx, &analyzer, paths, &solid.temperature)?;
+    // Non-success returns the best NUMERICAL candidate. Its physical check may
+    // differ from the last rejected trial, so never attach that trial's refusal.
+    if accepted.is_none() {
+        physical_checks = physical_checks.checked_add(1).ok_or_else(|| bad("physical check count overflow"))?;
+        match revalidate_candidate(cx, problem, interfaces, paths, original, &solid.temperature,
+            &air, solid.analysis.meets_absolute_tolerance(control.absolute_tolerance), gates)?
+        {
+            Ok(candidate) => { accepted = Some(candidate); physical_refusal = None; }
+            Err(refusal) => { physical_rejections += 1; physical_refusal = Some(refusal); }
+        }
+    }
+    let correction = SpectralAirMaximumSolve {
+        solution: LinearAirMaximumSolve { solid, wall_temperatures_k, air },
+        initial_analysis, preparation,
+    };
+    poll(cx)?;
+    Ok(PhysicalAirMaximumPolish { correction, accepted, physical_refusal,
+        physical_checks, physical_rejections })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn revalidate_candidate(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    paths: &[AirPath], original: &ConductionSolution, temperature: &[f64],
+    candidate_air: &[AirMarch], goal_met: bool, gates: PhysicalCoolingGates,
+) -> Result<CandidateAcceptance> {
+    let references: Vec<_> = candidate_air.iter().flat_map(|air| &air.segments)
         .map(|row| (row.region.as_str(), row.reference_temperature_k)).collect();
     let port_count = references.len();
     let physical = original.revalidate_linear_robin_temperature(cx, problem, interfaces,
-        &out.correction.solution.solid.temperature, &references, threshold, gates.energy_relative_tolerance);
-    drop(references);
+        temperature, &references, original.report.residual_threshold, gates.energy_relative_tolerance);
     let (solid, boundary) = match physical {
         Ok(physical) => physical,
         Err(error @ ConductionError::Cancelled { .. }) => return Err(error.into()),
-        Err(error) => return reject(cx, out, PhysicalCoolingRefusal::Solid(error)),
+        Err(error) => return refuse(cx, PhysicalCoolingRefusal::Solid(error)),
     };
     let mut fluxes = BTreeMap::new();
     let mut robin_total = 0.0;
@@ -199,14 +259,14 @@ pub fn polish_linear_maximum_with_spectral(
             * finite(marched.outlet_temperature_k - path.inlet_temperature_k())?)?;
         let enthalpy_error = finite(enthalpy - marched.total_heat_rate_w)?.abs();
         if reference_delta > gates.reference_tolerance_k {
-            return reject(cx, out, PhysicalCoolingRefusal::Reference {
+            return refuse(cx, PhysicalCoolingRefusal::Reference {
                 branch, delta_k: reference_delta, limit_k: gates.reference_tolerance_k });
         }
         if imbalance > limit {
-            return reject(cx, out, PhysicalCoolingRefusal::Interface { branch, imbalance_w: imbalance, limit_w: limit });
+            return refuse(cx, PhysicalCoolingRefusal::Interface { branch, imbalance_w: imbalance, limit_w: limit });
         }
         if enthalpy_error > limit {
-            return reject(cx, out, PhysicalCoolingRefusal::Enthalpy { branch, imbalance_w: enthalpy_error, limit_w: limit });
+            return refuse(cx, PhysicalCoolingRefusal::Enthalpy { branch, imbalance_w: enthalpy_error, limit_w: limit });
         }
         branches.push(PhysicalBranchCheck { reference_delta_k: reference_delta,
             interface_imbalance_w: imbalance, enthalpy_imbalance_w: enthalpy_error, watt_limit: limit });
@@ -215,14 +275,13 @@ pub fn polish_linear_maximum_with_spectral(
     let decomposition = finite(robin_total - solid.report.energy.robin_out_w)?.abs();
     let limit = gates.watts(robin_total.abs().max(solid.report.energy.robin_out_w.abs()))?;
     if decomposition > limit {
-        return reject(cx, out, PhysicalCoolingRefusal::Decomposition { imbalance_w: decomposition, limit_w: limit });
+        return refuse(cx, PhysicalCoolingRefusal::Decomposition { imbalance_w: decomposition, limit_w: limit });
     }
     let changed = solid.temperature.iter().zip(&original.temperature).any(|(a, b)| a.to_bits() != b.to_bits());
-    let goal_met = out.correction.solution.solid.analysis.meets_absolute_tolerance(control.absolute_tolerance);
     poll(cx)?;
-    Ok(PhysicalAirMaximumPolish { accepted: Some(AcceptedLinearCooling {
+    Ok(Ok(AcceptedLinearCooling {
         solid, boundary, wall_temperatures_k: walls, air, branches,
         robin_decomposition_imbalance_w: decomposition, stored_goal_met: goal_met,
         temperature_changed: changed,
-    }), ..out })
+    }))
 }

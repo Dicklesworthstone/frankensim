@@ -1,8 +1,8 @@
 //! Missing solid stability is prepared once before complete solid/air correction.
 
 use fs_conduction::adjoint::{
-    LinearGoalSolveConfig, LinearRobinMaximumAnalysis, SpectralInverseLimits,
-    SpectralPreparation, SpectralStop,
+    LinearGoalSolveConfig, LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis,
+    SpectralInverseLimits, SpectralPreparation, SpectralStop,
 };
 
 use super::{
@@ -109,6 +109,31 @@ pub fn solve_linear_maximum_with_spectral(
     control: LinearGoalSolveConfig,
     spectral: SpectralMaximumControl,
 ) -> Result<SpectralAirMaximumSolve> {
+    let PreparedMaximum { analyzer, initial_analysis, preparation } = prepare(
+        cx, problem, interfaces, paths, linear, initial_temperature, region_vertices,
+        solid_config, feedback_config, control, spectral,
+    )?;
+    let solution = solve::finish(cx, &analyzer, paths, initial_temperature, region_vertices, control)?;
+    poll(cx)?;
+    Ok(SpectralAirMaximumSolve { solution, initial_analysis, preparation })
+}
+
+// Shared by numerical-only correction and physical in-loop admission. No
+// second preparation or response solve is needed after a physical rejection.
+pub(super) struct PreparedMaximum<'m> {
+    pub(super) analyzer: LinearRobinFeedbackAnalyzer<'m>,
+    pub(super) initial_analysis: LinearRobinMaximumAnalysis,
+    pub(super) preparation: Option<SpectralPreparationSummary>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare<'m>(
+    cx: &Cx<'_>, problem: ConductionProblem<'m>, interfaces: Option<&ThermalInterfaces>,
+    paths: &[AirPath], linear: LinearConfig, initial_temperature: &[f64],
+    region_vertices: &[usize], solid_config: LinearGoalAnalysisConfig,
+    feedback_config: RobinFeedbackAnalysisConfig, control: LinearGoalSolveConfig,
+    spectral: SpectralMaximumControl,
+) -> Result<PreparedMaximum<'m>> {
     solve::admit_control(cx, control)?;
     if !spectral.initial_shift.is_finite() || spectral.initial_shift <= 0.0
         || spectral.limits.max_shift_attempts == 0
@@ -126,7 +151,6 @@ pub fn solve_linear_maximum_with_spectral(
         analyzer = analyzer.with_spectral_inverse(cx, spectral.initial_shift, spectral.limits)?;
     }
     let preparation = analyzer.spectral_preparation().map(SpectralPreparationSummary::from_preparation);
-    let solution = solve::finish(cx, &analyzer, paths, initial_temperature, region_vertices, control)?;
     poll(cx)?;
-    Ok(SpectralAirMaximumSolve { solution, initial_analysis, preparation })
+    Ok(PreparedMaximum { analyzer, initial_analysis, preparation })
 }
