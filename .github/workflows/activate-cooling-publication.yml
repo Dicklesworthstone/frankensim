@@ -1,0 +1,76 @@
+# One-shot source patch, not a CI gate. The exact trigger message is deliberately
+# absent from the resulting commit, so this cannot become a recurring writer.
+name: Activate reviewed cooling publication
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/activate-cooling-publication.yml']
+permissions:
+  contents: read
+jobs:
+  apply-reviewed-edits:
+    if: >-
+      github.event.head_commit.message == 'feat(cli): stage atomic cooling publication and apply reviewed activation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply exact reviewed edits, refusing changed context
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          changes = {
+              'crates/fs-cli/src/solve.rs': [
+                  ('pub const SOLVE_DRIVER_VERSION: u32 = 30;',
+                   '/// Version 31 atomically adopts physically accepted coupled corrections,\n/// rebuilding the field, Robin boundary and live air receipt before export.\npub const SOLVE_DRIVER_VERSION: u32 = 31;')],
+              'crates/fs-cli/src/solve/algebraic/coupled.rs': [
+                  ('use fs_solver::goal::inverse::spectral::SpectralInverseLimits;',
+                   'use fs_solver::goal::inverse::spectral::SpectralInverseLimits;\n\npub(super) mod publication;')],
+              'crates/fs-cli/src/solve/algebraic.rs': [
+                  ('        return coupled::maximum_evidence(\n            cx,\n            problem,\n            data.interfaces.as_ref(),\n            &data.air_paths,\n            data.linear,\n            &solved.solution.temperature,\n            &vertices,\n            memory_bytes,\n            config,\n            requested_k,\n        );',
+                   '        return coupled::publication::polish_rung(\n            cx, solved, &vertices, memory_bytes, config, requested_k,\n        );')],
+              'crates/fs-cli/tests/solve.rs': [
+                  ('SOLVE_DRIVER_VERSION, 30,', 'SOLVE_DRIVER_VERSION, 31,'),
+                  ('assert!(control.starts_with("{\\\"schema\\\":\\\"frankensim.cli.coupled-maximum-evidence.v1\\\""), "{receipt}");',
+                   'assert!(control.starts_with("{\\\"schema\\\":\\\"frankensim.cli.coupled-maximum-publication.v1\\\""), "{receipt}");'),
+                  ('assert!(control.contains("\\\"correction_supported\\\":false"), "{receipt}");',
+                   'assert!(control.contains("\\\"correction_supported\\\":true"), "{receipt}");'),
+                  ('assert!(control.contains("\\\"candidate_accepted\\\":false"), "{receipt}");',
+                   'assert!(control.contains("\\\"mode\\\":\\\"physical-goal-correction\\\""), "{receipt}");'),
+                  ('assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0);',
+                   'assert!(receipt_number_field(control, "primal_iterations") <= receipt_number_field(control, "max_primal_iterations"));')],
+              'crates/fs-cli/tests/coupled_maximum_budget.rs': [
+                  ('Some("frankensim.cli.coupled-maximum-evidence.v1")', 'Some("frankensim.cli.coupled-maximum-publication.v1")'),
+                  ('assert_eq!(control.str_field("mode"), Some("assessment-only"));',
+                   'assert_eq!(control.str_field("mode"), Some("physical-goal-correction"));'),
+                  ('assert_eq!(control.f64_field("primal_iterations"), Some(0.0));',
+                   'assert!(control.f64_field("primal_iterations").unwrap() <= control.f64_field("max_primal_iterations").unwrap());\n    if control.get("physical_accepted") == Some(&JsonValue::Bool(true)) {\n        let air = conduction.get("conjugate").unwrap();\n        assert_eq!(air.str_field("publication_schema"), Some("frankensim.cli.accepted-cooling.v1"));\n        assert!(air.get("initial_exchange").is_some());\n    } else {\n        assert_eq!(control.get("candidate_accepted"), Some(&JsonValue::Bool(false)));\n    }'),
+                  ('assert_eq!(control.str_field("status"), Some("coupled-bound-unavailable"));',
+                   'assert!(matches!(control.str_field("status"), Some("coupled-bound-unavailable" | "physical-gate-refused")));')],
+          }
+          prepared = {}
+          for name, edits in changes.items():
+              path = Path(name)
+              source = path.read_text()
+              for before, after in edits:
+                  if source.count(before) != 1:
+                      raise SystemExit(f'Refusing changed/ambiguous context in {name}: {before!r}')
+                  source = source.replace(before, after, 1)
+              prepared[path] = source
+          # All contexts checked before any source write. Never alter another path.
+          for path, source in prepared.items():
+              path.write_text(source)
+          PY
+          git diff --check
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/fs-cli/src/solve.rs crates/fs-cli/src/solve/algebraic.rs crates/fs-cli/src/solve/algebraic/coupled.rs crates/fs-cli/tests/solve.rs crates/fs-cli/tests/coupled_maximum_budget.rs
+          git commit -m 'feat(cli): activate physical cooling publication under driver v31' -m 'Atomically publish the accepted field, boundary and refreshed air receipt. Preserve rejected-candidate work without applying its bound to the old field. Update focused retained-run regressions. Source activation only; no native build or numerical test pass is claimed by this job.'
+          git push origin HEAD:main
