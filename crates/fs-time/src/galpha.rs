@@ -10,6 +10,9 @@ use fs_solver::{
 };
 use std::fmt;
 
+#[path = "galpha/adjoint.rs"]
+pub mod adjoint;
+
 /// Prefactored generalized-α stepper for fixed (M, C, K, h).
 pub struct GeneralizedAlpha {
     n: usize,
@@ -198,6 +201,8 @@ impl ImplicitStepTelemetry {
 /// Typed refusal from an operator-backed generalized-alpha step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimeSolveError {
+    /// Cooperative cancellation occurred before the public state was changed.
+    Cancelled,
     /// An operator, state vector, or forcing vector has the wrong dimension.
     Dimension {
         /// Semantic role of the mismatched object.
@@ -243,6 +248,7 @@ pub enum TimeSolveError {
 impl fmt::Display for TimeSolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "generalized-alpha step cancelled before publication"),
             Self::Dimension {
                 role,
                 expected,
@@ -824,6 +830,25 @@ impl OperatorFirstOrderGeneralizedAlpha {
         problem: &P,
         forcing: &[f64],
     ) -> Result<ImplicitStepTelemetry, TimeSolveError> {
+        self.step_controlled(state, problem, forcing, &mut || false)
+    }
+
+    /// Advance with cooperative cancellation before setup, between bounded
+    /// Newton attempts, and before publication. One attempt includes the
+    /// configured inner Krylov/globalization work; callbacks must bound their
+    /// own work. Cancellation leaves all state and history unchanged.
+    pub fn step_controlled<P, Cancel>(
+        &self,
+        state: &mut FirstOrderState,
+        problem: &P,
+        forcing: &[f64],
+        cancelled: &mut Cancel,
+    ) -> Result<ImplicitStepTelemetry, TimeSolveError>
+    where
+        P: FirstOrderProblem + ?Sized,
+        Cancel: FnMut() -> bool,
+    {
+        first_order_poll(cancelled)?;
         require_dimension("first-order problem", self.n, problem.dimension())?;
         require_dimension("first-order state", self.n, state.u.len())?;
         require_dimension("first-order rate", self.n, state.rate.len())?;
@@ -856,9 +881,28 @@ impl OperatorFirstOrderGeneralizedAlpha {
             .zip(&state.rate)
             .map(|(u, rate)| self.h.mul_add(*rate, *u))
             .collect();
-        let mut newton = NewtonKrylovState::new(&residual, guess, self.solve.newton)
-            .map_err(TimeSolveError::NewtonSetup)?;
-        let report = newton.run(&residual, self.solve.max_newton_iterations);
+        let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+        first_order_poll(cancelled)?;
+        let mut newton = setup.map_err(TimeSolveError::NewtonSetup)?;
+        let mut report = newton.run(&residual, 0);
+        for _ in 0..self.solve.max_newton_iterations {
+            // Plateau is a report diagnosis, not a terminal Newton state;
+            // the ordinary run continues after it, so this path must too.
+            if report.converged
+                || !matches!(
+                    report.diagnosis,
+                    Some(
+                        fs_solver::NewtonStallDiagnosis::BudgetExhausted
+                            | fs_solver::NewtonStallDiagnosis::Plateau
+                    )
+                )
+            {
+                break;
+            }
+            first_order_poll(cancelled)?;
+            report = newton.run(&residual, 1);
+            first_order_poll(cancelled)?;
+        }
         if !report.converged {
             return Err(TimeSolveError::NotConverged(report));
         }
@@ -870,12 +914,21 @@ impl OperatorFirstOrderGeneralizedAlpha {
             h: self.h,
             newton: report,
         };
+        first_order_poll(cancelled)?;
         state.u = u_new;
         state.rate = rate_new;
         state.t = next_t;
         state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
+    }
+}
+
+fn first_order_poll<Cancel: FnMut() -> bool>(cancelled: &mut Cancel) -> Result<(), TimeSolveError> {
+    if cancelled() {
+        Err(TimeSolveError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 

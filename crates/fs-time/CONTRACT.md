@@ -54,6 +54,21 @@ where claimed below.
   γ = 1/2 + αm − αf. This is not the structural second-order formulation
   relabeled: state and rate are first-class and the residual is enforced at
   `(t_n + αf h, u_n + αf (u_{n+1}−u_n))`.
+- `galpha::adjoint::FirstOrderVjp` and
+  `OperatorFirstOrderGeneralizedAlpha::step_vjp` differentiate the converged
+  first-order residual through an explicit transposed effective-system solve.
+  The model supplies mass/tangent transpose actions and the parameter VJP of
+  `M(p) rate + r(t,u,p)`, including parameter-dependent mass. Returned
+  cotangents cover initial state, initial rate, model parameters and forcing;
+  neither mass nor tangent must be symmetric. Chaining steps requires both
+  endpoint state and rate seeds. The caller propagates the initial-rate
+  cotangent through any consistency initialization, and adds direct objective
+  terms and forcing-parameter chain rules. `FirstOrderAdjointConfig` bounds the
+  independent adjoint FGMRES solve with an explicit preconditioner, while
+  `adjoint_workspace_components` gives a conservative scalar-storage ceiling.
+  The pullback borrows existing input history and returns complete primal and
+  adjoint reports. Failed solves, incomplete derivative writes, nonfinite
+  results, insufficient workspace and cancellation return no partial gradient.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,
@@ -271,6 +286,11 @@ before publication. One cycle has at most the configured restart length of
 Arnoldi iterations. Long callbacks must bound their own work; this does not
 claim interruption within an operator or one Krylov cycle. Cancelled forward
 attempts leave the entire `ImexState` unchanged and are retryable.
+`OperatorFirstOrderGeneralizedAlpha::step_controlled` polls before setup,
+between bounded Newton attempts and before publication. Its `step_vjp` also
+polls between adjoint restart cycles and around final derivative callbacks.
+Cancelled attempts preserve the entire input state/history; one Newton
+attempt or provider callback must finish before its cancellation is observed.
 Long trajectories are resumable by cloning `SecondOrderState`,
 `FirstOrderState`, `ImexState`, or `AdaptiveState` between calls; split runs
 continue bitwise when the same operators, forcing, preconditioner policy, and
@@ -396,8 +416,17 @@ per-relation and aggregate reset-target caps.
 - No dense output / continuous extension for RK45; no stiffness
   detection; no event location.
 - Adjoint support is specific to each admitted map: Verlet, free-body DEP,
-  frozen-step/recorded RK45, and autonomous operator IMEX ARS(2,2,2).
-  Generalized-alpha and exponential-integrator pullbacks remain absent.
+  frozen-step/recorded RK45, autonomous operator IMEX ARS(2,2,2), and
+  operator-backed first-order generalized-alpha. Structural second-order
+  generalized-alpha and exponential-integrator pullbacks remain absent.
+  First-order generalized-alpha holds time, timestep, spectral radius and
+  solver policy fixed. It differentiates the converged residual rather than
+  Newton/Krylov iterations and requires independent state/rate input seeds.
+  Its tests check nonlinear nonsymmetric, parameter-dependent mass and tangent
+  against an independent dense endpoint-rate solve with forward duals and
+  five-point differences, plus full trajectory accumulation and descent.
+  Primal and adjoint convergence residuals limit gradient accuracy; there is
+  no interval gradient enclosure or adaptive-controller/event derivative.
   IMEX gradients hold the step size, solver policy and initial-condition
   parameterization fixed, require correct transposed model actions, and are
   limited by the returned primal/adjoint residuals. They do not differentiate
