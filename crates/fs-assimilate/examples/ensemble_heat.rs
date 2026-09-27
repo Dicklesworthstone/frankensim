@@ -13,11 +13,15 @@
 //! inferred. At most 32 distinct thermocouples share one timestamp in this mode.
 //! No input file uses labeled noiseless synthetic readings, not experimental
 //! data. Run: cargo run -p fs-assimilate --features ensemble --example ensemble_heat
+//! --smooth selects late-delivery history estimation with an arrival_s column.
 
 use fs_assimilate::nonlinear::ensemble::{Ensemble, EnsembleControl, EnsembleError, EnsembleObservation};
 use fs_assimilate::nonlinear::ensemble::forecast::ForecastStatus;
 use fs_assimilate::nonlinear::ensemble::correlated::ObservationBlock;
 use std::io::Read;
+
+#[path = "ensemble_heat/smooth.rs"]
+mod smooth;
 
 const N: usize = 513;
 const MEMBERS: usize = 8;
@@ -162,6 +166,7 @@ fn options(args:&[String])->Result<(Option<&str>,Option<f64>),String> {
 fn rmse(a:&[f64],b:&[f64])->f64 { (a.iter().zip(b).map(|(a,b)|(a-b)*(a-b)).sum::<f64>()/a.len() as f64).sqrt() }
 fn main()->Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_>=std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg|arg=="--smooth") { return smooth::run(&args[1..]); }
     let (path,shared_sigma)=options(&args)?;
     let (rows,truth,source)=if let Some(path)=path {
         let mut text=String::new();std::fs::File::open(path)?.take(65_537).read_to_string(&mut text)?;
