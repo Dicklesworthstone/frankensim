@@ -1,6 +1,8 @@
 //! Affine Robin-reference feedback on the actual retained linear FEM operator.
 //! The references vary with wall means; they are not frozen at an iterate.
 
+mod solve;
+
 use std::collections::BTreeMap;
 use fs_sparse::Csr;
 use fs_solver::goal::feedback::{
