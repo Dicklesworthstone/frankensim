@@ -1221,10 +1221,9 @@ mod tests {
     #[test]
     fn canonical_fixture_is_explicit_and_admitted() {
         let spec = parse(FIXTURE).expect("canonical elasticity fixture");
-        // 32 steps: the tracked example happens to end inside the 1% area
-        // tolerance (measured 2026-09-24), but that endpoint sits inside the
-        // multiplier transient. 20, 24 and 28 steps end infeasible
-        // (q61wp.16.1).
+        // 32 steps. With the scheduled area projection (q61wp.16.1) the
+        // bracket reaches its 0.45 target by about step 12 and holds it:
+        // 20, 24, 28 and 32 steps all end feasible (measured 2026-09-27).
         assert_eq!(spec.steps, 32);
         assert_eq!(spec.load_direction, [0.0, -1.0]);
         assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 4);

@@ -48,7 +48,15 @@ with zero meshing anywhere in the loop.
   per iteration, redistance + audit, augmented-Lagrangian volume
   multiplier NORMALIZED BY THE MEAN ENERGY SCALE (an O(1) multiplier
   against O(J) energies shrinks the structure to nothing at full
-  speed — measured failure mode), scheduled nucleation; ledger rows
+  speed — measured failure mode), then a scheduled material-area
+  projection (`schedule_material_area`: a common nodal offset moves the
+  area at most 0.04 toward the target per update, cannot overshoot it,
+  and holds it within 1e-3 once reached; best effort, since the plain step
+  stands if no offset meets the tolerance on a very coarse grid). Without
+  it, the vmax-normalized velocity moves a full step however close the
+  area is, and the multiplier winds up and swings for tens of steps
+  (q61wp.16.1; 20/24/28/32-step bracket sweeps went from 1 feasible to
+  all feasible), scheduled nucleation; ledger rows
   with compliance, volume, ℓ, drift, and FNV snapshot hashes. The load is
   definitionally zero outside the checked `EdgeBand`; unrelated SDF cuts on
   the same edge are skipped, while a caller-supplied cut through supported load
