@@ -16,6 +16,9 @@
 //! State clones must be independent, and producers must remain deterministic
 //! and side-effect free on rejected trials, as in the fixed-step driver.
 
+/// Bounded, model-bound persistent checkpoints at attempt boundaries.
+pub mod checkpoint;
+
 use super::{CoupledEvolution, EvolutionInputError};
 use super::super::{
     CouplingControls, CouplingError, CouplingFailure, CouplingTrial,
@@ -82,7 +85,7 @@ pub enum AdaptiveFailure<E> {
         /// Unchanged error ratio that failed acceptance.
         error_ratio: f64,
     },
-    /// The requested maximum possible evaluation count cannot fit in `usize`.
+    /// The requested maximum possible evaluation or accepted-step count cannot fit in `usize`.
     WorkBudgetOverflow,
 }
 
@@ -194,7 +197,9 @@ impl<S: Clone> AdaptiveEvolution<S> {
         let mut report = AdaptiveReport { attempts: 0, evaluations: 0, rejected: 0,
             accepted: Vec::new(), complete: self.is_complete() };
         if max_attempts == 0 || report.complete { return Ok(report); }
-        if max_attempts.checked_mul(self.base.controls.max_evaluations * 3).is_none() {
+        if max_attempts.checked_mul(self.base.controls.max_evaluations * 3).is_none()
+            || self.accepted_steps.checked_add(max_attempts).is_none()
+        {
             return Err(AdaptiveError { reason: AdaptiveFailure::WorkBudgetOverflow, report });
         }
         let denominator = ((1_u32 << self.settings.method_order) - 1) as f64;
