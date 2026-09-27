@@ -54,9 +54,16 @@ fn fsim_coupled_budget_uses_published_feedback_and_sealed_reports_replay() {
     let first_dir = scratch();
     let (id, report_bytes, package, conduction) = execute(&first_dir);
     let control = conduction.get("solver_control").unwrap();
-    assert_eq!(control.str_field("schema"), Some("frankensim.cli.coupled-maximum-evidence.v1"));
-    assert_eq!(control.str_field("mode"), Some("assessment-only"));
-    assert_eq!(control.f64_field("primal_iterations"), Some(0.0));
+    assert_eq!(control.str_field("schema"), Some("frankensim.cli.coupled-maximum-publication.v1"));
+    assert_eq!(control.str_field("mode"), Some("physical-goal-correction"));
+    assert!(control.f64_field("primal_iterations").unwrap() <= control.f64_field("max_primal_iterations").unwrap());
+    if control.get("physical_accepted") == Some(&JsonValue::Bool(true)) {
+        let air = conduction.get("conjugate").unwrap();
+        assert_eq!(air.str_field("publication_schema"), Some("frankensim.cli.accepted-cooling.v1"));
+        assert!(air.get("initial_exchange").is_some());
+    } else {
+        assert_eq!(control.get("candidate_accepted"), Some(&JsonValue::Bool(false)));
+    }
     assert!(control.f64_field("air_paths").unwrap() >= 1.0);
     assert!(control.f64_field("ports").unwrap() >= 1.0);
     assert!(control.f64_field("response_iterations").unwrap()
@@ -74,7 +81,7 @@ fn fsim_coupled_budget_uses_published_feedback_and_sealed_reports_replay() {
             assert!(terms[0].str_field("reason").unwrap().contains("coupled"));
         }
         None => {
-            assert_eq!(control.str_field("status"), Some("coupled-bound-unavailable"));
+            assert!(matches!(control.str_field("status"), Some("coupled-bound-unavailable" | "physical-gate-refused")));
             assert_eq!(terms[0].str_field("state"), Some("no-data"));
             assert!(terms[0].f64_field("value").is_none());
         }

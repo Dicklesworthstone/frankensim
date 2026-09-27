@@ -145,7 +145,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 30 proves the solid inverse of systems above the dense proposal
 /// cap by bounded interval LDL elimination before the shifted-Gram fallback,
 /// so large obtuse-mesh rungs publish a verified coupled solver bound.
-pub const SOLVE_DRIVER_VERSION: u32 = 30;
+/// Version 31 atomically adopts physically accepted coupled corrections,
+/// rebuilding the field, Robin boundary and live air receipt before export.
+pub const SOLVE_DRIVER_VERSION: u32 = 31;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
