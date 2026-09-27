@@ -125,3 +125,52 @@ if a sampled physical solve leaves its admitted regime, the study retains the
 refusal. The same sample-budget and source-independent resume commands apply.
 Contact resistance remains selected from immutable interface cards and is not
 a mutable uncertainty target.
+
+## Replicated randomized Sobol quadrature
+
+The version-1 `qmc.fsim` example uses the same native fan-speed, heat-input and
+air-inlet parameters with four independently scrambled Sobol nets of four
+points each. Every point still runs the ordinary native cooling pipeline.
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/qmc.fsim qmc-uq.db
+```
+
+Select the method and its entire layout before sampling:
+
+```lisp
+:version 1
+:samples 16
+:method quasi-monte-carlo
+:qmc (owen-scrambled-sobol :replicates 4 :samples-per-replicate 4)
+```
+
+The sample count must equal the replicate count times the points per
+replicate. There must be at least two replicates, with at least two points per
+replicate; only the point count must be a power of two. The native limit
+remains 256 full solves, and Sobol quadrature supports at most ten declared
+parameters. Zero-width uniform laws remain valid. The parser refuses missing
+or inconsistent layouts, excess dimensions, a QMC layout on Monte Carlo, and
+QMC combined with the version-2 Bernoulli stopping policy.
+
+The report keeps `statistics: null` and adds a `qmc` object with the exact
+layout, completed replicate count, unfinished point count, retained replicate
+means, temperature mean and probability of the numerical pass event.
+Standard errors come from variation between complete independently scrambled
+nets. Dependent points inside a net are never treated as independent
+Bernoulli trials or used to calculate the Monte Carlo standard error.
+
+The existing `--budget` and resume commands work at any point, including
+inside a net. An unfinished net is retained paid work but is excluded from
+estimates. One complete net supplies a mean with an unavailable standard
+error; two or more supply the descriptive between-replicate error. Resume
+uses the same retained assets, layout, scramble keys and next point, and
+produces the same completed observations, report, package and checkpoint
+bytes as uninterrupted execution. Refused physical samples terminate the
+study and suppress every quadrature estimate.
+
+Randomized quadrature may reduce integration error for a given solve budget,
+but its reported standard errors are descriptive, not confidence intervals
+or permission to stop when a result looks favorable. They do not bound
+finite-grid bias, native numerical errors or physical-model errors; zero
+variation between replicates does not prove an exact result.

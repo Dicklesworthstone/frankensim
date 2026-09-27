@@ -21,11 +21,16 @@ use crate::{CommandOutput, Diagnostic, OutputMode, exit, push_json_string, refus
 
 #[path = "study_uncertainty/compliance.rs"]
 mod compliance;
+#[path = "study_uncertainty/execution.rs"]
+mod execution;
+#[path = "study_uncertainty/qmc.rs"]
+mod qmc;
 #[path = "study_uncertainty/legacy.rs"]
 mod legacy;
 #[path = "study_uncertainty/model.rs"]
 mod model;
 use model::{Model, Sample};
+use execution::Execution;
 
 const DRIVER: &str = "native-cooling-uncertainty-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
@@ -136,7 +141,12 @@ fn budget(text: Option<&str>) -> Result<Option<usize>> {
 }
 fn plan(model: &Model) -> UqPlan {
     let study = model.bound.study();
-    let mut plan = UqPlan::new(study.qoi(), PropagationMethod::MonteCarlo, study.samples())
+    let method = if study.qmc().is_some() {
+        PropagationMethod::QuasiMonteCarlo
+    } else {
+        PropagationMethod::MonteCarlo
+    };
+    let mut plan = UqPlan::new(study.qoi(), method, study.samples())
         .with_correlation(CorrelationModel::Independent)
         .with_compliance_threshold(model.bound.threshold_k());
     plan.seed = study.seed();
@@ -270,7 +280,7 @@ fn op_ir(id: ContentHash, n: usize) -> String {
 fn persist(
     model: &Model,
     ledger: &Ledger,
-    execution: &UqExecution,
+    execution: &Execution,
     rows: &[Sample],
     status: &str,
     termination: &str,
@@ -290,18 +300,26 @@ fn persist(
         ));
     }
     let id = model.identity();
-    let report = execution.report();
-    let compliance = compliance::assess(model, execution)?;
+    let report = execution.monte_carlo().map(UqExecution::report);
+    let qmc_report = execution.qmc_report();
+    let compliance = execution.compliance(model)?;
     let scope = if compliance.is_some() {
         compliance::SCOPE
+    } else if qmc_report.is_some() {
+        qmc::SCOPE
     } else {
         NO_CLAIM
     };
     let compliance_field = compliance.as_ref().map_or_else(String::new, |assessment| {
         format!(",\"compliance\":{}", assessment.json())
     });
+    let qmc_field = qmc_report.as_ref().map_or_else(String::new, |report| {
+        format!(",\"qmc\":{}", qmc::json(report))
+    });
+    let method = if qmc_report.is_some() { "quasi-monte-carlo" } else { "monte-carlo" };
     let samples = rows_json(rows);
-    let statistics = if status == "completed" && compliance.is_none() {
+    let statistics = if let Some(report) = report.as_ref()
+        .filter(|_| status == "completed" && compliance.is_none()) {
         let quantiles = report.percentiles.map_or_else(
             || "null".into(),
             |v| format!("[{},{},{}]", v[0], v[1], v[2]),
@@ -318,12 +336,12 @@ fn persist(
     } else {
         "null".into()
     };
-    let failure = report
-        .rejection_reason
+    let failure = execution
+        .rejection_reason()
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":\"monte-carlo\",\"correlation\":\"independent\",\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":\"independent\",\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -346,34 +364,33 @@ fn persist(
     let compliance_html = compliance
         .as_ref()
         .map_or_else(String::new, |assessment| assessment.html());
+    let statistics_html = if let Some(report) = &qmc_report {
+        qmc::html(report)
+    } else {
+        let complete = report.as_ref().filter(|_| status == "completed");
+        format!("<p>Mean: {} K; sample standard deviation: {} K; empirical pass fraction: {}.</p>",
+            complete.map_or_else(|| "unavailable".into(), |report| optional(report.mean)),
+            complete.map_or_else(|| "unavailable".into(), |report| optional(report.std_dev)),
+            complete.map_or_else(|| "unavailable".into(), |report| optional(report.probability_of_compliance)))
+    };
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p><p>Mean: {} K; sample standard deviation: {} K; empirical pass fraction: {}.</p>{compliance_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
-        model.bound.study().samples(),
-        if status == "completed" {
-            optional(report.mean)
-        } else {
-            "unavailable".into()
-        },
-        if status == "completed" {
-            optional(report.std_dev)
-        } else {
-            "unavailable".into()
-        },
-        if status == "completed" {
-            optional(report.probability_of_compliance)
-        } else {
-            "unavailable".into()
-        }
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p>{statistics_html}{compliance_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
+        model.bound.study().samples()
     );
     let mut package = EvidencePackage::new(Provenance::new(
         format!("fs-cli/{}+{DRIVER}", env!("CARGO_PKG_VERSION")),
         id.to_hex(),
     ));
     if status == "completed" {
-        package = package.with_claim(Claim::estimated("cooling.uncertainty.sample-mean",
-            format!("{} K across {n} completed native solves; descriptive Monte Carlo standard error {} K. Result {}. {NO_CLAIM}",
-                optional(report.mean), report.sampling_error, hash_bytes(summary.as_bytes()).to_hex()),
-            "fixed-count-native-monte-carlo-descriptive-standard-error", report.sampling_error));
+        if let Some(report) = &report {
+            package = package.with_claim(Claim::estimated("cooling.uncertainty.sample-mean",
+                format!("{} K across {n} completed native solves; descriptive Monte Carlo standard error {} K. Result {}. {NO_CLAIM}",
+                    optional(report.mean), report.sampling_error, hash_bytes(summary.as_bytes()).to_hex()),
+                "fixed-count-native-monte-carlo-descriptive-standard-error", report.sampling_error));
+        } else if let Some(claim) = qmc_report.as_ref()
+            .and_then(|report| qmc::claim(report, hash_bytes(summary.as_bytes()))) {
+            package = package.with_claim(claim);
+        }
     }
     if let Some(claim) = compliance
         .as_ref()
@@ -384,14 +401,10 @@ fn persist(
     let package = package
         .to_json()
         .map_err(|e| fail("cli-uncertainty-package", e.to_string()))?;
-    let checkpoint = if report.status == UqStatus::Refused {
+    let checkpoint = if execution.status() == UqStatus::Refused {
         None
     } else {
-        Some(
-            execution
-                .checkpoint(id)
-                .map_err(|e| fail("cli-uncertainty-checkpoint", e.to_string()))?,
-        )
+        Some(execution.checkpoint(id)?)
     };
     let seed = model.bound.study().seed().to_le_bytes();
     let versions = format!(
@@ -571,7 +584,6 @@ fn drive(
     started: Instant,
     prior: Option<&Loaded>,
 ) -> Result<Outcome> {
-    let plan = plan(model);
     let (mut execution, mut rows, used_before) = if let Some(old) = prior {
         if hash_field(&old.value, "model")? != model.identity() {
             return Err(fail("cli-uncertainty-resume", "retained model changed"));
@@ -582,8 +594,7 @@ fn drive(
             "checkpoint",
             "native-uncertainty-checkpoint",
         )?;
-        let execution = UqExecution::restore(&plan, model.identity(), &checkpoint)
-            .map_err(|e| fail("cli-uncertainty-resume", e.to_string()))?;
+        let execution = Execution::restore(model, &checkpoint)?;
         let rows = read_rows(&linked(
             ledger,
             &old.value,
@@ -600,10 +611,10 @@ fn drive(
         }
         // Replay only the cheap sampler, checking each actual child against its
         // exact addressed parameters; the physical prefix is never re-solved.
-        let mut sampler = UqExecution::new(&plan).map_err(|e| fail("cli-uncertainty-plan", e))?;
+        let mut sampler = Execution::new(model)?;
         for row in &rows {
             model.verify_sample(ledger, row)?;
-            let result = sampler.advance(
+            sampler.advance(
                 1,
                 || false,
                 |parameters| {
@@ -618,10 +629,10 @@ fn drive(
                     }
                 },
             );
-            if result.status == UqStatus::Refused {
+            if sampler.status() == UqStatus::Refused {
                 return Err(fail(
                     "cli-uncertainty-resume",
-                    result.rejection_reason.unwrap_or_default(),
+                    sampler.rejection_reason().unwrap_or_default(),
                 ));
             }
         }
@@ -643,7 +654,7 @@ fn drive(
         (execution, rows, used)
     } else {
         (
-            UqExecution::new(&plan).map_err(|e| fail("cli-uncertainty-plan", e))?,
+            Execution::new(model)?,
             Vec::new(),
             0.0,
         )
@@ -653,16 +664,16 @@ fn drive(
     let mut interrupted = false;
     loop {
         let used = used_before + started.elapsed().as_secs_f64();
-        let report = execution.report();
-        let compliance = compliance::assess(model, &execution)?;
-        let (status, termination) = if report.status == UqStatus::Refused {
+        let execution_status = execution.status();
+        let compliance = execution.compliance(model)?;
+        let (status, termination) = if execution_status == UqStatus::Refused {
             ("refused", "child-refused")
         } else if compliance
             .as_ref()
             .is_some_and(|assessment| assessment.resolved())
         {
             ("decision-reached", "probability-target")
-        } else if report.status == UqStatus::Complete {
+        } else if execution_status == UqStatus::Complete {
             if compliance.is_some() {
                 ("budget-exhausted", "lifetime-sample-budget")
             } else {

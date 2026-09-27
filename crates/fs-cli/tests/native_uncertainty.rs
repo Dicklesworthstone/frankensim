@@ -5,6 +5,8 @@
 mod compliance;
 #[path = "native_uncertainty/fan_speed.rs"]
 mod fan_speed;
+#[path = "native_uncertainty/qmc.rs"]
+mod qmc;
 #[path = "../src/json_read.rs"]
 mod json_read;
 

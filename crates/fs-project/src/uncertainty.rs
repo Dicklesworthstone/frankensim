@@ -2,8 +2,9 @@
 //! physical-model grammar. Every sample changes only explicit project inputs;
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
-//! Version 1 admits fixed-count independent uniform inputs. Version 2 requires
-//! an explicit Bernoulli-mixture policy for sequential probability decisions.
+//! Version 1 admits fixed-count independent uniform inputs with Monte Carlo
+//! or explicitly replicated randomized Sobol quadrature. Version 2 requires
+//! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
 //! An engineering
 //! interval or card tolerance is never silently interpreted as a probability
 //! law. The study inherits units, capabilities, physics seed, versions, memory
@@ -109,6 +110,17 @@ pub struct CompliancePolicy {
     pub min_samples: usize,
 }
 
+/// Fixed randomized-quadrature layout, declared before any native solves.
+/// Replicates use independent Owen scramble keys; points inside a net are
+/// dependent and cannot enter a Bernoulli-iid confidence sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QmcLayout {
+    /// Independently scrambled nets, at least two.
+    pub replicates: usize,
+    /// Power-of-two point count per net, at least two.
+    pub samples_per_replicate: usize,
+}
+
 /// Strictly parsed study. Private fields prevent edits that detach semantics
 /// from the retained canonical declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +136,7 @@ pub struct UncertaintyStudy {
     interfaces: Vec<String>,
     parameters: Vec<UniformParameter>,
     compliance: Option<CompliancePolicy>,
+    qmc: Option<QmcLayout>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -137,7 +150,7 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare independent uniform inputs on the native cooling project; version 1 is fixed-count and version 2 requires an explicit Bernoulli-mixture compliance policy".into() }
+        hint: "declare independent uniform inputs; version 1 is fixed-count Monte Carlo or explicit replicated QMC, and version 2 requires a Monte Carlo Bernoulli-mixture compliance policy".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
@@ -200,6 +213,21 @@ fn compliance_policy(node: &Node, samples: usize) -> Result<CompliancePolicy> {
     if !(2..=samples).contains(&min_samples) { return Err(error("compliance min-samples must be in 2..=samples")); }
     Ok(CompliancePolicy { required_probability, alpha, min_samples })
 }
+fn qmc_layout(node: &Node, samples: usize) -> Result<QmcLayout> {
+    let nodes = list(node)?;
+    symbol(nodes.first().ok_or_else(|| error("empty QMC layout"))?, "owen-scrambled-sobol")?;
+    let f = fields(&nodes[1..], &["replicates", "samples-per-replicate"])?;
+    let replicates = usize::try_from(integer(f["replicates"])?)
+        .map_err(|_| error("QMC replicate count overflow"))?;
+    let samples_per_replicate = usize::try_from(integer(f["samples-per-replicate"])?)
+        .map_err(|_| error("QMC point count overflow"))?;
+    if !(2..=256).contains(&replicates) || samples_per_replicate < 2
+        || !samples_per_replicate.is_power_of_two()
+        || replicates.checked_mul(samples_per_replicate) != Some(samples) {
+        return Err(error("QMC requires at least two replicates times a power-of-two point count >=2, exactly matching :samples"));
+    }
+    Ok(QmcLayout { replicates, samples_per_replicate })
+}
 fn paths(node: &Node) -> Result<Vec<String>> {
     let nodes = list(node)?;
     if nodes.len() > 32 { return Err(error("at most 32 paths per asset family")); }
@@ -218,17 +246,28 @@ impl UncertaintyStudy {
         let nodes = list(&root)?;
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
         let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
-            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance"])?;
+            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc"])?;
         let version = integer(f["version"])?;
         if version != 1 && version != u64::from(VERSION) { return Err(error("unsupported study version")); }
         if (version == 1) == f.contains_key("compliance") {
             return Err(error("version 1 forbids a compliance policy; version 2 requires one"));
         }
-        symbol(f["method"], "monte-carlo")?;
+        let randomized_qmc = match &f["method"].kind {
+            NodeKind::Symbol(method) if method == "monte-carlo" => false,
+            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => true,
+            _ => return Err(error("method must be monte-carlo or quasi-monte-carlo")),
+        };
+        if randomized_qmc != f.contains_key("qmc") {
+            return Err(error("quasi-monte-carlo requires an explicit :qmc layout; monte-carlo forbids it"));
+        }
+        if randomized_qmc && version != 1 {
+            return Err(error("QMC requires version 1 fixed-count semantics; dependent net points cannot use the version 2 Bernoulli-iid compliance policy"));
+        }
         symbol(f["correlation"], "independent")?;
         let samples = usize::try_from(integer(f["samples"])?).map_err(|_| error("sample count overflow"))?;
         if !(2..=MAX_SAMPLES).contains(&samples) { return Err(error("samples must be in 2..=256")); }
         let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
+        let qmc = f.get("qmc").map(|node| qmc_layout(node, samples)).transpose()?;
         let wall_seconds = quantity(f["wall-time"], crate::spec::dims::TIME)?;
         if !(wall_seconds > 0.0 && wall_seconds <= 86_400.0) { return Err(error("wall-time must be in (0, 86400] seconds")); }
         let geometry_nodes = list(f["geometry"])?;
@@ -247,6 +286,9 @@ impl UncertaintyStudy {
         }
         let parameter_nodes = list(f["parameters"])?;
         if parameter_nodes.is_empty() || parameter_nodes.len() > 32 { return Err(error("declare 1..=32 parameters")); }
+        if qmc.is_some() && parameter_nodes.len() > 10 {
+            return Err(error("replicated Sobol QMC supports at most 10 parameters; no Monte Carlo tail fallback"));
+        }
         let mut parameters = Vec::new();
         let mut names = BTreeSet::new();
         let mut targets = BTreeSet::new();
@@ -284,7 +326,7 @@ impl UncertaintyStudy {
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
-            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters, compliance })
+            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters, compliance, qmc })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -302,6 +344,8 @@ impl UncertaintyStudy {
     #[must_use] pub fn parameters(&self) -> &[UniformParameter] { &self.parameters }
     /// Predeclared Bernoulli stopping policy; absent for version-1 fixed-count studies.
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
+    /// Explicit randomized Sobol layout; absent for the Monte Carlo method.
+    #[must_use] pub const fn qmc(&self) -> Option<QmcLayout> { self.qmc }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.

@@ -221,3 +221,52 @@ fn fan_speed_requires_positive_finite_dimensionless_support_and_unique_target() 
     );
     assert!(UncertaintyStudy::parse(&duplicate).is_err());
 }
+
+fn qmc_study() -> String {
+    STUDY.replace(":method monte-carlo",
+        ":method quasi-monte-carlo :qmc (owen-scrambled-sobol :replicates 2 :samples-per-replicate 4)")
+}
+
+#[test]
+fn randomized_qmc_layout_roundtrips_without_changing_fixed_count_or_native_binding() {
+    let study = UncertaintyStudy::parse(&qmc_study()).unwrap();
+    assert_eq!(study.qmc(), Some(QmcLayout { replicates: 2, samples_per_replicate: 4 }));
+    assert_eq!(study.compliance(), None);
+    assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+    let mc = UncertaintyStudy::parse(STUDY).unwrap().bind(&base()).unwrap();
+    let qmc = study.bind(&base()).unwrap();
+    assert_eq!(mc.sample_project(&[5.0, 297.0]).unwrap(), qmc.sample_project(&[5.0, 297.0]).unwrap());
+    let three = qmc_study().replace(":samples 8", ":samples 12").replace(":replicates 2", ":replicates 3");
+    assert_eq!(UncertaintyStudy::parse(&three).unwrap().qmc().unwrap().replicates, 3,
+        "only the point count, not the independent replicate count, must be a power of two");
+}
+
+#[test]
+fn qmc_refuses_missing_extraneous_incompatible_or_unbalanced_layouts() {
+    let source = qmc_study();
+    for (from, to) in [
+        (":method quasi-monte-carlo", ":method monte-carlo"),
+        (":replicates 2", ":replicates 1"),
+        (":replicates 2", ":replicates 3"),
+        (":replicates 2", ":replicates 257"),
+        (":samples-per-replicate 4", ":samples-per-replicate 3"),
+        (":samples-per-replicate 4", ":samples-per-replicate 0"),
+        (":samples-per-replicate 4", ":samples-per-replicate 4 :samples-per-replicate 4"),
+        (":samples-per-replicate 4", ":samples-per-replicate 4 :skip-origin true"),
+        ("owen-scrambled-sobol", "sobol"),
+        (":qmc (owen-scrambled-sobol :replicates 2 :samples-per-replicate 4)", ""),
+        (":version 1", ":version 2 :compliance (bernoulli-mixture :required-probability 0.9 :alpha 0.05 :min-samples 2)"),
+    ] {
+        assert!(source.contains(from));
+        assert!(UncertaintyStudy::parse(&source.replace(from, to)).is_err(), "admitted {to}");
+    }
+    let eleven = (0..11).map(|index| format!(
+        "(uniform :name \"p{index}\" :target power :entity \"r{index}\" :low 1W :high 2W)"
+    )).collect::<Vec<_>>().join(" ");
+    let start = source.find(":parameters (").unwrap() + ":parameters (".len();
+    let excessive = format!("{}{eleven}))", &source[..start]);
+    assert!(UncertaintyStudy::parse(&excessive).is_err(), "no undeclared Monte Carlo fallback after Sobol dimension ten");
+    let fixed = source.replace(":low 4W :high 6W", ":low 5W :high 5W")
+        .replace(":low 294K :high 300K", ":low 297K :high 297K");
+    assert!(UncertaintyStudy::parse(&fixed).unwrap().bind(&base()).is_ok());
+}
