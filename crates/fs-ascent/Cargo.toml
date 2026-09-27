@@ -13,6 +13,8 @@ layer = "L4"
 [features]
 # Opt-in physical inverse design; the default optimizer dependency graph is unchanged.
 equilibrium-design = ["dep:fs-couple"]
+# Opt-in time-series calibration through the shared RK45 discrete adjoint.
+transient-design = ["dep:fs-time"]
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
@@ -22,6 +24,7 @@ fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-opt = { path = "../fs-opt" }
 fs-solver = { path = "../fs-solver" }
+fs-time = { path = "../fs-time", optional = true }
 
 [dev-dependencies]
 # Physical inverse-design consumers; normal fs-couple use is opt-in above.
@@ -59,3 +62,7 @@ required-features = ["equilibrium-design"]
 [[test]]
 name = "equilibrium_playback_cli"
 required-features = ["equilibrium-design"]
+
+[[example]]
+name = "transient_fit"
+required-features = ["transient-design"]

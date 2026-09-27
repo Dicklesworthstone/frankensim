@@ -31,6 +31,8 @@ pub mod riemann;
 pub mod runner;
 pub mod sqp;
 pub mod stop;
+#[cfg(feature = "transient-design")]
+pub mod transient;
 pub mod trust;
 pub mod wolfe;
 pub use nsga::{
