@@ -112,6 +112,18 @@ where claimed below.
   example now uses this sweep with six parked checkpoints for forty steps.
   `IdentityPreconditioner` is the explicit unpreconditioned fixture lane, not
   the field-scale recommendation.
+- `RecordedImex2::pullback_samples` accepts a capped, nondecreasing list of
+  accepted endpoint indices and the existing RK45 `SampleObjective` interface.
+  Index zero denotes the initial state; repeated indices support multiple
+  sensors at one endpoint. Each callback receives the actual recorded time,
+  supplies the scalar loss plus state/direct-parameter partials, and runs once
+  in reverse declaration order after replay verification. All terms accumulate
+  in one checkpointed sweep, with no stored observation states or extra solve
+  per observation. The result contains the total objective, initial/parameter
+  gradients, observation count, and replay/checkpoint usage. The caller chains
+  any initial-condition parameter dependence. Samples do not alter the fixed
+  IMEX mesh or interpolate off-grid times. Objective failure, unwritten output,
+  insufficient budgets and cancellation return no partial value or gradient.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
   Euler for u′ = Au + N(u), **symmetric A** via the fs-la Jacobi
   eigenbasis; φ₁(x) = expm1(x)/x (cancellation-free). Exact for N ≡ 0.
@@ -441,6 +453,10 @@ per-relation and aggregate reset-target caps.
   The recording regressions additionally compare checkpointed/full-storage
   gradients bit-for-bit, check forward cap/clone/resume behavior, reject changed
   replay physics, and exercise exact replay/checkpoint budgets.
+  `tests/imex_samples.rs` compares sampled losses and all total parameter/state
+  derivatives against dense five-point differences, checks exact full-storage
+  reverse equality, repeated sensors and actual times, and exercises zero-step
+  initial terms, all cancellation boundaries and observation/budget refusals.
 - Operator-backed generalized-alpha and IMEX remove the dense storage/API
   ceiling, but no roofline or field-scale iteration-count claim is made.
   `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity

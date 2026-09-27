@@ -12,6 +12,8 @@ use crate::stiff::{ImexSolveError, ImexStages, ImexState, OperatorImex2, imex_po
 use fs_blake3::{Blake3, ContentHash};
 use fs_solver::FlexiblePreconditioner;
 
+pub mod samples;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImexRecordingConfig {
     /// Number of fixed steps in the complete trajectory, including zero.
@@ -57,6 +59,7 @@ pub enum ImexTrajectoryError {
     ReplayMismatch { step: usize },
     CheckpointLimit { required: usize, limit: usize },
     ReplayLimit,
+    Observation(String),
 }
 impl From<ImexAdjointError> for ImexTrajectoryError {
     fn from(error: ImexAdjointError) -> Self {
@@ -92,6 +95,7 @@ pub struct RecordedImex2<'a, M, P> {
     config: ImexRecordingConfig,
     parameters: usize,
     initial: Vec<f64>,
+    initial_time: f64,
     current: Vec<f64>,
     time: f64,
     records: Vec<Endpoint>,
@@ -105,6 +109,7 @@ impl<M, P> Clone for RecordedImex2<'_, M, P> {
             config: self.config,
             parameters: self.parameters,
             initial: self.initial.clone(),
+            initial_time: self.initial_time,
             current: self.current.clone(),
             time: self.time,
             records: self.records.clone(),
@@ -183,21 +188,26 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
             config,
             parameters,
             initial: initial.to_vec(),
+            initial_time: time,
             current: initial.to_vec(),
             time,
             records: Vec::new(),
         })
     }
 
+    #[must_use]
     pub fn state(&self) -> &[f64] {
         &self.current
     }
+    #[must_use]
     pub fn time(&self) -> f64 {
         self.time
     }
+    #[must_use]
     pub fn accepted_steps(&self) -> usize {
         self.records.len()
     }
+    #[must_use]
     pub fn required_checkpoints(&self) -> usize {
         fs_ad::revolve::min_budget(self.config.steps)
     }
@@ -337,6 +347,7 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
                 1,
                 &mut progress,
                 adjoint_preconditioner,
+                &mut |_, _, _, _| Ok(()),
                 cancelled,
             )?
         };
@@ -376,7 +387,7 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn segment<Q: FlexiblePreconditioner, Cancel: FnMut() -> bool>(
+    fn segment<Q, Cancel, Observe>(
         &self,
         state: &[f64],
         begin: usize,
@@ -385,12 +396,20 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
         depth: usize,
         progress: &mut Progress,
         adjoint_preconditioner: &Q,
+        observe: &mut Observe,
         cancelled: &mut Cancel,
-    ) -> Result<Cotangent, ImexTrajectoryError> {
+    ) -> Result<Cotangent, ImexTrajectoryError>
+    where
+        Q: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+        Observe:
+            FnMut(usize, &[f64], &mut Cotangent, &mut Cancel) -> Result<(), ImexTrajectoryError>,
+    {
         imex_poll(cancelled)?;
         progress.peak = progress.peak.max(depth);
         if end - begin == 1 {
             let stages = self.replay(begin, state, progress, cancelled)?;
+            observe(end, &stages.next, &mut bar, cancelled)?;
             let gradient = self.method.reverse_stages(
                 state,
                 self.model,
@@ -420,6 +439,7 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
             depth + 1,
             progress,
             adjoint_preconditioner,
+            observe,
             cancelled,
         )?;
         drop(midpoint);
@@ -431,6 +451,7 @@ impl<'a, M: ImexVjp, P: FlexiblePreconditioner> RecordedImex2<'a, M, P> {
             depth,
             progress,
             adjoint_preconditioner,
+            observe,
             cancelled,
         )
     }

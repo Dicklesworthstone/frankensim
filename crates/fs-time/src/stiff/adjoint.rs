@@ -105,6 +105,7 @@ impl OperatorImex2 {
     /// primal stages, FGMRES basis/Hessenberg storage, residual histories and
     /// gradient outputs. Excludes allocator metadata and callback-owned memory.
     /// Uses the configured restart length, even when it exceeds the dimension.
+    #[must_use]
     pub fn adjoint_workspace_components(&self, parameters: usize) -> Option<usize> {
         let m = self.solve.restart;
         let vectors = m.checked_mul(2)?.checked_add(24)?.checked_mul(self.n)?;
