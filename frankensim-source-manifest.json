@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "035d24b8a7a69643adb47e504e1ea39170e6f00665d58908dfa8df31521fc441",
+  "manifest_identity": "1aadefacb1b16d37b238983e0acd906e4286e76230c81a8e38997896d3e79c12",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "276783fe72f4eb3c5038af4d9b6d38cfbc08ebc3ad514df1121d0b5078096ff0",
+    "source_root": "603f6997a28254201de2e82e8b2ce832a28239d8330820d679dbe936f6c90a4d",
     "tracked_file_count": 4770,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1824,7 +1824,7 @@
       {"path": "crates/fs-exec/src/cx.rs", "git_mode": "100644", "bytes": 31608, "content_blake3": "7fa614363521c6f1cad03479b8e65ce714ebd3e0f6cc75945b6d89ac424dfbac"},
       {"path": "crates/fs-exec/src/fault.rs", "git_mode": "100644", "bytes": 4898, "content_blake3": "83f772fb51e4692d4f65c59f94b6377943c3cadb6e20cc70d13274e5cb50597e"},
       {"path": "crates/fs-exec/src/freeze.rs", "git_mode": "100644", "bytes": 47721, "content_blake3": "2161a9c2796eb60c34d906ac0a609651160b282d3aefe94293278cac9a874a5e"},
-      {"path": "crates/fs-exec/src/invocation.rs", "git_mode": "100644", "bytes": 228122, "content_blake3": "a61ae229bfd9807082493bb3148b8416558bb55aa381add4695d98a706538943"},
+      {"path": "crates/fs-exec/src/invocation.rs", "git_mode": "100644", "bytes": 229180, "content_blake3": "086ec6da4eadb6b62958c252a15fd97818004252d22c88175cae7763c7a70e93"},
       {"path": "crates/fs-exec/src/kernel.rs", "git_mode": "100644", "bytes": 4906, "content_blake3": "f17e6d6f45100812b147ef33e082a81e5f85b36f30e40a3e5a02df6c760b28c6"},
       {"path": "crates/fs-exec/src/kill.rs", "git_mode": "100644", "bytes": 8248, "content_blake3": "d4126a8e149894c3c0c6793a1b7c74a5169e43ba75934f81221f59d9cfdeaecd"},
       {"path": "crates/fs-exec/src/latency.rs", "git_mode": "100644", "bytes": 3525, "content_blake3": "20c304ccff3f5ad13e308e8278d3d6ce33b369d673ca451312d7eb12b6bc3766"},
