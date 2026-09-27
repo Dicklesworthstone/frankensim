@@ -192,15 +192,25 @@ fn project(
     let primal_iterations = correction.primal_iterations;
     // Preserve the original coupling origin in the replay evidence. Replacing
     // a physical Robin reference changes the rounded RHS, not the modeled air law.
+    // All inverse diagnostics describe the selected PUBLISHED analysis. On a
+    // physical refusal, none of these fields may come from the rejected trial.
+    let coupled = analysis.coupled();
+    let inverse_method = coupled.inverse_method()
+        .map(|method| json_string(method.tag())).unwrap_or_else(|| "null".into());
+    let response_defect = coupled.response_residual_infinity_upper()
+        .iter().copied().reduce(f64::max);
     let mut control_json = control_json;
     control_json.pop();
     control_json.push_str(&format!(
-        ",\"bound_target\":\"pre-correction-stored-affine-system\",\"air_paths\":{},\"ports\":{},\"max_response_iterations\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"bound_status\":{}}}",
+        ",\"bound_target\":\"pre-correction-stored-affine-system\",\"air_paths\":{},\"ports\":{},\"max_response_iterations\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"maximum_response_residual_upper\":{},\"inverse_method\":{},\"schur_inverse_infinity_upper\":{},\"bound_status\":{}}}",
         paths.len(), paths.iter().map(|path| path.segments().len()).sum::<usize>(),
-        primal_limit, number(analysis.coupled().residual_infinity_upper())?,
-        optional_number(analysis.coupled().solid_inverse_infinity_upper())?,
-        optional_number(analysis.coupled().coupled_inverse_infinity_upper())?,
-        json_string(&format!("{:?}", analysis.coupled().status()))));
+        primal_limit, number(coupled.residual_infinity_upper())?,
+        optional_number(coupled.solid_inverse_infinity_upper())?,
+        optional_number(coupled.gain_infinity_upper())?,
+        optional_number(coupled.coupled_inverse_infinity_upper())?,
+        optional_number(response_defect)?, inverse_method,
+        optional_number(coupled.schur_inverse_infinity_upper())?,
+        json_string(&format!("{:?}", coupled.status()))));
     let evidence = MaximumEvidence { term: Some(term), control_json: Some(control_json),
         primal_iterations, linear_work: None };
     let replacement = match result.accepted.take() {

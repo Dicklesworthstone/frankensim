@@ -89,6 +89,11 @@ fn one_field_drives_the_qoi_bound_physical_report_and_live_air_receipt() {
         assert_eq!(control.str_field("schema"), Some(SCHEMA));
         assert_eq!(control.get("physical_accepted"), Some(&Json::Bool(true)));
         assert_eq!(control.get("candidate_accepted"), Some(&Json::Bool(true)));
+        let gain = control.f64_field("feedback_gain_infinity_upper").unwrap();
+        assert!(gain > 0.0 && gain < 1.0);
+        assert_eq!(control.str_field("inverse_method"), Some("state-contraction"));
+        assert_eq!(control.get("schur_inverse_infinity_upper"), Some(&Json::Null));
+        assert!(control.f64_field("maximum_response_residual_upper").unwrap() >= 0.0);
         assert!(publication.evidence.primal_iterations > 0);
         let receipt = Json::parse(&replacement.conjugate).unwrap();
         assert_eq!(receipt.get("initial_exchange"), Some(&Json::parse(&history).unwrap()));
@@ -147,6 +152,12 @@ fn a_rejected_changed_candidate_never_supplies_the_unchanged_fields_bound() {
             SpectralMaximumControl { initial_shift: 0.001, limits }, gates).unwrap();
         assert!(result.accepted.is_some());
         let initial = result.correction.initial_analysis.algebraic_half_width_k();
+        let original_coupled = result.correction.initial_analysis.coupled();
+        let original_gain = original_coupled.gain_infinity_upper();
+        let original_method = original_coupled.inverse_method().map(|method| method.tag());
+        let original_schur = original_coupled.schur_inverse_infinity_upper();
+        let original_response = original_coupled.response_residual_infinity_upper()
+            .iter().copied().reduce(f64::max);
         assert_ne!(initial, result.correction.solution.solid.analysis.algebraic_half_width_k());
         // Exercise the projector's refusal contract independently of which gate failed.
         result.accepted = None;
@@ -156,6 +167,13 @@ fn a_rejected_changed_candidate_never_supplies_the_unchanged_fields_bound() {
         assert!(output.replacement.is_none());
         let control = Json::parse(output.evidence.control_json.as_ref().unwrap()).unwrap();
         assert_eq!(control.f64_field("final_bound_k"), initial);
+        for key in ["feedback_gain_infinity_upper", "inverse_method",
+            "schur_inverse_infinity_upper", "maximum_response_residual_upper"]
+        { assert!(control.get(key).is_some(), "missing coupled witness {key}"); }
+        assert_eq!(control.f64_field("feedback_gain_infinity_upper"), original_gain);
+        assert_eq!(control.str_field("inverse_method"), original_method);
+        assert_eq!(control.f64_field("schur_inverse_infinity_upper"), original_schur);
+        assert_eq!(control.f64_field("maximum_response_residual_upper"), original_response);
         assert!(output.evidence.primal_iterations > 0);
         assert_eq!(control.get("candidate_accepted"), Some(&Json::Bool(false)));
     });
