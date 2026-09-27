@@ -940,6 +940,36 @@ authority.
   Component uncertainty is a conservative arithmetic sum of stated
   half-widths, not a probabilistic convolution, and no correlation between
   components is modelled.
+- `transient::enthalpy::EnthalpyBackwardEuler` evolves a spatial specific-enthalpy
+  field on the existing P1 tetrahedral mesh. It reuses the existing conductivity,
+  source, Neumann, Robin and finite-contact assembly; temperature-dependent k(T)
+  is evaluated at each actual nonlinear trial. Fixed reference masses are
+  `m_i = sum_e rho0 V_e/4`; equilibrium density changes never create or remove
+  specimen mass. The nodal equilibrium chart returns temperature and liquid
+  fraction, preserving a true isothermal latent plateau without apparent-Cp
+  smoothing. The discrete residual is `m*(h-h_old)+dt*(A(T(h))*T(h)-b)` in joules.
+  Its exact generalized Jacobian is `M+dt*J_T*diag(dT/dh)`, with column scaling;
+  a zero temperature slope leaves a positive mass column. The shared bounded
+  Newton/FGMRES driver uses a physical Picard-Jacobi inverse, and each current
+  tangent is assembled once per Newton attempt. Sparse actions allocate no
+  scratch. Typed chart, spatial, solver, work, cancellation and energy failures
+  return no new state and never mutate the supplied history. The accepted
+  `sum m_i*(h_new_i-h_old_i)` must match independently integrated external heat
+  within the caller's absolute joule tolerance; internal contact cancels from
+  that account. Spatial caps precede mass allocation and checked products bound
+  Newton workspace/work arithmetic. Constitutive, assembly and operator tiles
+  poll Cx, with final polling before publication.
+  This initial lane binds one spatially uniform equilibrium chart and a declared
+  reference density. All Dirichlet rows refuse explicitly: a temperature on a
+  latent plateau does not determine enthalpy. Geometry and energetic internal
+  variables are frozen; there is no material motion, expansion, pressure work,
+  remapping, phase kinetics, vaporization, or implicit radiation law in this API.
+  `tests/enthalpy_transport.rs` compares constant-Cp stepping with the existing
+  temperature solver, latent heating with independent energy formulas and the
+  exact uniform lumped limit, a nonlinear-conductivity endpoint with independent
+  P1 algebra, mixed sensible/latent exchange with an exact one-Newton solution,
+  and immutable-history/cancellation refusals. These are numerical checks,
+  not experimental material validation or interval error bounds.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

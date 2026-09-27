@@ -60,6 +60,9 @@
 /// Coupling-safe backward-Euler steps with explicit solid energy storage.
 pub mod backward_euler;
 
+/// Primary-enthalpy storage with stationary nonlinear spatial transport.
+pub mod enthalpy;
+
 use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator, assemble_operator_with_element_materials, reduce_matrix_and_lift,
