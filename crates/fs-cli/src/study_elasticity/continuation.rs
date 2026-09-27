@@ -335,34 +335,18 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             } else { "running" };
         if status != "running" {
             if spec.final_dwr && matches!(status, "completed" | "constraint-unmet") {
-                let assessed = fs_topols::assess_compliance_dwr_controlled(
-                    state.geometry(), fixture(spec), settings(spec, spec.steps), |_| {
+                let expected = assessment::Design::from_report(&report)?;
+                let (assessed_status, result) = assessment::run(
+                    spec, state.geometry(), expected, status, |_| {
                         match stop_status(gate.is_requested(),
                             retained_wall + start.elapsed().as_secs_f64(), spec.wall_s) {
                             Some(stop) => ControlFlow::Break(stop),
                             None => ControlFlow::Continue(()),
                         }
                     },
-                ).map_err(|error| fail("cli-study-elasticity-dwr", error.to_string()))
-                    .and_then(|outcome| match outcome {
-                        ControlFlow::Continue(assessed) => {
-                            assessment::require_same_design(&assessed, &report)?;
-                            Ok(ControlFlow::Continue(assessed))
-                        }
-                        ControlFlow::Break(stop) => Ok(ControlFlow::Break(stop)),
-                    });
-                match assessed {
-                    Ok(ControlFlow::Continue(assessed)) => {
-                        evidence.final_dwr = Some(assessment::FinalAssessment::Estimated(assessed));
-                    }
-                    Ok(ControlFlow::Break(stop)) => status = stop,
-                    Err(error) => {
-                        evidence.final_dwr = Some(assessment::FinalAssessment::Refused(error.message));
-                        status = stop_status(gate.is_requested(),
-                            retained_wall + start.elapsed().as_secs_f64(), spec.wall_s)
-                            .unwrap_or("numerical-failure");
-                    }
-                }
+                );
+                status = assessed_status;
+                evidence.final_dwr = result;
             }
             return persist(spec, ledger, state.geometry(), &report, status,
                 retained_wall + start.elapsed().as_secs_f64(), predecessor, &evidence)

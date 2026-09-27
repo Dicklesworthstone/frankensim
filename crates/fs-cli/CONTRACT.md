@@ -766,15 +766,15 @@ survive canonical recognition, including ignored geometry or unit declarations.
 The separate free-boundary elasticity producer executes the real level-set
 optimizer; q61wp.16 remains partial against its broader error-control goals.
 
-For the plain single-load `elasticity-2d` producer, append
+For the plain or projected-volume single-load `elasticity-2d` producer, append
 `(assessment :type elasticity-dwr :max-solves-per-attempt 2)` after the optimizer
 section to assess the exact final accepted design. This explicit opt-in requires
 at least 256 MiB admitted memory for the coarse/enriched state pair and the
 existing bounded mesh-level envelope 2..=5. It authorizes two assessment solves
 per attempt, each capped at 60,000 CG iterations with a 1e-12 recomputed
 Euclidean relative-residual target. Memory is an admission allowance, not
-measured peak RSS. Projected, stress and load-family modes refuse this
-assessment request until their exact problem settings have an assessment owner.
+measured peak RSS. Stress and load-family modes refuse this assessment request
+until their exact problem settings have an assessment owner.
 
 The final optimizer update is durably retained before assessment starts.
 Cancellation and lifetime-wall-budget checks bracket the indivisible DWR phase.
@@ -792,8 +792,24 @@ residuals/iterations and geometry identity. Absolute indicator sum is marking
 mass, not an interval radius. No certified continuum-error bound, adaptive
 optimization, physical validation or optimum is claimed. An unmet material
 constraint remains `constraint-unmet` even if error assessment succeeds.
+
+Projected-volume final assessment binds the actual feasible current design,
+including the prepared baseline when a bounded search accepts zero updates.
+The existing constraint evidence records an optional `optimizer_terminal`
+before the assessment starts. This distinguishes a finished
+`no-feasible-descent` search from a paused optimizer: cancellation or numerical
+refusal can retry only the assessment, without repeating projection, optimizer
+recovery solves, candidates or accepted updates. An assessed stalled design
+remains `no-feasible-descent`; estimated numerical error does not establish
+optimization convergence. Prescribed regions and refinement-origin geometry
+are retained unchanged, and the assessment uses the declared final grid.
+Disabled assessment omits this terminal marker and preserves existing behavior.
+
 The `final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work`
 binary regression exercises numerical reporting and final-checkpoint recovery.
+Projected-volume regressions additionally cover a genuinely accepted feasible
+endpoint, a zero-update feasible stall, stops before and after the real DWR
+phase, retry without search/recovery callbacks, and completed-result reuse.
 
 Every accepted transition retains the source, iteration log, exact parametric
 geometry, SVG/HTML report, JSON summary and format-9 package in one ledger

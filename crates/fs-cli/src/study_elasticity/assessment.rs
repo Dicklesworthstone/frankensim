@@ -1,9 +1,11 @@
 //! Explicit final-design DWR assessment. The two bounded solves run only after
-//! the last requested update has been durably retained. A stop at either phase
-//! boundary publishes the same accepted geometry with assessment pending.
+//! the actual optimizer endpoint has been durably retained. This includes a
+//! feasible projected baseline when the search accepts no update. A stop at
+//! either phase boundary retains the same geometry with assessment pending.
 
 use super::*;
-use fs_topols::ComplianceDwrAssessment;
+use fs_topols::{ComplianceDwrAssessment, ComplianceDwrStage};
+use std::ops::ControlFlow;
 
 pub(super) enum FinalAssessment {
     Estimated(ComplianceDwrAssessment),
@@ -28,22 +30,67 @@ pub(super) fn parse(root: &Node) -> Result<bool> {
 }
 
 pub(super) fn validate(spec: &ElasticitySpec) -> Result<()> {
-    if spec.final_dwr && (spec.projected.is_some() || spec.memory_bytes < 256 * 1024 * 1024) {
+    if spec.final_dwr && (matches!(&spec.projected, Some(continuation::ProjectedControls::Stress(_)))
+        || spec.memory_bytes < 256 * 1024 * 1024)
+    {
         return Err(fail("cli-study-elasticity-assessment",
-            "final elasticity DWR currently requires the plain single-load mode and at least 256 MiB admitted memory for coarse and enriched states"));
+            "final elasticity DWR requires plain or projected-volume single-load mode and at least 256 MiB admitted memory for coarse and enriched states"));
     }
     Ok(())
 }
 
-pub(super) fn require_same_design(assessment: &ComplianceDwrAssessment, report: &OptimizeReport) -> Result<()> {
-    if report.snapshots.last() != Some(&assessment.snapshot)
-        || report.compliance.last().map(|value| value.to_bits()) != Some(assessment.estimate.j_primal.to_bits())
-        || report.volume.last().map(|value| value.to_bits()) != Some(assessment.volume.to_bits())
-    {
-        return Err(fail("cli-study-elasticity-dwr-design",
-            "DWR coarse solve does not reproduce the accepted geometry, compliance and material area"));
+/// Independently measured mechanics of the geometry being assessed. A feasible
+/// projected baseline is valid even when the optimizer accepted no updates.
+pub(super) struct Design {
+    pub(super) snapshot: u64,
+    pub(super) compliance: f64,
+    pub(super) volume: f64,
+}
+
+impl Design {
+    pub(super) fn from_report(report: &OptimizeReport) -> Result<Self> {
+        match (report.snapshots.last(), report.compliance.last(), report.volume.last()) {
+            (Some(&snapshot), Some(&compliance), Some(&volume)) => Ok(Self { snapshot, compliance, volume }),
+            _ => Err(fail("cli-study-elasticity-dwr-design", "final assessment requires an evaluated accepted design")),
+        }
     }
-    Ok(())
+}
+
+/// Shared numerical assessment for plain and same-area projected endpoints.
+/// The caller durably retains its optimizer terminal before entering here.
+pub(super) fn run(
+    spec: &ElasticitySpec,
+    phi: &GridSdf,
+    expected: Design,
+    terminal: &'static str,
+    mut control: impl FnMut(ComplianceDwrStage) -> ControlFlow<&'static str>,
+) -> (&'static str, Option<FinalAssessment>) {
+    let assessed = fs_topols::assess_compliance_dwr_controlled(
+        phi, fixture(spec), settings(spec, spec.steps), &mut control,
+    ).map_err(|error| error.to_string()).and_then(|outcome| match outcome {
+        ControlFlow::Continue(assessment) => {
+            if expected.snapshot != assessment.snapshot
+                || expected.compliance.to_bits() != assessment.estimate.j_primal.to_bits()
+                || expected.volume.to_bits() != assessment.volume.to_bits()
+            {
+                Err("DWR coarse solve does not reproduce the accepted geometry, compliance and material area".into())
+            } else {
+                Ok(ControlFlow::Continue(assessment))
+            }
+        }
+        ControlFlow::Break(stop) => Ok(ControlFlow::Break(stop)),
+    });
+    match assessed {
+        Ok(ControlFlow::Continue(assessment)) => (terminal, Some(FinalAssessment::Estimated(assessment))),
+        Ok(ControlFlow::Break(stop)) => (stop, None),
+        Err(reason) => {
+            let status = match control(ComplianceDwrStage::BeforePublish) {
+                ControlFlow::Break(stop) => stop,
+                ControlFlow::Continue(()) => "numerical-failure",
+            };
+            (status, Some(FinalAssessment::Refused(reason)))
+        }
+    }
 }
 
 pub(super) fn json(assessment: Option<&FinalAssessment>, requested: bool) -> String {
@@ -109,6 +156,9 @@ mod tests {
             ":memory 134217728 B")).is_err());
         let projected = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
             "/../../examples/marquee/bracket-projected-volume-2d.fsim"));
-        assert!(super::super::parse(&with_assessment(projected)).is_err());
+        assert!(super::super::parse(&with_assessment(projected)).unwrap().final_dwr);
+        let stress = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/marquee/bracket-projected-stress-2d.fsim"));
+        assert!(super::super::parse(&with_assessment(stress)).is_err());
     }
 }

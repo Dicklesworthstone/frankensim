@@ -120,6 +120,8 @@ pub(crate) struct VolumeEvidence {
     refusals: Vec<String>,
     mesh: Option<mesh::LastCheck>,
     origin: Option<origin::Origin>,
+    // Retains a completed search across interruption of its final assessment.
+    optimizer_terminal: Option<&'static str>,
 }
 impl VolumeEvidence {
     pub(crate) fn current(&self) -> Measured {
@@ -140,7 +142,9 @@ impl VolumeEvidence {
             self.attempts.iter().map(usize::to_string).collect::<Vec<_>>().join(","),
             self.refusals.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","), reduction,
             regions::json_field(&self.policy.regions) + &mesh::field(self.policy.resolution, self.mesh.as_ref())
-                + &self.origin.as_ref().map_or_else(String::new, origin::Origin::json_field))
+                + &self.origin.as_ref().map_or_else(String::new, origin::Origin::json_field)
+                + &self.optimizer_terminal.map_or_else(String::new,
+                    |status| format!(",\"optimizer_terminal\":{status:?}")))
     }
     pub(crate) fn html(&self) -> String {
         format!("<p>Hard material area: {:.8e} m² ± {:.8e} m². Independently solved same-material, same-load baseline: {:.8e} J; current compliance: {:.8e} J. Baseline area projection is feasibility preparation, not an optimization improvement. No stress limit or stress evaluation was requested. Prescribed material/void regions: {}. The area is numerical cut quadrature; iteration completion is not convergence or optimality.</p>",
@@ -198,7 +202,15 @@ impl VolumeEvidence {
             .filter(|_| accepted.len() >= 2).unwrap_or(baseline);
         let mesh = mesh::read(value, policy, previous, current, accepted.len())?;
         let origin = origin::read(value, policy)?;
-        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, mesh, origin };
+        let optimizer_terminal = match value.get("optimizer_terminal") {
+            None => None,
+            Some(JsonValue::Str(status)) if status == "completed" && refusals.is_empty() => Some("completed"),
+            Some(JsonValue::Str(status)) if status == "no-feasible-descent" && !refusals.is_empty() =>
+                Some("no-feasible-descent"),
+            _ => return Err(malformed("invalid projected-volume optimizer terminal")),
+        };
+        let evidence = Self { policy: policy.clone(), baseline, accepted, attempts: counts,
+            refusals, mesh, origin, optimizer_terminal };
         // Recompute rather than trusting the retained headline improvement.
         let expected = document(evidence.json().as_bytes())?;
         if value.get("relative_reduction") != expected.get("relative_reduction") {
@@ -215,9 +227,52 @@ enum VolumeStage {
     Update(ProjectedStage),
     Mesh(mesh::MeshCheckStage),
     Origin(origin::Stage),
+    Assessment(fs_topols::ComplianceDwrStage),
 }
 fn stopped(gate: &CancelGate, start: Instant, consumed: f64, spec: &ElasticitySpec) -> Option<&'static str> {
     stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
+}
+
+/// Retain the actual feasible endpoint before starting an optional assessment.
+/// The terminal marker distinguishes a finished zero-update search from a
+/// paused optimizer, so an assessment retry cannot silently enlarge the search.
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    spec: &ElasticitySpec, ledger: &Ledger, phi: &GridSdf, report: &OptimizeReport,
+    terminal: &'static str, gate: &CancelGate, start: Instant, consumed: f64,
+    predecessor: Option<ContentHash>, evidence: &mut Evidence,
+    mut observe: impl FnMut(VolumeStage),
+) -> Result<Outcome> {
+    if !spec.final_dwr {
+        return persist(spec, ledger, phi, report, terminal,
+            consumed + start.elapsed().as_secs_f64(), predecessor, evidence);
+    }
+    let retained = evidence.volume.as_mut().ok_or_else(|| malformed("missing feasible assessment endpoint"))?;
+    let current = retained.current();
+    if current.snapshot != snapshot(phi)
+        || (terminal == "completed" && report.rows.len() != spec.steps)
+        || (terminal == "no-feasible-descent" && retained.refusals.is_empty())
+        || !matches!(terminal, "completed" | "no-feasible-descent")
+    {
+        return Err(malformed("final assessment requires the retained, finished projected-volume endpoint"));
+    }
+    retained.optimizer_terminal = Some(terminal);
+    let pending = persist(spec, ledger, phi, report, "running",
+        consumed + start.elapsed().as_secs_f64(), predecessor, evidence)?;
+    let predecessor = pending.pointer.strip_prefix("study-").and_then(ContentHash::from_hex);
+    let expected = assessment::Design {
+        snapshot: current.snapshot, compliance: current.compliance, volume: current.volume,
+    };
+    let (status, result) = assessment::run(spec, phi, expected, terminal, |stage| {
+        observe(VolumeStage::Assessment(stage));
+        match stopped(gate, start, consumed, spec) {
+            Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+        }
+    });
+    evidence.final_dwr = result;
+    persist(spec, ledger, phi, report, status,
+        consumed + start.elapsed().as_secs_f64(), predecessor, evidence)
+        .map_err(|error| retained_error(error, Some(&pending)))
 }
 
 pub(in super::super) fn drive(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
@@ -266,10 +321,15 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             origin.fine_level != settings(spec, spec.steps).level) {
             return Err(malformed("retained refinement level differs from the study"));
         }
+        if retained.optimizer_terminal.is_some_and(|terminal|
+            !spec.final_dwr || (terminal == "completed" && report.rows.len() != spec.steps)) {
+            return Err(malformed("retained optimizer terminal disagrees with the assessment request or update count"));
+        }
         let status = match old.value.str_field("status") {
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
             Some("no-feasible-descent") => "no-feasible-descent",
+            Some("numerical-failure") if spec.final_dwr && retained.optimizer_terminal.is_some() => "numerical-failure",
             Some("mesh-unresolved") if retained.mesh.as_ref().is_some_and(|c| c.outcome == "baseline-unresolved") => "mesh-unresolved",
             _ => return Err(malformed("unknown projected-volume terminal")),
         };
@@ -279,6 +339,13 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
         if matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved") {
             return last.ok_or_else(|| malformed("terminal volume-only state has no receipt"));
+        }
+        if let Some(terminal) = evidence.volume.as_ref().and_then(|value| value.optimizer_terminal) {
+            // The optimizer already stopped. Assess the retained geometry
+            // directly; do not restore its search, re-project, or replay updates.
+            return finish(spec, ledger, &phi, &report, terminal, gate, start, consumed,
+                predecessor, &mut evidence, &mut observe)
+                .map_err(|error| retained_error(error, last.as_ref()));
         }
         if let Some(status) = stopped(gate, start, consumed, spec) {
             return Err(constraints_stop(status, last.as_ref()));
@@ -335,7 +402,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None, origin: Some(origin) });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
+            origin: Some(origin), optimizer_terminal: None });
         state
     } else {
         let prepared = regions::prepare(spec, &policy.regions, |stage| {
@@ -360,7 +428,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             ControlFlow::Break(status) => return Err(constraints_stop(status, None)),
         };
         evidence.volume = Some(VolumeEvidence { policy: policy.clone(), baseline: state.current().into(),
-            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None, origin: None });
+            accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
+            origin: None, optimizer_terminal: None });
         state
     };
     let target = spec.steps.min(report.rows.len().saturating_add(cap.unwrap_or(spec.steps - report.rows.len())));
@@ -383,6 +452,11 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             (state.checkpoint().next_iteration() == target).then_some(
                 if state.checkpoint().is_complete() { "completed" } else { "budget-exhausted" }));
         if let Some(status) = status {
+            if status == "completed" {
+                return finish(spec, ledger, state.checkpoint().geometry(), &report, status,
+                    gate, start, consumed, predecessor, &mut evidence, &mut observe)
+                    .map_err(|error| retained_error(error, last.as_ref()));
+            }
             return persist(spec, ledger, state.checkpoint().geometry(), &report, status,
                 consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));
@@ -448,8 +522,8 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
             ProjectedProgress::NoDescent(attempts) => {
                 retained.refusals = attempts.into_iter().map(|attempt| attempt.refusal
                     .unwrap_or_else(|| "candidate was not admitted".into())).collect();
-                return persist(spec, ledger, state.checkpoint().geometry(), &report, "no-feasible-descent",
-                    consumed + start.elapsed().as_secs_f64(), predecessor, &evidence)
+                return finish(spec, ledger, state.checkpoint().geometry(), &report, "no-feasible-descent",
+                    gate, start, consumed, predecessor, &mut evidence, &mut observe)
                     .map_err(|error| retained_error(error, last.as_ref()));
             }
             ProjectedProgress::IterationLimit => return Err(malformed("projected-volume completed before target")),
