@@ -22,6 +22,12 @@ const SOLVER_MAX_ITERS: usize = 60_000;
 pub(crate) mod controlled;
 pub use controlled::{DesignEvaluationStage, evaluate_compliance_design_controlled};
 
+mod dwr;
+pub use dwr::{
+    ComplianceDwrAssessment, ComplianceDwrStage, assess_compliance_dwr,
+    assess_compliance_dwr_controlled,
+};
+
 /// One authoritative evaluation of the geometry actually returned to the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct EvaluatedFinalState {

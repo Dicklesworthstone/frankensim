@@ -88,6 +88,14 @@ pub struct ElasticityDwrEstimate {
     pub dofs: usize,
     /// Enriched vector displacement DOF count.
     pub enriched_dofs: usize,
+    /// Recomputed Euclidean relative residual of the coarse solve.
+    pub primal_relative_residual: f64,
+    /// Recomputed Euclidean relative residual of the enriched solve.
+    pub enriched_relative_residual: f64,
+    /// Aggregate coarse CG iterations, including true-residual corrections.
+    pub primal_iterations: usize,
+    /// Aggregate enriched CG iterations, including true-residual corrections.
+    pub enriched_iterations: usize,
 }
 
 /// Estimate compliance error using self-adjoint coarse and enriched primal
@@ -353,6 +361,14 @@ fn estimate_elasticity_compliance_impl(
         j_enriched: fine.compliance(),
         dofs: coarse.dof_count(),
         enriched_dofs: fine.dof_count(),
+        primal_relative_residual: coarse.euclidean_rel_residual().ok_or_else(|| {
+            invalid("elasticity DWR requires a recomputed Euclidean coarse residual".to_string())
+        })?,
+        enriched_relative_residual: fine.euclidean_rel_residual().ok_or_else(|| {
+            invalid("elasticity DWR requires a recomputed Euclidean enriched residual".to_string())
+        })?,
+        primal_iterations: coarse.iters,
+        enriched_iterations: fine.iters,
     })
 }
 

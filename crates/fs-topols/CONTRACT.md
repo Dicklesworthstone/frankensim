@@ -76,6 +76,32 @@ with zero meshing anywhere in the loop.
 - `optimize::material_volume`: certified cut-quadrature area of
   `{φ < 0}`.
 
+## Final-design goal-error assessment
+
+`assess_compliance_dwr` and `assess_compliance_dwr_controlled` evaluate the
+unchanged final bilinear level set through fs-dwr's canonical vector-compliance
+estimator. Clamp, typed load support, material, quadrature, stabilization,
+60,000-iteration cap per solve and 1e-12 recomputed Euclidean residual target
+match `evaluate_compliance_design`. The original geometry is solved on its
+declared uniform grid and one finer grid; no projection, redistancing, or
+optimization step is performed. Assessment admits levels 1..=5 and enriches
+through level 6.
+
+`ComplianceDwrAssessment` binds the original nodal snapshot and material area
+to coarse/enriched compliance, signed DWR estimate, absolute indicator mass,
+bulk/Nitsche/traction/ghost decomposition, DOF counts, actual recomputed
+Euclidean residuals and actual CG iteration counts. These are Estimated
+numerical quantities, not certified continuum bounds. Absolute indicator mass
+is a marking signal, not an interval radius; algebraic residuals do not bound
+discretization error.
+
+Cancellation checks bracket the entire two-solve estimator. A stop returns no
+partial assessment and cannot mutate geometry. There is no cancellation point
+inside its assembly, solves or residual integration. Focused G3 tests compare
+the exact canonical coarse evaluation, quadratic load scaling and a thinner
+geometry; G4 tests stop before estimation and before publication. The CLI
+consumer supplies admission budgets and retains accepted geometry before work.
+
 ## Invariants
 
 1. Enclosure containment holds on the DISCRETE moving geometry

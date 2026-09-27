@@ -29,6 +29,9 @@ use super::STUDY_RUN_RECEIPT_SCHEMA;
 mod continuation;
 use continuation::drive;
 
+#[path = "study_elasticity/assessment.rs"]
+mod assessment;
+
 #[cfg(feature = "sdf3-study")]
 #[path = "study_elasticity/sdf3.rs"]
 mod sdf3;
@@ -110,6 +113,7 @@ struct ElasticitySpec {
     max_iterations: usize,
     id: ContentHash,
     projected: Option<continuation::ProjectedControls>,
+    final_dwr: bool,
 }
 
 fn list<'a>(node: &'a Node, what: &'static str) -> Result<&'a [Node]> {
@@ -271,6 +275,9 @@ fn canonical(spec: &ElasticitySpec) -> String {
     } else {
         let _ = writeln!(out, "    :steps {})", spec.steps);
     }
+    if spec.final_dwr {
+        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt 2)");
+    }
     let _ = writeln!(out, ")");
     out
 }
@@ -330,6 +337,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         .ok_or_else(|| fail("cli-study-elasticity-budget", "max-iterations is required"))?;
     let projected = continuation::parse_controls(optimizer_fields,
         base.constraints.as_ref().expect("validated constraints").volume_fraction)?;
+    let final_dwr = assessment::parse(&root)?;
     let mut parsed = ElasticitySpec {
         base,
         canonical: String::new(),
@@ -351,6 +359,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         max_iterations,
         id: ContentHash([0; 32]),
         projected,
+        final_dwr,
     };
     validate_model(&parsed)?;
     parsed.canonical = canonical(&parsed);
@@ -376,6 +385,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
 }
 
 fn validate_model(spec: &ElasticitySpec) -> Result<()> {
+    assessment::validate(spec)?;
     let base = &spec.base;
     let metadata = base.metadata.as_ref().expect("validated metadata");
     if metadata.decision_gate != DecisionGate::ScopingEstimate
@@ -681,6 +691,8 @@ fn persist(
     let continuation = evidence.json();
     let constraints = evidence.constraint_fields();
     let constraint_html = evidence.constraint_html();
+    let goal_error = assessment::json(evidence.final_dwr.as_ref(), spec.final_dwr);
+    let goal_error_html = assessment::html(evidence.final_dwr.as_ref(), spec.final_dwr);
     let no_claim = if spec.projected.is_some() { continuation::PROJECTED_SCOPE } else { NO_CLAIM };
     let count = report.rows.len();
     let trace = trace_hash(&report.rows);
@@ -728,7 +740,7 @@ fn persist(
         _ => (String::new(), String::new()),
     };
     let summary = format!(
-        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{}{volume_fields},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}}}",
+        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{}{volume_fields},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}{goal_error}}}",
         spec.id.to_hex(),
         spec.steps,
         final_volume.map_or("null".to_string(), |value| format!("{value:.17e}")),
@@ -752,7 +764,7 @@ fn persist(
         );
     }
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}{volume_html}<p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}{volume_html}<p>Final discrete compliance: {final_compliance} J.</p>{goal_error_html}{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
         spec.steps,
         geometry_svg(phi),
         trace.to_hex()

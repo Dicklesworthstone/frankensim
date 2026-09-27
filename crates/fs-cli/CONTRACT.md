@@ -763,7 +763,37 @@ scalar Poisson/CutFEM radius optimizer. The canonical example is
 and hole boundaries, unit square, dimensionless compliance, fixed hole
 centers and area equality. The executable reader rejects fields that do not
 survive canonical recognition, including ignored geometry or unit declarations.
-Elasticity and free-boundary topology remain unimplemented under q61wp.16.
+The separate free-boundary elasticity producer executes the real level-set
+optimizer; q61wp.16 remains partial against its broader error-control goals.
+
+For the plain single-load `elasticity-2d` producer, append
+`(assessment :type elasticity-dwr :max-solves-per-attempt 2)` after the optimizer
+section to assess the exact final accepted design. This explicit opt-in requires
+at least 256 MiB admitted memory for the coarse/enriched state pair and the
+existing bounded mesh-level envelope 2..=5. It authorizes two assessment solves
+per attempt, each capped at 60,000 CG iterations with a 1e-12 recomputed
+Euclidean relative-residual target. Memory is an admission allowance, not
+measured peak RSS. Projected, stress and load-family modes refuse this
+assessment request until their exact problem settings have an assessment owner.
+
+The final optimizer update is durably retained before assessment starts.
+Cancellation and lifetime-wall-budget checks bracket the indivisible DWR phase.
+An interrupted attempt preserves the accepted geometry, records elapsed wall
+time and leaves assessment pending; a numerical refusal retains its reason and
+elapsed charge with `numerical-failure`. Resume can retry assessment on the
+already complete optimizer checkpoint without another geometry update. A
+completed terminal assessment is reused without solving again. Disabled
+assessment leaves existing output unchanged.
+
+The retained report, receipt continuation and HTML expose signed estimated
+goal error, absolute cell-indicator sum, coarse/enriched compliance on the
+same bilinear geometry, residual contribution breakdown, actual solve
+residuals/iterations and geometry identity. Absolute indicator sum is marking
+mass, not an interval radius. No certified continuum-error bound, adaptive
+optimization, physical validation or optimum is claimed. An unmet material
+constraint remains `constraint-unmet` even if error assessment succeeds.
+The `final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work`
+binary regression exercises numerical reporting and final-checkpoint recovery.
 
 Every accepted transition retains the source, iteration log, exact parametric
 geometry, SVG/HTML report, JSON summary and format-9 package in one ledger

@@ -2721,6 +2721,7 @@ version = "0.0.1"
 dependencies = [
  "fs-adjoint",
  "fs-cutfem",
+ "fs-dwr",
  "fs-ivl",
  "fs-material",
  "fs-obs",

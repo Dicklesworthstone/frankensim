@@ -235,7 +235,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
-        projected: None, volume: None };
+        projected: None, volume: None, final_dwr: None };
     let mut report = OptimizeReport::default();
     let mut consumed = 0.0;
     let mut predecessor = prior.map(|old| old.hash);
