@@ -6,6 +6,7 @@ on:
       - 'crates/fs-couple/src/iqn_ils.rs'
       - 'crates/fs-couple/src/iqn_ils/**'
       - 'crates/fs-airflow/examples/stored_air.rs'
+      - 'crates/fs-airflow/examples/stored_air/**'
       - 'crates/fs-conduction/src/transient/**'
       - 'crates/fs-math/src/**'
       - '.github/workflows/partitioned-coupling.yml'
@@ -56,7 +57,7 @@ jobs:
       - name: Test the real FEM solid and finite-capacity air consumer
         if: ${{ !cancelled() }}
         run: cargo test -p fs-airflow --example stored_air
-      - name: Execute the sealed-enclosure pulse and report its accepted trajectory
+      - name: Execute sealed-enclosure and file-driven duty histories
         if: ${{ !cancelled() }}
         shell: bash
         run: |
@@ -64,3 +65,5 @@ jobs:
           cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 > "$RUNNER_TEMP/stored-air.csv"
           head -n 2 "$RUNNER_TEMP/stored-air.csv"
           tail -n 2 "$RUNNER_TEMP/stored-air.csv"
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --duty-csv crates/fs-airflow/examples/stored_air/duty.csv > "$RUNNER_TEMP/stored-air-duty.csv"
+          tail -n 2 "$RUNNER_TEMP/stored-air-duty.csv"

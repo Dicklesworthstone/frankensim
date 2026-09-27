@@ -3,7 +3,11 @@
 //! Run `cargo run -p fs-airflow --example stored_air -- --air-capacity-j-k 0.02`.
 //! The 10 mm cube uses the actual P1 conduction/capacity operator, not a lumped
 //! solid. Its entire exterior exchanges with one isothermal air inventory.
-//! A 2 W pulse ends exactly at 1 s; the declared run ends at 5 s. The outlet
+//! By default a 2 W pulse ends at 1 s and the run ends at 5 s. Optional
+//! `--duty-csv history.csv` reads `duration_s,power_scale` rows: each duration
+//! holds that nonnegative scale on the same 2 W spatial source. The supplied
+//! durations define the entire run window; the last value is never extended.
+//! The outlet
 //! is at the air temperature and the inlet is fixed at 300 K. Ventilation is
 //! a declared heat-capacity rate, not a fan/momentum solve. No CFD, mixing-law
 //! validation, spatial error bound, or native .fsim/ledger integration is claimed.
@@ -15,12 +19,15 @@ use fs_couple::iqn_ils::{IqnIlsConfig, driver::{BalanceControl, CouplingControls
     CouplingTrial, InterfaceControl, StepInterval, march::adaptive::{AdaptiveEvolution, AdaptiveSettings}}};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
+#[path = "stored_air/history.rs"]
+mod history;
+
 const RHO_CP: f64 = 2.0e6;
 const INITIAL_K: f64 = 300.0;
 const HTC: f64 = 100.0;
 
 #[derive(Clone, Debug, PartialEq)]
-struct State { solid_k: Vec<f64>, air_k: f64, net_input_j: f64 }
+struct State { solid_k: Vec<f64>, air_k: f64, net_input_j: f64, source_input_j: f64 }
 
 #[derive(Clone, Copy, Debug)]
 struct Inputs { air_capacity_j_k: f64, ventilation_w_k: f64, tolerance_k: f64, attempts: usize }
@@ -40,13 +47,17 @@ impl Inputs {
     }
 }
 
-fn parse(args: &[String]) -> Result<Inputs, String> {
+struct Options { inputs: Inputs, duty_csv: Option<std::path::PathBuf> }
+
+fn parse(args: &[String]) -> Result<Options, String> {
     let mut inputs = Inputs::default();
+    let mut duty_csv = None;
     let mut seen = std::collections::BTreeSet::new();
     if args.len() % 2 != 0 { return Err("every flag requires a value".into()); }
     for pair in args.chunks_exact(2) {
         if !seen.insert(pair[0].as_str()) { return Err(format!("duplicate {}", pair[0])); }
         match pair[0].as_str() {
+            "--duty-csv" => duty_csv = Some(std::path::PathBuf::from(&pair[1])),
             "--air-capacity-j-k" => inputs.air_capacity_j_k = pair[1].parse().map_err(|_| "invalid air capacity")?,
             "--ventilation-w-k" => inputs.ventilation_w_k = pair[1].parse().map_err(|_| "invalid ventilation")?,
             "--tolerance-k" => inputs.tolerance_k = pair[1].parse().map_err(|_| "invalid tolerance")?,
@@ -54,7 +65,7 @@ fn parse(args: &[String]) -> Result<Inputs, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
-    inputs.validate()
+    Ok(Options { inputs: inputs.validate()?, duty_csv })
 }
 
 struct Model<'a> {
@@ -64,14 +75,21 @@ struct Model<'a> {
     capacity_j_k: f64,
     ventilation_w_k: f64,
     conductance_w_k: f64,
+    duty: fs_conduction::duty::DutyCycle,
 }
 impl<'a> Model<'a> {
+    #[cfg(test)]
     fn new(cx: &Cx<'_>, mesh: &'a ConductionMesh, inputs: Inputs) -> Result<Self, ConductionError> {
+        Self::with_duty(cx, mesh, inputs, history::default_pulse())
+    }
+    fn with_duty(cx: &Cx<'_>, mesh: &'a ConductionMesh, inputs: Inputs,
+        duty: fs_conduction::duty::DutyCycle) -> Result<Self, ConductionError>
+    {
         let solid = BackwardEuler::uniform(cx, mesh, VolumetricHeatCapacity::declared(RHO_CP)?)?;
         let conductance_w_k = HTC * mesh.boundary().iter().map(|f| f.area).sum::<f64>();
         Ok(Self { mesh, solid, material: ConductivityModel::isotropic_declared(1.5)?,
             capacity_j_k: inputs.air_capacity_j_k, ventilation_w_k: inputs.ventilation_w_k,
-            conductance_w_k })
+            conductance_w_k, duty })
     }
 
     fn trial(&self, cx: &Cx<'_>, old: &State, interval: StepInterval, x: &[f64])
@@ -83,7 +101,7 @@ impl<'a> Model<'a> {
         }
         let boundary = ThermalBoundaryBuilder::new(self.mesh)
             .region("enclosure-air", |_| true, ThermalBc::robin(HTC, x[0])?)?.finish()?;
-        let source = ScalarField::Uniform(if interval.start_s < 1.0 { 2.0e6 } else { 0.0 });
+        let source = ScalarField::Uniform(2.0e6 * history::scale(&self.duty, interval)?);
         let problem = ConductionProblem { mesh: self.mesh, boundary: &boundary,
             material: &self.material, element_materials: None, source: &source };
         let dt = interval.duration_s();
@@ -100,16 +118,17 @@ impl<'a> Model<'a> {
         let air_k = old.air_k + delta;
         let air_storage_j = self.capacity_j_k * (air_k - old.air_k);
         let ventilation_out_w = self.ventilation_w_k * (air_k - INITIAL_K);
+        let source_input_j = old.source_input_j + dt * response.source_w;
         let net_input_j = dt * (response.source_w - ventilation_out_w);
         let energy_residual_j = response.stored_energy_change_j + air_storage_j - net_input_j;
         let exchange_residual_j = dt * self.conductance_w_k * (air_k - x[0]);
         if !(air_k.is_finite() && air_k > 0.0 && energy_residual_j.is_finite()
             && exchange_residual_j.is_finite() && net_input_j.is_finite()
-            && (old.net_input_j + net_input_j).is_finite())
+            && (old.net_input_j + net_input_j).is_finite() && source_input_j.is_finite())
         { return Err(ConductionError::Config { parameter: "stored-air endpoint",
             what: "temperature, exchange or storage is not representable".into() }); }
         Ok(CouplingTrial { state: State { solid_k: response.temperature, air_k,
-            net_input_j: old.net_input_j + net_input_j }, image: vec![air_k],
+            net_input_j: old.net_input_j + net_input_j, source_input_j }, image: vec![air_k],
             balance_residuals: vec![energy_residual_j, exchange_residual_j] })
     }
 
@@ -124,10 +143,12 @@ impl<'a> Model<'a> {
     }
 }
 
-fn evolution(mesh: &ConductionMesh, end_s: f64) -> AdaptiveEvolution<State> {
-    let endpoints = if end_s > 1.0 { vec![1.0, end_s] } else { vec![end_s] };
+fn evolution_for(mesh: &ConductionMesh, duty: &fs_conduction::duty::DutyCycle, end_s: f64) -> AdaptiveEvolution<State> {
+    assert!(end_s > 0.0 && end_s <= duty.window_s(), "endpoint must be inside the declared history");
+    let mut endpoints: Vec<f64> = duty.boundaries_s().iter().copied().skip(1).take_while(|&t| t < end_s).collect();
+    endpoints.push(end_s);
     AdaptiveEvolution::new(State { solid_k: vec![INITIAL_K; mesh.vertex_count()],
-        air_k: INITIAL_K, net_input_j: 0.0 }, vec![INITIAL_K], 0.0, endpoints,
+        air_k: INITIAL_K, net_input_j: 0.0, source_input_j: 0.0 }, vec![INITIAL_K], 0.0, endpoints,
         CouplingControls { max_evaluations: 32, relaxation: 0.5,
             method: CouplingMethod::IqnIls(IqnIlsConfig::default()),
             interfaces: vec![InterfaceControl { scale: 1.0, absolute_tolerance: 1.0e-8, relative_tolerance: 0.0 }],
@@ -155,14 +176,16 @@ fn mesh(n: usize) -> Result<ConductionMesh, ConductionError> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let inputs = parse(&std::env::args().skip(1).collect::<Vec<_>>())?;
+    let options = parse(&std::env::args().skip(1).collect::<Vec<_>>())?;
+    let inputs = options.inputs;
+    let duty = match &options.duty_csv { Some(path) => history::read(path)?, None => history::default_pulse() };
     with_cx(|cx| -> Result<(), Box<dyn std::error::Error>> {
         let mesh = mesh(3)?;
-        let model = Model::new(cx, &mesh, inputs)?;
-        let mut run = evolution(&mesh, 5.0);
+        let model = Model::with_duty(cx, &mesh, inputs, duty)?;
+        let mut run = evolution_for(&mesh, &model.duty, model.duty.window_s());
         let (mut evaluations, mut rejected) = (0usize, 0usize);
-        eprintln!("FEM-solid/well-mixed-air estimate; air_capacity_j_k={} ventilation_w_k={} tolerance_k={}; 2W pulse [0,1]s; no spatial/physical-validation claim",
-            inputs.air_capacity_j_k, inputs.ventilation_w_k, inputs.tolerance_k);
+        eprintln!("FEM-solid/well-mixed-air estimate; air_capacity_j_k={} ventilation_w_k={} tolerance_k={}; source=2W*declared_scale window_s={} segments={}; no spatial/physical-validation claim",
+            inputs.air_capacity_j_k, inputs.ventilation_w_k, inputs.tolerance_k, model.duty.window_s(), model.duty.segments().len());
         println!("time_s,solid_max_k,air_k,local_error_ratio,stored_minus_net_input_j");
         for _ in 0..inputs.attempts {
             let report = run.advance(1, &mut |old, interval, x| model.trial(cx, old, interval, x),
@@ -180,6 +203,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("complete={} accepted={} rejected={} producer_evaluations={} retained_time_s={}",
             run.is_complete(), run.accepted_steps(), rejected, evaluations, run.time_s());
         if !run.is_complete() { return Err("attempt budget exhausted; CSV is an accepted partial trajectory".into()); }
+        eprintln!("source_energy_j={:.17e} declared_source_energy_j={:.17e}",
+            run.state().source_input_j, 2.0 * model.duty.energy_scale_seconds());
         Ok(())
     })
 }
@@ -188,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     fn solve(cx: &Cx<'_>, model: &Model<'_>, tolerance: f64, end: f64) -> AdaptiveEvolution<State> {
-        let mut run = evolution(model.mesh, end);
+        let mut run = evolution_for(model.mesh, &model.duty, end);
         let report = run.advance(20_000, &mut |old, interval, x| model.trial(cx, old, interval, x),
             &mut |_, a, b, _| Ok(distance(a, b, tolerance)), &mut || false).unwrap();
         assert!(report.complete); run
@@ -228,7 +253,7 @@ mod tests {
             let mesh = mesh(1).unwrap();
             let model = Model::new(cx, &mesh, Inputs::default()).unwrap();
             let full = solve(cx, &model, 1e-4, 0.5);
-            let mut prefix = evolution(&mesh, 0.5);
+            let mut prefix = evolution_for(&mesh, &model.duty, 0.5);
             prefix.advance(1, &mut |old, interval, x| model.trial(cx, old, interval, x),
                 &mut |_, a, b, _| Ok(distance(a, b, 1e-4)), &mut || false).unwrap();
             let mut resumed = prefix.clone();
@@ -237,6 +262,21 @@ mod tests {
                     &mut |_, a, b, _| Ok(distance(a, b, 1e-4)), &mut || false).unwrap().complete { break; }
             }
             assert_eq!(full, resumed);
+        });
+    }
+    #[test]
+    fn repeated_duty_pulses_reach_the_actual_fem_and_close_the_declared_energy() {
+        with_cx(|cx| {
+            use fs_conduction::duty::{DutyCycle, DutySegment};
+            let mesh = mesh(1).unwrap();
+            let duty = DutyCycle::new(vec![DutySegment::constant(0.125, 1.0).unwrap(),
+                DutySegment::constant(0.25, 0.0).unwrap(), DutySegment::constant(0.125, 2.0).unwrap()]).unwrap();
+            let inputs = Inputs { ventilation_w_k: 0.0, ..Inputs::default() };
+            let model = Model::with_duty(cx, &mesh, inputs, duty).unwrap();
+            let run = solve(cx, &model, 1e-4, 0.5);
+            assert!((run.state().source_input_j - 0.75).abs() < 1e-12);
+            assert!((model.stored_energy_j(run.state()) - 0.75).abs() < 2e-5);
+            assert_eq!(run.time_s(), model.duty.window_s());
         });
     }
     #[test]
