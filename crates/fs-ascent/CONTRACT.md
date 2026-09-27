@@ -152,6 +152,31 @@ so converged and stalled are distinguishable outcomes.
   offset and initial temperature from dense-generated two-body thermal data;
   `tests/imex_calibration.rs` checks the complete parameter chain against an
   independent dense forward calculation, recovery, continuation and refusals.
+- Under `transient-design`, `transient::structural::{StructuralTransientFamily,
+  StructuralTransientModel, StructuralTransientStudy,
+  evaluate_structural_transient}` bind SQP to operator generalized-alpha
+  structural trajectories with time-dependent loads. One checkpointed sweep
+  differentiates displacement, velocity and acceleration observations, including
+  repeated/initial endpoints, direct sensor parameters and load parameters.
+  The model's initial-state VJP completes the q/v/a chain; parameter-dependent
+  consistent acceleration can use `fs_time::galpha::initialization`'s mass solve
+  and transposed pullback. Initial clock, timestep, spectral radius, timetable
+  and solve policies remain fixed. The transposed effective-operator
+  preconditioner is explicit; the primal uses the existing Newton solver.
+  Independent limits bound state dimension, samples, forward steps, records,
+  per-step workspace, replay work, parked checkpoints and the dense SQP system.
+  Bounds are SQP inequalities; numerical, model and budget failures retain
+  their errors instead of becoming penalties. Accepted physical evaluations
+  remain paired with their optimizer point; clone/resume preserve BFGS state
+  and attempted-evaluation accounting, including failed or cancelled trials.
+  `examples/structural_calibration.rs` fits coupling stiffness, damping, load
+  amplitude, initial displacement and sensor offset from dense-generated
+  two-body spring/damper q/v/a observations. Its integration tests compare the
+  entire gradient with an independent dense forward/initialization reference
+  and check recovery, exact split/clone behavior, zero-step initial objectives
+  and bounded refusal. This is a lumped structural numerical consumer, with
+  no plate/shell spatial discretization, experimental validation, global
+  optimum or parameter-identifiability claim.
 
 ## Invariants
 

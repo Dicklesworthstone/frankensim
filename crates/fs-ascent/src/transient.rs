@@ -16,6 +16,7 @@ use fs_time::adaptive::adjoint::trajectory::{
 pub mod observations;
 pub mod campaign;
 pub mod imex;
+pub mod structural;
 
 /// One immutable parameter point, including its observation model and data.
 /// `OdeVjp` and `SampleObjective` partials use the SAME decision coordinates as
