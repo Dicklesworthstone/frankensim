@@ -79,6 +79,38 @@ fn inf_norm(values: &[f64]) -> f64 {
     values.iter().map(|v| v.abs()).fold(0.0f64, f64::max)
 }
 
+// Multiplying an objective by a positive constant must not turn its Newton
+// step into an overflow or a zero residual. Outside the ordinary exponent
+// range, solve the equivalent model (g/s, H/s) with an exact power-of-two s.
+// Keeping s = 1 in the ordinary range preserves the established trajectories.
+// The range leaves headroom for the squared residual and cubic curvature
+// products in CG; it is not an admission guarantee for arbitrary conditioning.
+fn quadratic_scale(g: &[f64]) -> f64 {
+    let magnitude = inf_norm(g);
+    let bits = magnitude.to_bits();
+    let exponent = bits >> 52;
+    if magnitude == 0.0 || (1023 - 64..=1023 + 64).contains(&exponent) {
+        1.0
+    } else if exponent != 0 {
+        f64::from_bits(exponent << 52)
+    } else {
+        // Subnormal gradients have no implicit leading bit. Their highest
+        // stored mantissa bit still gives a nonzero, exact binary scale.
+        f64::from_bits(1u64 << (63 - bits.leading_zeros()))
+    }
+}
+
+fn scaled_difference(a: f64, b: f64, scale: f64) -> f64 {
+    let difference = a - b;
+    if difference.is_finite() {
+        difference / scale
+    } else {
+        // Opposite finite objective values can overflow on subtraction even
+        // when the scaled actual decrease and agreement ratio are finite.
+        a / scale - b / scale
+    }
+}
+
 /// Validate before any callback; every budget leaf is a hard ceiling even
 /// under `All`, where ordinary boolean composition would permit overspending.
 fn admit_rule(rule: &StopRule, evals: usize) -> Option<usize> {
@@ -260,10 +292,22 @@ impl TrustRegionState {
         hv_at: crate::FnHv<'_>,
         paused: &mut dyn FnMut() -> bool,
     ) -> IterationOutcome {
+        let scale = quadratic_scale(&self.g);
+        let scaled_gradient =
+            (scale != 1.0).then(|| self.g.iter().map(|v| v / scale).collect::<Vec<_>>());
+        let gradient = scaled_gradient.as_deref().unwrap_or(&self.g);
         let step = {
             let xc = self.x.clone();
-            let mut hv = |v: &[f64]| hv_at(&xc, v);
-            steihaug(&self.g, &mut hv, self.delta, 1e-8, paused)
+            let mut hv = |v: &[f64]| {
+                let mut product = hv_at(&xc, v);
+                if scale != 1.0 {
+                    for value in &mut product {
+                        *value /= scale;
+                    }
+                }
+                product
+            };
+            steihaug(gradient, &mut hv, self.delta, 1e-8, paused)
         };
         let (p, _hit, neg, hv_count) = match step {
             Ok(step) => step,
@@ -282,7 +326,7 @@ impl TrustRegionState {
             return IterationOutcome::Paused;
         }
         // Keep the established floating-point operation order on valid runs.
-        let hp = hv_at(&self.x, &p);
+        let mut hp = hv_at(&self.x, &p);
         self.hv_evals += 1;
         if paused() {
             return IterationOutcome::Paused;
@@ -291,7 +335,12 @@ impl TrustRegionState {
         if hp.iter().any(|v| !v.is_finite()) {
             return complete(false);
         }
-        let gp: f64 = self.g.iter().zip(&p).map(|(a, b)| a * b).sum();
+        if scale != 1.0 {
+            for value in &mut hp {
+                *value /= scale;
+            }
+        }
+        let gp: f64 = gradient.iter().zip(&p).map(|(a, b)| a * b).sum();
         let php: f64 = p.iter().zip(&hp).map(|(a, b)| a * b).sum();
         let model_decrease = -gp - 0.5 * php;
         if !model_decrease.is_finite() || model_decrease <= 0.0 {
@@ -321,12 +370,10 @@ impl TrustRegionState {
             self.delta *= 0.25;
             return complete(true);
         }
-        let actual = self.f - f_new;
-        let rho = if model_decrease.abs() < 1e-300 {
-            0.0
-        } else {
-            actual / model_decrease
-        };
+        let actual = scaled_difference(self.f, f_new, scale);
+        // Positivity and finiteness were checked above. An absolute floor
+        // would make identical models disagree after changing objective units.
+        let rho = actual / model_decrease;
         if !actual.is_finite() || !rho.is_finite() {
             self.delta *= 0.25;
             return complete(true);
@@ -402,15 +449,14 @@ fn steihaug(
             };
         }
         let alpha = rr / dhd;
-        if !alpha.is_finite() {
-            return Err(SteihaugStop::Unusable(hv_count));
-        }
         let mut p_next = p.clone();
         for i in 0..n {
             p_next[i] = alpha.mul_add(d[i], p_next[i]);
         }
         let pn_norm: f64 = p_next.iter().map(|v| v * v).sum::<f64>().sqrt();
-        if pn_norm >= delta {
+        // Positive curvature can be so small that the unrestricted CG step
+        // overflows. Its finite trust-boundary truncation is still usable.
+        if !alpha.is_finite() || pn_norm >= delta {
             let tau = boundary_tau(&p, &d, delta);
             for i in 0..n {
                 p[i] = tau.mul_add(d[i], p[i]);
@@ -870,17 +916,188 @@ mod tests {
     }
 
     #[test]
-    fn trust_region_internal_overflow_is_not_convergence() {
-        let mut state = TrustRegionState::new(&[0.0], &mut |_| (1.0, vec![1e308]));
-        let outcome = state.run(
-            &mut |_| panic!("overflowed model reached objective"),
-            &mut |_, _| panic!("overflowed residual reached Hessian"),
-            &StopRule::GradNorm(1e-8), 10,
+    fn trust_region_large_finite_gradient_takes_a_boundary_step() {
+        let mut fg = |x: &[f64]| (1e308 * (1.0 - x[0]), vec![-1e308]);
+        let mut state = TrustRegionState::new(&[0.0], &mut fg);
+        let outcome = state.run(&mut fg, &mut |_, _| vec![0.0], &StopRule::GradNorm(0.0), 1);
+        assert_eq!(
+            outcome.progress,
+            TrustRegionProgress::Stopped(StopReason::IterationCap)
         );
-        assert_eq!(outcome.progress, TrustRegionProgress::Stopped(StopReason::Stall));
-        assert_eq!(outcome.solution.evals, 1);
-        assert_eq!(outcome.solution.hv_evals, 0);
-        assert_eq!(outcome.solution.grad_norm, 1e308);
+        assert!((outcome.solution.x[0] - 1.0).abs() < 1e-15);
+        assert!(outcome.solution.f.abs() / 1e308 < 1e-15);
+        assert_eq!(outcome.solution.evals, 2);
+        assert_eq!(outcome.solution.hv_evals, 2);
+        assert_eq!(state.radius(), 2.0);
+    }
+
+    // G1/G3: multiplying f, g and H by a positive constant preserves the
+    // manufactured minimizer. Previously both ends stalled before one trial.
+    #[test]
+    fn trust_region_convex_quadratics_survive_extreme_objective_units() {
+        for scale in [1e-250, 1e-200, 1.0, 1e200, 1e250] {
+            let mut fg = |x: &[f64]| {
+                let a = x[0] - 2.0;
+                let b = x[1] + 1.0;
+                (
+                    scale * (a * a + 4.0 * b * b),
+                    vec![scale * 2.0 * a, scale * 8.0 * b],
+                )
+            };
+            let mut hv = |_: &[f64], v: &[f64]| vec![scale * (2.0 * v[0]), scale * (8.0 * v[1])];
+            let mut state = TrustRegionState::new(&[0.0, 0.0], &mut fg);
+            let rule = StopRule::GradNorm(scale * 1e-10);
+            let outcome = state.run(&mut fg, &mut hv, &rule, 30);
+            assert_eq!(
+                outcome.progress,
+                TrustRegionProgress::Stopped(StopReason::GradNorm),
+                "objective scale {scale}"
+            );
+            assert!((outcome.solution.x[0] - 2.0).abs() < 1e-10);
+            assert!((outcome.solution.x[1] + 1.0).abs() < 1e-10);
+            assert!(outcome.solution.f / scale < 1e-20);
+            assert!(outcome.solution.evals > 1);
+        }
+    }
+
+    // G0/G3: a concave direction must still reach the correct boundary when
+    // the original model decrease is subnormal or exceeds the old norm range.
+    #[test]
+    fn trust_region_negative_curvature_survives_subnormal_objective_units() {
+        for scale in [
+            f64::from_bits(1u64 << 24),
+            1e-310,
+            1e-200,
+            1.0,
+            1e200,
+            1e300,
+        ] {
+            let mut fg = |x: &[f64]| {
+                (
+                    scale * (-0.5 * x[0] * x[0] + 0.5 * x[1] * x[1]),
+                    vec![-scale * x[0], scale * x[1]],
+                )
+            };
+            let mut state = TrustRegionState::new(&[1.0, 0.0], &mut fg);
+            let outcome = state.run(
+                &mut fg,
+                &mut |_, v| vec![-scale * v[0], scale * v[1]],
+                &StopRule::GradNorm(0.0),
+                1,
+            );
+            assert_eq!(
+                outcome.solution.x,
+                vec![2.0, 0.0],
+                "objective scale {scale}"
+            );
+            assert_eq!(outcome.solution.negative_curvature_hits, 1);
+            assert_eq!(outcome.solution.evals, 2);
+            assert_eq!(outcome.solution.hv_evals, 2);
+            assert_eq!(state.radius(), 2.0);
+        }
+    }
+
+    #[test]
+    fn trust_region_scaled_agreement_survives_actual_decrease_overflow() {
+        let mut fg = |x: &[f64]| (9e307 - 1.4e308 * x[0] - 1.4e308 * x[1], vec![-1.4e308; 2]);
+        let mut state = TrustRegionState::new(&[0.0, 0.0], &mut fg);
+        let outcome = state.run(
+            &mut fg,
+            &mut |_, _| vec![0.0; 2],
+            &StopRule::GradNorm(0.0),
+            1,
+        );
+        assert!((9e307 - outcome.solution.f).is_infinite());
+        assert!(outcome.solution.f.is_finite() && outcome.solution.f < 0.0);
+        for value in outcome.solution.x {
+            assert!((value - 1.0 / 2.0f64.sqrt()).abs() < 1e-15);
+        }
+        assert_eq!(state.radius(), 2.0);
+    }
+
+    #[test]
+    fn trust_region_tiny_positive_curvature_reaches_finite_boundary() {
+        let mut fg = |x: &[f64]| (-x[0] + (0.5e-320 * x[0]) * x[0], vec![-1.0 + 1e-320 * x[0]]);
+        let mut state = TrustRegionState::new(&[0.0], &mut fg);
+        let outcome = state.run(
+            &mut fg,
+            &mut |_, v| vec![1e-320 * v[0]],
+            &StopRule::GradNorm(0.0),
+            1,
+        );
+        assert_eq!(outcome.solution.x, vec![1.0]);
+        assert_eq!(outcome.solution.negative_curvature_hits, 0);
+        assert_eq!(state.radius(), 2.0);
+    }
+
+    #[test]
+    fn trust_region_representable_tiny_model_decrease_is_not_zero() {
+        let mut fg = |x: &[f64]| {
+            (
+                1e-10 * x[0] + (0.5e290 * x[0]) * x[0],
+                vec![1e-10 + 1e290 * x[0]],
+            )
+        };
+        let mut state = TrustRegionState::new(&[0.0], &mut fg);
+        let outcome = state.run(
+            &mut fg,
+            &mut |_, v| vec![1e290 * v[0]],
+            &StopRule::GradNorm(1e-25),
+            3,
+        );
+        assert_eq!(
+            outcome.progress,
+            TrustRegionProgress::Stopped(StopReason::GradNorm)
+        );
+        assert!((outcome.solution.x[0] / -1e-300 - 1.0).abs() < 1e-14);
+        assert!(outcome.solution.f < 0.0 && outcome.solution.f.is_finite());
+    }
+
+    // G5/G4: rescaling is local model arithmetic, so checkpoints still retain
+    // everything necessary and cancelled normalized products remain charged.
+    #[test]
+    fn trust_region_scaled_models_replay_after_pause_and_every_split() {
+        use std::cell::Cell;
+        let scale = 1e200;
+        let mut fg = |x: &[f64]| {
+            let (f, mut g) = rosenbrock(x);
+            for value in &mut g {
+                *value *= scale;
+            }
+            (scale * f, g)
+        };
+        let mut hv = |x: &[f64], v: &[f64]| {
+            rosenbrock_hv(x, v)
+                .into_iter()
+                .map(|value| scale * value)
+                .collect()
+        };
+        let initial = TrustRegionState::new(&[-1.2, 1.0], &mut fg);
+        let rule = StopRule::GradNorm(scale * 1e-12);
+        let mut straight = initial.clone();
+        straight.run(&mut fg, &mut hv, &rule, 12);
+        for split in 0..=12 {
+            let mut segmented = initial.clone();
+            segmented.run(&mut fg, &mut hv, &rule, split);
+            segmented.run(&mut fg, &mut hv, &rule, 12 - split);
+            assert_same_state(&straight, &segmented);
+        }
+        let calls = Cell::new(0usize);
+        let mut paused = initial;
+        let outcome = paused.run_with_pause(
+            &mut |_| panic!("cancelled scaled model reached objective"),
+            &mut |x, v| {
+                calls.set(calls.get() + 1);
+                hv(x, v)
+            },
+            &rule,
+            12,
+            &mut || calls.get() == 1,
+        );
+        assert_eq!(outcome.progress, TrustRegionProgress::Paused);
+        paused.run(&mut fg, &mut hv, &rule, 12);
+        straight.hv_evals += 1;
+        assert_same_state(&straight, &paused);
     }
 
     #[test]

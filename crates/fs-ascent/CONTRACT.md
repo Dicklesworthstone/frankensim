@@ -24,7 +24,21 @@ so converged and stalled are distinguishable outcomes.
   and zoom callback.
 - `trust::trust_region_newton` — Steihaug-CG on the quadratic model
   with NEGATIVE-CURVATURE boundary steps (counted in the report),
-  classical radius laws (¼/¾ thresholds); `hv_fd_of_gradients` is the
+  classical radius laws (¼/¾ thresholds). Extreme gradient magnitudes use
+  exact power-of-two objective normalization in the quadratic model and
+  actual/predicted reduction ratio; callback results, reported objective and
+  gradient, and stopping tolerances retain the caller's units. Normalization
+  admits subnormal objective scales and avoids overflow from uniformly scaled
+  gradients, curvature products, and opposite-sign objective differences.
+  Positive curvature whose unrestricted CG step overflows truncates to the
+  finite trust boundary, and representable positive model decreases have no
+  arbitrary absolute zero floor. Ordinary-scale arithmetic retains the
+  established trajectory. Inline G1/G3 tests cover convex quadratics scaled by
+  `1e-250` through `1e250`, subnormal negative-curvature models, tiny positive
+  curvature and model decreases, plus G4/G5 cancellation/checkpoint replay.
+  Callback outputs must still be finite; no arbitrary-conditioning guarantee,
+  recovery of precision already lost inside callbacks, or invariance under
+  changing design-variable units is claimed. `hv_fd_of_gradients` is the
   interim Hessian-vector product with its O(√ε) accuracy in the name
   (second-order adjoints are recorded follow-up).
 - `auglag::augmented_lagrangian` — PHR augmented Lagrangian
