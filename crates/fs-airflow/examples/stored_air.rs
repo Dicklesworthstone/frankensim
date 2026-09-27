@@ -88,7 +88,7 @@ impl<'a> Model<'a> {
             material: &self.material, element_materials: None, source: &source };
         let dt = interval.duration_s();
         let response = self.solid.advance(cx, problem, None, &old.solid_k, dt, StepConfig {
-            linear: LinearConfig { tolerance: 1.0e-12, max_iterations: 512 }, energy_tolerance_j: 1.0e-8,
+            linear: LinearConfig { tolerance: 1.0e-12, max_iterations: 512, restart: 60 }, energy_tolerance_j: 1.0e-8,
         })?;
         // Solve the air endpoint implicitly using the actual FEM wall exchange.
         // Q_solid(x) + H*(x - T_air_new) is the same wall field's exchange at
