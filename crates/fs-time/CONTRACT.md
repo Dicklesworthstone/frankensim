@@ -111,6 +111,20 @@ where claimed below.
   consistency derivatives remain the caller's chain rule, supported by the
   initialization routines above. The models must remain pure and unchanged;
   these fingerprints diagnose replay consistency and do not certify derivatives.
+- `RecordedStructural::pullback_samples` accumulates displacement, velocity and
+  acceleration observations through `trajectory::samples::StructuralSampleObjective`.
+  Ordered endpoint indices include the initial state and may repeat for several
+  sensors. Each callback receives the actual q/v/a, clock and absolute counter,
+  writes all three state partials plus direct parameter partials, and runs once
+  in reverse declaration order after endpoint verification. All observations
+  share one checkpoint sweep, including initial-only zero-step objectives.
+  The sample cap is checked before scanning the timetable; `3*n+p` callback
+  scratch is dropped before each leaf adjoint and fits the per-step workspace.
+  No observed-state history is retained. Failed, incomplete or nonfinite
+  observations and cancellation publish no partial objective or gradient.
+  The returned initial q/v/a cotangents still require the caller's consistency
+  chain. Timetable, step, clock and solver policy are fixed; this API does not
+  interpolate measurements or differentiate their sampling times.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,

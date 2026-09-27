@@ -13,6 +13,9 @@ use crate::galpha::{
 use fs_blake3::{Blake3, ContentHash};
 use fs_solver::FlexiblePreconditioner;
 
+#[path = "trajectory/samples.rs"]
+pub mod samples;
+
 /// One immutable structural model and its time-dependent applied load.
 /// Both callbacks must overwrite all outputs, be pure for fixed time and
 /// parameter point, and bound their own work. The load is independent of q/v/a;
@@ -104,6 +107,8 @@ pub enum StructuralTrajectoryError {
     ForcingDerivative(String),
     /// A load provider returned nonfinite or unwritten components.
     NonFiniteForcing,
+    /// A sampled objective refused or returned nonfinite/unwritten outputs.
+    Observation(String),
 }
 impl From<SecondOrderAdjointError> for StructuralTrajectoryError {
     fn from(error: SecondOrderAdjointError) -> Self {

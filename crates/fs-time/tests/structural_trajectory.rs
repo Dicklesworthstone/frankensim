@@ -8,10 +8,11 @@ use fs_time::galpha::{
         trajectory::{
             RecordedStructural, StructuralRecordingConfig, StructuralRecordingStatus,
             StructuralReplayBudget, StructuralTrajectoryError, StructuralTrajectoryModel,
+            samples::StructuralSampleObjective,
         },
     },
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
@@ -596,4 +597,314 @@ fn load_and_derivative_faults_refuse_without_mutating_the_recording() {
             &mut || false,
         )
         .unwrap();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SampleFault {
+    None,
+    Callback,
+    AccelerationIncomplete,
+    ParameterIncomplete,
+}
+
+struct Sensors {
+    p: [f64; 2],
+    calls: RefCell<Vec<(usize, usize)>>,
+    fault: Cell<SampleFault>,
+}
+
+impl Sensors {
+    fn new(p: [f64; 2]) -> Self {
+        Self {
+            p,
+            calls: RefCell::new(Vec::new()),
+            fault: Cell::new(SampleFault::None),
+        }
+    }
+}
+
+fn sample_value(sample: usize, state: &SecondOrderState, p: [f64; 2]) -> f64 {
+    let weight = 1.0 + 0.1 * sample as f64;
+    0.5 * weight * state.q[0].powi(2)
+        + 0.2 * state.v[1].powi(2)
+        + 0.03 * state.a[0].powi(2)
+        + p[0] * state.q[1]
+        + 0.1 * p[1] * state.a[1]
+        + 0.01 * p[0].powi(2)
+}
+
+impl StructuralSampleObjective for Sensors {
+    fn evaluate(
+        &self,
+        sample: usize,
+        state: &SecondOrderState,
+        state_bar: (&mut [f64], &mut [f64], &mut [f64]),
+        parameter_bar: &mut [f64],
+    ) -> Result<f64, String> {
+        self.calls.borrow_mut().push((sample, state.steps));
+        // Sample four is reached after a valid later sample has accumulated.
+        let fault = if sample == 4 {
+            self.fault.get()
+        } else {
+            SampleFault::None
+        };
+        if fault == SampleFault::Callback {
+            return Err("sensor unavailable".into());
+        }
+        state_bar.0[0] = (1.0 + 0.1 * sample as f64) * state.q[0];
+        state_bar.0[1] = self.p[0];
+        state_bar.1[0] = 0.0;
+        state_bar.1[1] = 0.4 * state.v[1];
+        state_bar.2[0] = 0.06 * state.a[0];
+        if fault != SampleFault::AccelerationIncomplete {
+            state_bar.2[1] = 0.1 * self.p[1];
+        }
+        parameter_bar[0] = state.q[1] + 0.02 * self.p[0];
+        if fault != SampleFault::ParameterIncomplete {
+            parameter_bar[1] = 0.1 * state.a[1];
+        }
+        Ok(sample_value(sample, state, self.p))
+    }
+}
+
+fn sampled_value(p: [f64; 2], indices: &[usize]) -> f64 {
+    let (states, _) = full_storage(&Model::new(p), *indices.last().unwrap());
+    indices
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(sample, endpoint)| sample_value(sample, &states[*endpoint], p))
+        .sum()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One full-storage reference and its independent FD check.
+fn repeated_structural_sensors_match_full_storage_and_parameter_differences_in_one_sweep() {
+    let model = Model::new([1.3, 0.6]);
+    let indices = [0, 0, 1, 4, 4, 7];
+    let mut recorded = recording(&model, 7);
+    recorded.advance(7, 7, &mut || false).unwrap();
+    let (states, costs) = full_storage(&model, 7);
+    let (mut q, mut v, mut a) = (vec![0.0; 2], vec![0.0; 2], vec![0.0; 2]);
+    let mut parameters = vec![0.0; 2];
+    let mut value = 0.0;
+    for endpoint in (0..=7).rev() {
+        let state = &states[endpoint];
+        for (sample, _) in indices
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, index)| **index == endpoint)
+        {
+            value += sample_value(sample, state, model.p);
+            q[0] += (1.0 + 0.1 * sample as f64) * state.q[0];
+            q[1] += model.p[0];
+            v[1] += 0.4 * state.v[1];
+            a[0] += 0.06 * state.a[0];
+            a[1] += 0.1 * model.p[1];
+            parameters[0] += state.q[1] + 0.02 * model.p[0];
+            parameters[1] += 0.1 * state.a[1];
+        }
+        if endpoint == 0 {
+            break;
+        }
+        let previous = &states[endpoint - 1];
+        let gradient = method()
+            .step_vjp(
+                previous,
+                &model,
+                &load(&model, previous.t),
+                (&q, &v, &a),
+                &Identity,
+                config(7).adjoint,
+                config(7).max_workspace_components,
+                &mut || false,
+            )
+            .unwrap();
+        let mut forcing = [f64::NAN; 2];
+        model
+            .forcing_vjp(
+                method().forcing_time(previous.t).unwrap(),
+                &gradient.forcing,
+                &mut forcing,
+            )
+            .unwrap();
+        for i in 0..2 {
+            parameters[i] += gradient.parameters[i];
+            parameters[i] += forcing[i];
+        }
+        q = gradient.initial_q;
+        v = gradient.initial_v;
+        a = gradient.initial_a;
+    }
+    let sensors = Sensors::new(model.p);
+    let before = (model.residual_calls.get(), model.load_calls.get());
+    let result = recorded
+        .pullback_samples(
+            &indices,
+            indices.len(),
+            &sensors,
+            &Identity,
+            budget(7),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(result.value.to_bits(), value.to_bits());
+    assert_eq!(result.gradient.initial_q, q);
+    assert_eq!(result.gradient.initial_v, v);
+    assert_eq!(result.gradient.initial_a, a);
+    assert_eq!(result.gradient.parameters, parameters);
+    assert_eq!(result.observations, indices.len());
+    assert_eq!(
+        *sensors.calls.borrow(),
+        indices
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(sample, endpoint)| (sample, states[*endpoint].steps))
+            .collect::<Vec<_>>()
+    );
+    let work = replay_costs(&costs);
+    assert_eq!(result.gradient.replayed_steps, work.0);
+    assert_eq!(result.gradient.peak_checkpoints, budget(7).checkpoints);
+    assert_eq!(model.residual_calls.get() - before.0, work.1);
+    assert_eq!(model.load_calls.get() - before.1, work.0);
+    for i in 0..2 {
+        let delta = 1e-5 * (1.0 + model.p[i].abs());
+        let mut plus = model.p;
+        plus[i] += delta;
+        let mut minus = model.p;
+        minus[i] -= delta;
+        let fd = (sampled_value(plus, &indices) - sampled_value(minus, &indices)) / (2.0 * delta);
+        assert!(
+            (result.gradient.parameters[i] - fd).abs() < 3e-7 * (1.0 + fd.abs()),
+            "parameter {i}: adjoint={}, FD={fd}",
+            result.gradient.parameters[i]
+        );
+    }
+}
+
+#[test]
+fn repeated_initial_sensors_need_no_primal_steps_or_checkpoints() {
+    let model = Model::new([1.3, 0.6]);
+    let recorded = recording(&model, 0);
+    let sensors = Sensors::new(model.p);
+    let result = recorded
+        .pullback_samples(&[0, 0], 2, &sensors, &Identity, budget(0), &mut || false)
+        .unwrap();
+    let state = initial();
+    assert_eq!(
+        result.value,
+        sample_value(1, &state, model.p) + sample_value(0, &state, model.p)
+    );
+    assert_eq!(result.observations, 2);
+    assert_eq!(
+        result.gradient.initial_q,
+        [1.1 * state.q[0] + state.q[0], 2.0 * model.p[0]]
+    );
+    assert_eq!(result.gradient.initial_v, [0.0, 0.8 * state.v[1]]);
+    assert_eq!(
+        result.gradient.initial_a,
+        [0.12 * state.a[0], 0.2 * model.p[1]]
+    );
+    assert_eq!(
+        result.gradient.parameters,
+        [2.0 * (state.q[1] + 0.02 * model.p[0]), 0.2 * state.a[1]]
+    );
+    assert_eq!(
+        *sensors.calls.borrow(),
+        [(1, state.steps), (0, state.steps)]
+    );
+    assert_eq!(result.gradient.replayed_steps, 0);
+    assert_eq!(result.gradient.peak_checkpoints, 0);
+    assert_eq!(model.residual_calls.get(), 0);
+    assert_eq!(model.load_calls.get(), 0);
+}
+
+#[test]
+fn sampled_objective_bounds_faults_and_cancellation_preserve_retryable_recording() {
+    let model = Model::new([1.3, 0.6]);
+    let indices = [0, 0, 1, 4, 4, 7];
+    let mut recorded = recording(&model, 7);
+    recorded.advance(7, 7, &mut || false).unwrap();
+    let before = recorded.state().clone();
+    let sensors = Sensors::new(model.p);
+    let calls = model.residual_calls.get();
+    for (invalid, cap) in [
+        (&[][..], 0),
+        (&[4, 1][..], 2),
+        (&[0, 8][..], 2),
+        (&indices[..], indices.len() - 1),
+    ] {
+        assert!(matches!(
+            recorded.pullback_samples(invalid, cap, &sensors, &Identity, budget(7), &mut || false),
+            Err(StructuralTrajectoryError::InvalidInput(_))
+        ));
+    }
+    assert_eq!(*sensors.calls.borrow(), Vec::new());
+    assert_eq!(model.residual_calls.get(), calls);
+    let expected = recorded
+        .pullback_samples(
+            &indices,
+            indices.len(),
+            &sensors,
+            &Identity,
+            budget(7),
+            &mut || false,
+        )
+        .unwrap();
+    for fault in [
+        SampleFault::Callback,
+        SampleFault::AccelerationIncomplete,
+        SampleFault::ParameterIncomplete,
+    ] {
+        sensors.fault.set(fault);
+        sensors.calls.borrow_mut().clear();
+        assert!(matches!(
+            recorded.pullback_samples(
+                &indices,
+                indices.len(),
+                &sensors,
+                &Identity,
+                budget(7),
+                &mut || false
+            ),
+            Err(StructuralTrajectoryError::Observation(_))
+        ));
+        assert_eq!(
+            *sensors.calls.borrow(),
+            [(5, before.steps), (4, initial().steps + 4)]
+        );
+        same_state(recorded.state(), &before);
+    }
+    sensors.fault.set(SampleFault::None);
+    sensors.calls.borrow_mut().clear();
+    assert!(matches!(
+        recorded.pullback_samples(
+            &indices,
+            indices.len(),
+            &sensors,
+            &Identity,
+            budget(7),
+            &mut || sensors.calls.borrow().len() >= 2
+        ),
+        Err(StructuralTrajectoryError::Step(
+            SecondOrderAdjointError::Step(TimeSolveError::Cancelled)
+        ))
+    ));
+    same_state(recorded.state(), &before);
+    sensors.calls.borrow_mut().clear();
+    let retried = recorded
+        .pullback_samples(
+            &indices,
+            indices.len(),
+            &sensors,
+            &Identity,
+            budget(7),
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(retried.value.to_bits(), expected.value.to_bits());
+    assert_eq!(retried.gradient, expected.gradient);
+    assert_eq!(retried.observations, indices.len());
 }
