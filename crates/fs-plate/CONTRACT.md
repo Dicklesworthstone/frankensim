@@ -101,6 +101,34 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   kinematics is inferred. `tests/plate_loading.rs` checks independent rigid
   motion, force/moment resultants, virtual work, moving-edge continuity,
   support elimination and bounded atomic refusal.
+- Under `transient`, `transient::PlateDynamics` binds the existing sparse DKT
+  pencil to `fs-time`'s structural residual, discrete adjoint and loaded
+  trajectory interfaces. It borrows a fixed mesh/support model and uses
+  `M = mass_scale*M0`, `K = stiffness_scale*K0`, and
+  `C = mass_damping_per_s*M + stiffness_damping_s*K`. The four parameters
+  precede the load's parameters in every VJP. Explicit stored transposes
+  and all mass/stiffness/damping derivatives are implemented without dense
+  matrices or per-action scratch. `PlateLoad` supplies a pure time-dependent
+  reduced load and its parameter VJP, permitting moving mesh-point stencils.
+  Positive diagonal lumped mass is required; the exact mass preconditioner
+  supports consistent acceleration and its initialization pullback. An
+  effective-operator Jacobi preconditioner supports the explicit adjoint
+  solve. The shared primal Newton driver retains its current preconditioner.
+  DOF, full support-map, stored-entry and load-parameter caps precede scanning
+  or allocation. Admission/preconditioner construction polls cancellation;
+  operator/load callback work is bounded by the admitted model and caller.
+  Recording, solve scratch, replay, checkpoint and observation budgets remain
+  owned by the shared time integrator. Geometry, supports and reference
+  matrices are fixed; stiffness scaling also scales any prestress/stiffeners.
+  The adapter does not independently certify positive-semidefinite K or
+  identify physical damping. It retains the DKT/lumped-mass spatial model,
+  linear small-deflection kinematics, and the supplied initial-state chain.
+  `examples/moving_plate.rs` advances a force across a clamped DKT mesh and
+  differentiates sampled deflection through all four mechanical parameters
+  and force amplitude, including consistent initial acceleration. The focused
+  transient tests compare complete q/v/a and gradients with independent dense
+  stepping, check common-scale invariance, undamped energy conservation and
+  damped decay, and exercise admission/cancellation/refusal behavior.
 
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
@@ -148,14 +176,19 @@ through `fs_sparse::Coo` canonical accumulation; modal path inherits
 fs-modal's determinism (tested there). Cross-ISA goldens are not recorded.
 
 ## Cancellation behavior
-None; assembly and modal calls run to completion (fs-modal budgets are the
-only bounds). Joins the executor-integration seam when a consumer needs it.
+Spatial assembly and modal calls run to completion under their existing
+controls. Moving-load location is bounded by admitted node/triangle counts.
+The transient adapter polls admission and preconditioner construction; its
+operator callbacks are bounded by the admitted sparse model. The shared time
+integrator owns cancellation and accepted-prefix behavior during stepping
+and reverse replay.
 
 ## Unsafe boundary
 None. Workspace `unsafe_code = "deny"`.
 
 ## Feature flags
-None.
+`transient` enables the shared generalized-alpha dynamics and adjoint adapter.
+Moving-load interpolation is available without this feature.
 
 ## Conformance tests
 
