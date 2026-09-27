@@ -38,6 +38,7 @@
 //! downstream through fs-modal).
 
 pub mod shell;
+pub mod loading;
 pub use shell::{
     ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,
     generate_bell_shell, generate_cylinder_shell, modes_shell,

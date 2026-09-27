@@ -82,6 +82,25 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   section, section count (expected and actual), degenerate element (with the offending element id and 2A), bad
   boundary (with out-of-bounds node index and node count), bad stiffener,
   forwarded modal refusals.
+- `loading::PlatePointStencil` locates a point on the actual triangular mesh
+  within node/triangle admission bounds. It uses the lowest-index containing
+  triangle at shared edges and P1 weights for the `(w, wx, wy)` interface
+  fields. This interpolation is explicit and distinct from the DKT element's
+  interior rotation polynomial. A physical transverse force and Cartesian
+  moments `[Fz, Mx, My]` map to `[Fz, -My, Mx]` generalized efforts: physical
+  rotations are `[wy, -wx, 0]`. Applying the same stencil and its transpose
+  preserves virtual work and power. Point probes reconstruct displacement,
+  slopes, transverse velocity and angular velocity; `load_vjp` differentiates
+  force/moment amplitudes at a fixed location. Repeated additive transfers
+  support caller-bounded distributed loads. Eliminated-DOF applied loads are
+  returned separately; they are not the complete dynamic support reactions.
+  Invalid/outside locations, malformed support maps and nonfinite arithmetic
+  refuse, and a refused addition leaves the force vector unchanged. Moving
+  paths relocate on the undeformed mesh; changing supports requires a new
+  stencil. No path-coordinate derivative, contact model or moving-support
+  kinematics is inferred. `tests/plate_loading.rs` checks independent rigid
+  motion, force/moment resultants, virtual work, moving-edge continuity,
+  support elimination and bounded atomic refusal.
 
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
