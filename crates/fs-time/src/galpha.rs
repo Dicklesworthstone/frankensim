@@ -12,6 +12,8 @@ use std::fmt;
 
 #[path = "galpha/adjoint.rs"]
 pub mod adjoint;
+#[path = "galpha/second_order_adjoint.rs"]
+pub mod second_order_adjoint;
 
 /// Prefactored generalized-α stepper for fixed (M, C, K, h).
 pub struct GeneralizedAlpha {
@@ -468,6 +470,26 @@ impl OperatorGeneralizedAlpha {
         problem: &P,
         forcing: &[f64],
     ) -> Result<ImplicitStepTelemetry, TimeSolveError> {
+        self.step_controlled(state, problem, forcing, &mut || false)
+    }
+
+    /// Advance with cancellation checks before setup, between bounded Newton
+    /// attempts and before publication. One attempt includes the configured
+    /// inner Krylov/globalization work; callbacks must bound their own work.
+    /// Cancellation leaves displacement, velocity, acceleration and history
+    /// unchanged, including when a previous step has already been accepted.
+    pub fn step_controlled<P, Cancel>(
+        &self,
+        state: &mut SecondOrderState,
+        problem: &P,
+        forcing: &[f64],
+        cancelled: &mut Cancel,
+    ) -> Result<ImplicitStepTelemetry, TimeSolveError>
+    where
+        P: SecondOrderProblem + ?Sized,
+        Cancel: FnMut() -> bool,
+    {
+        structural_poll(cancelled)?;
         require_dimension("structural problem", self.n, problem.dimension())?;
         require_dimension("displacement state", self.n, state.q.len())?;
         require_dimension("velocity state", self.n, state.v.len())?;
@@ -496,9 +518,27 @@ impl OperatorGeneralizedAlpha {
                 )
             })
             .collect();
-        let mut newton = NewtonKrylovState::new(&residual, guess, self.solve.newton)
-            .map_err(TimeSolveError::NewtonSetup)?;
-        let report = newton.run(&residual, self.solve.max_newton_iterations);
+        let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+        structural_poll(cancelled)?;
+        let mut newton = setup.map_err(TimeSolveError::NewtonSetup)?;
+        let mut report = newton.run(&residual, 0);
+        for _ in 0..self.solve.max_newton_iterations {
+            // Plateau is diagnostic, not terminal in the shared solver.
+            if report.converged
+                || !matches!(
+                    report.diagnosis,
+                    Some(
+                        fs_solver::NewtonStallDiagnosis::BudgetExhausted
+                            | fs_solver::NewtonStallDiagnosis::Plateau
+                    )
+                )
+            {
+                break;
+            }
+            structural_poll(cancelled)?;
+            report = newton.run(&residual, 1);
+            structural_poll(cancelled)?;
+        }
         if !report.converged {
             return Err(TimeSolveError::NotConverged(report));
         }
@@ -510,6 +550,7 @@ impl OperatorGeneralizedAlpha {
             h: self.h,
             newton: report,
         };
+        structural_poll(cancelled)?;
         state.q = q_new;
         state.v = v_new;
         state.a = a_new;
@@ -517,6 +558,14 @@ impl OperatorGeneralizedAlpha {
         state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
+    }
+}
+
+fn structural_poll<Cancel: FnMut() -> bool>(cancelled: &mut Cancel) -> Result<(), TimeSolveError> {
+    if cancelled() {
+        Err(TimeSolveError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 

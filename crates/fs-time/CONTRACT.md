@@ -69,6 +69,18 @@ where claimed below.
   The pullback borrows existing input history and returns complete primal and
   adjoint reports. Failed solves, incomplete derivative writes, nonfinite
   results, insufficient workspace and cancellation return no partial gradient.
+- `galpha::second_order_adjoint::SecondOrderVjp` and
+  `OperatorGeneralizedAlpha::step_vjp` differentiate the structural
+  Chung–Hulbert residual and Newmark correctors. Explicit transpose actions
+  cover mass, damping and the nonlinear internal-force tangent; the parameter
+  VJP includes `M(p) a + C(p) v + r(q,p)`. Returned cotangents cover all three
+  initial vectors (displacement, velocity, acceleration), parameters and
+  forcing. A trajectory reverse sweep must carry all three endpoint seeds.
+  If initial acceleration comes from an equilibrium calculation, its cotangent
+  must enter that calculation's chain rule. `SecondOrderAdjointConfig` bounds
+  an independently preconditioned transposed FGMRES solve. Workspaces are
+  conservatively capped, prior input history is borrowed, and failed solves,
+  incomplete derivatives or cancellation return no partial result.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,
@@ -298,9 +310,10 @@ before publication. One cycle has at most the configured restart length of
 Arnoldi iterations. Long callbacks must bound their own work; this does not
 claim interruption within an operator or one Krylov cycle. Cancelled forward
 attempts leave the entire `ImexState` unchanged and are retryable.
-`OperatorFirstOrderGeneralizedAlpha::step_controlled` polls before setup,
-between bounded Newton attempts and before publication. Its `step_vjp` also
-polls between adjoint restart cycles and around final derivative callbacks.
+Both `OperatorFirstOrderGeneralizedAlpha::step_controlled` and structural
+`OperatorGeneralizedAlpha::step_controlled` poll before setup, between bounded
+Newton attempts and before publication. Their `step_vjp` methods also poll
+between adjoint restart cycles and around final derivative callbacks.
 Cancelled attempts preserve the entire input state/history; one Newton
 attempt or provider callback must finish before its cancellation is observed.
 Long trajectories are resumable by cloning `SecondOrderState`,
@@ -429,14 +442,18 @@ per-relation and aggregate reset-target caps.
   detection; no event location.
 - Adjoint support is specific to each admitted map: Verlet, free-body DEP,
   frozen-step/recorded RK45, autonomous operator IMEX ARS(2,2,2), and
-  operator-backed first-order generalized-alpha. Structural second-order
-  generalized-alpha and exponential-integrator pullbacks remain absent.
-  First-order generalized-alpha holds time, timestep, spectral radius and
-  solver policy fixed. It differentiates the converged residual rather than
-  Newton/Krylov iterations and requires independent state/rate input seeds.
-  Its tests check nonlinear nonsymmetric, parameter-dependent mass and tangent
+  operator-backed first-order and structural second-order generalized-alpha.
+  Exponential-integrator pullbacks remain absent.
+  Generalized-alpha holds time, timestep, spectral radius and solver policy
+  fixed. It differentiates the converged residual rather than Newton/Krylov
+  iterations. The first-order tests check independent state/rate input seeds
+  with nonlinear nonsymmetric, parameter-dependent mass and tangent
   against an independent dense endpoint-rate solve with forward duals and
   five-point differences, plus full trajectory accumulation and descent.
+  Structural tests independently solve for endpoint acceleration with dense
+  forward duals and five-point differences, check parameter-dependent mass,
+  damping and internal force, and verify all displacement/velocity/acceleration
+  and forcing cotangents through multiple steps and an inverse-loss descent.
   Primal and adjoint convergence residuals limit gradient accuracy; there is
   no interval gradient enclosure or adaptive-controller/event derivative.
   IMEX gradients hold the step size, solver policy and initial-condition
