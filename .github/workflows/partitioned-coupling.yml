@@ -1,0 +1,37 @@
+name: Partitioned coupling
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-couple/src/iqn_ils.rs'
+      - 'crates/fs-couple/src/iqn_ils/**'
+      - 'crates/fs-math/src/**'
+      - '.github/workflows/partitioned-coupling.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-coupling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_PKG_VERSION: '0.0.1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and execute the actual coupling and deterministic-math sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustc --version --verbose
+          # No surrogate implementations or constellation bootstrap: these
+          # production modules depend only on std and the real fs-math crate.
+          rustc --edition=2024 --crate-type rlib --crate-name fs_math crates/fs-math/src/lib.rs -o "$RUNNER_TEMP/libfs_math.rlib"
+          printf '#[path = "%s/crates/fs-couple/src/iqn_ils.rs"] pub mod iqn_ils;\n' "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/coupling_tests.rs"
+          rustc --edition=2024 --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" -o "$RUNNER_TEMP/coupling-tests"
+          "$RUNNER_TEMP/coupling-tests" --nocapture
+          rustc --edition=2024 -O --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" -o "$RUNNER_TEMP/coupling-tests-opt"
+          "$RUNNER_TEMP/coupling-tests-opt" --nocapture

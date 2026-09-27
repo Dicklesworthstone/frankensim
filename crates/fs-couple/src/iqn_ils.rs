@@ -17,6 +17,9 @@
 
 use core::fmt;
 
+/// Transactional partitioned steps with fixed-scale convergence and balance gates.
+pub mod driver;
+
 /// Hard bound on the small dense least-squares problem.
 pub const MAX_HISTORY: usize = 64;
 
