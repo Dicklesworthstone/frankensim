@@ -24,5 +24,16 @@ only through the public `PlateModel`.
 in `fs-plate`, which takes this crate as a dev-dependency (a legal cycle).
 `fs-ascent`'s `plate_calibration` example and test consume it the same way.
 
+The `preconditioned_plate` example accepts mesh size 8 (147 free DOFs) or 12
+(363 free DOFs), comparing physical Jacobi scaling against the default identity
+hook under identical short-restart controls. These are measured fixed-mesh,
+fixed-step cases, not a mesh-independent convergence or timing guarantee.
+`crates/fs-plate/tests/plate_preconditioning.rs` checks the effective M/C/K
+diagonal, both bounded larger-mesh solves, a 147-DOF dense-LU endpoint, and a
+12-step sampled trajectory with checkpoint replay and all five total physical
+parameter derivatives against independent dense differences. Forward and
+adjoint solves retain explicit restart/cycle limits; initialization and load
+chain rules are included in the gradient.
+
 ## Unsafe boundary
 None. Workspace `unsafe_code = "deny"`.
