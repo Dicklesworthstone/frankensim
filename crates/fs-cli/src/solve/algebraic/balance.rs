@@ -11,11 +11,26 @@ use fs_conduction::adjoint::{
     LinearGoalAnalysisConfig, LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis,
 };
 
-const MAX_RETARGET_CALLS: usize = 4;
+pub(super) const MAX_RETARGET_CALLS: usize = 4;
 
 /// Work belongs to the rung, including attempts whose candidate was rejected.
 #[derive(Clone)]
-pub(in crate::solve) struct LinearWork {
+pub(in crate::solve) enum LinearWork {
+    Solid(SolidWork),
+    Coupled(super::coupled::publication::balance::Work),
+}
+
+impl LinearWork {
+    pub(in crate::solve) fn from_analysis(analysis: &LinearMaximumAnalysis, limit: usize) -> Self {
+        Self::Solid(SolidWork::from_analysis(analysis, limit))
+    }
+    pub(in crate::solve) fn from_polish(result: &LinearMaximumPolish, limit: usize) -> Self {
+        Self::Solid(SolidWork::from_polish(result, limit))
+    }
+}
+
+#[derive(Clone)]
+pub(in crate::solve) struct SolidWork {
     initial_bound_k: Option<f64>,
     primal_limit: usize,
     stability_iterations: usize,
@@ -28,7 +43,7 @@ pub(in crate::solve) struct LinearWork {
     physical_gate_refused: bool,
 }
 
-impl LinearWork {
+impl SolidWork {
     pub(in crate::solve) fn from_analysis(analysis: &LinearMaximumAnalysis, limit: usize) -> Self {
         Self {
             initial_bound_k: analysis.algebraic_half_width_k(),
@@ -100,7 +115,12 @@ pub(in crate::solve) fn retarget_linear_maximum(
             "adaptive correction requires a finite positive absolute target",
         ));
     }
-    let Some(mut totals) = solved.algebraic.linear_work.clone() else {
+    if matches!(&solved.algebraic.linear_work, Some(LinearWork::Coupled(_))) {
+        return super::coupled::publication::balance::retarget(
+            cx, solved, vertices, absolute_k, memory_bytes,
+        );
+    }
+    let Some(LinearWork::Solid(mut totals)) = solved.algebraic.linear_work.clone() else {
         return Ok(false);
     };
     let remaining = totals
@@ -182,7 +202,7 @@ pub(in crate::solve) fn retarget_linear_maximum(
     }
     solved.solution = result.solution;
     solved.algebraic.primal_iterations = primal_iterations;
-    solved.algebraic.linear_work = Some(totals);
+    solved.algebraic.linear_work = Some(LinearWork::Solid(totals));
     Ok(changed)
 }
 
@@ -203,7 +223,12 @@ pub(in crate::solve) fn finish_discretization_balance(
             "adaptive algebraic allowance exceeds one tenth of its finite measured term",
         ));
     }
-    let Some(totals) = &solved.algebraic.linear_work else {
+    if matches!(&solved.algebraic.linear_work, Some(LinearWork::Coupled(_))) {
+        return super::coupled::publication::balance::finish(
+            solved, discretization_k, allowance_k,
+        );
+    }
+    let Some(LinearWork::Solid(totals)) = &solved.algebraic.linear_work else {
         return Ok(());
     };
     let bound = maximum_bound(&solved.algebraic);

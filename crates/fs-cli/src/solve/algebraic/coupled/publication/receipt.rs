@@ -7,13 +7,13 @@ use fs_conduction::{ScalarField, ThermalBc};
 use crate::json_read::JsonValue as Json;
 use super::{AirPath, Cx, SolveRefusal, cancelled, error, json_string, number};
 
-fn set(value: &mut Json, key: &str, next: Json) -> Result<(), SolveRefusal> {
+pub(super) fn set(value: &mut Json, key: &str, next: Json) -> Result<(), SolveRefusal> {
     let Json::Object(rows) = value else { return Err(error("air receipt member is not an object")); };
     if let Some((_, old)) = rows.iter_mut().find(|(name, _)| name == key) { *old = next; }
     else { rows.push((key.into(), next)); }
     Ok(())
 }
-fn numeric(value: f64) -> Result<Json, SolveRefusal> {
+pub(super) fn numeric(value: f64) -> Result<Json, SolveRefusal> {
     Ok(Json::Number { value, raw: number(value)? })
 }
 fn text(value: &str) -> Json { Json::Str(value.into()) }
@@ -24,7 +24,13 @@ fn checked_sum(values: impl Iterator<Item = f64>) -> Result<f64, SolveRefusal> {
 }
 
 fn render(cx: &Cx<'_>, value: &Json, out: &mut String) -> Result<(), SolveRefusal> {
-    cx.checkpoint().map_err(|_| cancelled())?;
+    encode(value, out, &mut || cx.checkpoint().map_err(|_| cancelled()))
+}
+
+pub(super) fn encode(
+    value: &Json, out: &mut String, checkpoint: &mut impl FnMut() -> Result<(), SolveRefusal>,
+) -> Result<(), SolveRefusal> {
+    checkpoint()?;
     match value {
         Json::Null => out.push_str("null"),
         Json::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
@@ -34,7 +40,7 @@ fn render(cx: &Cx<'_>, value: &Json, out: &mut String) -> Result<(), SolveRefusa
             out.push('[');
             for (i, value) in values.iter().enumerate() {
                 if i != 0 { out.push(','); }
-                render(cx, value, out)?;
+                encode(value, out, checkpoint)?;
             }
             out.push(']');
         }
@@ -43,7 +49,7 @@ fn render(cx: &Cx<'_>, value: &Json, out: &mut String) -> Result<(), SolveRefusa
             for (i, (key, value)) in rows.iter().enumerate() {
                 if i != 0 { out.push(','); }
                 out.push_str(&json_string(key)); out.push(':');
-                render(cx, value, out)?;
+                encode(value, out, checkpoint)?;
             }
             out.push('}');
         }

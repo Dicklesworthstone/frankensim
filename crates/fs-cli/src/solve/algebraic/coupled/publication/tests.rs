@@ -196,3 +196,91 @@ fn malformed_history_or_cancellation_cannot_partially_replace_caller_state() {
         assert_eq!(original, saved);
     });
 }
+
+fn coupled_work(evidence: &MaximumEvidence) -> balance::Work {
+    match &evidence.linear_work {
+        Some(super::super::super::balance::LinearWork::Coupled(work)) => work.clone(),
+        _ => panic!("a physically attempted linear cooling rung must enter adaptive balancing"),
+    }
+}
+
+#[test]
+fn adaptive_retry_keeps_paid_rejections_and_uses_only_the_remaining_primal_allowance() {
+    let f = Fixture::new(false);
+    with_cx(|_, cx| {
+        let original = f.original(cx);
+        let (linear, config) = configs();
+        let vertices: Vec<_> = (0..f.mesh.vertex_count()).collect();
+        let history = f.history();
+        let first = prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-20, 1).unwrap();
+        assert!(first.replacement.is_none(), "one iteration is not a physical solve");
+        let work = coupled_work(&first.evidence);
+        assert_eq!(work.remaining().unwrap(), linear.max_iterations - first.evidence.primal_iterations);
+        let retry = prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-7,
+            work.remaining().unwrap()).unwrap();
+        let accepted = retry.replacement.as_ref().expect("bounded retry is physically admitted");
+        let total = work.accumulate(&coupled_work(&retry.evidence)).unwrap();
+        let bound = crate::solve::algebraic::maximum_bound(&retry.evidence);
+        let merged = total.control(retry.evidence.control_json.as_deref().unwrap(), bound,
+            None, None, || cx.checkpoint().map_err(|_| cancelled())).unwrap();
+        let json = Json::parse(&merged).unwrap();
+        assert_eq!(json.f64_field("primal_iterations"),
+            Some((first.evidence.primal_iterations + retry.evidence.primal_iterations) as f64));
+        assert_eq!(json.f64_field("max_primal_iterations"), Some(linear.max_iterations as f64));
+        assert_eq!(json.f64_field("retarget_calls"), Some(1.0));
+        assert!(json.f64_field("physical_rejections").unwrap() >= 1.0);
+        assert!(json.f64_field("physical_checks").unwrap()
+            <= json.f64_field("goal_checks").unwrap() + json.f64_field("preliminary_goal_checks").unwrap());
+        assert!(json.f64_field("response_iterations").unwrap() <= json.f64_field("max_response_iterations").unwrap());
+        assert!(accepted.solution.report.final_residual <= original.report.residual_threshold);
+        assert!((Json::parse(&accepted.conjugate).unwrap().f64_field("air_total_w").unwrap()-6.0).abs() < 1e-6);
+        assert!(prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-7,
+            linear.max_iterations + 1).is_err());
+    });
+}
+
+#[test]
+fn repeated_adaptive_finalization_preserves_the_selected_inverse_and_reference_origin() {
+    let f = Fixture::new(true);
+    with_cx(|_, cx| {
+        let publication = prepared(&f, cx, &f.original(cx), &f.history());
+        let work = coupled_work(&publication.evidence);
+        let bound = crate::solve::algebraic::maximum_bound(&publication.evidence).unwrap();
+        assert!(bound > 0.0);
+        let original = publication.evidence.control_json.as_deref().unwrap();
+        let initial = Json::parse(original).unwrap();
+        let first = work.control(original, Some(bound), Some((20.0, 1.0)), None, || Ok(())).unwrap();
+        let second = work.control(&first, Some(bound), Some((0.0, 0.0)), None, || Ok(())).unwrap();
+        let final_control = Json::parse(&second).unwrap();
+        assert_eq!(final_control.get("goal_met"), Some(&Json::Bool(false)));
+        assert_eq!(final_control.f64_field("requested_tolerance_k"), Some(0.0));
+        assert_eq!(final_control.f64_field("last_correction_target_k"), Some(1e-7));
+        for key in ["maximum_interval_k", "final_bound_k", "inverse_method",
+            "feedback_gain_infinity_upper", "analysis_reference_origin"]
+        { assert_eq!(final_control.get(key), initial.get(key), "changed selected witness {key}"); }
+        assert_eq!(final_control.as_object().unwrap().iter().filter(|(key,_)| key == "adaptive_balance").count(), 1);
+    });
+}
+
+#[test]
+fn adaptive_control_cancellation_does_not_publish_a_partially_rewritten_receipt() {
+    let f = Fixture::new(false);
+    with_cx(|gate, cx| {
+        let publication = prepared(&f, cx, &f.original(cx), &f.history());
+        let work = coupled_work(&publication.evidence);
+        let original = publication.evidence.control_json.as_deref().unwrap();
+        let saved = original.to_string();
+        let mut checkpoints = 0;
+        let result = work.control(original, crate::solve::algebraic::maximum_bound(&publication.evidence),
+            Some((10.0, 0.5)), None, || {
+                checkpoints += 1;
+                if checkpoints == 3 { gate.request(); }
+                cx.checkpoint().map_err(|_| cancelled())
+            });
+        assert!(result.is_err());
+        assert_eq!(original, saved);
+    });
+}
