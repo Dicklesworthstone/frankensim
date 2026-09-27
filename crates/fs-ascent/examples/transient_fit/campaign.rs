@@ -14,6 +14,9 @@ use fs_ascent::{SqpStop, transient::{TransientConfig,
 use fs_time::{PiController, adaptive::adjoint::{OdeVjp, trajectory::{RecordingConfig, ReplayBudget}}};
 use std::{collections::BTreeMap, io::Read};
 
+// This file is itself included through #[path], so a bare `mod shared;`
+// would resolve beside it (transient_fit/shared.rs), not under campaign/.
+#[path = "campaign/shared.rs"]
 mod shared;
 
 const BOUNDS: [[f64;2];2] = [[0.1,2.0],[-1.0,1.0]];

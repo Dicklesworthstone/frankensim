@@ -1033,10 +1033,13 @@ dependencies = [
  "fs-math",
  "fs-obs",
  "fs-opt",
+ "fs-plate",
+ "fs-plate-transient",
  "fs-qty",
  "fs-rand",
  "fs-solver",
  "fs-sparse",
+ "fs-time",
  "fsci-opt",
 ]
 
@@ -2158,8 +2161,21 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-modal",
+ "fs-plate-transient",
  "fs-qty",
+ "fs-solver",
  "fs-sparse",
+ "fs-time",
+]
+
+[[package]]
+name = "fs-plate-transient"
+version = "0.0.1"
+dependencies = [
+ "fs-plate",
+ "fs-solver",
+ "fs-sparse",
+ "fs-time",
 ]
 
 [[package]]

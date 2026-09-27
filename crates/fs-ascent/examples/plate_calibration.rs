@@ -17,7 +17,7 @@
 mod moving;
 
 use fs_ascent::sqp::{SqpSample, SqpState, SqpStop};
-use fs_plate::transient::{PlateDynamics, PlateDynamicsParameters, PlateLoad};
+use fs_plate_transient::{PlateDynamics, PlateDynamicsParameters, PlateLoad};
 use fs_plate::{PlateMesh, PlateModel};
 use fs_time::galpha::initialization::{second_order_acceleration, second_order_acceleration_vjp};
 use fs_time::galpha::second_order_adjoint::trajectory::{

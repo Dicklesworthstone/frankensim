@@ -101,7 +101,7 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   kinematics is inferred. `tests/plate_loading.rs` checks independent rigid
   motion, force/moment resultants, virtual work, moving-edge continuity,
   support elimination and bounded atomic refusal.
-- Under `transient`, `transient::PlateDynamics` binds the existing sparse DKT
+- In the `fs-plate-transient` crate, `PlateDynamics` binds the existing sparse DKT
   pencil to `fs-time`'s structural residual, discrete adjoint and loaded
   trajectory interfaces. It borrows a fixed mesh/support model and uses
   `M = mass_scale*M0`, `K = stiffness_scale*K0`, and
@@ -187,8 +187,12 @@ and reverse replay.
 None. Workspace `unsafe_code = "deny"`.
 
 ## Feature flags
-`transient` enables the shared generalized-alpha dynamics and adjoint adapter.
-Moving-load interpolation is available without this feature.
+None. The shared generalized-alpha dynamics and adjoint adapter moved to the
+`fs-plate-transient` crate on 2026-09-27. As an optional feature here, its
+`fs-time`/`fs-solver` edge closed the package cycle
+`fs-feec -> fs-couple -> fs-plate -> fs-solver -> fs-feec`, and every workspace
+cargo command failed. Its source still lives at `src/transient.rs`, compiled by
+that crate. Moving-load interpolation remains here.
 
 ## Conformance tests
 
