@@ -7,9 +7,14 @@
 //! are W/K, heater power is W, and time is seconds. Synthetic endpoint data
 //! come from this same discrete model: this demonstrates inverse computation,
 //! not independent physical validation or parameter identifiability in general.
+//! Forty-step gradients use at most six parked checkpoints with bounded replay.
 use fs_solver::LinearOp;
 use fs_time::stiff::{
-    IdentityPreconditioner, ImexSolveConfig, ImexState, OperatorImex2, adjoint::ImexVjp,
+    IdentityPreconditioner, ImexSolveConfig, OperatorImex2,
+    adjoint::ImexVjp,
+    adjoint::trajectory::{
+        ImexRecordingConfig, ImexRecordingStatus, ImexReplayBudget, RecordedImex2,
+    },
 };
 
 struct Thermal {
@@ -54,19 +59,28 @@ impl ImexVjp for Thermal {
     }
 }
 
-fn forward(
+fn forward<'a>(
     method: &OperatorImex2,
-    model: &Thermal,
-) -> Result<(Vec<Vec<f64>>, Vec<f64>), Box<dyn std::error::Error>> {
-    let mut state = ImexState::new(0.0, &[1.0, 0.2]);
-    let mut checkpoints = Vec::new();
-    for _ in 0..40 {
-        checkpoints.push(state.u.clone());
-        method.step(&mut state, model, &IdentityPreconditioner, &|u, out| {
-            model.nonlinear(u, out)
-        })?;
+    model: &'a Thermal,
+) -> Result<RecordedImex2<'a, Thermal, IdentityPreconditioner>, Box<dyn std::error::Error>> {
+    let config = ImexRecordingConfig {
+        steps: 40,
+        max_workspace_components: method
+            .adjoint_workspace_components(2)
+            .ok_or("workspace overflow")?,
+    };
+    let mut tape = RecordedImex2::new(
+        *method,
+        model,
+        &IdentityPreconditioner,
+        0.0,
+        &[1.0, 0.2],
+        config,
+    )?;
+    if tape.advance(40, 40, &mut || false)?.status != ImexRecordingStatus::ReachedEnd {
+        return Err("forward trajectory incomplete".into());
     }
-    Ok((checkpoints, state.u))
+    Ok(tape)
 }
 
 fn loss(endpoint: &[f64], target: &[f64]) -> f64 {
@@ -87,24 +101,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_cycles: 4,
         },
     );
-    let (_, target) = forward(
+    let target = forward(
         &method,
         &Thermal {
             conductance: 1.2,
             heater: 0.8,
         },
-    )?;
+    )?
+    .state()
+    .to_vec();
     let mut model = Thermal {
         conductance: 0.5,
         heater: 0.3,
     };
-    let workspace = method
-        .adjoint_workspace_components(2)
-        .ok_or("workspace overflow")?;
     println!("iteration,loss_k2,conductance_w_per_k,heater_w");
     for iteration in 0..=80 {
-        let (checkpoints, endpoint) = forward(&method, &model)?;
-        let value = loss(&endpoint, &target);
+        let tape = forward(&method, &model)?;
+        let value = loss(tape.state(), &target);
         if iteration % 10 == 0 {
             println!(
                 "{iteration},{value:.12e},{:.9},{:.9}",
@@ -114,27 +127,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if iteration == 80 || value < 1e-14 {
             break;
         }
-        let mut bar = endpoint
+        let bar = tape
+            .state()
             .iter()
             .zip(&target)
             .map(|(a, b)| a - b)
             .collect::<Vec<_>>();
-        let mut gradient = [0.0; 2];
-        for state in checkpoints.iter().rev() {
-            let pullback = method.step_vjp(
-                state,
-                &model,
-                &IdentityPreconditioner,
-                &IdentityPreconditioner,
+        let gradient = tape
+            .pullback(
                 &bar,
-                workspace,
+                &[0.0; 2],
+                &IdentityPreconditioner,
+                ImexReplayBudget {
+                    checkpoints: 6,
+                    forward_steps: 200,
+                },
                 &mut || false,
-            )?;
-            for (total, contribution) in gradient.iter_mut().zip(&pullback.parameters) {
-                *total += contribution;
-            }
-            bar = pullback.initial;
-        }
+            )?
+            .parameters;
         let mut step = 8.0;
         let mut accepted = false;
         for _ in 0..20 {
@@ -143,8 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 heater: model.heater - step * gradient[1],
             };
             if candidate.conductance > 0.0 && candidate.heater >= 0.0 {
-                let (_, endpoint) = forward(&method, &candidate)?;
-                if loss(&endpoint, &target)
+                if loss(forward(&method, &candidate)?.state(), &target)
                     < value - 1e-4 * step * gradient.iter().map(|v| v * v).sum::<f64>()
                 {
                     model = candidate;

@@ -84,6 +84,17 @@ where claimed below.
   allocator metadata and callback-owned memory are outside that bound.
   `examples/imex_thermal_fit.rs` composes the pullbacks to fit conductance and
   heater power through a two-body thermal trajectory.
+- `stiff::adjoint::trajectory::RecordedImex2` records/resumes the production
+  fixed-step method with O(N) compact endpoint fingerprints and only the
+  initial/current full states. Its reverse sweep follows the binary
+  `fs-ad::revolve` schedule, parks O(log N) states, enforces explicit checkpoint
+  and replay-work caps, and checks every replayed endpoint before using its
+  derivatives. Leaf pullbacks reuse the checked forward stages. Cancellation
+  leaves the accepted forward prefix or complete reverse recording retryable;
+  no partial gradient is returned. Models and both preconditioners must remain
+  pure and unchanged across recording, forks and replay. The fingerprints are
+  replay diagnostics, not proof of derivative correctness. The thermal fitting
+  example now uses this sweep with six parked checkpoints for forty steps.
   `IdentityPreconditioner` is the explicit unpreconditioned fixture lane, not
   the field-scale recommendation.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
@@ -391,11 +402,16 @@ per-relation and aggregate reset-target caps.
   parameterization fixed, require correct transposed model actions, and are
   limited by the returned primal/adjoint residuals. They do not differentiate
   adaptive controllers, events/resets or nonautonomous splittings and do not
-  provide an interval enclosure of the gradient. Multi-step IMEX checkpoint
-  scheduling and initial-condition/direct-objective derivatives remain caller
-  responsibilities. `tests/imex_adjoint.rs` checks nonsymmetric state/parameter
+  provide an interval enclosure of the gradient. IMEX binary checkpoint
+  scheduling is provided, while initial-condition/direct-objective derivatives
+  remain caller responsibilities. It does not provide disk spill or serialization
+  of a recording, and reverse sweeps restart after cancellation.
+  `tests/imex_adjoint.rs` checks nonsymmetric state/parameter
   gradients against independent dense-solve differences, reverse trajectory
   accumulation, descent, every cancellation boundary and derivative refusals.
+  The recording regressions additionally compare checkpointed/full-storage
+  gradients bit-for-bit, check forward cap/clone/resume behavior, reject changed
+  replay physics, and exercise exact replay/checkpoint budgets.
 - Operator-backed generalized-alpha and IMEX remove the dense storage/API
   ceiling, but no roofline or field-scale iteration-count claim is made.
   `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity

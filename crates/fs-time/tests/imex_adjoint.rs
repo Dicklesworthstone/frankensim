@@ -401,3 +401,364 @@ fn missing_derivative_outputs_cannot_be_mistaken_for_zero_gradient() {
         Err(ImexAdjointError::NonFiniteDerivative)
     ));
 }
+
+use fs_time::stiff::adjoint::trajectory::{
+    ImexRecordingConfig, ImexRecordingStatus, ImexReplayBudget, ImexTrajectoryError, RecordedImex2,
+};
+
+fn recording(model: &Model, steps: usize) -> RecordedImex2<'_, Model, IdentityPreconditioner> {
+    RecordedImex2::new(
+        method(),
+        model,
+        &IdentityPreconditioner,
+        0.0,
+        &[0.9, -0.4],
+        ImexRecordingConfig {
+            steps,
+            max_workspace_components: 10_000,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn checkpointed_imex_matches_full_storage_bits_and_dense_parameter_differences() {
+    let model = Model { p: [4.0, 0.7] };
+    for steps in [0usize, 1, 2, 3, 5, 16, 64] {
+        let mut tape = recording(&model, steps);
+        assert_eq!(
+            tape.advance(steps, steps, &mut || false).unwrap().status,
+            ImexRecordingStatus::ReachedEnd
+        );
+        let budget = ImexReplayBudget {
+            checkpoints: tape.required_checkpoints(),
+            forward_steps: 1000,
+        };
+        let seed = [0.3, -1.1];
+        let direct = [0.125, -0.0625];
+        let actual = tape
+            .pullback(&seed, &direct, &IdentityPreconditioner, budget, &mut || {
+                false
+            })
+            .unwrap();
+        let mut full = ImexState::new(0.0, &[0.9, -0.4]);
+        let mut states = Vec::new();
+        for _ in 0..steps {
+            states.push(full.u.clone());
+            method()
+                .step(&mut full, &model, &IdentityPreconditioner, &|u, o| {
+                    model.nonlinear(u, o)
+                })
+                .unwrap();
+        }
+        assert_eq!(tape.state(), full.u);
+        assert_eq!(tape.time().to_bits(), full.t.to_bits());
+        let mut bar = seed.to_vec();
+        let mut parameter_bar = direct;
+        for u in states.iter().rev() {
+            let step = method()
+                .step_vjp(
+                    u,
+                    &model,
+                    &IdentityPreconditioner,
+                    &IdentityPreconditioner,
+                    &bar,
+                    10_000,
+                    &mut || false,
+                )
+                .unwrap();
+            for (sum, contribution) in parameter_bar.iter_mut().zip(step.parameters) {
+                *sum += contribution;
+            }
+            bar = step.initial;
+        }
+        assert_eq!(
+            actual
+                .initial
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            bar.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual
+                .parameters
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            parameter_bar
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert!(actual.peak_checkpoints <= tape.required_checkpoints());
+        if steps == 64 {
+            assert_eq!(actual.peak_checkpoints, 7);
+            assert_eq!(actual.replayed_steps, 256);
+        }
+        let objective = |p| dot(&dense_endpoint(p, &[0.9, -0.4], steps), &seed) + dot(&p, &direct);
+        for i in 0..2 {
+            let (mut pp, mut pm) = (model.p, model.p);
+            pp[i] += 1e-5;
+            pm[i] -= 1e-5;
+            close(actual.parameters[i], (objective(pp) - objective(pm)) / 2e-5);
+        }
+    }
+}
+
+#[test]
+fn imex_recording_resumes_caps_and_cancellation_without_repeating_accepted_steps() {
+    let model = Model { p: [4.0, 0.7] };
+    let mut tape = recording(&model, 8);
+    assert_eq!(
+        tape.advance(2, 8, &mut || false).unwrap().status,
+        ImexRecordingStatus::StepLimit
+    );
+    assert_eq!(tape.accepted_steps(), 2);
+    assert!(matches!(
+        tape.pullback(
+            &[1.0, 0.0],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            ImexReplayBudget {
+                checkpoints: 4,
+                forward_steps: 100
+            },
+            &mut || false
+        ),
+        Err(ImexTrajectoryError::Incomplete)
+    ));
+    assert_eq!(
+        tape.advance(8, 3, &mut || false).unwrap().status,
+        ImexRecordingStatus::RecordLimit
+    );
+    assert_eq!(tape.accepted_steps(), 3);
+    let mut fork = tape.clone();
+    let polls = Cell::new(0);
+    fork.advance(1, 8, &mut || {
+        polls.set(polls.get() + 1);
+        false
+    })
+    .unwrap();
+    let mut calls = 0;
+    let report = tape
+        .advance(8, 8, &mut || {
+            calls += 1;
+            calls > polls.get() + 2
+        })
+        .unwrap();
+    assert_eq!(report.status, ImexRecordingStatus::Cancelled);
+    assert_eq!(tape.accepted_steps(), 4);
+    assert_eq!(tape.state(), fork.state());
+    assert_eq!(tape.time(), fork.time());
+    tape.advance(8, 8, &mut || false).unwrap();
+    fork.advance(8, 8, &mut || false).unwrap();
+    let mut straight = recording(&model, 8);
+    straight.advance(8, 8, &mut || false).unwrap();
+    assert_eq!(tape.state(), straight.state());
+    assert_eq!(tape.state(), fork.state());
+    let budget = ImexReplayBudget {
+        checkpoints: 4,
+        forward_steps: 100,
+    };
+    let expected = straight
+        .pullback(
+            &[1.0, 0.0],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false,
+        )
+        .unwrap();
+    assert_eq!(
+        tape.pullback(
+            &[1.0, 0.0],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn imex_reverse_budget_and_cancellation_failures_leave_recording_retryable() {
+    let model = Model { p: [4.0, 0.7] };
+    let mut tape = recording(&model, 3);
+    tape.advance(3, 3, &mut || false).unwrap();
+    let before = tape.state().to_vec();
+    let mut budget = ImexReplayBudget {
+        checkpoints: 2,
+        forward_steps: 100,
+    };
+    let calls = Cell::new(0);
+    let expected = tape
+        .pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || {
+                calls.set(calls.get() + 1);
+                false
+            },
+        )
+        .unwrap();
+    budget.forward_steps = expected.replayed_steps;
+    assert_eq!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false
+        )
+        .unwrap(),
+        expected
+    );
+    budget.forward_steps -= 1;
+    assert!(matches!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false
+        ),
+        Err(ImexTrajectoryError::ReplayLimit)
+    ));
+    budget.forward_steps += 1;
+    budget.checkpoints = 1;
+    assert!(matches!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false
+        ),
+        Err(ImexTrajectoryError::CheckpointLimit { .. })
+    ));
+    budget.checkpoints = 2;
+    for stop in 1..=calls.get() {
+        let mut poll = 0;
+        assert!(matches!(
+            tape.pullback(
+                &[0.3, -1.1],
+                &[0.0; 2],
+                &IdentityPreconditioner,
+                budget,
+                &mut || {
+                    poll += 1;
+                    poll == stop
+                }
+            ),
+            Err(ImexTrajectoryError::Step(ImexAdjointError::Step(
+                ImexSolveError::Cancelled
+            )))
+        ));
+    }
+    assert_eq!(tape.state(), before);
+    assert_eq!(tape.accepted_steps(), 3);
+    assert_eq!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            budget,
+            &mut || false
+        )
+        .unwrap(),
+        expected
+    );
+}
+
+struct Changing {
+    k: Cell<f64>,
+}
+impl Changing {
+    fn model(&self) -> Model {
+        Model {
+            p: [self.k.get(), 0.7],
+        }
+    }
+}
+impl LinearOp for Changing {
+    fn n(&self) -> usize {
+        2
+    }
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        self.model().apply(x, y);
+    }
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        self.model().apply_transpose(x, y);
+    }
+}
+impl ImexVjp for Changing {
+    fn parameter_count(&self) -> usize {
+        2
+    }
+    fn nonlinear(&self, x: &[f64], y: &mut [f64]) {
+        self.model().nonlinear(x, y);
+    }
+    fn nonlinear_vjp(
+        &self,
+        x: &[f64],
+        s: &[f64],
+        xb: &mut [f64],
+        pb: &mut [f64],
+    ) -> Result<(), String> {
+        self.model().nonlinear_vjp(x, s, xb, pb)
+    }
+    fn linear_parameter_vjp(&self, x: &[f64], s: &[f64], pb: &mut [f64]) -> Result<(), String> {
+        self.model().linear_parameter_vjp(x, s, pb)
+    }
+}
+
+#[test]
+fn imex_replay_rejects_changed_forward_physics_instead_of_using_a_stale_gradient() {
+    let model = Changing { k: Cell::new(4.0) };
+    let mut tape = RecordedImex2::new(
+        method(),
+        &model,
+        &IdentityPreconditioner,
+        0.0,
+        &[0.9, -0.4],
+        ImexRecordingConfig {
+            steps: 5,
+            max_workspace_components: 10_000,
+        },
+    )
+    .unwrap();
+    tape.advance(5, 5, &mut || false).unwrap();
+    model.k.set(4.1);
+    assert!(matches!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            ImexReplayBudget {
+                checkpoints: 3,
+                forward_steps: 100
+            },
+            &mut || false
+        ),
+        Err(ImexTrajectoryError::ReplayMismatch { .. })
+    ));
+    model.k.set(4.0);
+    assert!(
+        tape.pullback(
+            &[0.3, -1.1],
+            &[0.0; 2],
+            &IdentityPreconditioner,
+            ImexReplayBudget {
+                checkpoints: 3,
+                forward_steps: 100
+            },
+            &mut || false
+        )
+        .is_ok()
+    );
+}

@@ -9,6 +9,8 @@
 use super::{ImexSolveError, ImexStage, OperatorImex2, ShiftedLinearOp, imex_poll};
 use fs_solver::{FlexiblePreconditioner, LinearOp, SolveReport};
 
+pub mod trajectory;
+
 /// A fixed parameter point with matched primal and transposed derivatives.
 /// Implementations must be pure throughout one call, overwrite every output,
 /// and implement the actual `L^T` action for a nonsymmetric `LinearOp`.
@@ -175,6 +177,35 @@ impl OperatorImex2 {
             &|state, out| model.nonlinear(state, out),
             cancelled,
         )?;
+        self.reverse_stages(
+            initial,
+            model,
+            adjoint_preconditioner,
+            terminal,
+            p,
+            stages,
+            cancelled,
+        )
+    }
+
+    // Reuse the already replayed and checked primal stages in trajectory
+    // sweeps; no second forward solve is needed for a leaf pullback.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn reverse_stages<M, Q, Cancel>(
+        &self,
+        initial: &[f64],
+        model: &M,
+        adjoint_preconditioner: &Q,
+        terminal: &[f64],
+        p: usize,
+        stages: super::ImexStages,
+        cancelled: &mut Cancel,
+    ) -> Result<ImexStepGradient, ImexAdjointError>
+    where
+        M: ImexVjp,
+        Q: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
         let shifted = ShiftedLinearOp {
             linear: model,
             shift: -self.gamma * self.h,
