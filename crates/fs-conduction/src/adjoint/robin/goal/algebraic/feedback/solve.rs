@@ -81,20 +81,67 @@ impl LinearRobinFeedbackAnalyzer<'_> {
     ///
     /// # Errors
     /// The same refusals as `solve_maximum_to_goal`.
-    #[allow(clippy::too_many_lines)] // One loop owns the shared work and publication boundary.
     pub fn solve_maximum_to_goal_observed(
         &self,
         cx: &Cx<'_>,
         initial_temperature: &[f64],
         region_vertices: &[usize],
         config: LinearGoalSolveConfig,
-        mut observe: impl FnMut(usize, &LinearRobinMaximumAnalysis),
+        observe: impl FnMut(usize, &LinearRobinMaximumAnalysis),
     ) -> Result<LinearGoalSolve<LinearRobinMaximumAnalysis>, ConductionError> {
+        self.solve_maximum_controlled(
+            cx, initial_temperature, region_vertices, config, observe, |_, _| Ok(true),
+        )
+    }
+
+    /// Correct until BOTH the outward maximum bound and a consumer gate pass.
+    ///
+    /// `admit` receives the exact full physical field and its analysis, only
+    /// after that field meets `absolute_tolerance`. This includes the initial
+    /// field: a loose maximum goal cannot bypass physical residual/energy gates.
+    /// A false result continues the SAME FGMRES/defect loop under the original
+    /// iteration and correction caps; inverse/response preparation is reused.
+    /// Every goal-eligible candidate is offered, even if its bound is slightly
+    /// worse than a numerically best but physically rejected candidate.
+    ///
+    /// `GoalTolerance` means the returned field passed both checks. Other stops
+    /// retain the best numerical candidate, which is NOT consumer-admitted.
+    /// There are at most `goal_checks` gate calls and no hidden solve retries.
+    /// Gate results must depend on the candidate, not the number of calls.
+    /// Errors retain the consumer's type; cancellation is checked after each
+    /// callback, even when it returns true or an error. A callback must treat
+    /// its output as provisional until this method returns successfully.
+    ///
+    /// # Errors
+    /// Existing numerical/admission failures, consumer errors, and cancellation.
+    pub fn solve_maximum_to_goal_admitted<E: From<ConductionError>>(
+        &self,
+        cx: &Cx<'_>,
+        initial_temperature: &[f64],
+        region_vertices: &[usize],
+        config: LinearGoalSolveConfig,
+        admit: impl FnMut(&[f64], &LinearRobinMaximumAnalysis) -> Result<bool, E>,
+    ) -> Result<LinearGoalSolve<LinearRobinMaximumAnalysis>, E> {
+        self.solve_maximum_controlled(
+            cx, initial_temperature, region_vertices, config, |_, _| {}, admit,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)] // One loop owns all work and admission.
+    fn solve_maximum_controlled<E: From<ConductionError>>(
+        &self,
+        cx: &Cx<'_>,
+        initial_temperature: &[f64],
+        region_vertices: &[usize],
+        config: LinearGoalSolveConfig,
+        mut observe: impl FnMut(usize, &LinearRobinMaximumAnalysis),
+        mut admit: impl FnMut(&[f64], &LinearRobinMaximumAnalysis) -> Result<bool, E>,
+    ) -> Result<LinearGoalSolve<LinearRobinMaximumAnalysis>, E> {
         poll(cx, 0)?;
         if !(config.absolute_tolerance.is_finite() && config.absolute_tolerance > 0.0)
             || !(1..=32).contains(&config.check_every)
         {
-            return Err(invalid("coupled goal solve needs a finite positive tolerance and check_every in 1..=32"));
+            return Err(invalid("coupled goal solve needs a finite positive tolerance and check_every in 1..=32").into());
         }
         let analysis = self.analyze_maximum(cx, initial_temperature, region_vertices)?;
         observe(0, &analysis);
@@ -110,9 +157,12 @@ impl LinearRobinFeedbackAnalyzer<'_> {
             return Ok(result);
         };
         if best_bound <= config.absolute_tolerance {
-            result.stop = LinearGoalStop::GoalTolerance;
+            let accepted = admit(&result.temperature, &result.analysis);
             poll(cx, 0)?;
-            return Ok(result);
+            if accepted? {
+                result.stop = LinearGoalStop::GoalTolerance;
+                return Ok(result);
+            }
         }
         if config.max_primal_iterations == 0 { poll(cx, 0)?; return Ok(result); }
 
@@ -169,14 +219,20 @@ impl LinearRobinFeedbackAnalyzer<'_> {
                 result.goal_checks = result.goal_checks.saturating_add(1);
                 observe(result.primal_iterations, &checked);
                 poll(cx, result.primal_iterations)?;
-                if let Some(bound) = checked.algebraic_half_width_k()
-                    && bound < best_bound
+                let bound = checked.algebraic_half_width_k();
+                let accepted = if bound.is_some_and(|value| value <= config.absolute_tolerance) {
+                    let decision = admit(&candidate, &checked);
+                    poll(cx, result.primal_iterations)?;
+                    decision?
+                } else { false };
+                if let Some(bound) = bound
+                    && (accepted || bound < best_bound)
                 {
                     best_bound = bound;
                     result.temperature = candidate;
                     result.analysis = checked;
                 }
-                if best_bound <= config.absolute_tolerance {
+                if accepted {
                     result.stop = LinearGoalStop::GoalTolerance;
                     break 'attempt;
                 }
