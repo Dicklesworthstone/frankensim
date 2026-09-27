@@ -11,6 +11,8 @@ use fs_math::det;
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport};
 use std::fmt;
 
+pub mod adjoint;
+
 /// Prefactored operators for the IMEX-θ two-stage (ARS(2,2,2)-style)
 /// scheme on u′ = L·u + N(u).
 pub struct Imex2 {
@@ -161,6 +163,8 @@ pub enum ImexStage {
 /// Typed refusal from an operator-backed IMEX step.
 #[derive(Debug, Clone)]
 pub enum ImexSolveError {
+    /// Cancellation was observed before publishing a complete step.
+    Cancelled,
     /// State/operator dimensions disagree.
     Dimension {
         /// Required dimension.
@@ -204,6 +208,7 @@ pub enum ImexSolveError {
 impl fmt::Display for ImexSolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "IMEX step cancelled before publication"),
             Self::Dimension { expected, actual } => write!(
                 f,
                 "IMEX operator/state dimension {actual} differs from method dimension {expected}"
@@ -271,6 +276,21 @@ pub struct OperatorImex2 {
     solve: ImexSolveConfig,
 }
 
+struct ImexStages {
+    one: Vec<f64>,
+    next: Vec<f64>,
+    report_one: SolveReport,
+    report_two: SolveReport,
+}
+
+fn imex_poll<Cancel: FnMut() -> bool>(cancelled: &mut Cancel) -> Result<(), ImexSolveError> {
+    if cancelled() {
+        Err(ImexSolveError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 impl OperatorImex2 {
     /// Configure an operator-backed IMEX method.
     #[must_use]
@@ -296,7 +316,6 @@ impl OperatorImex2 {
 
     /// Advance one step. State changes only after both true-residual solves
     /// converge, so a failed attempt is transaction-like.
-    #[allow(clippy::too_many_lines)] // Both tableau stages form one atomic transaction.
     pub fn step<L, N, P>(
         &self,
         state: &mut ImexState,
@@ -309,6 +328,29 @@ impl OperatorImex2 {
         N: Fn(&[f64], &mut [f64]),
         P: FlexiblePreconditioner,
     {
+        self.step_controlled(state, linear, preconditioner, nonlin, &mut || false)
+    }
+
+    /// Cancellable ARS(2,2,2) step. Polls around model evaluations, between
+    /// FGMRES restart cycles, and immediately before publication. One cycle
+    /// contains at most the configured `restart` Arnoldi iterations; callbacks
+    /// must themselves bound their work. Cancellation leaves the entire state,
+    /// including its clock and history, unchanged, so the attempt is retryable.
+    pub fn step_controlled<L, N, P, Cancel>(
+        &self,
+        state: &mut ImexState,
+        linear: &L,
+        preconditioner: &P,
+        nonlin: &N,
+        cancelled: &mut Cancel,
+    ) -> Result<ImexStepTelemetry, ImexSolveError>
+    where
+        L: LinearOp + ?Sized,
+        N: Fn(&[f64], &mut [f64]),
+        P: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
+        imex_poll(cancelled)?;
         if linear.n() != self.n {
             return Err(ImexSolveError::Dimension {
                 expected: self.n,
@@ -333,65 +375,109 @@ impl OperatorImex2 {
             .steps
             .checked_add(1)
             .ok_or(ImexSolveError::StepCounterOverflow { steps: state.steps })?;
-        let shifted = ShiftedLinearOp {
-            linear,
-            shift: -self.gamma * self.h,
-        };
-        let nu = evaluate_nonlinearity(nonlin, &state.u, ImexStage::One)?;
-        let mut rhs_one = vec![0.0; self.n];
-        for i in 0..self.n {
-            rhs_one[i] = self.h.mul_add(self.gamma * nu[i], state.u[i]);
-        }
-        let mut stage_one = FgmresState::new(&rhs_one, self.solve.restart);
-        let report_one = stage_one.run(
-            &shifted,
-            preconditioner,
-            &rhs_one,
-            self.solve.tolerance,
-            self.solve.max_cycles,
-        );
-        if !report_one.converged {
-            return Err(ImexSolveError::NotConverged {
-                stage: ImexStage::One,
-                report: report_one,
-            });
-        }
-        let u_one = stage_one.x;
-        let nu_one = evaluate_nonlinearity(nonlin, &u_one, ImexStage::Two)?;
-        let mut linear_u_one = vec![0.0; self.n];
-        linear.apply(&u_one, &mut linear_u_one);
-        let delta = 1.0 - 1.0 / (2.0 * self.gamma);
-        let mut rhs_two = vec![0.0; self.n];
-        for i in 0..self.n {
-            let explicit = delta.mul_add(nu[i], (1.0 - delta) * nu_one[i]);
-            rhs_two[i] = state.u[i] + self.h * ((1.0 - self.gamma) * linear_u_one[i] + explicit);
-        }
-        let mut stage_two = FgmresState::new(&rhs_two, self.solve.restart);
-        let report_two = stage_two.run(
-            &shifted,
-            preconditioner,
-            &rhs_two,
-            self.solve.tolerance,
-            self.solve.max_cycles,
-        );
-        if !report_two.converged {
-            return Err(ImexSolveError::NotConverged {
-                stage: ImexStage::Two,
-                report: report_two,
-            });
-        }
+        let stages = self.stages(&state.u, linear, preconditioner, nonlin, cancelled)?;
         let telemetry = ImexStepTelemetry {
             step: state.steps,
             t_start: state.t,
             h: self.h,
-            stage_one: report_one,
-            stage_two: report_two,
+            stage_one: stages.report_one,
+            stage_two: stages.report_two,
         };
-        state.u = stage_two.x;
+        imex_poll(cancelled)?;
+        state.u = stages.next;
         state.t = next_t;
         state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
+    }
+
+    fn solve_stage<L, P, Cancel>(
+        &self,
+        operator: &L,
+        preconditioner: &P,
+        rhs: &[f64],
+        stage: ImexStage,
+        cancelled: &mut Cancel,
+    ) -> Result<(Vec<f64>, SolveReport), ImexSolveError>
+    where
+        L: LinearOp,
+        P: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
+        imex_poll(cancelled)?;
+        let mut solve = FgmresState::new(rhs, self.solve.restart);
+        for cycle in 0..self.solve.max_cycles {
+            imex_poll(cancelled)?;
+            let report = solve.run(operator, preconditioner, rhs, self.solve.tolerance, 1);
+            imex_poll(cancelled)?;
+            if report.converged {
+                return Ok((solve.x, report));
+            }
+            if report.diagnosis == Some(fs_solver::StallDiagnosis::Breakdown)
+                || cycle + 1 == self.solve.max_cycles
+            {
+                return Err(ImexSolveError::NotConverged { stage, report });
+            }
+        }
+        unreachable!("constructor requires a positive cycle budget")
+    }
+
+    fn stages<L, N, P, Cancel>(
+        &self,
+        initial: &[f64],
+        linear: &L,
+        preconditioner: &P,
+        nonlin: &N,
+        cancelled: &mut Cancel,
+    ) -> Result<ImexStages, ImexSolveError>
+    where
+        L: LinearOp + ?Sized,
+        N: Fn(&[f64], &mut [f64]),
+        P: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
+        imex_poll(cancelled)?;
+        let shifted = ShiftedLinearOp {
+            linear,
+            shift: -self.gamma * self.h,
+        };
+        let nu = evaluate_nonlinearity(nonlin, initial, ImexStage::One)?;
+        imex_poll(cancelled)?;
+        let mut rhs_one = vec![0.0; self.n];
+        for i in 0..self.n {
+            rhs_one[i] = self.h.mul_add(self.gamma * nu[i], initial[i]);
+        }
+        let (u_one, report_one) = self.solve_stage(
+            &shifted,
+            preconditioner,
+            &rhs_one,
+            ImexStage::One,
+            cancelled,
+        )?;
+        let nu_one = evaluate_nonlinearity(nonlin, &u_one, ImexStage::Two)?;
+        imex_poll(cancelled)?;
+        let mut linear_u_one = vec![0.0; self.n];
+        linear.apply(&u_one, &mut linear_u_one);
+        imex_poll(cancelled)?;
+        let delta = 1.0 - 1.0 / (2.0 * self.gamma);
+        let mut rhs_two = vec![0.0; self.n];
+        for i in 0..self.n {
+            let explicit = delta.mul_add(nu[i], (1.0 - delta) * nu_one[i]);
+            rhs_two[i] = initial[i] + self.h * ((1.0 - self.gamma) * linear_u_one[i] + explicit);
+        }
+        let (next, report_two) = self.solve_stage(
+            &shifted,
+            preconditioner,
+            &rhs_two,
+            ImexStage::Two,
+            cancelled,
+        )?;
+        Ok(ImexStages {
+            one: u_one,
+            next,
+            report_one,
+            report_two,
+        })
     }
 }
 

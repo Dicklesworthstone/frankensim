@@ -69,6 +69,21 @@ where claimed below.
   `LinearOp`. Each `(I − γhL)` stage uses FGMRES with an injected
   `FlexiblePreconditioner`; both true-residual reports are recorded in
   `ImexStepTelemetry`, and `ImexState` changes only if both stages converge.
+- `stiff::adjoint::{ImexVjp, ImexStepGradient}` and
+  `OperatorImex2::step_vjp` differentiate the actual ARS(2,2,2) step for
+  autonomous `u' = L(p)u + N(u,p)`. Two primal and two transposed shifted
+  FGMRES solves use explicit primal/adjoint preconditioners. The pullback
+  includes parameter derivatives of both implicit matrices, the explicit
+  linear term and both nonlinear stage evaluations. It reuses the production
+  stage calculation and applies the implicit function theorem, without
+  differentiating Krylov iterations. The caller supplies consistent pure
+  derivative actions, a finite endpoint seed and a scalar workspace ceiling;
+  incomplete/nonfinite derivative outputs, insufficient workspace, failed
+  solves and cancellation return no partially accumulated gradient.
+  `adjoint_workspace_components` bounds live scalar storage conservatively;
+  allocator metadata and callback-owned memory are outside that bound.
+  `examples/imex_thermal_fit.rs` composes the pullbacks to fit conductance and
+  heater power through a two-body thermal trajectory.
   `IdentityPreconditioner` is the explicit unpreconditioned fixture lane, not
   the field-scale recommendation.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
@@ -239,7 +254,13 @@ in identity unless named by its exact trace ID.
 All entry points are synchronous and run to completion for one bounded step.
 Operator generalized-alpha bounds work by the configured Newton outer and
 FGMRES cycle/restart budgets; operator IMEX bounds each stage by its configured
-FGMRES budget. Long trajectories are resumable by cloning `SecondOrderState`,
+FGMRES budget. `OperatorImex2::step_controlled` and `step_vjp` additionally
+poll around model callbacks, between FGMRES restart cycles and immediately
+before publication. One cycle has at most the configured restart length of
+Arnoldi iterations. Long callbacks must bound their own work; this does not
+claim interruption within an operator or one Krylov cycle. Cancelled forward
+attempts leave the entire `ImexState` unchanged and are retryable.
+Long trajectories are resumable by cloning `SecondOrderState`,
 `FirstOrderState`, `ImexState`, or `AdaptiveState` between calls; split runs
 continue bitwise when the same operators, forcing, preconditioner policy, and
 configuration are supplied. Hybrid problem validation polls `Cx` before work,
@@ -363,8 +384,18 @@ per-relation and aggregate reset-target caps.
   no BDF/multistep.
 - No dense output / continuous extension for RK45; no stiffness
   detection; no event location.
-- Adjoints ship for Verlet only (the template); generalized-α/IMEX/
-  RK45 adjoints are the fs-ad integration lane (o3ui).
+- Adjoint support is specific to each admitted map: Verlet, free-body DEP,
+  frozen-step/recorded RK45, and autonomous operator IMEX ARS(2,2,2).
+  Generalized-alpha and exponential-integrator pullbacks remain absent.
+  IMEX gradients hold the step size, solver policy and initial-condition
+  parameterization fixed, require correct transposed model actions, and are
+  limited by the returned primal/adjoint residuals. They do not differentiate
+  adaptive controllers, events/resets or nonautonomous splittings and do not
+  provide an interval enclosure of the gradient. Multi-step IMEX checkpoint
+  scheduling and initial-condition/direct-objective derivatives remain caller
+  responsibilities. `tests/imex_adjoint.rs` checks nonsymmetric state/parameter
+  gradients against independent dense-solve differences, reverse trajectory
+  accumulation, descent, every cancellation boundary and derivative refusals.
 - Operator-backed generalized-alpha and IMEX remove the dense storage/API
   ceiling, but no roofline or field-scale iteration-count claim is made.
   `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity
