@@ -7,6 +7,42 @@ use super::{
 };
 
 impl LinearGoalAnalyzer<'_> {
+    /// Prepare interval-LDL inverse evidence for the stored solid matrix.
+    ///
+    /// The declared stability budget is the one authority for extra inverse
+    /// work: a zero budget performs none, and interval updates are capped at
+    /// the remaining iterations times `nnz(A)` (one iteration is one matrix
+    /// pass), then charged back to the shared counter. Stored entries use the
+    /// same memory-derived class as the residual limits. Only an established
+    /// bound is retained, and nothing is solved.
+    pub(super) fn prepare_sparse_inverse(&mut self, cx: &Cx<'_>) -> Result<(), ConductionError> {
+        use fs_solver::goal::inverse::sparse::{SparseInverseLimits, VerifiedSparseInverse};
+        poll(cx, self.stability_iterations)?;
+        let remaining = self.config.max_stability_iterations
+            .saturating_sub(self.stability_iterations);
+        let pass = self.response.matrix.nnz().max(1);
+        if remaining == 0 {
+            return Ok(());
+        }
+        let limits = self.config.residual_limits;
+        let sparse = SparseInverseLimits {
+            max_rows: limits.max_rows,
+            max_input_nonzeros: limits.max_nonzeros,
+            max_entries: limits.max_nonzeros,
+            max_updates: remaining.saturating_mul(pass),
+        };
+        let evidence = VerifiedSparseInverse::prepare(&self.response.matrix, sparse,
+            || cx.checkpoint().is_ok()).map_err(map_enclosure)?;
+        let paid = evidence.work().updates.div_ceil(pass).max(1);
+        self.stability_iterations = self.stability_iterations.saturating_add(paid)
+            .min(self.config.max_stability_iterations);
+        if evidence.inverse_upper().is_some() {
+            self.sparse_inverse = Some(evidence);
+        }
+        poll(cx, self.stability_iterations)?;
+        Ok(())
+    }
+
     pub(super) fn prepare_inverse_columns(
         &mut self,
         cx: &Cx<'_>,

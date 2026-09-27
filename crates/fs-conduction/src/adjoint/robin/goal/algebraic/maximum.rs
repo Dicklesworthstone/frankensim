@@ -115,6 +115,11 @@ impl<'m> LinearGoalAnalyzer<'m> {
         if analyzer.analyze(cx, temperature)?.enclosure.inverse_infinity_upper().is_none() {
             analyzer.prepare_inverse_columns(cx, temperature)?;
         }
+        // Above the dense cap, and when obtuse-dihedral P1 entries defeat
+        // every positive scaling, interval LDL can still prove the inverse.
+        if analyzer.analyze(cx, temperature)?.enclosure.inverse_infinity_upper().is_none() {
+            analyzer.prepare_sparse_inverse(cx)?;
+        }
         poll(cx, analyzer.stability_iterations)?;
         Ok(analyzer)
     }

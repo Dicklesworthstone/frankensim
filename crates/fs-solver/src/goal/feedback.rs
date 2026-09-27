@@ -238,7 +238,33 @@ fn enclose_feedback(
     checkpoint: impl FnMut() -> bool,
 ) -> Result<(FeedbackResidualReport, usize), GoalResidualError> {
     enclose_feedback_inner(matrix, rhs, primal, injection, feedback, offset,
-        responses, scaling, inverse_columns, None, limits, checkpoint)
+        responses, scaling, inverse_columns, None, None, limits, checkpoint)
+}
+
+/// Assess the full coupled equation using interval-LDL solid inverse evidence.
+///
+/// [`VerifiedSparseInverse`] proves `||A^-1||_inf` by bounded interval LDL
+/// elimination with no dense 256-row cap, and it is bound to the EXACT stored
+/// CSR it was prepared from. Its `enclose_goal` re-checks that identity here,
+/// so evidence for a different matrix refuses rather than lending its norm.
+/// The complete state-contraction or port-Schur check must still succeed. No
+/// new solve or factorization is performed.
+///
+/// # Errors
+/// As [`enclose_affine_feedback_error_with_inverse`], plus a changed matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn enclose_affine_feedback_error_with_sparse_inverse(
+    matrix: &Csr, rhs: &[f64], primal: &[f64],
+    injection: &Csr, feedback: &Csr, offset: &[f64],
+    responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
+    inverse: &super::inverse::sparse::VerifiedSparseInverse, limits: FeedbackResidualLimits,
+    mut checkpoint: impl FnMut() -> bool,
+) -> Result<FeedbackResidualReport, GoalResidualError> {
+    let (report, used) = enclose_feedback_inner(
+        matrix, rhs, primal, injection, feedback, offset, responses, scaling,
+        None, None, Some(inverse), limits, &mut checkpoint,
+    )?;
+    schur::finish_report(matrix, feedback, responses, limits, used, report, checkpoint)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -248,6 +274,7 @@ fn enclose_feedback_inner(
     responses: Option<&[Vec<f64>]>, scaling: Option<&[f64]>,
     inverse_columns: Option<&[Vec<f64>]>,
     spectral: Option<&super::inverse::spectral::SpectralInverse>,
+    sparse: Option<&super::inverse::sparse::VerifiedSparseInverse>,
     limits: FeedbackResidualLimits, checkpoint: impl FnMut() -> bool,
 ) -> Result<(FeedbackResidualReport, usize), GoalResidualError> {
     let mut work = Work { checkpoint, left: 512 };
@@ -296,6 +323,10 @@ fn enclose_feedback_inner(
         proof.enclose_goal_error(
             rhs, primal, &zeros, &zeros, scaling,
             limits.solid, || (work.checkpoint)(),
+        )?
+    } else if let Some(evidence) = sparse {
+        evidence.enclose_goal(
+            matrix, rhs, primal, &zeros, &zeros, scaling, limits.solid, || (work.checkpoint)(),
         )?
     } else { match inverse_columns {
         Some(columns) => super::inverse::enclose_goal_error_with_inverse(

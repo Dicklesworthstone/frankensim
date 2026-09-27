@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 29,
+        SOLVE_DRIVER_VERSION, 30,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -5234,8 +5234,11 @@ fn g1_adaptive_fidelity_memory_limit_keeps_the_last_probed_mesh_unresolved() {
         conduction.contains("\"status\":\"unresolved\""),
         "{conduction}"
     );
+    // Interval LDL proves the small refined solids' inverses inside the 32 KiB
+    // declaration (driver 30), so the algebraic side no longer binds first:
+    // the tet memory cap stops the study, as this test's name says.
     assert!(
-        conduction.contains("\"stop\":\"solver-algebraic-budget\""),
+        conduction.contains("\"stop\":\"memory-budget\""),
         "{conduction}"
     );
     let first_number = |text: &str, key: &str| {

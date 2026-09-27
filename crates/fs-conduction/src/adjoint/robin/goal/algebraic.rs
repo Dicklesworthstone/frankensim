@@ -126,6 +126,7 @@ pub struct LinearGoalAnalyzer<'m> {
     stability_relative_residual: Option<f64>,
     stability_scaling: Option<Vec<f64>>,
     inverse_columns: Option<Vec<Vec<f64>>>,
+    sparse_inverse: Option<fs_solver::goal::inverse::sparse::VerifiedSparseInverse>,
 }
 
 fn validate_field(
@@ -254,6 +255,7 @@ impl<'m> LinearGoalAnalyzer<'m> {
             problem, response, rhs, weights, free_dual, config,
             dual_relative_residual, dual_iterations, stability_iterations,
             stability_relative_residual, stability_scaling, inverse_columns: None,
+            sparse_inverse: None,
         })
     }
 
@@ -283,6 +285,14 @@ impl<'m> LinearGoalAnalyzer<'m> {
         self.inverse_columns.as_deref()
     }
 
+    /// Interval-LDL inverse evidence for solids beyond the dense proposal
+    /// cap, retained only when it established a verified bound. It is tied
+    /// to the exact stored matrix, which every use re-checks.
+    #[must_use]
+    pub fn sparse_inverse(&self) -> Option<&fs_solver::goal::inverse::sparse::VerifiedSparseInverse> {
+        self.sparse_inverse.as_ref()
+    }
+
     /// Assess another admissible field on the SAME operator and fixed goal.
     /// No primal, dual, or witness solve is repeated. Prescribed temperatures
     /// and every material's temperature support are rechecked before use.
@@ -297,13 +307,18 @@ impl<'m> LinearGoalAnalyzer<'m> {
         poll(cx, 0)?;
         validate_field(cx, self.problem, &self.response.dofs, approximate_temperature)?;
         let free_temperature = self.response.dofs.gather(approximate_temperature);
-        let enclosure = match &self.inverse_columns {
-            Some(columns) => fs_solver::goal::inverse::enclose_goal_error_with_inverse(
+        let enclosure = match (&self.inverse_columns, &self.sparse_inverse) {
+            (Some(columns), _) => fs_solver::goal::inverse::enclose_goal_error_with_inverse(
                 &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
                 &self.free_dual, self.stability_scaling.as_deref(), columns,
                 self.config.residual_limits, || cx.checkpoint().is_ok(),
             ),
-            None => enclose_goal_error(
+            (None, Some(evidence)) => evidence.enclose_goal(
+                &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
+                &self.free_dual, self.stability_scaling.as_deref(),
+                self.config.residual_limits, || cx.checkpoint().is_ok(),
+            ),
+            (None, None) => enclose_goal_error(
                 &self.response.matrix, &self.rhs, &free_temperature, &self.weights,
                 &self.free_dual, self.stability_scaling.as_deref(),
                 self.config.residual_limits, || cx.checkpoint().is_ok(),

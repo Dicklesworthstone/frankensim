@@ -9,6 +9,7 @@ use fs_solver::goal::feedback::{
     FeedbackResidualLimits, FeedbackResidualReport, enclose_affine_feedback_error_with_inverse,
     enclose_affine_feedback_error_with_schur as enclose_affine_feedback_error,
     enclose_affine_feedback_error_with_spectral,
+    enclose_affine_feedback_error_with_sparse_inverse,
     enclose_affine_feedback_error_with_spectral_inverse,
 };
 use fs_solver::goal::inverse::spectral::{
@@ -385,14 +386,22 @@ impl LinearRobinFeedbackAnalyzer<'_> {
                 self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
                 self.config.residual, || cx.checkpoint().is_ok(),
             )
-        } else { match self.solid.inverse_columns() {
-            Some(columns) => enclose_affine_feedback_error_with_inverse(
+        } else { match (self.solid.inverse_columns(), self.solid.sparse_inverse()) {
+            (Some(columns), _) => enclose_affine_feedback_error_with_inverse(
                 &self.solid.response.matrix, &self.solid.rhs, &free,
                 &self.injection, &self.feedback, &self.offset,
                 self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
                 columns, self.config.residual, || cx.checkpoint().is_ok(),
             ),
-            None => match spectral {
+            // Interval LDL evidence is cheaper than the shifted-Gram fallback
+            // on large obtuse meshes; it runs before any spectral preparation.
+            (None, Some(evidence)) => enclose_affine_feedback_error_with_sparse_inverse(
+                &self.solid.response.matrix, &self.solid.rhs, &free,
+                &self.injection, &self.feedback, &self.offset,
+                self.responses.as_deref(), self.solid.stability_scaling.as_deref(),
+                evidence, self.config.residual, || cx.checkpoint().is_ok(),
+            ),
+            (None, None) => match spectral {
                 Some(limits) => match enclose_affine_feedback_error_with_spectral(
                     &self.solid.response.matrix, &self.solid.rhs, &free,
                     &self.injection, &self.feedback, &self.offset,

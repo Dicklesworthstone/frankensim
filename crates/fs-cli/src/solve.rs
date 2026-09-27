@@ -142,7 +142,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// dominance cannot establish a linear maximum-error bound.
 /// Version 29 balances coarse and enriched linear maximum errors against the
 /// measured adaptive discretization estimate, re-probing every changed field.
-pub const SOLVE_DRIVER_VERSION: u32 = 29;
+/// Version 30 proves the solid inverse of systems above the dense proposal
+/// cap by bounded interval LDL elimination before the shifted-Gram fallback,
+/// so large obtuse-mesh rungs publish a verified coupled solver bound.
+pub const SOLVE_DRIVER_VERSION: u32 = 30;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

@@ -270,6 +270,19 @@ this fallback establishes no additional coupled-error authority.
 against an independent dense solution, real maximum-goal correction, shared
 iteration limits and structural admission.
 
+When neither dominance nor the dense proposal proves the inverse (typically
+above 256 free unknowns on obtuse-dihedral P1 meshes), `new_for_maximum`
+prepares `fs_solver`'s `VerifiedSparseInverse`: bounded interval LDL
+elimination with positive pivot intervals and an outward `A-H` asymmetry
+check. It is charged to the same `max_stability_iterations` allowance (one
+iteration = one matrix pass of interval updates; zero allowance does no
+inverse work), and its stored entries are capped by the residual nonzero
+limit. Only an established bound is retained. Every later analysis, including
+the coupled affine-feedback maximum (which uses it before the shifted-Gram
+spectral fallback), re-checks the exact stored CSR before using its norm.
+On the 43,840-tet heatsink ladder rung this proves `||A^-1||_inf <= 9.1e6` over
+9,295 rows with about 1.2M peak entries (measured 2026-09-27).
+
 ## Invariants
 
 1. **Operator symmetry and definiteness.** The Dirichlet-reduced conduction +

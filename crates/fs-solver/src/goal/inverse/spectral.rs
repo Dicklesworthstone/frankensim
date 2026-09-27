@@ -4,8 +4,10 @@
 //! positive shift s, independently enclose E = A - s I - L L^T. If
 //! eta >= max(||E||_1, ||E||_inf) and alpha = s - eta > 0, then
 //!
-//!     v^T A v >= alpha ||v||_2^2,
-//!     ||A^-1||_inf <= sqrt(n) / alpha.
+//! ```text
+//! v^T A v >= alpha ||v||_2^2,
+//! ||A^-1||_inf <= sqrt(n) / alpha.
+//! ```
 //!
 //! Indeed ||E||_2 <= sqrt(||E||_1 ||E||_inf) <= eta and L L^T is PSD.
 //! This proves a lower bound for EVERY eigenvalue when A is symmetric, and

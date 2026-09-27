@@ -122,7 +122,17 @@ fn inverse_proposals_share_work_and_respect_structural_admission() {
                 .unwrap();
                 assert!(analyzer.inverse_columns().is_none());
                 let checked = analyzer.analyze_maximum(cx, &initial, &region).unwrap();
-                assert!(checked.algebraic_half_width_k().is_none());
+                // Dense proposals need n columns and never fit these budgets.
+                // Interval LDL may still prove the inverse inside the SAME
+                // budget (one iteration = one matrix pass); a zero budget
+                // performs no inverse work, and a bound exists only with it.
+                if iterations == 0 {
+                    assert!(analyzer.sparse_inverse().is_none());
+                }
+                assert_eq!(
+                    checked.algebraic_half_width_k().is_some(),
+                    analyzer.sparse_inverse().is_some()
+                );
                 assert!(checked.linear_analysis().stability_iterations <= iterations);
             }
         })

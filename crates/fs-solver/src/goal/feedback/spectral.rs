@@ -78,7 +78,7 @@ pub fn enclose_affine_feedback_error_with_spectral_inverse(
 ) -> Result<FeedbackResidualReport, GoalResidualError> {
     let (mut report, used) = enclose_feedback_inner(
         certificate.matrix(), rhs, primal, injection, feedback, offset, responses,
-        scaling, None, Some(certificate), limits, &mut checkpoint,
+        scaling, None, Some(certificate), None, limits, &mut checkpoint,
     )?;
     report.solid_spectral = Some(SpectralFeedbackDiagnostics {
         stop: SpectralStop::Certified, shift: Some(certificate.shift()),
@@ -160,7 +160,7 @@ pub fn enclose_affine_feedback_error_with_spectral(
         .checked_sub(before_second).ok_or(GoalResidualError::Allocation)?;
     let (mut report, second_work) = enclose_feedback_inner(
         certificate.matrix(), rhs, primal, injection, feedback, offset, responses,
-        scaling, None, Some(&certificate), second_limits, &mut checkpoint,
+        scaling, None, Some(&certificate), None, second_limits, &mut checkpoint,
     )?;
     report.solid_spectral = Some(diagnostics);
     let used = before_second.checked_add(second_work).ok_or(GoalResidualError::Allocation)?;

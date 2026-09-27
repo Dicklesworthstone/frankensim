@@ -327,25 +327,25 @@ verified solid inverse is available; measurement is negligible because no
 observation data enter. The
 published solve also bounds its maximum's roundoff: a componentwise
 `γ_k (|b| + |A||T|)` row bound on the assembled solid operator, mapped through
-the adjoint at the hottest region vertex. On the tracked finned heatsink the
-ladder variant measured all eight terms on 2026-09-26: boundary conditions about
+the adjoint at the hottest region vertex. On the tracked finned heatsink this
+measures all eight terms on the ladder variant: boundary conditions about
 20.0 K, model form about 1.34 K, geometry about 0.018 K, discretization about
 0.001 K with the ladder (about 0.0016 K adaptively), material parameters
-about 0.0012 K, and roundoff about 9e-6 K. The parameters term is a declared
+about 0.0012 K, solver algebraic about 7e-4 K, and roundoff about 9e-6 K. The parameters term is a declared
 +/-8% AA6061 conductivity tolerance, sourced from the gap between the fixture
 card and the in-repo NIST 6061-T6 fit (fsim v6 `:conductivity-tolerance-rel`).
 The geometry term is an illustrative +/-0.05 mm surface offset (fsim v7
 `:surface-offset-m`), re-solved on the same topology with watts conserved.
 The conservative total is about 21.4 K against a 51.2 K nominal margin and a
-5 K required margin, so the requirement read `satisfied`. That is an Estimated
+5 K required margin, so the requirement reads `satisfied`. That is an Estimated
 decision from declared engineering intervals and an h-ladder half-width, not
-a certificate or validation. AT HEAD (49313c65a) the ladder is back to seven
-terms and `indeterminate`. The solver term now requires a verified coupled
-enclosure (the frozen-reference tolerance comparison it replaced missed a
-30 K coupled error). The 43,840-tet finest rung cannot yet prove its solid
-inverse, so the term is NO-DATA until bead q61wp.73 lands a verified
-eigenvalue bound. The base-mesh `heatsink-fan.fsim` encloses its solver term
-(about 1e-7 K) but has no discretization estimate, so it stays indeterminate.
+a certificate or validation. The solver term is a verified coupled
+enclosure, not a tolerance comparison (a frozen-reference comparison missed a
+30 K coupled error). On the 43,840-tet finest rung, bounded interval LDL
+elimination proves the solid inverse (9,295 rows, about 1.2M peak entries,
+inside the ladder project's declared 256 MiB and its stability-work budget).
+The base-mesh `heatsink-fan.fsim` encloses its solver term (about 1e-7 K) but
+has no discretization estimate, so it stays indeterminate.
 
 | Command | Purpose |
 |---------|---------|
