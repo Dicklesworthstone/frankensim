@@ -16,6 +16,9 @@
 //! discretization-error, or port-schema certificate. Empty balance controls are
 //! an explicit decision to perform no conservation gate.
 
+/// Bounded physical-time continuation with committed-step checkpoints.
+pub mod march;
+
 use core::fmt;
 use std::collections::BTreeSet;
 
@@ -46,6 +49,7 @@ pub struct InterfaceControl {
     /// Finite nonnegative absolute tolerance in native units.
     pub absolute_tolerance: f64,
     /// Finite nonnegative tolerance relative to `scale`, not a growing iterate.
+    /// The combined native-unit tolerance must be representable as a finite f64.
     pub relative_tolerance: f64,
 }
 
@@ -98,7 +102,9 @@ pub struct CouplingTrial<S> {
 pub struct IterationResidual {
     /// One-based producer call number.
     pub evaluation: usize,
-    /// Infinity norm of the unrelaxed residual divided by fixed scales.
+    /// Rounded infinity norm of the residual divided by fixed scales.
+    /// The acceptance gate compares native-unit residuals, so scaling underflow
+    /// here cannot promote a nonzero residual to exact convergence.
     pub maximum_scaled_residual: f64,
     /// Number of coordinates outside their tolerances.
     pub unconverged_coordinates: usize,
@@ -241,9 +247,11 @@ fn validate(
         control(rule.scale.is_finite() && rule.scale > 0.0, "scale", index)?;
         control(rule.absolute_tolerance.is_finite() && rule.absolute_tolerance >= 0.0, "absolute tolerance", index)?;
         control(rule.relative_tolerance.is_finite() && rule.relative_tolerance >= 0.0, "relative tolerance", index)?;
+        // Gate in native units: dividing a tiny nonzero residual by a large
+        // scale can underflow to zero, which must not satisfy a zero tolerance.
         thresholds.push(finite(
-            rule.absolute_tolerance / rule.scale + rule.relative_tolerance,
-            "scaled tolerance", index,
+            rule.absolute_tolerance + rule.relative_tolerance * rule.scale,
+            "combined tolerance", index,
         )?);
     }
     let mut names = BTreeSet::new();
@@ -315,7 +323,7 @@ where
                 let residual = finite(mapped - x, "interface residual", index)?;
                 let scaled = finite(residual / controls.interfaces[index].scale, "scaled residual", index)?;
                 maximum = maximum.max(scaled.abs());
-                missed += usize::from(scaled.abs() > thresholds[index]);
+                missed += usize::from(residual.abs() > thresholds[index]);
                 residuals.push(residual);
             }
             let mut failed = 0;
@@ -594,5 +602,21 @@ mod tests {
             assert_eq!(error.report.evaluations, calls.get());
             assert_eq!((state, interface), (9, [0.0]));
         }
+    }
+
+    #[test]
+    fn scaling_underflow_cannot_satisfy_an_exact_zero_tolerance() {
+        let mut policy = controls(1, 1);
+        policy.interfaces[0] = InterfaceControl { scale: 1.0e300, absolute_tolerance: 0.0, relative_tolerance: 0.0 };
+        let mut state = 7;
+        let mut interface = [0.0];
+        let error = coupled_step(&mut state, &mut interface, interval(), &policy,
+            &mut |_, _, _| Ok::<_, &'static str>(CouplingTrial {
+                state: 8, image: vec![1.0e-300], balance_residuals: vec![],
+            }), &mut || false,
+        ).unwrap_err();
+        assert!(matches!(error.reason, CouplingFailure::NotConverged));
+        assert_eq!(error.report.iterations[0].unconverged_coordinates, 1);
+        assert_eq!((state, interface), (7, [0.0]));
     }
 }
