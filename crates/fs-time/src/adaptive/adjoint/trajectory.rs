@@ -17,6 +17,8 @@ use super::{AdjointError, OdeVjp, check, finite, poll, replay, reverse, workspac
 use super::super::{AdaptiveError, AdaptiveState, PiController, Workspace, commit, validate};
 use fs_blake3::{Blake3, ContentHash};
 
+pub mod samples;
+
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
     pub end: f64,
@@ -58,6 +60,7 @@ pub enum TrajectoryError {
     ReplayMismatch { step: usize },
     CheckpointLimit { required: usize, limit: usize },
     ReplayLimit,
+    Observation(String),
 }
 impl From<AdjointError> for TrajectoryError {
     fn from(error: AdjointError) -> Self { Self::Step(error) }
@@ -86,11 +89,13 @@ pub struct RecordedRk45<'a, M> {
     config: RecordingConfig,
     parameters: usize,
     records: Vec<StepRecord>,
+    sample_times: Vec<f64>,
 }
 impl<M> Clone for RecordedRk45<'_, M> {
     fn clone(&self) -> Self {
         Self { model: self.model, initial: self.initial.clone(), state: self.state.clone(),
-            config: self.config.clone(), parameters: self.parameters, records: self.records.clone() }
+            config: self.config.clone(), parameters: self.parameters, records: self.records.clone(),
+            sample_times: self.sample_times.clone() }
     }
 }
 
@@ -120,7 +125,7 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
         validate(&state, config.end, config.rtol, config.atol, &config.controller)?;
         check(model, &state.u, config.max_workspace_components)?;
         Ok(Self { model, initial: state.u.clone(), state, config,
-            parameters: model.parameter_count(), records: Vec::new() })
+            parameters: model.parameter_count(), records: Vec::new(), sample_times: Vec::new() })
     }
     pub fn state(&self) -> &AdaptiveState { &self.state }
     pub fn accepted_steps(&self) -> usize { self.records.len() }
@@ -155,9 +160,13 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
             }
             self.records.try_reserve_exact(1).map_err(|_| TrajectoryError::Allocation)?;
             let start = self.state.t;
-            let h = self.state.h.min(self.config.end - start);
+            // Land on observation times with the production stepper, not an
+            // interpolated surrogate. Duplicates share one accepted endpoint.
+            let next = self.sample_times.partition_point(|time| *time <= start);
+            let stop = self.sample_times.get(next).copied().unwrap_or(self.config.end);
+            let h = self.state.h.min(stop - start);
             report.attempts += 1;
-            let Some(trial) = work.trial(&self.state, &|t,u,out| self.model.rhs(t,u,out), self.config.end,
+            let Some(trial) = work.trial(&self.state, &|t,u,out| self.model.rhs(t,u,out), stop,
                 self.config.rtol, self.config.atol, &self.config.controller, cancelled)? else {
                 report.status = RecordingStatus::Cancelled; return Ok(report);
             };
@@ -201,7 +210,8 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
         let mut progress = Progress { replays: 0, peak: 0, budget };
         let bar = Cotangent { initial: terminal.to_vec(), parameters: direct_parameters.to_vec() };
         let bar = if self.records.is_empty() { bar } else {
-            self.segment(&self.initial, 0, self.records.len(), bar, 1, &mut progress, cancelled)?
+            self.segment(&self.initial, 0, self.records.len(), bar, 1, &mut progress,
+                &mut |_, _, _, _| Ok(()), cancelled)?
         };
         poll(cancelled)?;
         Ok(TrajectoryGradient { initial: bar.initial, parameters: bar.parameters,
@@ -222,14 +232,19 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn segment<Cancel: FnMut() -> bool>(
+    fn segment<Cancel, Observe>(
         &self, state: &[f64], begin: usize, end: usize, mut bar: Cotangent,
-        depth: usize, progress: &mut Progress, cancelled: &mut Cancel,
-    ) -> Result<Cotangent, TrajectoryError> {
+        depth: usize, progress: &mut Progress, observe: &mut Observe, cancelled: &mut Cancel,
+    ) -> Result<Cotangent, TrajectoryError>
+    where
+        Cancel: FnMut() -> bool,
+        Observe: FnMut(usize, &[f64], &mut Cotangent, &mut Cancel) -> Result<(), TrajectoryError>,
+    {
         poll(cancelled)?;
         progress.peak = progress.peak.max(depth);
         if end - begin == 1 {
             let work = self.checked_replay(begin, state, progress, cancelled)?;
+            observe(begin, &work.next, &mut bar, cancelled)?;
             let r = &self.records[begin];
             let result = reverse(self.model, state, r.start, r.end, r.h, &bar.initial, work, cancelled)?;
             for (value, update) in bar.parameters.iter_mut().zip(result.parameters) { *value += update; }
@@ -240,9 +255,9 @@ impl<'a, M: OdeVjp> RecordedRk45<'a, M> {
         let mid = begin + span / 2 + span % 2;
         let mut midpoint = state.to_vec();
         for i in begin..mid { midpoint = self.checked_replay(i, &midpoint, progress, cancelled)?.next; }
-        let bar = self.segment(&midpoint, mid, end, bar, depth + 1, progress, cancelled)?;
+        let bar = self.segment(&midpoint, mid, end, bar, depth + 1, progress, observe, cancelled)?;
         drop(midpoint);
-        self.segment(state, begin, mid, bar, depth, progress, cancelled)
+        self.segment(state, begin, mid, bar, depth, progress, observe, cancelled)
     }
 }
 
