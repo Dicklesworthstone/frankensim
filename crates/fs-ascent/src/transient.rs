@@ -14,6 +14,7 @@ use fs_time::adaptive::adjoint::trajectory::{
 };
 
 pub mod observations;
+pub mod campaign;
 
 /// One immutable parameter point, including its observation model and data.
 /// `OdeVjp` and `SampleObjective` partials use the SAME decision coordinates as
@@ -164,12 +165,12 @@ pub fn evaluate_transient<F: TransientFamily, Cancel: FnMut() -> bool>(
     }))
 }
 
-fn sample(bounds: &[[f64; 2]], evaluation: &TransientEvaluation) -> SqpSample {
+fn box_sample(bounds: &[[f64; 2]], point: &[f64], value: f64, gradient: &[f64]) -> SqpSample {
     let n = bounds.len(); let mut ci = Vec::with_capacity(2*n); let mut ji = vec![0.0; 2*n*n];
-    for (i, (b, x)) in bounds.iter().zip(&evaluation.point).enumerate() {
+    for (i, (b, x)) in bounds.iter().zip(point).enumerate() {
         ci.push(b[0]-x); ci.push(x-b[1]); ji[2*i*n+i]=-1.0; ji[(2*i+1)*n+i]=1.0;
     }
-    SqpSample { f: evaluation.value, gradient: evaluation.gradient.clone(), ce: Vec::new(), ci, je: Vec::new(), ji }
+    SqpSample { f: value, gradient: gradient.to_vec(), ce: Vec::new(), ci, je: Vec::new(), ji }
 }
 
 /// Retains the accepted SQP state and exactly its matching simulated evaluation.
@@ -197,7 +198,7 @@ impl<'a, F: TransientFamily> TransientStudy<'a, F> {
         let mut accepted = None;
         let state = SqpState::try_new(point, config.max_kkt_dimension, &mut |x| {
             let Some(evaluation) = evaluate_transient(family, &config, x, cancelled)? else { return Ok(None); };
-            let result = sample(family.bounds(), &evaluation); accepted = Some(evaluation); Ok(Some(result))
+            let result = box_sample(family.bounds(), &evaluation.point, evaluation.value, &evaluation.gradient); accepted = Some(evaluation); Ok(Some(result))
         }, None).map_err(normalize)?;
         let accepted = accepted.ok_or(SqpError::Invalid("missing complete initial trajectory"))?;
         poll(cancelled).map_err(SqpError::Evaluation).map_err(normalize)?;
@@ -227,7 +228,7 @@ impl<'a, F: TransientFamily> TransientStudy<'a, F> {
         let family = self.family; let config = &self.config; let mut candidate = None;
         let outcome = self.state.try_run(&mut |point| {
             let Some(evaluation) = evaluate_transient(family, config, point, cancelled)? else { return Ok(None); };
-            let result = sample(family.bounds(), &evaluation); candidate = Some(evaluation); Ok(Some(result))
+            let result = box_sample(family.bounds(), &evaluation.point, evaluation.value, &evaluation.gradient); candidate = Some(evaluation); Ok(Some(result))
         }, tolerance, steps, maximum_evaluations, None);
         // At most one accepted step: never associate a rejected trial with the
         // retained optimizer. Errors keep the last accepted physical result.

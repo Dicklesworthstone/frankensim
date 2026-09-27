@@ -11,6 +11,9 @@ use fs_time::PiController;
 use std::io::Read;
 use std::sync::Arc;
 
+#[path = "transient_fit/campaign.rs"]
+mod campaign;
+
 const BOUNDS: [[f64;2];3] = [[0.1,2.0],[0.2,3.0],[-0.5,0.5]];
 struct Data { times: Vec<f64>, values: Arc<Vec<f64>> }
 impl Data {
@@ -76,6 +79,7 @@ fn config(end:f64)->TransientConfig {TransientConfig {
 }}
 fn main()->Result<(),Box<dyn std::error::Error>> {
     let args:Vec<_>=std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--campaign") { return campaign::run(&args[1..]); }
     if args.len()>1 {return Err("usage: transient_fit [readings.csv]".into());}
     let (data,source)=if let Some(path)=args.first() {
         let mut text=String::new();std::fs::File::open(path)?.take(65_537).read_to_string(&mut text)?;

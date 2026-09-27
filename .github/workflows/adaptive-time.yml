@@ -4,6 +4,10 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-time/**'
+      - 'crates/fs-ascent/src/transient.rs'
+      - 'crates/fs-ascent/src/transient/**'
+      - 'crates/fs-ascent/examples/transient_fit.rs'
+      - 'crates/fs-ascent/examples/transient_fit/**'
       - '.github/workflows/adaptive-time.yml'
   workflow_dispatch:
 permissions:
@@ -19,7 +23,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        run: |
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # A tracked .bat EOL rule changes raw checkout bytes. Restore only
+            # this Git-clean runner file from its object, then rerun ALL checks.
+            numpy=../franken_numpy
+            file=legacy_numpy_code/numpy/doc/make.bat
+            git -C "$numpy" diff --quiet HEAD -- "$file"
+            git -C "$numpy" cat-file blob "HEAD:$file" > "$numpy/$file"
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
       - name: Test checked stepping and event localization
         run: "cargo test --release -p fs-time --lib adaptive::"
       - name: Test existing time-integration behavior
@@ -30,3 +43,7 @@ jobs:
         run: "cargo test --release -p fs-time --lib hybrid_sensitivity::"
       - name: Test thermal control, relay and gradient-driven impact fit
         run: cargo test --release -p fs-time --example rk45_thermostat --example rk45_impact_fit --example rk45_thermal_control
+      - name: Test sensor losses and multi-experiment calibration
+        run: "cargo test --release -p fs-ascent --features transient-design --lib transient::"
+      - name: Test CSV calibration paths
+        run: cargo test --release -p fs-ascent --features transient-design --example transient_fit
