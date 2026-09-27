@@ -109,7 +109,8 @@ const WRAPPED: [[f64; 5]; 84] = [
  ];
 
 /// Section 3.1, equations (2)-(4), with piano key number i = MIDI - 20.
-/// K is TOTAL hammer force coefficient [N/m^p], not stress and not per string.
+/// K is the force coefficient [N/m^p] applied to EACH string in the source
+/// model's unison contact equation (M2AN 48 (2014), equation 3.8).
 pub fn hammer_parameters(midi: u8) -> Result<(f64, f64, f64), String> {
     if !(21..=108).contains(&midi) { return Err("hammer key outside A0..C8".into()); }
     let i = f64::from(midi - 20);
@@ -118,16 +119,48 @@ pub fn hammer_parameters(midi: u8) -> Result<(f64, f64, f64), String> {
         det::pow(10.0, 5.3097e-2 * i + 7.6425)))
 }
 
-/// Cold conversion of the published force envelope F=K*delta^p to the EXISTING
-/// WoolFelt stress law. Dividing by TOTAL patch area ensures three unison patches
-/// sum to K*delta^p rather than tripling the hammer's stiffness.
+/// Legacy conversion of the published force envelope to the EXISTING WoolFelt
+/// stress law. It divided K across the unison, making each string too soft.
 /// q, residual crush and Prony times are estimates; the spectrum is scaled to
 /// each hammer's actual reference tangent, never the old uniform 5 MPa modulus.
 pub fn hammer_material(c: &Course) -> Result<(WoolFelt, GeneralizedMaxwell), String> {
+    hammer_material_with_allocation(c, false)
+}
+
+/// Source-consistent stiffness for each unison string. The published R_H
+/// dissipation is not yet represented by the estimated Prony spectrum.
+pub fn hammer_material_rt0425(c: &Course) -> Result<(WoolFelt, GeneralizedMaxwell), String> {
+    hammer_material_with_allocation(c, true)
+}
+
+/// The source's conservative K_H law, with no estimated crush or Prony loss.
+/// Pair it with `hammer_relaxation_rt0425` in the coupled contact solver.
+pub fn hammer_material_rt0425_damped(c: &Course) -> Result<(WoolFelt, GeneralizedMaxwell), String> {
     c.validate()?;
     let (_, p, k) = hammer_parameters(c.midi)?;
     let reference = 0.2;
-    let stress = k * det::pow(reference * c.felt_thickness_m, p) / c.felt_area_m2;
+    let stress = k * c.unison as f64 * det::pow(reference * c.felt_thickness_m, p) / c.felt_area_m2;
+    let law = WoolFelt::new(stress, reference, p, p, 0.0, 0.8).map_err(|e| e.to_string())?;
+    let elastic = GeneralizedMaxwell::new(p * stress / reference, vec![])
+        .map_err(|e| e.to_string())?;
+    Ok((law, elastic))
+}
+
+/// RT-0425 §3.1 equation (5), N s / m^p per string. The negative exponent
+/// agrees with Appendix A: C1 2.434e5 and A4 6.470e5 in the printed table.
+pub fn hammer_relaxation_rt0425(midi: u8) -> Result<f64, String> {
+    let (_, _, k) = hammer_parameters(midi)?;
+    let i = f64::from(midi - 20);
+    Ok(k * det::pow(10.0, -0.04366 * i - 2.294))
+}
+
+fn hammer_material_with_allocation(c: &Course, per_string: bool)
+    -> Result<(WoolFelt, GeneralizedMaxwell), String> {
+    c.validate()?;
+    let (_, p, k) = hammer_parameters(c.midi)?;
+    let reference = 0.2;
+    let force_coefficient = if per_string { k * c.unison as f64 } else { k };
+    let stress = force_coefficient * det::pow(reference * c.felt_thickness_m, p) / c.felt_area_m2;
     let law = WoolFelt::new(stress, reference, p, p + 0.7, 0.25, 0.8)
         .map_err(|e| e.to_string())?;
     let tangent = p * stress / reference;
@@ -220,6 +253,19 @@ mod tests {
         assert!(hammer_parameters(109).is_err());
     }
     #[test]
+    fn published_hammer_stiffness_applies_to_each_unison_string() {
+        for c in courses().unwrap() {
+            let (law, _) = hammer_material_rt0425(&c).unwrap();
+            let (_, p, k) = hammer_parameters(c.midi).unwrap();
+            for strain in [0.01, 0.08, 0.2, 0.4] {
+                let force = c.felt_area_m2 / c.unison as f64
+                    * law.stress(strain, &law.initial_state());
+                let expected = k * (strain * c.felt_thickness_m).powf(p);
+                assert!((force / expected - 1.0).abs() < 1e-10, "key {}", c.midi);
+            }
+        }
+    }
+    #[test]
     fn published_hammer_polynomials_match_table_examples() {
         let (m, p, k) = hammer_parameters(24).unwrap();
         assert!((m * 1000.0 - 10.95).abs() < 0.005);
@@ -229,5 +275,17 @@ mod tests {
         assert!((m * 1000.0 - 8.14).abs() < 0.005);
         assert!((p - 2.543).abs() < 0.0005);
         assert!((k / 1.755e10 - 1.0).abs() < 1e-4);
+    }
+    #[test]
+    fn published_relaxation_and_conservative_law_match_appendix_a() {
+        for (midi, expected) in [(24, 2.434e5), (69, 6.470e5), (107, 1.477e6)] {
+            let r = hammer_relaxation_rt0425(midi).unwrap();
+            assert!((r / expected - 1.0).abs() < 5e-4, "key {midi}: {r}");
+            let c = courses().unwrap()[usize::from(midi - 21)];
+            let (law, prony) = hammer_material_rt0425_damped(&c).unwrap();
+            assert_eq!(law.crush_fraction, 0.0);
+            assert_eq!(law.q, law.p);
+            assert!(prony.terms.is_empty());
+        }
     }
 }

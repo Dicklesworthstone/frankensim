@@ -18,6 +18,8 @@ mod hammer_materials;
 
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
+    [--rt0425-bridge-contacts] [--rt0425-hammer-stiffness]
+    [--rt0425-hammer-dissipation]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
     [--concert-pitch 430..450 | --raw-tensions]
@@ -28,6 +30,7 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
+    [--pcm-full-scale-pa positive-Pa]
     [--dump-scale strings.csv] [--dump-board board.csv]
 --preset steinway-d reconstructs the published 17-rib Model D drawing, with
 spruce panel, sugar-pine ribs, maple bridges, cut-off bar and 88 bridge stations.
@@ -36,6 +39,12 @@ felt cards and shank mechanics. Its native header selects flat FSB or crowned
 3-D shell FSS. An invalid/missing supplied board never falls back to the preset.
 Mesh-generation/export controls cannot accompany a supplied board override.
 The preset cannot be combined with --board modal CSV.
+--rt0425-bridge-contacts projects the source's 84 published coupling points
+onto this approximate board's bridges; four end keys remain extrapolated.
+--rt0425-hammer-stiffness applies the source K_H to each unison string.
+--rt0425-hammer-dissipation requires that stiffness and uses the published
+per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
+These opt-in corrections have not passed a perceptual similarity gate.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
 published shank geometry reduced to rigid rotation plus one bending coordinate.
@@ -110,7 +119,10 @@ Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
 latency, in addition to acoustic travel time. Histories persist across blocks.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
-applies only to that diagnostic, not to physical microphone pressure.";
+applies only to that diagnostic, not to physical microphone pressure.
+--pcm-full-scale-pa declares the pressure mapped to PCM full scale (default 2 Pa).
+An over-range render refuses before writing a clipped WAV; this option changes
+encoding gain, not the mechanics, microphone position, or acoustic calibration.";
 
 #[derive(Debug)]
 struct Options {
@@ -120,24 +132,28 @@ struct Options {
     string_stretching: Option<String>,
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
+    rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
+    rt0425_hammer_dissipation: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
     dump_scale: Option<String>, dump_board: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
-    sample_rate: u32, substeps: usize, modes: usize, help: bool,
+    sample_rate: u32, substeps: usize, modes: usize, pcm_full_scale_pa: f64, help: bool,
 }
 impl Default for Options {
     fn default() -> Self {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, raw_tensions: false,
+            rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
+            rt0425_hammer_dissipation: false,
             string_stretching: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, microphone_right: None, diagnostic_volume: false,
             dump_board: None, note: None, velocity: None, duration: 6.0,
-            sample_rate: 48_000, substeps: 4, modes: 24, help: false }
+            sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false }
     }
 }
 impl Options {
@@ -150,6 +166,9 @@ impl Options {
             if !seen.insert(flag.as_str()) { return Err(format!("duplicate option {flag}")); }
             if flag == "--diagnostic-volume" { options.diagnostic_volume = true; continue; }
             if flag == "--raw-tensions" { options.raw_tensions = true; continue; }
+            if flag == "--rt0425-bridge-contacts" { options.rt0425_bridge_contacts = true; continue; }
+            if flag == "--rt0425-hammer-stiffness" { options.rt0425_hammer_stiffness = true; continue; }
+            if flag == "--rt0425-hammer-dissipation" { options.rt0425_hammer_dissipation = true; continue; }
             if flag == "--midi-half-pedal" { options.midi_mapping.continuous_sustain = true; continue; }
             let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
@@ -192,6 +211,7 @@ impl Options {
                 "--sample-rate" => options.sample_rate = value.parse().map_err(|_| invalid())?,
                 "--substeps" => options.substeps = value.parse().map_err(|_| invalid())?,
                 "--modes" => options.modes = value.parse().map_err(|_| invalid())?,
+                "--pcm-full-scale-pa" => options.pcm_full_scale_pa = value.parse().map_err(|_| invalid())?,
                 _ => return Err(format!("unknown option {flag}\n{USAGE}")),
             }
         }
@@ -211,6 +231,12 @@ impl Options {
         }
         if options.preset.as_deref().is_some_and(|p| p != "steinway-d") {
             return Err("unknown piano preset; available: steinway-d".into());
+        }
+        if (options.rt0425_bridge_contacts && !options.uses_preset_board())
+            || (options.rt0425_hammer_stiffness && (options.preset.is_none()
+                || options.hammers.is_some() || options.render.is_none()))
+            || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
+            return Err("RT-0425 contacts need the preset board; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
         }
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
@@ -237,6 +263,10 @@ impl Options {
             || options.board_band_hz >= 0.45 * f64::from(options.sample_rate)
             || !options.observer_gain.is_finite() || options.observer_gain <= 0.0 {
             return Err("invalid board frequency band or diagnostic observer gain".into());
+        }
+        if !options.pcm_full_scale_pa.is_finite() || options.pcm_full_scale_pa <= 0.0
+            || (seen.contains("--pcm-full-scale-pa") && options.render.is_none()) {
+            return Err("--pcm-full-scale-pa requires --render and a positive finite pressure".into());
         }
         if options.performance.is_some()
             && (options.render.is_none() || options.note.is_some() || options.velocity.is_some()) {
@@ -347,10 +377,17 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
         &scale.iter().map(|c| c.midi).collect::<Vec<_>>())).transpose()?;
     let footprints=options.hammer_footprints.as_deref().map(|path|
         linear::hammer_footprint::Specification::load(path,&scale)).transpose()?;
+    let source_rates=options.rt0425_hammer_dissipation.then(||
+        scale.iter().map(|c|steinway_scale::hammer_relaxation_rt0425(c.midi))
+            .collect::<Result<Vec<_>,_>>()).transpose()?;
     let mut piano = if options.preset.is_some() {
         let materials = match imported {
             Some(materials) => materials,
-            None => scale.iter().map(steinway_scale::hammer_material).collect::<Result<Vec<_>,_>>()?,
+            None => scale.iter().map(if options.rt0425_hammer_dissipation {
+                steinway_scale::hammer_material_rt0425_damped
+            } else if options.rt0425_hammer_stiffness {
+                steinway_scale::hammer_material_rt0425
+            } else { steinway_scale::hammer_material }).collect::<Result<Vec<_>,_>>()?,
         };
         engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, Some(engine::ShankGeometry::published()),
@@ -364,6 +401,7 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
     } else {
         engine::Instrument::new(scale, modes, options.sample_rate, options.substeps, options.modes, true)
     }?;
+    if let Some(rates)=source_rates {piano.configure_source_hammer_dissipation(&rates)?;}
     if let Some(spec) = stretching { piano.configure_string_stretching(spec)?; }
     Ok(piano)
 }
@@ -405,6 +443,15 @@ fn render(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options) -> Result<(), String> {
     let stretching = load_string_stretching(&scale, options)?;
     render_with_string_material(path, scale, modes, surface, options, stretching.as_ref())
+}
+fn check_pcm_headroom(peak_pa: f64, full_scale_pa: f64) -> Result<(), String> {
+    if !peak_pa.is_finite() {
+        return Err("non-finite rendered pressure cannot be encoded".into());
+    }
+    if peak_pa >= full_scale_pa {
+        return Err(format!("rendered peak {peak_pa:.6} Pa reaches PCM full scale {full_scale_pa:.6} Pa; rerun with --pcm-full-scale-pa greater than {peak_pa:.6} to avoid clipping"));
+    }
+    Ok(())
 }
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
@@ -472,10 +519,11 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
     let elapsed = start.elapsed().as_secs_f64();
     let peak = pressure.iter().fold(0.0_f64, |a, p| a.max(p.abs()));
     let seconds = f64::from(count) / f64::from(rate);
-    let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, 2.0).map_err(|e| e.to_string())?;
+    check_pcm_headroom(peak, options.pcm_full_scale_pa)?;
+    let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, options.pcm_full_scale_pa).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
     if stream.microphone().is_some() {
-        println!("Computed half-space pressure in Pa; PCM full scale 2 Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.");
+        println!("Computed half-space pressure in Pa; PCM full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.pcm_full_scale_pa);
     } else {
         println!("Diagnostic volume-velocity observer, gain {} Pa/(m^3/s); no peak normalization or calibrated SPL claim.", options.observer_gain);
     }
@@ -510,7 +558,9 @@ fn run() -> Result<(), String> {
     } else { "ESTIMATED demonstration" });
     let tuning_source = options.tuning_hz().map_or_else(|| "input tensions preserved".to_owned(),
         |f| format!("tensions adjusted to A4={f} Hz first-partial equal temperament; L, mass and EI preserved"));
-    let preset = options.uses_preset_board().then(|| steinway_d::build(options.mesh_divisions)).transpose()?;
+    let preset = options.uses_preset_board().then(|| if options.rt0425_bridge_contacts {
+        steinway_d::build_with_rt0425_contacts(options.mesh_divisions)
+    } else { steinway_d::build(options.mesh_divisions) }).transpose()?;
     if let Some(preset) = &preset {
         if let Some(path) = &options.dump_geometry { std::fs::write(path, &preset.geometry).map_err(|e| format!("{path}: {e}"))?; }
         if let Some(path) = &options.dump_obj { std::fs::write(path, &preset.obj).map_err(|e| format!("{path}: {e}"))?; }
@@ -551,7 +601,10 @@ fn run() -> Result<(), String> {
     if let Some(path) = &options.hammers {
         println!("Hammer materials supplied by {path}; no automatic coupon-fit or calibration claim. Scale mass/patch geometry unchanged.");
     } else if options.preset.is_some() {
-        println!("Per-key source-derived hammer loading envelopes; estimated unloading/crush and tangent-scaled Prony relaxation.");
+        println!("Per-key source-derived hammer loading envelopes{}; {}.",
+            if options.rt0425_hammer_stiffness { " with RT-0425 stiffness per unison string" } else { " with legacy stiffness divided across the unison" },
+            if options.rt0425_hammer_dissipation { "RT-0425 R_H power-law rate loss, no estimated crush or Prony terms" }
+            else { "estimated unloading/crush and tangent-scaled Prony relaxation, not RT-0425 R_H" });
     }
     if options.preset.is_some() {
         println!("Published shank geometry -> rigid rotation + bending; reciprocal jack port and 1.5 mm let-off. Linearized action fragment; damping/backcheck estimated.");
@@ -596,6 +649,22 @@ mod render_tests {
         Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
     }
     #[test]
+    fn pcm_pressure_scale_is_explicit_and_overrange_refuses_before_write() {
+        assert_eq!(options(&[]).unwrap().pcm_full_scale_pa, 2.0);
+        let o = options(&["--render", "piano.wav", "--pcm-full-scale-pa", "4"]).unwrap();
+        assert_eq!(o.pcm_full_scale_pa, 4.0);
+        assert!(check_pcm_headroom(3.193, o.pcm_full_scale_pa).is_ok());
+        let refusal = check_pcm_headroom(3.193, 2.0).unwrap_err();
+        assert!(refusal.contains("--pcm-full-scale-pa greater than 3.193000"));
+        assert!(check_pcm_headroom(2.0, 2.0).is_err());
+        assert!(check_pcm_headroom(f64::NAN, 4.0).is_err());
+        for args in [vec!["--pcm-full-scale-pa", "4"],
+            vec!["--render", "piano.wav", "--pcm-full-scale-pa", "0"],
+            vec!["--render", "piano.wav", "--pcm-full-scale-pa", "NaN"]] {
+            assert!(options(&args).is_err(), "accepted {args:?}");
+        }
+    }
+    #[test]
     fn damper_selection_composes_with_physical_and_midi_inputs_and_protects_its_source() {
         let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
             "--dampers", "pads.fspd", "--hammers", "felt.fsh"]).unwrap();
@@ -609,6 +678,26 @@ mod render_tests {
             vec!["--render", "piano.wav", "--dampers", "estimated", "--dampers", "other.fspd"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn rt0425_corrections_are_explicit_preset_inputs() {
+        let o = options(&["--preset", "steinway-d", "--render", "piano.wav",
+            "--rt0425-bridge-contacts", "--rt0425-hammer-stiffness"]).unwrap();
+        assert!(o.rt0425_bridge_contacts && o.rt0425_hammer_stiffness);
+        assert!(!options(&["--preset", "steinway-d", "--render", "piano.wav"])
+            .unwrap().rt0425_bridge_contacts);
+        for args in [
+            vec!["--rt0425-bridge-contacts"],
+            vec!["--rt0425-hammer-stiffness"],
+            vec!["--preset", "steinway-d", "--rt0425-hammer-stiffness"],
+            vec!["--preset", "steinway-d", "--board-geometry", "board.fsb", "--rt0425-bridge-contacts"],
+            vec!["--preset", "steinway-d", "--hammers", "felt.fsh", "--render", "piano.wav", "--rt0425-hammer-stiffness"],
+        ] { assert!(options(&args).is_err(), "accepted {args:?}"); }
+        let source = options(&["--preset", "steinway-d", "--render", "piano.wav",
+            "--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation"]).unwrap();
+        assert!(source.rt0425_hammer_dissipation);
+        assert!(options(&["--preset", "steinway-d", "--render", "piano.wav",
+            "--rt0425-hammer-dissipation"]).is_err());
     }
     #[test]
     fn stereo_receiver_is_explicit_physical_input_and_preserves_existing_controls() {

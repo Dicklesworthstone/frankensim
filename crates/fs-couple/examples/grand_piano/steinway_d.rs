@@ -51,6 +51,27 @@ const BASS_BRIDGE: &[[f64; 2]] = &[
 ];
 const CUTOFF: &[[f64; 2]] = &[[57.,730.],[193.,930.]];
 
+// RT-0425 Appendix A, C1..B7 (MIDI 24..107): bridge coupling centre (x0,y0)
+// in metres. These belong to its reference board, not to this reconstructed
+// outline; project onto the nearest point of the corresponding structural
+// bridge below. A0..B0 and C8 are extrapolated because Appendix A omits them.
+const RT0425_BRIDGE: [[f64; 2]; 84] = [
+    [0.40,1.69], [0.42,1.67], [0.44,1.65], [0.46,1.63], [0.48,1.60], [0.50,1.56],
+    [0.52,1.52], [0.53,1.48], [0.55,1.44], [0.56,1.39], [0.57,1.35], [0.58,1.30],
+    [0.59,1.26], [0.60,1.22], [0.61,1.18], [0.61,1.14], [0.62,1.11], [0.23,1.58],
+    [0.25,1.49], [0.27,1.41], [0.30,1.34], [0.32,1.26], [0.35,1.19], [0.37,1.13],
+    [0.40,1.06], [0.42,1.01], [0.45,0.95], [0.47,0.90], [0.49,0.85], [0.51,0.80],
+    [0.54,0.75], [0.56,0.71], [0.58,0.67], [0.60,0.63], [0.62,0.60], [0.64,0.56],
+    [0.66,0.53], [0.68,0.50], [0.70,0.47], [0.71,0.44], [0.73,0.41], [0.75,0.39],
+    [0.76,0.36], [0.78,0.34], [0.80,0.32], [0.81,0.30], [0.83,0.28], [0.85,0.27],
+    [0.86,0.25], [0.88,0.23], [0.90,0.22], [0.91,0.21], [0.93,0.19], [0.94,0.18],
+    [0.96,0.17], [0.97,0.16], [0.99,0.15], [1.01,0.14], [1.02,0.13], [1.04,0.12],
+    [1.05,0.11], [1.07,0.10], [1.09,0.09], [1.10,0.08], [1.12,0.07], [1.13,0.06],
+    [1.15,0.06], [1.16,0.05], [1.18,0.04], [1.19,0.04], [1.21,0.03], [1.22,0.02],
+    [1.24,0.02], [1.25,0.01], [1.27,0.01], [1.28,0.00], [1.29,0.00], [1.31,-0.01],
+    [1.32,-0.01], [1.33,-0.02], [1.34,-0.02], [1.36,-0.02], [1.37,-0.03], [1.38,-0.03],
+];
+
 pub struct Preset {
     pub geometry: String,
     pub obj: String,
@@ -101,6 +122,32 @@ fn curve_point(curve: &[[f64;2]], fraction:f64)->[f64;2] {
     }
     *curve.last().expect("nonempty source curve")
 }
+fn nearest_bridge_point(p: [f64; 2], curve: &[[f64; 2]]) -> ([f64; 2], f64) {
+    let mut best = ([0.0, 0.0], f64::INFINITY);
+    for segment in curve.windows(2) {
+        let (a, b) = (si(segment[0]), si(segment[1]));
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let t = (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1])
+            / (d[0] * d[0] + d[1] * d[1])).clamp(0.0, 1.0);
+        let q = [a[0] + t * d[0], a[1] + t * d[1]];
+        let error = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt();
+        if error < best.1 { best = (q, error); }
+    }
+    best
+}
+fn published_bridge_point(key: u8) -> ([f64; 2], f64) {
+    let p = match key {
+        21..=23 => {
+            let steps = f64::from(24 - key);
+            [RT0425_BRIDGE[0][0] - steps * 0.02,
+             RT0425_BRIDGE[0][1] + steps * 0.02]
+        }
+        24..=107 => RT0425_BRIDGE[usize::from(key - 24)],
+        108 => [1.39, -0.04],
+        _ => unreachable!("piano key range is A0..C8"),
+    };
+    nearest_bridge_point(p, if key <= 40 { BASS_BRIDGE } else { LONG_BRIDGE })
+}
 fn locate(p:[f64;2],xy:&[[f64;2]],tris:&[[usize;3]])->Result<(usize,[f64;3]),String> {
     for (i,&[a,b,c]) in tris.iter().enumerate() {
         let twice=area2(xy[a],xy[b],xy[c]);
@@ -118,6 +165,14 @@ fn locate(p:[f64;2],xy:&[[f64;2]],tris:&[[usize;3]])->Result<(usize,[f64;3]),Str
 /// inserted in each row, so structural bridges/cut-off and ribs are actual mesh
 /// beams, not nearest-node decorations. `divisions` controls transverse refinement.
 pub fn build(divisions: usize) -> Result<Preset,String> {
+    build_with_contacts(divisions, false)
+}
+
+pub fn build_with_rt0425_contacts(divisions: usize) -> Result<Preset,String> {
+    build_with_contacts(divisions, true)
+}
+
+fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Preset,String> {
     if !(4..=24).contains(&divisions) { return Err("Model D mesh divisions must be 4..24".into()); }
     let curves=[LONG_BRIDGE,BASS_BRIDGE,CUTOFF];
     let mut levels:Vec<f64>=OUTLINE.iter().copied().map(station).collect();
@@ -195,7 +250,10 @@ pub fn build(divisions: usize) -> Result<Preset,String> {
             }
         }
     }
-    let mut geometry=String::from("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; see steinway_d.rs for estimates\nsupport,clamped\npretension,0\ndamping,0.015\n");
+    let contacts = if published_contacts {
+        "RT-0425 Appendix A coupling points projected to reconstructed bridges; four extrapolated end keys"
+    } else { "estimated per-key bridge stations" };
+    let mut geometry=format!("frankensim-board-geometry-si-v1\nsource,mixed,Approximate Model D reconstruction: Boutillon Ege Paulello 2012 Fig 2/Table 1; Steinway Model D specifications; {contacts}; see steinway_d.rs for estimates\nsupport,clamped\npretension,0\ndamping,0.015\n");
     let mut obj=String::from("# Source-derived Model D SOUND BOARD assembly, SI metres, z up; not full piano CAD\n# Same flat structural image as the FSB. No invented crown or measured-data claim.\no sitka_spruce_panel\n");
     for (i,p) in xy.iter().enumerate() {
         writeln!(geometry,"node,{i},{:.17e},{:.17e}",p[0],p[1]).unwrap();
@@ -235,14 +293,17 @@ pub fn build(divisions: usize) -> Result<Preset,String> {
         }
         vertices+=8;
     }
-    // Individual key/string bridge stations are not labelled in the source.
-    // This estimated assignment is separate from the diagram-derived curves.
-    // Bass low -> high approaches the junction; long bridge low -> high proceeds
-    // toward the keyboard. End margins avoid placing strings directly on the rim.
+    // The legacy preset estimated stations by arc length. The explicit
+    // RT-0425 variant places the 84 published contacts on the closest point of
+    // each reconstructed bridge. Four end keys remain extrapolations.
     for key in 21u8..=108 {
-        let p=if key<=40 {curve_point(BASS_BRIDGE,0.95-0.90*f64::from(key-21)/19.)}
-            else {curve_point(LONG_BRIDGE,0.04+0.92*f64::from(key-41)/67.)};
-        let (tri,w)=locate(si(p),&xy,&tris)?;
+        let p=if published_contacts { published_bridge_point(key).0 }
+            else {
+                let raster=if key<=40 {curve_point(BASS_BRIDGE,0.95-0.90*f64::from(key-21)/19.)}
+                    else {curve_point(LONG_BRIDGE,0.04+0.92*f64::from(key-41)/67.)};
+                si(raster)
+            };
+        let (tri,w)=locate(p,&xy,&tris)?;
         writeln!(geometry,"bridge,{key},{tri},{:.17e},{:.17e},{:.17e}",w[0],w[1],w[2]).unwrap();
     }
     Ok(Preset{geometry,obj})
@@ -269,5 +330,20 @@ mod tests {
         for p in OUTLINE {let q=si(*p);assert!((0.0..1.56).contains(&q[0]));assert!((0.0..2.74).contains(&q[1]));}
         assert_eq!(RIBS.len(),17);
         assert!(build(0).is_err());assert!(build(25).is_err());
+    }
+    #[test]
+    fn rt0425_contacts_cover_published_keys_and_remain_on_reconstructed_bridges() {
+        let p = build_with_rt0425_contacts(12).unwrap();
+        super::super::board_geometry::BoardGeometry::read(&p.geometry).unwrap();
+        assert_eq!(p.geometry.lines().filter(|l| l.starts_with("bridge,")).count(), 88);
+        for key in 24..=107 {
+            let (_, correction) = published_bridge_point(key);
+            assert!(correction < 0.08, "key {key}: {correction} m projection");
+        }
+        let (a4, correction) = published_bridge_point(69);
+        assert!((a4[0] - 0.81).abs() < 0.03);
+        assert!((a4[1] - 0.30).abs() < 0.03);
+        assert!(correction < 0.03);
+        assert_ne!(p.geometry, build(12).unwrap().geometry);
     }
 }
