@@ -4,6 +4,12 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-uq/**'
+      - 'crates/fs-project/src/uncertainty*'
+      - 'crates/fs-project/src/uncertainty/**'
+      - 'crates/fs-cli/src/study_uncertainty*'
+      - 'crates/fs-cli/src/study_uncertainty/**'
+      - 'crates/fs-cli/tests/native_uncertainty*'
+      - 'crates/fs-cli/tests/native_uncertainty/**'
       - 'crates/fs-cli/src/uq_command/**'
       - 'crates/fs-cli/tests/cooling_network_qmc.rs'
       - 'crates/fs-cli/tests/cooling_sensitivity.rs'
@@ -31,3 +37,43 @@ jobs:
         run: cargo test --release -p fs-cli --test cooling_network_qmc --test cooling_qmc_recovery_admission --test cooling_sensitivity --test cooling_uq_mean_control
       - name: Test nominal adjoint mean-control admission and parameter binding
         run: cargo test --release -p fs-cli --bin frankensim mean_control
+      - name: Test native project uncertainty admission and physical child solves
+        run: cargo test --release -p fs-project --lib uncertainty && cargo test --release -p fs-cli --test native_uncertainty
+  monte-carlo-source:
+    # Execute the actual numerical owners even when constellation bootstrap
+    # blocks the whole-workspace build. No replacement RNG, math or color type.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_PKG_VERSION: '0.0.1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile actual Monte Carlo, copula and checkpoint sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          for opt in 0 3; do
+            out="$RUNNER_TEMP/uq-$opt"
+            mkdir "$out"
+            build() {
+              local name="$1"; shift
+              local package="${name//_/-}"
+              CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/crates/$package" CARGO_PKG_NAME="$package" \
+                rustc --edition=2024 -C opt-level="$opt" --crate-type rlib --crate-name "$name" \
+                "crates/$package/src/lib.rs" -L dependency="$out" -o "$out/lib$name.rlib" "$@"
+            }
+            build fs_blake3
+            build fs_math
+            build fs_obs
+            build fs_qty --extern fs_blake3="$out/libfs_blake3.rlib"
+            build fs_rand --extern fs_math="$out/libfs_math.rlib"
+            build fs_evidence --extern fs_blake3="$out/libfs_blake3.rlib" --extern fs_qty="$out/libfs_qty.rlib" --extern fs_obs="$out/libfs_obs.rlib"
+            printf '#[path = "%s/crates/fs-uq/src"] pub mod owner { pub mod product_plan; pub mod product_execution; pub mod product_checkpoint; pub mod product_copula; }\npub use owner::*;\npub use product_plan::*;\npub use product_execution::UqExecution;\npub use product_checkpoint::UqCheckpointError;\n' "$GITHUB_WORKSPACE" > "$out/tests.rs"
+            rustc --edition=2024 -C opt-level="$opt" --test "$out/tests.rs" -L dependency="$out" \
+              --extern fs_blake3="$out/libfs_blake3.rlib" --extern fs_math="$out/libfs_math.rlib" \
+              --extern fs_rand="$out/libfs_rand.rlib" --extern fs_evidence="$out/libfs_evidence.rlib" -o "$out/tests"
+            "$out/tests" --nocapture
+          done
