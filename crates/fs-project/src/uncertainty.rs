@@ -39,6 +39,9 @@ pub enum Target {
     AirInletTemperature,
     /// Prescribed outward flux; negative values still mean inward heating.
     HeatFlux,
+    /// Absolute speed ratio of one explicitly named native fan-system bank.
+    /// The source curve and its admitted speed domain remain unchanged.
+    FanSpeedRatio,
 }
 
 impl Target {
@@ -50,6 +53,7 @@ impl Target {
             Self::ConvectionCoefficient => "W/m^2/K",
             Self::ConvectionTemperature | Self::AirInletTemperature => "K",
             Self::HeatFlux => "W/m^2",
+            Self::FanSpeedRatio => "1",
         }
     }
     fn dims(self) -> Dims {
@@ -59,6 +63,7 @@ impl Target {
             Self::ConvectionCoefficient => dims::HEAT_TRANSFER_COEFFICIENT,
             Self::ConvectionTemperature | Self::AirInletTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
+            Self::FanSpeedRatio => Dims::NONE,
         }
     }
 }
@@ -70,7 +75,7 @@ pub struct UniformParameter {
     pub name: String,
     /// The native field to vary.
     pub target: Target,
-    /// Region, boundary target, or air branch according to `target`.
+    /// Region, boundary target, air branch, or fan-bank identity according to `target`.
     pub entity: String,
     /// Closed distribution support in coherent SI units; equality is deterministic.
     pub low: f64,
@@ -172,6 +177,8 @@ fn integer(node: &Node) -> Result<u64> {
 }
 fn quantity(node: &Node, dims: Dims) -> Result<f64> {
     match &node.kind {
+        NodeKind::Float(value) if dims == Dims::NONE && value.is_finite() => Ok(*value),
+        NodeKind::Int(value) if dims == Dims::NONE => Ok(*value as f64),
         NodeKind::Qty { value, dims: found, .. } if *found == dims && value.is_finite() => Ok(*value),
         _ => Err(error(format!("expected an explicit finite {} quantity", dims.unit_string()))),
     }
@@ -254,6 +261,7 @@ impl UncertaintyStudy {
                     "convection-temperature" => Target::ConvectionTemperature,
                     "air-inlet-temperature" => Target::AirInletTemperature,
                     "heat-flux" => Target::HeatFlux,
+                    "fan-speed-ratio" => Target::FanSpeedRatio,
                     _ => return Err(error("unsupported random project field")),
                 },
                 _ => return Err(error("parameter target must be a symbol")),
@@ -267,7 +275,7 @@ impl UncertaintyStudy {
             let high = quantity(p["high"], target.dims())?;
             if low > high || (target == Target::Power && low < 0.0)
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
-                    | Target::AirInletTemperature) && low <= 0.0) {
+                    | Target::AirInletTemperature | Target::FanSpeedRatio) && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
@@ -380,6 +388,29 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
     if parameter.target == Target::Power {
         for row in project.power.as_mut().ok_or_else(|| error("missing power map"))? {
             if row.region == parameter.entity { row.watts = QtyAny::new(value, parameter.target.dims()); matches += 1; }
+        }
+    } else if parameter.target == Target::FanSpeedRatio {
+        let system = project.cooling.as_mut().and_then(|c| c.fan_system.as_mut())
+            .ok_or_else(|| error("fan-speed-ratio requires a declared native fan system"))?;
+        // ProjectSpec's structural validation does not replace this family's
+        // admission. Check identities, topology, curves and domains before a
+        // random input can select a bank or repair an invalid base declaration.
+        system.validate().map_err(|e| error(format!("{}: {}", e.code, e.detail)))?;
+        for bank in &mut system.banks {
+            if bank.bank_id == parameter.entity {
+                let (low, high) = bank.speed_ratio_domain;
+                if value < low || value > high {
+                    return Err(error(format!(
+                        "fan speed support for {} exceeds the unchanged declared domain [{low}, {high}]",
+                        parameter.entity
+                    )));
+                }
+                // Absolute ratio relative to the retained source curve, not a
+                // multiplier of the base operating speed or a previous sample.
+                // The ordinary native flow producer owns fan affinity laws.
+                bank.speed_ratio = value;
+                matches += 1;
+            }
         }
     } else {
         let setup = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())

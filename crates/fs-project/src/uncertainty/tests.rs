@@ -132,3 +132,92 @@ fn air_inlet_binding_moves_the_whole_named_branch_but_not_other_branches() {
     }).collect::<Vec<_>>();
     assert_eq!(found, [298.0, 298.0, 295.0]);
 }
+
+fn fan_study() -> String {
+    STUDY.replace(
+        "(uniform :name \"power\" :target power :entity \"air\" :low 4W :high 6W)",
+        "(uniform :name \"speed\" :target fan-speed-ratio :entity \"fixture-bank\" :low 0.6 :high 1.4)",
+    )
+}
+
+#[test]
+fn fan_speed_is_an_absolute_ratio_on_only_the_named_retained_bank() {
+    let mut original = base();
+    let system = original.cooling.as_mut().unwrap().fan_system.as_mut().unwrap();
+    system.banks[0].speed_ratio = 0.8;
+    let mut other = system.banks[0].clone();
+    other.bank_id = "other-bank".into();
+    other.speed_ratio = 1.2;
+    system.banks.push(other);
+    system.topology = crate::fansystem::FanSystemTopology::Series(
+        vec!["fixture-bank".into(), "other-bank".into()]);
+    let canonical = crate::print_sexpr(&original).unwrap();
+    let study = UncertaintyStudy::parse(&fan_study()).unwrap();
+    assert_eq!(study.parameters()[0].target, Target::FanSpeedRatio);
+    assert_eq!(study.parameters()[0].target.unit(), "1");
+    assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+    let bound = study.bind(&original).unwrap();
+    for ratio in [0.6, 1.0, 1.4, 0.6] {
+        let sample = bound.sample_project(&[ratio, 297.0]).unwrap();
+        let mut expected = original.clone();
+        let cooling = expected.cooling.as_mut().unwrap();
+        cooling.fan_system.as_mut().unwrap().banks[0].speed_ratio = ratio;
+        let ThermalBoundaryCondition::Convection { reference_temperature, .. } =
+            &mut cooling.conduction.as_mut().unwrap().boundaries[0].condition else { panic!() };
+        reference_temperature.value = 297.0;
+        assert_eq!(sample, expected, "only the bank speed and declared ambient may change");
+        let wire = crate::print_sexpr(&sample).unwrap();
+        assert_eq!(crate::parse_sexpr(&wire).unwrap().spec, sample);
+        crate::fansystem::lower_fan_system(sample.cooling.as_ref().unwrap().fan_system.as_ref().unwrap())
+            .expect("each sampled bank lowers through the ordinary production fan laws");
+    }
+    assert_eq!(crate::print_sexpr(&original).unwrap(), canonical);
+    assert_eq!(bound.base(), &original);
+}
+
+#[test]
+fn fan_speed_support_cannot_expand_domains_repair_bad_banks_or_infer_legacy_fans() {
+    let source = fan_study();
+    for (from, to) in [
+        (":low 0.6", ":low 0.49"),
+        (":high 1.4", ":high 2.01"),
+        (":entity \"fixture-bank\"", ":entity \"unknown-bank\""),
+    ] {
+        assert!(UncertaintyStudy::parse(&source.replace(from, to)).unwrap().bind(&base()).is_err());
+    }
+    for defect in 0..4 {
+        let mut original = base();
+        let cooling = original.cooling.as_mut().unwrap();
+        if defect == 0 {
+            cooling.fan_system = None;
+        } else {
+            let system = cooling.fan_system.as_mut().unwrap();
+            match defect {
+                1 => system.banks.push(system.banks[0].clone()),
+                2 => system.banks[0].speed_ratio_domain = (0.0, 2.0),
+                _ => system.banks[0].speed_ratio = 3.0,
+            }
+        }
+        assert!(UncertaintyStudy::parse(&source).unwrap().bind(&original).is_err(), "defect {defect}");
+    }
+    let bound = UncertaintyStudy::parse(&source).unwrap().bind(&base()).unwrap();
+    for ratio in [0.59, 1.41, f64::NAN, f64::INFINITY] {
+        assert!(bound.sample_project(&[ratio, 297.0]).is_err());
+    }
+}
+
+#[test]
+fn fan_speed_requires_positive_finite_dimensionless_support_and_unique_target() {
+    let source = fan_study();
+    for value in ["0", "-0.1", "0.6K", "0.6W", "\"0.6\"", "NaN", "1e999"] {
+        assert!(UncertaintyStudy::parse(&source.replace(":low 0.6", &format!(":low {value}"))).is_err(),
+            "admitted speed {value}");
+    }
+    let fixed = source.replace(":low 0.6 :high 1.4", ":low 1 :high 1");
+    assert!(UncertaintyStudy::parse(&fixed).unwrap().bind(&base()).is_ok());
+    let duplicate = source.replace(
+        "(uniform :name \"ambient\" :target convection-temperature :entity \"air\" :low 294K :high 300K)",
+        "(uniform :name \"second-speed\" :target fan-speed-ratio :entity \"fixture-bank\" :low 0.8 :high 1.2)",
+    );
+    assert!(UncertaintyStudy::parse(&duplicate).is_err());
+}

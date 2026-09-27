@@ -88,3 +88,40 @@ compliance signoff, certifies continuum error, validates the material model,
 or replaces the native QoI's engineering uncertainty budget. The unchanged
 base project's solver, material domains, requirements, and per-solve budgets
 still apply to every sample.
+
+## Fan speed through the native coupled cooling model
+
+`fan-speed.fsim` varies the existing finned heatsink's fan speed, power and
+inlet temperature. Its three uniform laws and independence are illustrative
+study declarations, not measured manufacturing distributions. Run it with:
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json study examples/native-uncertainty/fan-speed.fsim fan-speed-uq.db
+```
+
+The `fan-speed-ratio` target names a `fan-system` bank by its exact `:id`:
+
+```lisp
+(uniform :name "fan-speed" :target fan-speed-ratio :entity "heatsink-bank"
+  :low 0.6 :high 0.8)
+```
+
+Both bounds are positive dimensionless numbers inside that bank's existing
+`:speed-domain-lo`/`:speed-domain-hi`. Each sample sets the **absolute speed
+ratio relative to the bank's source curve**. For example, a sampled 0.8 sets
+`:speed-ratio 0.8` even when the base project has `:speed-ratio 0.7`. The curve,
+its source and tolerance, rated point, fan count, arrangement, topology and
+other banks retain their original declarations. The native flow solver
+applies the existing fan affinity law and resolves the operating point; the
+heatsink's `airflow-convection` boundary then recomputes heat transfer and the
+coupled solid/air temperature. A boundary with a fixed declared convection
+coefficient keeps that coefficient and need not show a thermal response to
+fan speed.
+
+Missing banks, duplicate identities, invalid fan systems, nonpositive speeds,
+and support extending beyond the declared speed domain refuse before any
+sample runs. Fan speed does not expand a convection card's operating regime:
+if a sampled physical solve leaves its admitted regime, the study retains the
+refusal. The same sample-budget and source-independent resume commands apply.
+Contact resistance remains selected from immutable interface cards and is not
+a mutable uncertainty target.
