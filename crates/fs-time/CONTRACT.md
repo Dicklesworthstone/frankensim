@@ -95,6 +95,22 @@ where claimed below.
   The caller supplies the force at the initial physical time and applies any
   remaining state/velocity/forcing parameterization. They do not establish
   uniqueness of a singular-mass model or solve constrained DAE initialization.
+- `galpha::second_order_adjoint::trajectory::RecordedStructural` records and
+  differentiates complete structural trajectories under a
+  `StructuralTrajectoryModel` with time-dependent, parameterized loading.
+  Loads and their parameter VJPs use `OperatorGeneralizedAlpha::forcing_time`,
+  the actual `t_n + (1-alpha_f)h` load time of the production residual. The
+  recorder retains initial/current q/v/a with empty solver history and O(N)
+  compact endpoint fingerprints. Binary reverse replay parks O(log N) q/v/a
+  checkpoints and enforces explicit checkpoint and forward-replay limits.
+  Each replay verifies q/v/a, time and the absolute step counter before using
+  its derivative. Leaf pullbacks reuse the checked endpoint and Newton report,
+  avoiding a duplicate primal solve, and add the forcing parameter contribution
+  once. Forward caps/cancellation preserve the accepted prefix; reverse failure
+  returns no partial gradient and leaves the recording retryable. Initial
+  consistency derivatives remain the caller's chain rule, supported by the
+  initialization routines above. The models must remain pure and unchanged;
+  these fingerprints diagnose replay consistency and do not certify derivatives.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,

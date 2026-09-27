@@ -8,10 +8,13 @@
 
 use super::{
     ImplicitStepTelemetry, OperatorGeneralizedAlpha, SecondOrderProblem, SecondOrderState,
-    TimeSolveError, structural_poll,
+    TimeSolveError, checked_time_advance, structural_poll,
 };
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport, StallDiagnosis};
 use std::cell::RefCell;
+
+#[path = "second_order_adjoint/trajectory.rs"]
+pub mod trajectory;
 
 /// A fixed structural parameter point with explicit transposed actions.
 /// Implementations must be pure during a call and overwrite every output.
@@ -182,6 +185,25 @@ impl<M: SecondOrderVjp + ?Sized> LinearOp for StructuralTranspose<'_, M> {
 }
 
 impl OperatorGeneralizedAlpha {
+    /// Physical time of the external load in the production structural
+    /// residual, `t_n + (1-alpha_f)*h`. Refuses unrepresentable clock advances
+    /// before a time-dependent forcing provider is called.
+    pub fn forcing_time(&self, time: f64) -> Result<f64, TimeSolveError> {
+        let end = checked_time_advance(time, self.h)?;
+        let fraction = 1.0 - self.alpha_f;
+        let stage = self.h.mul_add(fraction, time);
+        if stage.is_finite() && stage > time && stage <= end {
+            Ok(stage)
+        } else {
+            Err(TimeSolveError::InvalidStageTime {
+                t_bits: time.to_bits(),
+                h_bits: self.h.to_bits(),
+                fraction_bits: fraction.to_bits(),
+                stage_t_bits: stage.to_bits(),
+            })
+        }
+    }
+
     /// Conservative numerical scalar-storage bound, including primal/adjoint
     /// Krylov work, temporary forward state, Newton/linear histories, derivative
     /// scratch and returned gradients. The caller's existing state/history is
@@ -278,20 +300,64 @@ impl OperatorGeneralizedAlpha {
                 limit: max_workspace_components,
             });
         }
-        let acceleration_q = 1.0 / (self.beta * self.h * self.h);
-        let acceleration_v = 1.0 / (self.beta * self.h);
-        let acceleration_a = 0.5 / self.beta - 1.0;
-        let velocity_a = self.gamma * self.h;
-        if !finite(&[acceleration_q, acceleration_v, acceleration_a, velocity_a]) {
-            return Err(SecondOrderAdjointError::InvalidInput(
-                "finite Newmark derivative coefficients required",
-            ));
-        }
+        self.adjoint_coefficients()?;
         // Reuse the actual nonlinear residual and correctors. Copy only the
         // three live state vectors, never the caller's trajectory history.
         let mut next = SecondOrderState::new(initial.t, &initial.q, &initial.v, &initial.a);
         next.steps = initial.steps;
         let primal = self.step_controlled(&mut next, model, forcing, cancelled)?;
+        self.reverse_endpoint(
+            initial,
+            model,
+            terminal,
+            adjoint_preconditioner,
+            config,
+            p,
+            next,
+            primal,
+            cancelled,
+        )
+    }
+
+    fn adjoint_coefficients(&self) -> Result<[f64; 4], SecondOrderAdjointError> {
+        let coefficients = [
+            1.0 / (self.beta * self.h * self.h),
+            1.0 / (self.beta * self.h),
+            0.5 / self.beta - 1.0,
+            self.gamma * self.h,
+        ];
+        if finite(&coefficients) {
+            Ok(coefficients)
+        } else {
+            Err(SecondOrderAdjointError::InvalidInput(
+                "finite Newmark derivative coefficients required",
+            ))
+        }
+    }
+
+    // Private replay seam: `next` and `primal` must come from the matching
+    // converged production step, verified by the recorder before this call.
+    // Reusing them avoids a second Newton solve at every reverse leaf.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn reverse_endpoint<M, P, Cancel>(
+        &self,
+        initial: &SecondOrderState,
+        model: &M,
+        terminal: (&[f64], &[f64], &[f64]),
+        adjoint_preconditioner: &P,
+        config: SecondOrderAdjointConfig,
+        p: usize,
+        next: SecondOrderState,
+        primal: ImplicitStepTelemetry,
+        cancelled: &mut Cancel,
+    ) -> Result<SecondOrderStepGradient, SecondOrderAdjointError>
+    where
+        M: SecondOrderVjp + ?Sized,
+        P: FlexiblePreconditioner,
+        Cancel: FnMut() -> bool,
+    {
+        let [acceleration_q, acceleration_v, acceleration_a, velocity_a] =
+            self.adjoint_coefficients()?;
         if !finite(&next.q) || !finite(&next.v) || !finite(&next.a) {
             return Err(SecondOrderAdjointError::NonFiniteAccumulation);
         }
