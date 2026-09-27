@@ -14,6 +14,9 @@
 //! A cancellation closure can bridge `fs_exec::Cx::checkpoint`; long model
 //! callbacks must provide their own cancellation. No cross-ISA claim is made.
 
+#[path = "ensemble/forecast.rs"]
+pub mod forecast;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnsembleError {
     Invalid(&'static str),

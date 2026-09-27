@@ -56,7 +56,10 @@ jobs:
       - name: Test sensor losses and multi-experiment calibration
         run: "cargo test --release -p fs-ascent --features transient-design --lib transient::"
       - name: Test ensemble state estimation
-        run: "cargo test --release -p fs-assimilate --features ensemble --lib nonlinear::ensemble::"
+        run: |
+          cargo test --release -p fs-assimilate --features ensemble --lib nonlinear::ensemble::
+          cargo test --release -p fs-assimilate --features ensemble --example ensemble_heat
+          cargo run --release -p fs-assimilate --features ensemble --example ensemble_heat
       - name: Test CSV calibration paths
         run: cargo test --release -p fs-ascent --features transient-design --example transient_fit
       - name: Test and run stiff thermal calibration
@@ -114,9 +117,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test ensemble source in debug and optimized builds
+      - name: Test ensemble source and heat example in debug and optimized builds
         run: |
+          printf 'pub mod nonlinear { #[path = "%s/crates/fs-assimilate/src/nonlinear/ensemble.rs"] pub mod ensemble; }\n' "$PWD" > "$RUNNER_TEMP/ensemble-crate.rs"
           for opt in 0 3; do
             rustc +stable --edition=2024 --test -C opt-level="$opt" crates/fs-assimilate/src/nonlinear/ensemble.rs -o "$RUNNER_TEMP/ensemble-tests-$opt"
             "$RUNNER_TEMP/ensemble-tests-$opt"
+            rustc +stable --edition=2024 --crate-name fs_assimilate --crate-type rlib -C opt-level="$opt" "$RUNNER_TEMP/ensemble-crate.rs" -o "$RUNNER_TEMP/libfs_assimilate.rlib"
+            rustc +stable --edition=2024 --test -C opt-level="$opt" --extern "fs_assimilate=$RUNNER_TEMP/libfs_assimilate.rlib" crates/fs-assimilate/examples/ensemble_heat.rs -o "$RUNNER_TEMP/ensemble-heat-tests-$opt"
+            "$RUNNER_TEMP/ensemble-heat-tests-$opt"
+            rustc +stable --edition=2024 -C opt-level="$opt" --extern "fs_assimilate=$RUNNER_TEMP/libfs_assimilate.rlib" crates/fs-assimilate/examples/ensemble_heat.rs -o "$RUNNER_TEMP/ensemble-heat-$opt"
+            "$RUNNER_TEMP/ensemble-heat-$opt"
           done

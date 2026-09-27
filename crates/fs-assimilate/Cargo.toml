@@ -27,3 +27,7 @@ fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "ensemble_heat"
+required-features = ["ensemble"]
