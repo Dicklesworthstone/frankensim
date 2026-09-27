@@ -68,3 +68,24 @@ jobs:
           tail -n 2 "$RUNNER_TEMP/stored-air.csv"
           cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --duty-csv crates/fs-airflow/examples/stored_air/duty.csv > "$RUNNER_TEMP/stored-air-duty.csv"
           tail -n 2 "$RUNNER_TEMP/stored-air-duty.csv"
+      - name: Resume the actual FEM executable from disk and compare its accepted trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --attempts 4 --checkpoint-dir "$RUNNER_TEMP/stored-air-prefix" > "$RUNNER_TEMP/prefix.csv" 2> "$RUNNER_TEMP/prefix.log"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          grep -q 'attempt budget exhausted' "$RUNNER_TEMP/prefix.log"
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --resume "$RUNNER_TEMP/stored-air-prefix" --checkpoint-dir "$RUNNER_TEMP/stored-air-resumed" > "$RUNNER_TEMP/suffix.csv"
+          python3 - <<'PYCODE'
+          import os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          full = (root / 'stored-air.csv').read_bytes().splitlines(keepends=True)
+          prefix = (root / 'prefix.csv').read_bytes().splitlines(keepends=True)
+          suffix = (root / 'suffix.csv').read_bytes().splitlines(keepends=True)
+          assert full and prefix and suffix and full[0] == prefix[0] == suffix[0]
+          assert full == prefix + suffix[1:], 'disk restart changed the accepted FEM trajectory'
+          print('Separate-process FEM checkpoint/restart trace matches uninterrupted execution exactly')
+          PYCODE

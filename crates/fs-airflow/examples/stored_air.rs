@@ -7,6 +7,9 @@
 //! `--duty-csv history.csv` reads `duration_s,power_scale` rows: each duration
 //! holds that nonnegative scale on the same 2 W spatial source. The supplied
 //! durations define the entire run window; the last value is never extended.
+//! `--checkpoint-dir NEW_DIR` retains every completed attempt; `--resume FILE_OR_DIR`
+//! restores a prior generation using the same executable and physical inputs.
+//! `--attempts` is an explicit additional budget for this invocation.
 //! The outlet
 //! is at the air temperature and the inlet is fixed at 300 K. Ventilation is
 //! a declared heat-capacity rate, not a fan/momentum solve. No CFD, mixing-law
@@ -21,6 +24,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
 #[path = "stored_air/history.rs"]
 mod history;
+#[path = "stored_air/restart.rs"]
+mod restart;
 
 const RHO_CP: f64 = 2.0e6;
 const INITIAL_K: f64 = 300.0;
@@ -47,16 +52,25 @@ impl Inputs {
     }
 }
 
-struct Options { inputs: Inputs, duty_csv: Option<std::path::PathBuf> }
+struct Options {
+    inputs: Inputs,
+    duty_csv: Option<std::path::PathBuf>,
+    checkpoint_dir: Option<std::path::PathBuf>,
+    resume: Option<std::path::PathBuf>,
+}
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut inputs = Inputs::default();
     let mut duty_csv = None;
+    let mut checkpoint_dir = None;
+    let mut resume = None;
     let mut seen = std::collections::BTreeSet::new();
     if args.len() % 2 != 0 { return Err("every flag requires a value".into()); }
     for pair in args.chunks_exact(2) {
         if !seen.insert(pair[0].as_str()) { return Err(format!("duplicate {}", pair[0])); }
         match pair[0].as_str() {
+            "--checkpoint-dir" => checkpoint_dir = Some(std::path::PathBuf::from(&pair[1])),
+            "--resume" => resume = Some(std::path::PathBuf::from(&pair[1])),
             "--duty-csv" => duty_csv = Some(std::path::PathBuf::from(&pair[1])),
             "--air-capacity-j-k" => inputs.air_capacity_j_k = pair[1].parse().map_err(|_| "invalid air capacity")?,
             "--ventilation-w-k" => inputs.ventilation_w_k = pair[1].parse().map_err(|_| "invalid ventilation")?,
@@ -65,7 +79,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
-    Ok(Options { inputs: inputs.validate()?, duty_csv })
+    Ok(Options { inputs: inputs.validate()?, duty_csv, checkpoint_dir, resume })
 }
 
 struct Model<'a> {
@@ -183,15 +197,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mesh = mesh(3)?;
         let model = Model::with_duty(cx, &mesh, inputs, duty)?;
         let mut run = evolution_for(&mesh, &model.duty, model.duty.window_s());
-        let (mut evaluations, mut rejected) = (0usize, 0usize);
+        let identity = if options.resume.is_some() || options.checkpoint_dir.is_some() {
+            Some(restart::binding(&model, inputs, &restart::executable_identity()?))
+        } else { None };
+        let mut progress = restart::Progress::default();
+        if let Some(path) = &options.resume {
+            progress = restart::restore(&mut run, &restart::read(path)?, identity.as_ref().expect("restart identity"))?;
+            eprintln!("resumed_time_s={} prior_attempts={} prior_producer_evaluations={}",
+                run.time_s(), progress.attempts, progress.evaluations);
+        }
+        // Refuse mismatched resumes before creating output or running a solve.
+        let mut writer = options.checkpoint_dir.as_deref().map(restart::Writer::new).transpose()?;
+        let mut checkpoint = None;
+        if let Some(writer) = &mut writer {
+            checkpoint = Some(writer.publish(&run, progress, identity.as_ref().expect("checkpoint identity"))?);
+        }
         eprintln!("FEM-solid/well-mixed-air estimate; air_capacity_j_k={} ventilation_w_k={} tolerance_k={}; source=2W*declared_scale window_s={} segments={}; no spatial/physical-validation claim",
             inputs.air_capacity_j_k, inputs.ventilation_w_k, inputs.tolerance_k, model.duty.window_s(), model.duty.segments().len());
         println!("time_s,solid_max_k,air_k,local_error_ratio,stored_minus_net_input_j");
         for _ in 0..inputs.attempts {
-            let report = run.advance(1, &mut |old, interval, x| model.trial(cx, old, interval, x),
+            if run.is_complete() { break; }
+            let result = run.advance(1, &mut |old, interval, x| model.trial(cx, old, interval, x),
                 &mut |_, coarse, fine, _| Ok(distance(coarse, fine, inputs.tolerance_k)),
-                &mut || cx.checkpoint().is_err())?;
-            evaluations += report.evaluations; rejected += report.rejected;
+                &mut || cx.checkpoint().is_err());
+            let report = match result {
+                Ok(report) => report,
+                Err(error) => {
+                    progress.record(&error.report)?;
+                    if let Some(writer) = &mut writer {
+                        let path = writer.publish(&run, progress, identity.as_ref().expect("checkpoint identity"))?;
+                        eprintln!("checkpoint={}", path.display());
+                    }
+                    return Err(Box::new(error));
+                }
+            };
+            progress.record(&report)?;
+            // Persist before starting another attempt, including after rejection.
+            if let Some(writer) = &mut writer {
+                checkpoint = Some(writer.publish(&run, progress, identity.as_ref().expect("checkpoint identity"))?);
+            }
             if let Some(row) = report.accepted.last() {
                 let state = run.state();
                 let maximum = state.solid_k.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -200,8 +244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if report.complete { break; }
         }
-        eprintln!("complete={} accepted={} rejected={} producer_evaluations={} retained_time_s={}",
-            run.is_complete(), run.accepted_steps(), rejected, evaluations, run.time_s());
+        if let Some(path) = checkpoint { eprintln!("checkpoint={}", path.display()); }
+        eprintln!("complete={} accepted={} rejected={} producer_evaluations={} retained_time_s={} cumulative_attempts={}",
+            run.is_complete(), run.accepted_steps(), progress.rejected, progress.evaluations,
+            run.time_s(), progress.attempts);
         if !run.is_complete() { return Err("attempt budget exhausted; CSV is an accepted partial trajectory".into()); }
         eprintln!("source_energy_j={:.17e} declared_source_energy_j={:.17e}",
             run.state().source_input_j, 2.0 * model.duty.energy_scale_seconds());
