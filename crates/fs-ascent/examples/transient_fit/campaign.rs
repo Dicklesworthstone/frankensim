@@ -5,11 +5,16 @@
 //! rate [0.1,2]/s and sensor bias [-1,1] in the common signal unit. Sigma uses
 //! that signal unit; Huber threshold is dimensionless. This is an illustrative
 //! reduced-model fit, not a validated sensor or cooling model.
+//! --shared-sigma adds one independent reference-error source per experiment,
+//! shared by all its channels/times. CSV sigma then means INDEPENDENT noise.
+//! This fixed-covariance GLS mode is mutually exclusive with --huber.
 use fs_ascent::{SqpStop, transient::{TransientConfig,
     campaign::{CampaignControl, CampaignStudy, Experiment, TransientCampaign},
     observations::{ObservedFamily, SensorData, SensorFamily, SensorLoss, SensorModel, SensorReading}}};
 use fs_time::{PiController, adaptive::adjoint::{OdeVjp, trajectory::{RecordingConfig, ReplayBudget}}};
 use std::{collections::BTreeMap, io::Read};
+
+mod shared;
 
 const BOUNDS: [[f64;2];2] = [[0.1,2.0],[-1.0,1.0]];
 const HEADER: &str = "experiment,amplitude,time_s,channel,value,sigma";
@@ -99,20 +104,31 @@ fn synthetic()->String {
     text
 }
 pub fn run(args:&[String])->Result<(),Box<dyn std::error::Error>> {
-    let mut path=None;let mut loss=SensorLoss::Quadratic;let mut i=0;
+    let mut path=None;let mut loss=SensorLoss::Quadratic;let mut shared_sigma=None;let mut i=0;
     while i<args.len() {
         if args[i]=="--huber" {
             let threshold:f64=args.get(i+1).ok_or("--huber requires a threshold")?.parse()?;
             loss=SensorLoss::Huber{threshold};i+=2;
             // Check even when no CSV rows were yet parsed.
             SensorReading::new(0.0,0,0.0,1.0,loss)?;
+        } else if args[i]=="--shared-sigma" {
+            let sigma:f64=args.get(i+1).ok_or("--shared-sigma requires a scale")?.parse()?;
+            if !sigma.is_finite() || sigma<0.0 || shared_sigma.replace(sigma).is_some() {
+                return Err("shared sigma must be finite, nonnegative and specified once".into());
+            }
+            i+=2;
         } else if path.is_none() && !args[i].starts_with("--") {path=Some(&args[i]);i+=1;}
-        else {return Err("usage: transient_fit --campaign [readings.csv] [--huber threshold]".into());}
+        else {return Err("usage: transient_fit --campaign [readings.csv] [--huber threshold | --shared-sigma scale]".into());}
+    }
+    if shared_sigma.is_some() && loss!=SensorLoss::Quadratic {
+        return Err("--shared-sigma and --huber cannot be combined".into());
     }
     let (text,source)=if let Some(path)=path {
         let mut text=String::new();std::fs::File::open(path)?.take((MAX_BYTES+1) as u64).read_to_string(&mut text)?;(text,"csv")
     } else {(synthetic(),"synthetic-noiseless")};
-    let data=parse(&text,loss)?;let campaign=campaign(&data)?;
+    let data=parse(&text,loss)?;
+    if let Some(sigma)=shared_sigma {return shared::run(data,sigma,source);}
+    let campaign=campaign(&data)?;
     let mut control=CampaignControl::new(1500,1500*data.len());
     let mut study=CampaignStudy::new(&campaign,&[1.2,-0.3],&mut control,&mut||false)?;
     let initial=study.accepted().value;let report=study.run(1e-6,100,1500,&mut||false)?;

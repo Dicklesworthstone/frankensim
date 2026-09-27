@@ -10,7 +10,7 @@ use fs_time::AdaptiveState;
 use fs_time::adaptive::adjoint::{AdjointError, OdeVjp};
 use fs_time::adaptive::adjoint::trajectory::{
     RecordedRk45, RecordingConfig, RecordingReport, RecordingStatus, ReplayBudget, TrajectoryError,
-    samples::SampleObjective,
+    samples::{SampleObjective, SampledGradient},
 };
 
 pub mod observations;
@@ -27,6 +27,17 @@ pub trait TransientModel: OdeVjp + SampleObjective {
     /// (dx_initial/dparameters)^T * initial_bar. Overwrite every entry; supply
     /// explicit zeros for parameter-independent initial conditions.
     fn initial_vjp(&self, initial_bar: &[f64], parameter_bar: &mut [f64]) -> Result<(), String>;
+
+    /// Default additive observation objective. Models with a joint loss may
+    /// override this using the same recording and shared replay allowance.
+    /// The returned value and partials must refer to this immutable model.
+    fn observation_pullback<C: FnMut() -> bool>(
+        &self, recording: &RecordedRk45<'_, Self>, budget: ReplayBudget, cancelled: &mut C,
+    ) -> Result<SampledGradient, TrajectoryError>
+    where Self: Sized,
+    {
+        recording.pullback_samples(self, budget, cancelled)
+    }
 }
 
 /// A pure model factory over a fixed, nondecreasing observation timetable and
@@ -147,7 +158,7 @@ pub fn evaluate_transient<F: TransientFamily, Cancel: FnMut() -> bool>(
     let forward = tape.advance(config.max_attempts, config.max_records, cancelled)?;
     if forward.status == RecordingStatus::Cancelled { return Err(TransientError::Cancelled); }
     if forward.status != RecordingStatus::ReachedEnd { return Err(TransientError::ForwardStopped(forward.status)); }
-    let result = tape.pullback_samples(&model, config.replay, cancelled)?;
+    let result = model.observation_pullback(&tape, config.replay, cancelled)?;
     let mut initial_partial = vec![f64::NAN; point.len()];
     poll(cancelled)?;
     model.initial_vjp(&result.gradient.initial, &mut initial_partial).map_err(TransientError::Model)?;

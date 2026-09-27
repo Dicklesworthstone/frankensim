@@ -11,6 +11,9 @@
 use super::{OdeVjp, SampleObjective, TransientFamily, TransientModel};
 use std::sync::Arc;
 
+/// Joint fitting with fixed cross-channel and cross-time error factors.
+pub mod correlated;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SensorLoss {
     Quadratic,
