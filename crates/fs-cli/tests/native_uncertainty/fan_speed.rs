@@ -87,7 +87,16 @@ fn g0_native_fan_speed_outside_declared_domain_refuses_before_ledger_creation() 
     let path = fixture.sources.join("study.fsim");
     let source = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, source.replace(":low 0.8", ":low 0.4")).unwrap();
-    let result = fixture.study(None, fs_cli::exit::REFUSED);
-    assert!(format!("{result:?}").contains("unchanged declared domain"));
+    let output = fs_cli::run(vec![
+        "--json".into(), "study".into(),
+        path.to_str().unwrap().into(),
+        fixture.ledger.to_str().unwrap().into(),
+    ]);
+    assert_eq!(output.exit_code, fs_cli::exit::REFUSED, "{}", output.stderr);
+    assert!(output.stdout.is_empty(), "admission refusal must publish no result");
+    let diagnostic = JsonValue::parse(output.stderr.trim()).unwrap();
+    assert_eq!(diagnostic.str_field("schema"), Some("frankensim.cli.diagnostic.v1"));
+    assert_eq!(diagnostic.str_field("code"), Some("cli-uncertainty-model"));
+    assert!(diagnostic.str_field("message").unwrap().contains("unchanged declared domain"));
     assert!(!fixture.ledger.exists(), "invalid fan uncertainty must fail before any solve or ledger write");
 }
