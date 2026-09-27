@@ -128,6 +128,30 @@ so converged and stalled are distinguishable outcomes.
   optimizer `StopReason`. Its versioned receipt binds the problem identity,
   complete point/history/cache bits, accounting, and driver bits; observing a
   request is mutation-free and the same checkpoint resumes under a fresh Cx.
+- Under `transient-design`, `transient::imex::{ImexTransientFamily,
+  ImexTransientModel, ImexTransientStudy, evaluate_imex_transient}` bind the
+  existing SQP engine to stiff ARS(2,2,2) trajectories. Each usable decision
+  point records one matrix-free IMEX trajectory and evaluates all sensor losses
+  in one checkpointed reverse sweep. The total gradient includes linear and
+  nonlinear dynamics, direct sensor parameters, and the initial-condition VJP.
+  Primal and transposed preconditioners are explicit separate inputs. The
+  nondecreasing endpoint-index timetable permits initial and repeated sensor
+  readings; step size, timetable and solver policy are held fixed.
+  `ImexTransientConfig` bounds state size, samples, forward steps, records,
+  per-step scratch, replay work, checkpoints and the small dense SQP system.
+  Parameter bounds are SQP inequalities. Out-of-box trials are refused;
+  numerical/model/budget failures never become artificial objective penalties.
+  A study retains the accepted optimizer and its exactly matching physical
+  evaluation. Clone and continuation preserve accepted derivatives, BFGS state
+  and cumulative attempted-evaluation counts; failed and cancelled trials stay
+  charged, while unfinished searches/recordings restart on retry. Cancellation
+  is polled at solver/callback boundaries, without within-kernel preemption.
+  Convergence reports a local KKT result for supplied discrete derivatives,
+  without a global-optimality, interval-gradient or parameter-identifiability
+  claim. `examples/imex_calibration.rs` fits conductance, heater power, sensor
+  offset and initial temperature from dense-generated two-body thermal data;
+  `tests/imex_calibration.rs` checks the complete parameter chain against an
+  independent dense forward calculation, recovery, continuation and refusals.
 
 ## Invariants
 

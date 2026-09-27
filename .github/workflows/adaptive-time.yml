@@ -8,6 +8,9 @@ on:
       - 'crates/fs-ascent/src/transient/**'
       - 'crates/fs-ascent/examples/transient_fit.rs'
       - 'crates/fs-ascent/examples/transient_fit/**'
+      - 'crates/fs-ascent/examples/imex_calibration.rs'
+      - 'crates/fs-ascent/tests/imex_calibration.rs'
+      - 'crates/fs-ascent/Cargo.toml'
       - '.github/workflows/adaptive-time.yml'
   workflow_dispatch:
 permissions:
@@ -37,6 +40,10 @@ jobs:
         run: "cargo test --release -p fs-time --lib adaptive::"
       - name: Test existing time-integration behavior
         run: cargo test --release -p fs-time --test time_battery
+      - name: Test stiff and implicit discrete adjoints
+        run: |
+          cargo test --release -p fs-time --test imex_adjoint --test imex_samples --test generalized_alpha_adjoint --test structural_generalized_alpha_adjoint
+          cargo test --release -p fs-time --lib galpha::
       - name: Run bounded impact and restart example
         run: cargo run --release -p fs-time --example rk45_impact
       - name: Test hybrid trajectory sensitivities
@@ -47,3 +54,7 @@ jobs:
         run: "cargo test --release -p fs-ascent --features transient-design --lib transient::"
       - name: Test CSV calibration paths
         run: cargo test --release -p fs-ascent --features transient-design --example transient_fit
+      - name: Test and run stiff thermal calibration
+        run: |
+          cargo test --release -p fs-ascent --features transient-design --test imex_calibration
+          cargo run --release -p fs-ascent --features transient-design --example imex_calibration

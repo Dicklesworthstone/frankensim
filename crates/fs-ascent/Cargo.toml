@@ -13,7 +13,7 @@ layer = "L4"
 [features]
 # Opt-in physical inverse design; the default optimizer dependency graph is unchanged.
 equilibrium-design = ["dep:fs-couple"]
-# Opt-in time-series calibration through the shared RK45 discrete adjoint.
+# Opt-in time-series calibration through shared RK45 and IMEX discrete adjoints.
 transient-design = ["dep:fs-time"]
 
 [dependencies]
@@ -65,4 +65,12 @@ required-features = ["equilibrium-design"]
 
 [[example]]
 name = "transient_fit"
+required-features = ["transient-design"]
+
+[[example]]
+name = "imex_calibration"
+required-features = ["transient-design"]
+
+[[test]]
+name = "imex_calibration"
 required-features = ["transient-design"]
