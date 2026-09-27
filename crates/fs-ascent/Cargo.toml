@@ -27,6 +27,7 @@ fs-solver = { path = "../fs-solver" }
 fs-time = { path = "../fs-time", optional = true }
 
 [dev-dependencies]
+fs-plate = { path = "../fs-plate", features = ["transient"] }
 # Physical inverse-design consumers; normal fs-couple use is opt-in above.
 fs-couple = { path = "../fs-couple" }
 fs-dcontact = { path = "../fs-dcontact" }
@@ -81,4 +82,12 @@ required-features = ["transient-design"]
 
 [[test]]
 name = "structural_calibration"
+required-features = ["transient-design"]
+
+[[example]]
+name = "plate_calibration"
+required-features = ["transient-design"]
+
+[[test]]
+name = "plate_calibration"
 required-features = ["transient-design"]

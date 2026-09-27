@@ -177,6 +177,20 @@ so converged and stalled are distinguishable outcomes.
   and bounded refusal. This is a lumped structural numerical consumer, with
   no plate/shell spatial discretization, experimental validation, global
   optimum or parameter-identifiability claim.
+- `examples/plate_calibration.rs` supplies the spatial DKT consumer of that
+  structural trajectory/observation machinery. The existing `SqpState` fits
+  stiffness scale, moving-force amplitude and displacement sensor offset on
+  a clamped 32-triangle, 27-free-DOF plate; no modal truncation is used. Mass
+  and Rayleigh coefficients are fixed to avoid the common stiffness/mass/load
+  scale ambiguity. Every trial uses the sparse `fs-plate::transient` adapter,
+  work-conjugate mesh point loads/probes, consistent initial acceleration and
+  its pullback, and one sampled checkpoint sweep. Synthetic readings use an
+  independent dense generalized-alpha path on the same spatial pencil.
+  `tests/plate_calibration.rs` checks all fitted gradients against dense finite
+  differences, actual recovery, exact split/clone behavior, cancellation and
+  invalid observations without replacing the accepted sample or refunding
+  attempted work. This is fixed-mesh numerical recovery; spatial convergence,
+  physical damping identification and experimental validation are separate.
 
 ## Invariants
 

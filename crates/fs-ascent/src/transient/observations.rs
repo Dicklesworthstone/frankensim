@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 /// Joint fitting with fixed cross-channel and cross-time error factors.
 pub mod correlated;
+/// Physical sensor response states and their matched derivative actions.
+pub mod lag;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SensorLoss {
