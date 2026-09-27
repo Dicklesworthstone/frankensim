@@ -16,6 +16,8 @@
 
 #[path = "ensemble/forecast.rs"]
 pub mod forecast;
+#[path = "ensemble/correlated.rs"]
+pub mod correlated;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnsembleError {
@@ -208,6 +210,16 @@ impl Ensemble {
             poll(cancelled)?;
             *prediction = finite(result.map_err(|message| EnsembleError::Model { member, message })?, "prediction")?;
         }
+        self.analyze_predictions(observation, localization, anomalies, cancelled)
+    }
+
+    // One numerical update shared by scalar and joint analyses. Callers admit
+    // observation/shape/workspace first and supply exactly count finite values.
+    // This function performs no model calls and creates no second work ledger.
+    fn analyze_predictions<C: FnMut() -> bool>(
+        &mut self, observation: EnsembleObservation, localization: Option<&[f64]>,
+        mut anomalies: Vec<f64>, cancelled: &mut C,
+    ) -> Result<EnsembleAnalysis, EnsembleError> {
         let observed_mean = mean(anomalies.iter().copied(), self.count)?;
         let mut scale = observation.sigma;
         for value in &mut anomalies {
