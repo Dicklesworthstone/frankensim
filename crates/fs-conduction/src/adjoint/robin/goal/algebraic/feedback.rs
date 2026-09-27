@@ -299,7 +299,7 @@ impl LinearRobinFeedbackAnalyzer<'_> {
             &self.solid.response.matrix, initial_shift, limits, || cx.checkpoint().is_ok(),
         ).map_err(|error| match error {
             SpectralError::Residual(error) => map_enclosure(error),
-            error => invalid(error.to_string()),
+            error => invalid(&error.to_string()),
         })?;
         poll(cx, preparation.work_entries)?;
         self.spectral_preparation = Some(preparation);
@@ -401,7 +401,7 @@ impl LinearRobinFeedbackAnalyzer<'_> {
                 ) {
                     Ok(report) => Ok(report),
                     Err(SpectralError::Residual(error)) => Err(error),
-                    Err(error) => return Err(invalid(error.to_string())),
+                    Err(error) => return Err(invalid(&error.to_string())),
                 },
                 None => enclose_affine_feedback_error(
                     &self.solid.response.matrix, &self.solid.rhs, &free,

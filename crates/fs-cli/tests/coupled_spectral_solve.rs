@@ -159,3 +159,32 @@ fn invalid_proof_controls_and_cancellation_never_publish_a_temperature_bundle() 
         assert!(initial.iter().all(|t| *t == 300.0));
     });
 }
+
+#[test]
+fn lower_layer_spectral_proposal_errors_preserve_the_config_diagnostic() {
+    let fixture = Fixture::new(1, 1.5);
+    with_cx(|_, cx| {
+        let (linear, solid, feedback, _, spectral) = configs();
+        let initial = vec![300.0; fixture.mesh.vertex_count()];
+        let vertices: Vec<_> = (0..initial.len()).collect();
+        let analyzer = fs_airflow::conjugate::goal::maximum::prepare_linear_maximum(
+            cx, fixture.problem(), None, &fixture.paths, linear, &initial, solid, feedback,
+        ).unwrap();
+        assert!(analyzer.analyze_maximum(cx, &initial, &vertices).unwrap()
+            .coupled().solid_inverse_infinity_upper().is_none());
+        let mut invalid_limits = spectral.limits;
+        invalid_limits.max_shift_attempts = 0;
+        let error = analyzer.analyze_maximum_with_spectral_fallback(
+            cx, &initial, &vertices, invalid_limits,
+        ).unwrap_err();
+        assert!(matches!(error, fs_conduction::ConductionError::Config { ref what, .. }
+            if what.contains("InvalidProposal")));
+        let error = match analyzer.with_spectral_inverse(cx, -1.0, spectral.limits) {
+            Err(error) => error,
+            Ok(_) => panic!("negative shift must refuse"),
+        };
+        assert!(matches!(error, fs_conduction::ConductionError::Config { ref what, .. }
+            if what.contains("InvalidProposal")));
+        assert!(initial.iter().all(|t| *t == 300.0));
+    });
+}
