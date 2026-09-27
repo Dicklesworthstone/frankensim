@@ -9,6 +9,9 @@
 
 use super::{Ensemble, EnsembleControl, EnsembleError, finite, mean, poll, sum, zeros};
 
+#[path = "smoother.rs"]
+pub mod smoother;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForecastStatus { Complete, MemberLimit, Cancelled }
 
