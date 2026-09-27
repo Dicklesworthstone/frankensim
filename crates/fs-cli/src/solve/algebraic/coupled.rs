@@ -6,7 +6,8 @@ use fs_airflow::conjugate::{AirPath, goal::CoupledGoalError};
 use fs_conduction::adjoint::{LinearGoalAnalysisConfig, RobinFeedbackAnalysisConfig};
 use fs_conduction::{ConductionProblem, LinearConfig, ThermalInterfaces};
 use fs_exec::Cx;
-use fs_solver::goal::feedback::FeedbackResidualLimits;
+use fs_solver::goal::feedback::{FeedbackResidualLimits, FeedbackResidualReport};
+use fs_solver::goal::inverse::spectral::SpectralInverseLimits;
 
 use super::{
     MaximumEvidence, PropagatedTerm, SolveRefusal, conduction_error, json_string, number,
@@ -36,6 +37,50 @@ fn policy(
         max_response_iterations: linear.max_iterations,
         max_lowering_entries: count(16),
     }
+}
+
+/// The fallback proves the SAME stored coupled equation, without changing the
+/// field or its physical solve. Existing successful evidence stays byte-for-byte
+/// unchanged; new witnesses carry their own schema inside solver_control.
+/// Export/resume continue to read old sealed evidence without upgrading it.
+fn spectral_policy(
+    memory_bytes: u64,
+    config: RobinFeedbackAnalysisConfig,
+) -> SpectralInverseLimits {
+    SpectralInverseLimits {
+        system: config.residual.solid,
+        // Sparse maps, factors, Gram residuals and an owned CSR share this
+        // logical-record cap. Leave room for the existing solid/air analysis;
+        // this is conservative storage admission, not measured peak RSS.
+        max_storage_entries: usize::try_from(memory_bytes / 128).unwrap_or(usize::MAX),
+        // NOT a second allowance: the lower-layer wrapper deducts ordinary
+        // residual passes and the proposal scan, then shares the remainder
+        // across every shift attempt and the optional port-Schur check.
+        max_work_entries: config.residual.max_verification_entries,
+        max_shift_attempts: 16,
+    }
+}
+
+fn spectral_fields(
+    report: &FeedbackResidualReport,
+    limits: SpectralInverseLimits,
+) -> Result<String, SolveRefusal> {
+    let Some(proof) = report.solid_spectral() else {
+        return Ok(String::new());
+    };
+    Ok(format!(
+        ",\"solid_spectral\":{{\"schema\":\"frankensim.cli.spectral-inverse-evidence.v1\",\"method\":\"outward-shifted-gram\",\"stop\":{},\"shift\":{},\"defect_upper\":{},\"coercivity_lower\":{},\"work_entries\":{},\"peak_storage_entries\":{},\"shift_attempts\":{},\"max_shared_verification_entries\":{},\"max_storage_entries\":{},\"max_shift_attempts\":{},\"scope\":\"stored-matrix inverse proof; logical storage, not peak RSS\"}}",
+        json_string(&format!("{:?}", proof.stop())),
+        optional_number(proof.shift())?,
+        optional_number(proof.defect_upper())?,
+        optional_number(proof.coercivity_lower())?,
+        proof.work_entries(),
+        proof.peak_storage_entries(),
+        proof.shift_attempts(),
+        limits.max_work_entries,
+        limits.max_storage_entries,
+        limits.max_shift_attempts,
+    ))
 }
 
 fn cancelled() -> SolveRefusal {
@@ -122,7 +167,12 @@ pub(super) fn maximum_evidence(
             );
         }
     };
-    let analysis = match analyzer.analyze_maximum(cx, temperature, vertices) {
+    let spectral_limits = spectral_policy(memory_bytes, config);
+    // Comparison/dense inverse evidence is still preferred. Only a missing
+    // solid inverse invokes the bounded sparse verifier, including n > 256.
+    let analysis = match analyzer.analyze_maximum_with_spectral_fallback(
+        cx, temperature, vertices, spectral_limits,
+    ) {
         Ok(analysis) => analysis,
         Err(fs_conduction::ConductionError::Cancelled { .. }) => return Err(cancelled()),
         Err(error) => {
@@ -154,7 +204,7 @@ pub(super) fn maximum_evidence(
     } else {
         "coupled-goal-unresolved"
     };
-    let detail = format!(
+    let mut detail = format!(
         "{SCHEMA}; published mesh and temperature field; {} independent air paths, {} ordered Robin ports, {} selected vertices ({} free); nominal {:e} K, interval {:?} K; full coupled residual infinity upper {:e}, solid inverse {:?}, feedback gain {:?}, coupled inverse {:?}, inverse route {:?}, port Schur inverse {:?}, disposition {:?}; {} response iterations shared across all ports (cap {}); {} response residuals checked; no new primal solve or field mutation; requested allowance {:?} K, goal met {}; {SCOPE}",
         paths.len(),
         analyzer.ports().len(),
@@ -175,6 +225,11 @@ pub(super) fn maximum_evidence(
         requested,
         goal_met,
     );
+    let spectral_evidence = spectral_fields(coupled, spectral_limits)?;
+    if !spectral_evidence.is_empty() {
+        detail.push_str("; sparse inverse witness: ");
+        detail.push_str(&spectral_evidence[1..]);
+    }
     let term = match bound {
         Some(half_width_k) => PropagatedTerm::Measured {
             half_width_k,
@@ -194,7 +249,7 @@ pub(super) fn maximum_evidence(
         .map(|method| json_string(method.tag()))
         .unwrap_or_else(|| "null".to_string());
     let control_json = format!(
-        "{{\"schema\":{},\"status\":{},\"mode\":\"assessment-only\",\"goal_met\":{},\"correction_supported\":false,\"candidate_accepted\":false,\"requested_tolerance_k\":{},\"initial_bound_k\":{},\"final_bound_k\":{},\"maximum_interval_k\":{},\"primal_iterations\":0,\"response_iterations\":{},\"max_response_iterations\":{},\"max_stability_iterations\":{},\"air_paths\":{},\"ports\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"maximum_response_residual_upper\":{},\"inverse_method\":{},\"schur_inverse_infinity_upper\":{},\"bound_status\":{},\"scope\":{}}}",
+        "{{\"schema\":{},\"status\":{},\"mode\":\"assessment-only\",\"goal_met\":{},\"correction_supported\":false,\"candidate_accepted\":false,\"requested_tolerance_k\":{},\"initial_bound_k\":{},\"final_bound_k\":{},\"maximum_interval_k\":{},\"primal_iterations\":0,\"response_iterations\":{},\"max_response_iterations\":{},\"max_stability_iterations\":{},\"air_paths\":{},\"ports\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"maximum_response_residual_upper\":{},\"inverse_method\":{},\"schur_inverse_infinity_upper\":{},\"bound_status\":{},\"scope\":{}{spectral_evidence}}}",
         json_string(SCHEMA),
         json_string(status),
         goal_met,
@@ -228,3 +283,6 @@ pub(super) fn maximum_evidence(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod spectral_tests;
