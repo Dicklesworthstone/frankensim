@@ -28,7 +28,7 @@ pub use fs_evidence::{Color, ValidityDomain};
 use fs_exec::Cx;
 use fs_ivl::Interval;
 
-mod nonlinear;
+pub mod nonlinear;
 mod robust;
 
 pub mod dimensioned;
@@ -64,7 +64,7 @@ const POLL_POLICY_ID: &str = "fixed-stride:v3";
 pub const MAX_DENSE_STATE_DIM: usize = 256;
 /// Maximum observations admitted by one synchronous dense aggregate call.
 ///
-/// This also bounds canonical-order sorting and candidate-identity materialization
+/// This also bounds canonical-order sorting and candidate-identity-materialization
 /// for low-dimensional campaigns. High-rate streams belong in a cancellable,
 /// incremental assimilation session rather than one monolithic call.
 pub const MAX_DENSE_OBSERVATIONS: usize = 4_096;
@@ -811,7 +811,7 @@ pub enum AssimError {
     },
     /// The covariance row count differs from the mean dimension.
     CovarianceDimensionMismatch {
-        /// State dimension from the mean.
+        /// State dimension.
         state: usize,
         /// Covariance row count.
         rows: usize,
