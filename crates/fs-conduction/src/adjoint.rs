@@ -40,6 +40,12 @@ use fs_adjoint::{AdjointReport, ift_gradient_matfree};
 use fs_exec::Cx;
 use fs_solver::{CsrOp, norm2};
 
+/// Existing sparse-proof controls and outcomes used by the public Robin
+/// analyzer. Consumers need no direct solver dependency to request this proof.
+pub use fs_solver::goal::inverse::spectral::{
+    SpectralInverseLimits, SpectralPreparation, SpectralStop,
+};
+
 use crate::ConductionError;
 use crate::assemble::{
     DofMap, assemble_operator_scaled_with_interfaces, element_stiffness, reduce,

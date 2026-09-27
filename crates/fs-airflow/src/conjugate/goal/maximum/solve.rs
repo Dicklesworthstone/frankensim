@@ -1,6 +1,8 @@
 //! One-shot coupled maximum correction with air states rebuilt from its field.
 
-use fs_conduction::adjoint::{LinearGoalSolve, LinearGoalSolveConfig, LinearRobinMaximumAnalysis};
+use fs_conduction::adjoint::{
+    LinearGoalSolve, LinearGoalSolveConfig, LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis,
+};
 use crate::conjugate::AirMarch;
 use super::{AirPath, ConductionProblem, Cx, LinearConfig, LinearGoalAnalysisConfig,
     Result, RobinFeedbackAnalysisConfig, ThermalInterfaces, bad, poll, prepare_linear_maximum};
@@ -52,6 +54,15 @@ pub fn solve_linear_maximum(
     feedback_config: RobinFeedbackAnalysisConfig,
     control: LinearGoalSolveConfig,
 ) -> Result<LinearAirMaximumSolve> {
+    admit_control(cx, control)?;
+    let analyzer = prepare_linear_maximum(
+        cx, problem, interfaces, paths, linear, initial_temperature,
+        solid_config, feedback_config,
+    )?;
+    finish(cx, &analyzer, paths, initial_temperature, region_vertices, control)
+}
+
+pub(super) fn admit_control(cx: &Cx<'_>, control: LinearGoalSolveConfig) -> Result<()> {
     poll(cx)?;
     // Reject invalid correction controls before paying for preparation.
     if !(control.absolute_tolerance.is_finite() && control.absolute_tolerance > 0.0)
@@ -59,10 +70,15 @@ pub fn solve_linear_maximum(
     {
         return Err(bad("air maximum solve needs a positive finite tolerance and check_every in 1..=32"));
     }
-    let analyzer = prepare_linear_maximum(
-        cx, problem, interfaces, paths, linear, initial_temperature,
-        solid_config, feedback_config,
-    )?;
+    Ok(())
+}
+
+// Both entry points rebuild air states through exactly the same producer.
+// Visibility is limited to this module family, after AirPath/port admission.
+pub(super) fn finish(
+    cx: &Cx<'_>, analyzer: &LinearRobinFeedbackAnalyzer<'_>, paths: &[AirPath],
+    initial_temperature: &[f64], region_vertices: &[usize], control: LinearGoalSolveConfig,
+) -> Result<LinearAirMaximumSolve> {
     let solid = analyzer.solve_maximum_to_goal(cx, initial_temperature, region_vertices, control)?;
     let wall_temperatures_k = analyzer.wall_mean_temperatures(cx, &solid.temperature)?;
     let mut air = Vec::new();
