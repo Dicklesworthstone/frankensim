@@ -270,3 +270,46 @@ fn qmc_refuses_missing_extraneous_incompatible_or_unbalanced_layouts() {
         .replace(":low 294K :high 300K", ":low 297K :high 297K");
     assert!(UncertaintyStudy::parse(&fixed).unwrap().bind(&base()).is_ok());
 }
+
+#[test]
+fn explicit_copula_preserves_parameter_order_units_and_native_binding() {
+    for source in [STUDY.to_string(), qmc_study(), STUDY.replace(":version 1",
+        ":version 2 :compliance (bernoulli-mixture :required-probability 0.9 :alpha 0.05 :min-samples 2)")] {
+        let declared = source.replace(":correlation independent",
+            ":correlation (gaussian-copula :latent-correlation ((1 0.8) (0.8 1)))");
+        let study = UncertaintyStudy::parse(&declared).unwrap();
+        assert_eq!(study.latent_correlation().unwrap(), &[vec![1.0, 0.8], vec![0.8, 1.0]]);
+        assert_eq!(study.parameters()[0].name, "power");
+        assert_eq!(study.parameters()[0].target.unit(), "W");
+        assert_eq!(study.parameters()[1].name, "ambient");
+        assert_eq!(study.parameters()[1].target.unit(), "K");
+        assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
+        let dependent = study.bind(&base()).unwrap();
+        let independent = UncertaintyStudy::parse(&source).unwrap().bind(&base()).unwrap();
+        assert_eq!(dependent.sample_project(&[4.5, 298.0]).unwrap(),
+            independent.sample_project(&[4.5, 298.0]).unwrap());
+        assert_eq!(independent.study().latent_correlation(), None);
+    }
+}
+
+#[test]
+fn copula_requires_an_explicit_law_and_a_finite_matrix_for_every_parameter() {
+    for declaration in [
+        "unknown", "((1 0.8) (0.8 1))",
+        "(correlated :latent-correlation ((1 0.8) (0.8 1)))",
+        "(gaussian-copula :physical-correlation ((1 0.8) (0.8 1)))",
+        "(gaussian-copula :latent-correlation ((1)))",
+        "(gaussian-copula :latent-correlation ((1 0.8) (0.8)))",
+        "(gaussian-copula :latent-correlation ((1 0.8K) (0.8 1)))",
+        "(gaussian-copula :latent-correlation ((1 NaN) (NaN 1)))",
+        "(gaussian-copula :latent-correlation ((1 1e999) (1e999 1)))",
+        "(gaussian-copula :latent-correlation ((1 0) (0 1)) :fit true)",
+    ] {
+        assert!(UncertaintyStudy::parse(&STUDY.replace(":correlation independent",
+            &format!(":correlation {declaration}"))).is_err(), "admitted {declaration}");
+    }
+    let constants = STUDY.replace(":low 4W :high 6W", ":low 5W :high 5W");
+    assert!(UncertaintyStudy::parse(&constants.replace(":correlation independent",
+        ":correlation (gaussian-copula :latent-correlation ((1)))")).is_err(),
+        "constant marginals still occupy their declared latent coordinate");
+}

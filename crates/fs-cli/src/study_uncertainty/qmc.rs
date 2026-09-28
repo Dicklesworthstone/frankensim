@@ -5,9 +5,13 @@ use fs_blake3::ContentHash;
 use fs_package::Claim;
 use fs_uq::{QmcEstimate, QmcReport};
 
-use super::optional;
+use super::{Model, input_law, optional};
 
-pub(super) const SCOPE: &str = "Estimated randomized Sobol quadrature of the declared native numerical cooling model under independent uniform input laws. Independent Owen scrambles, not dependent points within a net, are the units for descriptive standard errors. Only complete equal-sized nets enter mean and compliance estimates; unfinished net points remain retained paid work. These standard errors are not confidence intervals or optional-stopping bounds and do not bound finite-grid quadrature bias, numerical error or physical-model error. Zero between-replicate variation does not prove exactness. Child engineering uncertainty budgets and verdicts remain unchanged. Refused executions publish no estimates; samples are never replaced, clipped or skipped.";
+const SCOPE: &str = "Independent Owen scrambles, not dependent points within a net, are the units for descriptive standard errors. Only complete equal-sized nets enter mean and compliance estimates; unfinished net points remain retained paid work. These standard errors are not confidence intervals or optional-stopping bounds and do not bound finite-grid quadrature bias, numerical error or physical-model error. Zero between-replicate variation does not prove exactness. Child engineering uncertainty budgets and verdicts remain unchanged. Refused executions publish no estimates; samples are never replaced, clipped or skipped.";
+
+pub(super) fn scope(model: &Model) -> String {
+    format!("Estimated randomized Sobol quadrature of the declared native numerical cooling model under {}. {SCOPE}", input_law(model))
+}
 
 pub(super) fn json(report: &QmcReport) -> String {
     let means = report.replicate_means.iter().map(ToString::to_string)
@@ -49,13 +53,13 @@ pub(super) fn html(report: &QmcReport) -> String {
     )
 }
 
-pub(super) fn claim(report: &QmcReport, result: ContentHash) -> Option<Claim> {
+pub(super) fn claim(report: &QmcReport, result: ContentHash, scope: &str) -> Option<Claim> {
     let estimate = report.estimate.as_ref()?;
     let error = estimate.standard_error?;
     Some(Claim::estimated(
         "cooling.uncertainty.sample-mean",
         format!(
-            "{} K across {} complete scrambles of {} native solves; descriptive between-replicate standard error {} K. Result {}. {SCOPE}",
+            "{} K across {} complete scrambles of {} native solves; descriptive between-replicate standard error {} K. Result {}. {scope}",
             estimate.mean, report.completed_replicates, report.config.samples_per_replicate,
             error, result.to_hex(),
         ),

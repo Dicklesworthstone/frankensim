@@ -36,7 +36,35 @@ const DRIVER: &str = "native-cooling-uncertainty-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
 const REPORT_SCHEMA: &str = "frankensim.cli.native-uncertainty-result.v1";
 const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
-const NO_CLAIM: &str = "Empirical propagation through the declared native numerical cooling model with explicitly independent uniform inputs. Fixed-count means, spread, quantiles and pass fractions are descriptive estimates, not confidence intervals or optional-stopping decisions. Child engineering uncertainty budgets and verdicts remain unchanged. No continuum, physical-model, experimental-validation or safety-signoff claim; source/card tolerances are not probability distributions. Interrupted or refused samples are never replaced, clipped or skipped.";
+const FIXED_SCOPE: &str = "Fixed-count means, spread, quantiles and pass fractions are descriptive estimates, not confidence intervals or optional-stopping decisions. Child engineering uncertainty budgets and verdicts remain unchanged. No continuum, physical-model, experimental-validation or safety-signoff claim; source/card tolerances are not probability distributions. Interrupted or refused samples are never replaced, clipped or skipped.";
+
+fn input_law(model: &Model) -> &'static str {
+    if model.bound.study().latent_correlation().is_some() {
+        "uniform input laws joined by the declared Gaussian copula (latent-normal correlation, not physical Pearson correlation)"
+    } else {
+        "independent uniform input laws"
+    }
+}
+
+fn fixed_scope(model: &Model) -> String {
+    let inputs = if model.bound.study().latent_correlation().is_some() {
+        "explicit uniform marginals joined by the declared Gaussian copula (latent-normal correlation, not physical Pearson correlation)"
+    } else {
+        "explicitly independent uniform inputs"
+    };
+    format!("Empirical propagation through the declared native numerical cooling model with {inputs}. {FIXED_SCOPE}")
+}
+
+fn dependence_field(model: &Model) -> String {
+    let study = model.bound.study();
+    let Some(matrix) = study.latent_correlation() else { return String::new(); };
+    let order = study.parameters().iter().map(|parameter| quoted(&parameter.name))
+        .collect::<Vec<_>>().join(",");
+    let rows = matrix.iter().map(|row| format!("[{}]",
+        row.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")))
+        .collect::<Vec<_>>().join(",");
+    format!(",\"dependence\":{{\"model\":\"gaussian-copula\",\"matrix_coordinates\":\"latent-standard-normal\",\"parameter_order\":[{order}],\"latent_correlation\":[{rows}],\"physical_marginals\":\"declared-uniform\"}}")
+}
 
 type Result<T> = std::result::Result<T, Failure>;
 #[derive(Debug)]
@@ -147,6 +175,8 @@ fn plan(model: &Model) -> UqPlan {
         PropagationMethod::MonteCarlo
     };
     let mut plan = UqPlan::new(study.qoi(), method, study.samples())
+        // This is the marginal plan. An explicit copula is supplied separately
+        // to its statistical owner, never disguised as uniform Pearson data.
         .with_correlation(CorrelationModel::Independent)
         .with_compliance_threshold(model.bound.threshold_k());
     plan.seed = study.seed();
@@ -304,11 +334,11 @@ fn persist(
     let qmc_report = execution.qmc_report();
     let compliance = execution.compliance(model)?;
     let scope = if compliance.is_some() {
-        compliance::SCOPE
+        compliance::scope(model)
     } else if qmc_report.is_some() {
-        qmc::SCOPE
+        qmc::scope(model)
     } else {
-        NO_CLAIM
+        fixed_scope(model)
     };
     let compliance_field = compliance.as_ref().map_or_else(String::new, |assessment| {
         format!(",\"compliance\":{}", assessment.json())
@@ -317,6 +347,10 @@ fn persist(
         format!(",\"qmc\":{}", qmc::json(report))
     });
     let method = if qmc_report.is_some() { "quasi-monte-carlo" } else { "monte-carlo" };
+    let correlation = if model.bound.study().latent_correlation().is_some() {
+        "gaussian-copula"
+    } else { "independent" };
+    let dependence_field = dependence_field(model);
     let samples = rows_json(rows);
     let statistics = if let Some(report) = report.as_ref()
         .filter(|_| status == "completed" && compliance.is_none()) {
@@ -341,7 +375,7 @@ fn persist(
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":\"independent\",\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{dependence_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -349,7 +383,7 @@ fn persist(
         model.bound.study().samples(),
         execution.evaluations_attempted(),
         model.bound.threshold_k(),
-        quoted(scope)
+        quoted(&scope)
     );
     let mut table = String::new();
     for (i, row) in rows.iter().enumerate() {
@@ -384,11 +418,11 @@ fn persist(
     if status == "completed" {
         if let Some(report) = &report {
             package = package.with_claim(Claim::estimated("cooling.uncertainty.sample-mean",
-                format!("{} K across {n} completed native solves; descriptive Monte Carlo standard error {} K. Result {}. {NO_CLAIM}",
+                format!("{} K across {n} completed native solves; descriptive Monte Carlo standard error {} K. Result {}. {scope}",
                     optional(report.mean), report.sampling_error, hash_bytes(summary.as_bytes()).to_hex()),
                 "fixed-count-native-monte-carlo-descriptive-standard-error", report.sampling_error));
         } else if let Some(claim) = qmc_report.as_ref()
-            .and_then(|report| qmc::claim(report, hash_bytes(summary.as_bytes()))) {
+            .and_then(|report| qmc::claim(report, hash_bytes(summary.as_bytes()), &scope)) {
             package = package.with_claim(claim);
         }
     }
@@ -776,6 +810,9 @@ pub(crate) fn study_path(
     let result = (|| {
         let cap = budget(override_text)?;
         let model = Model::load(path)?;
+        // Admit the entire joint law, including numerical PSD, before opening
+        // a ledger. The bounded sampler is reconstructed when driving the run.
+        Execution::new(&model)?;
         let ledger = Ledger::open(
             ledger_path
                 .to_str()

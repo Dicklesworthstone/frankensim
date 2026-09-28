@@ -2,7 +2,8 @@
 //! physical-model grammar. Every sample changes only explicit project inputs;
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
-//! Version 1 admits fixed-count independent uniform inputs with Monte Carlo
+//! Uniform inputs require explicit independence or a declared Gaussian copula.
+//! Version 1 admits fixed-count propagation with Monte Carlo
 //! or explicitly replicated randomized Sobol quadrature. Version 2 requires
 //! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
 //! An engineering
@@ -135,6 +136,7 @@ pub struct UncertaintyStudy {
     materials: Vec<String>,
     interfaces: Vec<String>,
     parameters: Vec<UniformParameter>,
+    latent_correlation: Option<Vec<Vec<f64>>>,
     compliance: Option<CompliancePolicy>,
     qmc: Option<QmcLayout>,
 }
@@ -150,7 +152,7 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare independent uniform inputs; version 1 is fixed-count Monte Carlo or explicit replicated QMC, and version 2 requires a Monte Carlo Bernoulli-mixture compliance policy".into() }
+        hint: "declare uniform inputs with explicit independence or a Gaussian copula; version 1 is fixed-count Monte Carlo or replicated QMC, and version 2 requires a Monte Carlo Bernoulli-mixture compliance policy".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
@@ -234,9 +236,34 @@ fn paths(node: &Node) -> Result<Vec<String>> {
     nodes.iter().map(text).collect()
 }
 
+fn latent_correlation(node: &Node, dimension: usize) -> Result<Option<Vec<Vec<f64>>>> {
+    if matches!(&node.kind, NodeKind::Symbol(value) if value == "independent") {
+        return Ok(None);
+    }
+    let nodes = list(node)?;
+    symbol(nodes.first().ok_or_else(|| error("empty dependence declaration"))?, "gaussian-copula")?;
+    let f = fields(&nodes[1..], &["latent-correlation"])?;
+    let rows = list(f["latent-correlation"])?;
+    if rows.len() != dimension {
+        return Err(error("latent correlation matrix must match parameter declaration order, including constant marginals"));
+    }
+    let matrix = rows.iter().map(|row| {
+        let entries = list(row)?;
+        if entries.len() != dimension { return Err(error("latent correlation matrix must be square")); }
+        entries.iter().map(|entry| match entry.kind {
+            NodeKind::Int(value) => Ok(value as f64),
+            NodeKind::Float(value) if value.is_finite() => Ok(value),
+            _ => Err(error("latent correlations must be finite dimensionless numbers")),
+        }).collect::<Result<Vec<_>>>()
+    }).collect::<Result<Vec<_>>>()?;
+    // Numerical symmetry, range, unit-diagonal and PSD admission belong to
+    // fs-uq's copula executor, before any native ledger or physical solve.
+    Ok(Some(matrix))
+}
+
 impl UncertaintyStudy {
     /// Parse using the existing typed FrankenScript AST. Unknown/repeated fields,
-    /// inferred distributions, implicit units, and undeclared independence refuse.
+    /// inferred distributions, implicit units, and undeclared dependence refuse.
     ///
     /// # Errors
     /// Returns a project diagnostic before any file or numerical work.
@@ -263,7 +290,6 @@ impl UncertaintyStudy {
         if randomized_qmc && version != 1 {
             return Err(error("QMC requires version 1 fixed-count semantics; dependent net points cannot use the version 2 Bernoulli-iid compliance policy"));
         }
-        symbol(f["correlation"], "independent")?;
         let samples = usize::try_from(integer(f["samples"])?).map_err(|_| error("sample count overflow"))?;
         if !(2..=MAX_SAMPLES).contains(&samples) { return Err(error("samples must be in 2..=256")); }
         let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
@@ -289,6 +315,7 @@ impl UncertaintyStudy {
         if qmc.is_some() && parameter_nodes.len() > 10 {
             return Err(error("replicated Sobol QMC supports at most 10 parameters; no Monte Carlo tail fallback"));
         }
+        let latent_correlation = latent_correlation(f["correlation"], parameter_nodes.len())?;
         let mut parameters = Vec::new();
         let mut names = BTreeSet::new();
         let mut targets = BTreeSet::new();
@@ -326,7 +353,8 @@ impl UncertaintyStudy {
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
-            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters, compliance, qmc })
+            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
+            latent_correlation, compliance, qmc })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -342,6 +370,13 @@ impl UncertaintyStudy {
     #[must_use] pub fn qoi(&self) -> &str { &self.qoi }
     /// Ordered probability laws.
     #[must_use] pub fn parameters(&self) -> &[UniformParameter] { &self.parameters }
+    /// Gaussian-copula correlation of latent standard normals, in parameter
+    /// declaration order; not Pearson correlation of physical uniform inputs.
+    /// Absence means the source explicitly declared independent marginals.
+    /// The statistical executor owns numerical matrix/PSD admission.
+    #[must_use] pub fn latent_correlation(&self) -> Option<&[Vec<f64>]> {
+        self.latent_correlation.as_deref()
+    }
     /// Predeclared Bernoulli stopping policy; absent for version-1 fixed-count studies.
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
     /// Explicit randomized Sobol layout; absent for the Monte Carlo method.

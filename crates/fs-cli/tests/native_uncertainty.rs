@@ -7,6 +7,8 @@ mod compliance;
 mod fan_speed;
 #[path = "native_uncertainty/qmc.rs"]
 mod qmc;
+#[path = "native_uncertainty/copula.rs"]
+mod copula;
 #[path = "../src/json_read.rs"]
 mod json_read;
 
