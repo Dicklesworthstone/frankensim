@@ -29,6 +29,8 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
     [--note 21..108] [--velocity m/s] [--duration seconds]
+    [--bridge-trace-csv paired.csv]
+    [--modal-pressure-csv modal.csv]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
     [--pcm-full-scale-pa positive-Pa]
     [--dump-scale strings.csv] [--dump-board board.csv]
@@ -118,6 +120,15 @@ This assumes an infinite baffle, with no lid/room scattering or air backreaction
 Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
 latency, in addition to acoustic travel time. Histories persist across blocks.
+--bridge-trace-csv requires one --note and a geometric pressure render. It
+writes that key's modeled vertical bridge velocity, a centered-difference
+acceleration, and the left pressure sample on the same output clock. The
+acceleration is a diagnostic derivative of output-rate velocity, not a sensor
+model; pressure retains its filter and travel-time delay.
+--modal-pressure-csv requires the same single-note geometric render. It writes
+each loaded-board mode's delayed pressure at each receiver on the WAV clock;
+the signed modal sum reconstructs the pressure, including cancellation. Modes
+are indexed in the loaded basis, not identified as bare-board eigenfrequencies.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
 applies only to that diagnostic, not to physical microphone pressure.
 --pcm-full-scale-pa declares the pressure mapped to PCM full scale (default 2 Pa).
@@ -138,6 +149,7 @@ struct Options {
     board_band_hz: f64, observer_gain: f64,
     microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
     dump_scale: Option<String>, dump_board: Option<String>,
+    bridge_trace_csv: Option<String>, modal_pressure_csv: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, pcm_full_scale_pa: f64, help: bool,
 }
@@ -152,7 +164,8 @@ impl Default for Options {
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, microphone_right: None, diagnostic_volume: false,
-            dump_board: None, note: None, velocity: None, duration: 6.0,
+            dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None,
+            note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false }
     }
 }
@@ -205,6 +218,8 @@ impl Options {
                 "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
                 "--dump-scale" => options.dump_scale = Some(value.clone()),
                 "--dump-board" => options.dump_board = Some(value.clone()),
+                "--bridge-trace-csv" => options.bridge_trace_csv = Some(value.clone()),
+                "--modal-pressure-csv" => options.modal_pressure_csv = Some(value.clone()),
                 "--note" => options.note = Some(value.parse().map_err(|_| invalid())?),
                 "--velocity" => options.velocity = Some(value.parse().map_err(|_| invalid())?),
                 "--duration" => options.duration = value.parse().map_err(|_| invalid())?,
@@ -294,13 +309,24 @@ impl Options {
         if geometric && !options.diagnostic_volume && seen.contains("--observer-gain") {
             return Err("--observer-gain requires --diagnostic-volume for a geometric board".into());
         }
+        if options.bridge_trace_csv.is_some()
+            && (options.render.is_none() || options.note.is_none()
+                || !geometric || options.diagnostic_volume) {
+            return Err("--bridge-trace-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+        }
+        if options.modal_pressure_csv.is_some()
+            && (options.render.is_none() || options.note.is_none()
+                || !geometric || options.diagnostic_volume) {
+            return Err("--modal-pressure-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+        }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
             options.dampers.as_ref().filter(|s| s.as_str() != "estimated"),
             options.string_stretching.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
-            options.dump_geometry.as_ref(), options.dump_obj.as_ref()];
+            options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
+            options.modal_pressure_csv.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
             if let Some(path) = output {
                 if path.is_empty() || inputs.iter().flatten().any(|input| input == path)
@@ -453,10 +479,66 @@ fn check_pcm_headroom(peak_pa: f64, full_scale_pa: f64) -> Result<(), String> {
     }
     Ok(())
 }
+fn bridge_acceleration(velocity: &[f64], sample: usize, rate: u32) -> f64 {
+    let left = sample.saturating_sub(1);
+    let right = (sample + 1).min(velocity.len() - 1);
+    (velocity[right] - velocity[left]) * f64::from(rate) / (right - left) as f64
+}
+fn write_bridge_trace(path: &str, velocity: &[f64], pressure: &[f64],
+    rate: u32, channels: usize) -> Result<(), String> {
+    use std::io::Write;
+    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    writeln!(out, "sample,time_s,bridge_velocity_m_s,bridge_acceleration_m_s2,pressure_left_pa")
+        .map_err(|e| format!("{path}: {e}"))?;
+    for (i, &v) in velocity.iter().enumerate() {
+        writeln!(out, "{i},{:.17e},{:.17e},{:.17e},{:.17e}",
+            i as f64 / f64::from(rate), v, bridge_acceleration(velocity, i, rate),
+            pressure[i * channels]).map_err(|e| format!("{path}: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("{path}: {e}"))
+}
+fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
+    rate: u32, channels: usize, modes: usize) -> Result<(), String> {
+    use std::io::Write;
+    let file = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    write!(out, "sample,time_s").map_err(|e| format!("{path}: {e}"))?;
+    for channel in 0..channels {
+        let side = if channel == 0 {"left"} else {"right"};
+        write!(out, ",pressure_{side}_pa").map_err(|e| format!("{path}: {e}"))?;
+        for mode in 0..modes {
+            write!(out, ",{side}_mode_{mode}_pa").map_err(|e| format!("{path}: {e}"))?;
+        }
+    }
+    writeln!(out).map_err(|e| format!("{path}: {e}"))?;
+    for (sample, frame) in pressure.chunks_exact(channels).enumerate() {
+        write!(out, "{sample},{:.17e}", sample as f64 / f64::from(rate))
+            .map_err(|e| format!("{path}: {e}"))?;
+        for channel in 0..channels {
+            write!(out, ",{:.17e}", frame[channel]).map_err(|e| format!("{path}: {e}"))?;
+            let start = (sample * channels + channel) * modes;
+            let components = &modal[start..start + modes];
+            let reconstructed: f64 = components.iter().sum();
+            if (reconstructed - frame[channel]).abs() > 1e-10 * frame[channel].abs().max(1.0) {
+                return Err(format!("modal pressure fails to reconstruct channel {channel} sample {sample}"));
+            }
+            for value in components {
+                write!(out, ",{value:.17e}").map_err(|e| format!("{path}: {e}"))?;
+            }
+        }
+        writeln!(out).map_err(|e| format!("{path}: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("{path}: {e}"))
+}
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
     stretching: Option<&linear::string_stretching::Specification>) -> Result<(), String> {
-    study_key(&scale, options.note)?;
+    let key = study_key(&scale, options.note)?;
+    let observed_course = options.bridge_trace_csv.as_ref().map(|_| {
+        scale.iter().position(|c| c.midi == key)
+            .ok_or_else(|| format!("bridge observation key {key} is absent"))
+    }).transpose()?;
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
@@ -479,6 +561,12 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
             options.note, options.velocity)?,
     }};
     let piano = prepare_instrument_with_string_material(scale, modes, options, stretching)?;
+    let bridge_row = observed_course.map(|course| {
+        piano.bank.strings.iter().find(|s|
+            s.course == course && s.member == 0 && s.polarization == 0 && !s.duplex)
+            .map(|s| s.bridge.clone())
+            .ok_or_else(|| format!("no speaking vertical bridge port for key {key}"))
+    }).transpose()?;
     debug_assert_eq!(piano.sample_rate(), rate);
     if let Some(path) = &options.string_stretching {
         let count = (0..piano.bank.strings.len())
@@ -512,9 +600,41 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
     }
     let channels=stream.channels();
     let mut pressure = vec![0.0; count as usize*channels];
+    let mut bridge_velocity = bridge_row.as_ref().map(|_| Vec::with_capacity(count as usize));
+    let modal_modes = stream.instrument().bank.board_count;
+    let mut modal_pressure = if options.modal_pressure_csv.is_some() {
+        let values = (count as usize).checked_mul(channels)
+            .and_then(|n| n.checked_mul(modal_modes))
+            .filter(|&n| n <= 4_000_000)
+            .ok_or("modal pressure trace exceeds the 4-million-value diagnostic budget")?;
+        Some(vec![0.0; values])
+    } else { None };
+    let mut trace_frame = 0;
     let start = std::time::Instant::now();
     for block in pressure.chunks_mut(256*channels) {
-        stream.render_interleaved_block(block).map_err(|e| e.to_string())?;
+        if bridge_velocity.is_some() || modal_pressure.is_some() {
+            for frame in block.chunks_mut(channels) {
+                stream.render_interleaved_block(frame).map_err(|e| e.to_string())?;
+                if let (Some(row), Some(velocity)) = (&bridge_row, &mut bridge_velocity) {
+                    let bank = &stream.instrument().bank;
+                    velocity.push(row.iter().zip(&bank.v[bank.modes.len()..])
+                        .map(|(shape, speed)| shape * speed).sum::<f64>());
+                }
+                if let Some(modal) = &mut modal_pressure {
+                    let offset = trace_frame * channels * modal_modes;
+                    if let Some([left, right]) = stream.stereo_microphones() {
+                        left.mode_pressures(&mut modal[offset..offset + modal_modes])?;
+                        right.mode_pressures(&mut modal[offset + modal_modes..offset + 2*modal_modes])?;
+                    } else {
+                        stream.microphone().ok_or("modal trace needs a physical microphone")?
+                            .mode_pressures(&mut modal[offset..offset + modal_modes])?;
+                    }
+                }
+                trace_frame += 1;
+            }
+        } else {
+            stream.render_interleaved_block(block).map_err(|e| e.to_string())?;
+        }
     }
     let elapsed = start.elapsed().as_secs_f64();
     let peak = pressure.iter().fold(0.0_f64, |a, p| a.max(p.abs()));
@@ -522,6 +642,14 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
     check_pcm_headroom(peak, options.pcm_full_scale_pa)?;
     let (wav, clips) = fs_couple::pcm_wav::encode_pcm16_wav_interleaved(&pressure, rate, channels as u16, options.pcm_full_scale_pa).map_err(|e| e.to_string())?;
     std::fs::write(path, wav).map_err(|e| format!("{path}: {e}"))?;
+    if let (Some(csv), Some(velocity)) = (&options.bridge_trace_csv, &bridge_velocity) {
+        write_bridge_trace(csv, velocity, &pressure, rate, channels)?;
+        println!("Modeled vertical bridge motion at key {key}: {csv}; centered output-rate acceleration, left pressure, same sample indices. Pressure includes propagation and anti-alias delay.");
+    }
+    if let (Some(csv), Some(modal)) = (&options.modal_pressure_csv, &modal_pressure) {
+        write_modal_pressure(csv, modal, &pressure, rate, channels, modal_modes)?;
+        println!("Loaded-board modal pressure at key {key}: {csv}; signed contributions at each physical receiver on the WAV clock. Basis indices are not bare-board eigenfrequencies.");
+    }
     if stream.microphone().is_some() {
         println!("Computed half-space pressure in Pa; PCM full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.pcm_full_scale_pa);
     } else {
@@ -663,6 +791,42 @@ mod render_tests {
             vec!["--render", "piano.wav", "--pcm-full-scale-pa", "NaN"]] {
             assert!(options(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn bridge_trace_requires_one_key_and_physical_pressure() {
+        let accepted = options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--note", "69", "--bridge-trace-csv", "paired.csv"]).unwrap();
+        assert_eq!(accepted.bridge_trace_csv.as_deref(), Some("paired.csv"));
+        for args in [
+            vec!["--preset", "steinway-d", "--note", "69", "--bridge-trace-csv", "paired.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--bridge-trace-csv", "paired.csv"],
+            vec!["--render", "a.wav", "--note", "69", "--bridge-trace-csv", "paired.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--note", "69",
+                "--diagnostic-volume", "--bridge-trace-csv", "paired.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--note", "69",
+                "--bridge-trace-csv", "a.wav"],
+        ] { assert!(options(&args).is_err(), "accepted {args:?}"); }
+        let linear = [0.0, 0.01, 0.02, 0.03];
+        for i in 0..linear.len() {
+            assert!((bridge_acceleration(&linear, i, 100) - 1.0).abs() < 1e-12);
+        }
+    }
+    #[test]
+    fn modal_pressure_trace_requires_single_key_and_distinct_output() {
+        let accepted = options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--note", "69", "--modal-pressure-csv", "modal.csv",
+            "--bridge-trace-csv", "bridge.csv", "--microphone-right", "0.775,1,1"])
+            .unwrap();
+        assert_eq!(accepted.modal_pressure_csv.as_deref(), Some("modal.csv"));
+        for args in [
+            vec!["--preset", "steinway-d", "--note", "69", "--modal-pressure-csv", "modal.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--modal-pressure-csv", "modal.csv"],
+            vec!["--render", "a.wav", "--note", "69", "--modal-pressure-csv", "modal.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--note", "69",
+                "--diagnostic-volume", "--modal-pressure-csv", "modal.csv"],
+            vec!["--preset", "steinway-d", "--render", "a.wav", "--note", "69",
+                "--modal-pressure-csv", "a.wav"],
+        ] { assert!(options(&args).is_err(), "accepted {args:?}"); }
     }
     #[test]
     fn damper_selection_composes_with_physical_and_midi_inputs_and_protects_its_source() {
