@@ -1238,8 +1238,9 @@ mod tests {
         // (q61wp.16.1) the bracket reaches its 0.45 target by about step 12
         // and holds it; 20/24/28/32 steps all end feasible. Level 5, not 4:
         // at 16x16 the loop plateaus (+4.6% vs the first feasible design),
-        // while at 32x32 compliance falls 61.36 -> 48.07 J, -21.7% at the same
-        // area (measured 2026-09-28, 9 s).
+        // while at 32x32 compliance falls to 48.07 J (-21.7%). With
+        // exchange-rate hole nucleation (6 holes) it ends at 23.38 J, -31.1% vs
+        // its first feasible design at the same area (measured 2026-09-28).
         assert_eq!(spec.steps, 32);
         assert_eq!(spec.load_direction, [0.0, -1.0]);
         assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 5);

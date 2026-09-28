@@ -56,7 +56,16 @@ with zero meshing anywhere in the loop.
   it, the vmax-normalized velocity moves a full step however close the
   area is, and the multiplier winds up and swings for tens of steps
   (q61wp.16.1; 20/24/28/32-step bracket sweeps went from 1 feasible to
-  all feasible), scheduled nucleation; ledger rows
+  all feasible). Scheduled nucleation by EXCHANGE RATE
+  (`topder::nucleate_by_exchange`): a hole is punched where the compliance
+  topological derivative `DT(x)` is below `Λ`, the median interface
+  `σ:ε = 2w`. Because the area is re-projected, a hole is a trade of interior
+  material for boundary material, so the gain is `(Λ − DT)·πρ²`. Keep-outs
+  cover only the clamped strip and the load pad; free edges need only room
+  for the hole. The node must be `ρ + h` deep. The former multiplier
+  threshold and six-radius margin on ALL edges never admitted a hole on the
+  canonical bracket; now it nucleates 6, and 32 steps reach 23.38 J vs
+  48.07 J without holes (-31.1% vs its first feasible design). Ledger rows
   with compliance, volume, ℓ, drift, and FNV snapshot hashes. The load is
   definitionally zero outside the checked `EdgeBand`; unrelated SDF cuts on
   the same edge are skipped, while a caller-supplied cut through supported load

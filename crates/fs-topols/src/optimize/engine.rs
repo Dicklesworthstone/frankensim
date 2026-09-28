@@ -25,11 +25,12 @@ struct ShapeDirection {
     smooth: Vec<f64>,
     mean_energy: f64,
     topological: Option<Vec<f64>>,
+    /// Interface exchange rate: median `σ:ε = 2w` over interface probes.
+    interface_exchange: f64,
 }
 
 struct GeometryMove {
     normal_multiplier: f64,
-    hole_multiplier: f64,
     scale: f64,
     with_holes: bool,
 }
@@ -214,7 +215,8 @@ impl ComplianceKernel {
         } else {
             None
         };
-        Ok(ShapeDirection { smooth, mean_energy, topological })
+        let interface_exchange = crate::optimize::interface_exchange_rate(&energy, &seeded);
+        Ok(ShapeDirection { smooth, mean_energy, topological, interface_exchange })
     }
 
     fn propose(
@@ -242,10 +244,11 @@ impl ComplianceKernel {
         load_pad_nodes += retain_cantilever_load_pad(&mut phi, self.support);
         let mut events = Vec::new();
         if let Some(dt_field) = direction.topological.as_ref().filter(|_| movement.with_holes) {
-            events = nucleate(
-                &mut phi, dt_field, movement.hole_multiplier,
+            events = crate::topder::nucleate_by_exchange(
+                &mut phi, dt_field, direction.interface_exchange,
                 settings.hole_radius_cells * h,
-                6.0 * settings.hole_radius_cells * h, 2,
+                crate::optimize::cantilever_nucleation_region(settings.hole_radius_cells * h, h, self.support),
+                2,
             );
             if !events.is_empty() {
                 load_pad_nodes += retain_cantilever_load_pad(&mut phi, self.support);
@@ -328,7 +331,7 @@ pub fn optimize_compliance(
         let direction = kernel.direction(&current, iteration)?;
         let GeometryTrial { phi: trial_phi, audit, events, load_pad_nodes } =
             kernel.propose(&current, &direction, GeometryMove {
-                normal_multiplier: ell, hole_multiplier: ell, scale: 1.0, with_holes: true,
+                normal_multiplier: ell, scale: 1.0, with_holes: true,
             })?;
         let candidate = kernel.evaluate(trial_phi)?;
         let next_ell = ell + settings.mu_al * direction.mean_energy.abs().max(1e-30)
@@ -525,7 +528,7 @@ mod shape_derivative_gate {
                 checked += 1;
             }
             let trial = kernel.propose(&current, &direction, GeometryMove {
-                normal_multiplier: ell, hole_multiplier: ell, scale: 1.0, with_holes: true,
+                normal_multiplier: ell, scale: 1.0, with_holes: true,
             }).unwrap();
             let candidate = kernel.evaluate(trial.phi).unwrap();
             ell = (ell + settings.mu_al * direction.mean_energy.abs().max(1e-30)

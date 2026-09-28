@@ -11,7 +11,7 @@
 
 use crate::fim::{RedistanceAudit, redistance};
 use crate::gridsdf::GridSdf;
-use crate::topder::{NucleationEvent, nucleate, topological_derivative};
+use crate::topder::{NucleationEvent, topological_derivative};
 use crate::veloext::extend_velocity;
 use crate::weno::{Velocity, advect, build_band};
 use fs_cutfem::quad::cut_cell_rules;
@@ -298,6 +298,40 @@ pub(crate) fn schedule_material_area(
         max_shift: reach,
         max_evaluations: 64,
     });
+}
+
+/// Interface exchange rate for hole nucleation: the median of `σ:ε = 2w`
+/// over valid interface probes (`w` is the sampled strain-energy density).
+/// The median resists the stress spikes at the clamp and the load pad.
+pub(crate) fn interface_exchange_rate(energy: &[f64], seeded: &[bool]) -> f64 {
+    let mut rates: Vec<f64> = energy
+        .iter()
+        .zip(seeded)
+        .filter(|(w, s)| **s && w.is_finite() && **w > 0.0)
+        .map(|(w, _)| 2.0 * w)
+        .collect();
+    if rates.is_empty() {
+        return 0.0;
+    }
+    rates.sort_by(f64::total_cmp);
+    rates[rates.len() / 2]
+}
+
+/// Hole centers keep `ρ + h` from every box edge and stay clear of the
+/// clamped left strip and the loaded right pad (each widened by `ρ + 2h`).
+pub(crate) fn cantilever_nucleation_region(
+    radius: f64,
+    h: f64,
+    support: EdgeBand,
+) -> crate::topder::NucleationRegion {
+    let guard = radius + 2.0 * h;
+    crate::topder::NucleationRegion {
+        containment: radius + h,
+        keep_out: [
+            [0.0, 0.0, guard, 1.0],
+            [1.0 - 2.0 * h - guard, support.start() - guard, 1.0, support.end() + guard],
+        ],
+    }
 }
 
 mod engine;

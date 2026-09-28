@@ -133,11 +133,12 @@ assert esummary['iterations_completed']==32 and esummary['final_compliance_j']>0
 assert esummary['volume_constraint_satisfied'] is True, esummary
 assert abs(esummary['final_material_area_m2']-0.45) <= 0.001, esummary
 # ...and it must actually optimize at that area: the final design is at least
-# 15% stiffer than the first feasible iterate (measured -21.7% at level 5).
+# 25% stiffer than the first feasible iterate (measured -31.1% at level 5 with
+# exchange-rate hole nucleation; -21.7% without holes).
 import re
 rows=re.findall(r'<tr><td>(\d+)</td><td>([^<]+)</td><td>([^<]+)</td>',(root/ereport['report_html']).read_text())
 first=next(float(c) for _,c,v in rows if abs(float(v)-0.45)<=0.0045)
-assert esummary['final_compliance_j'] <= 0.85*first, (first, esummary['final_compliance_j'])
+assert esummary['final_compliance_j'] <= 0.75*first, (first, esummary['final_compliance_j'])
 assert (root/epackage['package']).stat().st_size>0
 for name,code in [('elastic-units','study-objective-dimension-mismatch'),('elastic-area','study-volume-fraction-out-of-bounds'),('elastic-band','cli-study-elasticity-load')]:
     assert code in (root/(name+'.stderr')).read_text()
