@@ -8,6 +8,9 @@
 
 use crate::gp::Gp;
 
+mod bo;
+pub use bo::{NoisyBoConfig, NoisyBoReport, NoisyIncumbent, NoisyObservation, minimize_noisy};
+
 /// Fixed common-random-number bank with arbitrary positive width.
 ///
 /// The leading columns use the existing scrambled-Sobol normal bank. Beyond
