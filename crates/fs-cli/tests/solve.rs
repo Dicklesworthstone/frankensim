@@ -5134,7 +5134,9 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
     assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"interval\""), "{qoi}");
     assert!(qoi.contains("outward-coupled-linear-maximum-enclosure"), "{qoi}");
-    assert!(qoi.contains("disposition Enclosed"), "{qoi}");
+    // Since the physical-publication driver (v31) the derivation states the
+    // enclosed maximum interval rather than a disposition word.
+    assert!(qoi.contains("maximum interval Some(["), "{qoi}");
     assert!(!conduction.contains("tolerance-tightening-resolve"), "{conduction}");
 }
 
