@@ -2,7 +2,7 @@
 """Build the actual weak-constraint numerical source closure, without bootstrap.
 
 This is deliberately NOT a full-workspace or full fs-ascent package check.
-Temporary Cargo manifests select complete production modules; no numerical
+Temporary Cargo manifests select byte-checked copies of production modules; no numerical
 functions or tests are rewritten or replaced. All dependency sources are from
 this checkout. The normal workspace remains authoritative for integration.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -20,22 +21,44 @@ def prepare(root: Path, out: Path) -> Path:
     package = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]
     version = package["version"]
 
+    def copy_sources(source: Path, destination: Path) -> None:
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            for path in source.rglob("*"):
+                if path.is_file() and path.read_bytes() != (destination / path.relative_to(source)).read_bytes():
+                    raise RuntimeError(f"source copy mismatch: {path}")
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            if source.read_bytes() != destination.read_bytes():
+                raise RuntimeError(f"source copy mismatch: {source}")
+
     def module(name: str, path: str) -> str:
         source = root / path
         if not source.is_file():
             raise FileNotFoundError(source)
-        return f"#[path = {json.dumps(str(source))}] pub mod {name};\n"
+        # Preserve normal Rust module layout. An absolute #[path] on a .rs
+        # module changes how its unannotated child modules are resolved.
+        relative = Path(path).relative_to("crates")
+        destination = out / relative
+        copy_sources(source, destination)
+        children = source.with_suffix("")
+        if children.is_dir():
+            copy_sources(children, destination.with_suffix(""))
+        return f"pub mod {name};\n"
 
     def crate(name: str, source: str | None, deps: tuple[str, ...] = (), *, lib: str | None = None) -> Path:
         folder = out / name
-        folder.mkdir(parents=True)
-        lib_path = root / lib if lib else folder / "lib.rs"
+        folder.mkdir(parents=True, exist_ok=True)
+        lib_path = folder / "src/lib.rs"
+        lib_path.parent.mkdir(parents=True, exist_ok=True)
         if source is not None:
             lib_path.write_text(source)
-        elif not lib_path.is_file():
-            raise FileNotFoundError(lib_path)
+        elif lib is not None:
+            copy_sources((root / lib).parent, lib_path.parent)
+        else:
+            raise ValueError(f"missing library source for {name}")
         text = f'[package]\nname = "{name}"\nversion = {json.dumps(version)}\nedition = "2024"\n'
-        text += f'[lib]\npath = {json.dumps(str(lib_path))}\n'
         text += '[dependencies]\n' + ''.join(f'{dep} = {{ path = "../{dep}" }}\n' for dep in deps)
         (folder / "Cargo.toml").write_text(text)
         return folder

@@ -19,7 +19,7 @@ pub struct StudySettings {
     pub max_optimizer_components: usize,
 }
 impl StudySettings {
-    fn validate(self, dimension: usize) -> Result<(), WindowStudyError> {
+    pub(super) fn validate(self, dimension: usize) -> Result<(), WindowStudyError> {
         if self.memory == 0 || self.max_evaluations == 0 || dimension == 0
             || !self.gradient_tolerance.is_finite() || self.gradient_tolerance <= 0.0
         { return Err(LbfgsError::InvalidInput("positive memory, tolerance, dimension and evaluation cap required")); }

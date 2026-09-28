@@ -25,6 +25,8 @@ use fs_time::adaptive::adjoint::trajectory::{
 
 /// Accepted-state composition with the existing fallible L-BFGS engine.
 pub mod study;
+/// Shared model-parameter and state estimation in one numerical study.
+pub mod joint;
 
 #[derive(Debug, Clone)]
 pub struct IntervalPolicy {
@@ -46,6 +48,7 @@ pub enum WindowError {
     EvaluationLimit,
     IntervalLimit,
     Observation(String),
+    Model(String),
     ForwardStopped { interval: usize, status: RecordingStatus },
     Trajectory { interval: usize, source: TrajectoryError },
     Cancelled,
@@ -134,6 +137,16 @@ impl WindowControl {
 pub trait WindowObjective {
     fn evaluate(&self, times: &[f64], dimension: usize, states: &[f64],
         state_bar: &mut [f64], cancelled: &mut dyn FnMut() -> bool) -> Result<f64, String>;
+
+    /// Explicit observation partials in the OdeVjp model's parameter coordinates,
+    /// holding every knot state fixed. Override for parameter-dependent sensors.
+    /// The default declares parameter-independent observation loss. These do not
+    /// include state-prior or process-noise derivatives: those scales are fixed.
+    fn parameter_partials(&self, _times: &[f64], _dimension: usize, _states: &[f64],
+        parameter_bar: &mut [f64], _cancelled: &mut dyn FnMut() -> bool) -> Result<(), String>
+    {
+        parameter_bar.fill(0.0); Ok(())
+    }
 }
 
 /// Immutable knot layout and diagonal background/model-error declarations.
@@ -177,13 +190,14 @@ impl WeakConstraintWindow {
     pub fn workspace_components(&self, parameters: usize) -> Result<usize, WindowError> {
         self.reference.len().checked_mul(4)
             .and_then(|v| self.dimension().checked_mul(4).and_then(|n| v.checked_add(n)))
-            .and_then(|v| parameters.checked_mul(2).and_then(|p| v.checked_add(p)))
+            .and_then(|v| parameters.checked_mul(3).and_then(|p| v.checked_add(p)))
             .ok_or(WindowError::Invalid("evaluation workspace overflow"))
     }
 
     /// One complete numerical objective and gradient. Every interval uses its
-    /// own accepted RK45 map and transposed initial-state derivative. Fixed RHS
-    /// parameter derivatives are not optimization variables and are discarded.
+    /// own accepted RK45 map and transposed initial-state derivative. Return
+    /// parameter partials too, holding knots and all covariance scales fixed;
+    /// the state-only study does not optimize these parameters.
     /// The window is immutable and no partial objective/gradient escapes errors.
     /// Successful earlier INTERVAL work is charged but is recomputed on retry.
     pub fn evaluate<M: OdeVjp, O: WindowObjective, C: FnMut() -> bool>(
@@ -197,6 +211,18 @@ impl WeakConstraintWindow {
         { return Err(WindowError::Invalid("model/point shape or initial step")); }
         let p = model.parameter_count();
         control.admit(steps, self.workspace_components(p)?)?;
+        self.evaluate_admitted(model, objective, point, policy, control, cancelled)
+    }
+
+    // The joint parameter path admits and charges the whole trial BEFORE its
+    // model factory runs, then enters here without charging a second evaluation.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_admitted<M: OdeVjp, O: WindowObjective, C: FnMut() -> bool>(
+        &self, model: &M, objective: &O, point: &[f64], policy: &IntervalPolicy,
+        control: &mut WindowControl, cancelled: &mut C,
+    ) -> Result<WindowEvaluation, WindowError> {
+        let n = self.dimension(); let length = self.control_dimension();
+        let steps = self.times.len()-1; let p = model.parameter_count();
         let mut states = zeros(length)?;
         for (i, (x, z)) in states.iter_mut().zip(point).enumerate() {
             if i % 256 == 0 { poll(cancelled)?; }
@@ -211,6 +237,19 @@ impl WeakConstraintWindow {
         for chunk in gradient.chunks(256) {
             poll(cancelled)?;
             if chunk.iter().any(|g| !g.is_finite()) { return Err(WindowError::NonFinite("observation partials")); }
+        }
+        let mut parameter_gradient = zeros(p)?;
+        if p != 0 {
+            parameter_gradient.fill(f64::NAN);
+            let mut stopped = false;
+            let mut check = || { stopped |= cancelled(); stopped };
+            let result = objective.parameter_partials(&self.times, n, &states, &mut parameter_gradient, &mut check);
+            if check() { return Err(WindowError::Cancelled); }
+            result.map_err(WindowError::Observation)?;
+            for chunk in parameter_gradient.chunks(256) {
+                poll(cancelled)?;
+                if chunk.iter().any(|g| !g.is_finite()) { return Err(WindowError::NonFinite("observation parameter partials")); }
+            }
         }
         let mut background = Sum::default(); let mut model_error = Sum::default();
         for i in 0..n {
@@ -250,6 +289,10 @@ impl WeakConstraintWindow {
                 if i % 256 == 0 { poll(cancelled)?; }
                 gradient[k*n+i] = finite(gradient[k*n+i]+update, "left endpoint gradient")?;
             }
+            for (i, update) in bar.parameters.iter().enumerate() {
+                if i % 256 == 0 { poll(cancelled)?; }
+                parameter_gradient[i] = finite(parameter_gradient[i]+update, "model parameter gradient")?;
+            }
             accepted_steps = accepted_steps.checked_add(tape.accepted_steps()).ok_or(WindowError::Invalid("step count overflow"))?;
             replayed_steps = replayed_steps.checked_add(bar.replayed_steps).ok_or(WindowError::Invalid("replay count overflow"))?;
         }
@@ -261,7 +304,7 @@ impl WeakConstraintWindow {
         let mut total = Sum::default(); total.add(observation_value)?; total.add(background_value)?; total.add(model_value)?;
         let controls = copy(point)?;
         poll(cancelled)?;
-        Ok(WindowEvaluation { controls, states, gradient, defects, value: total.finish()?,
+        Ok(WindowEvaluation { controls, states, gradient, parameter_gradient, defects, value: total.finish()?,
             observation_value, background_value, model_value, accepted_steps, replayed_steps })
     }
 }
@@ -272,6 +315,9 @@ pub struct WindowEvaluation {
     pub states: Vec<f64>,
     /// Derivative with respect to dimensionless controls, NOT physical states.
     pub gradient: Vec<f64>,
+    /// Partial derivative in OdeVjp parameter coordinates, with knots fixed.
+    /// Includes explicit observation partials and every interval's dynamics.
+    pub parameter_gradient: Vec<f64>,
     /// Actual knot-major endpoint increments, `x[k+1]-M[k](x[k])`.
     pub defects: Vec<f64>,
     pub value: f64,
