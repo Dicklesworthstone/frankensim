@@ -3,7 +3,7 @@
 use super::{IntervalPolicy, WeakConstraintWindow, WindowControl, WindowError,
     WindowEvaluation, WindowObjective, poll};
 use crate::{LbfgsError, LbfgsReport, LbfgsState, StopReason, StopRule};
-use fs_time::adaptive::adjoint::OdeVjp;
+use super::intervals::IntervalScheme;
 
 pub type WindowStudyError = LbfgsError<WindowError>;
 
@@ -46,33 +46,33 @@ impl StudySettings {
 /// The model, objective, times, scales and numerical policy must remain unchanged
 /// on continuation. GradNorm means local numerical stationarity, not a posterior
 /// covariance, exact continuous sensitivity, or certified/global optimality.
-pub struct WeakConstraintStudy<'a, M, O> {
+pub struct WeakConstraintStudy<'a, M, O, S = IntervalPolicy> {
     window: &'a WeakConstraintWindow,
     model: &'a M,
     objective: &'a O,
-    policy: IntervalPolicy,
+    policy: S,
     settings: StudySettings,
     optimizer: LbfgsState,
     accepted: WindowEvaluation,
 }
-impl<M, O> Clone for WeakConstraintStudy<'_, M, O> {
+impl<M, O, S: Clone> Clone for WeakConstraintStudy<'_, M, O, S> {
     fn clone(&self) -> Self {
         Self { window: self.window, model: self.model, objective: self.objective,
             policy: self.policy.clone(), settings: self.settings,
             optimizer: self.optimizer.clone(), accepted: self.accepted.clone() }
     }
 }
-impl<'a, M: OdeVjp, O: WindowObjective> WeakConstraintStudy<'a, M, O> {
+impl<'a, M, O: WindowObjective, S: IntervalScheme<M>> WeakConstraintStudy<'a, M, O, S> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(window: &'a WeakConstraintWindow, model: &'a M, objective: &'a O,
-        point: &[f64], policy: IntervalPolicy, settings: StudySettings,
+        point: &[f64], policy: S, settings: StudySettings,
         control: &mut WindowControl, cancelled: &mut impl FnMut()->bool,
     ) -> Result<Self, WindowStudyError> {
         poll(cancelled).map_err(LbfgsError::Evaluation)?;
         settings.validate(window.control_dimension())?;
         let mut accepted = None;
         let optimizer = LbfgsState::try_new(point, settings.memory, &mut |z| {
-            let result = window.evaluate(model, objective, z, &policy, control, cancelled)?;
+            let result = window.evaluate_using(model, objective, z, &policy, control, cancelled)?;
             let response = (result.value, result.gradient.clone()); accepted = Some(result); Ok::<_,WindowError>(response)
         })?;
         let accepted = accepted.ok_or(LbfgsError::InvalidInput("missing initial trajectory"))?;
@@ -102,7 +102,7 @@ impl<'a, M: OdeVjp, O: WindowObjective> WeakConstraintStudy<'a, M, O> {
         let (window, model, objective, policy) = (self.window, self.model, self.objective, &self.policy);
         let mut candidate = None;
         let result = self.optimizer.try_run(&mut |z| {
-            let evaluation = window.evaluate(model, objective, z, policy, control, cancelled)?;
+            let evaluation = window.evaluate_using(model, objective, z, policy, control, cancelled)?;
             let response = (evaluation.value, evaluation.gradient.clone()); candidate = Some(evaluation);
             Ok::<_, WindowError>(response)
         }, &StopRule::GradNorm(self.settings.gradient_tolerance), iterations, self.settings.max_evaluations);

@@ -1,8 +1,8 @@
-//! State-form weak-constraint 4D-Var over the production RK45 interval map.
+//! State-form weak-constraint 4D-Var over checked discrete interval maps.
 //!
 //! Each knot state is a decision variable. The objective is the observation
 //! loss plus Gaussian penalties on the initial departure and on
-//! `x[k+1] - RK45(x[k])`. Model-error scales describe ENDPOINT state increments,
+//! `x[k+1] - M[k](x[k])`. Model-error scales describe ENDPOINT state increments,
 //! not white-noise spectral densities; no implicit dt scaling is invented.
 //! Background and model-error covariances are fixed, diagonal and mutually
 //! independent. A joint observation callback can describe cross-time noise.
@@ -17,16 +17,20 @@
 //! exact nonlinear posterior, or an uncertainty-coverage/physical certificate.
 //! Reference: Tremolet, QJRMS 132 (2006), 2483-2504, doi:10.1256/qj.05.224.
 
-use fs_time::AdaptiveState;
 use fs_time::adaptive::adjoint::{AdjointError, OdeVjp};
+#[cfg(test)]
+use fs_time::{AdaptiveState, adaptive::adjoint::trajectory::RecordedRk45};
 use fs_time::adaptive::adjoint::trajectory::{
-    RecordedRk45, RecordingConfig, RecordingStatus, ReplayBudget, TrajectoryError,
+    RecordingConfig, RecordingStatus, ReplayBudget, TrajectoryError,
 };
 
 /// Accepted-state composition with the existing fallible L-BFGS engine.
 pub mod study;
 /// Shared model-parameter and state estimation in one numerical study.
 pub mod joint;
+/// Shared interval-map boundary for explicit and implicit discrete adjoints.
+pub mod intervals;
+use intervals::{IntervalScheme, IntervalTape};
 
 #[derive(Debug, Clone)]
 pub struct IntervalPolicy {
@@ -51,6 +55,10 @@ pub enum WindowError {
     Model(String),
     ForwardStopped { interval: usize, status: RecordingStatus },
     Trajectory { interval: usize, source: TrajectoryError },
+    /// A backend refused a particular interval; its original diagnostic is retained.
+    Integrator { interval: usize, phase: &'static str, diagnostic: String },
+    /// A completed map or pullback violated its declared shape/time contract.
+    IntervalOutput { interval: usize, what: &'static str },
     Cancelled,
 }
 impl std::fmt::Display for WindowError {
@@ -204,14 +212,24 @@ impl WeakConstraintWindow {
         &self, model: &M, objective: &O, point: &[f64], policy: &IntervalPolicy,
         control: &mut WindowControl, cancelled: &mut C,
     ) -> Result<WindowEvaluation, WindowError> {
+        self.evaluate_using(model, objective, point, policy, control, cancelled)
+    }
+
+    /// Evaluate with a declared discrete interval scheme. The same observation,
+    /// background, defect and coordinate-chain-rule code serves every scheme.
+    /// Only a complete endpoint and its matching transpose action are usable.
+    /// Numerical step choices and model/solver policy remain fixed for a gradient.
+    pub fn evaluate_using<M, O: WindowObjective, S: IntervalScheme<M>, C: FnMut() -> bool>(
+        &self, model: &M, objective: &O, point: &[f64], policy: &S,
+        control: &mut WindowControl, cancelled: &mut C,
+    ) -> Result<WindowEvaluation, WindowError> {
         poll(cancelled)?;
-        let n = self.dimension(); let length = self.control_dimension(); let steps = self.times.len()-1;
-        if model.dimension() != n || point.len() != length || point.iter().any(|x| !x.is_finite())
-            || !policy.initial_step.is_finite() || policy.initial_step <= 0.0
-        { return Err(WindowError::Invalid("model/point shape or initial step")); }
-        let p = model.parameter_count();
-        control.admit(steps, self.workspace_components(p)?)?;
-        self.evaluate_admitted(model, objective, point, policy, control, cancelled)
+        if policy.dimension(model) != self.dimension() || point.len() != self.control_dimension()
+            || point.iter().any(|x| !x.is_finite())
+        { return Err(WindowError::Invalid("model/point shape or values")); }
+        policy.validate(&self.times)?;
+        control.admit(self.times.len()-1, self.workspace_components(policy.parameter_count(model))?)?;
+        self.evaluate_admitted_using(model, objective, point, policy, control, cancelled)
     }
 
     // The joint parameter path admits and charges the whole trial BEFORE its
@@ -221,8 +239,16 @@ impl WeakConstraintWindow {
         &self, model: &M, objective: &O, point: &[f64], policy: &IntervalPolicy,
         control: &mut WindowControl, cancelled: &mut C,
     ) -> Result<WindowEvaluation, WindowError> {
+        self.evaluate_admitted_using(model, objective, point, policy, control, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_admitted_using<M, O: WindowObjective, S: IntervalScheme<M>, C: FnMut() -> bool>(
+        &self, model: &M, objective: &O, point: &[f64], policy: &S,
+        control: &mut WindowControl, cancelled: &mut C,
+    ) -> Result<WindowEvaluation, WindowError> {
         let n = self.dimension(); let length = self.control_dimension();
-        let steps = self.times.len()-1; let p = model.parameter_count();
+        let steps = self.times.len()-1; let p = policy.parameter_count(model);
         let mut states = zeros(length)?;
         for (i, (x, z)) in states.iter_mut().zip(point).enumerate() {
             if i % 256 == 0 { poll(cancelled)?; }
@@ -263,20 +289,20 @@ impl WeakConstraintWindow {
         let (mut accepted_steps, mut replayed_steps) = (0usize, 0usize);
         for k in 0..steps {
             poll(cancelled)?;
-            if model.dimension() != n || model.parameter_count() != p { return Err(WindowError::Invalid("model dimensions changed")); }
+            if policy.dimension(model) != n || policy.parameter_count(model) != p { return Err(WindowError::Invalid("model dimensions changed")); }
             // Admission above reserves enough remaining allowance for the whole
             // trial, but only intervals actually attempted are spent.
             control.intervals += 1;
-            let mut config = policy.recording.clone(); config.end = self.times[k+1];
-            let initial = AdaptiveState::new(self.times[k], &states[k*n..(k+1)*n], policy.initial_step);
-            let mut tape = RecordedRk45::new(model, initial, config).map_err(|e| trajectory_error(k, e))?;
-            let report = tape.advance(policy.max_attempts, policy.max_records, cancelled).map_err(|e| trajectory_error(k, e))?;
-            if report.status == RecordingStatus::Cancelled { return Err(WindowError::Cancelled); }
-            if report.status != RecordingStatus::ReachedEnd { return Err(WindowError::ForwardStopped { interval: k, status: report.status }); }
+            let tape = policy.record(model, k, self.times[k], self.times[k+1],
+                &states[k*n..(k+1)*n], &mut || cancelled())?;
+            poll(cancelled)?;
+            if tape.end_time() != self.times[k+1] || tape.endpoint().len() != n {
+                return Err(WindowError::IntervalOutput { interval: k, what: "endpoint time or dimension" });
+            }
             for i in 0..n {
                 if i % 256 == 0 { poll(cancelled)?; }
                 let offset = k*n+i; let next = (k+1)*n+i;
-                let defect = finite(states[next]-tape.state().u[i], "model defect")?;
+                let defect = finite(states[next]-tape.endpoint()[i], "model defect")?;
                 defects[offset] = defect;
                 let r = finite(defect/self.model_sigma[offset], "scaled model defect")?;
                 model_error.add((0.5*r)*r)?;
@@ -284,7 +310,11 @@ impl WeakConstraintWindow {
                 gradient[next] = finite(gradient[next]+partial, "right endpoint gradient")?;
                 seed[i] = -partial;
             }
-            let bar = tape.pullback(&seed, &direct, policy.replay, cancelled).map_err(|e| trajectory_error(k, e))?;
+            let bar = tape.pullback(&seed, &direct, &mut || cancelled())?;
+            poll(cancelled)?;
+            if bar.initial.len() != n || bar.parameters.len() != p {
+                return Err(WindowError::IntervalOutput { interval: k, what: "pullback dimension" });
+            }
             for (i, update) in bar.initial.iter().enumerate() {
                 if i % 256 == 0 { poll(cancelled)?; }
                 gradient[k*n+i] = finite(gradient[k*n+i]+update, "left endpoint gradient")?;
