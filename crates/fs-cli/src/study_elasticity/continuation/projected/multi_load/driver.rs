@@ -1,6 +1,7 @@
 //! Native orchestration of the existing simultaneous independent-load optimizer.
 use super::*;
 use fs_topols::WeightedComplianceDwrStage;
+use fs_topols::robust_resolution::MultiLoadMeshStage;
 
 fn stopped(gate: &CancelGate, start: Instant, consumed: f64, spec: &ElasticitySpec) -> Option<&'static str> {
     stop_status(gate.is_requested(), consumed + start.elapsed().as_secs_f64(), spec.wall_s)
@@ -15,8 +16,9 @@ fn retain(spec: &ElasticitySpec, ledger: &Ledger, owner: &MultiLoadProjectedOpti
         != owner.restoration_updates()
         || (owner.is_restoring_stress() && status == "completed")
     { return Err(malformed("restoration progress cannot be published as feasible completion")); }
-    retained.family.as_mut()
-        .expect("independent load history").capture(owner);
+    let history = retained.family.as_mut().expect("independent load history");
+    history.capture(owner);
+    mesh::validate_terminal(history, &retained.policy, status, settings(spec, spec.steps).level)?;
     persist(spec, ledger, owner.geometry(), report, status, wall, predecessor, evidence)
 }
 
@@ -45,6 +47,7 @@ fn finish(spec: &ElasticitySpec, ledger: &Ledger, phi: &GridSdf,
             consumed + start.elapsed().as_secs_f64(), predecessor, evidence);
     }
     let history = retained.family.as_mut().ok_or_else(|| malformed("missing final independent cases"))?;
+    mesh::validate_terminal(history, &retained.policy, terminal, settings(spec, spec.steps).level)?;
     let expected_cases = history.accepted.last().unwrap_or(&history.baseline).clone();
     history.optimizer_terminal = Some(terminal);
     let pending = persist(spec, ledger, phi, report, "running",
@@ -78,11 +81,23 @@ pub(super) fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option
 }
 
 pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
+    gate: &CancelGate, prior: Option<&Loaded>, observe: impl FnMut(MultiLoadProjectedStage),
+    observe_assessment: impl FnMut(WeightedComplianceDwrStage)) -> Result<Outcome>
+{
+    drive_mesh_observed(spec, ledger, cap, gate, prior, observe, observe_assessment, |_| {})
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive_mesh_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     gate: &CancelGate, prior: Option<&Loaded>, mut observe: impl FnMut(MultiLoadProjectedStage),
-    mut observe_assessment: impl FnMut(WeightedComplianceDwrStage)) -> Result<Outcome>
+    mut observe_assessment: impl FnMut(WeightedComplianceDwrStage),
+    mut observe_mesh: impl FnMut(MultiLoadMeshStage)) -> Result<Outcome>
 {
     if ledger.in_transaction() { return Err(malformed("multi-load study requires its own ledger transaction")); }
     let policy = stress_controls(spec)?;
+    if let Some(resolution) = policy.resolution {
+        resolution.validate(settings(spec, spec.steps).level).map_err(|error| malformed(&error.to_string()))?;
+    }
     let family = policy.family.as_ref().ok_or_else(|| malformed("missing independent load family"))?;
     let cases = family.cases(spec)?;
     let start = Instant::now();
@@ -127,15 +142,17 @@ pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, 
             Some("running") => "running", Some("completed") => "completed",
             Some("cancelled") => "cancelled", Some("budget-exhausted") => "budget-exhausted",
             Some("no-feasible-descent") => "no-feasible-descent",
+            Some("mesh-unresolved") if policy.resolution.is_some() => "mesh-unresolved",
             Some("numerical-failure") if spec.final_dwr && history.optimizer_terminal.is_some() => "numerical-failure",
             _ => return Err(malformed("unknown multi-load study terminal")),
         };
+        mesh::validate_terminal(history, policy, status, settings(spec, spec.steps).level)?;
         consumed = old.value.f64_field("consumed_wall_s").filter(|value| value.is_finite() && *value >= 0.0)
             .ok_or_else(|| malformed("invalid retained multi-load wall charge"))?;
         last = Some(Outcome { pointer: format!("study-{}", old.hash.to_hex()), receipt: old.bytes.clone(), status });
         // These are sealed, read-only terminals. Do not rerun physics or consume
         // recovery work merely to return an already completed/exhausted receipt.
-        if status == "completed" || status == "no-feasible-descent"
+        if matches!(status, "completed" | "no-feasible-descent" | "mesh-unresolved")
         { return last.ok_or_else(|| malformed("missing terminal receipt")); }
         if let Some(terminal) = history.optimizer_terminal.or_else(||
             (spec.final_dwr && completed_feasible).then_some("completed")) {
@@ -146,8 +163,12 @@ pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, 
                 predecessor, &mut evidence, &mut observe_assessment)
                 .map_err(|error| retained_error(error, last.as_ref()));
         }
+        // A mesh-checked update needs a fresh fine baseline and one complete
+        // coarse/fine candidate family. Recovery cannot refund these charges.
+        let minimum_update_solves = cases.len() * policy.resolution
+            .map_or(1, |resolution| 1 + 2 * resolution.extra_levels as usize);
         if status == "budget-exhausted"
-            && (family.max_solves - history.solves < cases.len() || report.rows.len() == spec.steps) {
+            && (family.max_solves - history.solves < minimum_update_solves || report.rows.len() == spec.steps) {
             return last.ok_or_else(|| malformed("missing terminal receipt"));
         }
         if let Some(status) = stopped(gate, start, consumed, spec) {
@@ -234,7 +255,7 @@ pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, 
         evidence.projected = Some(ConstraintEvidence {
             policy: policy.clone(), baseline: combined, accepted: Vec::new(), attempts: Vec::new(), refusals: Vec::new(), mesh: None,
             family: Some(History { cases, baseline, accepted: Vec::new(), checkpoint: Vec::new(),
-                solves: owner.solves_started(), recovery_solves: 0, optimizer_terminal: None }),
+                solves: owner.solves_started(), recovery_solves: 0, optimizer_terminal: None, mesh: None }),
         });
         owner
     };
@@ -268,12 +289,52 @@ pub(super) fn drive_assessment_observed(spec: &ElasticitySpec, ledger: &Ledger, 
             return retain(spec, ledger, &owner, &report, status, consumed + start.elapsed().as_secs_f64(),
                 predecessor, &mut evidence).map_err(|error| retained_error(error, last.as_ref()));
         }
-        let progress = owner.advance_one_polling(policy.search.poll_iters, |stage| {
-            observe(stage);
-            match stopped(gate, start, consumed, spec) {
-                Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+        let progress = if let Some(resolution) = policy.resolution {
+            match owner.advance_one_resolution_polling(resolution, policy.search.poll_iters, |stage| {
+                observe_mesh(stage);
+                if let MultiLoadMeshStage::Optimizer(stage) = stage { observe(stage); }
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            }) {
+                Err(error) => Err(error),
+                Ok(ControlFlow::Break(status)) => Ok(ControlFlow::Break(status)),
+                Ok(ControlFlow::Continue(progress)) => {
+                    let (progress, check) = mesh::LastCheck::capture(progress)
+                        .map_err(|error| retained_error(error, last.as_ref()))?;
+                    if let Some(check) = check {
+                        let retained = evidence.projected.as_mut().expect("constrained history");
+                        if let Some(reason) = &check.reason { retained.refusals = vec![reason.clone()]; }
+                        retained.family.as_mut().expect("load history").mesh = Some(check);
+                    }
+                    match progress {
+                        Some(progress) => Ok(ControlFlow::Continue(progress)),
+                        None => return retain(spec, ledger, &owner, &report, "mesh-unresolved",
+                            consumed + start.elapsed().as_secs_f64(), predecessor, &mut evidence)
+                            .map_err(|error| retained_error(error, last.as_ref())),
+                    }
+                }
             }
-        }).map_err(|error| retained_error(malformed(&error.to_string()), last.as_ref()))?;
+        } else {
+            owner.advance_one_polling(policy.search.poll_iters, |stage| {
+                observe(stage);
+                match stopped(gate, start, consumed, spec) {
+                    Some(status) => ControlFlow::Break(status), None => ControlFlow::Continue(()),
+                }
+            })
+        };
+        let progress = match progress {
+            Ok(progress) => progress,
+            Err(error) => {
+                // A failed fine baseline may have started several real solves.
+                // Keep the unchanged accepted state AND the owner's work count,
+                // as on interrupted candidates and failed checkpoint recovery.
+                let charged = retain(spec, ledger, &owner, &report, "running",
+                    consumed + start.elapsed().as_secs_f64(), predecessor, &mut evidence)
+                    .map_err(|write| retained_error(write, last.as_ref()))?;
+                return Err(retained_error(malformed(&error.to_string()), Some(&charged)));
+            }
+        };
         let progress = match progress {
             ControlFlow::Continue(progress) => progress,
             ControlFlow::Break(status) => return retain(spec, ledger, &owner, &report, status,

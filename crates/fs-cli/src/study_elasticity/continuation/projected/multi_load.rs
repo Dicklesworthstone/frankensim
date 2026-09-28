@@ -4,6 +4,7 @@
 use super::*;
 use super::super::super::{number as node_number, pair as node_pair};
 use fs_topols::{DesignBoxEdge, RobustAggregate, RobustLoadCase};
+use fs_topols::resolution::ResolutionPolicy;
 use fs_topols::robust_descent::{
     MultiLoadProjectedOptimizer, MultiLoadProjectedProgress, MultiLoadProjectedSettings,
     MultiLoadProjectedStage,
@@ -12,6 +13,9 @@ use fs_topols::robust_descent::{
 #[path = "multi_load/driver.rs"]
 mod driver;
 pub(super) use driver::drive;
+
+#[path = "multi_load/mesh.rs"]
+mod mesh;
 
 #[path = "multi_load/restoration.rs"]
 pub(super) mod restoration;
@@ -76,7 +80,7 @@ impl LoadFamily {
     pub(super) fn dwr_case_count(&self) -> Option<usize> {
         (self.aggregate == RobustAggregate::WeightedSum).then_some(self.additional.len() + 1)
     }
-    pub(super) fn html(&self, history: &History) -> String {
+    pub(super) fn html(&self, history: &History, resolution: Option<ResolutionPolicy>) -> String {
         let admission = if self.restoration_reduction.is_some() {
             "Every case, including zero-weight cases, contributes to measured worst stress excess during restoration and must meet the unweighted stress limit before compliance descent."
         } else {
@@ -85,6 +89,7 @@ impl LoadFamily {
         format!("<p>{} independent right-edge operating conditions, including the primary scenario with weight one. Compliance columns report the {} objective; weights are not probabilities and forces are never summed. {admission} Study case solves: {}/{}. Lifetime recovery case solves: {}/{}. Candidate CG and stress sampling are cancellable; baseline construction and two-family checkpoint recovery currently remain synchronous.</p>",
             history.cases.len(), aggregate_name(self.aggregate), history.solves, self.max_solves,
             history.recovery_solves, self.max_recovery_solves)
+            + &mesh::html(resolution, history.mesh.as_ref())
     }
 
     pub(super) fn canonical(&self, out: &mut String) {
@@ -202,6 +207,7 @@ pub(super) struct History {
     recovery_solves: usize,
     // Separates a finished optimizer from an interrupted final assessment.
     optimizer_terminal: Option<&'static str>,
+    mesh: Option<mesh::LastCheck>,
 }
 
 impl History {
@@ -210,17 +216,17 @@ impl History {
         self.solves = owner.solves_started();
     }
 
-    pub(super) fn json_field(&self, family: &LoadFamily) -> String {
+    pub(super) fn json_field(&self, family: &LoadFamily, resolution: Option<ResolutionPolicy>) -> String {
         let terminal = self.optimizer_terminal.map_or_else(String::new,
             |status| format!(",\"optimizer_terminal\":{}", quoted(status)));
         format!(concat!(",\"load_family\":{{\"schema\":\"independent-loads-v1\",",
             "\"startup_and_recovery\":\"synchronous\",\"aggregate\":{},\"cases\":[{}],\"baseline_cases\":{},\"accepted_cases\":[{}],",
             "\"solves_started\":{},\"max_solves\":{},\"recovery_solves_used\":{},",
-            "\"max_recovery_solves\":{},\"checkpoint_hex\":{}{}}}"),
+            "\"max_recovery_solves\":{},\"checkpoint_hex\":{}{}{}}}"),
             quoted(aggregate_name(family.aggregate)), cases_json(&self.cases), states_json(&self.baseline),
             self.accepted.iter().map(|row| states_json(row)).collect::<Vec<_>>().join(","),
             self.solves, family.max_solves, self.recovery_solves, family.max_recovery_solves,
-            quoted(&hex(&self.checkpoint)), terminal)
+            quoted(&hex(&self.checkpoint)), terminal, mesh::field(resolution, self.mesh.as_ref()))
     }
 
     pub(super) fn read(value: &JsonValue, baseline: &SampledStressEvaluation,
@@ -285,7 +291,8 @@ impl History {
                 _ => return Err(malformed("invalid assessed load-family optimizer terminal")),
             },
         };
-        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves, optimizer_terminal }))
+        let mesh = mesh::read(value, policy, &cases, &baseline, &accepted)?;
+        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves, optimizer_terminal, mesh }))
     }
 }
 
