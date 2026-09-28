@@ -16,6 +16,8 @@
 //! and stalled are DISTINGUISHABLE outcomes.
 
 pub mod auglag;
+#[cfg(feature = "conduction-assimilation")]
+pub mod conduction_assimilation;
 #[cfg(feature = "equilibrium-design")]
 pub mod equilibrium;
 pub mod interior;

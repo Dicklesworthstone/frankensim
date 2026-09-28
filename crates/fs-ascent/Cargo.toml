@@ -15,9 +15,12 @@ layer = "L4"
 equilibrium-design = ["dep:fs-couple"]
 # Opt-in time-series calibration through RK45, IMEX and structural adjoints.
 transient-design = ["dep:fs-time"]
+# Spatial state reconstruction through the existing conduction producer.
+conduction-assimilation = ["transient-design", "dep:fs-conduction"]
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint" }
+fs-conduction = { path = "../fs-conduction", optional = true }
 fs-couple = { path = "../fs-couple", optional = true }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
