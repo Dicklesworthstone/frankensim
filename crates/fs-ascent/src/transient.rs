@@ -17,6 +17,7 @@ pub mod observations;
 pub mod campaign;
 pub mod imex;
 pub mod structural;
+pub mod variational;
 
 /// One immutable parameter point, including its observation model and data.
 /// `OdeVjp` and `SampleObjective` partials use the SAME decision coordinates as
