@@ -30,7 +30,37 @@ jobs:
         with:
           persist-credentials: false
       - name: Materialize pinned dependencies
-        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # The pinned NumPy snapshot's attributes convert make.bat on
+            # checkout. Restore only this known line-ending-only discrepancy
+            # in the fresh, incomplete CI clone, not an arbitrary dirty sibling.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not the observed line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('literal restoration did not preserve the locked source and index')
+          print('Restored exact locked make.bat bytes; full bootstrap verification remains required.')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
       - name: Test QMC propagation and durable recovery
         run: cargo test --release -p fs-uq --lib product_ && cargo test --release -p fs-uq --test product_qmc --test product_sensitivity
       - name: Test native cooling QMC recovery
