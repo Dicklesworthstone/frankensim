@@ -95,3 +95,7 @@ required-features = ["transient-design"]
 [[test]]
 name = "plate_calibration"
 required-features = ["transient-design"]
+
+[[example]]
+name = "weak_constraint_heat"
+required-features = ["transient-design"]

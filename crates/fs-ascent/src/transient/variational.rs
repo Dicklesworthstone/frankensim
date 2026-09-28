@@ -23,6 +23,9 @@ use fs_time::adaptive::adjoint::trajectory::{
     RecordedRk45, RecordingConfig, RecordingStatus, ReplayBudget, TrajectoryError,
 };
 
+/// Accepted-state composition with the existing fallible L-BFGS engine.
+pub mod study;
+
 #[derive(Debug, Clone)]
 pub struct IntervalPolicy {
     /// The end field is replaced by each declared knot endpoint. The other
