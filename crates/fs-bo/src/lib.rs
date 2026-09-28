@@ -17,6 +17,8 @@ pub mod acq;
 pub mod acq_grad;
 pub mod bo;
 pub mod gp;
+/// Bounded kernel learning that preserves declared per-observation noise.
+pub mod hyper;
 pub mod mf;
 /// Joint-posterior noisy expected improvement for stochastic objectives.
 pub mod noisy;
