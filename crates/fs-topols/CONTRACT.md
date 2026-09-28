@@ -95,6 +95,21 @@ numerical quantities, not certified continuum bounds. Absolute indicator mass
 is a marking signal, not an interval radius; algebraic residuals do not bound
 discretization error.
 
+`assess_weighted_compliance_dwr[_controlled]` assesses the actual linear
+weighted-sum objective over 1..=16 independent traction cases, including cases
+with zero objective weight. Each case uses the same material, clamp, support,
+traction and solver settings as `evaluate_robust_sampled_stress`, with two
+solves on the unchanged geometry. Forces are never summed. Ordered weighted
+sums combine coarse/enriched compliance, signed estimates, absolute indicator
+masses and residual terms; per-case loads and numerical evidence remain
+available. The library test compares every coarse compliance bitwise with the
+sampled-stress owner and checks quadratic load scaling and phase cancellation.
+This estimates compliance error only, not stress error or stress feasibility.
+Worst-case objectives are not supported by this linear-sum assessment.
+Cases run sequentially, with cancellation before each two-solve case and before
+publication; a stopped attempt returns no partial family. Levels 1..=5 bound
+enrichment at level 6. No optimum or certified continuum-error bound follows.
+
 Cancellation checks bracket the entire two-solve estimator. A stop returns no
 partial assessment and cannot mutate geometry. There is no cancellation point
 inside its assembly, solves or residual integration. Focused G3 tests compare

@@ -97,6 +97,10 @@ pub use robust::{
     RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
     RobustStop, evaluate_robust_design, optimize_compliance_robust_guarded,
 };
+pub use robust::dwr::{
+    LoadCaseDwrAssessment, WeightedComplianceDwrAssessment, WeightedComplianceDwrStage,
+    assess_weighted_compliance_dwr, assess_weighted_compliance_dwr_controlled,
+};
 pub use robust_descent::{
     RobustDescentReport, optimize_compliance_multi_load, optimize_compliance_multi_load_guarded,
 };

@@ -20,6 +20,9 @@ const MATERIAL_STRAIN_LIMIT: f64 = 1.0;
 const SOLVER_TOL: f64 = 1e-12;
 const SOLVER_MAX_ITERS: usize = 60_000;
 
+/// Goal-error assessment of the actual weighted-sum objective.
+pub mod dwr;
+
 /// One independent edge-traction scenario.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RobustLoadCase {
