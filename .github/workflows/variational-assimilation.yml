@@ -1,0 +1,32 @@
+name: Variational assimilation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-ascent/src/variational.rs'
+      - 'crates/fs-ascent/src/variational/**'
+      - 'crates/fs-ascent/src/lbfgs.rs'
+      - 'crates/fs-ascent/src/lbfgs/**'
+      - 'crates/fs-ascent/src/wolfe.rs'
+      - 'crates/fs-ascent/src/stop.rs'
+      - 'crates/fs-ascent/examples/transient_fit/**'
+      - '.github/workflows/variational-assimilation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  variational-source:
+    # Compile and execute the actual numerical source, not a formula mirror.
+    # Full workspace Cargo/bootstrap validation remains a separate obligation.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test state-form objective in debug and optimized builds
+        run: |
+          for opt in 0 3; do
+            rustc +stable --edition=2024 --test -C opt-level="$opt" crates/fs-ascent/src/variational.rs -o "$RUNNER_TEMP/variational-$opt"
+            "$RUNNER_TEMP/variational-$opt"
+          done
