@@ -45,25 +45,7 @@ impl GaussianCopulaExecution {
     pub fn new(marginal_plan: &UqPlan, latent_correlation: &[Vec<f64>])
         -> Result<Self, &'static str>
     {
-        let dim = marginal_plan.parameters.len();
-        if dim == 0 || dim > 256 || latent_correlation.len() != dim
-            || latent_correlation.iter().any(|row| row.len() != dim)
-        { return Err("copula requires 1..=256 uniform marginals and a matching latent matrix"); }
-        if !matches!(&marginal_plan.correlation, CorrelationModel::Independent) {
-            return Err("copula construction requires an Independent marginal plan; another joint law cannot be overwritten");
-        }
-        for parameter in &marginal_plan.parameters {
-            if parameter.unit.is_empty() { return Err("uniform marginals require explicit physical units"); }
-            match parameter.kind {
-                UncertaintyKind::AleatoryUniform { lo, hi }
-                    if lo.is_finite() && hi.is_finite() && lo <= hi => {},
-                _ => return Err("Gaussian copula requires explicit finite uniform supports"),
-            }
-        }
-        let mut latent = marginal_plan.clone();
-        latent.parameters = marginal_plan.parameters.iter().map(|parameter|
-            ParameterUncertainty::gaussian(&parameter.name, 0.0, 1.0, "1")).collect();
-        latent.correlation = CorrelationModel::JointGaussian { matrix: latent_correlation.to_vec() };
+        let latent = latent_plan(marginal_plan, latent_correlation)?;
         let execution = UqExecution::new(&latent)?;
         Ok(Self { marginals: marginal_plan.parameters.clone(), execution })
     }
@@ -124,26 +106,57 @@ impl GaussianCopulaExecution {
     }
 
     fn bound_model(&self, model: ContentHash) -> ContentHash {
-        // The inner checkpoint already binds the exact latent matrix, parameter
-        // order/names, sampler, QoI, seed, threshold and lifetime budget.
-        let mut hash = DomainHasher::new("org.frankensim.uq.uniform-gaussian-copula.v1");
-        hash.update(model.as_bytes());
-        hash.update(&(self.marginals.len() as u64).to_le_bytes());
-        for parameter in &self.marginals {
-            hash.update(&(parameter.unit.len() as u64).to_le_bytes());
-            hash.update(parameter.unit.as_bytes());
-            let UncertaintyKind::AleatoryUniform { lo, hi } = parameter.kind else {
-                unreachable!("private admitted marginals");
-            };
-            hash.update(&lo.to_bits().to_le_bytes());
-            hash.update(&hi.to_bits().to_le_bytes());
-        }
-        hash.finalize()
+        bound_model(&self.marginals, model)
     }
 }
 
+// Share admission and the exact transformation with randomized QMC. The
+// method-specific owner still admits the method, PSD matrix and work policy.
+pub(super) fn latent_plan(marginal_plan: &UqPlan, latent_correlation: &[Vec<f64>])
+    -> Result<UqPlan, &'static str>
+{
+    let dim = marginal_plan.parameters.len();
+    if dim == 0 || dim > 256 || latent_correlation.len() != dim
+        || latent_correlation.iter().any(|row| row.len() != dim)
+    { return Err("copula requires 1..=256 uniform marginals and a matching latent matrix"); }
+    if !matches!(&marginal_plan.correlation, CorrelationModel::Independent) {
+        return Err("copula construction requires an Independent marginal plan; another joint law cannot be overwritten");
+    }
+    for parameter in &marginal_plan.parameters {
+        if parameter.unit.is_empty() { return Err("uniform marginals require explicit physical units"); }
+        match parameter.kind {
+            UncertaintyKind::AleatoryUniform { lo, hi }
+                if lo.is_finite() && hi.is_finite() && lo <= hi => {},
+            _ => return Err("Gaussian copula requires explicit finite uniform supports"),
+        }
+    }
+    let mut latent = marginal_plan.clone();
+    latent.parameters = marginal_plan.parameters.iter().map(|parameter|
+        ParameterUncertainty::gaussian(&parameter.name, 0.0, 1.0, "1")).collect();
+    latent.correlation = CorrelationModel::JointGaussian { matrix: latent_correlation.to_vec() };
+    Ok(latent)
+}
+
+pub(super) fn bound_model(marginals: &[ParameterUncertainty], model: ContentHash) -> ContentHash {
+    // The inner checkpoint already binds the exact latent matrix, parameter
+    // order/names, sampler, QoI, seed, threshold and lifetime budget.
+    let mut hash = DomainHasher::new("org.frankensim.uq.uniform-gaussian-copula.v1");
+    hash.update(model.as_bytes());
+    hash.update(&(marginals.len() as u64).to_le_bytes());
+    for parameter in marginals {
+        hash.update(&(parameter.unit.len() as u64).to_le_bytes());
+        hash.update(parameter.unit.as_bytes());
+        let UncertaintyKind::AleatoryUniform { lo, hi } = parameter.kind else {
+            unreachable!("private admitted marginals");
+        };
+        hash.update(&lo.to_bits().to_le_bytes());
+        hash.update(&hi.to_bits().to_le_bytes());
+    }
+    hash.finalize()
+}
+
 #[derive(Debug)]
-enum EvaluationError<E> { Transform(&'static str), Producer(E) }
+pub(super) enum EvaluationError<E> { Transform(&'static str), Producer(E) }
 impl<E: Display> Display for EvaluationError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self { Self::Transform(reason) => write!(f, "copula transform: {reason}"),
@@ -151,7 +164,7 @@ impl<E: Display> Display for EvaluationError<E> {
     }
 }
 
-fn physical_parameters(marginals: &[ParameterUncertainty], latent: &[f64]) -> Result<Vec<f64>, &'static str> {
+pub(super) fn physical_parameters(marginals: &[ParameterUncertainty], latent: &[f64]) -> Result<Vec<f64>, &'static str> {
     if marginals.len() != latent.len() { return Err("latent sample arity differs"); }
     marginals.iter().zip(latent).map(|(parameter, &z)| {
         if !z.is_finite() { return Err("nonfinite latent normal"); }
