@@ -5,22 +5,25 @@
 //! the tradeoff with freely estimated model-error increments. Parameter/state
 //! confounding is not solved by adding a prior and no identifiability is claimed.
 //! Model coordinates can be physical parameters or explicit transforms (e.g.
-//! log rate); OdeVjp and observation partials must use those SAME coordinates.
+//! log rate); interval-map and observation partials use those SAME coordinates.
 
 use super::{IntervalPolicy, WeakConstraintWindow, WindowControl, WindowError,
     WindowEvaluation, WindowObjective, Sum, copy, finite, poll, zeros};
 use super::study::{StudySettings, WindowStudyError};
+use super::intervals::IntervalScheme;
 use fs_time::adaptive::adjoint::OdeVjp;
 use crate::{LbfgsError, LbfgsReport, LbfgsState, StopReason, StopRule};
 
 /// Pure factory at one parameter point. The returned model owns the observation
-/// loss and its explicit parameter partials as well as the ODE and its VJP.
+/// loss and its explicit parameter partials. The chosen IntervalScheme supplies
+/// the numerical forecast and derivative contract (OdeVjp for RK45, ImexVjp
+/// for the stiff adapter). The factory need not pretend to be an explicit ODE.
 /// Parameters are unbounded finite coordinates; implement a smooth transform
 /// inside the model for positive physical quantities. Domain/producer errors
 /// propagate, never become artificial objective penalties. The factory receives
 /// cancellation and is charged as part of its window evaluation before running.
 pub trait ParameterFamily {
-    type Model: OdeVjp + WindowObjective;
+    type Model: WindowObjective;
     fn instantiate(&self, coordinates: &[f64], cancelled: &mut dyn FnMut() -> bool)
         -> Result<Self::Model, String>;
 }
@@ -62,11 +65,22 @@ impl<'a, F: ParameterFamily> JointWindow<'a, F> {
     }
     pub fn evaluate<C: FnMut() -> bool>(&self, point: &[f64], policy: &IntervalPolicy,
         control: &mut WindowControl, cancelled: &mut C) -> Result<JointEvaluation, WindowError>
+    where F::Model: OdeVjp,
     {
+        self.evaluate_using(point, policy, control, cancelled)
+    }
+
+    /// Joint state/parameter evaluation through a declared discrete integrator.
+    /// One shared parameter point supplies every interval; both implicit-stage
+    /// and direct sensor partials contribute without extra solves per parameter.
+    /// Model-error and parameter-prior scales stay fixed during differentiation.
+    pub fn evaluate_using<S: IntervalScheme<F::Model>, C: FnMut() -> bool>(
+        &self, point: &[f64], policy: &S, control: &mut WindowControl, cancelled: &mut C,
+    ) -> Result<JointEvaluation, WindowError> {
         poll(cancelled)?;
         if point.len() != self.control_dimension() || point.iter().any(|v| !v.is_finite())
-            || !policy.initial_step.is_finite() || policy.initial_step <= 0.0
-        { return Err(WindowError::Invalid("invalid joint controls or initial step")); }
+        { return Err(WindowError::Invalid("invalid joint controls")); }
+        policy.validate(self.window.times())?;
         control.admit(self.window.times.len()-1, self.workspace_components()?)?;
         let n = self.window.control_dimension(); let p = self.mean.len();
         let mut parameters = zeros(p)?;
@@ -79,10 +93,10 @@ impl<'a, F: ParameterFamily> JointWindow<'a, F> {
         let model = self.family.instantiate(&parameters, &mut check);
         if check() { return Err(WindowError::Cancelled); }
         let model = model.map_err(WindowError::Model)?;
-        if model.dimension() != self.window.dimension() || model.parameter_count() != p {
+        if policy.dimension(&model) != self.window.dimension() || policy.parameter_count(&model) != p {
             return Err(WindowError::Invalid("instantiated joint model dimensions"));
         }
-        let window = self.window.evaluate_admitted(&model, &model, &point[..n], policy, control, cancelled)?;
+        let window = self.window.evaluate_admitted_using(&model, &model, &point[..n], policy, control, cancelled)?;
         let mut gradient = zeros(self.control_dimension())?;
         gradient[..n].copy_from_slice(&window.gradient);
         let mut prior = Sum::default();
@@ -117,28 +131,28 @@ pub struct JointEvaluation {
 /// coordinates, states, gradients and penalty components remain paired. Clone
 /// retains curvature and evaluation count but cannot clone the work allowance.
 /// Factories/data/scales/policies must remain unchanged across continuation.
-pub struct JointWindowStudy<'a, 'w, F> {
+pub struct JointWindowStudy<'a, 'w, F, S = IntervalPolicy> {
     window: &'a JointWindow<'w, F>,
-    policy: IntervalPolicy,
+    policy: S,
     settings: StudySettings,
     optimizer: LbfgsState,
     accepted: JointEvaluation,
 }
-impl<F> Clone for JointWindowStudy<'_, '_, F> {
+impl<F, S: Clone> Clone for JointWindowStudy<'_, '_, F, S> {
     fn clone(&self) -> Self {
         Self { window: self.window, policy: self.policy.clone(), settings: self.settings,
             optimizer: self.optimizer.clone(), accepted: self.accepted.clone() }
     }
 }
-impl<'a, 'w, F: ParameterFamily> JointWindowStudy<'a, 'w, F> {
-    pub fn new(window: &'a JointWindow<'w, F>, point: &[f64], policy: IntervalPolicy,
+impl<'a, 'w, F: ParameterFamily, S: IntervalScheme<F::Model>> JointWindowStudy<'a, 'w, F, S> {
+    pub fn new(window: &'a JointWindow<'w, F>, point: &[f64], policy: S,
         settings: StudySettings, control: &mut WindowControl, cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, WindowStudyError> {
         poll(cancelled).map_err(LbfgsError::Evaluation)?;
         settings.validate(window.control_dimension())?;
         let mut accepted = None;
         let optimizer = LbfgsState::try_new(point, settings.memory, &mut |z| {
-            let evaluation = window.evaluate(z, &policy, control, cancelled)?;
+            let evaluation = window.evaluate_using(z, &policy, control, cancelled)?;
             let result = (evaluation.value, evaluation.gradient.clone()); accepted = Some(evaluation);
             Ok::<_, WindowError>(result)
         })?;
@@ -164,7 +178,7 @@ impl<'a, 'w, F: ParameterFamily> JointWindowStudy<'a, 'w, F> {
     {
         let window = self.window; let policy = &self.policy; let mut candidate = None;
         let result = self.optimizer.try_run(&mut |z| {
-            let evaluation = window.evaluate(z, policy, control, cancelled)?;
+            let evaluation = window.evaluate_using(z, policy, control, cancelled)?;
             let output = (evaluation.value, evaluation.gradient.clone()); candidate = Some(evaluation);
             Ok::<_, WindowError>(output)
         }, &StopRule::GradNorm(self.settings.gradient_tolerance), iterations, self.settings.max_evaluations);

@@ -154,3 +154,5 @@ fn stiff_missing_heating_is_reconstructed_and_model_error_allowance_matters() {
     let norm=|v:&[f64]|v.iter().map(|x|x*x).sum::<f64>().sqrt();
     assert!(norm(&results[1].defects)<norm(&results[0].defects));
 }
+
+mod joint;

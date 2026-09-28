@@ -4,6 +4,8 @@ use super::{IntervalPolicy, WeakConstraintWindow, WindowControl, WindowError,
     WindowEvaluation, WindowObjective, poll};
 use crate::{LbfgsError, LbfgsReport, LbfgsState, StopReason, StopRule};
 use super::intervals::IntervalScheme;
+#[cfg(test)]
+use fs_time::adaptive::adjoint::OdeVjp;
 
 pub type WindowStudyError = LbfgsError<WindowError>;
 
