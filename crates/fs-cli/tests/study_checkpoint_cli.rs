@@ -194,7 +194,7 @@ fn elasticity_objective_twins_respond_to_the_load_and_the_material_budget() {
 fn final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work() {
     let dir = scratch("final-dwr");
     let path = dir.join("assessed.fsim");
-    let source = FIXTURE.replace(":mesh-level 4", ":mesh-level 3")
+    let source = FIXTURE.replace(":mesh-level 5", ":mesh-level 3")
         .replace(":max-iterations 32", ":max-iterations 1")
         .replace(":steps 32", ":steps 1")
         .replace(":move-cells 0.35", ":move-cells 0.05")

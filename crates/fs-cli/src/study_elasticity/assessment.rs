@@ -7,6 +7,9 @@ use super::*;
 use fs_topols::{ComplianceDwrAssessment, ComplianceDwrStage};
 use std::ops::ControlFlow;
 
+// This file is itself included through #[path], so a bare `mod multi_load;`
+// would resolve beside it (study_elasticity/multi_load.rs), not in assessment/.
+#[path = "assessment/multi_load.rs"]
 mod multi_load;
 pub(super) use multi_load::run as run_multi_load;
 
