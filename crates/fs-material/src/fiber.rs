@@ -410,6 +410,7 @@ pub struct WoolFelt {
     /// Unload/reload exponent `q ≥ p`.
     pub q: f64,
     /// Residual-crush fraction `c ∈ (0, 1)` of the maximum excursion.
+    /// `c = 0` with `q = p` is the conservative power-law limit.
     pub crush_fraction: f64,
     /// Densification strain — validity bound where felt bottoms out.
     pub eps_densify: f64,
@@ -429,7 +430,7 @@ impl WoolFelt {
     ///
     /// # Errors
     /// [`MaterialError::Parameters`] unless `f_ref > 0`, `eps_ref > 0`,
-    /// `p > 1`, `q ≥ p`, `0 < crush_fraction < 1`, and
+    /// `p > 1`, `q ≥ p`, `0 < crush_fraction < 1` (or `c = 0, q = p`), and
     /// `eps_densify > eps_ref` — the parameter region where the
     /// dissipation proof above holds strictly.
     pub fn new(
@@ -446,12 +447,12 @@ impl WoolFelt {
             && p > 1.0
             && q >= p
             && q.is_finite()
-            && crush_fraction > 0.0
+            && (crush_fraction > 0.0 || (crush_fraction == 0.0 && q == p))
             && crush_fraction < 1.0
             && eps_densify > eps_ref)
         {
             return Err(MaterialError::Parameters {
-                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1, densify>ref"
+                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1 or crush=0 with q=p, densify>ref"
                     .to_string(),
             });
         }
