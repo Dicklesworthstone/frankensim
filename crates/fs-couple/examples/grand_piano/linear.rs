@@ -16,7 +16,9 @@
 //! coupling is second-order consistent, NOT the exact full coupled propagator.
 //! No new oscillator, eigensolver or matrix factorization is implemented here.
 //!
-//! All unison members and duplex segments of a course share its bridge shape.
+//! All unison members and duplex segments of a course/polarization share its
+//! bridge shape. Optional orthogonal transverse motion uses the SAME bank,
+//! board coordinates and energy, not a second independent piano.
 //! Reduce partial forces BEFORE projecting to the board, and project board
 //! displacement ONCE per course. This exact reassociation changes roundoff,
 //! not the retained model: O(partials + courses*board_modes + board_modes^2)
@@ -71,6 +73,12 @@ pub struct StringMode {
 #[derive(Clone, Debug)]
 pub struct StringPort {
     pub course: usize,
+    /// Physical unison member, independent of contact-site subdivision.
+    pub member: usize,
+    /// 0: original hammer/vertical plane; 1: orthogonal transverse plane.
+    pub polarization: usize,
+    /// Segment identity must not be inferred from the absence of hammer contact.
+    pub duplex: bool,
     pub modes: std::ops::Range<usize>,
     pub bridge: Vec<f64>,
     pub hammer_lift: f64,
@@ -230,12 +238,34 @@ impl Bank {
     /// oversampling never silently admits inaudible/aliased retained modes.
     pub fn new(courses: &[Course], board: &[BoardMode], rate: u32, band_hz: f64,
         max_modes: usize, damping: bool) -> Result<Self, String> {
+        Self::new_with_transverse_bridge(courses,board,rate,band_hz,max_modes,damping,None)
+    }
+
+    /// Optional orthogonal transverse bridge rows, course-major, in the SAME
+    /// bare-board basis as BoardMode::bridge. The geometry consumer must project
+    /// a physical unit direction orthogonal to the hammer plane and string axis.
+    /// Both polarizations retain every speaking/unison/duplex mode admitted by
+    /// the original per-span frequency budget, with the same physical T, EI, mu.
+    /// Only the original vertical plane is directly struck. There is ONE hammer
+    /// per course, not twice the contact area, force or launch energy. Each
+    /// direction contributes its own endpoint kinetic/potential quadratic form;
+    /// this is vector motion of one string mass, not twice its scalar mass.
+    /// None preserves the original arithmetic and retained coordinates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_transverse_bridge(courses: &[Course], board: &[BoardMode], rate: u32,
+        band_hz: f64, max_modes: usize, damping: bool, secondary: Option<&[Vec<f64>]>)
+        -> Result<Self, String> {
         let r = board.len();
         if courses.is_empty() || courses.len() > 88 || !(1..=MAX_BOARD_MODES).contains(&r)
             || !(1..=MAX_STRING_MODES).contains(&max_modes) || rate < 8_000
             || !band_hz.is_finite() || band_hz <= 0.0 || band_hz > 0.45*f64::from(rate) {
             return Err("invalid course, modal, frequency or sample-rate budget".into());
         }
+        if secondary.is_some_and(|rows| rows.len()!=courses.len()
+            || rows.iter().any(|row|row.len()!=r || row.iter().any(|x|!x.is_finite()))) {
+            return Err("transverse bridge rows must cover every course and bare-board mode".into());
+        }
+        let planes=if secondary.is_some() {2}else{1};
         for b in board {
             if !b.frequency_hz.is_finite() || b.frequency_hz <= 0.0
                 || !b.damping_ratio.is_finite() || b.damping_ratio < 0.0
@@ -244,7 +274,7 @@ impl Bank {
             }
         }
         let mut strings = Vec::new();
-        let mut groups = Vec::with_capacity(courses.len());
+        let mut groups = Vec::with_capacity(courses.len()*planes);
         let mut modes = Vec::new();
         let mut contact_strings = Vec::new();
         let mut oscillator = Vec::new();
@@ -260,6 +290,7 @@ impl Bank {
         let mut omitted_duplex_modes = 0;
         for (ci, c) in courses.iter().enumerate() {
             c.validate()?;
+            for polarization in 0..planes {
             let group_start = strings.len();
             for member in 0..c.unison {
                 let cents = (member as f64 - 0.5*(c.unison-1) as f64)*c.detune_cents;
@@ -273,7 +304,9 @@ impl Bank {
                     let mut modal_endpoint_k = 0.0;
                     let mut hammer_lift = c.strike_fraction;
                     let mut damper_lift = 0.35; // authored station, replace for measured dampers
-                    let bridge: Vec<f64> = board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect();
+                    let bridge: Vec<f64> = if polarization==0 {
+                        board.iter().map(|b| b.bridge[usize::from(c.midi-21)]).collect()
+                    } else {secondary.expect("admitted transverse rows")[ci].clone()};
                     for n in 1..=max_modes {
                         let f = card.partial_hz(n, tension);
                         if !f.is_finite() { return Err("derived string frequency overflow".into()); }
@@ -306,14 +339,15 @@ impl Bank {
                         endpoint_k[i*r+j] += tension/card.length_m*bridge[i]*bridge[j];
                         loaded_add[i*r+j] += modal_endpoint_k*bridge[i]*bridge[j];
                     } }
-                    let contact = if duplex { None } else {
+                    let contact = if duplex || polarization!=0 { None } else {
                         let index = contact_strings.len(); contact_strings.push(si); Some(index)
                     };
-                    strings.push(StringPort { course: ci, modes: start..modes.len(), bridge,
+                    strings.push(StringPort { course: ci, member, polarization, duplex, modes: start..modes.len(), bridge,
                         hammer_lift, damper_lift, contact });
                 }
             }
             groups.push(group_start..strings.len());
+            }
         }
         let loaded: Vec<f64> = endpoint_k.iter().zip(&loaded_add).map(|(x,y)| x+y).collect();
         let eig = fs_modal::eigh_gen_dense(&loaded, &mass, r).map_err(|e| e.to_string())?;
@@ -390,6 +424,10 @@ impl Bank {
             contact_board,
             free_q:vec![0.0;n+r],free_v:vec![0.0;n+r],
             r_string:vec![0.0;n],board_rhs:vec![0.0;r],board_end:vec![0.0;r] })
+    }
+
+    pub fn has_secondary_polarization(&self)->bool {
+        self.strings.iter().any(|s|s.polarization==1)
     }
 
     /// Cold projection of a physical bare-board shape into the SAME loaded
@@ -785,3 +823,7 @@ mod tests {
         assert_eq!(pointers,(b.next_q.as_ptr(),b.next_v.as_ptr(),b.contact_response.as_ptr()));
     }
 }
+
+#[cfg(test)]
+#[path="polarization_bank_tests.rs"]
+mod polarization_tests;

@@ -2,7 +2,7 @@
 name = "fs-sparse"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Sparse formats (CSR/BSR/SELL-C-sigma), deterministic assembly, SpMV/SpMM, AMG."

@@ -2,7 +2,7 @@
 name = "fs-blake3"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Pure safe-Rust BLAKE3 plain and derive-domain modes: the workspace's 32-byte content-hash owner."

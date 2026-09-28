@@ -2,7 +2,7 @@
 name = "fs-qty"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Compile-time dimensional analysis (Qty) plus runtime-checked QtyAny and SI unit parsing."

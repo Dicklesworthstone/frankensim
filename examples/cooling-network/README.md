@@ -6,6 +6,21 @@ cargo test -p fs-cli --bin frankensim network_command::tests
 cargo test -p fs-cli --test cooling_network
 ```
 
+> **Transient numbers (2026-09-25).** Commit 05db922bf made the transient
+> heat capacity row-sum lumped. The consistent P1 mass let a cold radiative sink
+> raise a sampled peak, which violates the comparison principle. On the 12-tet
+> teaching meshes, sampled transient peaks moved by up to about 2 K. On a
+> refined plate the two rules agree within 0.6% and converge together. Steady
+> results are unchanged. Several examples' temperature limits were re-tuned to
+> keep their role; see 45af6da3d. TRANSIENT_COOLING, ADAPTIVE_COOLING,
+> NONLINEAR_TRANSIENT_COOLING, REPEATED_COOLING, TRANSIENT_DESIGN,
+> ENCLOSURE_RADIATION, COMPONENT_POWER_ALLOCATION, MULTI_LIMIT_ALLOCATION,
+> TIME_CONVERGENCE, TRANSIENT_RADIATION, TRANSIENT_ADJOINT, ENCLOSURE_ADJOINTS
+> and RADIATIVE_TRAJECTORY_ADJOINTS (the last five re-measured 2026-09-26) now
+> state FrankenSim's measured lumped values next to their
+> consistent-mass references. ADAPTIVE_MESH_COOLING and RADIATIVE_MESH_STUDIES
+> cover steady problems, so they are unaffected.
+
 This **experimental binary command** accepts a JSON request containing an actual
 linear tetrahedral solid, named exterior cooling faces, a quadratic hydraulic
 graph, independent pressure-reservoir temperatures, and explicit numerical

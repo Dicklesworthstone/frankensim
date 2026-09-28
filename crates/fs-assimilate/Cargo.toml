@@ -2,13 +2,17 @@
 name = "fs-assimilate"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Data assimilation: checked linear-Gaussian belief updates from instrument observations, with registration-free point sensors and honestly estimated, content-addressed posterior candidates for external validation."
 
 [package.metadata.frankensim]
 layer = "L4"
+
+[features]
+# Opt-in ensemble estimation beyond the dense Gaussian state envelope.
+ensemble = []
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -23,3 +27,7 @@ fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "ensemble_heat"
+required-features = ["ensemble"]

@@ -32,11 +32,13 @@ fn close(a: f64, b: f64, tol: f64) { assert!((a-b).abs() <= tol, "{a:e} != {b:e}
 fn manufactured_source() -> ScalarField {
     let old = [299.0,299.5,300.2,300.4];
     let target = [300.0,301.0,302.0,303.0];
-    // Unit tetra: V=1/6, M=V/20*(I+11^T), grad(T)=[1,2,3].
-    // K*T=V*k(Tmean)*[-6,1,2,3], with k(301.5)=1.03.
-    // M^-1 K*T=20*k*[-6,1,2,3] (the conductive load sums to zero).
+    // Unit tetra: V=1/6, source load M=V/20*(I+11^T), lumped capacity
+    // C=rho_c*V/4*I, grad(T)=[1,2,3]. K*T=V*k(Tmean)*[-6,1,2,3], k(301.5)=1.03.
+    // f = M^-1 (C d/dt + K T) with M^-1=(20/V)(I-11^T/5):
+    // (20/V)(rho_c V/4)/dt = 1250 multiplies d-sum(d)/5; K*T sums to zero.
+    let mean: f64 = (0..4).map(|i| target[i]-old[i]).sum::<f64>()/5.0;
     ScalarField::Nodal((0..4).map(|i|
-        100.0/0.4*(target[i]-old[i])+20.0*1.03*[-6.,1.,2.,3.][i]).collect())
+        1250.0*(target[i]-old[i]-mean)+20.0*1.03*[-6.,1.,2.,3.][i]).collect())
 }
 
 #[test]

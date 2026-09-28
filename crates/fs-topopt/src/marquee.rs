@@ -10,8 +10,8 @@
 //!
 //! DWR-goal-driven refinement: fs-dwr's per-leaf compliance-goal
 //! indicators gate one-level refinement of the cut band and its ghost-
-//! penalty halo — the quadtree refines when enough of the OBJECTIVE's
-//! estimated error mass lies on the design boundary.
+//! penalty halo — the quadtree refines when the OBJECTIVE's estimated
+//! error mass is concentrated on exactly that refinement target.
 
 use fs_cutfem::sdf::CutSdf;
 use fs_cutfem::{CellKey, FemParams, Quadtree, ScalarSample, Space};
@@ -25,10 +25,20 @@ use std::collections::BTreeMap;
 /// Bump this whenever the mass partition, strict comparison, level-advance
 /// semantics, or spatial target changes; reports carry the version so old
 /// evidence cannot be mistaken for evidence from a revised policy.
-pub const DWR_CUT_BAND_POLICY_VERSION: u16 = 1;
+///
+/// Version 2 measures mass on the region the policy actually refines (cut
+/// cells plus their one-cell ghost halo, [`in_dwr_refinement_band`]) and adds
+/// a concentration clause. Version 1 counted only zero-straddling cells, so
+/// it measured a different region than it refined: on the seeded marquee at
+/// level 4 the cut cells held 11% of the mass on 10% of the cells, while
+/// cut + halo held 48% on 26%, and the largest indicators sat one cell off
+/// the interface. The gate never fired and the marquee never refined.
+pub const DWR_CUT_BAND_POLICY_VERSION: u16 = 2;
 
-/// Strict fraction of absolute DWR mass that must lie on estimator-time cut
-/// cells before the global band receives one additional level of headroom.
+/// Strict fraction of absolute DWR mass that must lie on estimator-time
+/// refinement-band leaves before the band receives one more level. The band
+/// must also hold strictly more than its area share of the mass, so a band
+/// that covers most of the domain cannot pass on area alone.
 pub const DWR_CUT_BAND_MASS_GATE: f64 = 0.15;
 
 /// Exhaustive reason emitted by the versioned DWR cut-band policy.
@@ -38,8 +48,9 @@ pub enum DwrBandDecision {
     Disabled,
     /// Every supplied indicator had zero absolute mass.
     ZeroMass,
-    /// Positive mass existed, but its estimator-time cut fraction did not
-    /// strictly exceed [`DWR_CUT_BAND_MASS_GATE`].
+    /// Positive mass existed, but its estimator-time refinement-band share
+    /// did not strictly exceed both [`DWR_CUT_BAND_MASS_GATE`] and the band's
+    /// area share.
     GateNotMet,
     /// The mass gate passed, but the current band was already at the analysis
     /// grid's maximum level.
@@ -421,8 +432,15 @@ pub struct DwrBandRefinement {
     /// Versioned policy that produced this decision.
     pub policy_version: u16,
     /// Sum of absolute indicator mass on zero-straddling cells of the
-    /// estimator's analysis snapshot.
+    /// estimator's analysis snapshot (forensic; a subset of `band_mass`).
     pub cut_mass: f64,
+    /// Sum of absolute indicator mass on refinement-band leaves (cut cells
+    /// and their one-cell halo) of the analysis snapshot. The gate reads this.
+    pub band_mass: f64,
+    /// Summed area of the refinement-band leaves that carry indicators.
+    pub band_area: f64,
+    /// Summed area of every leaf that carries an indicator.
+    pub total_area: f64,
     /// Sum of absolute indicator mass over every supplied cell.
     pub total_mass: f64,
     /// Band level before this decision.
@@ -455,6 +473,9 @@ pub struct DwrBandRefinement {
 struct DwrBandAdvanceReceipt {
     policy_version: u16,
     cut_mass: f64,
+    band_mass: f64,
+    band_area: f64,
+    total_area: f64,
     total_mass: f64,
     previous_level: u32,
     decision: DwrBandDecision,
@@ -467,10 +488,29 @@ struct DwrBandAdvanceReceipt {
 /// refinement band must include the halo, not just the straddling
 /// cells (the CutBandNotUniform contract, learned the hard way twice).
 fn halo_cut(sdf: &dyn CutSdf, lo: [f64; 2], hi: [f64; 2]) -> bool {
-    let (wx, wy) = (hi[0] - lo[0], hi[1] - lo[1]);
-    let xlo = [(lo[0] - wx).max(0.0), (lo[1] - wy).max(0.0)];
-    let xhi = [(hi[0] + wx).min(1.0), (hi[1] + wy).min(1.0)];
-    sdf.enclose(xlo, xhi).contains_zero()
+    sdf.enclose_halo(lo, hi).contains_zero()
+}
+
+/// Whether leaf `[lo, hi]` belongs to the DWR refinement band: the cell or
+/// its one-cell halo straddles the zero level set. This is the exact
+/// predicate the policy refines and, since policy version 2, the partition
+/// its mass gate measures.
+#[must_use]
+pub fn in_dwr_refinement_band(sdf: &dyn CutSdf, lo: [f64; 2], hi: [f64; 2]) -> bool {
+    halo_cut(sdf, lo, hi)
+}
+
+trait HaloEnclosure {
+    fn enclose_halo(&self, lo: [f64; 2], hi: [f64; 2]) -> Interval;
+}
+
+impl<T: CutSdf + ?Sized> HaloEnclosure for T {
+    fn enclose_halo(&self, lo: [f64; 2], hi: [f64; 2]) -> Interval {
+        let (wx, wy) = (hi[0] - lo[0], hi[1] - lo[1]);
+        let xlo = [(lo[0] - wx).max(0.0), (lo[1] - wy).max(0.0)];
+        let xhi = [(hi[0] + wx).min(1.0), (hi[1] + wy).min(1.0)];
+        self.enclose(xlo, xhi)
+    }
 }
 
 /// Plan a fail-closed cut-band/halo refinement on a private grid clone.
@@ -492,15 +532,12 @@ fn plan_halo_refinement(
         if enclosure_error.borrow().is_some() {
             return false;
         }
-        let (wx, wy) = (hi[0] - lo[0], hi[1] - lo[1]);
-        let xlo = [(lo[0] - wx).max(0.0), (lo[1] - wy).max(0.0)];
-        let xhi = [(hi[0] + wx).min(1.0), (hi[1] + wy).min(1.0)];
-        let enclosure = sdf.enclose(xlo, xhi);
+        let enclosure = sdf.enclose_halo(lo, hi);
         if enclosure.lo().is_finite() && enclosure.hi().is_finite() {
             enclosure.contains_zero()
         } else {
             *enclosure_error.borrow_mut() = Some(format!(
-                "cut-band halo SDF enclosure for box {xlo:?}..{xhi:?} is non-finite: [{}, {}]",
+                "cut-band halo SDF enclosure for cell {lo:?}..{hi:?} is non-finite: [{}, {}]",
                 enclosure.lo(),
                 enclosure.hi()
             ));
@@ -553,6 +590,9 @@ fn classify_dwr_cut_band(
 
     let mut total_mass = 0.0f64;
     let mut cut_mass = 0.0f64;
+    let mut band_mass = 0.0f64;
+    let mut band_area = 0.0f64;
+    let mut total_area = 0.0f64;
     for (&cell, &eta) in indicators {
         if !grid.is_leaf(cell) {
             return Err(fs_cutfem::CutFemError::InvalidFemInput {
@@ -589,12 +629,35 @@ fn classify_dwr_cut_band(
                 });
             }
         }
+        let halo = sdf.enclose_halo(lo, hi);
+        if !(halo.lo().is_finite() && halo.hi().is_finite()) {
+            return Err(fs_cutfem::CutFemError::InvalidFemInput {
+                what: format!(
+                    "DWR halo SDF enclosure for cell {cell:?} is non-finite: [{}, {}]",
+                    halo.lo(),
+                    halo.hi()
+                ),
+            });
+        }
+        let area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
+        total_area += area;
+        if halo.contains_zero() {
+            band_mass += eta.abs();
+            band_area += area;
+            if !band_mass.is_finite() {
+                return Err(fs_cutfem::CutFemError::InvalidFemInput {
+                    what: "DWR refinement-band indicator mass is non-finite".to_string(),
+                });
+            }
+        }
     }
+    // Share of mass versus share of area, cross-multiplied to stay exact.
+    let concentrated = band_mass * total_area > band_area * total_mass;
     let decision = if !enabled {
         DwrBandDecision::Disabled
     } else if total_mass == 0.0 {
         DwrBandDecision::ZeroMass
-    } else if cut_mass <= DWR_CUT_BAND_MASS_GATE * total_mass {
+    } else if band_mass <= DWR_CUT_BAND_MASS_GATE * total_mass || !concentrated {
         DwrBandDecision::GateNotMet
     } else if band_level >= analysis_max_level {
         DwrBandDecision::LevelHeadroomExhausted
@@ -605,6 +668,9 @@ fn classify_dwr_cut_band(
     Ok(DwrBandAdvanceReceipt {
         policy_version: DWR_CUT_BAND_POLICY_VERSION,
         cut_mass,
+        band_mass,
+        band_area,
+        total_area,
         total_mass,
         previous_level: band_level,
         decision,
@@ -622,6 +688,9 @@ fn apply_dwr_band_receipt(
     let DwrBandAdvanceReceipt {
         policy_version,
         cut_mass,
+        band_mass,
+        band_area,
+        total_area,
         total_mass,
         previous_level,
         decision,
@@ -663,6 +732,9 @@ fn apply_dwr_band_receipt(
     Ok(DwrBandRefinement {
         policy_version,
         cut_mass,
+        band_mass,
+        band_area,
+        total_area,
         total_mass,
         previous_level,
         band_level: *band_level,

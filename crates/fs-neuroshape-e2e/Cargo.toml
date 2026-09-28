@@ -2,7 +2,7 @@
 name = "fs-neuroshape-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "NeuroShapeCert: certified facts about a learned neural implicit shape — a Lipschitz bound, interval-sign-margin sphere tracing, and interval evidence that at least one negative component exists and is enclosed by a positive closed frame. The frame yields only a component-count lower bound, never an exact global count; sampled contours and a local finite-difference Hessian remain non-authoritative cross-checks."

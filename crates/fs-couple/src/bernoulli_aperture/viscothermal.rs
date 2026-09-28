@@ -212,7 +212,7 @@ impl WideTubeLoss {
 /// Duplicate/absent selections, more than 1024 total cells, unresolvable original
 /// transit/quarter intervals, >0.5 rad per cell, failed response or existing
 /// network topology/memory/load admission. No numerical limits are relaxed.
-pub fn with_viscothermal_sections(mut graph: TubeNetworkSpec, gas:&GasState, dt:f64,
+pub fn with_viscothermal_sections(graph: TubeNetworkSpec, gas:&GasState, dt:f64,
     selections:&[ViscothermalSectionSpec],gate:&CancelGate)
     -> Result<(TubeNetworkSpec,Vec<ViscothermalSection>),AcousticRealizeError>
 {
@@ -220,6 +220,33 @@ pub fn with_viscothermal_sections(mut graph: TubeNetworkSpec, gas:&GasState, dt:
     if graph.sound_speed_m_s.to_bits()!=gas.sound_speed.to_bits() {
         return Err(invalid("viscothermal medium must equal the network propagation medium"));
     }
+    let (graph, reports, _) = expand_sections(graph, gas, None, dt, selections, gate)?;
+    Ok((graph, reports))
+}
+
+/// Regional form of the same loss discretization. Every replacement interval
+/// inherits its ORIGINAL section gas, including transport properties. Other
+/// sections and original node addresses are retained. No averaged temperature,
+/// extra flight time or second loss law is introduced. The returned gas mapping
+/// must be bound with `ApertureNetwork::with_section_gases`.
+///
+/// # Errors
+/// Incomplete/invalid gas mapping or the unchanged physical/numerical loss gates.
+pub fn with_regional_viscothermal_sections(graph: TubeNetworkSpec, gases: Vec<GasState>, dt:f64,
+    selections:&[ViscothermalSectionSpec],gate:&CancelGate)
+    -> Result<(TubeNetworkSpec,Vec<GasState>,Vec<ViscothermalSection>),AcousticRealizeError>
+{
+    checkpoint(gate)?;
+    graph.validate_section_gases(&gases)?;
+    let inlet = gases[graph.inlet_section_index()?];
+    let (graph, reports, mapped) = expand_sections(graph, &inlet, Some(gases), dt, selections, gate)?;
+    Ok((graph, mapped.expect("regional expansion preserves its mapping"), reports))
+}
+
+fn expand_sections(mut graph: TubeNetworkSpec, uniform:&GasState, gases:Option<Vec<GasState>>, dt:f64,
+    selections:&[ViscothermalSectionSpec],gate:&CancelGate)
+    -> Result<(TubeNetworkSpec,Vec<ViscothermalSection>,Option<Vec<GasState>>),AcousticRealizeError>
+{
     let mut seen=std::collections::BTreeSet::new();
     let mut total=0usize;
     for s in selections {
@@ -229,17 +256,32 @@ pub fn with_viscothermal_sections(mut graph: TubeNetworkSpec, gas:&GasState, dt:
         total=total.checked_add(s.cells).ok_or_else(||invalid("viscothermal cell count overflow"))?;
     }
     if total>1024 {return Err(invalid("viscothermal expansion exceeds 1024 total cells"));}
-    if selections.is_empty() {return Ok((graph,Vec::new()));}
+    if selections.is_empty() {return Ok((graph,Vec::new(),gases));}
     // Bound the mandatory records before allocating; the final owner additionally
     // admits all wave/energy arrays, load states and lowering scratch.
     let minimum=total.checked_mul(4*core::mem::size_of::<NetworkNode>()+4*core::mem::size_of::<TubeSection>())
         .ok_or_else(||invalid("viscothermal record size overflow"))?;
     if minimum>graph.max_wave_memory_bytes {return Err(invalid("viscothermal records exceed network memory budget"));}
     let original=core::mem::take(&mut graph.sections);
+    let mut mapped = if gases.is_some() {
+        let count = original.len().checked_add(4*total-selections.len())
+            .ok_or_else(||invalid("regional loss mapping size overflow"))?;
+        let bytes = count.checked_mul(core::mem::size_of::<GasState>())
+            .and_then(|b| b.checked_add(minimum)).ok_or_else(||invalid("regional loss mapping size overflow"))?;
+        if bytes > graph.max_wave_memory_bytes {return Err(invalid("regional gas and loss records exceed memory budget"));}
+        let mut out = Vec::new();
+        out.try_reserve_exact(count).map_err(|_|invalid("regional gas allocation failed"))?;
+        Some(out)
+    } else { None };
     let mut reports=Vec::new();
     for (index,section) in original.into_iter().enumerate() {
         checkpoint(gate)?;
-        let Some(selection)=selections.iter().find(|s|s.section==index) else {graph.sections.push(section);continue;};
+        let gas = gases.as_ref().map_or(uniform, |states| &states[index]);
+        let Some(selection)=selections.iter().find(|s|s.section==index) else {
+            graph.sections.push(section);
+            if let Some(mapped) = &mut mapped {mapped.push(*gas);}
+            continue;
+        };
         let realized=section.realize(gas.sound_speed,gas.density,dt)?;
         let n=realized.one_way_samples;
         if n<4*selection.cells {return Err(invalid("each viscothermal cell needs four positive propagation intervals"));}
@@ -273,6 +315,7 @@ pub fn with_viscothermal_sections(mut graph: TubeNetworkSpec, gas:&GasState, dt:
                 graph.sections.push(TubeSection {nodes:[left,right],
                     length_m:(boundary(k+1)-boundary(k)) as f64*(gas.sound_speed*dt),
                     radius_m:section.radius_m,max_length_error_m:0.0});
+                if let Some(mapped) = &mut mapped {mapped.push(*gas);}
                 left=right;
             }
         }
@@ -292,13 +335,18 @@ pub fn with_viscothermal_sections(mut graph: TubeNetworkSpec, gas:&GasState, dt:
     // Ask the actual owner to admit topology, port scattering and load histories.
     // This temporary zero-state object is cold admission, not a second solver.
     let mut segments=Vec::new();
-    for s in &graph.sections {let r=s.realize(gas.sound_speed,gas.density,dt)?;
+    for (i,s) in graph.sections.iter().enumerate() {
+        let gas=mapped.as_ref().map_or(uniform,|states| &states[i]);
+        let r=s.realize(gas.sound_speed,gas.density,dt)?;
         segments.push(fs_vfit::waveguide::network::NetworkSegment {nodes:s.nodes,
             one_way_samples:r.one_way_samples,impedance_pa_s_m3:r.impedance_pa_s_m3});}
-    fs_vfit::waveguide::network::WaveguideNetwork::new(&graph.nodes,&segments,dt,graph.max_wave_memory_bytes)
+    let gas_bytes = mapped.as_ref().map_or(0, |states| states.len()*core::mem::size_of::<GasState>());
+    let budget = graph.max_wave_memory_bytes.checked_sub(gas_bytes)
+        .ok_or_else(||invalid("regional gas payload exceeds network memory budget"))?;
+    fs_vfit::waveguide::network::WaveguideNetwork::new(&graph.nodes,&segments,dt,budget)
         .map_err(wave_error)?;
     checkpoint(gate)?;
-    Ok((graph,reports))
+    Ok((graph,reports,mapped))
 }
 
 type Matrix=[C64;4];

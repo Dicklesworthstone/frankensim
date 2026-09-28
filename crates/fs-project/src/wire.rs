@@ -21,10 +21,11 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
-    DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan, FanCurveDecl, FanCurvePoint,
-    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState,
-    MaterialBinding, Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
+    AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
+    ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
+    FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
+    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
     RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
     SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary, ThermalBoundaryCondition,
     ThermalLimit, UnitsDoctrine, Vent, Versions,
@@ -296,7 +297,7 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
     if let Some(geometry) = &spec.geometry {
         let mut items = vec![sym("geometry")];
         for artifact in geometry {
-            items.push(list(vec![
+            let mut row = vec![
                 sym("artifact"),
                 kw("role"),
                 text(&artifact.role),
@@ -306,7 +307,18 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
                 text(&format!("{:016x}", artifact.source_hash)),
                 kw("parser"),
                 text(&artifact.parser_version),
-            ]));
+            ];
+            if let Some(offset) = &artifact.surface_offset {
+                row.extend([
+                    kw("surface-offset-m"),
+                    float(offset.offset_m),
+                    kw("offset-basis"),
+                    text(&offset.basis),
+                    kw("offset-source"),
+                    text(&offset.source),
+                ]);
+            }
+            items.push(list(row));
         }
         sections.push(list(items));
     }
@@ -360,6 +372,16 @@ fn lower_structure(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), P
                 kw("source"),
                 text(&binding.source),
             ]);
+            if let Some(tolerance) = &binding.conductivity_tolerance {
+                row.extend([
+                    kw("conductivity-tolerance-rel"),
+                    float(tolerance.rel),
+                    kw("tolerance-basis"),
+                    text(&tolerance.basis),
+                    kw("tolerance-source"),
+                    text(&tolerance.source),
+                ]);
+            }
             items.push(list(row));
         }
         sections.push(list(items));
@@ -650,7 +672,7 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
         boundaries.push(row);
     }
 
-    Ok(list(vec![
+    let mut declaration = vec![
         sym("conduction"),
         kw("adiabatic-remainder"),
         boolean(setup.adiabatic_remainder),
@@ -658,6 +680,50 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
         list(regions),
         kw("boundaries"),
         list(boundaries),
+    ];
+    if let Some(radiation) = &setup.radiation {
+        declaration.push(kw("radiation"));
+        declaration.push(lower_radiation(radiation)?);
+    }
+    Ok(list(declaration))
+}
+
+fn lower_radiation(radiation: &ConductionRadiation) -> Result<Node, ProjectError> {
+    let mut surfaces = vec![sym("surfaces")];
+    for surface in &radiation.surfaces {
+        let mut row = vec![
+            sym("surface"),
+            kw("name"),
+            text(&surface.name),
+            kw("target"),
+            text(&surface.target),
+            kw("card"),
+            text(&surface.card),
+        ];
+        if let Some(claim) = &surface.claim {
+            row.push(kw("claim"));
+            row.push(text(claim));
+        }
+        row.extend([
+            kw("query-temperature"),
+            qty(surface.query_temperature)?,
+            kw("reservoir-temperature"),
+            qty(surface.reservoir_temperature)?,
+        ]);
+        surfaces.push(list(row));
+    }
+    Ok(list(vec![
+        sym("radiation"),
+        kw("surfaces"),
+        list(surfaces),
+        kw("max-iterations"),
+        int(i64::from(radiation.max_iterations)),
+        kw("temperature-tolerance"),
+        qty(radiation.temperature_tolerance)?,
+        kw("heat-tolerance"),
+        qty(radiation.heat_tolerance)?,
+        kw("relaxation"),
+        float(radiation.relaxation),
     ]))
 }
 
@@ -1641,9 +1707,37 @@ fn read_geometry(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryArtifac
         let pairs = read_pairs(
             inner,
             "artifact",
-            &["role", "format", "source-hash", "parser"],
+            &[
+                "role",
+                "format",
+                "source-hash",
+                "parser",
+                "surface-offset-m",
+                "offset-basis",
+                "offset-source",
+            ],
             out,
         );
+        let surface_offset = match [
+            field(&pairs, "surface-offset-m"),
+            field(&pairs, "offset-basis"),
+            field(&pairs, "offset-source"),
+        ] {
+            [None, None, None] => None,
+            [Some(offset), Some(basis), Some(source)] => Some(SurfaceOffset {
+                offset_m: expect_float(Some(offset), "artifact.surface-offset-m", out),
+                basis: expect_str(Some(basis), "artifact.offset-basis", out),
+                source: expect_str(Some(source), "artifact.offset-source", out),
+            }),
+            _ => {
+                out.push(Violation {
+                    code: "project-malformed-clause",
+                    what: "a surface offset needs `:surface-offset-m`, `:offset-basis` and `:offset-source` together".to_string(),
+                    fix: "declare all three keys, or none".to_string(),
+                });
+                None
+            }
+        };
         let source_hash = {
             let raw = expect_str(field(&pairs, "source-hash"), "artifact.source-hash", out);
             match u64::from_str_radix(&raw, 16) {
@@ -1664,6 +1758,7 @@ fn read_geometry(body: &[Node], out: &mut Vec<Violation>) -> Vec<GeometryArtifac
             format: expect_str(field(&pairs, "format"), "artifact.format", out),
             source_hash,
             parser_version: expect_str(field(&pairs, "parser"), "artifact.parser", out),
+            surface_offset,
         });
     }
     artifacts
@@ -1953,10 +2048,40 @@ fn read_materials(body: &[Node], out: &mut Vec<Violation>) -> Vec<MaterialBindin
             inner,
             "binding",
             &[
-                "region", "card", "claim", "state", "temp-lo", "temp-hi", "source",
+                "region",
+                "card",
+                "claim",
+                "state",
+                "temp-lo",
+                "temp-hi",
+                "source",
+                "conductivity-tolerance-rel",
+                "tolerance-basis",
+                "tolerance-source",
             ],
             out,
         );
+        let tolerance_fields = [
+            field(&pairs, "conductivity-tolerance-rel"),
+            field(&pairs, "tolerance-basis"),
+            field(&pairs, "tolerance-source"),
+        ];
+        let conductivity_tolerance = match tolerance_fields {
+            [None, None, None] => None,
+            [Some(rel), Some(basis), Some(source)] => Some(MaterialTolerance {
+                rel: expect_float(Some(rel), "binding.conductivity-tolerance-rel", out),
+                basis: expect_str(Some(basis), "binding.tolerance-basis", out),
+                source: expect_str(Some(source), "binding.tolerance-source", out),
+            }),
+            _ => {
+                out.push(Violation {
+                    code: "project-malformed-clause",
+                    what: "a conductivity tolerance needs `:conductivity-tolerance-rel`, `:tolerance-basis` and `:tolerance-source` together".to_string(),
+                    fix: "declare all three keys, or none".to_string(),
+                });
+                None
+            }
+        };
         bindings.push(MaterialBinding {
             region: expect_str(field(&pairs, "region"), "binding.region", out),
             card: expect_str(field(&pairs, "card"), "binding.card", out),
@@ -1965,6 +2090,7 @@ fn read_materials(body: &[Node], out: &mut Vec<Violation>) -> Vec<MaterialBindin
             temp_lo: expect_qty(field(&pairs, "temp-lo"), "binding.temp-lo", out),
             temp_hi: expect_qty(field(&pairs, "temp-hi"), "binding.temp-hi", out),
             source: expect_str(field(&pairs, "source"), "binding.source", out),
+            conductivity_tolerance,
         });
     }
     bindings
@@ -2302,7 +2428,7 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
     let pairs = read_pairs(
         body,
         "conduction",
-        &["adiabatic-remainder", "regions", "boundaries"],
+        &["adiabatic-remainder", "regions", "boundaries", "radiation"],
         out,
     );
     let adiabatic_remainder = expect_boolean(
@@ -2516,6 +2642,109 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
         regions,
         boundaries,
         adiabatic_remainder,
+        radiation: field(&pairs, "radiation").and_then(|node| read_radiation(node, out)),
+    })
+}
+
+fn read_radiation(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionRadiation> {
+    let Some(("radiation", body)) = section_name(node) else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`conduction.radiation` must be a `(radiation ...)` declaration".to_string(),
+            fix: "declare named surfaces and explicit radiation convergence controls".to_string(),
+        });
+        return None;
+    };
+    let pairs = read_pairs(
+        body,
+        "radiation",
+        &[
+            "surfaces",
+            "max-iterations",
+            "temperature-tolerance",
+            "heat-tolerance",
+            "relaxation",
+        ],
+        out,
+    );
+    let mut surfaces = Vec::new();
+    match field(&pairs, "surfaces").and_then(section_name) {
+        Some(("surfaces", rows)) => {
+            for node in rows {
+                let Some(("surface", body)) = section_name(node) else {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "`radiation.surfaces` rows must be `(surface ...)`".to_string(),
+                        fix: "declare a name, exterior target, emissivity card, query temperature, and reservoir temperature".to_string(),
+                    });
+                    continue;
+                };
+                let fields = read_pairs(
+                    body,
+                    "radiation.surface",
+                    &[
+                        "name",
+                        "target",
+                        "card",
+                        "claim",
+                        "query-temperature",
+                        "reservoir-temperature",
+                    ],
+                    out,
+                );
+                surfaces.push(RadiatingSurface {
+                    name: expect_str(field(&fields, "name"), "radiation.surface.name", out),
+                    target: expect_str(field(&fields, "target"), "radiation.surface.target", out),
+                    card: expect_str(field(&fields, "card"), "radiation.surface.card", out),
+                    claim: field(&fields, "claim")
+                        .map(|value| expect_str(Some(value), "radiation.surface.claim", out)),
+                    query_temperature: expect_qty(
+                        field(&fields, "query-temperature"),
+                        "radiation.surface.query-temperature",
+                        out,
+                    ),
+                    reservoir_temperature: expect_qty(
+                        field(&fields, "reservoir-temperature"),
+                        "radiation.surface.reservoir-temperature",
+                        out,
+                    ),
+                });
+            }
+        }
+        _ => out.push(Violation {
+            code: "project-malformed-clause",
+            what: "`radiation.surfaces` must be a `(surfaces ...)` list".to_string(),
+            fix: "declare at least one named radiating exterior surface".to_string(),
+        }),
+    }
+    let max_iterations = match field(&pairs, "max-iterations") {
+        Some(Node {
+            kind: NodeKind::Int(value),
+            ..
+        }) if u32::try_from(*value).is_ok() => u32::try_from(*value).unwrap_or_default(),
+        _ => {
+            out.push(Violation {
+                code: "project-malformed-clause",
+                what: "`radiation.max-iterations` expected an integer fitting u32".to_string(),
+                fix: "declare an explicit positive outer-iteration budget fitting u32".to_string(),
+            });
+            0
+        }
+    };
+    Some(ConductionRadiation {
+        surfaces,
+        max_iterations,
+        temperature_tolerance: expect_qty(
+            field(&pairs, "temperature-tolerance"),
+            "radiation.temperature-tolerance",
+            out,
+        ),
+        heat_tolerance: expect_qty(
+            field(&pairs, "heat-tolerance"),
+            "radiation.heat-tolerance",
+            out,
+        ),
+        relaxation: expect_float(field(&pairs, "relaxation"), "radiation.relaxation", out),
     })
 }
 

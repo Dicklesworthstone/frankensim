@@ -2,7 +2,7 @@
 name = "fs-schedule-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "CampaignSchedule: outward-bounded max-plus makespan analysis plus an explicitly Estimated value-of-information recommendation with distinct act, robust-stop, and deficient-menu outcomes."

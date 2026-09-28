@@ -2,7 +2,7 @@
 name = "fs-atmo"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Atmosphere: FlatSiteLogLaw mean wind, wall-compatible solenoidal turbulence, provenance-bound air-state sampling."

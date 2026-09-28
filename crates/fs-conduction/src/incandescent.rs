@@ -94,10 +94,10 @@ pub fn solve_incandescent_radiative_balance(
     let current_a = input.voltage_v / input.hot_resistance_ohm;
     let joule_power_w = input.voltage_v * current_a;
     let denominator = input.emissivity * STEFAN_BOLTZMANN_W_M2_K4 * input.radiating_area_m2;
-    let ambient_fourth = input.ambient_temperature_k.powi(4);
+    let ambient_fourth = fs_math::det::powi(input.ambient_temperature_k, 4);
     let filament_temperature_k = (ambient_fourth + joule_power_w / denominator).sqrt().sqrt();
     let radiative_power_w =
-        denominator * (filament_temperature_k.powi(4) - input.ambient_temperature_k.powi(4));
+        denominator * (fs_math::det::powi(filament_temperature_k, 4) - ambient_fourth);
     let relative_energy_closure =
         (joule_power_w - radiative_power_w).abs() / joule_power_w.max(1.0);
 

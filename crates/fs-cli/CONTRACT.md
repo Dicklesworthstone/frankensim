@@ -446,20 +446,132 @@ ladder status, order, rung count, refinement ratio, safety factor and the
 conduction receipt it was read from.
 
 **Declared-input propagation** (conduction receipt block `propagation`, driver
-version 16). When the project declares an envelope and exactly one
+version 24). When the project declares an envelope and exactly one
 temperature-maximum requirement, the conduction stage re-runs flow-network and
 conduction at base fidelity for each vertex of the declared interval inputs:
 inlet/reference temperature at the envelope bounds crossed with fan-curve
 pressure x (1 -/+ declared tolerance) for the Boundary-conditions term; every
 card-derived coefficient x (1 -/+ the card's discrepancy allowance), inside
 the conjugate fixed point, for the Model-form term; one joint worst corner
-whose excess over the summed half-widths is added to the boundary term; and a
-100x tighter solver tolerance for the Solver-algebraic term. Each half-width is
+whose excess over the summed half-widths is added to the boundary term. Each input half-width is
 the largest deviation of the region maximum from the base-fidelity nominal;
 monotone response per input is assumed and disclosed. A refused vertex, or a
 declared (non-card) coefficient, keeps its term NO-DATA under a specific
 reason. Measurement is always negligible (the pipeline ingests no observation
-data). Roundoff, geometry and material parameters remain NO-DATA; while any
+data).
+
+**Published linear solver error** (`solver_algebraic`, driver version 24).
+For fixed linear conductivity, Robin references and matching contact, the
+Solver-algebraic term now uses the actual published mesh and temperature field,
+including an adaptive or ladder endpoint. `fs-conduction` computes outward
+residuals and a verified inverse bound. Every competing region vertex is
+enclosed using the whole-field bound, so the maximum may relocate without
+inheriting an invalid selected-node claim. No second primal or selected-node
+dual solve is needed. The receipt retains the maximum interval, residual and
+inverse bounds, stability-proposal diagnostics and work counts. Missing inverse
+evidence or a finite-range/structural refusal leaves this term NO-DATA. The
+residual's evaluation roundoff is already included, not a second independent
+uncertainty contribution. This encloses the stored floating-point linear
+system only; the engineering term remains Estimated and establishes no
+assembly, continuum, material or physical-validation claim. Nonlinear
+conductivity and ambient radiation retain the explicitly named
+100x tighter base-solve comparison as an estimate, without a linear enclosure
+claim. Old driver checkpoints cannot resume into the changed analysis.
+
+**Maximum-goal corrections** (`solver_control`, driver version 25). Each
+supported fixed-reference linear mesh solve allocates 10% of `budgets.accuracy_rel` times its
+pre-correction temperature rise above the coolest declared reference to
+algebraic error. With no declared reference, the basis is explicitly the
+pre-correction absolute temperature. This is a frozen requested-accuracy
+allocation, not a measured discretization term. The maximum-controlled driver
+performs bounded corrections only when the field misses that Kelvin target.
+The correction budget is the existing linear iteration cap, with at most two
+defect retries and eight iterations between checks; all are retained alongside
+actual work, initial/final bounds, the allocation scale and the stop reason.
+Every adopted field independently passes the original physical residual gate;
+energy, Robin and contact fluxes are recomputed from it. Adaptive comparisons,
+ladder rows, roundoff and QoI all consume this accepted field. A rejected
+physical candidate preserves the original field and records the failed gate.
+Missing inverse evidence, exhausted work, zero/unrepresentable accuracy scales
+and unsupported nonlinear models never report goal completion. The
+original physical solve still runs; this correction path makes no speedup claim.
+
+**Coupled solid/air maximum error** (`solver_control`, driver version 26).
+For temperature-independent conductivity with fixed flow, geometry and heat
+transfer coefficients, the actual ordered air paths lower to their full affine
+reference law. The published field is checked against `(A - B C) T = b + B d`,
+including the contribution of prescribed temperatures and matching contact.
+The Solver-algebraic term uses `outward-coupled-linear-maximum-enclosure`; its bound
+and inverse include both the complete feedback residual and response-solve
+errors. The verified coupled inverse may use whole-state contraction or the
+port Schur check. Missing inverse evidence stays NO-DATA with its specific
+reason; it never selects a frozen-solid enclosure or a tolerance
+comparison. Port, transfer, response-storage, lowering and verification work
+are capped, and all response columns share one linear-iteration allowance.
+This path analyzes the field already accepted by the physical conjugate solve.
+Its `assessment-only` receipt separates response preparation from zero
+primal correction work and discloses whether the field meets the requested
+accuracy allocation; coupled goal corrections remain unsupported. Preparation
+refusals retain unknown response work as `null`, while evaluation refusals keep
+work already spent. Missing-bound reasons fit the QoI uncertainty contract,
+with full numeric diagnostics retained in `solver_control`. The bound
+concerns the stored affine coefficients, excluding their assembly rounding,
+exact exponential coefficients, nonlinear physics, hydraulic uncertainty,
+discretization and physical validation. Driver identity prevents old receipts
+from being resumed under these changed solver-error semantics.
+
+**Verified inverse proposals** (driver version 28). Fixed-linear maximum
+analysis can verify a numerical inverse when positive diagonal scaling cannot
+establish a bound. The outward `I - A R` check includes every proposed column's
+residual and rounding; storage, verification work and the single shared
+stability-iteration budget remain bounded. This enables consistent contact
+and enriched Robin systems without assuming the proposed inverse is exact.
+The additional route admits at most 256 free unknowns and retains NO-DATA
+when its structural or verification conditions cannot be established.
+
+**Adaptive algebraic balance** (`solver_control`, driver version 29).
+Each supported fixed-linear coarse/enriched comparison now allocates one tenth
+of its current prospective Discretization term to the outward sum of both
+mesh solutions' maximum-error bounds. The term is still the existing Estimated
+`2 * max(abs(estimated_change), abs(measured_change))`, with its assumed
+order-one scope. The sum rounds upward and the allowance rounds downward.
+If necessary, either rung is corrected toward half the pair allowance.
+Every changed field is independently checked against its original physical
+residual gate, then prolonged and compared again before marking or stopping.
+Each pair permits at most four correction rounds; each rung shares its original
+primal-iteration cap across all corrections and permits at most four retarget
+calls, with cumulative stability preparation capped by five original allowances.
+History records the final bounds, pair allowance, correction rounds, physically
+accepted field updates and additional correction iterations. Small fixed-linear
+systems can establish a missing inverse using independently verified numerical
+inverse columns, with at most 256 free unknowns and explicit storage/traversal
+caps; all column solves share the existing stability-preparation allowance. The final `solver_control` uses `measured-adaptive-discretization` and
+keeps the last internal correction target separately from the final allowance.
+A covered pair with missing bounds, exhausted work or an unattainable allowance
+stops as `solver-algebraic-budget` and supplies no Discretization term. It retains
+the accepted physical field and its matching solver-error evidence. Unsupported
+coupled, nonlinear and radiating models retain their prior adaptive comparison
+with an explicit unsupported balance status; this change claims no continuum
+bound or new correction support for those models.
+
+The Roundoff term is fs-conduction's componentwise bound
+`γ_k Σ|λ_i|(|b_i| + (|A||T|)_i)` on the published solve. It uses the exact
+operator behind the field (including a radiating solve's combined partition),
+with λ the adjoint at the hottest vertex of the requirement region. It
+excludes air-network arithmetic and tracks only assembled magnitudes, not
+element-level cancellation, so it is Estimated. Propagation re-solves skip it.
+The Parameters term moves every material binding's declared relative
+conductivity tolerance (fsim v6) to its lower and then its upper bound
+together, re-solving at base fidelity with the card's sampled knots scaled
+over the same temperature span. Its half-width is the larger deviation. With
+no declared tolerance it stays NO-DATA, because the bound cards state no
+conductivity uncertainty. The Geometry term moves every exterior boundary
+vertex of regions assigned from an artifact that declares a surface offset
+(fsim v7) by +/- the offset along its area-weighted outward normal, keeping
+the same topology. The nominal lowering therefore stays valid, while the
+solve, the source (watts conserved over the perturbed volume) and the
+airflow wetted areas use the perturbed geometry. A tet collapsing below a
+tenth of its volume refuses, and contact-coupled bodies refuse. While any
 term is NO-DATA the verdict stays Estimated / indeterminate and the `no_claim`
 text counts the NO-DATA terms. The
 report projects the interval term's magnitude into the uncertainty table and
@@ -585,6 +697,64 @@ at invocation completion; optimizer resume and the generic `--budget` override
 are explicitly refused. A binary without the feature refuses this producer
 with an actionable feature message.
 
+### Native cooling probability study
+
+`study <study.fsim> <ledger.db> [--budget N]` recognizes
+`fsim-uncertainty-study :version 1` and executes the
+`native-cooling-uncertainty-v1` producer. The example is
+`examples/native-uncertainty/study.fsim`. It binds 1..=32 explicitly independent
+uniform inputs to an admitted native cooling project, with 2..=256 fixed-count
+Monte Carlo samples and an explicit sampling seed and total wall allowance.
+Every accepted observation comes from an ordinary geometry import, material
+resolution, staged solve and retained `temperature-max` QoI. Probability support
+does not widen the base's operating envelope or card domains, change its solver
+policy, or convert an engineering interval into a probability distribution.
+
+Each observation retains its ordinal, parameter values, child run, project hash,
+QoI receipt and kelvin value. Only a completed fixed-count study publishes its
+mean, sample standard deviation, descriptive standard error, empirical quantiles
+and pass fraction against the requirement's limit minus its explicit margin.
+Partial, cancelled and refused runs retain accepted observations with
+`statistics: null`. A refused physical sample terminates the study at that
+ordinal; it is never clipped, counted as a pass, replaced or skipped.
+
+`--budget N` caps additional samples in this invocation; zero admits and retains
+the model without evaluating it. `study --resume study-<receipt-hash> <ledger.db>`
+loads the bounded statistical checkpoint, verifies accepted child QoIs, and uses
+retained project, geometry and card bytes without reopening the source paths.
+The original total sample and cooperative wall allowances continue across
+resume. Completed and refused terminal receipts return unchanged. Study outputs
+are committed together at invocation completion; completed child solve evidence
+has its own normal solve-stage durability. Input bytes obey an explicit fraction
+of the base memory budget; this is an admission cap, not measured peak RSS.
+
+The existing `report` and `package` verbs export retained study artifacts.
+Replay on the same numerical implementation reproduces the completed report;
+invocation wall use and checkpoint ancestry remain separate receipt data.
+All version-1 statistics are Estimated, advisory descriptions of the declared numerical
+input model. They do not supply confidence sequences, optional-stopping
+decisions, physical validation, continuum-error certificates or compliance
+signoff, and they do not replace the child's engineering uncertainty budget.
+
+Version 2 requires a predeclared `bernoulli-mixture` compliance policy with
+required probability, alpha and minimum sample count. The model's raw
+`temperature-max <= limit - margin` indicators enter fs-eproc's fixed
+Beta(1/2,1/2) likelihood mixture. At or above the declared minimum, a lower
+confidence bound at least the target means `meets-probability-target`; an upper
+bound strictly below it means `below-probability-target`. Either stops with
+`decision-reached`, termination `probability-target`, and exit 0. An unresolved
+lifetime sample cap returns `budget-exhausted`, termination
+`lifetime-sample-budget`, and exit 6. Resume cannot change the retained policy
+or add to the declared lifetime cap. Version-1 bytes and semantics are unchanged.
+
+The version-2 `compliance` report contains both probability-confidence endpoints,
+the empirical frequency, policy, count and decision; `statistics` stays null.
+All-pass or all-fail samples retain nonzero probability uncertainty. Mathematical
+time-uniform coverage requires the declared Bernoulli model; deterministic
+floating-point inversion is Estimated and is not an outward-rounded proof.
+No mean control variate, QMC-point confidence claim, replacement of failed
+samples, physical-error bound or safety-signoff authority is introduced.
+
 ### Normalized thermal study
 
 `study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing
@@ -593,7 +763,83 @@ scalar Poisson/CutFEM radius optimizer. The canonical example is
 and hole boundaries, unit square, dimensionless compliance, fixed hole
 centers and area equality. The executable reader rejects fields that do not
 survive canonical recognition, including ignored geometry or unit declarations.
-Elasticity and free-boundary topology remain unimplemented under q61wp.16.
+The separate free-boundary elasticity producer executes the real level-set
+optimizer; q61wp.16 remains partial against its broader error-control goals.
+
+For the plain or projected-volume single-load `elasticity-2d` producer, append
+`(assessment :type elasticity-dwr :max-solves-per-attempt 2)` after the optimizer
+section to assess the exact final accepted design. This explicit opt-in requires
+at least 256 MiB admitted memory for the coarse/enriched state pair and the
+existing bounded mesh-level envelope 2..=5. It authorizes two assessment solves
+per attempt, each capped at 60,000 CG iterations with a 1e-12 recomputed
+Euclidean relative-residual target. Memory is an admission allowance, not
+measured peak RSS. Single-load projected-stress mode still refuses this
+assessment request. An explicit weighted-sum load family is supported below.
+
+The final optimizer update is durably retained before assessment starts.
+Cancellation and lifetime-wall-budget checks bracket the indivisible DWR phase.
+An interrupted attempt preserves the accepted geometry, records elapsed wall
+time and leaves assessment pending; a numerical refusal retains its reason and
+elapsed charge with `numerical-failure`. Resume can retry assessment on the
+already complete optimizer checkpoint without another geometry update. A
+completed terminal assessment is reused without solving again. Disabled
+assessment leaves existing output unchanged.
+
+The retained report, receipt continuation and HTML expose signed estimated
+goal error, absolute cell-indicator sum, coarse/enriched compliance on the
+same bilinear geometry, residual contribution breakdown, actual solve
+residuals/iterations and geometry identity. Absolute indicator sum is marking
+mass, not an interval radius. No certified continuum-error bound, adaptive
+optimization, physical validation or optimum is claimed. An unmet material
+constraint remains `constraint-unmet` even if error assessment succeeds.
+
+Projected-volume final assessment binds the actual feasible current design,
+including the prepared baseline when a bounded search accepts zero updates.
+The existing constraint evidence records an optional `optimizer_terminal`
+before the assessment starts. This distinguishes a finished
+`no-feasible-descent` search from a paused optimizer: cancellation or numerical
+refusal can retry only the assessment, without repeating projection, optimizer
+recovery solves, candidates or accepted updates. An assessed stalled design
+remains `no-feasible-descent`; estimated numerical error does not establish
+optimization convergence. Prescribed regions and refinement-origin geometry
+are retained unchanged, and the assessment uses the declared final grid.
+Disabled assessment omits this terminal marker and preserves existing behavior.
+
+The `final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work`
+binary regression exercises numerical reporting and final-checkpoint recovery.
+Projected-volume regressions additionally cover a genuinely accepted feasible
+endpoint, a zero-update feasible stall, stops before and after the real DWR
+phase, retry without search/recovery callbacks, and completed-result reuse.
+
+The existing projected-stress independent-load study also accepts this same
+assessment when its aggregate is `weighted-sum`. Its explicit
+`:max-solves-per-attempt` must be exactly twice the declared number of load
+cases (including the primary case and every zero-weight case), so two cases
+require `4`; the native limit of 16 cases caps an attempt at 32 solves.
+Cases are assessed sequentially on the unchanged final level set with the
+same per-case traction support/vector, material and solver as the optimizer.
+The 256 MiB minimum and mesh-level limit 5 apply; only indicator evidence is
+retained between cases, not previous displacement systems. Coarse compliance
+must reproduce every retained case and the weighted sum bitwise before the
+assessment is published. Results retain per-case and weighted coarse/enriched
+compliance, signed estimates, absolute indicator mass and residual breakdowns,
+plus each actual solver residual and iteration count. Weights are not
+probabilities; forces are never summed before equilibrium. Worst-weighted-case
+objectives refuse this linear-sum assessment rather than hiding active-case
+switches. Compliance DWR does not estimate or certify stress error.
+
+Only an area- and sampled-stress-feasible `completed` or `no-feasible-descent`
+endpoint is assessed. A zero-update feasible baseline is eligible. Paused
+optimization, exhausted work during stress restoration and infeasible
+restoration stalls perform no assessment solves; the latter retain an explicit
+assessment refusal with the existing optimizer status. The load-family history
+retains its `optimizer_terminal` before assessment, and cancellation is checked
+before each two-solve case and before final publication. Each case remains
+indivisible. Resumption retries only assessment of the retained endpoint, even
+with zero recovery-solve allowance; it neither restarts candidate search nor
+re-solves optimizer recovery. Interrupted attempt wall time remains charged,
+and completed assessments are reused byte for byte. Numerical assessment
+refusals retain the accepted geometry and permit assessment-only retry.
 
 Every accepted transition retains the source, iteration log, exact parametric
 geometry, SVG/HTML report, JSON summary and format-9 package in one ledger

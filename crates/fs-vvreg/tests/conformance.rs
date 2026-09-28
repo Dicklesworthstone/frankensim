@@ -789,7 +789,7 @@ fn canonical_rows_are_deterministic_sorted_and_bit_exact_for_floats() {
     assert_eq!(rows_a, sorted, "rows are emitted in sorted-id order");
     let hertz = canonical_row(reg.entry("g1-hertz-sphere-plane").expect("seeded"));
     assert!(hertz.contains("\"tier\":\"G1\""));
-    assert!(hertz.contains("{\"spdx\":\"MIT OR Apache-2.0\"}"));
+    assert!(hertz.contains("{\"spdx\":\"LicenseRef-FrankenSim-MIT-with-OpenAI-Anthropic-Rider\"}"));
     assert!(hertz.contains("\"oracle\":\"self-contained\""));
     assert!(hertz.contains("\"kind\":\"tolerance\""));
     // Floats are IEEE-754 bit tokens, never decimal formatting.

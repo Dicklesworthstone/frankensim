@@ -65,9 +65,12 @@ jobs:
           persist-credentials: false
       - name: Materialize pinned dependencies
         run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test adaptive 3D checkpoint publication boundaries
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-topopt --features cutfem-marquee --lib sdf3::adaptive_continuation::checkpoint_tests
       - name: Test native elasticity studies and constrained continuation
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-cli --lib study::elasticity
+        run: cargo test --release -p fs-cli --features sdf3-study --lib study::elasticity
       - name: Test native study, resume and retained report commands
         if: ${{ !cancelled() }}
-        run: cargo test --release -p fs-cli --test study_checkpoint_cli
+        run: cargo test --release -p fs-cli --features sdf3-study --test study_checkpoint_cli --test study_sdf3_cli

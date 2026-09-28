@@ -88,7 +88,7 @@ fn allocation_activates_a_dormant_footprint_and_replays_the_exact_repeated_resul
     assert_eq!(result.str_field("status"),Some("priority-allocation-complete"));
     assert_eq!(n(&result,"completed_priorities"),3.0);
     assert_eq!(selected(&result,"standby"),3.0);assert_eq!(selected(&result,"memory"),10.0);
-    near(selected(&result,"chip"),14.734144111050925,0.0011);
+    near(selected(&result,"chip"),15.092591099256298,0.0011);
     assert!(n(&result,"newton_trials")>0.0);
     let resolved=result.get("resolved_request").unwrap();
     for key in ["solid","hydraulics","air","radiation","budgets","objective"] {
@@ -112,7 +112,7 @@ fn derivative_free_and_reversed_priorities_change_only_the_declared_policy() {
     assert_eq!(result.str_field("search_method"),Some("priority-component-bisection"));
     assert_eq!(n(&result,"newton_trials"),0.0);
     assert_eq!(result.path(&["cooling_result","repeated_cycles","adjoint"]),Some(&J::Null));
-    near(selected(&result,"chip"),14.734144111050925,0.0011);
+    near(selected(&result,"chip"),15.092591099256298,0.0011);
     let mut reverse=spec;rows(member(&mut reverse,"priority")).reverse();
     let changed=success(&dir.allocate(&base,&reverse));verify_replay(&dir,&changed);
     assert!(selected(&changed,"chip")>selected(&result,"chip")+1.0);

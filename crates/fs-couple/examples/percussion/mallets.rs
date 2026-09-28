@@ -11,19 +11,29 @@ use std::{collections::BTreeMap, io::Read};
 
 #[path="mallet_shell.rs"]
 mod shell;
+#[path="mallet_shaft.rs"]
+mod shaft;
 
 const HEADER:&str="frankensim-felt-mallet-v1";
 const MAX_BYTES:u64=65_536;
 #[derive(Clone,Debug)]
-pub struct Spec { radius_m:f64, jaw:CompliantJaw }
+pub struct Spec { radius_m:f64, jaw:CompliantJaw, head:Option<Head> }
+/// V2 uses actual head mass (geometry), rotary inertia and the shaft's XY
+/// azimuth. V1's effective mass is never reinterpreted as a physical head.
+#[derive(Clone,Copy,Debug)]
+struct Head { rotary_kg_m2:f64, azimuth_rad:f64 }
 impl Spec {
     pub fn parse(text:&str)->Result<Self,Error> {
         if text.len() as u64>MAX_BYTES {return Err("mallet specification exceeds 64 KiB".into());}
         let mut rows=text.lines().enumerate().filter_map(|(i,l)| {
             let l=l.split('#').next().unwrap_or("").trim();(!l.is_empty()).then_some((i+1,l))
         });
-        if rows.next().map(|(_,r)|r)!=Some(HEADER) {return Err("expected frankensim-felt-mallet-v1".into());}
-        let mut geometry=None;let mut law=None;let mut conditioning=None;let mut creep=Vec::new();
+        let physical_head=match rows.next().map(|(_,r)|r) {
+            Some(HEADER)=>false,
+            Some("frankensim-felt-mallet-v2")=>true,
+            _=>return Err("expected frankensim-felt-mallet-v1 or -v2".into()),
+        };
+        let mut geometry=None;let mut law=None;let mut conditioning=None;let mut creep=Vec::new();let mut head=None;
         for (line,row) in rows {
             let f:Vec<_>=row.split(',').map(str::trim).collect();
             let bad=||format!("invalid felt-mallet record at line {line}");
@@ -33,6 +43,9 @@ impl Spec {
             };
             match (f[0],f.len()) {
                 ("geometry",5) if geometry.is_none()=>geometry=Some([value(1)?,value(2)?,value(3)?,value(4)?]),
+                ("attachment",3) if physical_head && head.is_none()=>head=Some(Head {
+                    rotary_kg_m2:value(1)?,azimuth_rad:value(2)?,
+                }),
                 ("felt",7) if law.is_none()=>law=Some(WoolFelt::new(value(1)?,value(2)?,value(3)?,value(4)?,value(5)?,value(6)?)?),
                 ("conditioning",2) if conditioning.is_none()=>conditioning=Some(value(1)?),
                 ("creep",3) if creep.len()<4=>creep.push(KelvinBranch {stiffness_n_m:value(1)?,viscosity_n_s_m:value(2)?}),
@@ -44,7 +57,11 @@ impl Spec {
             || std::f64::consts::PI*radius_m*radius_m/4.0==0.0 {
             return Err("mallet face radius/area must be positive and representable".into());
         }
-        let result=Self {radius_m,jaw:CompliantJaw {side:PadSide::Negative,mass_kg,drag_n_s_m:0.0,
+        if physical_head && head.is_none() {return Err("v2 mallet requires explicit attachment inertia and shaft azimuth".into());}
+        if head.is_some_and(|h| h.rotary_kg_m2<=0.0 || h.azimuth_rad.abs()>std::f64::consts::PI) {
+            return Err("v2 head needs positive rotary inertia and shaft azimuth in [-pi,pi] radians".into());
+        }
+        let result=Self {radius_m,head,jaw:CompliantJaw {side:PadSide::Negative,mass_kg,drag_n_s_m:0.0,
             initial_gap_m,initial_velocity_m_s:0.0,thickness_m,
             law:law.ok_or("mallet felt record is required")?,
             prior_maximum_strain:conditioning.ok_or("mallet conditioning record is required")?,creep}};

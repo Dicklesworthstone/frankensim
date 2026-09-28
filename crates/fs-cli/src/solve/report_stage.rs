@@ -309,6 +309,9 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                     &["adaptive", "last_estimated_change_k"][..],
                 ),
                 ("adaptive_scope", &["adaptive", "no_claim"][..]),
+                ("radiative_out_w", &["radiation", "radiative_out_w"][..]),
+                ("convective_out_w", &["radiation", "convective_out_w"][..]),
+                ("radiative_magnitude_share", &["radiation", "radiative_magnitude_share"][..]),
                 ("authority", &["authority"][..]),
             ] {
                 push_summary(&mut summary, receipt, label, path);
@@ -545,13 +548,25 @@ pub(super) fn report_receipt(
     let mut budget_items = Vec::with_capacity(terms.len());
     let mut measured_terms = 0usize;
     let mut discretization_half_width: Option<f64> = None;
+    let mut parameters_half_width: Option<f64> = None;
+    let radiation_sensitivity = qoi.value.path(&["model_form_sensitivity", "radiation"])
+        .map(|sensitivity| -> Result<String, SolveRefusal> {
+            if sensitivity.str_field("state") == Some("measured") {
+                let on = required_f64(qoi_stage, sensitivity, "radiation_on_k")?;
+                let off = required_f64(qoi_stage, sensitivity, "radiation_off_k")?;
+                let delta = required_f64(qoi_stage, sensitivity, "delta_on_minus_off_k")?;
+                Ok(format!("Radiation model-form sensitivity (Estimated): base-mesh radiation-on maximum {on} K versus radiation-off {off} K; on minus off {delta} K. This paired-model difference is not a bound on model-form error or experimental validation."))
+            } else {
+                Ok(format!("Radiation model-form sensitivity is unavailable: {}", required_str(qoi_stage, sensitivity, "reason")?))
+            }
+        }).transpose()?;
     for term in terms {
         let kind = required_str(qoi_stage, term, "kind")?;
         let term_state = required_str(qoi_stage, term, "state")?;
         // An `interval` term (QoI receipt v2) is a certified half-width: its
         // magnitude is the upper bound and its reason is the derivation the
         // producer recorded; every other state carries `value`/`reason`.
-        let (value, reason) = if term_state == "interval" {
+        let (value, mut reason) = if term_state == "interval" {
             let upper = term.f64_field("upper_kelvin");
             let derivation = term.get("derivation");
             let method = derivation.and_then(|d| d.str_field("method")).unwrap_or("");
@@ -577,6 +592,10 @@ pub(super) fn report_receipt(
                 term.str_field("reason").unwrap_or("").to_string(),
             )
         };
+        if kind == "model-form" && let Some(sensitivity) = &radiation_sensitivity {
+            reason.push_str("; ");
+            reason.push_str(sensitivity);
+        }
         if term_state != "no-data" && value.is_none() {
             return Err(shape_error(
                 qoi_stage,
@@ -588,6 +607,9 @@ pub(super) fn report_receipt(
         }
         if kind == "discretization" && term_state == "interval" {
             discretization_half_width = value;
+        }
+        if kind == "parameters" && term_state == "interval" {
+            parameters_half_width = value;
         }
         budget_items.push(BudgetTermItem {
             qoi: qoi_name.to_string(),
@@ -642,9 +664,10 @@ pub(super) fn report_receipt(
                 dispersion: f64::NAN,
             },
             discretization_error: discretization_half_width.unwrap_or(f64::NAN),
-            parameter_uncertainty: f64::NAN,
+            parameter_uncertainty: parameters_half_width.unwrap_or(f64::NAN),
             surrogate_error: f64::NAN,
-            total_uncertainty_budget: f64::NAN,
+            // The QoI receipt states a number only when every term is bounded.
+            total_uncertainty_budget: budget.f64_field("total").unwrap_or(f64::NAN),
             source_root: qoi_identity.to_string(),
         })
         .with_requirement(RequirementReportItem {
@@ -663,6 +686,15 @@ pub(super) fn report_receipt(
     }
     for item in budget_items {
         report = report.with_budget_term(item);
+    }
+    if let Some(no_claim) = conduction.value.path(&["radiation", "no_claim"])
+        .and_then(JsonValue::as_str)
+    {
+        report = report.with_no_claim(NoClaimItem {
+            component: "surface radiation".to_string(),
+            status: "Estimated".to_string(),
+            statement: no_claim.to_string(),
+        });
     }
     for receipt in &loaded {
         report = report.with_stage(StageReceiptItem {
@@ -702,10 +734,16 @@ pub(super) fn report_receipt(
         .with_no_claim(NoClaimItem {
             component: "report".to_string(),
             status: "projection".to_string(),
-            statement: format!(
-                "this report projects retained stage receipts and adds no physical, numerical, or validation authority; the QoI is an Estimated candidate with {measured_terms} of {} uncertainty terms measured (Estimated) and the rest NO-DATA; no DWR bound, corpus validation, or L3/L4 maturity is claimed, and while any term is NO-DATA no binary compliance verdict is claimed",
-                terms.len()
-            ),
+            statement: if measured_terms == terms.len() {
+                format!(
+                    "this report projects retained stage receipts and adds no physical, numerical, or validation authority; the QoI is an Estimated candidate with all {measured_terms} uncertainty terms measured (Estimated), so the requirement outcome `{outcome}` is an Estimated decision from the conservative linear budget sum, not a certificate; no DWR bound, corpus validation, or L3/L4 maturity is claimed"
+                )
+            } else {
+                format!(
+                    "this report projects retained stage receipts and adds no physical, numerical, or validation authority; the QoI is an Estimated candidate with {measured_terms} of {} uncertainty terms measured (Estimated) and the rest NO-DATA; no DWR bound, corpus validation, or L3/L4 maturity is claimed, and while any term is NO-DATA no binary compliance verdict is claimed",
+                    terms.len()
+                )
+            },
         })
         .with_replay_command(format!(
             "frankensim solve <project.fsim> <ledger> --materials <pack>   # project canonical hash {}; run {run_hex}",
@@ -735,8 +773,9 @@ pub(super) fn report_receipt(
     .with_claim(Claim::estimated(
         format!("qoi.{}.{}", identity_token(qoi_name), identity_token(qoi_region)),
         format!(
-            "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with {measured_terms} of {} engineering-uncertainty terms measured (Estimated) and the rest NO-DATA (receipt {})",
+            "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with {measured_terms} of {} engineering-uncertainty terms measured (Estimated){} (receipt {})",
             terms.len(),
+            if measured_terms == terms.len() { "" } else { " and the rest NO-DATA" },
             qoi.completed.receipt.to_hex()
         ),
         QOI_RECEIPT_SCHEMA,

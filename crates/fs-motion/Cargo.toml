@@ -2,7 +2,7 @@
 name = "fs-motion"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Certified rigid motion: motor tubes with Taylor-model component enclosures, spacetime charts binding motion to geometry, and analytic screw/Wankel constructors."

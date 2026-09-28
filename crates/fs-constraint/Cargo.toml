@@ -2,7 +2,7 @@
 name = "fs-constraint"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Constraint calculus: typed kinds with optimizer treatments, evidence-typed evaluations, minimal unsat cores, and ranked calibrated repairs."

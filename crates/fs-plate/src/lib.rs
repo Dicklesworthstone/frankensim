@@ -37,6 +37,7 @@
 //! everything sequential; repeat runs bitwise (inherited and tested
 //! downstream through fs-modal).
 
+pub mod loading;
 pub mod shell;
 pub use shell::{
     ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,

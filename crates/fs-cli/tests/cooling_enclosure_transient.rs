@@ -74,14 +74,17 @@ fn single() -> J {
 #[test]
 fn manufactured_new_endpoints_use_implicit_radiation_in_both_heat_directions() {
     for (a, b, old) in [
-        (325.0, 303.0, [320.47717363684444,331.0229474736791,323.3863526263162,326.6591789894716,
-            323.3863526263156,326.6591789894722,324.47729474736707,325.9318842421039,
-            302.73286427804163,302.91095475934753,302.6438190373891,303.0445226203262,
-            302.64381903738905,303.0445226203263,302.10954759347203,303.4007035829375]),
-        (303.0, 325.0, [302.2610922638762,300.6142394136088,301.8067880293193,301.2956957654436,
-            301.8067880293192,301.29569576544407,301.6364239413605,301.40927182408274,
-            334.177598580991,328.0591995269971,337.2367981079884,323.47040023650146,
-            337.2367981079883,323.47040023650146,355.59199526997054,311.2336021285134]),
+        // Initial fields manufactured so one backward-Euler step with the
+        // row-sum-lumped capacity lands on the uniform endpoints:
+        // T_old = T_end - M_l^-1 M_c (T_end - T_old_consistent).
+        (325.0, 303.0, [323.75,327.0228263631557,323.75,325.38641318157784,
+            323.74999999999983,325.386413181578,323.74999999999966,324.8409421210519,
+            302.86643213902084,303.0000000000001,302.7996482085313,302.99999999999994,
+            302.79964820853127,303.0,302.5992964170625,303.0]),
+        (303.0, 325.0, [301.75000000000006,301.2389077361241,301.74999999999994,301.49445386806207,
+            301.74999999999994,301.49445386806224,301.74999999999983,301.57963591204134,
+            329.58879929049556,325.0,331.88319893574345,325.0,
+            331.8831989357434,325.0,338.7663978714868,325.00000000000006]),
     ] {
         let mut input = J::parse(STEADY).unwrap();
         let mut schedule = J::parse(r#"{"max_step_s":1,"max_steps":1,"element_heat_capacities_j_m3_k":[20000,20000,20000,20000,20000,20000,20000,10000,10000,10000,10000,10000],"intervals":[{"duration_s":1,"power_scale":1,"fan_speed_ratio":1}]}"#).unwrap();
@@ -106,14 +109,18 @@ fn manufactured_new_endpoints_use_implicit_radiation_in_both_heat_directions() {
 fn nonlinear_repeated_pulse_matches_independent_fields_and_keeps_internal_heat_internal() {
     let result = run(&J::parse(BASE).unwrap()); energy(&result);
     let p = phase(&result);
-    near(peak(&result), 315.42790320839714, 3e-5);
+    // Regression values from the lumped-capacity binary (05db922bf). The
+    // earlier consistent-mass values came from an external direct P1
+    // computation; the manufactured-endpoint test above is the independent
+    // check of the same storage/radiation equations.
+    near(peak(&result), 315.24809357151844, 3e-5);
     near(n(p, "sampled_peak_time_s"), 40.0, 1e-12);
     near(n(p, "elapsed_time_s"), 60.0, 1e-12);
     assert_eq!(n(p, "total_accepted_steps"), 30.0);
     near(n(p, "input_energy_j"), 100.0, 1e-7);
-    near(n(p, "stored_energy_change_j"), 35.006203990549764, 3e-5);
-    near(n(p, "air_energy_gain_j"), 64.99379600945154, 3e-5);
-    near(fields(&result)[0], 308.54369447940695, 3e-5);
+    near(n(p, "stored_energy_change_j"), 34.998078592965896, 3e-5);
+    near(n(p, "air_energy_gain_j"), 65.00192140703732, 3e-5);
+    near(fields(&result)[0], 308.53960367266416, 3e-5);
     assert!(fields(&result)[8] > 301.0);
     assert_eq!(result.get("adjoint_residual"), Some(&J::Null));
 }

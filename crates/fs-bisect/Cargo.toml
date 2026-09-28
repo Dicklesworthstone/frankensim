@@ -2,7 +2,7 @@
 name = "fs-bisect"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Physics-VCS bisect (addendum Proposal 10): git-bisect for a wrong number — binary search over a commit sequence with a monotone predicate, two-tier low/full fidelity confirmation, and non-monotonicity detection."

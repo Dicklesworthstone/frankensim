@@ -2,7 +2,7 @@
 name = "fs-grammar-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "GrammarForge: discover a DIVERSE family of CSG programs (shape grammars) that approximate a target shape AND are fabricable, with machine-checked simplification that provably preserves the shape within a certified SDF tolerance. Composes fs-shapeprog (CSG programs + certified rewrites) x fs-archive (MAP-Elites illumination) x fs-fab (manufacturability margins) x fs-evidence (Verified). Groundbreaking: traditional CAD gives one hand-built model with no guarantees; this illuminates a certified-fabricable program family with proof-carrying simplification."

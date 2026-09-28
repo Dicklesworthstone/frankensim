@@ -1,0 +1,51 @@
+(fsim-sdf3-study :version 1
+  (metadata
+    :name "physical-pressure-and-shear-cantilever"
+    :created "2026-09-25"
+    :context-of-use "Numerical 3-D design with physical dimensions and independent reference surface loads"
+    :intended-decision "Explore a volume-limited cantilever under pressure and shear; not a strength qualification"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (seeds :root 1337)
+  (budgets
+    :wall-seconds 300.0
+    :memory-bytes 536870912
+    :linear-iterations 250000
+    :per-solve-iterations 50000
+    :quadrature-boxes 1000000
+    :quadrature-points 1000000)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem")
+  (units :storage "SI")
+  (domain
+    :type physical-curved-height-sdf
+    :bounds ((0.0 0.0 0.0) (0.1 0.05 0.04))
+    :height-m 0.028
+    :curvature-per-m 1.0)
+  (physics
+    :type elasticity-3d
+    :initial-level 1
+    :maximum-level 5
+    :maximum-leaves 2048
+    :youngs-modulus-pa 70000000000.0
+    :poissons-ratio 0.3)
+  (scenario
+    :fixed-boundary left
+    :loads (
+      (load :body-n-m3 (0.0 0.0 -26000.0)
+        :surface (pressure :pa 1000.0 :x-fraction (0.5 1.0)) :weight 0.7)
+      (load :body-n-m3 (0.0 0.0 -26000.0)
+        :surface (traction :pa (0.0 1000.0 0.0) :x-fraction (0.5 1.0)) :weight 0.3)))
+  (objective :type compliance :sense minimize :unit "J")
+  (optimizer
+    :type adaptive-simp
+    :initial-density 0.5
+    :volume-fraction 0.5
+    :filter-radius-m 0.01
+    :updates-per-stage 3
+    :move-limit 0.15
+    :marking-fraction 0.5
+    :max-marks 2
+    :schedule ((1.0 1.0) (2.0 2.0) (3.0 8.0))))

@@ -1,8 +1,9 @@
 //! Resumable Newton--Krylov, flexible GMRES, and solver admission.
 //!
 //! The nonlinear driver owns globalization mechanics but no physics. Problem
-//! crates provide residual and Jacobian actions; callers provide independent
-//! linear-system verification before selecting a named Krylov method.
+//! crates provide residual, Jacobian and optional inverse-preconditioner actions.
+//! Callers provide independent linear-system verification before selecting a
+//! named Krylov method.
 
 use crate::{LinearOp, SolveReport, StallDiagnosis, dot, norm2};
 use fs_sparse::precond::Precond;
@@ -636,6 +637,25 @@ pub trait NonlinearProblem {
     fn residual(&self, x: &[f64], residual: &mut [f64]);
     /// Overwrite `output` with `J(x) direction`.
     fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]);
+    /// Apply a right inverse-preconditioner approximation at the fixed Newton
+    /// point `x`, overwriting every output component. The default is identity.
+    ///
+    /// `outer_iteration` counts completed Newton attempts; `inner_iteration`
+    /// counts FGMRES columns across restart cycles within this attempt, starting
+    /// at zero for each new Newton solve. Variable policies must depend only on
+    /// these logical keys, `x`, `residual`, and the unchanged problem parameters
+    /// so clone/resume keeps the same numerical meaning. An unwritten or
+    /// non-finite component refuses the linear solve before publishing a step.
+    fn preconditioner_apply(
+        &self,
+        _x: &[f64],
+        _outer_iteration: usize,
+        _inner_iteration: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        output.copy_from_slice(residual);
+    }
 }
 
 /// Backtracking line-search controls.
@@ -928,12 +948,22 @@ impl<P: NonlinearProblem> LinearOp for JacobianAt<'_, P> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct IdentityFlexible;
+struct PreconditionerAt<'a, P> {
+    problem: &'a P,
+    x: &'a [f64],
+    outer_iteration: usize,
+}
 
-impl FlexiblePreconditioner for IdentityFlexible {
-    fn apply(&self, _logical_iteration: usize, residual: &[f64], output: &mut [f64]) {
-        output.copy_from_slice(residual);
+impl<P: NonlinearProblem> FlexiblePreconditioner for PreconditionerAt<'_, P> {
+    fn apply(&self, logical_iteration: usize, residual: &[f64], output: &mut [f64]) {
+        output.fill(f64::NAN);
+        self.problem.preconditioner_apply(
+            self.x,
+            self.outer_iteration,
+            logical_iteration,
+            residual,
+            output,
+        );
     }
 }
 
@@ -1053,10 +1083,15 @@ impl NewtonKrylovState {
             problem,
             x: &self.x,
         };
+        let preconditioner = PreconditionerAt {
+            problem,
+            x: &self.x,
+            outer_iteration: self.iterations,
+        };
         let mut linear = FgmresState::new(&rhs, self.config.linear_restart);
         let linear_report = linear.run(
             &jacobian,
-            &IdentityFlexible,
+            &preconditioner,
             &rhs,
             forcing,
             self.config.max_linear_cycles,

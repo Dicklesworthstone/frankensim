@@ -76,28 +76,7 @@ impl AdaptiveElasticity3 {
         if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
         let u = self.physical_displacements(u)?;
         let z = self.physical_displacements(z)?;
-        let mut result = vec![0.0; self.cells()];
-        for (id, cell) in self.raw.cells.iter().enumerate() {
-            if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
-            let local: [f64; 24] = std::array::from_fn(|j| u[3*cell.nodes[j/3]+j%3]);
-            for i in 0..24 {
-                let applied: f64 = cell.stiffness[i].iter().zip(&local).map(|(k,u)| k*u).sum();
-                result[id] += z[3*cell.nodes[i/3]+i%3]*applied;
-            }
-        }
-        for face in &self.raw.ghosts {
-            if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
-            let mut value = 0.0;
-            for c in 0..3 {
-                let ju: f64 = face.nodes.iter().zip(&face.jump).map(|(&n,&j)| j*u[3*n+c]).sum();
-                let jz: f64 = face.nodes.iter().zip(&face.jump).map(|(&n,&j)| j*z[3*n+c]).sum();
-                value += face.weight*jz*ju;
-            }
-            for &cell in &face.cells { result[cell] += 0.5*value; }
-        }
-        if !result.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("bilinear scale contraction overflow")); }
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
-        Ok(result)
+        self.raw.scale_bilinear_forms(&z, &u, checkpoint)
     }
 
     /// Assemble external reference forces plus the CURRENT material's Nitsche

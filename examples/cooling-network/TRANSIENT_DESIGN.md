@@ -15,7 +15,7 @@ whole-solid maximum, or selected-node maximum, as in the existing command.
 Add this object inside the existing `transient` request:
 
 ```json
-"temperature_limit_k": 320.85,
+"temperature_limit_k": 319.7,
 "fan_speed_design": {
   "min_speed_multiplier": 0.5,
   "max_speed_multiplier": 1.3,
@@ -109,6 +109,15 @@ adaptive run rejects it. The committed request uses the adaptive settings.
 Its reference passing peak is 320.849991 K at 30 seconds; the final maximum is
 only 302.887171 K. Checking just the cooled final state would miss the problem.
 These are independent mathematical references, **not Rust execution results**.
+
+FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) samples lower peaks. At the baseline fan the
+fixed 2-second run peaks at 319.3785076 K and the adaptive run at 319.5948767 K.
+The committed request therefore now targets 319.7 K. Adaptive sampling selects
+a fan multiplier of 0.6622803, with a passing peak of 319.6999974 K at 30 seconds
+and a final maximum of 303.4259583 K. Fixed steps are feasible even at the slowest
+declared fan (0.5), so the step-control policy still changes the selected
+design. The fixed-step regression declares its own 319.5 K target, where it
+selects 0.6258545.
 
 Adaptive step doubling estimates local endpoint error. It does not certify
 midpoint errors, the complete trajectory, or extrema between accepted samples.

@@ -2,7 +2,7 @@
 name = "fs-lbm"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Lattice Boltzmann core (fs-lbm): a D2Q9 BGK stream-and-collide solver with Guo body forcing and halfway bounce-back walls (verified against analytic Poiseuille flow), plus the lattice-scaling assistant that automates the dx/dt/tau/Mach bookkeeping under stability constraints — the chronic source of human LBM error that agents should never touch raw."

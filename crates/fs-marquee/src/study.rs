@@ -636,6 +636,7 @@ fn armijo_with_source(
             return Ok(None);
         }
         #[allow(clippy::cast_precision_loss)]
+        // det-ok: a power of one half is exact at every optimization level.
         let step = config.step_size * 0.5_f64.powi(backtracks as i32);
         let mut candidate = design.clone();
         for (radius, derivative) in candidate.radii.iter_mut().zip(gradient) {

@@ -2,7 +2,7 @@
 name = "fs-opt"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Optimization problem IR: typed objective/constraint graphs over manifold variables, with validation, class propagation, and canonical serialization."

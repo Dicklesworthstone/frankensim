@@ -13,6 +13,9 @@
 //! Reservoir pressures are zero gauge. Suction is retained within the supplied
 //! pressure limit. Compressibility, gas inertia, thermal effects, slip, moving
 //! topology and fluid acoustic radiation are not part of this image.
+/// Compressible mass storage and transport on the same geometric pressure graph.
+pub mod isothermal;
+
 use core::fmt;
 
 /// Explicit dense pressure-island ceiling, not a real-time performance claim.

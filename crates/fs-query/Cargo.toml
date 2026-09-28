@@ -2,7 +2,7 @@
 name = "fs-query"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Geometry queries: closest point, certified raycasts, offsets, clearance with rigorous separation bounds, the thickness oracle, and curvature on every chart."

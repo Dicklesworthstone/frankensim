@@ -2,7 +2,7 @@
 name = "fs-truss"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Ground-structure truss optimization with checked PDHG diagnostics, outward optimum certificates, catalog sizing, and rod buckling spot checks."

@@ -15,13 +15,13 @@ fn pulse_contact_and_fan_schedule_match_independent_transient_fem() {
     let run=doc.get("transient").unwrap();
     close(run.f64_field("time_s").unwrap(),150.0,1e-12);
     assert_eq!(run.f64_field("steps"),Some(75.0));
-    close(run.f64_field("sampled_peak_objective_k").unwrap(),306.3431585002163,3e-5);
+    close(run.f64_field("sampled_peak_objective_k").unwrap(),304.11663335714235,3e-5);
     close(run.f64_field("sampled_peak_time_s").unwrap(),30.0,1e-12);
-    close(run.f64_field("first_sampled_violation_s").unwrap(),22.0,1e-12);
-    close(doc.get("objective").unwrap().f64_field("value_k").unwrap(),301.46723362812094,3e-5);
+    close(run.f64_field("first_sampled_violation_s").unwrap(),24.0,1e-12);
+    close(doc.get("objective").unwrap().f64_field("value_k").unwrap(),301.73054647705186,3e-5);
     close(run.f64_field("input_energy_j").unwrap(),600.0,1e-7);
-    close(run.f64_field("stored_energy_change_j").unwrap(),536.2871880825311,3e-5);
-    close(run.f64_field("air_energy_gain_j").unwrap(),63.71281191746983,3e-5);
+    close(run.f64_field("stored_energy_change_j").unwrap(),533.2318718045553,3e-5);
+    close(run.f64_field("air_energy_gain_j").unwrap(),66.76812788943381,3e-5);
     assert!(run.f64_field("energy_residual_j").unwrap().abs()<r.limits.heat*150.0);
     assert_eq!(doc.path(&["fan","speed_ratio"]).unwrap().as_f64(),Some(1.5));
     close(doc.path(&["fan","flow_m3_s"]).unwrap().as_f64().unwrap(),0.006,1e-9);

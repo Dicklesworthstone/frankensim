@@ -2,7 +2,7 @@
 name = "fs-render"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Unbiased spectral path-tracing core (fs-render): the verifiable Monte-Carlo foundations — deterministic low-discrepancy sampling, cosine-weighted hemisphere sampling with a Lambertian FURNACE test (energy conservation to exactness), MIS balance/power heuristics with weight-sum audits (no energy loss/gain at strategy boundaries), and hero-wavelength spectral integration. CPU-native, deterministic, replayable."

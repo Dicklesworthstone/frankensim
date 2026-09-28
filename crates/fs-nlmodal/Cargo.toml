@@ -2,7 +2,7 @@
 name = "fs-nlmodal"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Geometric nonlinearity for thin structures in modal coordinates: von Karman plates and Kirchhoff-Carrier strings as port-Hamiltonian systems with quartic sum-of-squares storage — pitch glide, mode coupling, and the crash cascade with structurally exact energy accounting."
 authors.workspace = true

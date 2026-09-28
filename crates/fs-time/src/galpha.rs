@@ -10,6 +10,13 @@ use fs_solver::{
 };
 use std::fmt;
 
+#[path = "galpha/adjoint.rs"]
+pub mod adjoint;
+#[path = "galpha/initialization.rs"]
+pub mod initialization;
+#[path = "galpha/second_order_adjoint.rs"]
+pub mod second_order_adjoint;
+
 /// Prefactored generalized-α stepper for fixed (M, C, K, h).
 pub struct GeneralizedAlpha {
     n: usize,
@@ -198,6 +205,8 @@ impl ImplicitStepTelemetry {
 /// Typed refusal from an operator-backed generalized-alpha step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimeSolveError {
+    /// Cooperative cancellation occurred before the public state was changed.
+    Cancelled,
     /// An operator, state vector, or forcing vector has the wrong dimension.
     Dimension {
         /// Semantic role of the mismatched object.
@@ -243,6 +252,7 @@ pub enum TimeSolveError {
 impl fmt::Display for TimeSolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "generalized-alpha step cancelled before publication"),
             Self::Dimension {
                 role,
                 expected,
@@ -300,6 +310,18 @@ fn checked_time_advance(t: f64, h: f64) -> Result<f64, TimeSolveError> {
     }
 }
 
+/// Coefficients of the structural step's effective Jacobian
+/// `mass*M + damping*C + tangent*Dr(q)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SecondOrderOperatorWeights {
+    /// `(1 - alpha_m) / (beta*h*h)`.
+    pub mass: f64,
+    /// `(1 - alpha_f)*gamma / (beta*h)`.
+    pub damping: f64,
+    /// `1 - alpha_f`.
+    pub tangent: f64,
+}
+
 /// Structural residual `M a + C v + r(q) = f` used by the generalized-alpha
 /// driver. The tangent action must differentiate the exact `internal_force`
 /// implementation at the supplied state.
@@ -314,6 +336,31 @@ pub trait SecondOrderProblem {
     fn internal_force(&self, q: &[f64], output: &mut [f64]);
     /// Overwrite `output` with `Dr(q) direction`.
     fn tangent_apply(&self, q: &[f64], direction: &[f64], output: &mut [f64]);
+
+    /// Approximately solve the effective Jacobian system for `residual`.
+    ///
+    /// `q` is the same interpolated stage displacement used by `tangent_apply`,
+    /// and `weights` give the exact effective mass, damping, and tangent
+    /// coefficients. This is a right preconditioner inside flexible GMRES;
+    /// `outer_iteration` and `inner_iteration` are logical Newton and Krylov
+    /// indices. Overwrite every output component with a finite value. Invalid
+    /// output causes a solver refusal before the time-step state is published.
+    ///
+    /// The default copies the residual (identity). Implementations must bound
+    /// their own work and reproduce their results during checkpoint replay.
+    /// This hook changes only the forward implicit solve; adjoints continue
+    /// to use their separately supplied transpose-solve preconditioner.
+    fn preconditioner_apply(
+        &self,
+        _q: &[f64],
+        _weights: SecondOrderOperatorWeights,
+        _outer_iteration: usize,
+        _inner_iteration: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        output.copy_from_slice(residual);
+    }
 }
 
 /// Linear `M`, `C`, and `K` adapter over the shared `fs-solver::LinearOp`
@@ -462,6 +509,26 @@ impl OperatorGeneralizedAlpha {
         problem: &P,
         forcing: &[f64],
     ) -> Result<ImplicitStepTelemetry, TimeSolveError> {
+        self.step_controlled(state, problem, forcing, &mut || false)
+    }
+
+    /// Advance with cancellation checks before setup, between bounded Newton
+    /// attempts and before publication. One attempt includes the configured
+    /// inner Krylov/globalization work; callbacks must bound their own work.
+    /// Cancellation leaves displacement, velocity, acceleration and history
+    /// unchanged, including when a previous step has already been accepted.
+    pub fn step_controlled<P, Cancel>(
+        &self,
+        state: &mut SecondOrderState,
+        problem: &P,
+        forcing: &[f64],
+        cancelled: &mut Cancel,
+    ) -> Result<ImplicitStepTelemetry, TimeSolveError>
+    where
+        P: SecondOrderProblem + ?Sized,
+        Cancel: FnMut() -> bool,
+    {
+        structural_poll(cancelled)?;
         require_dimension("structural problem", self.n, problem.dimension())?;
         require_dimension("displacement state", self.n, state.q.len())?;
         require_dimension("velocity state", self.n, state.v.len())?;
@@ -490,9 +557,27 @@ impl OperatorGeneralizedAlpha {
                 )
             })
             .collect();
-        let mut newton = NewtonKrylovState::new(&residual, guess, self.solve.newton)
-            .map_err(TimeSolveError::NewtonSetup)?;
-        let report = newton.run(&residual, self.solve.max_newton_iterations);
+        let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+        structural_poll(cancelled)?;
+        let mut newton = setup.map_err(TimeSolveError::NewtonSetup)?;
+        let mut report = newton.run(&residual, 0);
+        for _ in 0..self.solve.max_newton_iterations {
+            // Plateau is diagnostic, not terminal in the shared solver.
+            if report.converged
+                || !matches!(
+                    report.diagnosis,
+                    Some(
+                        fs_solver::NewtonStallDiagnosis::BudgetExhausted
+                            | fs_solver::NewtonStallDiagnosis::Plateau
+                    )
+                )
+            {
+                break;
+            }
+            structural_poll(cancelled)?;
+            report = newton.run(&residual, 1);
+            structural_poll(cancelled)?;
+        }
         if !report.converged {
             return Err(TimeSolveError::NotConverged(report));
         }
@@ -504,6 +589,7 @@ impl OperatorGeneralizedAlpha {
             h: self.h,
             newton: report,
         };
+        structural_poll(cancelled)?;
         state.q = q_new;
         state.v = v_new;
         state.a = a_new;
@@ -511,6 +597,14 @@ impl OperatorGeneralizedAlpha {
         state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
+    }
+}
+
+fn structural_poll<Cancel: FnMut() -> bool>(cancelled: &mut Cancel) -> Result<(), TimeSolveError> {
+    if cancelled() {
+        Err(TimeSolveError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -570,6 +664,35 @@ impl<P: SecondOrderProblem + ?Sized> NonlinearProblem for StructuralStepResidual
         for i in 0..method.n {
             output[i] = mass_scale.mul_add(mass[i], damping_scale.mul_add(damping[i], tangent[i]));
         }
+    }
+
+    fn preconditioner_apply(
+        &self,
+        q_new: &[f64],
+        outer_iteration: usize,
+        inner_iteration: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        let method = self.method;
+        let q_eval: Vec<f64> = q_new
+            .iter()
+            .zip(self.q0)
+            .map(|(&q_new, &q0)| (1.0 - method.alpha_f).mul_add(q_new, method.alpha_f * q0))
+            .collect();
+        let weights = SecondOrderOperatorWeights {
+            mass: (1.0 - method.alpha_m) / (method.beta * method.h * method.h),
+            damping: (1.0 - method.alpha_f) * method.gamma / (method.beta * method.h),
+            tangent: 1.0 - method.alpha_f,
+        };
+        self.problem.preconditioner_apply(
+            &q_eval,
+            weights,
+            outer_iteration,
+            inner_iteration,
+            residual,
+            output,
+        );
     }
 }
 
@@ -690,6 +813,16 @@ pub fn first_order_galpha_step(
     }
 }
 
+/// Coefficients of the first-order step's effective Jacobian
+/// `mass*M + tangent*Dr(t, u)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FirstOrderOperatorWeights {
+    /// `alpha_m / (gamma*h)`.
+    pub mass: f64,
+    /// `alpha_f`.
+    pub tangent: f64,
+}
+
 /// First-order residual `M udot + r(t, u) = f`.
 pub trait FirstOrderProblem {
     /// State dimension.
@@ -700,6 +833,29 @@ pub trait FirstOrderProblem {
     fn internal_force(&self, t: f64, u: &[f64], output: &mut [f64]);
     /// Overwrite `output` with `Dr(t, u) direction`.
     fn tangent_apply(&self, t: f64, u: &[f64], direction: &[f64], output: &mut [f64]);
+
+    /// Approximately solve the effective Jacobian system for `residual`.
+    ///
+    /// `t` and `u` are exactly the stage time and state used by `tangent_apply`;
+    /// `weights` give the effective mass and tangent coefficients. The logical
+    /// Newton/Krylov indices permit variable right preconditioning. Overwrite
+    /// every output component with a finite value; invalid output refuses the
+    /// solve before publication. The default is identity. Implementations must
+    /// bound their own work and be deterministic for replay. The separately
+    /// supplied adjoint transpose-solve preconditioner is unaffected.
+    #[allow(clippy::too_many_arguments)] // stage, operator weights, and both logical iterations
+    fn preconditioner_apply(
+        &self,
+        _t: f64,
+        _u: &[f64],
+        _weights: FirstOrderOperatorWeights,
+        _outer_iteration: usize,
+        _inner_iteration: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        output.copy_from_slice(residual);
+    }
 }
 
 /// Linear first-order adapter over `fs-solver::LinearOp`.
@@ -824,6 +980,25 @@ impl OperatorFirstOrderGeneralizedAlpha {
         problem: &P,
         forcing: &[f64],
     ) -> Result<ImplicitStepTelemetry, TimeSolveError> {
+        self.step_controlled(state, problem, forcing, &mut || false)
+    }
+
+    /// Advance with cooperative cancellation before setup, between bounded
+    /// Newton attempts, and before publication. One attempt includes the
+    /// configured inner Krylov/globalization work; callbacks must bound their
+    /// own work. Cancellation leaves all state and history unchanged.
+    pub fn step_controlled<P, Cancel>(
+        &self,
+        state: &mut FirstOrderState,
+        problem: &P,
+        forcing: &[f64],
+        cancelled: &mut Cancel,
+    ) -> Result<ImplicitStepTelemetry, TimeSolveError>
+    where
+        P: FirstOrderProblem + ?Sized,
+        Cancel: FnMut() -> bool,
+    {
+        first_order_poll(cancelled)?;
         require_dimension("first-order problem", self.n, problem.dimension())?;
         require_dimension("first-order state", self.n, state.u.len())?;
         require_dimension("first-order rate", self.n, state.rate.len())?;
@@ -856,9 +1031,28 @@ impl OperatorFirstOrderGeneralizedAlpha {
             .zip(&state.rate)
             .map(|(u, rate)| self.h.mul_add(*rate, *u))
             .collect();
-        let mut newton = NewtonKrylovState::new(&residual, guess, self.solve.newton)
-            .map_err(TimeSolveError::NewtonSetup)?;
-        let report = newton.run(&residual, self.solve.max_newton_iterations);
+        let setup = NewtonKrylovState::new(&residual, guess, self.solve.newton);
+        first_order_poll(cancelled)?;
+        let mut newton = setup.map_err(TimeSolveError::NewtonSetup)?;
+        let mut report = newton.run(&residual, 0);
+        for _ in 0..self.solve.max_newton_iterations {
+            // Plateau is a report diagnosis, not a terminal Newton state;
+            // the ordinary run continues after it, so this path must too.
+            if report.converged
+                || !matches!(
+                    report.diagnosis,
+                    Some(
+                        fs_solver::NewtonStallDiagnosis::BudgetExhausted
+                            | fs_solver::NewtonStallDiagnosis::Plateau
+                    )
+                )
+            {
+                break;
+            }
+            first_order_poll(cancelled)?;
+            report = newton.run(&residual, 1);
+            first_order_poll(cancelled)?;
+        }
         if !report.converged {
             return Err(TimeSolveError::NotConverged(report));
         }
@@ -870,12 +1064,21 @@ impl OperatorFirstOrderGeneralizedAlpha {
             h: self.h,
             newton: report,
         };
+        first_order_poll(cancelled)?;
         state.u = u_new;
         state.rate = rate_new;
         state.t = next_t;
         state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
+    }
+}
+
+fn first_order_poll<Cancel: FnMut() -> bool>(cancelled: &mut Cancel) -> Result<(), TimeSolveError> {
+    if cancelled() {
+        Err(TimeSolveError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -935,6 +1138,35 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
         for i in 0..method.n {
             output[i] = mass_scale.mul_add(mass[i], tangent[i]);
         }
+    }
+
+    fn preconditioner_apply(
+        &self,
+        u_new: &[f64],
+        outer_iteration: usize,
+        inner_iteration: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        let method = self.method;
+        let u_eval: Vec<f64> = u_new
+            .iter()
+            .zip(self.u0)
+            .map(|(&u_new, &u0)| method.alpha_f.mul_add(u_new, (1.0 - method.alpha_f) * u0))
+            .collect();
+        let weights = FirstOrderOperatorWeights {
+            mass: method.alpha_m / (method.gamma * method.h),
+            tangent: method.alpha_f,
+        };
+        self.problem.preconditioner_apply(
+            self.t_eval,
+            &u_eval,
+            weights,
+            outer_iteration,
+            inner_iteration,
+            residual,
+            output,
+        );
     }
 }
 

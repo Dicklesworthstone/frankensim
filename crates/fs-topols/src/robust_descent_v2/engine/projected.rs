@@ -15,6 +15,7 @@ use crate::volume::{
 mod stress;
 mod checkpoint;
 mod restoration;
+mod resolution;
 
 /// Bounded candidate search and actual case-solve allowance.
 #[derive(Debug, Clone, Copy)]
@@ -298,12 +299,30 @@ impl MultiLoadProjectedOptimizer {
     fn advance_one_scheduled<B>(
         &mut self,
         poll_iters: Option<usize>,
-        mut control: impl FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
+        control: impl FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
     ) -> Result<ControlFlow<B, MultiLoadProjectedProgress>, CutFemError> {
+        self.advance_one_admitted_scheduled(poll_iters, 1,
+            |_, _, _, _, _| Ok(ControlFlow::Continue(None)), control)
+    }
+
+    // One proposal/projection/equilibrium/publication owner for ordinary and
+    // mesh-checked descent. Additional solves use the SAME lifetime allowance.
+    fn advance_one_admitted_scheduled<B, C>(
+        &mut self,
+        poll_iters: Option<usize>,
+        levels_per_candidate: usize,
+        mut admit: impl FnMut(usize, &MultiState, Option<&RobustSampledStressEvaluation>,
+            &mut usize, &mut C) -> Result<ControlFlow<B, Option<String>>, CutFemError>,
+        mut control: C,
+    ) -> Result<ControlFlow<B, MultiLoadProjectedProgress>, CutFemError>
+    where C: FnMut(MultiLoadProjectedStage) -> ControlFlow<B>,
+    {
         if self.next_iteration == self.kernel.settings.iterations {
             return Ok(ControlFlow::Continue(MultiLoadProjectedProgress::IterationLimit));
         }
-        let count = self.kernel.load_cases.len();
+        let count = self.kernel.load_cases.len().checked_mul(levels_per_candidate)
+            .filter(|&count| count > 0)
+            .ok_or_else(|| invalid("invalid complete mesh/load-family solve count"))?;
         if self.controls.max_solves - self.solves_started < count {
             return Ok(ControlFlow::Continue(MultiLoadProjectedProgress::SolveBudget(Vec::new())));
         }
@@ -404,6 +423,15 @@ impl MultiLoadProjectedOptimizer {
             } else if let Err(error) = self.require_candidate(&state, stress.as_ref()) {
                 attempt.refusal = Some(error.to_string());
             } else {
+                match admit(index, &candidate, stress.as_ref(), &mut self.solves_started, &mut control)? {
+                    ControlFlow::Break(reason) => return Ok(ControlFlow::Break(reason)),
+                    ControlFlow::Continue(Some(reason)) => {
+                        attempt.refusal = Some(reason);
+                        attempts.push(attempt);
+                        continue;
+                    }
+                    ControlFlow::Continue(None) => {}
+                }
                 let next_ell = self.ell + self.kernel.settings.mu_al
                     * direction.mean_energy.abs().max(1e-30)
                     * (candidate.volume - self.kernel.settings.volfrac) / self.kernel.settings.volfrac;

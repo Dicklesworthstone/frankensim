@@ -35,6 +35,13 @@ pub(super) fn sample<B>(
             }
         } else {
             let rules = cut_cell_rules(phi, lo, hi, 2);
+            // Admit exactly the cut cells the solve created (fs-cutfem drops
+            // inside area below 1e-12 of the cell); a zero-measure exterior
+            // neighbour of a lattice-aligned interface has no displacement.
+            let inside: f64 = rules.bulk.iter().map(|&(_, weight)| weight).sum();
+            if inside < 1e-12 * (hi[0] - lo[0]) * (hi[1] - lo[1]) {
+                continue;
+            }
             for &(point, weight) in &rules.bulk {
                 if weight > 0.0 {
                     observe_stress(

@@ -684,6 +684,58 @@ impl EquilibriumEnthalpyPhaseCurve {
         &self.knots
     }
 
+    /// Piecewise-linear temperature derivative `dT/dh` [K/(J/kg)] on this
+    /// specific-enthalpy chart, without extrapolation or phase smoothing.
+    ///
+    /// Inside a segment this is its exact chord slope, including exactly zero
+    /// throughout an isothermal latent-heat plateau. At an interior knot the
+    /// segment to the right (increasing enthalpy) is selected. The lower domain
+    /// endpoint also uses its right derivative; the upper endpoint uses its
+    /// left derivative. This explicit one-sided convention provides a
+    /// generalized derivative for semismooth enthalpy solves; it does not claim
+    /// classical differentiability at a slope-changing knot.
+    ///
+    /// For a chart generated from heat-capacity data, this differentiates the
+    /// admitted piecewise-linear chart, not the original continuous Cp curve.
+    /// No reciprocal or artificially large apparent heat capacity is formed
+    /// on a latent plateau.
+    ///
+    /// # Errors
+    /// Returns the same finite-input and domain refusals as
+    /// [`Self::state_at_specific_enthalpy`]. A nonzero segment slope that
+    /// overflows or underflows to zero returns
+    /// [`PhaseStateError::UnrepresentableTemperatureDerivative`].
+    pub fn temperature_derivative_at_specific_enthalpy(
+        &self,
+        specific_enthalpy_j_kg: f64,
+    ) -> Result<f64, PhaseStateError> {
+        if !specific_enthalpy_j_kg.is_finite() {
+            return Err(PhaseStateError::NonFiniteSpecificEnthalpy);
+        }
+        let lower = self.knots[0].specific_enthalpy_j_kg;
+        let upper = self.knots[self.knots.len() - 1].specific_enthalpy_j_kg;
+        if specific_enthalpy_j_kg < lower || specific_enthalpy_j_kg > upper {
+            return Err(PhaseStateError::OutsideEnthalpyDomain {
+                specific_enthalpy_j_kg,
+                lower_j_kg: lower,
+                upper_j_kg: upper,
+            });
+        }
+        let upper_index = self
+            .knots
+            .partition_point(|knot| knot.specific_enthalpy_j_kg <= specific_enthalpy_j_kg)
+            .min(self.knots.len() - 1);
+        let lower_knot = self.knots[upper_index - 1];
+        let upper_knot = self.knots[upper_index];
+        let temperature_increment = upper_knot.temperature_k - lower_knot.temperature_k;
+        let slope = temperature_increment
+            / (upper_knot.specific_enthalpy_j_kg - lower_knot.specific_enthalpy_j_kg);
+        if !slope.is_finite() || (temperature_increment > 0.0 && slope == 0.0) {
+            return Err(PhaseStateError::UnrepresentableTemperatureDerivative);
+        }
+        Ok(slope)
+    }
+
     /// Resolve equilibrium temperature, density, and phase fractions from
     /// specific enthalpy without extrapolation.
     pub fn state_at_specific_enthalpy(
@@ -704,7 +756,8 @@ impl EquilibriumEnthalpyPhaseCurve {
         }
         match self.knots.binary_search_by(|knot| {
             knot.specific_enthalpy_j_kg
-                .total_cmp(&specific_enthalpy_j_kg)
+                .partial_cmp(&specific_enthalpy_j_kg)
+                .expect("admitted enthalpy knots and query are finite")
         }) {
             Ok(index) => self.state_from_values(specific_enthalpy_j_kg, self.knots[index]),
             Err(upper_index) => {
@@ -874,6 +927,9 @@ pub enum PhaseStateError {
     },
     /// A queried specific enthalpy was not finite.
     NonFiniteSpecificEnthalpy,
+    /// A segment's positive `dT/dh` overflowed or underflowed to zero.
+    /// A genuine isothermal plateau instead returns exactly zero successfully.
+    UnrepresentableTemperatureDerivative,
     /// A signed energy increment was not finite.
     NonFiniteSpecificEnergyIncrement,
     /// Evaluation would extrapolate beyond the source-provided curve.

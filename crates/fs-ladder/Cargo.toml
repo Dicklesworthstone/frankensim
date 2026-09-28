@@ -2,7 +2,7 @@
 name = "fs-ladder"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Context- and QoI-specific fidelity graphs with evidenced cost/discrepancy edges, deterministic explained queries, and lossless legacy-ladder embedding."

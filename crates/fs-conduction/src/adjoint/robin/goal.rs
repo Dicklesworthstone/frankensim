@@ -7,6 +7,14 @@ use super::{
     nonlinear, poll, reduce, temperature_dependent, true_residual, vector,
 };
 
+mod algebraic;
+pub use algebraic::{
+    LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer, LinearGoalSolve,
+    LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis, LinearMaximumSolve,
+    LinearRobinFeedbackAnalyzer, LinearRobinMaximumAnalysis, RobinFeedbackAnalysisConfig,
+    analyze_linear_goal, analyze_linear_maximum,
+};
+
 mod feedback;
 pub use feedback::{RobinGoalFeedback, RobinGoalLinearization};
 

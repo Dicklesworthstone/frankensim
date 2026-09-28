@@ -2,7 +2,7 @@
 name = "fs-shapeprog"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Generative geometry program synthesis (fs-shapeprog): a typed constructive-geometry DSL with deterministic SDF semantics, bit-equivalent exact rewrites, compositional outward error bounds for approximate rewrites, transactional structured refusal, canonical content identities, and seeded shape-grammar derivation. The discrete-invention medium."

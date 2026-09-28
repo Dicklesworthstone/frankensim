@@ -26,7 +26,7 @@ fn read(ledger: &Ledger, out: &Outcome, spec: &ElasticitySpec)
     (phi, report, state)
 }
 fn owner(spec: &ElasticitySpec) -> MultiLoadProjectedOptimizer {
-    let policy = spec.projected.as_ref().unwrap();
+    let policy = stress_controls(spec).unwrap();
     let family = policy.family.as_ref().unwrap();
     let ControlFlow::Continue(prepared) = regions::prepare(spec, &policy.regions,
         |_| ControlFlow::<()>::Continue(())).unwrap() else { panic!("preparation stopped") };
@@ -42,7 +42,7 @@ fn measured(stress: f64, compliance: f64) -> SampledStressEvaluation {
 #[test]
 fn explicit_restoration_policy_is_canonical_and_can_use_only_the_primary_load() {
     let ordinary = parse_study(SOURCE).unwrap();
-    assert!(ordinary.projected.as_ref().unwrap().family.as_ref().unwrap().restoration_reduction.is_none());
+    assert!(stress_controls(&ordinary).unwrap().family.as_ref().unwrap().restoration_reduction.is_none());
     let declared = spec();
     assert_eq!(parse_study(&declared.canonical).unwrap().id, declared.id);
     for invalid in ["-0.1", "1.0", "2.0"] {
@@ -53,13 +53,13 @@ fn explicit_restoration_policy_is_canonical_and_can_use_only_the_primary_load() 
     let primary_only = source().replace(
         "        (case :band (0.375 0.625) :traction-pa (0.5 0.0) :weight 1.0)\n", "");
     let primary = parse_study(&primary_only).unwrap();
-    assert_eq!(primary.projected.as_ref().unwrap().family.as_ref().unwrap().cases(&primary).unwrap().len(), 1);
+    assert_eq!(stress_controls(&primary).unwrap().family.as_ref().unwrap().cases(&primary).unwrap().len(), 1);
     assert!(parse_study(&primary_only.replace(OPT_IN, "")).is_err());
 }
 
 #[test]
 fn restoration_and_compliance_have_distinct_measured_gates_and_progress_baselines() {
-    let mut policy = spec().projected.unwrap();
+    let mut policy = stress_controls(&spec()).unwrap().clone();
     policy.stress = SampledStressLimit::new(10.0, 0.0).unwrap();
     policy.family.as_mut().unwrap().restoration_reduction = Some(0.5);
     let initial = measured(12.0, 100.0);

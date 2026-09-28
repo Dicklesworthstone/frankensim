@@ -2,7 +2,7 @@
 name = "fs-fmm"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Kernel-independent black-box FMM: Chebyshev interpolation operators on octrees (P2M/M2M/M2L/L2L/L2P), direct near field, accuracy controlled by interpolation order."

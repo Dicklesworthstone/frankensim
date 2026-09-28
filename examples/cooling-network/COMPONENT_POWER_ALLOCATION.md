@@ -20,7 +20,7 @@ not measured hardware or validated operating limits.
 {
   "schema": "frankensim.cooling-component-design.v1",
   "units": "SI",
-  "temperature_limit_k": 302.5,
+  "temperature_limit_k": 301.5,
   "power_tolerance_w": 0.001,
   "temperature_tolerance_k": 0.0005,
   "max_evaluations": 128,
@@ -153,8 +153,12 @@ largest selected-watt discrepancy was 0.000733 W, below the declared 0.001 W
 bracket tolerance, and replay of each selected reference field was bit-identical.
 These are independent mathematical references, NOT Rust executions.
 
-For the example, the reference selects standby=3 W, memory=10 W and
-chip=14.734143 W. Its all-cycle sampled peak is 302.49999985 K at 20 seconds.
+For the example as it then declared (302.5 K), the reference selects standby=3 W,
+memory=10 W and chip=14.734143 W. Its all-cycle sampled peak is 302.49999985 K at
+20 seconds. With lumped capacity (measured 2026-09-25), the same 302.5 K limit
+would admit the full 24 W, so the example now declares 301.5 K. FrankenSim then
+selects standby=3 W, memory=10 W and chip=15.0925911 W, with a sampled peak of
+301.4999999957 K.
 Guidance and bisection each used 19 complete evaluations on this case; the reverse
 calculations add cost, so no speedup is claimed. Reversing priorities gives about
 16.569090 W to chip and near-zero to the other controls. With only two evaluations,

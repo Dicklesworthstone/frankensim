@@ -54,6 +54,93 @@ where claimed below.
   γ = 1/2 + αm − αf. This is not the structural second-order formulation
   relabeled: state and rate are first-class and the residual is enforced at
   `(t_n + αf h, u_n + αf (u_{n+1}−u_n))`.
+- Both implicit problem traits accept an optional `preconditioner_apply`
+  action for their forward Newton/FGMRES solve. It receives the exact stage
+  state (and first-order stage time), named effective-operator coefficients,
+  and logical outer/inner iteration indices. Structural weights are
+  `((1−αm)/(βh²), (1−αf)γ/(βh), 1−αf)` for mass, damping and tangent;
+  first-order weights are `(αm/(γh), αf)` for mass and tangent. The default
+  remains identity. A callback must completely overwrite its output, bound
+  its own work, and reproduce its policy during checkpoint replay. Invalid
+  output fails before publishing the time step. The explicit adjoint
+  preconditioner is independent; derivatives remain those of the converged
+  physical residual, without differentiating preconditioning or iteration.
+  `tests/first_order_preconditioner.rs` and
+  `tests/structural_preconditioner.rs` cover scale-separated nonsymmetric
+  solves with one Krylov column, independent dense endpoints, exact stage
+  inputs, malformed-output/cancellation atomicity, identity parity, and
+  checkpointed parameter/initial-state gradients against dense differences.
+- `galpha::adjoint::FirstOrderVjp` and
+  `OperatorFirstOrderGeneralizedAlpha::step_vjp` differentiate the converged
+  first-order residual through an explicit transposed effective-system solve.
+  The model supplies mass/tangent transpose actions and the parameter VJP of
+  `M(p) rate + r(t,u,p)`, including parameter-dependent mass. Returned
+  cotangents cover initial state, initial rate, model parameters and forcing;
+  neither mass nor tangent must be symmetric. Chaining steps requires both
+  endpoint state and rate seeds. The caller propagates the initial-rate
+  cotangent through any consistency initialization, and adds direct objective
+  terms and forcing-parameter chain rules. `FirstOrderAdjointConfig` bounds the
+  independent adjoint FGMRES solve with an explicit preconditioner, while
+  `adjoint_workspace_components` gives a conservative scalar-storage ceiling.
+  The pullback borrows existing input history and returns complete primal and
+  adjoint reports. Failed solves, incomplete derivative writes, nonfinite
+  results, insufficient workspace and cancellation return no partial gradient.
+- `galpha::second_order_adjoint::SecondOrderVjp` and
+  `OperatorGeneralizedAlpha::step_vjp` differentiate the structural
+  Chung–Hulbert residual and Newmark correctors. Explicit transpose actions
+  cover mass, damping and the nonlinear internal-force tangent; the parameter
+  VJP includes `M(p) a + C(p) v + r(q,p)`. Returned cotangents cover all three
+  initial vectors (displacement, velocity, acceleration), parameters and
+  forcing. A trajectory reverse sweep must carry all three endpoint seeds.
+  If initial acceleration comes from an equilibrium calculation, its cotangent
+  must enter that calculation's chain rule. `SecondOrderAdjointConfig` bounds
+  an independently preconditioned transposed FGMRES solve. Workspaces are
+  conservatively capped, prior input history is borrowed, and failed solves,
+  incomplete derivatives or cancellation return no partial result.
+- `galpha::initialization::{first_order_rate, second_order_acceleration}` solve
+  the initial mass equations `M rate = f-r(t,u)` and `M a = f-Cv-r(q)` with
+  bounded FGMRES and an explicit mass preconditioner. The corresponding
+  `first_order_rate_vjp` and `second_order_acceleration_vjp` solve the transposed
+  mass system and propagate the rate/acceleration seed into initial state,
+  velocity, model parameters and forcing. Parameter-dependent mass and damping
+  enter the same residual-parameter VJPs used by the step adjoints. These
+  routines provide the consistency chain needed when an inverse problem's
+  initial rate or acceleration changes with its parameters. They hold time
+  fixed, require a nonsingular mass model, return both residual reports, bound
+  scalar workspace, and publish no partial result on cancellation or refusal.
+  The caller supplies the force at the initial physical time and applies any
+  remaining state/velocity/forcing parameterization. They do not establish
+  uniqueness of a singular-mass model or solve constrained DAE initialization.
+- `galpha::second_order_adjoint::trajectory::RecordedStructural` records and
+  differentiates complete structural trajectories under a
+  `StructuralTrajectoryModel` with time-dependent, parameterized loading.
+  Loads and their parameter VJPs use `OperatorGeneralizedAlpha::forcing_time`,
+  the actual `t_n + (1-alpha_f)h` load time of the production residual. The
+  recorder retains initial/current q/v/a with empty solver history and O(N)
+  compact endpoint fingerprints. Binary reverse replay parks O(log N) q/v/a
+  checkpoints and enforces explicit checkpoint and forward-replay limits.
+  Each replay verifies q/v/a, time and the absolute step counter before using
+  its derivative. Leaf pullbacks reuse the checked endpoint and Newton report,
+  avoiding a duplicate primal solve, and add the forcing parameter contribution
+  once. Forward caps/cancellation preserve the accepted prefix; reverse failure
+  returns no partial gradient and leaves the recording retryable. Initial
+  consistency derivatives remain the caller's chain rule, supported by the
+  initialization routines above. The models must remain pure and unchanged;
+  these fingerprints diagnose replay consistency and do not certify derivatives.
+- `RecordedStructural::pullback_samples` accumulates displacement, velocity and
+  acceleration observations through `trajectory::samples::StructuralSampleObjective`.
+  Ordered endpoint indices include the initial state and may repeat for several
+  sensors. Each callback receives the actual q/v/a, clock and absolute counter,
+  writes all three state partials plus direct parameter partials, and runs once
+  in reverse declaration order after endpoint verification. All observations
+  share one checkpoint sweep, including initial-only zero-step objectives.
+  The sample cap is checked before scanning the timetable; `3*n+p` callback
+  scratch is dropped before each leaf adjoint and fits the per-step workspace.
+  No observed-state history is retained. Failed, incomplete or nonfinite
+  observations and cancellation publish no partial objective or gradient.
+  The returned initial q/v/a cotangents still require the caller's consistency
+  chain. Timetable, step, clock and solver policy are fixed; this API does not
+  interpolate measurements or differentiate their sampling times.
 - `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
   Newton report per accepted step, including outer residual decisions and
   inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,
@@ -69,8 +156,46 @@ where claimed below.
   `LinearOp`. Each `(I − γhL)` stage uses FGMRES with an injected
   `FlexiblePreconditioner`; both true-residual reports are recorded in
   `ImexStepTelemetry`, and `ImexState` changes only if both stages converge.
+- `stiff::adjoint::{ImexVjp, ImexStepGradient}` and
+  `OperatorImex2::step_vjp` differentiate the actual ARS(2,2,2) step for
+  autonomous `u' = L(p)u + N(u,p)`. Two primal and two transposed shifted
+  FGMRES solves use explicit primal/adjoint preconditioners. The pullback
+  includes parameter derivatives of both implicit matrices, the explicit
+  linear term and both nonlinear stage evaluations. It reuses the production
+  stage calculation and applies the implicit function theorem, without
+  differentiating Krylov iterations. The caller supplies consistent pure
+  derivative actions, a finite endpoint seed and a scalar workspace ceiling;
+  incomplete/nonfinite derivative outputs, insufficient workspace, failed
+  solves and cancellation return no partially accumulated gradient.
+  `adjoint_workspace_components` bounds live scalar storage conservatively;
+  allocator metadata and callback-owned memory are outside that bound.
+  `examples/imex_thermal_fit.rs` composes the pullbacks to fit conductance and
+  heater power through a two-body thermal trajectory.
+- `stiff::adjoint::trajectory::RecordedImex2` records/resumes the production
+  fixed-step method with O(N) compact endpoint fingerprints and only the
+  initial/current full states. Its reverse sweep follows the binary
+  `fs-ad::revolve` schedule, parks O(log N) states, enforces explicit checkpoint
+  and replay-work caps, and checks every replayed endpoint before using its
+  derivatives. Leaf pullbacks reuse the checked forward stages. Cancellation
+  leaves the accepted forward prefix or complete reverse recording retryable;
+  no partial gradient is returned. Models and both preconditioners must remain
+  pure and unchanged across recording, forks and replay. The fingerprints are
+  replay diagnostics, not proof of derivative correctness. The thermal fitting
+  example now uses this sweep with six parked checkpoints for forty steps.
   `IdentityPreconditioner` is the explicit unpreconditioned fixture lane, not
   the field-scale recommendation.
+- `RecordedImex2::pullback_samples` accepts a capped, nondecreasing list of
+  accepted endpoint indices and the existing RK45 `SampleObjective` interface.
+  Index zero denotes the initial state; repeated indices support multiple
+  sensors at one endpoint. Each callback receives the actual recorded time,
+  supplies the scalar loss plus state/direct-parameter partials, and runs once
+  in reverse declaration order after replay verification. All terms accumulate
+  in one checkpointed sweep, with no stored observation states or extra solve
+  per observation. The result contains the total objective, initial/parameter
+  gradients, observation count, and replay/checkpoint usage. The caller chains
+  any initial-condition parameter dependence. Samples do not alter the fixed
+  IMEX mesh or interpolate off-grid times. Objective failure, unwritten output,
+  insufficient budgets and cancellation return no partial value or gradient.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
   Euler for u′ = Au + N(u), **symmetric A** via the fs-la Jacobi
   eigenbasis; φ₁(x) = expm1(x)/x (cancellation-free). Exact for N ≡ 0.
@@ -239,7 +364,19 @@ in identity unless named by its exact trace ID.
 All entry points are synchronous and run to completion for one bounded step.
 Operator generalized-alpha bounds work by the configured Newton outer and
 FGMRES cycle/restart budgets; operator IMEX bounds each stage by its configured
-FGMRES budget. Long trajectories are resumable by cloning `SecondOrderState`,
+FGMRES budget. `OperatorImex2::step_controlled` and `step_vjp` additionally
+poll around model callbacks, between FGMRES restart cycles and immediately
+before publication. One cycle has at most the configured restart length of
+Arnoldi iterations. Long callbacks must bound their own work; this does not
+claim interruption within an operator or one Krylov cycle. Cancelled forward
+attempts leave the entire `ImexState` unchanged and are retryable.
+Both `OperatorFirstOrderGeneralizedAlpha::step_controlled` and structural
+`OperatorGeneralizedAlpha::step_controlled` poll before setup, between bounded
+Newton attempts and before publication. Their `step_vjp` methods also poll
+between adjoint restart cycles and around final derivative callbacks.
+Cancelled attempts preserve the entire input state/history; one Newton
+attempt or provider callback must finish before its cancellation is observed.
+Long trajectories are resumable by cloning `SecondOrderState`,
 `FirstOrderState`, `ImexState`, or `AdaptiveState` between calls; split runs
 continue bitwise when the same operators, forcing, preconditioner policy, and
 configuration are supplied. Hybrid problem validation polls `Cx` before work,
@@ -363,13 +500,45 @@ per-relation and aggregate reset-target caps.
   no BDF/multistep.
 - No dense output / continuous extension for RK45; no stiffness
   detection; no event location.
-- Adjoints ship for Verlet only (the template); generalized-α/IMEX/
-  RK45 adjoints are the fs-ad integration lane (o3ui).
+- Adjoint support is specific to each admitted map: Verlet, free-body DEP,
+  frozen-step/recorded RK45, autonomous operator IMEX ARS(2,2,2), and
+  operator-backed first-order and structural second-order generalized-alpha.
+  Exponential-integrator pullbacks remain absent.
+  Generalized-alpha holds time, timestep, spectral radius and solver policy
+  fixed. It differentiates the converged residual rather than Newton/Krylov
+  iterations. The first-order tests check independent state/rate input seeds
+  with nonlinear nonsymmetric, parameter-dependent mass and tangent
+  against an independent dense endpoint-rate solve with forward duals and
+  five-point differences, plus full trajectory accumulation and descent.
+  Structural tests independently solve for endpoint acceleration with dense
+  forward duals and five-point differences, check parameter-dependent mass,
+  damping and internal force, and verify all displacement/velocity/acceleration
+  and forcing cotangents through multiple steps and an inverse-loss descent.
+  Primal and adjoint convergence residuals limit gradient accuracy; there is
+  no interval gradient enclosure or adaptive-controller/event derivative.
+  IMEX gradients hold the step size, solver policy and initial-condition
+  parameterization fixed, require correct transposed model actions, and are
+  limited by the returned primal/adjoint residuals. They do not differentiate
+  adaptive controllers, events/resets or nonautonomous splittings and do not
+  provide an interval enclosure of the gradient. IMEX binary checkpoint
+  scheduling is provided, while initial-condition/direct-objective derivatives
+  remain caller responsibilities. It does not provide disk spill or serialization
+  of a recording, and reverse sweeps restart after cancellation.
+  `tests/imex_adjoint.rs` checks nonsymmetric state/parameter
+  gradients against independent dense-solve differences, reverse trajectory
+  accumulation, descent, every cancellation boundary and derivative refusals.
+  The recording regressions additionally compare checkpointed/full-storage
+  gradients bit-for-bit, check forward cap/clone/resume behavior, reject changed
+  replay physics, and exercise exact replay/checkpoint budgets.
+  `tests/imex_samples.rs` compares sampled losses and all total parameter/state
+  derivatives against dense five-point differences, checks exact full-storage
+  reverse equality, repeated sensors and actual times, and exercises zero-step
+  initial terms, all cancellation boundaries and observation/budget refusals.
 - Operator-backed generalized-alpha and IMEX remove the dense storage/API
   ceiling, but no roofline or field-scale iteration-count claim is made.
-  `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity
-  inner preconditioner; an injected nonlinear-preconditioner seam is pending
-  in the shared solver. `OperatorImex2` does accept an injected flexible
+  Both generalized-alpha formulations use model-provided flexible right
+  preconditioning when supplied, including during forward checkpoint replay.
+  `OperatorImex2` accepts an independently injected flexible
   preconditioner. Dense-vs-operator agreement is tolerance-based, not a claim
   that LU and Krylov execute identical floating-point reductions.
 - Public trajectory checkpoints are accepted-step boundaries. Although the

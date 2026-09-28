@@ -124,6 +124,7 @@ fn project_for_receipt(format: &str, source_hash: u64, parser_version: &str) -> 
             format: format.to_string(),
             source_hash,
             parser_version: parser_version.to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![GeometryAssignment {
             artifact: "enclosure".to_string(),

@@ -9,6 +9,11 @@
 //! boundary integrals and discrete energy accounting. Heat capacity and contact
 //! resistance are temperature independent. [`StepLinearization`] adds discrete
 //! endpoint/history derivatives; fluid storage is not introduced.
+//!
+//! [`BackwardEuler::advance_prescribed`] explicitly admits endpoint Dirichlet
+//! data that differ from history. The boundary correction is lifted through
+//! the transient operator, and boundary-node storage enters the reaction heat.
+//! The original `advance` entry point still requires constant prescribed data.
 
 mod nonlinear;
 pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
@@ -16,7 +21,7 @@ mod adjoint;
 pub use adjoint::StepLinearization;
 
 use fs_exec::Cx;
-use fs_solver::{CgState, CsrOp, norm2};
+use fs_solver::{CheckedCgConfig, CheckedCgError, CsrOp, checked_cg, norm2};
 use fs_sparse::Csr;
 
 use crate::assemble::{AssembledSystem, assemble_operator_scaled_with_interfaces, reduce_matrix_and_lift, DofMap};
@@ -30,6 +35,8 @@ use super::{assemble_capacitance, assemble_capacitance_from, axpy_csr, Volumetri
 pub struct StepConfig {
     /// Krylov tolerance/budget. For the nonlinear entry point the iteration
     /// cap covers ALL Newton corrections, not each correction separately.
+    /// The linear path permits at most two residual-defect repairs within
+    /// this same iteration cap; neither the tolerance nor the energy gate widens.
     pub linear: LinearConfig,
     /// Maximum absolute storage-minus-net-input mismatch in joules.
     pub energy_tolerance_j: f64,
@@ -50,14 +57,17 @@ pub struct StepSolution {
     pub neumann_out_w: f64,
     /// Endpoint outward Robin heat, watts.
     pub robin_out_w: f64,
-    /// Endpoint prescribed-temperature reaction, including consistent capacity.
+    /// Prescribed-temperature reaction, including boundary-node capacity.
+    /// For changing prescribed data, this is the backward-Euler discrete
+    /// reaction over the step, not an instantaneous boundary-jump impulse.
     pub dirichlet_in_w: f64,
     /// `1^T C (T_new - T_old)` of the actually published temperatures, joules.
     pub stored_energy_change_j: f64,
     /// Storage minus dt times net external input, joules; checked independently.
     pub energy_residual_j: f64,
-    /// Recomputed relative residual of the normalized correction solve (or
-    /// the worst such inner residual over nonlinear Newton corrections).
+    /// Recomputed relative residual of the returned physical correction for
+    /// the linear path, or the worst normalized inner residual over nonlinear
+    /// Newton corrections. The linear gate includes correction rescaling.
     /// Final absolute-temperature rounding is checked by the separate energy gate.
     pub relative_residual: f64,
     /// Total Krylov iterations for this solid response.
@@ -110,6 +120,40 @@ impl<'m> BackwardEuler<'m> {
         -> Result<StepSolution, ConductionError>
     {
         let dofs = self.admit_step(cx, problem, old, dt_s, config)?;
+        self.advance_admitted(cx, problem, interfaces, old, dt_s, config, dofs)
+    }
+
+    /// Advance linear conduction with explicitly prescribed ENDPOINT temperatures.
+    ///
+    /// `old` is the full physical field at the start of the step, including
+    /// its old prescribed values. `problem.boundary` supplies Dirichlet values
+    /// at the end of the step. This permits heating/cooling boundary histories
+    /// without overwriting history or applying the absolute Dirichlet lift twice.
+    /// The caller chooses the time grid and supplies each endpoint; no continuous
+    /// boundary profile, substep extrema or instantaneous heat impulse is inferred.
+    ///
+    /// Both free and prescribed nodes contribute to `stored_energy_change_j`.
+    /// The prescribed reaction includes their capacity change divided by `dt_s`,
+    /// so the returned field must still pass the unchanged discrete-energy gate.
+    /// Use [`Self::advance`] when prescribed values must remain constant.
+    ///
+    /// # Errors
+    /// The same input, material, cancellation, Krylov and energy refusals as
+    /// `advance`, except that a finite prescribed-temperature change is admitted.
+    /// No new field is returned on failure and `old` is never modified.
+    pub fn advance_prescribed(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64, config: StepConfig)
+        -> Result<StepSolution, ConductionError>
+    {
+        let dofs = self.admit_endpoint_step(cx, problem, old, dt_s, config)?;
+        self.advance_admitted(cx, problem, interfaces, old, dt_s, config, dofs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_admitted(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        config: StepConfig, dofs: DofMap) -> Result<StepSolution, ConductionError>
+    {
         for e in 0..self.mesh.element_count() {
             if e % 512 == 0 { poll(cx, e)?; }
             let model = match problem.element_materials {
@@ -122,16 +166,41 @@ impl<'m> BackwardEuler<'m> {
         let system = assemble_operator_scaled_with_interfaces(cx, self.mesh, problem.boundary,
             problem.material, problem.source, old, None, interfaces, problem.element_materials)?;
         let lhs = axpy_csr(&self.capacity, 1.0, &system.operator, dt_s);
-        // The unknown is a CORRECTION. Its fixed entries are zero; the absolute
-        // Dirichlet lift must not be added again to this right-hand side.
+        // The unknown is a CORRECTION. Only g_new - T_old is prescribed;
+        // the reduction's absolute-temperature lift is not this right-hand side.
         let (matrix, _) = reduce_matrix_and_lift(&lhs, &dofs);
+        let mut temperature = old.to_vec();
+        let mut changed = false;
+        for (slot, &v) in dofs.fixed().iter().enumerate() {
+            if slot % 512 == 0 { poll(cx, slot)?; }
+            let value = dofs.prescribed()[v];
+            changed |= value != old[v];
+            // Publish the supplied endpoint exactly, not old + a rounded delta.
+            temperature[v] = value;
+        }
+        let lift = if changed {
+            let mut prescribed_delta = vec![0.0; self.mesh.vertex_count()];
+            for (slot, &v) in dofs.fixed().iter().enumerate() {
+                if slot % 512 == 0 { poll(cx, slot)?; }
+                prescribed_delta[v] = finite(dofs.prescribed()[v] - old[v])?;
+            }
+            // (C + dt K)_ff delta_f = dt (b - K T_old)_f
+            //                           - (C + dt K)_fc (g_new - T_old)_c.
+            let mut lift = vec![0.0; self.mesh.vertex_count()];
+            lhs.spmv(&prescribed_delta, &mut lift);
+            poll(cx, 0)?;
+            Some(lift)
+        } else {
+            // Do not add two full nodal buffers to the unchanged default path.
+            None
+        };
         let mut applied = vec![0.0; self.mesh.vertex_count()];
         system.operator.spmv(old, &mut applied);
         poll(cx, 0)?;
-        let rhs: Vec<f64> = dofs.free().iter().map(|&v| finite(dt_s * (system.load[v] - applied[v])))
+        let rhs: Vec<f64> = dofs.free().iter().map(|&v|
+            finite(dt_s * (system.load[v] - applied[v]) - lift.as_ref().map_or(0.0, |lift| lift[v])))
             .collect::<Result<_, _>>()?;
         let (correction, relative_residual, krylov_iterations) = solve(cx, &matrix, &rhs, config.linear)?;
-        let mut temperature = old.to_vec();
         for (slot, &v) in dofs.free().iter().enumerate() {
             if slot % 512 == 0 { poll(cx, slot)?; }
             temperature[v] = finite(old[v] + correction[slot])?;
@@ -141,6 +210,19 @@ impl<'m> BackwardEuler<'m> {
     }
 
     fn admit_step(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        old: &[f64], dt_s: f64, config: StepConfig) -> Result<DofMap, ConductionError>
+    {
+        let dofs = self.admit_endpoint_step(cx, problem, old, dt_s, config)?;
+        for (slot, &v) in dofs.fixed().iter().enumerate() {
+            if slot % 512 == 0 { poll(cx, slot)?; }
+            if old[v] != dofs.prescribed()[v] {
+                return Err(invalid("history must match constant Dirichlet values; use advance_prescribed for explicit endpoint boundary data"));
+            }
+        }
+        Ok(dofs)
+    }
+
+    fn admit_endpoint_step(&self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
         old: &[f64], dt_s: f64, config: StepConfig) -> Result<DofMap, ConductionError>
     {
         poll(cx, 0)?;
@@ -158,13 +240,7 @@ impl<'m> BackwardEuler<'m> {
         }
         for (i, &t) in old.iter().enumerate() { if i % 512 == 0 { poll(cx, i)?; } finite(t)?; }
         if let Some(materials) = problem.element_materials { materials.validate_for(self.mesh)?; }
-        let dofs = DofMap::new(problem.boundary, n)?;
-        for &v in dofs.fixed() {
-            if old[v] != dofs.prescribed()[v] {
-                return Err(invalid("history must match constant Dirichlet values; boundary jumps need an explicit impulse model"));
-            }
-        }
-        Ok(dofs)
+        DofMap::new(problem.boundary, n)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -204,30 +280,31 @@ fn solve(cx: &Cx<'_>, matrix: &Csr, rhs: &[f64], config: LinearConfig)
     -> Result<(Vec<f64>, f64, usize), ConductionError>
 {
     poll(cx, 0)?;
-    let scale = rhs.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
-    let normalized: Vec<f64> = rhs.iter().map(|v| v/scale).collect();
+    if rhs.iter().all(|&v| v == 0.0) { return Ok((vec![0.0; rhs.len()], 0.0, 0)); }
     let op = CsrOp::symmetric(matrix.clone());
     let pre = spd_preconditioner(matrix);
-    let mut state = CgState::new(&op, &pre, &normalized);
-    while state.rel_residual() >= config.tolerance && state.iters < config.max_iterations {
-        poll(cx, state.iters)?;
-        let before = state.iters;
-        state.run(&op, &pre, config.tolerance, (config.max_iterations-before).min(16));
-        if state.iters == before { break; }
-    }
-    poll(cx, state.iters)?;
-    let mut applied = vec![0.0; rhs.len()];
-    matrix.spmv(&state.x, &mut applied);
-    let residual: Vec<f64> = normalized.iter().zip(applied).map(|(b,a)| finite(b-a)).collect::<Result<_,_>>()?;
-    let relative = finite(norm2(&residual) / norm2(&normalized))?;
-    if relative >= config.tolerance {
-        return Err(ConductionError::LinearSolveFailed { iteration: 0, krylov_iterations: state.iters,
+    // A recursive CG stop can miss the recomputed gate by roundoff even
+    // with work left (the 319.6 K transient-fan sizing regression). Repair
+    // that actual defect, rather than accepting it or weakening the tolerance.
+    // The driver scales internally, then checks the RETURNED correction in
+    // this original system. Checking only an intermediate normalized vector
+    // would miss rounding introduced by its final physical rescaling.
+    let checked = checked_cg(&op, &pre, rhs, CheckedCgConfig {
+        tolerance: config.tolerance,
+        max_iterations: config.max_iterations,
+        max_corrections: 2,
+    }, |iterations| poll(cx, iterations)).map_err(|error| match error {
+        CheckedCgError::Interrupted(reason) => reason,
+        CheckedCgError::InvalidInput(what) => invalid(what),
+    })?;
+    let relative = finite(checked.report.rel_residual)?;
+    let iterations = checked.report.iters;
+    if !checked.report.converged_euclidean() {
+        return Err(ConductionError::LinearSolveFailed { iteration: 0, krylov_iterations: iterations,
             true_relative_residual: relative, tolerance: config.tolerance });
     }
-    let solution = state.x.iter().map(|v| finite(v*scale)).collect::<Result<_,_>>()?;
-    poll(cx, state.iters)?;
-    Ok((solution, relative, state.iters))
+    poll(cx, iterations)?;
+    Ok((checked.x, relative, iterations))
 }
 fn sum(values: impl IntoIterator<Item=f64>) -> Result<f64, ConductionError> {
     values.into_iter().try_fold(0.0, |s,v| finite(s+v))
@@ -246,3 +323,6 @@ fn poll(cx: &Cx<'_>, at: usize) -> Result<(), ConductionError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod prescribed_tests;

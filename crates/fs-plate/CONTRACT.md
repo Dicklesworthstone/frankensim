@@ -82,6 +82,56 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   section, section count (expected and actual), degenerate element (with the offending element id and 2A), bad
   boundary (with out-of-bounds node index and node count), bad stiffener,
   forwarded modal refusals.
+- `loading::PlatePointStencil` locates a point on the actual triangular mesh
+  within node/triangle admission bounds. It uses the lowest-index containing
+  triangle at shared edges and P1 weights for the `(w, wx, wy)` interface
+  fields. This interpolation is explicit and distinct from the DKT element's
+  interior rotation polynomial. A physical transverse force and Cartesian
+  moments `[Fz, Mx, My]` map to `[Fz, -My, Mx]` generalized efforts: physical
+  rotations are `[wy, -wx, 0]`. Applying the same stencil and its transpose
+  preserves virtual work and power. Point probes reconstruct displacement,
+  slopes, transverse velocity and angular velocity; `load_vjp` differentiates
+  force/moment amplitudes at a fixed location. Repeated additive transfers
+  support caller-bounded distributed loads. Eliminated-DOF applied loads are
+  returned separately; they are not the complete dynamic support reactions.
+  Invalid/outside locations, malformed support maps and nonfinite arithmetic
+  refuse, and a refused addition leaves the force vector unchanged. Moving
+  paths relocate on the undeformed mesh; changing supports requires a new
+  stencil. No path-coordinate derivative, contact model or moving-support
+  kinematics is inferred. `tests/plate_loading.rs` checks independent rigid
+  motion, force/moment resultants, virtual work, moving-edge continuity,
+  support elimination and bounded atomic refusal.
+- In the `fs-plate-transient` crate, `PlateDynamics` binds the existing sparse DKT
+  pencil to `fs-time`'s structural residual, discrete adjoint and loaded
+  trajectory interfaces. It borrows a fixed mesh/support model and uses
+  `M = mass_scale*M0`, `K = stiffness_scale*K0`, and
+  `C = mass_damping_per_s*M + stiffness_damping_s*K`. The four parameters
+  precede the load's parameters in every VJP. Explicit stored transposes
+  and all mass/stiffness/damping derivatives are implemented without dense
+  matrices or per-action scratch. `PlateLoad` supplies a pure time-dependent
+  reduced load and its parameter VJP, permitting moving mesh-point stencils.
+  Positive diagonal lumped mass is required; the exact mass preconditioner
+  supports consistent acceleration and its initialization pullback. An
+  effective-operator Jacobi preconditioner supports the explicit adjoint
+  solve. Forward Newton/FGMRES automatically uses the same physical diagonal
+  through the model hook, using the integrator's actual effective mass,
+  damping and tangent weights. This action allocates no scratch and refuses
+  nonpositive, nonfinite or noninvertible diagonals before a step is accepted.
+  DOF, full support-map, stored-entry and load-parameter caps precede scanning
+  or allocation. Admission/preconditioner construction polls cancellation;
+  operator/load callback work is bounded by the admitted model and caller.
+  Recording, solve scratch, replay, checkpoint and observation budgets remain
+  owned by the shared time integrator. Geometry, supports and reference
+  matrices are fixed; stiffness scaling also scales any prestress/stiffeners.
+  The adapter does not independently certify positive-semidefinite K or
+  identify physical damping. It retains the DKT/lumped-mass spatial model,
+  linear small-deflection kinematics, and the supplied initial-state chain.
+  `examples/moving_plate.rs` advances a force across a clamped DKT mesh and
+  differentiates sampled deflection through all four mechanical parameters
+  and force amplitude, including consistent initial acceleration. The focused
+  transient tests compare complete q/v/a and gradients with independent dense
+  stepping, check common-scale invariance, undamped energy conservation and
+  damped decay, and exercise admission/cancellation/refusal behavior.
 
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
@@ -129,14 +179,23 @@ through `fs_sparse::Coo` canonical accumulation; modal path inherits
 fs-modal's determinism (tested there). Cross-ISA goldens are not recorded.
 
 ## Cancellation behavior
-None; assembly and modal calls run to completion (fs-modal budgets are the
-only bounds). Joins the executor-integration seam when a consumer needs it.
+Spatial assembly and modal calls run to completion under their existing
+controls. Moving-load location is bounded by admitted node/triangle counts.
+The transient adapter polls admission and preconditioner construction; its
+operator callbacks are bounded by the admitted sparse model. The shared time
+integrator owns cancellation and accepted-prefix behavior during stepping
+and reverse replay.
 
 ## Unsafe boundary
 None. Workspace `unsafe_code = "deny"`.
 
 ## Feature flags
-None.
+None. The shared generalized-alpha dynamics and adjoint adapter moved to the
+`fs-plate-transient` crate on 2026-09-27. As an optional feature here, its
+`fs-time`/`fs-solver` edge closed the package cycle
+`fs-feec -> fs-couple -> fs-plate -> fs-solver -> fs-feec`, and every workspace
+cargo command failed. Its source, tests and examples moved there on 2026-09-28.
+Moving-load interpolation remains here.
 
 ## Conformance tests
 

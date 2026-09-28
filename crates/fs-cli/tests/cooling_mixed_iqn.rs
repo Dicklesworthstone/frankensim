@@ -70,8 +70,8 @@ fn nonlinear_contact_pulse_retains_its_physical_peak_and_energy_under_accelerati
     assert_eq!(result.get("contact_sensitivities"),Some(&J::Null));
     // Independent dense P1/contact/air calculation already used by the
     // nonlinear-transient regression; no change of timestep or physics here.
-    close(value(&result,&["transient","sampled_peak_objective_k"]),306.1651033635,5e-5);
-    close(value(&result,&["objective","value_k"]),301.41523251,5e-5);
+    close(value(&result,&["transient","sampled_peak_objective_k"]),304.0634747779944,5e-5);
+    close(value(&result,&["objective","value_k"]),301.688560658997,5e-5);
     assert!(value(&result,&["transient","nonlinear","solid_solves"])>0.0);
 }
 

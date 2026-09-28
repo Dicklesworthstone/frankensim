@@ -262,6 +262,7 @@ fn reference_spec(board_card: &str, spreader_card: &str, tim_card: &str) -> Proj
                 temp_lo: kelvin(233.15),
                 temp_hi: kelvin(398.15),
                 source: "seed-v1".to_string(),
+                conductivity_tolerance: None,
             },
             MaterialBinding {
                 region: "spreader".to_string(),
@@ -271,6 +272,7 @@ fn reference_spec(board_card: &str, spreader_card: &str, tim_card: &str) -> Proj
                 temp_lo: kelvin(233.15),
                 temp_hi: kelvin(398.15),
                 source: "seed-v1".to_string(),
+                conductivity_tolerance: None,
             },
         ]),
         interface_cards: Some(vec![InterfaceCardBinding {

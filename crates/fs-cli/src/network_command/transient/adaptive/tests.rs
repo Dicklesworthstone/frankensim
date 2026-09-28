@@ -37,8 +37,8 @@ fn adaptive_contact_pulse_rejects_trials_without_adding_time_or_heat() {
     close(run.f64_field("input_energy_j").unwrap(), 600.0, 1e-7);
     close(run.f64_field("time_s").unwrap(), 150.0, 0.0);
     close(run.f64_field("sampled_peak_time_s").unwrap(), 30.0, 0.0);
-    close(run.f64_field("sampled_peak_objective_k").unwrap(), 306.368111738, 5e-4);
-    close(doc.path(&["objective","value_k"]).unwrap().as_f64().unwrap(), 301.485965248, 5e-4);
+    close(run.f64_field("sampled_peak_objective_k").unwrap(), 304.11908292812404, 5e-4);
+    close(doc.path(&["objective","value_k"]).unwrap().as_f64().unwrap(), 301.74601435038426, 5e-4);
     assert!(run.f64_field("energy_residual_j").unwrap().abs() < r.limits.heat*150.0);
     let history = run.get("history").unwrap().as_array().unwrap();
     let mut previous = 0.0;

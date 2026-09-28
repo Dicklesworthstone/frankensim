@@ -76,7 +76,13 @@ diagnoses, never timeout mysteries).
   FGMRES inner solves, Armijo line search or trust-region
   actual/predicted acceptance, and per-iteration telemetry. Outer
   checkpoints are `clone()` boundaries; construction failures and
-  stalls are typed in `NewtonError`/`NewtonStallDiagnosis`.
+  stalls are typed in `NewtonError`/`NewtonStallDiagnosis`. The problem's
+  optional `preconditioner_apply` supplies a right inverse-preconditioner
+  action at the fixed current Newton point. Its default is identity;
+  variable actions receive outer-attempt and inner-column indices, with
+  inner indices continuing across FGMRES restart cycles. An incomplete or
+  nonfinite output refuses the linear solve before accepting a new point.
+  Convergence remains checked against the original Jacobian and residual.
 - `spectral_service` — re-export of the one workspace `fs-spectral`
   authority. This is an ownership seam, not a claim that the generic
   eigensolver service is already implemented.
@@ -174,6 +180,28 @@ diagnoses, never timeout mysteries).
   tested).
 - `dot`/`norm2` — deterministic fixed-shape reductions (fs-tilelang
   combiner; shape depends on length only).
+
+### Residual-verified inverse proposals (`q61wp.73`)
+
+`goal::inverse::enclose_goal_error_with_inverse` extends the existing stored
+linear-system residual evaluator with independently checked inverse columns.
+The supplied column-major matrix `R` is a numerical proposal. Outward FMA
+arithmetic encloses `delta = ||I - A R||_infinity` and `||R||_infinity`; only
+`delta < 1` admits `||A^-1||_infinity <= ||R||_infinity / (1 - delta)`.
+The resulting goal interval retains the original weighted residual and adds
+the full dual-residual remainder. This check assumes neither symmetry nor
+positive definiteness and verifies the declared column orientation.
+Existing finite inverse evidence is preserved after validating proposal inputs.
+Inaccurate or singular proposals remain unbounded; nonfinite inputs, malformed
+columns, structural limits and cancellation have typed refusals.
+The dimension is at most 256. Both `n*n` proposal entries and `n*(n+nnz)`
+verification visits must fit `GoalResidualLimits.max_nonzeros`, in addition to
+the original row and sparse-entry caps. Verification allocates no dense scratch
+and polls within 512 entry visits and immediately before publication.
+`tests/goal_inverse.rs` covers an independent rational inverse and true goal,
+nonzero dual error, nonsymmetric orientation, bad/singular proposals, existing
+bound retention, range/structural limits and cancellation. The bound concerns
+the stored floating-point system, excluding assembly and physical uncertainty.
 
 ## Invariants
 
@@ -303,7 +331,11 @@ exact manufactured Schur saddle solve, verifier/admission refusals,
 non-collinear iteration-varying diagonal FGMRES preconditioners that
 exercise stored `z_j` directions plus split replay, and Newton solves with
 line-search/trust-region globalization, an explicit rejected-search
-receipt, and outer split replay.
+receipt, and outer split replay. Model preconditioning additionally covers
+a nonsymmetric nonlinear problem with six orders of Jacobian scaling,
+both globalizations under a one-column inner budget, variable logical keys
+across restart and outer clone/resume, identity-default equality, and
+incomplete/nonfinite callback refusal preserving the accepted state.
 
 ## No-claim boundaries
 
@@ -351,7 +383,10 @@ receipt, and outer split replay.
   its authority namespace is re-exported here.
 - FGMRES checkpoints assume the exact same operator, RHS, and logical
   preconditioner policy on resume; Newton checkpoints assume the exact
-  same problem implementation and parameters. These opaque input
+  same problem implementation, parameters, and model-preconditioner policy.
+  Preconditioner callbacks must be bounded and pure functions of that
+  fixed problem, the Newton point, input vector, and logical iteration keys.
+  These opaque input
   identities are caller/ledger invariants and are not authenticated by
   the lower-layer state itself.
 - This package remains labeled L3 until its FEEC-specific p-MG/Stokes

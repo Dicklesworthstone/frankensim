@@ -1,0 +1,13 @@
+(fsim-uncertainty-study
+  :version 3
+  :project "../../data/reference-project/cooling-reference.fsim"
+  :samples 8 :seed 29 :wall-time 900s
+  :method monte-carlo :correlation independent
+  :mean-control (coordinate-secant :max-solves 4)
+  :qoi "temperature-max"
+  :geometry ((mesh :role "enclosure"
+    :path "../../data/reference-project/plate.stl" :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk") :interfaces ()
+  :parameters (
+    (uniform :name "power" :target power :entity "air" :low 4W :high 6W)
+    (uniform :name "ambient" :target convection-temperature :entity "air" :low 294K :high 300K)))

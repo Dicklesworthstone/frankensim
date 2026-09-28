@@ -96,6 +96,7 @@ members = [
     "crates/fs-modal",
     "crates/fs-motion",
     "crates/fs-plate",
+    "crates/fs-plate-transient",
     "crates/fs-mbd",
     "crates/fs-contact",
     "crates/fs-tribo",
@@ -175,7 +176,9 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+# MIT with the OpenAI/Anthropic rider: not an SPDX expression, so the
+# workspace points at the text itself.
+license-file = "LICENSE"
 repository = "https://github.com/Dicklesworthstone/frankensim"
 authors = ["FrankenSim contributors"]
 

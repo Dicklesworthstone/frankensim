@@ -18,7 +18,7 @@ complexes, with anisotropic and temperature-dependent conductivity from
 `fs-matdb` cards whose query receipts travel with the solve. Layer: **L3**
 (FLUX).
 
-Surface radiation has two explicit entry points. A linearized
+Surface radiation has three explicit entry points. A linearized
 surface-to-ambient model supplies
 `h_rad = 4 ε σ T_mean³` over a caller-declared temperature-departure budget and
 reports its pointwise discrepancy against `ε σ (T_s⁴ - T_a⁴)`; the departure
@@ -29,9 +29,21 @@ gray-diffuse enclosure solves
 fixed point. Emissivity comes from an `fs-matdb` material card; this crate
 generates exactly one closed-form analytic view-factor geometry, the
 two-surface concentric-sphere enclosure. Other view factors are caller-supplied
-and admitted with analytic or external-QMC evidence. Both radiation rungs
+and admitted with analytic or external-QMC evidence. These radiation rungs
 retain and enforce the selected emissivity claim's temperature-validity
 interval.
+
+`solve_with_ambient_radiation` adds the nonlinear area-mean patch law
+`epsilon sigma A (T_mean^4 - T_ambient^4)` to existing named uniform Robin
+convection. It combines positive radiative secants with the original Robin
+rows and solves through the existing material/contact producer until both
+unrelaxed temperature updates and applied/nonlinear watt differences close.
+Its conduction report retains the combined boundary actually solved; separate
+original-convection rows and totals are the only heat carried to air. The
+exact final boundary/configuration, card receipts, signed radiative heat and
+cumulative solid/Krylov work remain available. Surface temperatures obey the
+emissivity claim's validity; the external reservoir is not a surface-material
+query. `SurfaceEmissivity::from_card_pinned` preserves exact claim selection.
 
 An optional contact operator couples two duplicated, exactly coincident P1
 traces without identifying their temperature degrees of freedom. For an
@@ -112,6 +124,7 @@ diameter.
 | `ViewFactorMatrix` / `ViewFactorEvidence` | an admitted closed-enclosure matrix whose row sums, area-weighted reciprocity, tolerances, evidence tag, and content identity are checked and retained; `concentric_spheres` supplies one closed-form two-surface geometry |
 | `RadiationSurface` / `GrayDiffuseEnclosure` / `RadiosityReport` | named non-overlapping P1 exterior traces, deterministic diffuse-gray radiosity, net heat rates, system residual, and enclosure energy closure |
 | `CoupledRadiationConfig` / `CoupledRadiationSolution` | a budgeted, under-relaxed outer fixed point that applies one uniform frozen radiation flux per named trace to explicit adiabatic-remainder faces |
+| `AmbientRadiationPatch` / `AmbientRadiationConfig` / `AmbientRadiationSolution` | nonlinear ambient patch radiation sharing the original uniform Robin trace, with separate convection/radiation accounting, heterogeneous material and finite contact preserved, independent temperature/watt gates and exact final binding |
 | `ConductivityTable` | one scalar `k(T)` as sampled knots plus the `fs-matdb` receipts that produced them. `from_claims_pinned` samples one explicit claim pin at every knot and still refuses invalid or out-of-domain use |
 | `LumpedThermalTransport` | reduced-body transport: explicitly provenance-free declared constants, sourced conductivity/emissivity, or sourced conductivity with radiation explicitly disabled; every active property receipt is retained, sampled models refuse extrapolation and bind to the same card as the phase curve |
 | `ConductivityModel` | constant tensor, isotropic `k(T)`, or orthotropic `Σ_i k_i(T) e_i e_iᵀ`; every construction is checked symmetric and positive definite. `from_pcb_homogenization` consumes fs-matdb's immutable laminate result and retains one property-use receipt per copper/matrix material use |
@@ -205,6 +218,70 @@ estimate that drifts in the dangerous direction. This crate therefore RECOMPUTES
 (`LinearSolveEvidence::true_relative_residual` / `converged_true`). The
 producing solver's own typed claim is carried verbatim in
 `LinearSolveEvidence::reported` so the two are never confused.
+
+### Goal-controlled regional maximum solves (`q61wp.73`)
+
+`LinearGoalAnalyzer::solve_maximum_to_goal` uses the cached linear operator
+and checked inverse to improve a field until its regional maximum's full
+algebraic error meets an absolute Kelvin tolerance. The analyzer's zero-weight
+preparation goal cannot admit this stopping decision: every candidate is
+checked with `analyze_maximum`, including changes of the hottest vertex.
+The method shares the existing linear-goal defect-correction loop, its one
+primal iteration budget, bounded check cadence, best-field retention and
+post-observer cancellation gate. It returns `LinearMaximumSolve`, with an
+explicit missing-bound, exhausted-budget or no-progress outcome when needed.
+No dual or stability solve is repeated during correction. This is a
+stored-system goal solve, not a continuum accuracy or energy-balance claim;
+the returned field is not a `ConductionSolution`. The existing
+`tests/linear_maximum.rs` checks the zero-weight counterexample against a
+dense solve, budget limits, prescribed regions and cancellation/retry.
+
+`polish_linear_maximum` connects this correction to an existing physical
+`ConductionSolution`. It independently reassembles the baseline and requires
+its actual residual to meet the original report's finite threshold. A changed
+best candidate is adopted only if independent reassembly meets that same
+threshold; otherwise the baseline field and its maximum analysis survive with
+a physical-gate refusal. Even a budget-limited improvement may be accepted,
+while `goal_met` refers strictly to the returned field. Energy, Robin/contact
+fluxes and final residual are recomputed by the same report helper as the
+ordinary solve. Historical nonlinear iterations and linear evidence are
+preserved; correction work has separate counters. The threshold is declared
+caller policy, not authenticated provenance. Nonlinear conductivity refuses;
+no frozen-radiation or air-feedback guarantee is inferred. Focused tests in
+`tests/algebraic_goal/polish.rs` cover real residual-accepted correction, an
+independent contact/Robin heat-balance oracle, missing inverse evidence,
+zero-work retention, false baseline summaries and cancellation.
+
+`LinearGoalAnalyzer::new_for_maximum` additionally supports a bounded inverse
+proposal when positive diagonal scaling cannot verify the stored operator.
+This covers consistent contact and Robin operators whose comparison matrices
+are not strictly dominant. At most 256 free unknowns are admitted, and both
+`n*n` stored proposal entries and `n*(n+nnz)` verification visits must fit the
+existing residual nonzero limit. Every column solve shares the remaining
+`max_stability_iterations` allowance with the original scaling proposal;
+`stability_iterations` reports their combined actual work. Each analysis
+rechecks `I - A R` against the same retained matrix before using the inverse.
+The proposal is never treated as exact, and exhausted work or insufficient
+verification leaves the bound unavailable. Existing finite inverse bounds and
+the ordinary linear-goal constructor keep their prior behavior. The current
+affine-feedback checker retains its separate solid-inverse verification route;
+this fallback establishes no additional coupled-error authority.
+`tests/algebraic_goal/inverse.rs` checks a strong consistent-contact operator
+against an independent dense solution, real maximum-goal correction, shared
+iteration limits and structural admission.
+
+When neither dominance nor the dense proposal proves the inverse (typically
+above 256 free unknowns on obtuse-dihedral P1 meshes), `new_for_maximum`
+prepares `fs_solver`'s `VerifiedSparseInverse`: bounded interval LDL
+elimination with positive pivot intervals and an outward `A-H` asymmetry
+check. It is charged to the same `max_stability_iterations` allowance (one
+iteration = one matrix pass of interval updates; zero allowance does no
+inverse work), and its stored entries are capped by the residual nonzero
+limit. Only an established bound is retained. Every later analysis, including
+the coupled affine-feedback maximum (which uses it before the shifted-Gram
+spectral fallback), re-checks the exact stored CSR before using its norm.
+On the 43,840-tet heatsink ladder rung this proves `||A^-1||_inf <= 9.1e6` over
+9,295 rows with about 1.2M peak entries (measured 2026-09-27).
 
 ## Invariants
 
@@ -684,6 +761,17 @@ authority.
   The report retains input emissivity uncertainty and measures the linearized
   point discrepancy, but it does not propagate a nonlinear radiosity or
   coupled-solution uncertainty certificate. No radiation adjoint is exposed.
+- AMBIENT PATCH RADIATION uses a constant emissivity sampled under an explicit
+  card query, and the fourth power of each trace's area mean. The inner Robin
+  flux varies linearly with local P1 temperature; it is neither a uniform
+  applied flux nor an integration of pointwise T^4. Only existing uniform
+  Robin regions are admitted, with a black isothermal reservoir and unit view
+  factor. No enclosure reflection, occlusion, spatial emissivity variation,
+  radiative tangent/adjoint or continuum/uncertainty bound is inferred.
+  `tests/ambient_radiation.rs` checks the independent scalar slab heat balance,
+  hot-reservoir heat signs, changed emissivity, exact reconstruction, joint
+  heterogeneous/contact resistance, claim pins, cancellation and both outer
+  convergence gates.
 - NO CONVECTION PHYSICS. The Robin row is a convective BOUNDARY COUPLING: `h`
   is an input. This crate computes no correlation, solves no boundary layer, and
   has no fluid side. Conjugate coupling is a separate bead.
@@ -852,6 +940,75 @@ authority.
   Component uncertainty is a conservative arithmetic sum of stated
   half-widths, not a probabilistic convolution, and no correlation between
   components is modelled.
+- `transient::enthalpy::EnthalpyBackwardEuler` evolves a spatial specific-enthalpy
+  field on the existing P1 tetrahedral mesh. It reuses the existing conductivity,
+  source, Neumann, Robin and finite-contact assembly; temperature-dependent k(T)
+  is evaluated at each actual nonlinear trial. Fixed reference masses are
+  `m_i = sum_e rho0 V_e/4`; equilibrium density changes never create or remove
+  specimen mass. The nodal equilibrium chart returns temperature and liquid
+  fraction, preserving a true isothermal latent plateau without apparent-Cp
+  smoothing. The discrete residual is `m*(h-h_old)+dt*(A(T(h))*T(h)-b)` in joules.
+  Its exact generalized Jacobian is `M+dt*J_T*diag(dT/dh)`, with column scaling;
+  a zero temperature slope leaves a positive mass column. The shared bounded
+  Newton/FGMRES driver uses a physical Picard-Jacobi inverse, and each current
+  tangent is assembled once per Newton attempt. Sparse actions allocate no
+  scratch. Typed chart, spatial, solver, work, cancellation and energy failures
+  return no new state and never mutate the supplied history. The accepted
+  `sum m_i*(h_new_i-h_old_i)` must match independently integrated external heat
+  within the caller's absolute joule tolerance; internal contact cancels from
+  that account. Spatial caps precede mass allocation and checked products bound
+  Newton workspace/work arithmetic. Constitutive, assembly and operator tiles
+  poll Cx, with final polling before publication.
+  This initial lane binds one spatially uniform equilibrium chart and a declared
+  reference density. All Dirichlet rows refuse explicitly: a temperature on a
+  latent plateau does not determine enthalpy. Geometry and energetic internal
+  variables are frozen; there is no material motion, expansion, pressure work,
+  remapping, phase kinetics, vaporization, or implicit radiation law in this API.
+  `tests/enthalpy_transport.rs` compares constant-Cp stepping with the existing
+  temperature solver, latent heating with independent energy formulas and the
+  exact uniform lumped limit, a nonlinear-conductivity endpoint with independent
+  P1 algebra, mixed sensible/latent exchange with an exact one-Newton solution,
+  and immutable-history/cancellation refusals. These are numerical checks,
+  not experimental material validation or interval error bounds.
+  `cargo run -p fs-conduction --example enthalpy_stefan -- 40 120` evolves a
+  melting front in a fixed tetrahedral slab from an initial similarity field
+  and time-dependent boundary flux. The future front is never imposed. The
+  example reports the computed 50% liquid contour, equivalent molten length,
+  nodal temperature RMS discrepancy and independently integrated whole-run
+  heat balance. Its material values are synthetic numerical-reference inputs.
+  `tests/enthalpy_stefan.rs` holds 480 time steps fixed and refines from 40 to
+  80 axial cells, checking improving front, molten-length and temperature
+  discrepancies plus energy closure. This finite comparison does not establish
+  a formal spatial or temporal order, or validate liquid-flow physics.
+- `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
+  this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
+  `linearize_accepted` rechecks a supplied endpoint's original Newton target,
+  chart fields and integrated energy balance before attaching its sparse
+  tangent. The linearization owns the endpoint and tangent and borrows only the
+  fixed mesh, so step-local sources and boundaries need not remain alive.
+  Temperature observation seeds become enthalpy seeds by `diag(dT/dh)`;
+  direct enthalpy/history seeds are added before the shared bounded FGMRES
+  transpose solve. For `J_h^T lambda = h_bar`, history receives
+  `M_ref*lambda` and P1 nodal source density receives
+  `dt*M_source^T*lambda`. The source uses the existing consistent tetrahedral
+  integration, while reference storage remains lumped. This explicit `dt`
+  follows the enthalpy residual's joule units. The transpose implements
+  `M_ref+dt*diag(dT/dh)*J_T^T`, sharing the primal conductivity Jacobian.
+  A true transpose residual, exact inner-column cap, allocation-size checks
+  and cancellation gates precede gradient publication. Smooth chart knots
+  and plateau interiors are admitted; temperature slope corners, chart
+  validity endpoints and conductivity slope/validity boundaries refuse an
+  ordinary two-sided gradient. No chart, density, conductivity-parameter,
+  geometry, boundary-control or phase-fraction derivative is inferred.
+  `tests/enthalpy_adjoint.rs` checks nonuniform-slope transpose identities,
+  nonlinear history/source derivatives against five-point forward differences,
+  zero temperature sensitivity on a latent plateau, differentiability policy,
+  and refused/cancelled/tampered inputs.
+  `cargo run -p fs-ascent --example enthalpy_calibration` composes these
+  derivatives through a bounded full-storage spatial trajectory to fit two
+  localized heater pulses from temperature histories using the existing SQP
+  optimizer. The example's synthetic observations and numerical recovery are
+  separate from experimental material validation.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

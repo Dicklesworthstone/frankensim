@@ -2,7 +2,7 @@
 name = "fs-session"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Sessions, capability tokens, and the enforcing resource governor: declared degradation ladder, idempotency keys, estimate() dry runs, errors as guidance."

@@ -28,9 +28,9 @@ use fs_time::{AdaptiveState, PiController, VERSION as FS_TIME_VERSION, rk45_adap
 use fsci_integrate::{SolveIvpOptions, SolveIvpResult, SolverKind, ToleranceValue, solve_ivp};
 
 const SUITE: &str = "bedrock/fs-time-frankenscipy-rk45-oracle-v1";
-const ORACLE_VERSION: &str = "fsci-integrate/0.1.0";
-const ORACLE_LOCK_VERSION: &str = "0.1.0";
-const ORACLE_PIN: &str = "9e271fd734465e2b2ff755aa73ea66a7217d619b";
+const ORACLE_VERSION: &str = "fsci-integrate/0.2.0";
+const ORACLE_LOCK_VERSION: &str = "0.2.0";
+const ORACLE_PIN: &str = "06108aea50fbb1541863101d371f9cd503e283d2";
 const CONSTELLATION_LOCK: &str = include_str!("../../../constellation.lock");
 const PRODUCTION_API: &str = "fs_time::rk45_adaptive:Dormand-Prince-5(4)+PI:max-norm:v1";
 const ORACLE_API: &str = "fsci_integrate::solve_ivp:SolverKind::Rk45:t-eval-endpoints:RMS-error:v1";
@@ -53,13 +53,13 @@ const CORRUPTION_SEED: u64 = 0xF5A5_0022_0000_0101;
 // Filled from the framing code and independently reconstructed without
 // executing either numerical implementation.
 const STATIONARY_FRAME_LEN: usize = 2_183;
-const STATIONARY_FRAME_FNV1A64: u64 = 0xb44b_a095_30e5_689b;
+const STATIONARY_FRAME_FNV1A64: u64 = 0x3160_f7ed_184b_ddcb;
 const DECAY_FRAME_LEN: usize = 2_182;
-const DECAY_FRAME_FNV1A64: u64 = 0xdd6e_7d60_53fa_9262;
+const DECAY_FRAME_FNV1A64: u64 = 0x53ef_99d7_09e0_8492;
 const OSCILLATOR_FRAME_LEN: usize = 2_234;
-const OSCILLATOR_FRAME_FNV1A64: u64 = 0xf2b1_6548_ac6a_a38d;
+const OSCILLATOR_FRAME_FNV1A64: u64 = 0x8d21_dcc9_ed3d_1a1d;
 const CORRUPTION_FRAME_LEN: usize = 4_392;
-const CORRUPTION_FRAME_FNV1A64: u64 = 0x929f_d15d_2c7e_9c96;
+const CORRUPTION_FRAME_FNV1A64: u64 = 0x14a2_1010_8a3d_949e;
 
 const STATIONARY_Y0: [f64; 2] = [1.5, -0.25];
 const DECAY_Y0: [f64; 1] = [2.0];
@@ -806,7 +806,7 @@ fn capture_measurement(fixture: FixtureSpec, stage: &str) -> Result<Measurement,
 
 fn fixture_outcome(fixture: FixtureSpec) -> CaseOutcome {
     if let Err(error) = admit_oracle_declaration() {
-        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.1.0");
+        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
     let inputs = fixture_inputs(fixture);
     let first = match capture_measurement(fixture, "first-measurement") {
@@ -839,7 +839,7 @@ fn fixture_outcome(fixture: FixtureSpec) -> CaseOutcome {
             hex_bytes(&replay_receipt),
         ))
         .with_evidence("crates/fs-time/CONTRACT.md#determinism-class")
-        .with_evidence("constellation.lock:frankenscipy-0.1.0");
+        .with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
 
     CaseOutcome::pass(format!(
@@ -857,7 +857,7 @@ fn fixture_outcome(fixture: FixtureSpec) -> CaseOutcome {
         hex_bytes(&first_receipt),
     ))
     .with_evidence("crates/fs-time/CONTRACT.md#conformance-tests")
-    .with_evidence("constellation.lock:frankenscipy-0.1.0")
+    .with_evidence("constellation.lock:frankenscipy-0.2.0")
 }
 
 fn corruption_frame(component: usize, bit: u32, canonical: u64, corrupted: u64) -> Vec<u8> {
@@ -900,7 +900,7 @@ fn reconstruct_corruption() -> Corruption {
 
 fn corruption_outcome(corruption: Corruption) -> CaseOutcome {
     if let Err(error) = admit_oracle_declaration() {
-        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.1.0");
+        return CaseOutcome::fail(error).with_evidence("constellation.lock:frankenscipy-0.2.0");
     }
     let measurement = match capture_measurement(STATIONARY, "red-baseline-measurement") {
         Ok(measurement) => measurement,

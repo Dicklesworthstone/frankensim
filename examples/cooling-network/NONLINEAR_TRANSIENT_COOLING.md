@@ -83,7 +83,9 @@ an illustrative sampled peak of approximately 306.16510336 K at 30 seconds,
 and a final peak of 301.41523251 K at 150 seconds. The constant-20/2 W/(m K)
 control gives approximately 306.34315850 K and 301.46723363 K respectively.
 These are independent numerical reference values, NOT recorded executions of
-the Rust implementation. The actual-binary regression compares against them.
+the Rust implementation. FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) gives 304.0634748 K at 30 seconds and a final peak
+of 301.6885607 K, and 304.1166334 K and 301.7305465 K for the constant-conductivity
+control. The actual-binary regressions now pin these measured values.
 
 ## Focused checks and remaining boundaries
 

@@ -2,7 +2,7 @@
 name = "fs-modal"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Generalized vibration eigenproblem facility: K phi = lambda M phi with certified intervals and inertia-certified spectrum slicing."

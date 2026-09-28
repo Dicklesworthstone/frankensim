@@ -2,7 +2,7 @@
 name = "fs-ir"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "FrankenScript IR: typed AST with spans, isomorphic s-expr/JSON syntaxes, study recognition, inspectable verb lowering."

@@ -145,3 +145,10 @@ second-cycle peak; the single-cycle cooldown derivative is zero. Deliberately
 freezing radiation feedback changes the power derivative by 1.489427 K;
 resetting the adjoint at cycle boundaries changes it by 4.411346 K. Material,
 fan, storage and visibility declarations in this example are illustrative.
+
+Measured 2026-09-26 with the release binary, which uses lumped (row-sum) P1
+capacitance rather than the reference's consistent mass, the example peaks at
+315.248094 K at 40 seconds. Its adjoint reports +15.098401 K per
+heating-power multiplier and -8.891514 K per common-capacity multiplier. The
+cooldown log-speed derivative is -0.025090 K, which is nonzero as described
+above.

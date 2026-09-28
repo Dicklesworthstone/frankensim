@@ -2,7 +2,7 @@
 name = "fs-rep-voxel"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Occupancy/multi-material voxel charts on the sparse VDB substrate, exact Euclidean distance transforms, point clouds with normals, and FrankenNetworkx lattice/strut graphs with solid realization."

@@ -2353,8 +2353,18 @@ impl<'clock> InvocationBudget<'clock> {
         receipt.root = invocation_receipt_root(&receipt);
         receipt
             .verify_semantics()
-            .map_err(|_| InvocationError::FinalizationReceiptMismatch {
-                invariant: "producer-invocation-receipt",
+            // Carry the verifier's own stable invariant name; a bare
+            // "producer-invocation-receipt" hid which check the producer broke.
+            .map_err(|error| InvocationError::FinalizationReceiptMismatch {
+                invariant: match error {
+                    ReceiptSemanticError::Child { invariant, .. }
+                    | ReceiptSemanticError::Invocation { invariant } => invariant,
+                    ReceiptSemanticError::RootMismatch => "producer-invocation-receipt-root",
+                    ReceiptSemanticError::UnsupportedVersion { .. } => {
+                        "producer-invocation-receipt-version"
+                    }
+                    _ => "producer-invocation-receipt",
+                },
             })?;
         let returned = try_clone_invocation_receipt(&receipt, "invocation-receipt-return")?;
         // The ambient parent charge covered the root capacity until this exact
@@ -4565,10 +4575,16 @@ fn verify_receipt_semantics(receipt: &InvocationReceipt) -> Result<(), ReceiptSe
         if expected_consumed != child.consumed {
             return Err(child_semantic_error(child, "subtree-conservation"));
         }
+        // Add the nested returns BEFORE subtracting the nested grants. Memory is
+        // reusable capacity (returned == granted, checked below), so a child
+        // that runs sequential grandchildren, each granted the same memory and
+        // returning it, sums nested memory grants above its own grant while its
+        // net transfer is zero. Subtracting first refused that valid ledger;
+        // the result is otherwise identical.
         let mut replay = child
             .granted
-            .checked_sub(topology.nested_granted[index])
-            .and_then(|available| available.checked_add(topology.nested_returned[index]))
+            .checked_add(topology.nested_returned[index])
+            .and_then(|available| available.checked_sub(topology.nested_granted[index]))
             .map_err(|_| child_semantic_error(child, "nested-affine-transfer"))?;
         replay = replay
             .checked_sub(child.direct_consumed)

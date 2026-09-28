@@ -2,7 +2,7 @@
 name = "fs-couple"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Multiphysics composition through typed port-thermodynamic relations (fs-couple): lossless Dirac interconnections, explicit storage/dissipation/source boundaries, measured energy audits, and Aitken interface acceleration without false whole-system passivity claims."

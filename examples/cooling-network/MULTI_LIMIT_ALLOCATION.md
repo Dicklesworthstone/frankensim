@@ -21,7 +21,7 @@ Add to the allocation document, not to the cooling base:
 ```json
 "thermal_constraints": [
   {"name":"chip-limit","component":"chip","temperature_limit_k":302},
-  {"name":"memory-limit","component":"memory","temperature_limit_k":301.4},
+  {"name":"memory-limit","component":"memory","temperature_limit_k":300.67},
   {"name":"wall-limit","objective":{"mean_wall_region":"last-face"},
    "temperature_limit_k":301}
 ]
@@ -151,8 +151,15 @@ from the chosen power by at most 0.000521 W, below the declared 0.001 W toleranc
 Thirty-six complete-trajectory derivative comparisons differed by at most
 2.42e-11 K/W. These are independent mathematical references, NOT Rust execution.
 
-The example selects standby=3 W, memory=6 W and chip=10.123629 W. The primary
-and chip peaks are 301.781650 K; memory reaches 301.400000 K and is limiting.
+With the consistent-mass reference and a 301.4 K memory limit, the example
+selected standby=3 W, memory=6 W and chip=10.123629 W. The primary and chip
+peaks were 301.781650 K, and memory reached 301.400000 K and was limiting. With
+lumped capacity (measured 2026-09-25), the memory region's peak depends mostly
+on memory power and only about 0.1 K on the chip. The example therefore now
+declares 300.67 K. FrankenSim selects standby=3 W, memory=6 W and
+chip=10.9948566 W, with primary and chip peaks of 301.1229 K and memory limiting
+at 300.67 K. Tightening the chip limit to 300.8 K selects 7.3961718 W. The
+remaining figures in this paragraph are the consistent-mass reference.
 Checking only the 304 K primary limit accepts chip=24 W, with a global peak of
 303.861436 K but a 301.589985 K memory peak: both extra limits would fail.
 Tightening the chip limit to 301.5 K instead selects about 8.259823 W and moves

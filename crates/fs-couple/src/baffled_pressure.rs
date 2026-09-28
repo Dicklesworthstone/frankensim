@@ -200,6 +200,27 @@ impl BaffledPressure {
         self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
     }
 
+    /// Pressure contribution of each input mode at the most recently emitted
+    /// sample. Call after `step_trace`; this only reads the delayed history and
+    /// does not advance the receiver. `sum(output)` reconstructs that sample's
+    /// pressure, subject to floating-point summation order.
+    pub fn mode_pressures(&self, output: &mut [f64]) -> Result<(), String> {
+        if output.len() != self.modes {
+            return Err("modal pressure output must have one entry per input mode".into());
+        }
+        output.fill(0.0);
+        let emitted_head = if self.head == 0 {self.history_frames - 1} else {self.head - 1};
+        for (delay, weights) in &self.kernels {
+            let frame = if emitted_head >= *delay {emitted_head - *delay}
+                else {emitted_head + self.history_frames - *delay};
+            let offset = frame * self.modes;
+            for (i, weight) in weights.iter().enumerate() {
+                output[i] += weight * self.history[offset + i];
+            }
+        }
+        Ok(())
+    }
+
     /// Legacy one-rate input. Multirate callers must supply the complete trace.
     pub fn step(&mut self, velocity: &[f64])->Result<f64,String> {
         self.step_trace(velocity)
@@ -244,6 +265,29 @@ mod tests {
     fn medium()->RayleighMedium {RayleighMedium{density:1.2,sound_speed:320.0}}
     fn patch(x:f64,shape:f64)->SurfaceSample {
         SurfaceSample{position_m:[x,0.0,0.0],area_m2:0.1,mode_shape:vec![shape]}
+    }
+    #[test]
+    fn modal_pressures_reconstruct_delayed_output_without_advancing_time() {
+        let surface = [SurfaceSample {position_m:[0.0,0.0,0.0],area_m2:0.1,
+            mode_shape:vec![1.0,-0.5]},
+            SurfaceSample {position_m:[0.25,0.0,0.0],area_m2:0.1,
+            mode_shape:vec![-0.25,1.0]}];
+        let mut mic=BaffledPressure::new(&surface,2,32_000,[0.0,0.0,1.0],medium()).unwrap();
+        let mut components=[0.0;2];
+        let mut heard = false;
+        assert!(mic.mode_pressures(&mut [0.0;1]).is_err());
+        for sample in 0..200 {
+            let velocity=[if sample<40 {0.0} else {0.2},
+                if sample<55 {0.0} else {-0.1}];
+            let pressure=mic.step_trace(&velocity).unwrap();
+            mic.mode_pressures(&mut components).unwrap();
+            let first=components;
+            mic.mode_pressures(&mut components).unwrap();
+            assert_eq!(components,first);
+            assert!((components.iter().sum::<f64>()-pressure).abs()<1e-12);
+            heard |= components.iter().any(|x| x.abs() > 0.0);
+        }
+        assert!(heard);
     }
     #[test]
     fn known_acceleration_arrives_after_propagation_with_physical_pressure_units() {

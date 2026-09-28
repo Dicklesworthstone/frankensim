@@ -2,7 +2,7 @@
 name = "fs-cheb"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Chebfun-style function objects: adaptive Chebyshev expansions, spectral collocation."

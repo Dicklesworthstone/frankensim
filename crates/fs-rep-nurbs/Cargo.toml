@@ -2,7 +2,7 @@
 name = "fs-rep-nurbs"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Rational B-spline charts: i128-bounded exact refinement, certified trim classification, measured closest-point brackets, and an honest SDF-routed Boolean policy."

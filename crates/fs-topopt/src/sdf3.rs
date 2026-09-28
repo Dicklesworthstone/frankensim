@@ -20,6 +20,8 @@ mod refine;
 pub mod continuation;
 pub mod adaptive_continuation;
 pub mod response;
+pub mod stress;
+pub mod design;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
 use fs_cutfem::elastic3::CutElasticity3;

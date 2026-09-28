@@ -41,6 +41,10 @@ mod paired_radiation;
 #[path = "curved_aperture.rs"]
 pub mod curved_aperture;
 
+/// Geometry-aware close microphones and ideal directional response.
+#[path = "receivers.rs"]
+pub mod receivers;
+
 /// A stationary point in the boundary's geometry frame, measured in metres.
 #[derive(Debug, Clone, Copy)]
 pub enum Receiver {
@@ -48,12 +52,17 @@ pub enum Receiver {
     FarField([f64;3]),
     /// Actual exterior pressure at the point; no extra distance gain is applied.
     FinitePoint([f64;3]),
+    /// Actual triangle clearance and adaptively integrated pressure/velocity.
+    NearField(receivers::Microphone),
 }
 impl Receiver {
     fn position(self)->[f64;3] {
-        match self {Self::FarField(p)|Self::FinitePoint(p)=>p}
+        match self {Self::FarField(p)|Self::FinitePoint(p)=>p,Self::NearField(m)=>m.position_m()}
     }
     fn propagation(self,radius:f64,medium:Medium,dt:f64)->Result<(f64,f64),Error> {
+        if matches!(self,Self::NearField(_)) {
+            return Err("near-field propagation requires the actual admitted triangle geometry".into());
+        }
         let range=self.position().iter().map(|x|x*x).sum::<f64>().sqrt();
         let delay=(range-radius)/medium.sound_speed;
         // A conservative enclosing-sphere rule excludes the body and leaves
@@ -65,7 +74,7 @@ impl Receiver {
             || matches!(self,Self::FarField(_)) && range<10.0*radius {
             return Err("receiver must lie outside the enclosing sphere with at least two propagation samples; far field additionally needs ten source radii".into());
         }
-        Ok((delay,match self {Self::FarField(_)=>1.0/range,Self::FinitePoint(_)=>1.0}))
+        Ok((delay,match self {Self::FarField(_)=>1.0/range,Self::FinitePoint(_)=>1.0,Self::NearField(_)=>unreachable!("admitted above")}))
     }
 }
 
@@ -179,7 +188,7 @@ fn check_closed(tris:&[[usize;3]])->Result<(),Error> {
 
 /// e^{-i omega t}: acceleration=-i omega velocity, so velocity=i acceleration/omega.
 fn acceleration_fields(weights:&[Vec<f64>],omega:f64)->Vec<Vec<C64>> {
-    weights.iter().map(|row|row.iter().map(|&b|C64::new(0.0,b/omega)).collect()).collect()
+    weights.iter().map(|row|row.iter().map(|v|C64::new(0.0,v/omega)).collect()).collect()
 }
 fn zero_filter(dt:f64)->DiscreteStateSpace {
     DiscreteStateSpace{n:0,a:vec![],b:vec![],c:vec![],d:0.0,e_leftover:0.0,t_s:dt}
@@ -192,9 +201,16 @@ fn fit_observer(omega:&[f64],values:&[C64],dt:f64,order:usize)->Result<(Discrete
         || values.iter().any(|v|!v.re.is_finite() || !v.im.is_finite()) {
         return Err("observer samples must be finite, ordered and below Nyquist".into());
     }
-    let scale=values.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
-    if scale==0.0 { return Ok((zero_filter(dt),0.0,0.0)); }
-    if !scale.is_finite() {return Err("observer response scale overflow".into());}
+    let magnitude=values.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    if magnitude==0.0 { return Ok((zero_filter(dt),0.0,0.0)); }
+    if !magnitude.is_finite() {return Err("observer response scale overflow".into());}
+    // Canonicalize physical polarity as well as amplitude before pole fitting.
+    // Opposite surface/microphone rows must not choose a different numerical
+    // transfer merely because the normalized least-squares data changed sign.
+    // Restore this SIGNED scale on C and D; error denominators stay positive.
+    let anchor=values.iter().max_by(|a,b|a.abs().total_cmp(&b.abs())).unwrap();
+    let sign=if anchor.re.abs()>=anchor.im.abs(){anchor.re}else{anchor.im};
+    let scale=magnitude.copysign(sign);
     let frequencies:Vec<_>=omega.iter().step_by(2).map(|w|2.0/dt*det::tan(w*dt/2.0)).collect();
     // The fit owner uses s=+i omega. Conjugation and frequency warping are both
     // required; fitting raw negative-time phasors reverses the physical phase.
@@ -209,7 +225,7 @@ fn fit_observer(omega:&[f64],values:&[C64],dt:f64,order:usize)->Result<(Discrete
     filter.try_runtime()?;
     let mut maximum=0.0_f64; let mut square=0.0; let mut held=0;
     for i in (1..omega.len()).step_by(2) {
-        let error=(filter.eval(omega[i])?.conj()-values[i]).abs()/scale;
+        let error=(filter.eval(omega[i])?.conj()-values[i]).abs()/magnitude;
         if !error.is_finite() {return Err("observer held-out error is nonfinite".into());}
         maximum=maximum.max(error); square+=error*error; held+=1;
     }
@@ -246,19 +262,22 @@ fn receiver_response(surface:&SpherePanels,solution:&RadiationSolution,medium:Me
             far_field(surface,solution,medium,&[position])[0],omega,radius/medium.sound_speed),
         Receiver::FinitePoint(position)=>shift_to_enclosing_sphere(
             exterior_pressure_at_points(surface,solution,medium,&[position])?[0],omega,-propagation_delay_s),
+        Receiver::NearField(_)=>return Err("near-field response requires its prepared spatial quadrature".into()),
     })
 }
 /// Shared one/two-receiver preparation and rendering over the same source.
 #[path = "stereo.rs"]
 pub mod stereo;
 
-struct Observer<'a> { filters:Vec<DiscreteStateSpaceRuntime<'a>>, delay:DelayedFilter, pressure_gain:f64 }
+struct Observer<'a> { filters:Vec<DiscreteStateSpaceRuntime<'a>>, delay:Option<DelayedFilter>, pressure_gain:f64 }
 impl Bake {
     fn runtime(&self)->Result<Observer<'_>,Error> {
         let dt=self.filters.first().ok_or("empty observer bank")?.t_s;
-        let delay=DelayedFilter::new(self.propagation_delay_s/dt,DigitalFilter {
-            sections:vec![],direct:1.0,t_s:dt,prewarp:0.0,
-        })?;
+        let delay=if self.propagation_delay_s==0.0 {None}else{
+            Some(DelayedFilter::new(self.propagation_delay_s/dt,DigitalFilter {
+                sections:vec![],direct:1.0,t_s:dt,prewarp:0.0,
+            })?)
+        };
         Ok(Observer {filters:self.filters.iter().map(DiscreteStateSpace::try_runtime).collect::<Result<_,_>>()?,
             delay,pressure_gain:self.pressure_gain})
     }
@@ -273,7 +292,9 @@ impl Observer<'_> {
         let mut amplitude=0.0;
         for (filter,&a) in self.filters.iter_mut().zip(accelerations) {amplitude+=filter.step(a)?;}
         if !amplitude.is_finite() {return Err("observer modal sum overflow".into());}
-        Ok(self.delay.push(amplitude*self.pressure_gain)?)
+        let pressure=amplitude*self.pressure_gain;
+        if !pressure.is_finite() {return Err("observer pressure scaling overflow".into());}
+        Ok(match &mut self.delay {Some(delay)=>delay.push(pressure)?,None=>pressure})
     }
 }
 

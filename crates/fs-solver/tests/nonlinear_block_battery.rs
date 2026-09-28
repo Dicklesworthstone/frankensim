@@ -678,3 +678,255 @@ fn newton_krylov_globalizes_logs_and_resumes_bitwise() {
         ),
     );
 }
+
+// The solution is z = [1, 1, 1], where z_i = scale_i * x_i. The
+// nonsymmetric triangular Jacobian spans six orders of magnitude.
+struct ScaledTriangular;
+const NEWTON_SCALES: [f64; 3] = [1e-3, 1.0, 1e3];
+
+impl ScaledTriangular {
+    fn diagonal(x: &[f64]) -> [f64; 3] {
+        std::array::from_fn(|i| {
+            let z = NEWTON_SCALES[i] * x[i];
+            (1.0 + 0.3 * z * z) * NEWTON_SCALES[i]
+        })
+    }
+}
+
+impl NonlinearProblem for ScaledTriangular {
+    fn dimension(&self) -> usize {
+        3
+    }
+    fn residual(&self, x: &[f64], residual: &mut [f64]) {
+        let z: [f64; 3] = std::array::from_fn(|i| NEWTON_SCALES[i] * x[i]);
+        for i in 0..3 {
+            residual[i] = z[i] * (1.0 + 0.1 * z[i] * z[i]) - 1.1;
+        }
+        residual[0] += 0.2 * (z[1] - 1.0);
+        residual[1] += 0.3 * (z[2] - 1.0);
+    }
+    fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
+        let diagonal = Self::diagonal(x);
+        for i in 0..3 {
+            output[i] = diagonal[i] * direction[i];
+        }
+        output[0] += 0.2 * NEWTON_SCALES[1] * direction[1];
+        output[1] += 0.3 * NEWTON_SCALES[2] * direction[2];
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NewtonPreconditioning {
+    Exact,
+    Variable,
+    IncompleteAfterFirst,
+    NonFiniteAfterFirst(f64),
+}
+
+struct PreconditionedTriangular {
+    policy: NewtonPreconditioning,
+    calls: std::cell::RefCell<Vec<(usize, usize, Vec<u64>)>>,
+}
+impl PreconditionedTriangular {
+    fn new(policy: NewtonPreconditioning) -> Self {
+        Self {
+            policy,
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+impl NonlinearProblem for PreconditionedTriangular {
+    fn dimension(&self) -> usize {
+        3
+    }
+    fn residual(&self, x: &[f64], residual: &mut [f64]) {
+        ScaledTriangular.residual(x, residual);
+    }
+    fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
+        ScaledTriangular.jacobian_apply(x, direction, output);
+    }
+    fn preconditioner_apply(
+        &self,
+        x: &[f64],
+        outer: usize,
+        inner: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        self.calls.borrow_mut().push((outer, inner, bit_pattern(x)));
+        if outer > 0 {
+            match self.policy {
+                NewtonPreconditioning::IncompleteAfterFirst => {
+                    output[0] = residual[0];
+                    return;
+                }
+                NewtonPreconditioning::NonFiniteAfterFirst(value) => {
+                    output.fill(value);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let mut right = [residual[0], residual[1], residual[2]];
+        if matches!(self.policy, NewtonPreconditioning::Variable) {
+            for (i, value) in right.iter_mut().enumerate() {
+                *value *= 1.0 + 0.25 * ((outer + inner + i) % 3) as f64;
+            }
+        }
+        let d = ScaledTriangular::diagonal(x);
+        output[2] = right[2] / d[2];
+        output[1] = (right[1] - 0.3 * NEWTON_SCALES[2] * output[2]) / d[1];
+        output[0] = (right[0] - 0.2 * NEWTON_SCALES[1] * output[1]) / d[0];
+    }
+}
+
+fn preconditioned_newton_config(globalization: Globalization) -> NewtonKrylovConfig {
+    NewtonKrylovConfig {
+        absolute_tolerance: 1e-11,
+        relative_tolerance: 1e-12,
+        linear_restart: 1,
+        max_linear_cycles: 1,
+        forcing_minimum: 1e-12,
+        forcing_maximum: 0.1,
+        globalization,
+        ..NewtonKrylovConfig::default()
+    }
+}
+
+#[test]
+fn newton_model_preconditioner_solves_ill_scaled_nonsymmetric_system() {
+    for globalization in [
+        Globalization::LineSearch(LineSearchConfig::default()),
+        Globalization::TrustRegion(TrustRegionConfig::default()),
+    ] {
+        let config = preconditioned_newton_config(globalization);
+        let mut identity = NewtonKrylovState::new(&ScaledTriangular, vec![0.0; 3], config).unwrap();
+        let failed = identity.run(&ScaledTriangular, 80);
+        assert_eq!(
+            failed.diagnosis,
+            Some(NewtonStallDiagnosis::LinearSolveFailed(
+                fs_solver::StallDiagnosis::BudgetExhausted
+            ))
+        );
+        assert_eq!(identity.x, vec![0.0; 3]);
+
+        let problem = PreconditionedTriangular::new(NewtonPreconditioning::Exact);
+        let mut state = NewtonKrylovState::new(&problem, vec![0.0; 3], config).unwrap();
+        let report = state.run(&problem, 80);
+        assert!(report.converged, "{globalization:?}: {report:?}");
+        for (x, scale) in state.x.iter().zip(NEWTON_SCALES) {
+            assert!((x * scale - 1.0).abs() < 1e-10);
+        }
+        assert!(
+            report
+                .history
+                .iter()
+                .all(|step| step.linear_iterations == 1)
+        );
+        assert!(problem.calls.borrow().iter().any(|call| call.0 > 0));
+    }
+}
+
+#[test]
+fn newton_variable_preconditioner_keys_and_checkpoint_replay_match() {
+    let config = NewtonKrylovConfig {
+        linear_restart: 2,
+        max_linear_cycles: 24,
+        ..preconditioned_newton_config(Globalization::LineSearch(LineSearchConfig::default()))
+    };
+    let full_problem = PreconditionedTriangular::new(NewtonPreconditioning::Variable);
+    let split_problem = PreconditionedTriangular::new(NewtonPreconditioning::Variable);
+    let mut full = NewtonKrylovState::new(&full_problem, vec![0.0; 3], config).unwrap();
+    let mut prefix = NewtonKrylovState::new(&split_problem, vec![0.0; 3], config).unwrap();
+    let expected = full.run(&full_problem, 30);
+    assert!(expected.converged, "{expected:?}");
+    assert!(!prefix.run(&split_problem, 2).converged);
+    let mut resumed = prefix.clone();
+    let actual = resumed.run(&split_problem, 28);
+    assert_eq!(expected, actual);
+    assert_eq!(bit_pattern(&full.x), bit_pattern(&resumed.x));
+    let calls = full_problem.calls.borrow();
+    assert_eq!(*calls, *split_problem.calls.borrow());
+    assert!(
+        calls.iter().any(|call| call.1 >= config.linear_restart),
+        "must exercise logical inner iterations across restart cycles"
+    );
+    for (outer, inner, point) in calls.iter() {
+        if *inner == 0 {
+            assert!(*outer < expected.iterations);
+        } else {
+            let previous = calls
+                .iter()
+                .find(|call| call.0 == *outer && call.1 + 1 == *inner)
+                .unwrap();
+            assert_eq!(
+                &previous.2, point,
+                "preconditioner point changed inside one Newton attempt"
+            );
+        }
+    }
+}
+
+#[test]
+fn newton_unwritten_or_nonfinite_preconditioner_preserves_accepted_state() {
+    for policy in [
+        NewtonPreconditioning::IncompleteAfterFirst,
+        NewtonPreconditioning::NonFiniteAfterFirst(f64::NAN),
+        NewtonPreconditioning::NonFiniteAfterFirst(f64::INFINITY),
+    ] {
+        let problem = PreconditionedTriangular::new(policy);
+        let config =
+            preconditioned_newton_config(Globalization::LineSearch(LineSearchConfig::default()));
+        let mut state = NewtonKrylovState::new(&problem, vec![0.0; 3], config).unwrap();
+        state.run(&problem, 1);
+        assert_eq!(state.iterations, 1);
+        let before = state.clone();
+        let report = state.run(&problem, 10);
+        assert_eq!(
+            report.diagnosis,
+            Some(NewtonStallDiagnosis::LinearSolveFailed(
+                fs_solver::StallDiagnosis::Breakdown
+            ))
+        );
+        assert_eq!(bit_pattern(&state.x), bit_pattern(&before.x));
+        assert_eq!(
+            state.residual_norm().to_bits(),
+            before.residual_norm().to_bits()
+        );
+        assert_eq!(state.iterations, before.iterations);
+        assert_eq!(state.history, before.history);
+        let mut resumed = before;
+        assert_eq!(report, resumed.run(&problem, 10));
+    }
+}
+
+#[test]
+fn newton_default_preconditioner_matches_explicit_identity() {
+    struct ExplicitIdentity;
+    impl NonlinearProblem for ExplicitIdentity {
+        fn dimension(&self) -> usize {
+            1
+        }
+        fn residual(&self, x: &[f64], output: &mut [f64]) {
+            SquareRootTwo.residual(x, output);
+        }
+        fn jacobian_apply(&self, x: &[f64], v: &[f64], output: &mut [f64]) {
+            SquareRootTwo.jacobian_apply(x, v, output);
+        }
+        fn preconditioner_apply(&self, _: &[f64], _: usize, _: usize, r: &[f64], out: &mut [f64]) {
+            out.copy_from_slice(r);
+        }
+    }
+    for globalization in [
+        Globalization::LineSearch(LineSearchConfig::default()),
+        Globalization::TrustRegion(TrustRegionConfig::default()),
+    ] {
+        let config = preconditioned_newton_config(globalization);
+        let mut default = NewtonKrylovState::new(&SquareRootTwo, vec![1.5], config).unwrap();
+        let mut explicit = NewtonKrylovState::new(&ExplicitIdentity, vec![1.5], config).unwrap();
+        let expected = default.run(&SquareRootTwo, 20);
+        assert!(expected.converged);
+        assert_eq!(expected, explicit.run(&ExplicitIdentity, 20));
+        assert_eq!(bit_pattern(&default.x), bit_pattern(&explicit.x));
+    }
+}

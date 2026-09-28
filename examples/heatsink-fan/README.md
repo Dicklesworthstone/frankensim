@@ -111,7 +111,8 @@ import-verify → assign → material-resolve → flow-network → conduction �
 Read the HTML: every number cites the receipt hash it was copied from, and
 the uncertainty table prints `NO-DATA` where nothing was measured. See
 `heatsink-fan-ladder.fsim` for the same project with `(solver :fidelity
-"ladder")` and a 900 s time budget: the conduction stage then solves the
+"ladder")`, a 900 s time budget and 256 MiB of declared memory (the verified
+solver bound's interval factor needs about 1.2M entries): the conduction stage then solves the
 audited mesh and two uniform refinements (685 → 5,480 → 43,840 tets), the
 receipt's `ladder` block lists every rung, and the QoI budget's discretization
 term becomes a measured `interval` (on this body the maximum moves by 0.37 mK
@@ -134,3 +135,25 @@ axis-aligned 301.99578 K on 713 tets, rotated 301.99562 K on 704 tets, a
 the ladder measured. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
+
+## Probability of compliance
+
+`heatsink-compliance.fsim` asks a probability question of this same project.
+The heat input is uniform in 2.5–3.5 W and the fan inlet air uniform in
+293.15–313.15 K, sampled independently as declared. Each sample runs the full
+import and staged solve. The raw pass/fail indicator of every retained
+`temperature-max` feeds an anytime-valid Bernoulli confidence sequence
+(Beta(1/2,1/2) mixture, α = 0.05). The study stops once the sequence clears
+the declared 0.8 target, or at 32 solves:
+
+```bash
+frankensim --json study examples/heatsink-fan/heatsink-compliance.fsim hs-uq.db
+```
+
+MEASURED 2026-09-26 (release build, about 36 s): `decision-reached` after 24
+solves, `meets-probability-target`, with confidence sequence [0.806, 1].
+Sampled maxima spanned 303.08–321.46 K against the 348.15 K limit after
+margin. Asking for 0.9 instead ends `indeterminate` at the 32-solve cap, with
+[0.847, 1]: 32 passing samples cannot show 0.9 at this α. The ranges are
+illustrative, not measured field variation. The claim is Estimated, and the
+sampling decision covers only the declared model.

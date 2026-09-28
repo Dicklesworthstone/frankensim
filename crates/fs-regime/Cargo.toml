@@ -2,7 +2,7 @@
 name = "fs-regime"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Physics-regime kernel: Buckingham-Pi group extraction, nondimensionalization/scaling maps, solver-validity model cards, similarity matching, admission gating."

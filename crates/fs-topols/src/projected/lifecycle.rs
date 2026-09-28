@@ -15,6 +15,14 @@ pub enum ProjectedSetupStage {
 }
 
 impl ProjectedOptimizer {
+    /// Exact prescribed nodes retained by this owner, in canonical order.
+    #[must_use]
+    pub fn fixed_nodes(&self) -> &[(usize, f64)] { &self.fixed }
+
+    /// The admitted numerical area policy; refinement cannot silently relax it.
+    #[must_use]
+    pub const fn projection_settings(&self) -> VolumeProjectionSettings { self.projection }
+
     /// Establish a feasible baseline with cancellation during projection and CG.
     ///
     /// The source is borrowed: stopping discards only staged work. The same

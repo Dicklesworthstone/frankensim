@@ -1,10 +1,13 @@
 //! Card-backed surface radiation for the steady P1 conduction rung.
 //!
-//! Two deliberately separate models live here:
+//! Three deliberately separate models live here:
 //!
 //! - [`LinearizedSurfaceRadiation`] produces a Robin row only inside an
 //!   explicit small-temperature-departure domain and reports its discrepancy
 //!   from the nonlinear Stefan-Boltzmann flux at the evaluated point.
+//! - [`solve_with_ambient_radiation`] adds the nonlinear area-mean patch law
+//!   to existing Robin convection, with separate convective/radiative heat
+//!   records and both temperature and watt convergence gates.
 //! - [`GrayDiffuseEnclosure`] solves the opaque, gray, diffuse radiosity
 //!   equations for an admitted view-factor matrix.  The outer coupling driver
 //!   freezes the resulting face fluxes for one conduction solve and repeats
@@ -19,7 +22,8 @@ use std::collections::BTreeSet;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::Cx;
-use fs_matdb::{MaterialCard, PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel};
+use fs_matdb::{ClaimId, ClaimSelection, MaterialCard, PropertyUsageReceipt, QueryPoint,
+    SelectionPolicy, UncertaintyModel};
 
 use crate::ConductionError;
 use crate::assemble::DofMap;
@@ -29,6 +33,12 @@ use crate::material::TEMPERATURE_AXIS;
 use crate::mesh::{BoundaryFace, ConductionMesh};
 use crate::solve::{
     ConductionProblem, ConductionSolution, InitialGuess, SolveConfig, solve, solve_with_interfaces,
+};
+
+mod ambient;
+pub use ambient::{
+    AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
+    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
 };
 
 /// CODATA exact SI value after the 2019 kelvin redefinition, W/(m² K⁴).
@@ -104,6 +114,26 @@ impl SurfaceEmissivity {
         temperature_k: f64,
         policy: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
+        Self::from_card_selection(surface_name, card, temperature_k, ClaimSelection::Policy(policy))
+    }
+
+    /// Resolve the exact declared emissivity claim. A missing or out-of-domain
+    /// pin refuses; it never falls back to another claim on the card.
+    pub fn from_card_pinned(
+        surface_name: &str,
+        card: &MaterialCard,
+        temperature_k: f64,
+        pinned: ClaimId,
+    ) -> Result<Self, ConductionError> {
+        Self::from_card_selection(surface_name, card, temperature_k, ClaimSelection::Pinned(pinned))
+    }
+
+    fn from_card_selection(
+        surface_name: &str,
+        card: &MaterialCard,
+        temperature_k: f64,
+        selection: ClaimSelection,
+    ) -> Result<Self, ConductionError> {
         if surface_name.trim().is_empty() {
             return Err(radiation_error(
                 "<unnamed>",
@@ -119,9 +149,10 @@ impl SurfaceEmissivity {
                 temperature: temperature_k,
                 upstream: error.to_string(),
             })?;
-        let answer = card
-            .claims()
-            .query(SURFACE_EMISSIVITY_PROPERTY, &point, policy)
+        let answer = match selection {
+            ClaimSelection::Policy(policy) => card.claims().query(SURFACE_EMISSIVITY_PROPERTY, &point, policy),
+            ClaimSelection::Pinned(pinned) => card.claims().query_pinned(SURFACE_EMISSIVITY_PROPERTY, &point, pinned),
+        }
             .map_err(|error| ConductionError::MaterialQuery {
                 property: SURFACE_EMISSIVITY_PROPERTY.to_string(),
                 temperature: temperature_k,

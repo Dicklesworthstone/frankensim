@@ -73,9 +73,12 @@ pub mod radiation;
 /// Reduced one-dimensional slab cooling screen with an explicit fixed-boundary
 /// and first-mode applicability boundary.
 pub mod reduced_slab;
+/// A-priori componentwise roundoff bound for one nodal temperature, mapped
+/// through the adjoint of the assembled steady operator.
+pub mod roundoff;
 pub mod solve;
 /// Transient conduction by the method of lines: declared volumetric heat
-/// capacity, the exact P1 capacitance matrix, and theta-method stepping.
+/// capacity, the row-sum-lumped P1 capacitance, and theta-method stepping.
 pub mod transient;
 /// Nominal linear continuum mean-temperature bounds from the equilibrated-flux verifier.
 #[cfg(feature = "thermal-verification")]
@@ -107,6 +110,8 @@ pub use power::{
     SurfacePowerAuditRow, SurfacePowerMap,
 };
 pub use radiation::{
+    AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
+    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
     CoupledRadiationConfig, CoupledRadiationReport, CoupledRadiationSolution, EMISSIVITY_DIMS,
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
     RadiosityReport, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
@@ -117,9 +122,10 @@ pub use reduced_slab::{
 };
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
-    EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
+    EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearMaximumPolish, LinearSolveEvidence,
+    MaximumPhysicalGateRefusal, Nonlinearity,
     RobinFlux, SolveConfig, StopReason, StopRule, element_heat_flux, element_heat_flux_assigned,
-    solve, solve_with_interfaces,
+    polish_linear_maximum, solve, solve_with_interfaces,
 };
 // Types reachable through public fields of `LinearSolveEvidence` must be
 // nameable from this crate without a direct fs-solver dependency (bead qvmwp).
@@ -244,6 +250,19 @@ pub enum ConductionError {
         what: String,
         /// Actionable correction.
         fix: String,
+    },
+    /// The bounded ambient-patch fixed point exhausted its solid solves.
+    /// This is a work/convergence failure, separate from invalid radiation
+    /// input or material extrapolation.
+    AmbientRadiationNotConverged {
+        /// Solid solves performed.
+        iterations: usize,
+        /// Largest final unrelaxed patch-temperature update, K.
+        temperature_change_k: f64,
+        /// Declared temperature convergence threshold, K.
+        temperature_tolerance_k: f64,
+        /// Largest final applied/nonlinear radiation mismatch, W.
+        heat_mismatch_w: f64,
     },
     /// A temperature left the span the conductivity table was sampled
     /// over. Extrapolation is never implicit.
@@ -401,6 +420,13 @@ impl fmt::Display for ConductionError {
                 f,
                 "thermal radiation {surface:?} refused: {what}; fix: {fix}"
             ),
+            ConductionError::AmbientRadiationNotConverged {
+                iterations, temperature_change_k, temperature_tolerance_k, heat_mismatch_w,
+            } => write!(f,
+                "ambient radiative fixed point exhausted {iterations} solid solves: unrelaxed update \
+                 {temperature_change_k:e} K (tolerance {temperature_tolerance_k:e} K), \
+                 applied/nonlinear heat mismatch {heat_mismatch_w:e} W; increase the declared \
+                 budget, reduce relaxation, or improve the solid solve tolerance"),
             ConductionError::OutsideTemperatureSpan {
                 temperature,
                 low,
@@ -487,6 +513,7 @@ impl ConductionError {
             ConductionError::MaterialAssignment { .. } => "conduction-material-assignment",
             ConductionError::Interface { .. } => "conduction-interface",
             ConductionError::Radiation { .. } => "conduction-radiation",
+            ConductionError::AmbientRadiationNotConverged { .. } => "conduction-ambient-radiation-budget",
             ConductionError::OutsideTemperatureSpan { .. } => "conduction-outside-span",
             ConductionError::MaterialQuery { .. } => "conduction-material-query",
             ConductionError::ScenarioRow { .. } => "conduction-scenario-row",

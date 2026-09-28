@@ -33,6 +33,9 @@ use fs_project::{
 };
 use fs_qty::QtyAny;
 
+#[path = "solve/radiation_product.rs"]
+mod radiation_product;
+
 const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -390,6 +393,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
             format: "stl".to_string(),
             source_hash,
             parser_version: parser_version.to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![GeometryAssignment {
             artifact: "enclosure".to_string(),
@@ -432,6 +436,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
             temp_lo: kelvin(233.15),
             temp_hi: kelvin(398.15),
             source: "solve-fixture".to_string(),
+            conductivity_tolerance: None,
         }]),
         interface_cards: Some(Vec::new()),
         perfect_contacts: None,
@@ -550,6 +555,7 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
             },
         }],
         adiabatic_remainder: false,
+        radiation: None,
     });
     spec
 }
@@ -557,8 +563,9 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
 fn multi_region_contact_project() -> ProjectSpec {
     let source = std::fs::read_to_string(format!("{REFERENCE_DATA}/multi-region-interface.fsim"))
         .expect("committed multi-region project");
-    let mut spec = fs_project::parse_sexpr(&source)
-        .expect("multi-region project parses")
+    let mut spec = fs_project::parse_sexpr_migrating(&source)
+        .expect("historical multi-region project migrates")
+        .decoded
         .spec;
     let (material_card, material_state) = fixture_card_identity();
     spec.materials = Some(
@@ -572,6 +579,7 @@ fn multi_region_contact_project() -> ProjectSpec {
                 temp_lo: QtyAny::new(233.15, fs_project::spec::dims::TEMPERATURE),
                 temp_hi: QtyAny::new(398.15, fs_project::spec::dims::TEMPERATURE),
                 source: "solve-contact-fixture".to_string(),
+                conductivity_tolerance: None,
             })
             .collect(),
     );
@@ -627,6 +635,7 @@ fn multi_region_contact_project() -> ProjectSpec {
         // duplicated joint traces. They must therefore remain in the explicit
         // adiabatic remainder until ThermalInterfaces binds them.
         adiabatic_remainder: true,
+        radiation: None,
     });
     spec
 }
@@ -1080,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 18,
+        SOLVE_DRIVER_VERSION, 31,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3250,6 +3259,10 @@ fn g0_the_tracked_reference_project_is_exactly_what_its_generator_produces() {
     let dir = reference_project_dir();
     let tracked = std::fs::read_to_string(dir.join("cooling-reference.fsim"))
         .expect("the tracked reference project exists");
+    let tracked = fs_project::parse_sexpr_migrating(&tracked)
+        .expect("historical tracked project migrates without changing physics")
+        .decoded
+        .canonical;
     let generated =
         print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
     assert_eq!(
@@ -3272,10 +3285,11 @@ fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings()
     let source = std::fs::read_to_string(reference_project_dir().join("cooling-reference.fsim"))
         .expect("the tracked reference project exists");
 
-    // parse_sexpr enforces canonical form (wire.rs:811 require_canonical),
-    // so a successful parse IS the round-trip proof -- a non-canonical
-    // tracked file could not get here.
-    let decoded = fs_project::parse_sexpr(&source).expect("the tracked project parses canonically");
+    // The migrating reader checks canonical form after its receipted version
+    // rewrite; noncanonical historical bytes still refuse.
+    let decoded = fs_project::parse_sexpr_migrating(&source)
+        .expect("the tracked historical project migrates canonically")
+        .decoded;
     assert!(
         decoded.findings().is_empty(),
         "the reference project must admit clean: {:?}",
@@ -3287,7 +3301,7 @@ fn g0_the_tracked_reference_project_is_canonical_and_admits_with_zero_findings()
     let mut slack = source.clone();
     slack.insert(slack.len() - 1, ' ');
     assert!(
-        fs_project::parse_sexpr(&slack).is_err(),
+        fs_project::parse_sexpr_migrating(&slack).is_err(),
         "a non-canonical spelling of the reference project must refuse"
     );
 
@@ -3462,9 +3476,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         "\"qoi_count\":1",
         "\"verdict\":\"indeterminate\"",
         // Declared-input propagation measures boundary conditions and the
-        // solver term; measurement is negligible; five terms stay NO-DATA.
+        // solver term; the published solve bounds roundoff; measurement is
+        // negligible; four terms stay NO-DATA.
         "\"weakest_term\":\"some-no-data\"",
-        "\"budget_terms_measured\":3",
+        "\"budget_terms_measured\":4",
         "\"budget_terms_total\":8",
     ] {
         assert!(
@@ -3485,7 +3500,21 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
+    assert!(receipt.contains("\"method\":\"outward-linear-maximum-enclosure\""), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"),
+        "a linear solve uses the published operator, without a second primal tolerance comparison");
+    assert!(receipt.contains("change of hottest node"), "{receipt}");
+    assert!(receipt.contains("verified inverse infinity upper"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"goal_met\":true"), "{receipt}");
+    assert_eq!(receipt_number_field(control, "allocation_fraction"), 0.1);
+    assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0,
+        "an already accurate physical solution performs no correction iterations");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let algebraic_width = receipt_number_field(algebraic, "half_width_k");
+    assert!(algebraic_width > 0.0 && algebraic_width < 1e-6, "{receipt}");
     assert!(
         receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
             && receipt.contains("\"stop\":\"fidelity-single-rung\"")
@@ -3546,20 +3575,26 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
     assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
     assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
+    let algebraic_term = qoi_receipt.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic_term, "upper_kelvin").to_bits(), algebraic_width.to_bits(),
+        "the actual bound is retained unchanged through the QoI/report handoff");
+    assert!(algebraic_term.contains("outward-linear-maximum-enclosure"));
     assert_eq!(
         receipt_number_field(&qoi_receipt, "effective_limit_kelvin"),
         353.15,
         "the project limit is already effective and must not be safety-factored twice"
     );
     assert!(qoi_receipt.contains(&format!("\"conduction_solution\":\"{solution_hash}\"")));
-    // Propagation measures boundary conditions and the solver term, and
-    // measurement is negligible; the other five sources stay explicit NO-DATA.
-    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 5);
+    // Propagation measures boundary conditions and the solver term, the
+    // published solve bounds roundoff, and measurement is negligible; the
+    // other four sources stay explicit NO-DATA.
+    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 4);
     for kind in EngineeringUncertaintyKind::ALL {
         let measured = matches!(
             kind,
             EngineeringUncertaintyKind::BoundaryConditions
                 | EngineeringUncertaintyKind::SolverAlgebraic
+                | EngineeringUncertaintyKind::Roundoff
                 | EngineeringUncertaintyKind::Measurement
         );
         let needle = format!("\"kind\":\"{}\",\"state\":\"no-data\"", kind.name());
@@ -3594,7 +3629,7 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(report_receipt.contains("frankensim.cli.solve-report.v1"));
     assert!(report_receipt.contains("\"stage\":\"report\""));
     assert!(report_receipt.contains("\"verdict\":\"indeterminate\""));
-    assert!(report_receipt.contains("\"budget_terms_measured\":3"));
+    assert!(report_receipt.contains("\"budget_terms_measured\":4"));
     assert!(report_receipt.contains(&format!("\"qoi_receipt\":\"{}\"", receipts[5])));
     assert!(report_receipt.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])));
     let html = String::from_utf8(artifact_bytes(
@@ -3626,8 +3661,8 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
     assert_eq!(
         twin.matches("\"state\": \"no-data\"").count(),
-        5,
-        "the five NO-DATA terms are carried into the twin"
+        4,
+        "the four NO-DATA terms are carried into the twin"
     );
     let package_text = String::from_utf8(artifact_bytes(
         &ledger,
@@ -3785,7 +3820,7 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
     // The exchange is in the receipt: the branch, the card, the derived
     // coefficient, the marched air, and the two independent watt gates.
     assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
@@ -3820,6 +3855,29 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let air_w = receipt_number_field(&receipt, "air_total_w");
     assert!((solid_w - air_w).abs() <= tolerance, "{solid_w} vs {air_w}");
     assert!(solid_w > 0.0);
+
+    // Solver error now covers the full air-reference feedback on this same
+    // field. Preparing response columns must not masquerade as correcting it.
+    assert!(receipt.contains("outward-coupled-linear-maximum-enclosure"), "{receipt}");
+    assert!(!receipt.contains("tolerance-tightening-resolve"), "{receipt}");
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"schema\":\"frankensim.cli.coupled-maximum-publication.v1\""), "{receipt}");
+    assert!(control.contains("\"correction_supported\":true"), "{receipt}");
+    assert!(control.contains("\"mode\":\"physical-goal-correction\""), "{receipt}");
+    assert!(receipt_number_field(control, "primal_iterations") <= receipt_number_field(control, "max_primal_iterations"));
+    assert!(receipt_number_field(control, "response_iterations")
+        <= receipt_number_field(control, "max_response_iterations"));
+    let gain = receipt_number_field(control, "feedback_gain_infinity_upper");
+    assert!(gain > 0.0 && gain < 1.0, "{receipt}");
+    assert!(receipt_number_field(control, "coupled_inverse_infinity_upper")
+        >= receipt_number_field(control, "solid_inverse_infinity_upper"));
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    let bound = receipt_number_field(algebraic, "half_width_k");
+    assert!(bound.is_finite() && bound > 0.0, "{receipt}");
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), bound.to_bits(),
+        "the full coupled bound must reach the published QoI budget unchanged");
 
     // A channel too short for the card's developed-flow floor (L/Dh = 5
     // against Gnielinski's [10, 1e6]) refuses by name; executed on the rch
@@ -3911,7 +3969,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v7"));
     // The production volumetricizer's facet recovery inserts a Steiner
     // point at the joint centroid and re-triangulates the shared unit
     // face into a deterministic four-triangle fan, so the declared
@@ -4036,7 +4094,9 @@ fn g1_contact_adaptive_probes_the_actual_hot_maximum_with_the_contact_operator()
 fn g1_contact_adaptive_refines_and_retains_the_last_probed_contact_field() {
     let mut spec = contact_refinement_project("adaptive");
     spec.budgets.as_mut().unwrap().accuracy_rel = 1e-10;
-    spec.budgets.as_mut().unwrap().memory_bytes = 2 * 1024 * 1024;
+    spec.budgets.as_mut().unwrap().memory_bytes = 64 * 1024 * 1024;
+    // Admit the enriched operator's verified inverse as well as its mesh;
+    // the separate low-memory test covers refusal and retained-field behavior.
     let receipt = contact_refinement_receipt(&spec, &contact_cards());
     assert!(
         receipt_number_field(&receipt, "solved_meshes") > 2.0,
@@ -4114,6 +4174,12 @@ fn g1_contact_adaptive_uses_the_nonlinear_material_tangent_and_retains_its_remai
         binding.card = cards.materials()[0].card().to_hex();
     }
     let receipt = contact_refinement_receipt(&spec, &cards);
+    assert!(!receipt.contains("outward-linear-maximum-enclosure"),
+        "a frozen k(T) operator must not be reported as the full nonlinear maximum bound");
+    assert!(receipt.contains("tolerance-tightening-resolve"),
+        "the explicitly Estimated nonlinear tolerance comparison remains available: {receipt}");
+    assert!(receipt.contains("\"solver_control\":{\"status\":\"unsupported-model\""),
+        "the requested algebraic allocation has an explicit nonlinear limit: {receipt}");
     assert!(
         receipt.contains("\"status\":\"observed-tolerance-met\""),
         "{receipt}"
@@ -4883,7 +4949,9 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         conduction.contains("\"status\":\"observed-tolerance-met\""),
         "{conduction}"
     );
-    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (6 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":6,"), "{conduction}");
     assert!(
         conduction.contains("\"maximum_remainder_k\":"),
         "{conduction}"
@@ -4913,19 +4981,29 @@ fn g1_adaptive_fidelity_evaluates_the_actual_maximum_and_keeps_discretization_un
         "the checked dual and both explicit remainders reproduce the independently solved maximum change"
     );
     assert!(conduction.contains("\"uses_nonlinear_jacobian\":false"));
-    let estimated = number("\"estimated_change_k\":");
+    // The term belongs to the PUBLISHED mesh: the last history row.
+    let last = |key: &str| -> f64 {
+        conduction
+            .rsplit(key)
+            .next()
+            .and_then(|rest| rest.split(|c| c == ',' || c == '}').next())
+            .and_then(|text| text.parse::<f64>().ok())
+            .expect("last history row value")
+    };
+    let estimated = last("\"estimated_change_k\":");
+    let last_measured = last("\"measured_change_k\":");
     let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
     // A tolerance-met adaptive study now supplies the Discretization term:
     // 2 x the larger enrichment change (Richardson at an assumed order >= 1),
-    // so four sources stay NO-DATA.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    // and the published solve bounds roundoff, so three sources stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
     let upper = qoi
         .split("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0,\"upper_kelvin\":")
         .nth(1)
         .and_then(|rest| rest.split(',').next())
         .and_then(|text| text.parse::<f64>().ok())
         .expect("measured adaptive discretization term");
-    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(measured.abs())).to_bits(), "{qoi}");
+    assert_eq!(upper.to_bits(), (2.0 * estimated.abs().max(last_measured.abs())).to_bits(), "{qoi}");
     assert!(qoi.contains("\"method\":\"adaptive-enrichment-order-one\""), "{qoi}");
     let report = String::from_utf8(artifact_bytes(&ledger, &receipts[6])).unwrap();
     let html = String::from_utf8(artifact_bytes(
@@ -5028,7 +5106,9 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
         conduction.contains("\"status\":\"observed-tolerance-met\""),
         "{conduction}"
     );
-    assert!(conduction.contains("\"solved_meshes\":2,"), "{conduction}");
+    // The tolerance is 1% of the temperature RISE above the declared inlet/reference,
+    // so the loop genuinely refines (10 solved meshes) before it is met.
+    assert!(conduction.contains("\"solved_meshes\":10,"), "{conduction}");
     assert!(!conduction.contains("unsupported-coupled-adjoint"));
     assert!(conduction.contains("analytic-air-solid-transpose-iqn-ils"));
     let history = conduction.split("\"history\":[").nth(1).unwrap();
@@ -5047,10 +5127,17 @@ fn g1_adaptive_conjugate_fidelity_closes_the_air_feedback_in_the_actual_goal() {
     assert!(number("linearization_remainder_k").abs() < 1e-8,
         "the linear solid and affine air law leave only numerical error in the remainder: {history}");
     assert!(conduction.contains("\"continuum_error_bound\":false"));
-    // The tolerance-met conjugate adaptive study supplies Discretization;
-    // propagation measures boundary, card model-form and solver terms, and
-    // measurement is negligible, so roundoff, geometry and parameters remain.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
+    // The adaptive comparison supplies Discretization. Since the verified
+    // solid inverses (4852d019d, 1f5d7c13b) the coupled solver bound encloses
+    // this mesh too (state contraction; 7.7e-10 K measured 2026-09-26), so
+    // only geometry and parameters stay NO-DATA through the QoI publication.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 2, "{qoi}");
+    assert!(qoi.contains("\"kind\":\"solver-algebraic\",\"state\":\"interval\""), "{qoi}");
+    assert!(qoi.contains("outward-coupled-linear-maximum-enclosure"), "{qoi}");
+    // Since the physical-publication driver (v31) the derivation states the
+    // enclosed maximum interval rather than a disposition word.
+    assert!(qoi.contains("maximum interval Some(["), "{qoi}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"), "{conduction}");
 }
 
 #[test]
@@ -5149,6 +5236,9 @@ fn g1_adaptive_fidelity_memory_limit_keeps_the_last_probed_mesh_unresolved() {
         conduction.contains("\"status\":\"unresolved\""),
         "{conduction}"
     );
+    // Interval LDL proves the small refined solids' inverses inside the 32 KiB
+    // declaration (driver 30), so the algebraic side no longer binds first:
+    // the tet memory cap stops the study, as this test's name says.
     assert!(
         conduction.contains("\"stop\":\"memory-budget\""),
         "{conduction}"
@@ -5200,7 +5290,7 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
     let conduction =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&conduction);
-    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v7"));
     assert!(
         conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
         "{conduction}"
@@ -5277,11 +5367,11 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         qoi.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])),
         "{qoi}"
     );
-    // Ladder discretization + propagated boundary/solver + negligible
-    // measurement are measured; the other four stay NO-DATA.
-    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 4, "{qoi}");
+    // Ladder discretization + propagated boundary/solver + the roundoff bound
+    // + negligible measurement are measured; the other three stay NO-DATA.
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 3, "{qoi}");
     assert!(
-        qoi.contains("4 of eight engineering uncertainty terms are explicit NO-DATA"),
+        qoi.contains("3 of eight engineering uncertainty terms are explicit NO-DATA"),
         "{qoi}"
     );
     let qoi_progress = progress
@@ -5290,7 +5380,7 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         .expect("QoI progress row");
     for expected in [
         "\"weakest_term\":\"some-no-data\"",
-        "\"budget_terms_measured\":4",
+        "\"budget_terms_measured\":5",
         "\"budget_terms_total\":8",
         "\"verdict\":\"indeterminate\"",
     ] {
@@ -5299,6 +5389,97 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
             "{expected}: {qoi_progress}"
         );
     }
+}
+
+#[test]
+fn g1_maximum_goal_corrects_a_loose_physical_solve_before_publication() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    // The uniform initial field can satisfy this loose residual rule while
+    // its regional maximum is still too inaccurate for the requested QoI.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 1e-5;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, _) = run_to_completion(&ledger, &decoded);
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let receipt = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let control = receipt.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.starts_with("{\"status\":\"goal-tolerance\""), "{receipt}");
+    assert!(control.contains("\"candidate_accepted\":true"), "{receipt}");
+    let target = receipt_number_field(control, "requested_tolerance_k");
+    let initial = receipt_number_field(control, "initial_bound_k");
+    let final_bound = receipt_number_field(control, "final_bound_k");
+    assert!(initial > target && final_bound <= target, "{receipt}");
+    let iterations = receipt_number_field(control, "primal_iterations");
+    assert!(iterations > 0.0, "the declared goal must drive real solver work: {receipt}");
+    assert!(iterations <= receipt_number_field(control, "max_primal_iterations"));
+    assert_eq!(target.to_bits(), (0.1 * 1e-5 * receipt_number_field(control, "scale_k")).to_bits());
+    assert!(receipt_number_field(&receipt, "final_residual")
+        <= receipt_number_field(&receipt, "residual_threshold"));
+    assert!(receipt_number_field(&receipt, "relative_closure") < 1e-6, "{receipt}");
+    let algebraic = receipt.split("\"solver_algebraic\":").nth(1).unwrap();
+    assert_eq!(receipt_number_field(algebraic, "half_width_k").to_bits(), final_bound.to_bits());
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(receipt_number_field(term, "upper_kelvin").to_bits(), final_bound.to_bits(),
+        "the reported uncertainty belongs to the corrected, published field");
+}
+
+#[test]
+fn g1_adaptive_balances_both_solver_errors_against_the_current_discretization_term() {
+    let mut spec = contact_refinement_project("adaptive");
+    // The starting physical tolerance leaves room for the measured comparison
+    // to demand extra algebraic work on this nontrivial contact system.
+    spec.solver.as_mut().unwrap().tolerance_rel = 0.1;
+    spec.budgets.as_mut().unwrap().accuracy_rel = 0.75;
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").unwrap();
+    import_multi_region_contact(&ledger, &spec);
+    let outcome = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
+        &decoded, &contact_cards(), &mut Vec::new()).unwrap();
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    let conduction = String::from_utf8(artifact_bytes(&ledger, &receipts[4])).unwrap();
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).unwrap();
+    let history = conduction.split("\"history\":[").nth(1).unwrap().split(']').next().unwrap();
+    let balances: Vec<&str> = history.split("\"algebraic_balance\":").skip(1).collect();
+    assert!(!balances.is_empty(), "{conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "correction_rounds") > 0.0),
+        "the observed discretization allowance must drive additional work: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "additional_correction_iterations") > 0.0),
+        "balancing must perform additional primal iterations: {conduction}");
+    assert!(balances.iter().any(|row| receipt_number_field(row, "field_updates") > 0.0),
+        "balancing must physically accept and re-probe a changed field: {conduction}");
+    let last = balances.last().unwrap();
+    assert!(last.starts_with("{\"status\":\"balanced\""), "{conduction}");
+    let pair = receipt_number_field(last, "pair_bound_k");
+    let allowance = receipt_number_field(last, "pair_allowance_k");
+    let discretization = receipt_number_field(last, "discretization_half_width_k");
+    assert!(pair <= allowance && allowance <= discretization / 10.0, "{conduction}");
+    let last_number = |key: &str| -> f64 {
+        history.rsplit(&format!("\"{key}\":")).next().unwrap()
+            .split([',', '}']).next().unwrap().parse().unwrap()
+    };
+    assert_eq!(discretization.to_bits(),
+        (2.0 * last_number("estimated_change_k").abs().max(last_number("measured_change_k").abs())).to_bits());
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(control.contains("\"tolerance_basis\":\"measured-adaptive-discretization\""));
+    assert!(receipt_number_field(control, "primal_iterations")
+        <= receipt_number_field(control, "max_primal_iterations"));
+    assert!(receipt_number_field(control, "stability_iterations")
+        <= receipt_number_field(control, "max_stability_iterations"));
+    assert!(receipt_number_field(control, "retarget_calls") <= 4.0);
+    assert_eq!(receipt_number_field(control, "requested_tolerance_k").to_bits(), allowance.to_bits());
+    let bound = receipt_number_field(control, "final_bound_k");
+    assert_eq!(bound.to_bits(), receipt_number_field(last, "coarse_bound_k").to_bits());
+    let solver_term = qoi.split("\"kind\":\"solver-algebraic\"").nth(1).unwrap();
+    assert_eq!(bound.to_bits(), receipt_number_field(solver_term, "upper_kelvin").to_bits());
+    assert_eq!(receipt_number_field(&qoi, "value").to_bits(), last_number("t_max_k").to_bits());
+    assert!(receipt_number_field(&conduction, "final_residual")
+        <= receipt_number_field(&conduction, "residual_threshold"));
 }
 
 /// Replay falsifier for the ladder path (bead q61wp.14 item 5, extended to
@@ -5337,6 +5518,13 @@ fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
         "QoI receipt bytes (interval term) reproduce"
     );
     let conduction = String::from_utf8(first.2).expect("utf-8");
+    // The bounded inverse proposal now covers this all-free Robin ladder;
+    // its verified error evidence must replay with the published endpoint.
+    assert!(conduction.contains("outward-linear-maximum-enclosure"), "{conduction}");
+    let control = conduction.split("\"solver_control\":").nth(1).unwrap();
+    assert!(receipt_number_field(control, "final_bound_k").is_finite(), "{conduction}");
+    assert!(!conduction.contains("tolerance-tightening-resolve"),
+        "the ladder endpoint's solver bound is not replaced by a base-mesh comparison");
     assert!(
         conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
         "{conduction}"

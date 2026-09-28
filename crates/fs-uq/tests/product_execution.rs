@@ -63,6 +63,49 @@ fn every_chunking_has_identical_observations_and_final_evidence() {
 }
 
 #[test]
+fn singleton_uniform_stays_in_support_without_shifting_later_draws() {
+    let singleton = 1.3_f64;
+    let mut plan = UqPlan::new("power", PropagationMethod::MonteCarlo, 8)
+        .with_parameter(ParameterUncertainty::uniform("fixed", singleton, singleton, "W"))
+        .with_parameter(ParameterUncertainty::uniform("variable", 2.0, 3.0, "W"))
+        .with_correlation(CorrelationModel::Independent);
+    plan.seed = 29;
+    let mut saw_out_of_support_interpolation = false;
+    let expected: Vec<_> = (0..plan.budget_max_samples)
+        .map(|ordinal| {
+            let mut stream = fs_rand::StreamKey {
+                seed: plan.seed,
+                kernel: 0x0517,
+                tile: ordinal as u32,
+            }
+            .stream();
+            let fixed_draw = stream.next_f64();
+            saw_out_of_support_interpolation |=
+                ((1.0 - fixed_draw) * singleton + fixed_draw * singleton) != singleton;
+            let variable_draw = stream.next_f64();
+            (1.0 - variable_draw) * 2.0 + variable_draw * 3.0
+        })
+        .collect();
+    assert!(saw_out_of_support_interpolation,
+        "this seed must exercise the former floating-point support violation");
+    let mut execution = UqExecution::new(&plan).unwrap();
+    let mut ordinal = 0;
+    let result = execution.advance(8, || false, |parameters| {
+        if parameters[0] != singleton {
+            return Err("fixed power sample left its declared singleton support");
+        }
+        assert_eq!(parameters[0].to_bits(), singleton.to_bits());
+        assert_eq!(parameters[1].to_bits(), expected[ordinal].to_bits(),
+            "the singleton must still consume its original random draw");
+        ordinal += 1;
+        Ok(parameters[1])
+    });
+    assert_eq!(result.status, UqStatus::Complete);
+    assert_eq!(execution.evaluations_attempted(), 8);
+    assert_eq!(execution.observations(), expected.as_slice());
+}
+
+#[test]
 fn cancellation_before_first_sample_returns_no_invented_statistics() {
     let mut execution = UqExecution::new(&plan(10)).unwrap();
     let result = execution.advance(10, || true, |_| -> Result<f64, &str> {

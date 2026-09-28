@@ -27,6 +27,8 @@ pub mod compliant;
 pub mod damping;
 /// Reciprocal configuration-dependent squeeze-film pressure ports.
 pub mod squeeze;
+/// Compressible thin-gap gas storage in the same coupled time equation.
+pub mod gas_film;
 /// Hereditary material loss in the existing shared mechanical time owner.
 pub mod relaxation;
 /// Passive multiport acoustic reaction in the same nonlinear time equation.
@@ -224,6 +226,7 @@ pub struct ImpactSystem {
     relaxation:Option<relaxation::Memory>,
     radiation:Option<radiation::Memory>,
     squeeze_films:Vec<squeeze::ResistiveFilm>,
+    gas_film:Option<Rc<gas_film::Memory>>,
     // Immutable shared laws plus body/start addresses; no duplicate mesh data.
     membranes:Vec<(usize,usize,membrane::MembranePotential)>,
     strings:Vec<(usize,usize,string::StringPotential)>,
@@ -318,7 +321,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,radiation:None,relaxation:None,squeeze_films:Vec::new()})
+        Ok(Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,radiation:None,relaxation:None,squeeze_films:Vec::new(),gas_film:None})
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]

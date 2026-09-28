@@ -17,7 +17,9 @@ struct RawMesh {
 fn load_committed() -> Vec<RawMesh> {
     let project_path = format!("{DATA}/multi-region-interface.fsim");
     let src = std::fs::read_to_string(&project_path).expect("fixture present");
-    let decoded = fs_project::parse_sexpr(&src).expect("parse");
+    let decoded = fs_project::parse_sexpr_migrating(&src)
+        .expect("historical fixture migrates")
+        .decoded;
     let artifacts = decoded.spec.geometry.clone().expect("geometry rows");
     let mut raw = Vec::new();
     for artifact in &artifacts {

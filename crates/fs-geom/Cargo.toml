@@ -2,7 +2,7 @@
 name = "fs-geom"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Region/Chart abstraction: charts present abstract regions, agreement is checkable, conversions carry Certified receipts."

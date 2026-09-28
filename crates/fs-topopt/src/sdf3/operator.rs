@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+use fs_cutfem::elastic3::stress::BulkStressPoint3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
 use fs_solver::op::{LinearOp, two_level::TwoLevelError, multilevel::MultilevelError};
 use fs_sparse::precond::{IdentityPrecond, Precond};
@@ -31,6 +32,15 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     fn fixed(&self)->&[bool];
     /// Bulk-plus-ghost contractions with any hanging-node map applied.
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3>;
+    /// Exact bulk, Nitsche and ghost stiffness contraction for an adjoint.
+    fn scale_bilinear_forms(&self, z: &[f64], u: &[f64], checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<f64>, ElasticityError3>;
+    /// Actual retained bulk quadrature stresses, with no surface/ghost samples.
+    fn bulk_stress(&self, u: &[f64], max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<BulkStressPoint3>, ElasticityError3>;
+    /// Pull back reference-material stress cotangents through the physical Q1 map.
+    fn reference_bulk_stress_pullback(&self, derivatives: &[[f64; 6]], checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<Vec<f64>, ElasticityError3>;
     /// Each shared active face once, with normal center separation.
     fn filter_edges(&self)->Vec<(usize,usize,f64)>;
 }
@@ -43,6 +53,12 @@ impl Sdf3Elasticity for CutElasticity3 {
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {CutElasticity3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {CutElasticity3::fixed(self)}
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {CutElasticity3::scale_quadratic_forms(self,u)}
+    fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
+    fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<BulkStressPoint3>,ElasticityError3> {CutElasticity3::bulk_stress(self,u,max_points,checkpoint)}
+    fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {
         // Preserve the original Cartesian neighbor and insertion order.
         let keys=self.cell_keys();
@@ -66,6 +82,12 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveElasticity3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {AdaptiveElasticity3::fixed(self)}
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::scale_quadratic_forms(self,u)}
+    fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
+    fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<BulkStressPoint3>,ElasticityError3> {AdaptiveElasticity3::bulk_stress(self,u,max_points,checkpoint)}
+    fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {AdaptiveElasticity3::filter_edges(self).to_vec()}
 }
 impl Sdf3Elasticity for AdaptiveSolveSpace3 {
@@ -106,6 +128,12 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveSolveSpace3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {self.elasticity().fixed()}
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {self.elasticity().scale_quadratic_forms(u)}
+    fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {self.elasticity().scale_bilinear_forms(z,u,checkpoint)}
+    fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<BulkStressPoint3>,ElasticityError3> {self.elasticity().bulk_stress(u,max_points,checkpoint)}
+    fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<Vec<f64>,ElasticityError3> {self.elasticity().reference_bulk_stress_pullback(derivatives,checkpoint)}
     fn filter_edges(&self)->Vec<(usize,usize,f64)> {self.elasticity().filter_edges().to_vec()}
 }
 

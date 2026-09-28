@@ -2,7 +2,7 @@
 name = "fs-robust"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Objective epistemics (addendum Proposal F): apply the three colors to the GOAL itself. Colored objectives over (design, environment), CVaR/robust optima, the weakest-input color rule on headlines, colored fragility curves, and the amended optimization contract that refuses to optimize an un-colored objective."

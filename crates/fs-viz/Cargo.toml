@@ -2,7 +2,7 @@
 name = "fs-viz"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Scientific visualization (fs-viz): the topological summaries that make a 10^8-cell field legible to an agent in one image. Verifiable primitives — RK4 streamline integration over analytic flow fields, Morse critical-point classification of scalar fields, and isocontour edge extraction (the one contouring implementation). Deterministic; verified against analytic flow/scalar fixtures."

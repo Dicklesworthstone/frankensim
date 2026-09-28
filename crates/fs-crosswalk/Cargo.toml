@@ -2,7 +2,7 @@
 name = "fs-crosswalk"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Regulatory vocabulary crosswalk (addendum Proposal 12): a machine-readable mapping of evidence-package fields onto the regulator's existing language — ASME V&V 10/20/40 and FAA/EASA certification-by-analysis — so the artifact lands in the standards' own terms. Owns risk R9."

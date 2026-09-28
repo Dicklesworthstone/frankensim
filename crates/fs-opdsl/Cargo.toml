@@ -2,7 +2,7 @@
 name = "fs-opdsl"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Typed operator IR: physics operators defined once, lowered to residual apply, JVP, VJP/discrete adjoint, DWR indicators, preconditioner hints, and tile kernels."

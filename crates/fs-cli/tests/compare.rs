@@ -431,8 +431,9 @@ fn the_foam_twin_shows_the_material_identity_change_and_its_consequences() {
     // Budget terms: the default fidelity measures no discretization term.
     // The declared-input propagation measures boundary conditions (the
     // envelope moves a linear Robin maximum one-for-one) and the solver
-    // term, measurement is negligible, and the declared coefficient carries
-    // no model-form allowance; the other five stay NO-DATA on both sides.
+    // term, the published solve bounds roundoff, measurement is negligible,
+    // and the declared coefficient carries no model-form allowance; the
+    // other four stay NO-DATA on both sides.
     let terms = out
         .split("\"budget_terms\":[")
         .nth(1)
@@ -443,10 +444,17 @@ fn the_foam_twin_shows_the_material_identity_change_and_its_consequences() {
         terms
             .matches("\"state_left\":\"no-data\",\"state_right\":\"no-data\"")
             .count(),
-        5,
+        4,
         "{out}"
     );
-    assert!(!terms.contains("\"changed\":true"), "{out}");
+    // The material identity changes the assembled operator, so exactly the
+    // two operator-derived bounds move: roundoff and the solver-algebraic
+    // linear enclosure. Every other term's state and magnitude is unchanged.
+    assert_eq!(terms.matches("\"changed\":true").count(), 2, "{out}");
+    for kind in ["roundoff", "solver-algebraic"] {
+        let row = terms.split(&format!("\"kind\":\"{kind}\"")).nth(1).expect("operator-derived row");
+        assert!(row.split('}').next().unwrap().contains("\"changed\":true"), "{kind}: {out}");
+    }
 
     // Stages: geometry import, assignment, and the flow network saw the same
     // inputs (their receipts differ only in binding keys: the run, the

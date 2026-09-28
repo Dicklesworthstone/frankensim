@@ -2,7 +2,7 @@
 name = "fs-flagship-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Flagship e2e suite (bead mye.5): staged smoke/mid/full golden ledgers, cross-flagship audits, failure drills, forensic logging — the system-level Gauntlet tier."

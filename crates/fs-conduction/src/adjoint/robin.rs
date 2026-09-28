@@ -12,7 +12,7 @@
 //! At a material slope discontinuity or validity endpoint, a primal can be
 //! retained but derivative requests refuse rather than choosing a unique slope.
 
-mod nonlinear;
+pub(crate) mod nonlinear;
 pub(super) mod goal;
 
 use std::collections::BTreeSet;

@@ -10,6 +10,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let substeps=mechanics::substeps_option(&mut args)?;
     let prepared=mechanics::prepared_option(&mut args)?||analytic||substeps.is_some();
     let right=acoustics::stereo::option(&mut args)?;
+    let microphone_spec=acoustics::receivers::input::option(&mut args)?;
     let radiation=radiation_spec::option(&mut args)?;
     let feedback=acoustics::stereo::feedback::option(&mut args)?;
     let second=sticks::option(&mut args)?;
@@ -21,6 +22,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     let (args,stroke)=playing::parse(args)?;
     let command=args.first().map(String::as_str);
     if !is_command(command)||args.len()<2 {return Err("usage: hihat INPUT.fshh [steps]; hihat-wav INPUT [frames] [full_scale_pa]; hihat-mic INPUT [frames] [full_scale_pa] [x y z]; see HIHAT.md".into());}
+    if let Some(spec)=&microphone_spec {spec.admit_command(command.unwrap(),args.len()>4,right.is_some())?;}
     acoustics::stereo::feedback::admit_command(feedback,command.unwrap(),false)?;
     let mic=command==Some("hihat-mic");let audio=command!=Some("hihat");
     if (!audio&&args.len()>3)||(audio&&args.len()>4&&!(mic&&args.len()==7))
@@ -44,7 +46,10 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
         Some(film)=>build_with_squeeze(&spec,&upper,&lower,stroke,second,steps,dt,audio,Some(film))?,
         None=>build(&spec,&upper,&lower,stroke,second,steps,dt,audio)?,
     }};
-    let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}
+    let receivers=match microphone_spec {
+        Some(spec)=>spec.into_receivers(),
+        None=>{let mut receivers=vec![receiver];if let Some(p)=right{receivers.push(acoustics::Receiver::FinitePoint(p));}receivers},
+    };
     let (mut e,loaded)=if feedback {
         let (e,bake)=acoustics::stereo::feedback::prepare(pair.experiment,usize::try_from(count)?,scale,
             &receivers,radiation.unwrap_or_default(),&CancelGate::new_clock_free())?;(e,Some(bake))
@@ -73,7 +78,7 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     }
     eprintln!("paired cymbals: upper_modes={}, lower_modes={}, contact_sites={}, one joint mechanics; supplied masses/geometry and authored contact, not a calibrated hi-hat; axial carriage, no rocking; squeeze_film={}",
         pair.upper_modes.len(),pair.lower_modes.len(),pair.collision.n_points(),
-        if squeeze.is_some(){"quasistatic incompressible Reynolds, declared validity limits"}else{"none"});
+        squeeze.as_ref().map_or("none",squeeze::Config::label));
     let gate=CancelGate::new_clock_free();let stdout=std::io::stdout();let mut out=std::io::BufWriter::new(stdout.lock());
     if audio {
         let wav=match loaded {
@@ -87,6 +92,8 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
     for (hand,ports) in pair.flexible_sticks.iter().enumerate() {
         if ports.is_some(){write!(out,",stick{}_tip_down_m,stick{}_tip_speed_m_s,stick{}_hand_down_m,stick{}_hand_speed_m_s,stick{}_bending_j",hand+1,hand+1,hand+1,hand+1,hand+1)?;}
     }
+    let gas=squeeze.as_ref().is_some_and(|f|f.gas().is_some());
+    if gas {write!(out,",gas_min_absolute_pa,gas_max_absolute_pa,gas_mass_kg,gas_free_energy_j")?;}
     writeln!(out)?;
     for _ in 0..steps {
         let f=e.system.step(&e.force,&gate)?;let x=e.system.state();
@@ -104,7 +111,25 @@ pub fn run(mut args:Vec<String>)->Result<(),Error> {
             write!(out,",{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",o.tip_displacement_m,o.tip_velocity_m_s,
                 o.hand_displacement_m,o.hand_velocity_m_s,o.flexural_energy_j)?;
         }
+        if gas {
+            let o=gas_observation(&e.system)?.ok_or("missing selected gas state")?;
+            write!(out,",{:.17e},{:.17e},{:.17e},{:.17e}",o.minimum_pressure_pa,o.maximum_pressure_pa,
+                o.mass_kg,o.free_energy_j)?;
+        }
         writeln!(out)?;
     }
     out.flush()?;Ok(())
+}
+
+// Observation follows wrappers but never advances an independent gas clock.
+pub(super) fn gas_observation(system:&Mechanics)
+    ->Result<Option<fs_couple::render::plate::impact::gas_film::GasObservation>,Error>
+{
+    Ok(match system {
+        Mechanics::Reference(s)=>s.gas_film_observation()?,
+        Mechanics::Nonlinear(s)=>s.gas_film_observation()?,
+        Mechanics::Substepped(s)=>s.gas_film_observation()?,
+        Mechanics::Driven{inner,..}=>gas_observation(inner)?,
+        Mechanics::Prepared(_)=>None,
+    })
 }

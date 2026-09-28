@@ -2,7 +2,7 @@
 name = "fs-verify"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Certified speculation verifier: equilibrated-flux a-posteriori error bounds, interval-evaluated to verified color; warm-start fallback for the nonlinear class."

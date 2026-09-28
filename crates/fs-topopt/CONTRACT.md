@@ -81,7 +81,13 @@ cubical homology), so the optimization stack lives here.
   and non-finite SDF enclosures return `InvalidFemInput` before
   caller-visible mutation), `DWR_CUT_BAND_POLICY_VERSION` and
   `DWR_CUT_BAND_MASS_GATE` (the explicit policy identity and strict 0.15
-  gate), `void_components`
+  gate). Since policy version 2 the gate measures mass on the region it
+  refines, `in_dwr_refinement_band` (cut cells plus their one-cell halo), and
+  the band must also hold strictly more than its area share of the mass.
+  Version 1 counted only cut cells, but the error it had to find sits one
+  cell off the interface. On the seeded fixture at level 4, cut cells held
+  11% of the mass on 10% of the cells, and the marquee never refined. The
+  band held 48% on 26%. `void_components`
   (topology witness), `min_feature_cells` (the medial-axis-class thickness oracle).
   The `run_marquee` refinement argument is an enable flag: each enabled
   iteration may advance the whole band by at most one level; it is not a
@@ -273,7 +279,10 @@ and deterministic synthetic
 planning step. G3 checks show that indicator negation, exact power-of-two
 scaling, reverse insertion, and within-partition mass-preserving
 redistribution preserve authorization and target topology.
-The iteration log emits policy version, cut/total mass and fraction, band
+An area-proportional indicator map is refused even though its band share
+exceeds 0.15, and one extra unit on a band leaf authorizes the advance.
+The iteration log emits policy version, cut/band/total mass, band area
+fraction, cut fraction, band
 levels, exhaustive decision reason, analysis/target design witnesses and
 metrics, target leaf counts, policy splits, post-update motion-conformance
 splits, the fully conformed target-grid leaf count, and their reconstructed

@@ -11,7 +11,7 @@
 
 use crate::fim::{RedistanceAudit, redistance};
 use crate::gridsdf::GridSdf;
-use crate::topder::{NucleationEvent, nucleate, topological_derivative};
+use crate::topder::{NucleationEvent, topological_derivative};
 use crate::veloext::extend_velocity;
 use crate::weno::{Velocity, advect, build_band};
 use fs_cutfem::quad::cut_cell_rules;
@@ -259,6 +259,79 @@ fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
         }
     }
     (mc.assemble(), kc.assemble())
+}
+
+/// Largest material-area change one plain-mode update may target, in the
+/// normalized unit square. About one fixed `move_cells` advection's worth of
+/// area on the tracked bracket (measured about 0.04 per step, q61wp.16.1).
+pub(crate) const AREA_SCHEDULE_STEP: f64 = 0.04;
+
+/// Move a proposed geometry's material area one scheduled step toward the
+/// target: `V_k + clamp(V* - V_k, -q, +q)`, via a common nodal offset
+/// ([`crate::volume::project_material_volume`]; area quadrature only, no PDE).
+///
+/// The augmented-Lagrangian multiplier alone cannot converge the area: the
+/// velocity is normalized by its maximum, so every update moves the boundary a
+/// full `move_cells` step however close the area is, and the multiplier winds
+/// up and overshoots in both directions. The schedule bounds each step, cannot
+/// overshoot `V*`, and holds it once reached (within 1e-3, ten times inside the
+/// study's feasibility band).
+pub(crate) fn schedule_material_area(
+    phi: &mut GridSdf,
+    current_volume: f64,
+    settings: OptimizeSettings,
+) {
+    let target = current_volume
+        + (settings.volfrac - current_volume).clamp(-AREA_SCHEDULE_STEP, AREA_SCHEDULE_STEP);
+    // A common offset beyond the largest nodal magnitude empties or fills the
+    // whole square, so this range always brackets the target. Far-field
+    // redistanced values can lie well outside a fixed guess such as 2.
+    let reach = phi.nodes().iter().fold(0.0_f64, |m, v| m.max(v.abs())) + 1.0;
+    // Best effort: on very coarse grids the cut-quadrature area can jump as a
+    // node changes sign, so no offset may meet the tolerance. The projection
+    // then publishes nothing (it never partially edits `phi`) and the plain
+    // multiplier step stands. Every row still records its measured area, and
+    // the study reports feasibility against its own 1%-of-box band.
+    let _ = crate::volume::project_material_volume(phi, settings.level, &[], crate::volume::VolumeProjectionSettings {
+        target: target.clamp(1e-6, 1.0 - 1e-6),
+        tolerance: 1e-3,
+        max_shift: reach,
+        max_evaluations: 64,
+    });
+}
+
+/// Interface exchange rate for hole nucleation: the median of `σ:ε = 2w`
+/// over valid interface probes (`w` is the sampled strain-energy density).
+/// The median resists the stress spikes at the clamp and the load pad.
+pub(crate) fn interface_exchange_rate(energy: &[f64], seeded: &[bool]) -> f64 {
+    let mut rates: Vec<f64> = energy
+        .iter()
+        .zip(seeded)
+        .filter(|(w, s)| **s && w.is_finite() && **w > 0.0)
+        .map(|(w, _)| 2.0 * w)
+        .collect();
+    if rates.is_empty() {
+        return 0.0;
+    }
+    rates.sort_by(f64::total_cmp);
+    rates[rates.len() / 2]
+}
+
+/// Hole centers keep `ρ + h` from every box edge and stay clear of the
+/// clamped left strip and the loaded right pad (each widened by `ρ + 2h`).
+pub(crate) fn cantilever_nucleation_region(
+    radius: f64,
+    h: f64,
+    support: EdgeBand,
+) -> crate::topder::NucleationRegion {
+    let guard = radius + 2.0 * h;
+    crate::topder::NucleationRegion {
+        containment: radius + h,
+        keep_out: [
+            [0.0, 0.0, guard, 1.0],
+            [1.0 - 2.0 * h - guard, support.start() - guard, 1.0, support.end() + guard],
+        ],
+    }
 }
 
 mod engine;

@@ -95,6 +95,11 @@ produce 76 accepted half-step endpoints, 46 trials (8 rejected), a sampled peak
 of approximately 306.368112 K at 30 seconds, and a final maximum of 301.485965 K.
 The 600 J input splits into about 536.448925 J stored and 63.551075 J exhausted.
 These are independent mathematical references, **not executed Rust results**.
+FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) accepts 44 half-step endpoints from 28 trials
+(6 rejected), with a sampled peak of 304.1190829 K at 30 seconds and a final
+maximum of 301.7460144 K. The input splits into 533.2398947 J stored and
+66.7601052 J exhausted. Against the example's 303.25 K limit, the first
+violation is at 24.227 s.
 
 Compilation, Rust tests and formatting have not been run in the authoring
 environment. No new dependency, native `.fsim` integration, ledger workflow,

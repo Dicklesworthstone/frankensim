@@ -2,7 +2,7 @@
 name = "fs-recompute"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Incremental-recompute store: content-addressed Merkle DAG with first-class slack, skip soundness certificates, pinning, and the determinism contract."

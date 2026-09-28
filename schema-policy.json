@@ -21,7 +21,7 @@
       "version_kind": "integer-const",
       "version_constant": "FSIM_VERSION",
       "version_location": "crates/fs-project/src/lib.rs",
-      "current_version": "4",
+      "current_version": "7",
       "lockstep": [],
       "surface": [
         "the canonical .fsim envelope and its canonical-hash construction",
@@ -31,7 +31,10 @@
         "structural finding identifiers reported by `frankensim validate`",
         "the optional cooling `(fan-system ...)` subsection admitted at bead frn2i.1 (schema v2): versioned bank declarations with explicit count/arrangement/speed-ratio/domain, monotone curve, stall boundary, tolerance basis, source identity, and an explicit multi-bank topology",
         "the optional cooling `(conduction ...)` subsection admitted at bead frankensim-s93ej.3 (schema v3): explicit volumetric-region seeds, fixed-temperature/heat-flux/convection boundary laws, and deliberate adiabatic-remainder intent",
-        "the optional `(airflow-convection ...)` conduction boundary law admitted at bead frankensim-s93ej.3 (schema v4): a named vent branch, stream-wise order, inlet temperature, channel hydraulic diameter/flow area/length, and an fs-convection card id from which the solve stage derives the Robin coefficient and marched air reference; no coefficient or reference temperature is declared"
+        "the optional `(airflow-convection ...)` conduction boundary law admitted at bead frankensim-s93ej.3 (schema v4): a named vent branch, stream-wise order, inlet temperature, channel hydraulic diameter/flow area/length, and an fs-convection card id from which the solve stage derives the Robin coefficient and marched air reference; no coefficient or reference temperature is declared",
+        "the optional conduction radiation block admitted at bead q61wp.74 (schema v5): uniquely named convective exterior targets, immutable surface emissivity cards with optional claim pins, explicit query and reservoir temperatures, and bounded iterations with physical temperature/heat tolerances and relaxation",
+        "the optional per-binding conductivity tolerance admitted at bead q61wp.72 (schema v6): `:conductivity-tolerance-rel` in (0,1) with mandatory `:tolerance-basis` and `:tolerance-source`, all three or none; a pre-v6 document declaring one refuses migration",
+        "the optional per-artifact surface-offset band admitted at bead q61wp.79 (schema v7): `:surface-offset-m` > 0 with mandatory `:offset-basis` and `:offset-source`, all three or none; a pre-v7 document declaring one refuses migration"
       ],
       "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
       "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
@@ -50,7 +53,19 @@
           "location": "crates/fs-project/tests/project.rs"
         },
         {
-          "test": "v3_envelopes_migrate_to_v4_without_inventing_airflow_convection",
+          "test": "v3_envelopes_migrate_to_current_without_inventing_airflow_convection",
+          "location": "crates/fs-project/tests/project.rs"
+        },
+        {
+          "test": "v4_envelopes_migrate_to_v5_without_inventing_radiation",
+          "location": "crates/fs-project/tests/project.rs"
+        },
+        {
+          "test": "v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance",
+          "location": "crates/fs-project/tests/project.rs"
+        },
+        {
+          "test": "v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset",
           "location": "crates/fs-project/tests/project.rs"
         }
       ],
@@ -804,6 +819,12 @@
       "reason": "query receipt returned through the API; retained by a caller, not exchanged as a promised file"
     },
     {
+      "constant": "TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION",
+      "location": "crates/fs-matdb/src/query.rs",
+      "reason_class": "identity-domain",
+      "reason": "content-hash domain separator for a usage receipt that retains typed validity coordinates"
+    },
+    {
       "constant": "COVERAGE_DECISION_IDENTITY_VERSION",
       "location": "crates/fs-package/src/coverage.rs",
       "reason_class": "identity-domain",
@@ -892,6 +913,12 @@
       "location": "crates/fs-project/src/fansystem.rs",
       "reason_class": "internal-wire",
       "reason": "declaration-struct version for the bead frn2i.1 fan system; the serialized promise is the .fsim envelope version (project.fsim v2), and this constant never appears on the wire"
+    },
+    {
+      "constant": "VERSION",
+      "location": "crates/fs-project/src/uncertainty.rs",
+      "reason_class": "internal-wire",
+      "reason": "in-flight native probability-study declaration (bead q61wp.72) with no registered maturity claim; versions 1 and 2 are both admitted, and it is not yet promised as a frozen file format"
     },
     {
       "constant": "DESIGN_EXTENSION_SCHEMA_VERSION",

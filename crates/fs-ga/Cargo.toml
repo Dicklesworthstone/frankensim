@@ -2,7 +2,7 @@
 name = "fs-ga"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Geometric algebra: PGA Cl(3,0,1) motors/screws/meets + CGA Cl(4,1) spheres/tangency via const-evaluated multiplication tables, with Vec3/quaternion facades."

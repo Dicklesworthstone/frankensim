@@ -85,14 +85,22 @@ fn a_sampled_profile_preserves_geometry_pencil_nonlinearity_and_two_sided_radiat
     for i in 0..sampled.mesh.nodes.len() { phi[new.dof_map[6*i+2].unwrap()] = 1./sampled.mass_kg.sqrt(); }
     let mut defect = phi.clone(); new.k.spmv(&phi,&mut defect);
     let residual = defect.iter().enumerate().map(|(i,x)|x*x/new.m.get(i,i)).sum::<f64>().sqrt();
-    let modes = [ModePair { lambda: 0.,phi,residual,interval:(-residual,residual) }];
+    // A reduction needs an elastic spectrum to scale its eigenpair check; the
+    // translation rides beside the lowest computed elastic modes.
+    let tau = core::f64::consts::TAU;
+    let elastic = fs_plate::shell::modes_shell(&new,((tau*20.0).powi(2),(tau*20_000.0).powi(2)),
+        &fs_plate::SliceOptions::default()).unwrap().modes;
+    assert!(!elastic.is_empty());
+    let mut modes = vec![ModePair { lambda: 0.,phi,residual,interval:(-residual,residual) }];
+    modes.extend(elastic.into_iter().take(3));
     let r = ShellReduction::new(&sampled.mesh,&sampled.sections,&new,&modes,
-        ReductionBudget { max_modes: 1,max_facet_modes: 2048,relative_tolerance: 1e-5 }).unwrap();
+        ReductionBudget { max_modes: modes.len(),max_facet_modes: 2048,relative_tolerance: 1e-5 }).unwrap();
     let surface = r.radiation_surface(&sampled.nodal_thickness_m,
         fs_plate::shell::reduction::radiation::RadiationSurfaceBudget { max_panels: 1024,max_panel_modes: 2048 }).unwrap();
     assert_eq!(surface.triangles().len(),2*sampled.mesh.tris.len()+32);
-    assert_eq!(surface.normal_velocity_weights().len(),1);
-    assert!(r.potential(&[0.0001]).abs() < 1e-12);
+    assert_eq!(surface.normal_velocity_weights().len(),modes.len());
+    let mut q = vec![0.;modes.len()]; q[0] = 0.0001;
+    assert!(r.potential(&q).abs() < 1e-12);
 }
 
 #[test]

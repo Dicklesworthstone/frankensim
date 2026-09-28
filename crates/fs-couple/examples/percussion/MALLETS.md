@@ -110,9 +110,9 @@ Newton and bounded substeps preserve the same physical model. Supplied head and
 wire specifications, head relaxation, carrier forces, fixed mufflers, and the
 already-admitted cavity and prescribed-vent options keep their semantics.
 The `drum-modal` linear-only image refuses rather than dropping felt history.
-Rimshots, mallet rotation, shaft bending, stick-stick collisions, evolving
-footprint area, and exterior mallet radiation remain outside this fixed-axis
-chart. Existing snare restrictions on compliant mutes remain. Paired hi-hat
+Rimshots, stick-stick collisions, evolving footprint area and exterior mallet
+radiation remain outside this chart. The v1 fixed-axis image does not include
+mallet rotation or shaft bending; the explicit v2 composition below does. Existing snare restrictions on compliant mutes remain. Paired hi-hat
 mallets are not admitted by this change; no stand sites are removed to fit them.
 
 ## Focused tests
@@ -209,3 +209,14 @@ model spherical mallet heads, mallet rocking, tangential friction, a resolved
 moving contact patch or measured manufacturer materials. Wide-area/steep-bell
 strikes may exhaust the existing felt or shell-validity limits; no force or
 geometry is clipped to guarantee a sound file.
+
+
+## Physical head on a flexible shaft
+
+[LOADED_MALLETS.md](LOADED_MALLETS.md) adds a separate v2 card for actual head
+mass, central rotary inertia and shaft azimuth. Together with a supplied shaft,
+it recomputes the loaded beam spectrum and projects every felt site's normal
+force and lever-arm moment into that same basis. This is not the v1 effective
+mass added to a shaft: v1 retains its original meaning and remains incompatible
+with a same-hand shaft selection. Both hands, existing heads/shells, material
+histories, force programs and pressure outputs remain in one mechanical solve.

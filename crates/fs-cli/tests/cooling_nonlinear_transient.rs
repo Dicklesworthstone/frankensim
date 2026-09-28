@@ -39,11 +39,11 @@ fn nonlinear_contact_pulse_matches_independent_endpoint_fem_and_energy() {
     let path=write(&dir,"pulse.json",&FIXTURE);
     let output=run(&path);let doc=document(&output);
     let trajectory=doc.get("transient").unwrap();
-    close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),306.1651033635,3e-5);
+    close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),304.0634747779944,3e-5);
     close(trajectory.f64_field("sampled_peak_time_s").unwrap(),30.0,1e-10);
-    close(doc.path(&["objective","value_k"]).and_then(J::as_f64).unwrap(),301.4152325108374,3e-5);
-    close(trajectory.f64_field("stored_energy_change_j").unwrap(),536.0649695201166,3e-5);
-    close(trajectory.f64_field("air_energy_gain_j").unwrap(),63.93503047989178,3e-5);
+    close(doc.path(&["objective","value_k"]).and_then(J::as_f64).unwrap(),301.688560658997,3e-5);
+    close(trajectory.f64_field("stored_energy_change_j").unwrap(),533.0467679015537,3e-5);
+    close(trajectory.f64_field("air_energy_gain_j").unwrap(),66.95323178845615,3e-5);
     close(trajectory.f64_field("input_energy_j").unwrap(),600.0,1e-7);
     assert!(trajectory.f64_field("energy_residual_j").unwrap().abs()<=150.0e-7);
     let nonlinear=trajectory.get("nonlinear").unwrap();
@@ -63,9 +63,9 @@ fn a_constant_curve_matches_the_original_linear_material_trajectory() {
     assert_ne!(constant,FIXTURE.as_str());
     let doc=document(&run(&write(&dir,"constant.json",&constant)));
     let trajectory=doc.get("transient").unwrap();
-    close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),306.3431585002163,3e-5);
-    close(doc.path(&["objective","value_k"]).and_then(J::as_f64).unwrap(),301.46723362812094,3e-5);
-    close(trajectory.f64_field("stored_energy_change_j").unwrap(),536.2871880825311,3e-5);
+    close(trajectory.f64_field("sampled_peak_objective_k").unwrap(),304.11663335714235,3e-5);
+    close(doc.path(&["objective","value_k"]).and_then(J::as_f64).unwrap(),301.73054647705186,3e-5);
+    close(trajectory.f64_field("stored_energy_change_j").unwrap(),533.2318718045553,3e-5);
     // Even a flat sampled table retains its finite validity span. The old
     // linear API intentionally refuses tables; use real scalar declarations.
     let legacy=constant.replace(POLICY,"")

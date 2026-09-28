@@ -24,7 +24,21 @@ so converged and stalled are distinguishable outcomes.
   and zoom callback.
 - `trust::trust_region_newton` — Steihaug-CG on the quadratic model
   with NEGATIVE-CURVATURE boundary steps (counted in the report),
-  classical radius laws (¼/¾ thresholds); `hv_fd_of_gradients` is the
+  classical radius laws (¼/¾ thresholds). Extreme gradient magnitudes use
+  exact power-of-two objective normalization in the quadratic model and
+  actual/predicted reduction ratio; callback results, reported objective and
+  gradient, and stopping tolerances retain the caller's units. Normalization
+  admits subnormal objective scales and avoids overflow from uniformly scaled
+  gradients, curvature products, and opposite-sign objective differences.
+  Positive curvature whose unrestricted CG step overflows truncates to the
+  finite trust boundary, and representable positive model decreases have no
+  arbitrary absolute zero floor. Ordinary-scale arithmetic retains the
+  established trajectory. Inline G1/G3 tests cover convex quadratics scaled by
+  `1e-250` through `1e250`, subnormal negative-curvature models, tiny positive
+  curvature and model decreases, plus G4/G5 cancellation/checkpoint replay.
+  Callback outputs must still be finite; no arbitrary-conditioning guarantee,
+  recovery of precision already lost inside callbacks, or invariance under
+  changing design-variable units is claimed. `hv_fd_of_gradients` is the
   interim Hessian-vector product with its O(√ε) accuracy in the name
   (second-order adjoints are recorded follow-up).
 - `auglag::augmented_lagrangian` — PHR augmented Lagrangian
@@ -114,6 +128,87 @@ so converged and stalled are distinguishable outcomes.
   optimizer `StopReason`. Its versioned receipt binds the problem identity,
   complete point/history/cache bits, accounting, and driver bits; observing a
   request is mutation-free and the same checkpoint resumes under a fresh Cx.
+- Under `transient-design`, `transient::imex::{ImexTransientFamily,
+  ImexTransientModel, ImexTransientStudy, evaluate_imex_transient}` bind the
+  existing SQP engine to stiff ARS(2,2,2) trajectories. Each usable decision
+  point records one matrix-free IMEX trajectory and evaluates all sensor losses
+  in one checkpointed reverse sweep. The total gradient includes linear and
+  nonlinear dynamics, direct sensor parameters, and the initial-condition VJP.
+  Primal and transposed preconditioners are explicit separate inputs. The
+  nondecreasing endpoint-index timetable permits initial and repeated sensor
+  readings; step size, timetable and solver policy are held fixed.
+  `ImexTransientConfig` bounds state size, samples, forward steps, records,
+  per-step scratch, replay work, checkpoints and the small dense SQP system.
+  Parameter bounds are SQP inequalities. Out-of-box trials are refused;
+  numerical/model/budget failures never become artificial objective penalties.
+  A study retains the accepted optimizer and its exactly matching physical
+  evaluation. Clone and continuation preserve accepted derivatives, BFGS state
+  and cumulative attempted-evaluation counts; failed and cancelled trials stay
+  charged, while unfinished searches/recordings restart on retry. Cancellation
+  is polled at solver/callback boundaries, without within-kernel preemption.
+  Convergence reports a local KKT result for supplied discrete derivatives,
+  without a global-optimality, interval-gradient or parameter-identifiability
+  claim. `examples/imex_calibration.rs` fits conductance, heater power, sensor
+  offset and initial temperature from dense-generated two-body thermal data;
+  `tests/imex_calibration.rs` checks the complete parameter chain against an
+  independent dense forward calculation, recovery, continuation and refusals.
+- Under `transient-design`, `transient::structural::{StructuralTransientFamily,
+  StructuralTransientModel, StructuralTransientStudy,
+  evaluate_structural_transient}` bind SQP to operator generalized-alpha
+  structural trajectories with time-dependent loads. One checkpointed sweep
+  differentiates displacement, velocity and acceleration observations, including
+  repeated/initial endpoints, direct sensor parameters and load parameters.
+  The model's initial-state VJP completes the q/v/a chain; parameter-dependent
+  consistent acceleration can use `fs_time::galpha::initialization`'s mass solve
+  and transposed pullback. Initial clock, timestep, spectral radius, timetable
+  and solve policies remain fixed. The transposed effective-operator
+  preconditioner is explicit; the primal uses the existing Newton solver.
+  Independent limits bound state dimension, samples, forward steps, records,
+  per-step workspace, replay work, parked checkpoints and the dense SQP system.
+  Bounds are SQP inequalities; numerical, model and budget failures retain
+  their errors instead of becoming penalties. Accepted physical evaluations
+  remain paired with their optimizer point; clone/resume preserve BFGS state
+  and attempted-evaluation accounting, including failed or cancelled trials.
+  `examples/structural_calibration.rs` fits coupling stiffness, damping, load
+  amplitude, initial displacement and sensor offset from dense-generated
+  two-body spring/damper q/v/a observations. Its integration tests compare the
+  entire gradient with an independent dense forward/initialization reference
+  and check recovery, exact split/clone behavior, zero-step initial objectives
+  and bounded refusal. This is a lumped structural numerical consumer, with
+  no plate/shell spatial discretization, experimental validation, global
+  optimum or parameter-identifiability claim.
+- `examples/plate_calibration.rs` supplies the spatial DKT consumer of that
+  structural trajectory/observation machinery. The existing `SqpState` fits
+  stiffness scale, moving-force amplitude and displacement sensor offset on
+  a clamped 32-triangle, 27-free-DOF plate; no modal truncation is used. Mass
+  and Rayleigh coefficients are fixed to avoid the common stiffness/mass/load
+  scale ambiguity. Every trial uses the sparse `fs-plate::transient` adapter,
+  work-conjugate mesh point loads/probes, consistent initial acceleration and
+  its pullback, and one sampled checkpoint sweep. Synthetic readings use an
+  independent dense generalized-alpha path on the same spatial pencil.
+  `tests/plate_calibration.rs` checks all fitted gradients against dense finite
+  differences, actual recovery, exact split/clone behavior, cancellation and
+  invalid observations without replacing the accepted sample or refunding
+  attempted work. This is fixed-mesh numerical recovery; spatial convergence,
+  physical damping identification and experimental validation are separate.
+- `examples/enthalpy_calibration.rs` connects the spatial enthalpy solver's
+  discrete adjoint to the existing `SqpState`. Two bounded heater-density
+  pulses act through a localized P1 source in a fixed tetrahedral slab.
+  Twelve cross-section-mean temperature observations at four accepted times
+  contribute to one reverse sweep through 24 stored endpoint linearizations.
+  Each reverse step adds observation seeds to the carried enthalpy derivative,
+  uses the actual transposed spatial tangent, and contracts the consistent
+  nodal source pullback with the heater profile. SQP owns bounds, BFGS,
+  line search, cumulative evaluation limits and the local KKT stop.
+  Geometry, reference mass, phase chart, conductivity and clock stay fixed;
+  chart/conductivity corners refuse through the owning conduction API.
+  `tests/enthalpy_calibration.rs` checks complete history gradients against
+  forward-only differences and recovers both synthetic pulse amplitudes while
+  the final field retains solid, latent and liquid regions. The example uses
+  same-model synthetic observations and a small full-storage trajectory;
+  it makes no experimental-validation, general-identifiability, global-optimum
+  or checkpoint-scaling claim. The added conduction/material dependencies are
+  development-only consumers; the optimizer's production graph is unchanged.
 
 ## Invariants
 

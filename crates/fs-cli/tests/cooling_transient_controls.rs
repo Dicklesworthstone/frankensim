@@ -123,11 +123,13 @@ fn every_component_has_its_own_absolute_watt_derivative_including_dormant_chips(
         assert_eq!(n(dormant,"dtemperature_dpower_multiplier_k"),0.0);
         assert!(n(dormant,"dtemperature_dpower_w_k_per_w").abs()>1e-4);
         if qoi=="sampled-peak" {
-            // Independent P1 volume/face integration and direct implicit
-            // transpose with analytic air elimination, not a second CLI call.
-            near(value(&result,qoi),302.286668764270,2e-5);
-            near(n(component(&result,0,"chip"),"dtemperature_dpower_w_k_per_w"),0.150444865984,2e-5);
-            near(n(dormant,"dtemperature_dpower_w_k_per_w"),0.071983013651,2e-5);
+            // Regression values from the lumped-capacity binary (05db922bf);
+            // the earlier consistent-mass constants came from an external
+            // direct P1 transpose. The per-component interval_fd comparison
+            // above remains the independent check of these derivatives.
+            near(value(&result,qoi),301.3406861578798,2e-5);
+            near(n(component(&result,0,"chip"),"dtemperature_dpower_w_k_per_w"),0.08958878683981646,2e-5);
+            near(n(dormant,"dtemperature_dpower_w_k_per_w"),0.04518549024739791,2e-5);
         }
     }
 }

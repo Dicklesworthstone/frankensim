@@ -2,7 +2,7 @@
 name = "fs-img"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "In-house PNG/OpenEXR writers and readers, bias-labeled a-trous denoiser, deterministic film transforms."

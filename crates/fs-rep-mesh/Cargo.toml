@@ -2,7 +2,7 @@
 name = "fs-rep-mesh"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Mesh charts: half-edge surfaces, oriented tet/hex complexes, generalized-winding-number repair, watertight queries."

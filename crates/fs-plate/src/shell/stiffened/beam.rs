@@ -14,6 +14,17 @@ pub struct RoundBeamSpec {
     pub pivot_m: f64, pub contact_m: f64, pub hand_m: f64,
     pub subdivisions: usize, pub maximum_hz: f64, pub maximum_modes: usize,
 }
+/// A body rigidly attached at a shaft station, with its centre of mass ON that
+/// station. Rotary inertia is about its centre, normal to the bending plane.
+/// This is actual added mass, never a tip-effective mass already including the
+/// shaft. Off-axis centres require a different, coupled inertial operator.
+#[derive(Debug, Clone, Copy)]
+pub struct RoundInertia {
+    pub x_m: f64,
+    pub mass_kg: f64,
+    pub rotary_kg_m2: f64,
+}
+
 /// Mass-normalized eigenbasis of a pin-supported shaft, with rigid mode first.
 #[derive(Debug, Clone)]
 pub struct RoundBeamModes {
@@ -64,6 +75,15 @@ impl RoundBeamModes {
     /// Retain every elastic eigenpair up to the explicit upper frequency, or
     /// refuse the budget. Includes the butt behind the pivot and finite tip.
     pub fn new(stations: &[RoundStation], spec: RoundBeamSpec) -> Result<Self, PlateError> {
+        Self::with_inertias(stations, spec, &[])
+    }
+
+    /// Assemble attached bodies into the ORIGINAL pencil before separating the
+    /// rigid mode or truncating the spectrum: M += m N N^T + J N' N'^T.
+    /// All retained frequencies, force rows and rigid inertia therefore use
+    /// the same loaded mass metric. Empty input preserves `new` exactly.
+    pub fn with_inertias(stations: &[RoundStation], spec: RoundBeamSpec,
+        attached: &[RoundInertia]) -> Result<Self, PlateError> {
         let s=spec;
         if stations.len()<2 || stations.len()>33 || s.subdivisions==0 || s.subdivisions>16
             || !(2..=17).contains(&s.maximum_modes)
@@ -77,6 +97,13 @@ impl RoundBeamModes {
         if !length.is_finite() || length<=0. || !(start..end).contains(&s.pivot_m)
             || s.contact_m<=s.pivot_m || s.contact_m>end || s.hand_m<=s.pivot_m || s.hand_m>end {
             return Err(bad("beam pivot and positive-lever force stations must lie on the shaft"));
+        }
+        if attached.len()>8 || attached.iter().any(|a|
+            !a.x_m.is_finite() || !(start..=end).contains(&a.x_m)
+            || !a.mass_kg.is_finite() || a.mass_kg<0.
+            || !a.rotary_kg_m2.is_finite() || a.rotary_kg_m2<0.
+            || (a.mass_kg==0. && a.rotary_kg_m2==0.)) {
+            return Err(bad("attached beam inertia needs at most eight in-profile stations and nonnegative, nonzero physical mass/inertia"));
         }
         let count=(stations.len()-1).checked_mul(s.subdivisions).and_then(|n|n.checked_add(2))
             .ok_or_else(||bad("round beam mesh overflow"))?;
@@ -109,6 +136,18 @@ impl RoundBeamModes {
                 }
             }}
         }
+        for a in attached {
+            let cell=nodes.partition_point(|x|*x<=a.x_m).saturating_sub(1).min(nodes.len()-2);
+            let l=nodes[cell+1]-nodes[cell];
+            let (n,d,_)=hermite((a.x_m-nodes[cell])/l,l);
+            for i in 0..4 { for j in 0..4 {
+                if let (Some(row),Some(col))=(map(2*cell+i),map(2*cell+j)) {
+                    let scale=(if i%2==0 {1.} else {1./length})*(if j%2==0 {1.} else {1./length});
+                    m[row*nd+col]+=scale*(a.mass_kg*n[i]*n[j]+a.rotary_kg_m2*d[i]*d[j]);
+                }
+            }}
+        }
+        if m.iter().any(|v|!v.is_finite()) {return Err(bad("attached beam mass matrix overflow"));}
         let mut rigid=vec![0.;nd];
         for (i,&x) in nodes.iter().enumerate() {
             if let Some(j)=map(2*i) {rigid[j]=x-s.pivot_m;}
@@ -165,11 +204,20 @@ impl RoundBeamModes {
     }
     /// Conjugate displacement/force row at a material station of the same beam.
     pub fn point(&self, x: f64) -> Result<Vec<f64>, PlateError> {
-        if !x.is_finite() || x<self.nodes_m[0] || x>*self.nodes_m.last().unwrap() {
-            return Err(bad("force point outside the beam"));
+        self.project(x, false)
+    }
+    /// Section rotation / modal displacement. Its transpose applies a physical
+    /// bending moment, or the lever-arm moment of a distributed face force.
+    pub fn slope(&self, x: f64) -> Result<Vec<f64>, PlateError> {
+        self.project(x, true)
+    }
+    fn project(&self, x: f64, rotation: bool) -> Result<Vec<f64>, PlateError> {
+        if !x.is_finite() || x<self.nodes_m[0] || x>self.nodes_m[self.nodes_m.len()-1] {
+            return Err(bad("beam point lies outside supplied geometry"));
         }
         let i=self.nodes_m.partition_point(|p|*p<=x).saturating_sub(1).min(self.nodes_m.len()-2);
-        let l=self.nodes_m[i+1]-self.nodes_m[i]; let (n,_,_)=hermite((x-self.nodes_m[i])/l,l);
+        let l=self.nodes_m[i+1]-self.nodes_m[i]; let (n,d,_)=hermite((x-self.nodes_m[i])/l,l);
+        let n=if rotation {d}else{n};
         let out:Vec<f64>=self.shapes.iter().map(|p|(0..4).map(|j|n[j]*p[2*i+j]).sum()).collect();
         if out.iter().any(|x|!x.is_finite()) {return Err(bad("beam point projection overflow"));} Ok(out)
     }

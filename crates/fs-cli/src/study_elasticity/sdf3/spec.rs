@@ -13,6 +13,9 @@ pub(super) struct Spec {
     pub per_solve: usize,
     pub boxes: usize,
     pub points: usize,
+    pub physical: bool,
+    pub bounds: ([f64; 3], [f64; 3]),
+    pub fixed: FixedFace,
     pub height: f64,
     pub curvature: f64,
     pub level: u32,
@@ -21,6 +24,7 @@ pub(super) struct Spec {
     pub youngs: f64,
     pub poisson: f64,
     pub loads: Vec<([f64; 3], f64)>,
+    pub surfaces: Vec<Option<loading::SurfaceSpec>>,
     pub density: f64,
     pub volume: f64,
     pub radius: f64,
@@ -78,6 +82,22 @@ fn vector(node: &Node) -> Result<[f64; 3]> {
         return Err(invalid("expected three vector components"));
     }
     Ok([scalar(&items[0])?, scalar(&items[1])?, scalar(&items[2])?])
+}
+
+fn surface(node: &Node) -> Result<Option<loading::SurfaceSpec>> {
+    if matches!(&node.kind, NodeKind::Symbol(s) if s == "none") { return Ok(None); }
+    let items = super::super::list(node, "reference surface load")?;
+    let (name, pressure) = match items.first().map(|n| &n.kind) {
+        Some(NodeKind::Symbol(s)) if s == "pressure" => ("pressure", true),
+        Some(NodeKind::Symbol(s)) if s == "traction" => ("traction", false),
+        _ => return Err(invalid("surface requires none, (pressure ...) or (traction ...)")),
+    };
+    let values = fields(node, name, &["pa", "x-fraction"])?;
+    let force = if pressure { loading::Force::Pressure(scalar(values[0])?) }
+        else { loading::Force::Traction(vector(values[0])?) };
+    Ok(Some(loading::SurfaceSpec {
+        force, x_fraction: super::super::pair(values[1], "surface x-fraction")?,
+    }))
 }
 
 pub(super) fn parse(source: &str) -> Result<Spec> {
@@ -142,13 +162,12 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         "domain",
         &["type", "bounds", "height-m", "curvature-per-m"],
     )?;
-    word(domain[0], "curved-height-sdf")?;
+    let physical = matches!(&domain[0].kind,
+        NodeKind::Symbol(s) | NodeKind::Str(s) if s == "physical-curved-height-sdf");
+    if !physical { word(domain[0], "curved-height-sdf")?; }
     let bounds = super::super::list(domain[1], "bounds")?;
-    if bounds.len() != 2 || vector(&bounds[0])? != [0.0; 3] || vector(&bounds[1])? != [1.0; 3] {
-        return Err(invalid(
-            "the admitted domain is the explicit one-metre cube",
-        ));
-    }
+    if bounds.len() != 2 { return Err(invalid("bounds require lower and upper SI vectors")); }
+    let bounds = (vector(&bounds[0])?, vector(&bounds[1])?);
     let physics = fields(
         &items[9],
         "physics",
@@ -162,16 +181,38 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         ],
     )?;
     word(physics[0], "elasticity-3d")?;
-    let scenario = fields(&items[10], "scenario", &["fixed-boundary", "body-loads"])?;
-    word(scenario[0], "left")?;
-    let load_nodes = super::super::list(scenario[1], "body loads")?;
+    let scenario_items = super::super::list(&items[10], "scenario")?;
+    let mixed = scenario_items.get(3).is_some_and(|node|
+        matches!(&node.kind, NodeKind::Keyword(s) if s == "loads"));
+    let scenario = fields(&items[10], "scenario",
+        &["fixed-boundary", if mixed { "loads" } else { "body-loads" }])?;
+    let fixed = match &scenario[0].kind {
+        NodeKind::Symbol(s) | NodeKind::Str(s) => match s.as_str() {
+            "left" => FixedFace::Left,
+            "right" => FixedFace::Right,
+            "front" => FixedFace::Front,
+            "back" => FixedFace::Back,
+            "bottom" => FixedFace::Bottom,
+            _ => return Err(invalid("fixed-boundary requires left, right, front, back or bottom")),
+        },
+        _ => return Err(invalid("fixed-boundary must name a box face")),
+    };
+    let load_nodes = super::super::list(scenario[1], "independent loads")?;
     if load_nodes.is_empty() || load_nodes.len() > 4 {
-        return Err(invalid("declare 1..=4 independent body loads"));
+        return Err(invalid("declare 1..=4 independent reference loads"));
     }
     let mut loads = Vec::with_capacity(load_nodes.len());
+    let mut surfaces = Vec::with_capacity(load_nodes.len());
     for load in load_nodes {
-        let values = fields(load, "load", &["density-n-m3", "weight"])?;
-        loads.push((vector(values[0])?, scalar(values[1])?));
+        if mixed {
+            let values = fields(load, "load", &["body-n-m3", "surface", "weight"])?;
+            loads.push((vector(values[0])?, scalar(values[2])?));
+            surfaces.push(surface(values[1])?);
+        } else {
+            let values = fields(load, "load", &["density-n-m3", "weight"])?;
+            loads.push((vector(values[0])?, scalar(values[1])?));
+            surfaces.push(None);
+        }
     }
     let objective = fields(&items[11], "objective", &["type", "sense", "unit"])?;
     for (value, expected) in objective.iter().zip(["compliance", "minimize", "J"]) {
@@ -230,6 +271,9 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         per_solve: count(budgets[3])?,
         boxes: count(budgets[4])?,
         points: count(budgets[5])?,
+        physical,
+        bounds,
+        fixed,
         height: scalar(domain[2])?,
         curvature: scalar(domain[3])?,
         level: u32::try_from(count(physics[1])?).map_err(|_| invalid("initial-level overflow"))?,
@@ -239,6 +283,7 @@ pub(super) fn parse(source: &str) -> Result<Spec> {
         youngs: scalar(physics[4])?,
         poisson: scalar(physics[5])?,
         loads,
+        surfaces,
         density: scalar(opt[1])?,
         volume: scalar(opt[2])?,
         radius: scalar(opt[3])?,
@@ -283,27 +328,28 @@ impl Spec {
                 "declared memory is too small for the requested geometry/field envelope",
             ));
         }
-        if !(0.1..=0.8).contains(&self.height)
-            || !(0.0..=0.4).contains(&self.curvature)
-            || !(1e-6..=1e15).contains(&self.youngs)
+        geometry::validate(self)?;
+        if !(1e-6..=1e15).contains(&self.youngs)
             || !(0.0..=1.0 / 3.0).contains(&self.poisson)
         {
             return Err(invalid(
                 "unsupported finite graph-domain or isotropic material parameters",
             ));
         }
-        if self.loads.iter().any(|(f, w)| {
-            !(0.0 < *w && *w <= 1.0)
-                || f.iter().any(|v| v.abs() > 1e12)
-                || f.iter().all(|v| *v == 0.0)
-        }) {
-            return Err(invalid(
-                "every independent load needs a nonzero finite vector and weight in (0,1]",
-            ));
+        if self.surfaces.len() != self.loads.len() {
+            return Err(invalid("surface and body load families must align"));
+        }
+        for ((f, w), surface) in self.loads.iter().zip(&self.surfaces) {
+            if !(0.0 < *w && *w <= 1.0)
+                || f.iter().any(|v| !v.is_finite() || v.abs() > 1e12)
+                || (f.iter().all(|v| *v == 0.0) && surface.is_none())
+            {
+                return Err(invalid("each case requires a nonzero reference load and weight in (0,1]"));
+            }
+            if let Some(surface) = surface { surface.validate(self.level)?; }
         }
         if !(0.01..=0.99).contains(&self.density)
             || !(0.01..=0.99).contains(&self.volume)
-            || !(0.001..=1.0).contains(&self.radius)
             || !(1..=16).contains(&self.updates)
             || !(0.001..=0.5).contains(&self.move_limit)
             || !(0.0 < self.marking && self.marking <= 1.0)

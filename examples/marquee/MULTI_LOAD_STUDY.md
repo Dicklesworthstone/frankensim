@@ -25,8 +25,8 @@ convergence. A solve allowance too small for another complete family gives
 
 ## Declare the actual operating conditions
 
-In a `projected-stress` optimizer, place this optional field immediately after
-`:stress-tolerance-pa` and before optional `:design-regions`:
+In a `projected-stress` optimizer, place this optional field after
+`:stress-tolerance-pa` and optional `:mesh-check`, before optional `:design-regions`:
 
 ```lisp
     :load-family (independent
@@ -59,6 +59,95 @@ fixed-node prescriptions. Region preparation precedes area projection and
 baseline solves; neither regions nor extra loads relax the feasibility gates.
 See `PROJECTED_STRESS.md` for those declarations and their discrete scope.
 Omitting `:load-family` keeps the original single-load path unchanged.
+
+## Check every load on finer grids before accepting a design
+
+`bracket-multi-load-mesh-2d.fsim` adds the existing mesh-check policy to an
+independent-load study. Its second, larger load has zero objective weight but
+still participates in every equilibrium, stress and resolution check:
+
+```sh
+cargo run --release -p fs-cli -- --json study \
+  examples/marquee/bracket-multi-load-mesh-2d.fsim ./multi-load-mesh.db
+```
+
+Place the explicit policy immediately before `:load-family`:
+
+```lisp
+    :mesh-check (refinement
+      :extra-levels 1
+      :absolute-compliance-tolerance-j 0.01
+      :relative-compliance-tolerance 0.05
+      :area-tolerance-m2 0.005)
+```
+
+The existing numerical owner solves every independent case on one or two finer
+grids, prolonging the same bilinear geometry without re-projection. Displacements
+and sampled stresses are independently solved on each grid, not interpolated.
+Every case must meet the unchanged unweighted stress limit and its individual
+compliance-resolution tolerance. The declared weighted-sum or worst-weighted
+objective must also decrease at every matching grid; agreement of an aggregate
+cannot conceal an unresolved zero-weight constituent. Material area stays
+subject to the original target and the explicit mesh-comparison allowance.
+
+An unresolved baseline returns `mesh-unresolved` (exit 6) with its complete
+measurements and reason, before any geometry search. This is a valid possible
+outcome for the example, not a promise that its illustrative tolerances pass.
+Otherwise the existing bounded search contracts rejected proposals and retains
+only a candidate that passes the coarse and finer-grid gates. These are observed
+grid-sensitivity checks, not adaptive optimization-grid refinement, continuum
+error bounds, continuous stress certificates or calibrated engineering evidence.
+
+All actual finer case starts, including interrupted or failed solves, consume
+the existing `:max-solves` allowance. Complete families must fit before work
+starts. Resume retains those charges and the original mesh policy; it cannot
+refund abandoned work. `constraints.load_family.mesh_resolution` carries each
+level's independent compliance, material area, stress maximum/location and probe
+count, together with the last complete baseline/candidate check. Partial
+families are never presented as complete measurements. HTML renders the
+per-level/per-case comparison, and exports read retained results without solving.
+
+Cancelled studies can resume from the accepted state. Completed, stalled,
+mesh-unresolved and solve-exhausted terminals reuse their retained results
+without recovery work. The optional final weighted DWR assessment remains
+separate: after a mesh-admitted endpoint is retained, assessment-only retries
+need no optimizer recovery or repeated mesh search. A mesh-unresolved baseline
+is not eligible. Combining mesh checks with stress restoration is explicitly
+refused; the existing numerical owner does not implement that combination.
+
+## Assess the final weighted compliance
+
+For a `weighted-sum` family, add this top-level section after `optimizer` in
+the study declaration:
+
+```lisp
+  (assessment :type elasticity-dwr :max-solves-per-attempt 4)
+```
+
+The allowance must equal **twice the complete case count**, including the
+primary scenario and zero-weight cases. The tracked two-case example therefore
+requires four solves. Each case receives an original-grid and a one-level
+enriched CutFEM solve on the same final bilinear level set, using its own
+traction. The weighted objective is assembled after those independent solves;
+weights retain their declared values. This assessment requires at least
+256 MiB of admitted memory and a mesh level no greater than five.
+
+`goal_error_assessment` reports the signed weighted DWR estimate, weighted
+absolute indicator mass, coarse/enriched objective and residual decomposition,
+with the corresponding evidence for every case. The coarse solves must
+reproduce the retained endpoint's per-case compliance, material area and exact
+geometry fingerprint before an estimate is published. The assessment targets
+the **weighted compliance**, not the sampled-stress constraint. Its signed
+estimate and indicator mass are not certified continuum-error bounds.
+
+Assessment starts only after retaining a feasible optimizer endpoint. A feasible
+baseline at `no-feasible-descent` can be assessed even when no update was accepted.
+Cancellation is checked between the bounded case assessments and before
+publication; an interrupted attempt charges wall time and leaves assessment
+pending. Resuming that endpoint retries assessment without advancing the
+optimizer or spending another recovery family. A completed assessment is reused.
+The `worst-weighted-case` aggregate is not admitted by this assessment because
+its governing case can change with refinement.
 
 ## Restore stress feasibility before optimizing compliance
 
@@ -120,7 +209,8 @@ resume baseline. With restoration, it uses the first stress-feasible design abov
 refused/interrupted candidates, and cannot exceed 100000. Resume never refunds
 this work. A separate `:max-recovery-solves` allowance (0..=100000) covers the
 original-baseline and current-state replay families: 2 times the number of
-cases per successful recovery. Zero disables resumed computation. Charges
+cases per successful recovery. Zero disables optimizer recovery, not retries
+of an already retained final assessment. Charges
 persist along the returned receipt chain, including failed replay attempts;
 follow the newly retained pointer in an error rather than an earlier receipt.
 An explicitly selected old receipt remains an immutable branch point, not a
@@ -147,5 +237,11 @@ continuous stress bound or KKT certificate is added. The package remains
 structural evidence, including when its retained design is stress-infeasible.
 
 Focused native tests are in the existing `study::elasticity` library filter and
-`study_checkpoint_cli` executable target. The new tests require native Rust
-execution; source-level checks do not establish acceptance or replay success.
+`study_checkpoint_cli` executable target. The mesh/load consumer tests run with:
+
+```sh
+cargo test -p fs-cli --lib study::elasticity::continuation::projected::multi_load::mesh::tests
+```
+
+The new tests require native Rust execution; source-level checks do not
+establish acceptance or replay success.

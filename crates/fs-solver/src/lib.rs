@@ -20,6 +20,9 @@
 //! structured stall diagnosis instead of a timeout mystery.
 
 pub mod block;
+pub mod checked_cg;
+/// Outward residual evaluation and checked discrete algebraic goal bounds.
+pub mod goal;
 pub mod krylov;
 pub mod mixed;
 pub mod nonlinear;
@@ -33,6 +36,7 @@ pub use block::{
     BlockError, BlockOperator, BlockOperator2, BlockOperator3, BlockSchur2,
     RealEquivalentComplexOp, RectLinearOp, SchurSolveSign, SquareBlock, ZeroBlock,
 };
+pub use checked_cg::{CheckedCgConfig, CheckedCgError, CheckedCgSolution, checked_cg};
 pub use krylov::{
     CgState, GmresState, MinresState, PminresState, ResidualClaim, SolveReport, StallDiagnosis,
 };

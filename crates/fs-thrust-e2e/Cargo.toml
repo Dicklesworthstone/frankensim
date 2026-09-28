@@ -2,7 +2,7 @@
 name = "fs-thrust-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "CertQD-Thrust: a certified quality-diversity discovery campaign for self-propelling point-vortex thrusters. Composes fs-vpm (vortex physics) x fs-archive (MAP-Elites illumination) x fs-surrogate (certify-or-escalate two-fidelity sims) x fs-evidence (invariant-conservation certificates coloring every result) x fs-report (a reproducible, content-addressed lab notebook) — an end-to-end optimization the system was not explicitly designed for, made tractable by its generality."

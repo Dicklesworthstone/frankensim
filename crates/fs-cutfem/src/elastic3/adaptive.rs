@@ -11,6 +11,7 @@ type Row=Vec<(OctreeNode3,f64)>;
 
 pub mod enrichment;
 pub mod dirichlet;
+pub mod stress;
 
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {
@@ -147,7 +148,7 @@ impl AdaptiveElasticity3 {
             }
         }
         let raw_nodes:Vec<_>=keys.iter().map(|&n|tree.position(n,domain)).collect();
-        let raw=CutElasticity3 {fixed:vec![false;raw_nodes.len()],nodes:raw_nodes,scales:vec![1.0;cells.len()],cells,ghosts,
+        let raw=CutElasticity3 {fixed:vec![false;raw_nodes.len()],nodes:raw_nodes,lame:[lambda,mu],scales:vec![1.0;cells.len()],cells,ghosts,
             volume_bounds:Interval::new(volume_bounds.lo().max(0.0),volume_bounds.hi()),embedded:None};
         let master_lattice = masters.iter().map(|n| n.map(|v| v * ((1u32 << 20) / tree.extent()))).collect();
         let reference = [material.youngs, material.poisson, options.ghost_gamma, 0.0];

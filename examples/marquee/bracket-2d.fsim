@@ -27,7 +27,7 @@
     ))
   (physics
     :type elasticity-2d
-    :mesh-level 4
+    :mesh-level 5
     :youngs-modulus-pa 70000000000.0
     :poissons-ratio 0.3)
   (scenario

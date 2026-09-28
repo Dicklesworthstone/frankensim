@@ -6,6 +6,10 @@ use super::super::crowned_board;
 use fs_io::obj::read_obj_document;
 use std::collections::{BTreeMap,BTreeSet};
 
+/// Compile paired solid skins into the same crowned-shell input.
+#[path = "solid_import.rs"]
+pub mod solid;
+
 pub fn import(obj:&str,specification:&str)->Result<Imported,String> {
     if obj.len()>MAX_OBJ_BYTES {return Err("OBJ exceeds 32 MiB".into());}
     let spec=Spec::read(specification)?;

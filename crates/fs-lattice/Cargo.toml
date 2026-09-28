@@ -2,7 +2,7 @@
 name = "fs-lattice"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Lattice/infill optimization (plan 9.5): periodic unit-cell homogenization with physics-bound audits, graded macro-optimization through fitted homogenized laws, and de-homogenization back to micro-geometry with full-resolution re-analysis. 2D smoke tier."

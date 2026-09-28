@@ -2,7 +2,7 @@
 name = "fs-ornith"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Flagship 1 (plan sec-15.1): the ornithoid multi-inlet aircraft at smoke tier — BEM/VPM screening under e-raced generations, LBM refinement with control-volume forces, SOS-certified stability, and the certified Pareto atlas."

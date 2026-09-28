@@ -115,6 +115,13 @@ at a recorded endpoint at 22 seconds: considering only the final field would
 miss that earlier excursion. The 600 J input divides into approximately
 536.2871881 J stored and 63.7128119 J passed to the external air.
 
+FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) gives a sampled hotspot of 304.1166334 K at
+30 seconds and a final maximum of 301.7305465 K. The example therefore now
+declares a 303.25 K limit, keeping the limit's role. That limit is first
+exceeded at 24 seconds, and the 600 J input splits into 533.2318718 J stored
+and 66.7681282 J to air. The Rust tests pinning these values were executed
+natively on 2026-09-25.
+
 These are independent mathematical reference values, not retained executions
 of the Rust implementation. Compilation, formatting and Rust tests have not
 been run in the authoring environment. Backward Euler is first-order in time;

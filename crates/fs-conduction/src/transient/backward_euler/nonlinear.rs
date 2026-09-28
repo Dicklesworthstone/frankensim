@@ -70,7 +70,9 @@ pub struct NonlinearStepSolution {
     pub nonlinear_iterations: usize,
     /// Rejected Newton trials, including material-range refusals.
     pub backtracks: usize,
-    /// Norm of F(T_old) on the free degrees of freedom, joules.
+    /// Initial free residual norm, joules. With prescribed endpoint data,
+    /// the predictor has old FREE temperatures and NEW fixed temperatures;
+    /// physical history in the capacity term remains the full old field.
     pub initial_residual_j: f64,
     /// Recomputed norm of F(T_new) on the published field, joules.
     pub residual_j: f64,
@@ -87,7 +89,7 @@ struct Evaluation {
 impl BackwardEuler<'_> {
     /// Advance one nonlinear endpoint from immutable old temperatures.
     ///
-    /// Uses the same mesh, consistent capacity, heterogeneous material laws,
+    /// Uses the same mesh, lumped capacity, heterogeneous material laws,
     /// boundaries and contact operators as `advance`. The NEW endpoint's k(T)
     /// is evaluated on every trial; conductivity is never frozen at T_old.
     /// Prescribed temperatures must already equal history. Constant models are
@@ -109,13 +111,61 @@ impl BackwardEuler<'_> {
         interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
         config: StepConfig, nonlinear: NonlinearStepConfig,
     ) -> Result<NonlinearStepSolution, ConductionError> {
+        self.advance_nonlinear_with_boundary(cx, problem, interfaces, old, dt_s,
+            config, nonlinear, false)
+    }
+
+    /// Advance k(T) conduction with explicitly prescribed ENDPOINT temperatures.
+    ///
+    /// The full `old` field remains immutable physical history. New Dirichlet
+    /// values come from `problem.boundary` and are installed in the predictor
+    /// before the first constitutive/residual evaluation. Newton and line-search
+    /// trials change only free nodes, so conductivity always sees the actual
+    /// endpoint field, including its new boundary data.
+    ///
+    /// Storage and prescribed reaction include the boundary-node temperature
+    /// changes. As with [`Self::advance_prescribed`], the caller supplies the
+    /// time grid and endpoint data; no continuous profile or instantaneous heat
+    /// impulse is inferred. Capacity and contact resistance remain independent
+    /// of temperature. Existing residual, energy and total-work gates apply.
+    ///
+    /// # Errors
+    /// The refusals from [`Self::advance_nonlinear`], except that changed fixed
+    /// temperatures are explicitly admitted. An out-of-range predictor refuses
+    /// rather than extrapolating its material law. Failure returns no new field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_nonlinear_prescribed(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        config: StepConfig, nonlinear: NonlinearStepConfig,
+    ) -> Result<NonlinearStepSolution, ConductionError> {
+        self.advance_nonlinear_with_boundary(cx, problem, interfaces, old, dt_s,
+            config, nonlinear, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_nonlinear_with_boundary(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old: &[f64], dt_s: f64,
+        config: StepConfig, nonlinear: NonlinearStepConfig, prescribed: bool,
+    ) -> Result<NonlinearStepSolution, ConductionError> {
         poll(cx, 0)?;
         nonlinear.validate()?;
         if config.linear.restart == 0 {
             return Err(invalid("nonlinear endpoint requires a positive FGMRES restart"));
         }
-        let dofs = self.admit_step(cx, problem, old, dt_s, config)?;
+        let dofs = if prescribed {
+            self.admit_endpoint_step(cx, problem, old, dt_s, config)?
+        } else {
+            self.admit_step(cx, problem, old, dt_s, config)?
+        };
         let mut temperature = old.to_vec();
+        if prescribed {
+            for (slot, &vertex) in dofs.fixed().iter().enumerate() {
+                if slot % 512 == 0 { poll(cx, slot)?; }
+                temperature[vertex] = dofs.prescribed()[vertex];
+            }
+        }
         let mut ev = self.evaluate_endpoint(cx, problem, interfaces, old, &temperature, dt_s, &dofs)?;
         let initial_residual_j = ev.norm;
         let threshold_j = finite(nonlinear.residual_atol_j + nonlinear.residual_rtol * initial_residual_j)?;

@@ -2,7 +2,7 @@
 name = "fs-project"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "The versioned .fsim project schema (bead f85xj.6.1): the user-facing contract for the ratified thermal-design-assurance vertical, with the Five Explicits mandatory, defaults rare and receipted, typed violations, isomorphic s-expression/JSON spellings over fs-ir's AST, canonical bytes for hashing, and migration receipts."

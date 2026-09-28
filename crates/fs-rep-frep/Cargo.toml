@@ -2,7 +2,7 @@
 name = "fs-rep-frep"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "F-rep charts: CSG DAGs with R-function differentiable Booleans and auto-derived interval/Lipschitz/gradient evaluators."

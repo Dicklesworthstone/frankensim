@@ -1,6 +1,8 @@
 //! Supplied plate geometry, spatial closure, material memory and pressure phrase.
 //! This is a bounded source adapter over the existing physical owners. Numeric
 //! sections and supplied spectra remain authored data, not identified materials.
+mod force;
+use super::force::ApertureForceProgram;
 use super::{AperturePerformance, AperturePerformanceConfig, ApertureObservation, CoupledAperture};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dynamic::{ApertureState, DynamicAperture};
@@ -82,6 +84,10 @@ pub struct PlateValvePerformanceInfo {
     pub memory_branches: usize,
     /// Blowing-pressure input assignments compiled on the source clock.
     pub compiled_controls: usize,
+    /// Explicit original-mesh force footprints.
+    pub force_ports: usize,
+    /// Raw sample-addressed mechanical force assignments, separate from pressure.
+    pub force_controls: usize,
     /// Actual acoustic graph nodes, including the unique inlet and every load.
     pub duct_nodes: usize,
     /// Physical propagating sections; a legacy tube has one.
@@ -126,9 +132,10 @@ impl PlateValvePerformance {
         let parsed = Parsed::read(bytes,max_block,gate)?;
         let dt=1.0/f64::from(parsed.config.sample_rate_hz);
         // Derive each declared physical load once, from its actual adjacent
-        // section and shared gas. No receiver changes the network's mechanics.
+        // section gas. No receiver changes the network's mechanics.
         let duct=parsed.duct.prepare(&parsed.air,dt,parsed.observation,gate)?;
-        let z=duct.inlet_impedance(parsed.air.density)?;
+        let inlet_density=duct.inlet_density(parsed.air.density)?;
+        let z=duct.inlet_impedance(inlet_density)?;
         let observation=duct.observation;
         let radiation_load=duct.observed_radiation();
         let radiation_loads=duct.radiation.clone();
@@ -138,7 +145,7 @@ impl PlateValvePerformance {
         if dt*(plate.stiffness_n_m()/plate.mass_kg()).sqrt()>parsed.max_angular_step {
             return Err(bad(0,"retained plate mode exceeds the declared mechanical angular-step allowance"));
         }
-        let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,parsed.air.density,z,
+        let mut valve=DynamicAperture::from_plate_with_closure(plate,parsed.closure,inlet_density,z,
             dt,parsed.config.samples,parsed.initial).map_err(PlateValveInputError::Physics)?;
         if let Some((material,initial))=parsed.relaxation {
             valve=valve.with_plate_relaxation(material,initial).map_err(PlateValveInputError::Physics)?;
@@ -151,13 +158,17 @@ impl PlateValvePerformance {
                 n.represented_sections().iter().map(|s|s.represented_length_m).sum()),
         };
         if !represented.is_finite() {return Err(bad(0,"total represented duct length overflowed"));}
-        let renderer=AperturePerformance::new(system,observation,parsed.schedule,parsed.config)
+        let mut renderer=AperturePerformance::new(system,observation,parsed.schedule,parsed.config)
             .map_err(PlateValveInputError::Gesture)?;
+        if let Some(program) = parsed.forces {
+            renderer = renderer.with_plate_forces(program).map_err(PlateValveInputError::Gesture)?;
+        }
         checkpoint(gate)?;
         let info=PlateValvePerformanceInfo {
             input_hash:hash_domain("org.frankensim.fs-couple.plate-valve-performance.v1",bytes),
             sample_rate_hz:parsed.config.sample_rate_hz,samples:parsed.config.samples,full_scale_pa:parsed.full_scale_pa,
             nodes:parsed.nodes,triangles:parsed.triangles,sections:parsed.sections,memory_branches,
+            force_ports:renderer.force_ports().len(),force_controls:renderer.pending_force_controls().len(),
             compiled_controls:renderer.pending_controls().len(),represented_tube_length_m:represented,radiation_load,
             duct_nodes,duct_sections,radiation_terminals:radiation_loads.len(),
         };
@@ -187,6 +198,7 @@ struct Parsed {
     config:AperturePerformanceConfig,full_scale_pa:f64,air:GasState,duct:DuctInput,
     observation:ApertureObservation,chart:PlateChart,plate:PlateApertureOptions,initial:ApertureState,
     closure:PlateClosureSpec,relaxation:Option<(PlateRelaxationSpec,InitialApertureMemory)>,
+    forces:Option<ApertureForceProgram>,
     max_angular_step:f64,schedule:GestureSchedule,nodes:usize,triangles:usize,sections:usize,
 }
 impl Parsed {
@@ -305,13 +317,26 @@ impl Parsed {
             }
             Some((PlateRelaxationSpec{regions:maps,max_branches:64,max_dt_over_tau,max_angular_step:memory_angle},initial))
         };
-        let mut row=r.row("compile_limits")?;
+        let mut row=r.next()?;
+        let forces = match row.word()? {
+            "compile_limits" => None,
+            "force_ports" => {
+                let count = row.count(32)?; row.finish()?;
+                let program = force::read(&mut r,count,node_count,triangle_count,samples,gate)?;
+                row = r.row("compile_limits")?;
+                Some(program)
+            }
+            _ => return Err(bad(r.line,"expected force_ports or compile_limits")),
+        };
         let max_compile_work:u64=row.parse()?;let max_controls=row.count(MAX_CONTROLS)?;row.finish()?;
         if max_compile_work>16777216 {return Err(bad(r.line,"pressure compilation exceeds 16777216 visits"));}
+        if forces.as_ref().is_some_and(|f| f.events.len() > max_controls) {
+            return Err(bad(r.line,"force assignments exceed the declared control budget"));
+        }
         if r.lines.next().is_some() {return Err(bad(r.line+1,"unexpected trailing geometry record"));}
         let config=AperturePerformanceConfig{sample_rate_hz:rate,samples,max_block,max_compile_work,max_controls};
         let schedule=decode_schedule(gestures)?;
-        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,initial,closure,relaxation,max_angular_step,
+        Ok(Self{config,full_scale_pa,air,duct,observation,chart,plate,initial,closure,relaxation,forces,max_angular_step,
             schedule,nodes:node_count,triangles:triangle_count,sections:section_count})
     }
 }

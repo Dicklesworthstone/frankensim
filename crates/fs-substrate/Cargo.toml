@@ -2,7 +2,7 @@
 name = "fs-substrate"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Hardware capability probes, machine fingerprints, topology maps, dispatch tables."

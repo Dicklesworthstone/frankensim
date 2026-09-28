@@ -2,7 +2,7 @@
 name = "fs-matdb"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Immutable, provenance-complete cross-physics material data: typed property claims with validity domains, uncertainty, and receipts."

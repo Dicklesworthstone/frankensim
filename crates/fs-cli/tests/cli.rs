@@ -80,6 +80,7 @@ fn valid_project() -> ProjectSpec {
             format: "stl".to_string(),
             source_hash: 9,
             parser_version: "1".to_string(),
+            surface_offset: None,
         }]),
         assignments: Some(vec![GeometryAssignment {
             artifact: "plate".to_string(),
@@ -563,12 +564,13 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
     assert!(output.stdout.contains("\"status\":\"ok\""));
     assert!(output.stdout.contains("\"finding_count\":0"));
-    // Frozen canonical hashes: any fixture-byte drift fails right here
-    // instead of rotting quietly. Regenerate with the real verb and commit
-    // fixture + hash in the same commit.
+    // Frozen current-schema canonical hashes: the real verb migrates these
+    // historical fixtures before hashing. Physical fixture drift still fails
+    // here; an intentional schema migration updates these pins using the
+    // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"1f135da400dec2bed1bba833b033026ce37bc93c113c79c25f6c6fb4e730780b\""
+            "\"project_hash\":\"cc648e2e627c7b1f709a6e21fce35b8ba4588ee6f1ab543b344875ec308572fc\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -578,7 +580,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"4e2d71ab877ec805b7aa617d5d8bd2ca70f6ea38ca5afd8f0742b23ae60d7135\""
+            "\"project_hash\":\"33b1b4193dafa62ec7c5a4e1aaf73fa86b4f93575572907f8c578b2d883611b7\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -685,6 +687,9 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
         "stderr: {}",
         output.stderr
     );
+    // This single-rung project has no discretization estimate, so one term
+    // stays NO-DATA and the verdict stays Estimated/indeterminate. The ladder
+    // variant measures all eight (see scripts/ci/examples_freshness_e2e.sh).
     assert!(
         output.stdout.contains("\"verdict\":\"indeterminate\""),
         "stdout: {}",
@@ -711,6 +716,17 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
             .unwrap_or_else(|error| panic!("{} was not exported: {error}", path.display()));
         assert!(!bytes.is_empty(), "{} is empty", path.display());
     }
+    // The declared surface offset moves T_max the physical way: more wetted
+    // area and thicker fins (outward) cool the part at fixed watts, and the
+    // inward bound heats it.
+    let report = std::fs::read_to_string(dir.join(format!("{run_id}.report.json"))).unwrap();
+    let solved = |label: &str| -> f64 {
+        let key = format!("declared surface offset {label} = ");
+        let tail = &report[report.find(&key).unwrap_or_else(|| panic!("no {label} vertex in {report}")) + key.len()..];
+        tail[..tail.find(' ').unwrap()].parse().unwrap()
+    };
+    let (inward, outward) = (solved("inward"), solved("outward"));
+    assert!(outward < inward, "outward {outward} K must be cooler than inward {inward} K");
 }
 
 #[test]
@@ -1180,7 +1196,9 @@ fn ja_005_level_a_energy_balance_brackets_the_retained_maximum() {
 
     // Inputs from the project itself.
     let source = std::fs::read_to_string(&fsim).expect("reference project reads");
-    let decoded = fs_project::parse_sexpr(&source).expect("reference project parses");
+    let decoded = fs_project::parse_sexpr_migrating(&source)
+        .expect("historical reference project migrates")
+        .decoded;
     let power = decoded.spec.power.as_ref().expect("power declared");
     assert_eq!(power.len(), 1, "one dissipating region");
     let q_w = power[0].watts.value * power[0].duty;

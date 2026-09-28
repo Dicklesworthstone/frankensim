@@ -2,7 +2,7 @@
 name = "fs-solver"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Solver stack: resumable matrix-free Krylov and Newton-Krylov methods, verified admission, typed block operators, transposed solves, and FEEC p-multigrid."

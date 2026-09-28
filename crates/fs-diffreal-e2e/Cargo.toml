@@ -2,7 +2,7 @@
 name = "fs-diffreal-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Differentiation & reality end-to-end suite: shared tape/VJP fixture sensitivities, independent dual/FD falsifiers, the as-built loop, and sampled-only tolerance checks with typed logs."

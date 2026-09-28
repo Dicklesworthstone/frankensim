@@ -29,6 +29,9 @@ use super::STUDY_RUN_RECEIPT_SCHEMA;
 mod continuation;
 use continuation::drive;
 
+#[path = "study_elasticity/assessment.rs"]
+mod assessment;
+
 #[cfg(feature = "sdf3-study")]
 #[path = "study_elasticity/sdf3.rs"]
 mod sdf3;
@@ -110,6 +113,7 @@ struct ElasticitySpec {
     max_iterations: usize,
     id: ContentHash,
     projected: Option<continuation::ProjectedControls>,
+    final_dwr: bool,
 }
 
 fn list<'a>(node: &'a Node, what: &'static str) -> Result<&'a [Node]> {
@@ -271,6 +275,9 @@ fn canonical(spec: &ElasticitySpec) -> String {
     } else {
         let _ = writeln!(out, "    :steps {})", spec.steps);
     }
+    if spec.final_dwr {
+        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt {})", assessment::max_solves(spec));
+    }
     let _ = writeln!(out, ")");
     out
 }
@@ -330,6 +337,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         .ok_or_else(|| fail("cli-study-elasticity-budget", "max-iterations is required"))?;
     let projected = continuation::parse_controls(optimizer_fields,
         base.constraints.as_ref().expect("validated constraints").volume_fraction)?;
+    let final_dwr = assessment::parse(&root, projected.as_ref())?;
     let mut parsed = ElasticitySpec {
         base,
         canonical: String::new(),
@@ -351,6 +359,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         max_iterations,
         id: ContentHash([0; 32]),
         projected,
+        final_dwr,
     };
     validate_model(&parsed)?;
     parsed.canonical = canonical(&parsed);
@@ -376,6 +385,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
 }
 
 fn validate_model(spec: &ElasticitySpec) -> Result<()> {
+    assessment::validate(spec)?;
     let base = &spec.base;
     let metadata = base.metadata.as_ref().expect("validated metadata");
     if metadata.decision_gate != DecisionGate::ScopingEstimate
@@ -681,6 +691,9 @@ fn persist(
     let continuation = evidence.json();
     let constraints = evidence.constraint_fields();
     let constraint_html = evidence.constraint_html();
+    let goal_error = assessment::json(evidence.final_dwr.as_ref(),
+        spec.final_dwr.then(|| assessment::max_solves(spec)));
+    let goal_error_html = assessment::html(evidence.final_dwr.as_ref(), spec.final_dwr);
     let no_claim = if spec.projected.is_some() { continuation::PROJECTED_SCOPE } else { NO_CLAIM };
     let count = report.rows.len();
     let trace = trace_hash(&report.rows);
@@ -728,7 +741,7 @@ fn persist(
         _ => (String::new(), String::new()),
     };
     let summary = format!(
-        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{}{volume_fields},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}}}",
+        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{count},\"target_iterations\":{},\"final_compliance_j\":{final_compliance},\"final_material_area_m2\":{}{volume_fields},\"snapshot\":\"{final_snapshot:#018x}\",\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}{constraints}{goal_error}}}",
         spec.id.to_hex(),
         spec.steps,
         final_volume.map_or("null".to_string(), |value| format!("{value:.17e}")),
@@ -752,7 +765,7 @@ fn persist(
         );
     }
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}{volume_html}<p>Final discrete compliance: {final_compliance} J.</p>{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Elasticity topology study</title><body><h1>Free-boundary 2-D elasticity topology study</h1><p>Status: {status}. {count}/{} iterations. Estimated.</p><p>{no_claim}</p>{constraint_html}{volume_html}<p>Final discrete compliance: {final_compliance} J.</p>{goal_error_html}{}<table><tr><th>Iteration</th><th>Compliance J</th><th>Material area m²</th><th>Snapshot</th></tr>{table}</table><p>Trace: {}</p></body></html>",
         spec.steps,
         geometry_svg(phi),
         trace.to_hex()
@@ -1063,9 +1076,12 @@ pub(crate) fn resume_path(
         )?;
         let old = load(&ledger, pointer)?;
         if old.value.str_field("driver") == Some(SDF3_DRIVER) {
+            #[cfg(feature = "sdf3-study")]
+            return sdf3::resume(&ledger, &old, override_text, &CancelGate::new());
+            #[cfg(not(feature = "sdf3-study"))]
             return Err(fail(
-                "cli-study-sdf3-resume-unsupported",
-                "3-D study receipts support retained report/package export; optimizer resume is not implemented",
+                "cli-study-sdf3-feature",
+                "resuming 3-D adaptive studies requires a binary built with --features sdf3-study",
             ));
         }
         let source = linked(&ledger, &old.value, "source", "study-source")?;
@@ -1179,16 +1195,29 @@ pub(crate) fn export(
             let _ = write!(paths, ",{key:?}:{}", quoted(&dest.to_string_lossy()));
         }
         Ok(format!(
-            "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{paths}}}\n",
-            quoted(loaded.value.str_field("status").unwrap_or("unknown"))
+            "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{}{paths}}}\n",
+            quoted(loaded.value.str_field("status").unwrap_or("unknown")),
+            // The package was just re-checked above; say so, as the thermal
+            // study's export does.
+            if command == "package" {
+                ",\"checker\":\"pass\",\"checker_authority\":\"structural-integrity-only\""
+            } else {
+                ""
+            }
         ))
     })();
     match result {
         Ok(mut stdout) => {
             if matches!(mode, OutputMode::Text) {
+                let value = JsonValue::parse(&stdout).expect("generated export JSON");
                 stdout = format!(
                     "command={command}\nstatus=ok\nrun={pointer}\nauthority=projection-of-retained-estimates\n"
                 );
+                for field in ["study_status", "report_html", "report_json", "package", "checker", "checker_authority"] {
+                    if let Some(value) = value.str_field(field) {
+                        let _ = writeln!(stdout, "{field}={}", crate::escape_text(value));
+                    }
+                }
             }
             CommandOutput { exit_code: exit::SUCCESS, stdout, stderr: String::new() }
         }
@@ -1205,11 +1234,16 @@ mod tests {
     #[test]
     fn canonical_fixture_is_explicit_and_admitted() {
         let spec = parse(FIXTURE).expect("canonical elasticity fixture");
-        // 32 steps: the tracked example ends inside the 1% area tolerance
-        // (measured 2026-09-24; 8 and 16 steps end infeasible).
+        // 32 steps at mesh level 5. With the scheduled area projection
+        // (q61wp.16.1) the bracket reaches its 0.45 target by about step 12
+        // and holds it; 20/24/28/32 steps all end feasible. Level 5, not 4:
+        // at 16x16 the loop plateaus (+4.6% vs the first feasible design),
+        // while at 32x32 compliance falls to 48.07 J (-21.7%). With
+        // exchange-rate hole nucleation (6 holes) it ends at 23.38 J, -31.1% vs
+        // its first feasible design at the same area (measured 2026-09-28).
         assert_eq!(spec.steps, 32);
         assert_eq!(spec.load_direction, [0.0, -1.0]);
-        assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 4);
+        assert_eq!(spec.base.physics.as_ref().unwrap().mesh_level, 5);
     }
 
     #[test]

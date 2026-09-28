@@ -2,7 +2,7 @@
 name = "fs-orbit"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Periodic-orbit service (fs-orbit): harmonic balance with alternating-frequency/time closure over the island-plus-linear-port problem shape, shooting with Floquet monodromy as the independent second method, and pseudo-arclength continuation through folds — deterministic, budgeted, refusal-first (the fs-vmanifest I09 slot's first implementation)."

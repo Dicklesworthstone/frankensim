@@ -2,7 +2,7 @@
 name = "fs-selfknow-e2e"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Structure & self-knowledge end-to-end battery: interface types, symmetry harvesting, spectral health, the abstraction ladder, explanation objects, and value-of-information — Layer 4 exercised as a whole with ledgered evidence and fail-safe assertions."

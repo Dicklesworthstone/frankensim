@@ -132,7 +132,20 @@ pub struct Prepared {
 }
 impl Prepared {
     pub fn new(spec: &Specification, courses: &[Course], bank: &Bank) -> Result<Self, String> {
+        Self::new_with_transverse_drag(spec,courses,bank,None)
+    }
+
+    /// Keep the original vertical pad law and explicitly scale its lateral
+    /// drag for the second transverse direction. Neither direction of a duplex
+    /// is touched. Missing lateral material response is refused, not guessed.
+    pub fn new_with_transverse_drag(spec: &Specification, courses: &[Course], bank: &Bank,
+        lateral_ratios: Option<&[f64]>) -> Result<Self, String> {
         spec.validate(courses)?;
+        if bank.has_secondary_polarization()!=lateral_ratios.is_some()
+            || lateral_ratios.is_some_and(|r|r.len()!=courses.len()
+                || r.iter().any(|v|!v.is_finite() || !(0.0..=10.0).contains(v))) {
+            return Err("damper preparation needs the complete explicit transverse drag selection".into());
+        }
         let board_start = bank.modes.len();
         let dimension = board_start + bank.board_count;
         if bank.v.len() != dimension || bank.q.len() != dimension {
@@ -143,9 +156,13 @@ impl Prepared {
         let mut cells = 0usize;
         for (si, s) in bank.strings.iter().enumerate() {
             // Dampers touch speaking strings only, never duplex segments.
-            if s.contact.is_none() { continue; }
+            if s.duplex { continue; }
             let c = courses.get(s.course).ok_or("invalid damper course address")?;
             let Some(p) = spec.pads[&c.midi] else { continue; };
+            let ratio=if s.polarization==0 {1.}else {lateral_ratios.ok_or("missing lateral pad response")?[s.course]};
+            let drag_ns_m=p.drag_ns_m*ratio;
+            if !drag_ns_m.is_finite() || drag_ns_m>1e6 {return Err("directional pad drag exceeds 1e6 N s/m".into());}
+            if drag_ns_m==0. {continue;} // explicit zero drag, not an absent vibrating string
             if s.modes.is_empty() || s.modes.end > board_start || s.bridge.len() != bank.board_count
                 || s.bridge.iter().any(|x| !x.is_finite())
                 || bank.modes[s.modes.clone()].iter().any(|m| m.string != si || !m.beta.is_finite()) {
@@ -179,18 +196,19 @@ impl Prepared {
                 let norm = shape.iter().map(|g| g*g).sum::<f64>()
                     + s.bridge.iter().map(|b| (lift*b).powi(2)).sum::<f64>();
                 if !norm.is_finite() || norm <= 0.0 || !lift.is_finite()
-                    || !(p.drag_ns_m * norm).is_finite() {
+                    || !(drag_ns_m * norm).is_finite() {
                     return Err("damper projection or damping rate is unrepresentable".into());
                 }
                 points.push(Point { shape, lift });
             }
             cells += count;
             pads.push(StringPad { course: s.course, modes: s.modes.clone(), bridge: s.bridge.clone(),
-                drag_ns_m: p.drag_ns_m, points });
+                drag_ns_m, points });
         }
         Ok(Self { pads, dimension, board_start, cells })
     }
 
+    /// Number of damped scalar direction fields; a two-plane string may count twice.
     pub fn string_count(&self) -> usize { self.pads.len() }
     pub fn cell_count(&self) -> usize { self.cells }
 

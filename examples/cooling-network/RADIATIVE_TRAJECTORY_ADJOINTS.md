@@ -116,3 +116,9 @@ For the example's two cycles, the reference sampled peak is 307.020212 K at
 log-emissivity derivative is -0.241978 K. The cooldown fan's log-speed derivative
 is -0.003683 K because an EARLIER cooldown influences that peak. In a single
 cycle the peak occurs at 30 seconds and the later cooldown derivative is zero.
+
+Measured 2026-09-26 with the release binary, which uses lumped (row-sum) P1
+capacitance rather than the reference's consistent mass, the two cycles peak at
+305.233319 K at 180 seconds. The pulse-power-multiplier derivative is
+5.364132 K, and the cooldown log-speed derivative is -0.003893 K. As described
+above, that derivative is nonzero only because of the earlier cooldown.

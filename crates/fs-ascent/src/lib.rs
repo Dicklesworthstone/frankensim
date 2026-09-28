@@ -31,7 +31,11 @@ pub mod riemann;
 pub mod runner;
 pub mod sqp;
 pub mod stop;
+#[cfg(feature = "transient-design")]
+pub mod transient;
 pub mod trust;
+#[cfg(feature = "transient-design")]
+pub mod variational;
 pub mod wolfe;
 pub use nsga::{
     NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION, NonFiniteKind, NsgaConfig,

@@ -2,7 +2,7 @@
 name = "fs-govern"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Machine-readable addendum and expansion-program governance: doctrine, proposals, R1-R10, and quantitative PR-001--PR-012 risk evidence."

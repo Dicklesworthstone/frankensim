@@ -2,7 +2,7 @@
 name = "fs-bem"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Laplace BEM panel methods: 3D exterior potential flow with FMM-accelerated GMRES, 2D Hess-Smith airfoils with Kutta condition and adjoint gradients, unsteady free-wake vortex shedding."

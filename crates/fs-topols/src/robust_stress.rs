@@ -196,6 +196,10 @@ fn von_mises(lambda: f64, mu: f64, strain: [f64; 3]) -> f64 {
     fs_material::tensor::von_mises(&[sxx, syy, szz, sxy, 0.0, 0.0])
 }
 
+/// fs-cutfem's cut-cell admission threshold (inside area over cell area);
+/// stress sampling must admit exactly the cells the solve created.
+const CUT_CELL_ADMISSION_FRACTION: f64 = 1e-12;
+
 fn full_cell_points(lo: [f64; 2], hi: [f64; 2]) -> [[f64; 2]; 5] {
     let mid = [f64::midpoint(lo[0], hi[0]), f64::midpoint(lo[1], hi[1])];
     let half = [0.5 * (hi[0] - lo[0]), 0.5 * (hi[1] - lo[1])];
@@ -283,7 +287,14 @@ pub(crate) fn sample_nodal_solution_controlled<B>(
             // An interface-only exterior neighbour has no material-side Q1
             // displacement. Its trace belongs to the positive-volume cell on
             // the other side, not to a fabricated or silently skipped sample.
-            if !rules.bulk.iter().any(|&(_, weight)| weight > 0.0) {
+            // Use the solver's own admission rule (fs-cutfem drops a cut cell
+            // whose inside area is below 1e-12 of the cell): on an exactly
+            // lattice-aligned interface the exterior neighbour's zero-measure
+            // inside can carry a rounding-positive weight, and probing it
+            // would read corners the solve never created.
+            let area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
+            let inside_area: f64 = rules.bulk.iter().map(|&(_, weight)| weight).sum();
+            if inside_area < CUT_CELL_ADMISSION_FRACTION * area {
                 continue;
             }
             for &(point, weight) in &rules.bulk {
@@ -568,7 +579,8 @@ mod tests {
             } else {
                 let rules = cut_cell_rules(&phi, lo, hi, 2);
                 let bulk = rules.bulk.iter().filter(|(_, weight)| *weight > 0.0).count();
-                if bulk > 0 {
+                let inside: f64 = rules.bulk.iter().map(|(_, weight)| *weight).sum();
+                if inside >= CUT_CELL_ADMISSION_FRACTION * (hi[0] - lo[0]) * (hi[1] - lo[1]) {
                     expected += bulk + rules.iface.iter().filter(|(_, weight, _)| *weight > 0.0).count();
                 }
             }

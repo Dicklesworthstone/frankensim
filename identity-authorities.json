@@ -161,14 +161,16 @@
       "path": "xtask/src/bootstrap_provenance.rs",
       "symbol": "write_bootstrap_provenance",
       "version": 3,
-      "domain": "org.frankensim.xtask.constellation-bootstrap-provenance.v3"
+      "domain": "org.frankensim.xtask.constellation-bootstrap-provenance.v3",
+      "authorities": ["contains", "std", "sync_all", "verify", "write_all"]
     },
     {
       "id": "xtask:constellation-lock",
       "path": "xtask/src/main.rs",
       "symbol": "write_constellation_lock",
       "version": 2,
-      "domain": "org.frankensim.xtask.constellation-lock-writer.v2"
+      "domain": "org.frankensim.xtask.constellation-lock-writer.v2",
+      "authorities": ["Ordering", "Path", "std"]
     }
   ],
   "exemptions": [

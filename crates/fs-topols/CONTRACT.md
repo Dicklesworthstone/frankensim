@@ -48,7 +48,24 @@ with zero meshing anywhere in the loop.
   per iteration, redistance + audit, augmented-Lagrangian volume
   multiplier NORMALIZED BY THE MEAN ENERGY SCALE (an O(1) multiplier
   against O(J) energies shrinks the structure to nothing at full
-  speed — measured failure mode), scheduled nucleation; ledger rows
+  speed — measured failure mode), then a scheduled material-area
+  projection (`schedule_material_area`: a common nodal offset moves the
+  area at most 0.04 toward the target per update, cannot overshoot it,
+  and holds it within 1e-3 once reached; best effort, since the plain step
+  stands if no offset meets the tolerance on a very coarse grid). Without
+  it, the vmax-normalized velocity moves a full step however close the
+  area is, and the multiplier winds up and swings for tens of steps
+  (q61wp.16.1; 20/24/28/32-step bracket sweeps went from 1 feasible to
+  all feasible). Scheduled nucleation by EXCHANGE RATE
+  (`topder::nucleate_by_exchange`): a hole is punched where the compliance
+  topological derivative `DT(x)` is below `Λ`, the median interface
+  `σ:ε = 2w`. Because the area is re-projected, a hole is a trade of interior
+  material for boundary material, so the gain is `(Λ − DT)·πρ²`. Keep-outs
+  cover only the clamped strip and the load pad; free edges need only room
+  for the hole. The node must be `ρ + h` deep. The former multiplier
+  threshold and six-radius margin on ALL edges never admitted a hole on the
+  canonical bracket; now it nucleates 6, and 32 steps reach 23.38 J vs
+  48.07 J without holes (-31.1% vs its first feasible design). Ledger rows
   with compliance, volume, ℓ, drift, and FNV snapshot hashes. The load is
   definitionally zero outside the checked `EdgeBand`; unrelated SDF cuts on
   the same edge are skipped, while a caller-supplied cut through supported load
@@ -67,6 +84,47 @@ with zero meshing anywhere in the loop.
   data here, it is the exact discrete external work.
 - `optimize::material_volume`: certified cut-quadrature area of
   `{φ < 0}`.
+
+## Final-design goal-error assessment
+
+`assess_compliance_dwr` and `assess_compliance_dwr_controlled` evaluate the
+unchanged final bilinear level set through fs-dwr's canonical vector-compliance
+estimator. Clamp, typed load support, material, quadrature, stabilization,
+60,000-iteration cap per solve and 1e-12 recomputed Euclidean residual target
+match `evaluate_compliance_design`. The original geometry is solved on its
+declared uniform grid and one finer grid; no projection, redistancing, or
+optimization step is performed. Assessment admits levels 1..=5 and enriches
+through level 6.
+
+`ComplianceDwrAssessment` binds the original nodal snapshot and material area
+to coarse/enriched compliance, signed DWR estimate, absolute indicator mass,
+bulk/Nitsche/traction/ghost decomposition, DOF counts, actual recomputed
+Euclidean residuals and actual CG iteration counts. These are Estimated
+numerical quantities, not certified continuum bounds. Absolute indicator mass
+is a marking signal, not an interval radius; algebraic residuals do not bound
+discretization error.
+
+`assess_weighted_compliance_dwr[_controlled]` assesses the actual linear
+weighted-sum objective over 1..=16 independent traction cases, including cases
+with zero objective weight. Each case uses the same material, clamp, support,
+traction and solver settings as `evaluate_robust_sampled_stress`, with two
+solves on the unchanged geometry. Forces are never summed. Ordered weighted
+sums combine coarse/enriched compliance, signed estimates, absolute indicator
+masses and residual terms; per-case loads and numerical evidence remain
+available. The library test compares every coarse compliance bitwise with the
+sampled-stress owner and checks quadratic load scaling and phase cancellation.
+This estimates compliance error only, not stress error or stress feasibility.
+Worst-case objectives are not supported by this linear-sum assessment.
+Cases run sequentially, with cancellation before each two-solve case and before
+publication; a stopped attempt returns no partial family. Levels 1..=5 bound
+enrichment at level 6. No optimum or certified continuum-error bound follows.
+
+Cancellation checks bracket the entire two-solve estimator. A stop returns no
+partial assessment and cannot mutate geometry. There is no cancellation point
+inside its assembly, solves or residual integration. Focused G3 tests compare
+the exact canonical coarse evaluation, quadratic load scaling and a thinner
+geometry; G4 tests stop before estimation and before publication. The CLI
+consumer supplies admission budgets and retains accepted geometry before work.
 
 ## Invariants
 

@@ -5,7 +5,7 @@ use crate::bernoulli_aperture::cavity::HelmholtzLoadSpec;
 use crate::bernoulli_aperture::wall::{WallPatch, WallPin};
 use fs_vfit::impedance::SeriesImpedanceSpec;
 use crate::bernoulli_aperture::viscothermal::{
-    ViscothermalSectionSpec, ViscothermalSection, with_viscothermal_sections,
+    ViscothermalSectionSpec, ViscothermalSection, with_viscothermal_sections, with_regional_viscothermal_sections,
 };
 use fs_vfit::relaxation::RelaxationImpedanceSpec;
 
@@ -16,7 +16,7 @@ const MAX_WAVE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) enum DuctInput {
     // Keep the original source's arithmetic and runtime when no graph is named.
     Tube { spec: UniformTubeSpec, radiation_band: Option<f64>, loss: Option<ViscothermalSectionSpec> },
-    Graph { nodes: Vec<NodeInput>, sections: Vec<TubeSection>, max_bytes: usize, losses: Vec<Option<ViscothermalSectionSpec>> },
+    Graph { nodes: Vec<NodeInput>, sections: Vec<TubeSection>, max_bytes: usize, losses: Vec<Option<ViscothermalSectionSpec>>, gases: Option<Vec<GasState>> },
 }
 
 pub(super) enum NodeInput {
@@ -29,6 +29,7 @@ pub(super) enum NodeInput {
 pub(super) struct PreparedDuct {
     tube: Option<UniformTubeSpec>,
     graph: Option<TubeNetworkSpec>,
+    gases: Option<Vec<GasState>>,
     pub observation: ApertureObservation,
     pub radiation: Vec<(usize, BaffledRadiationLoad)>,
     pub losses: Vec<ViscothermalSection>,
@@ -107,6 +108,8 @@ impl DuctInput {
                 }
                 let mut sections = Vec::with_capacity(section_count);
                 let mut losses = Vec::with_capacity(section_count);
+                let mut gases = Vec::with_capacity(section_count);
+                let mut regional = false;
                 for _ in 0..section_count {
                     checkpoint(gate)?;
                     let mut row = r.row("duct_section")?;
@@ -116,6 +119,16 @@ impl DuctInput {
                     }
                     let section = TubeSection { nodes, length_m: row.scalar()?, radius_m: row.scalar()?,
                         max_length_error_m: row.scalar()? };
+                    // Explicit region before the optional loss suffix. Omission
+                    // uses ambient; malformed data never selects that default.
+                    let local = if row.fields.clone().next() == Some("gas") {
+                        row.word()?;
+                        let local = GasState::try_new_moist_air(row.scalar()?, air.pressure, row.scalar()?)
+                            .map_err(|_|bad(r.line,"section gas is outside the shared moist-air domain"))?;
+                        regional = true;
+                        local
+                    } else { *air };
+                    gases.push(local);
                     losses.push(read_loss(&mut row)?);
                     row.finish()?;
                     if section.length_m <= 0.0 || section.radius_m <= 0.0 || section.max_length_error_m < 0.0 {
@@ -123,7 +136,7 @@ impl DuctInput {
                     }
                     sections.push(section);
                 }
-                Ok(Self::Graph { nodes, sections, max_bytes, losses })
+                Ok(Self::Graph { nodes, sections, max_bytes, losses, gases:regional.then_some(gases) })
             }
             _ => Err(bad(r.line, "expected an explicit tube or network after ambient")),
         }
@@ -140,7 +153,7 @@ impl DuctInput {
                     return Err(bad(0, "a tube observation must name inlet, terminal or baffled-outlet"));
                 }
                 if radiation_band.is_none() && loss.is_none() {
-                    return Ok(PreparedDuct { tube: Some(spec), graph: None, observation, radiation: vec![], losses: vec![] });
+                    return Ok(PreparedDuct { tube: Some(spec), graph: None, gases:None, observation, radiation: vec![], losses: vec![] });
                 }
                 let mut radiation = Vec::new();
                 let terminal = if let Some(band) = radiation_band {
@@ -163,11 +176,11 @@ impl DuctInput {
                     sections: vec![TubeSection { nodes: [0, 1], length_m: spec.length_m,
                         radius_m: spec.radius_m, max_length_error_m: spec.max_length_error_m }],
                     sound_speed_m_s: air.sound_speed, max_wave_memory_bytes: spec.max_wave_memory_bytes,
-                }), observation, radiation, losses: vec![] };
+                }), gases:None, observation, radiation, losses: vec![] };
                 prepared.install_losses(air, dt, &[loss], gate)?;
                 Ok(prepared)
             }
-            Self::Graph { nodes, sections, max_bytes, losses } => {
+            Self::Graph { nodes, sections, max_bytes, losses, gases } => {
                 match observation {
                     ApertureObservation::Inlet => {},
                     ApertureObservation::NetworkNode(node) if node < nodes.len() => {},
@@ -185,13 +198,14 @@ impl DuctInput {
                     checkpoint(gate)?;
                     lowered.push(match input {
                         NodeInput::Existing(kind) => kind,
-                        NodeInput::Cavity(cavity) => cavity.termination(air.density, air.sound_speed).map_err(physics)?,
+                        NodeInput::Cavity(cavity) => {
+                            let (_, gas) = terminal_gas(&sections, gases.as_deref(), node, air)?;
+                            cavity.termination(gas.density, gas.sound_speed).map_err(physics)?
+                        }
                         NodeInput::Wall(wall) => wall.shunt().map_err(physics)?,
                         NodeInput::Radiation(band) => {
-                            let mut incident = sections.iter().filter(|s| s.nodes.contains(&node));
-                            let section = incident.next().ok_or_else(|| bad(0, "radiating terminal is disconnected"))?;
-                            if incident.next().is_some() { return Err(bad(0, "radiating terminal must meet exactly one physical section")); }
-                            let load = BaffledRadiationLoad::new(section.radius_m, air.density, air.sound_speed, dt, band, gate)
+                            let (section, gas) = terminal_gas(&sections, gases.as_deref(), node, air)?;
+                            let load = BaffledRadiationLoad::new(section.radius_m, gas.density, gas.sound_speed, dt, band, gate)
                                 .map_err(physics)?;
                             if let ApertureObservation::NetworkBaffled { node: selected, receiver } = observation {
                                 if node == selected { check_receiver_band(receiver, band)?; }
@@ -201,12 +215,17 @@ impl DuctInput {
                         }
                     });
                 }
-                let graph = TubeNetworkSpec { nodes: lowered, sections, sound_speed_m_s: air.sound_speed,
+                let mut graph = TubeNetworkSpec { nodes: lowered, sections, sound_speed_m_s: air.sound_speed,
                     max_wave_memory_bytes: max_bytes };
+                if let Some(gases) = &gases {
+                    graph.sound_speed_m_s = gases[graph.inlet_section_index().map_err(physics)?].sound_speed;
+                    graph.validate_section_gases(gases).map_err(physics)?;
+                }
                 // Admit the actual pressure area before deriving the moving plate.
                 // Full graph topology and storage stay owned by ApertureNetwork.
-                graph.inlet_impedance(air.density).map_err(physics)?;
-                let mut prepared = PreparedDuct { tube: None, graph: Some(graph), observation, radiation, losses: vec![] };
+                if let Some(gases) = &gases { graph.inlet_impedance_with_gases(gases).map_err(physics)?; }
+                else { graph.inlet_impedance(air.density).map_err(physics)?; }
+                let mut prepared = PreparedDuct { tube: None, graph: Some(graph), gases, observation, radiation, losses: vec![] };
                 prepared.install_losses(air, dt, &losses, gate)?;
                 Ok(prepared)
             }
@@ -229,17 +248,35 @@ impl PreparedDuct {
         let graph = self.graph.as_ref().expect("loss selection uses the existing network owner");
         let selections: Vec<_> = assignments.iter().enumerate().filter_map(|(section, selected)|
             selected.map(|s| ViscothermalSectionSpec { section, ..s })).collect();
-        let (lowered, reports) = with_viscothermal_sections(graph.clone(), air, dt, &selections, gate)
-            .map_err(PlateValveInputError::Physics)?;
-        self.graph = Some(lowered);
-        self.losses = reports;
+        if let Some(gases) = &self.gases {
+            let (lowered, mapped, reports) = with_regional_viscothermal_sections(
+                graph.clone(), gases.clone(), dt, &selections, gate).map_err(PlateValveInputError::Physics)?;
+            self.graph = Some(lowered);
+            self.gases = Some(mapped);
+            self.losses = reports;
+        } else {
+            let (lowered, reports) = with_viscothermal_sections(graph.clone(), air, dt, &selections, gate)
+                .map_err(PlateValveInputError::Physics)?;
+            self.graph = Some(lowered);
+            self.losses = reports;
+        }
         Ok(())
+    }
+
+    pub fn inlet_density(&self, default: f64) -> Result<f64, PlateValveInputError> {
+        if let (Some(graph), Some(gases)) = (&self.graph, &self.gases) {
+            return Ok(gases[graph.inlet_section_index().map_err(PlateValveInputError::Physics)?].density);
+        }
+        Ok(default)
     }
 
     pub fn inlet_impedance(&self, density: f64) -> Result<f64, PlateValveInputError> {
         match (&self.tube, &self.graph) {
             (Some(tube), None) => tube.characteristic_impedance(density),
-            (None, Some(graph)) => graph.inlet_impedance(density),
+            (None, Some(graph)) => match &self.gases {
+                Some(gases) => graph.inlet_impedance_with_gases(gases),
+                None => graph.inlet_impedance(density),
+            },
             _ => unreachable!("exactly one propagation owner is selected"),
         }.map_err(PlateValveInputError::Physics)
     }
@@ -255,7 +292,10 @@ impl PreparedDuct {
     pub fn bind(self, valve: DynamicAperture) -> Result<CoupledAperture, PlateValveInputError> {
         match (self.tube, self.graph) {
             (Some(tube), None) => ApertureTube::new(valve, tube).map(CoupledAperture::Tube),
-            (None, Some(graph)) => ApertureNetwork::new(valve, graph).map(CoupledAperture::Network),
+            (None, Some(graph)) => match self.gases {
+                Some(gases) => ApertureNetwork::with_section_gases(valve, graph, gases),
+                None => ApertureNetwork::new(valve, graph),
+            }.map(CoupledAperture::Network),
             _ => unreachable!("exactly one propagation owner is selected"),
         }.map_err(PlateValveInputError::Physics)
     }
@@ -284,7 +324,7 @@ fn check_receiver_band(receiver: CircularOutletReceiver, band: f64) -> Result<()
 }
 
 // Optional suffix on the original tube/section record. It names numerical
-// approximation choices only: all transport coefficients come from `ambient`.
+// approximation choices only: transport coefficients come from the section gas.
 fn read_loss(row: &mut Row<'_>) -> Result<Option<ViscothermalSectionSpec>, PlateValveInputError> {
     let Some(kind) = row.fields.next() else {return Ok(None);};
     if kind != "viscothermal" {return Err(bad(row.line, "expected viscothermal MIN_HZ MAX_HZ CELLS ARMS or end of section"));}
@@ -297,4 +337,15 @@ fn read_loss(row: &mut Row<'_>) -> Result<Option<ViscothermalSectionSpec>, Plate
     // accept and ignore a caller's different finite-order request.
     if row.count(8)? != 8 {return Err(bad(row.line, "the shared viscothermal owner requires exactly eight arms"));}
     Ok(Some(selected))
+}
+
+// An enclosed chamber and an exterior outlet both inherit their adjacent gas;
+// neither is evaluated from a remote inlet's temperature or humidity.
+fn terminal_gas<'a>(sections: &'a [TubeSection], gases: Option<&'a [GasState]>,
+    node: usize, default: &'a GasState) -> Result<(&'a TubeSection, &'a GasState), PlateValveInputError>
+{
+    let mut incident = sections.iter().enumerate().filter(|(_,s)| s.nodes.contains(&node));
+    let (index, section) = incident.next().ok_or_else(||bad(0,"physical terminal is disconnected"))?;
+    if incident.next().is_some() {return Err(bad(0,"physical terminal must meet exactly one section"));}
+    Ok((section, gases.map_or(default, |g| &g[index])))
 }

@@ -18,6 +18,7 @@
 pub mod adaptive;
 pub mod galpha;
 pub mod hybrid;
+pub mod hybrid_sensitivity;
 pub mod lie;
 pub mod se3;
 #[cfg(feature = "time-slabs")]
@@ -25,7 +26,14 @@ pub mod slabs;
 pub mod stiff;
 pub mod symplectic;
 
-pub use adaptive::{AdaptiveState, PiController, rk45_adaptive};
+pub use adaptive::{
+    AdaptiveError, AdaptiveReport, AdaptiveState, AdaptiveStatus, PiController,
+    rk45_adaptive, rk45_adaptive_checked, rk45_adaptive_controlled,
+};
+pub use adaptive::events::{
+    DenseAdvance, DenseStep, EventAdvance, EventDirection, EventError, EventOccurrence,
+    EventOptions, InitialEvent, rk45_dense_step, rk45_until_event,
+};
 pub use fs_ga::{Se3, So3, Twist, Vec3};
 pub use galpha::{
     FirstOrderGeneralizedAlpha, FirstOrderProblem, FirstOrderState, GeneralizedAlpha,

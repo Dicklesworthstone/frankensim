@@ -92,7 +92,17 @@ bindings; it runs no solves and admits no scenarios itself.
   crate's catalog. Structural validation checks exactly those facts
   (`project-conduction-airflow-*` findings); deriving the coefficient, marching
   the air, and closing the solid/air fixed point are solve-stage authority,
-  not this layer's. The remaining sections are `Envelope`, sourced `ThermalLimit`
+  not this layer's. Optional `ConductionRadiation` (schema v5) adds named
+  `RadiatingSurface` rows to existing convective exterior targets: an immutable
+  surface-finish card hash, optional exact emissivity claim pin, explicit
+  material query and reservoir temperatures, and positive iteration, Kelvin,
+  watt, and relaxation controls. The material card owns the manufactured state
+  and claim validity. Every surface sees its own isothermal reservoir with
+  view factor one; mutual irradiation and occlusion are outside this input
+  model. Unknown, repeated, missing, and malformed inputs produce named
+  findings. Migration from v1 through v4 preserves absence of radiation and
+  never infers emissivity from a bulk-conductivity card. The remaining sections
+  are `Envelope`, sourced `ThermalLimit`
   requirements
   with explicit QoI, direction, effective limit, guard margin, severity,
   versioned base authority, and an already-applied `SafetyFactorPolicy` with
@@ -143,8 +153,18 @@ bindings; it runs no solves and admits no scenarios itself.
   recomputation and drift is `project-entity-id-mismatch` — a pin proves
   byte-equal derivation inputs, never physical sameness. Display names are
   outside identity, exactly as in fs-scenario.
+- A `MaterialBinding` may carry an optional `MaterialTolerance` (schema v6):
+  a relative conductivity half-width in (0,1) with a mandatory basis and
+  source, all three keys or none. It is an engineering declaration with
+  provenance, not a validated statistical bound. Absence means undeclared,
+  never zero, and the solve stage propagates a declared tolerance into the
+  Parameters budget term.
+- A `GeometryArtifact` may carry an optional `SurfaceOffset` (schema v7): a
+  uniform normal-offset half-width in metres with a mandatory basis and
+  source, all three keys or none. The solve stage propagates it into the
+  Geometry budget term.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 3 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 7 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -157,11 +177,12 @@ bindings; it runs no solves and admits no scenarios itself.
 - Canonical bytes are the checked s-expression render; `canonical_hash`
   hashes them under `org.frankensim.fs-project.canonical.v1`. The JSON
   spelling parses to the same AST, so both spellings reach one hash.
-- `FSIM_VERSION = 1`. Readers refuse other versions
+- `FSIM_VERSION = 7`. Readers refuse other versions
   (`fsim-unsupported-version`); `migrate_envelope` is the only path from an
   older envelope, applies a registered `MigrationRule`, and returns a
-  `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The only
-  registered rule is the synthetic version-0 proof rule, named as such.
+  `ProjectMigrationReceipt` (old/new hashes + rule, `verifies()`). The
+  registered rules preserve released v1–v6 inputs through named optional
+  accretions; a synthetic version-0 proof rule also exercises the machinery.
 - The defaultable fields are exactly two, and every applied default is
   receipted: power-row `duty` (`1.0`, continuous dissipation is the
   conservative assumption) and a declared fan curve's `min-flow` (the

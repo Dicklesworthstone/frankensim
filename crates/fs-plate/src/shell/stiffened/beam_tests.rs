@@ -69,3 +69,42 @@ fn missing_or_excess_elastic_modes_and_invalid_geometry_refuse_without_truncatio
     assert!(round_element(1.,[0.,0.],1.,1.).is_err());
     assert!(RoundBeamModes::new(&[RoundStation{x_m:0.,radius_m:0.},RoundStation{x_m:0.4,radius_m:0.}],spec()).is_err());
 }
+
+#[test]
+fn attached_head_changes_the_source_spectrum_and_keeps_loaded_mass_orthonormality() {
+    let s=spec(); let a=RoundInertia{x_m:s.contact_m,mass_kg:0.02,rotary_kg_m2:1.2e-6};
+    let bare=RoundBeamModes::new(&shaft(),s).unwrap();
+    let b=RoundBeamModes::with_inertias(&shaft(),s,&[a]).unwrap();
+    let expected=bare.pivot_inertia_kg_m2+a.mass_kg*(a.x_m-s.pivot_m).powi(2)+a.rotary_kg_m2;
+    assert!((b.pivot_inertia_kg_m2/expected-1.).abs()<1e-12);
+    assert!(b.omega.len()>=bare.omega.len());
+    assert!(b.omega[1]<0.98*bare.omega[1],"mass must enter the eigensolve, not an output scale");
+    let tip=b.point(a.x_m).unwrap();let slope=b.slope(a.x_m).unwrap();
+    assert!((slope[0]*expected.sqrt()-1.).abs()<1e-12);
+    for i in 0..b.omega.len() {for j in 0..b.omega.len() {
+        let mut product=a.mass_kg*tip[i]*tip[j]+a.rotary_kg_m2*slope[i]*slope[j];
+        // Reintegrate PHYSICAL shapes in the unscaled source mesh, including
+        // the whole shaft behind the pin, separately from the assembly code.
+        for (cell,x) in b.nodes_m.windows(2).enumerate() {
+            let (_,m)=round_element(x[1]-x[0],[0.005;2],s.young_pa,s.density_kg_m3).unwrap();
+            for row in 0..4 {for col in 0..4 {
+                product+=b.shapes[i][2*cell+row]*m[4*row+col]*b.shapes[j][2*cell+col];
+            }}
+        }
+        assert!((product-if i==j{1.}else{0.}).abs()<1e-6,"loaded M[{i},{j}]={product}");
+    }}
+}
+
+#[test]
+fn empty_inertia_is_identical_and_invalid_physical_attachments_refuse() {
+    let s=spec();let a=RoundBeamModes::new(&shaft(),s).unwrap();
+    let b=RoundBeamModes::with_inertias(&shaft(),s,&[]).unwrap();
+    assert_eq!(a.omega,b.omega);assert_eq!(a.shapes,b.shapes);assert_eq!(a.tip,b.tip);
+    let good=RoundInertia{x_m:0.39,mass_kg:0.02,rotary_kg_m2:1e-6};
+    for bad in [RoundInertia{x_m:0.5,..good},RoundInertia{mass_kg:-1.,..good},
+        RoundInertia{rotary_kg_m2:f64::NAN,..good},RoundInertia{mass_kg:0.,rotary_kg_m2:0.,..good}] {
+        assert!(RoundBeamModes::with_inertias(&shaft(),s,&[bad]).is_err());
+    }
+    assert!(RoundBeamModes::with_inertias(&shaft(),s,&[good;9]).is_err());
+    assert!(b.slope(f64::NAN).is_err());
+}

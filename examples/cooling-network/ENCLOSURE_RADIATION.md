@@ -184,9 +184,8 @@ cargo test -p fs-cli --bin frankensim uq_command::model::radiation
 The original sixteen enclosure forward/UQ regressions remain. Former missing-
 adjoint checks now exercise the still-unsupported adaptive derivative policy.
 Thirteen additional derivative/consumer regressions are described in
-ENCLOSURE_ADJOINTS.md. These Rust tests have NOT been executed in the authoring
-environment, which lacks Rust and network access for installing it. Compilation
-and actual CLI behavior remain unverified.
+ENCLOSURE_ADJOINTS.md. These Rust tests were executed natively on
+2026-09-25 and pass.
 
 Independent Python P1 calculations use direct endpoint equations with analytic
 two-plate radiation and air elimination, and a separate nested radiosity/solid
@@ -203,3 +202,5 @@ Freezing old-temperature radiation changes the peak by 0.10510 K. Refining from
 315.634980 K, illustrating why a successful algebraic solve is not a timestep
 error bound. These are independent numerical references, NOT executions of
 FrankenSim, runtime speedups, continuum certificates or physical validation.
+FrankenSim itself (measured 2026-09-25, release build, after 05db922bf made the transient capacitance row-sum lumped; the reference above uses the consistent P1 mass, so the two differ on this 12-tet mesh) samples 315.2480936 K at 40 seconds, with 34.9980786 J stored and
+65.0019214 J exported by air.

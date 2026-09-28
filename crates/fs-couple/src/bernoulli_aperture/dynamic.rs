@@ -14,6 +14,8 @@
 
 /// Hereditary bending and accepted material history of the retained plate.
 pub mod relaxation;
+/// Work-conjugate physical force footprints on the retained source plate.
+pub mod force;
 use relaxation::{ApertureRelaxation, MemoryTrial};
 
 use super::{BernoulliAperture, plate::{PlateApertureReduction, closure::{PlateClosure, PlateClosureSpec}}};
@@ -102,6 +104,10 @@ pub struct ApertureFrame {
     /// Differential-pressure work on this junction [J]. This excludes any
     /// storage/loss in a downstream bore or an externally driven plate.
     pub pressure_work_j: f64,
+    /// Work supplied by a separately prescribed mechanical force [J], F v_mid dt.
+    /// Positive force increases the opening coordinate. This is not pressure work,
+    /// jet loss, contact loss, or a reset of the rest geometry/material history.
+    pub mechanical_work_j: f64,
     /// Material arm storage [J], already included in stored_energy_j.
     pub relaxation_energy_j: f64,
     /// Material loss in this step [J], already included in dissipated_energy_j.
@@ -112,7 +118,7 @@ impl ApertureFrame {
     /// Local energy-balance residual [J]; numerical diagnostic, not a proof.
     #[must_use]
     pub fn balance_residual_j(&self) -> f64 {
-        self.storage_change_j + self.dissipated_energy_j - self.pressure_work_j
+        self.storage_change_j + self.dissipated_energy_j - self.pressure_work_j - self.mechanical_work_j
     }
 }
 
@@ -343,7 +349,23 @@ impl DynamicAperture {
     /// Budget, invalid input, numerical solve or nonfinite observation. Every
     /// failure leaves the old state and accepted-step count unchanged.
     pub fn step(&mut self, drive: ApertureDrive) -> Result<ApertureFrame, AcousticRealizeError> {
-        let trial = self.preview_step(drive)?;
+        self.step_with_force(drive, 0.0)
+    }
+
+    /// Advance with an independently prescribed generalized force [N], conjugate
+    /// to the opening coordinate [m]. Positive force opens; zero releases the
+    /// actuator without resetting motion, contact or material history. A physical
+    /// plate footprint is projected by `PlateApertureReduction::force_port`.
+    /// The force enters the SAME implicit momentum/pressure/contact solve and its
+    /// work remains separate from fluid supplies. It is not a lip/contact law.
+    ///
+    /// # Errors
+    /// Nonfinite force or the same physical/budget refusal as [`Self::step`].
+    /// A failed sample leaves every accepted state unchanged.
+    pub fn step_with_force(&mut self, drive: ApertureDrive, force_n: f64)
+        -> Result<ApertureFrame, AcousticRealizeError>
+    {
+        let trial = self.preview_step_with_force(drive, force_n)?;
         let frame = trial.frame;
         self.accept_frame(trial);
         Ok(frame)
@@ -352,6 +374,15 @@ impl DynamicAperture {
     // Sibling coupled runtimes may validate the other participant before
     // publication. Neither preview nor a failed outer observation changes state.
     pub(super) fn preview_step(&self, drive: ApertureDrive) -> Result<ApertureTrial, AcousticRealizeError> {
+        self.preview_step_with_force(drive, 0.0)
+    }
+
+    pub(super) fn preview_step_with_force(&self, drive: ApertureDrive, force_n: f64)
+        -> Result<ApertureTrial, AcousticRealizeError>
+    {
+        if !force_n.is_finite() {
+            return Err(invalid("aperture mechanical force must be finite newtons"));
+        }
         if self.accepted_steps >= self.spec.max_steps {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture step budget exhausted" });
         }
@@ -362,18 +393,22 @@ impl DynamicAperture {
         }
         let old = self.state;
         let dt = self.spec.time_step_s;
-        let material_force = |opening| {
-            self.relaxation.as_ref().map_or(Ok(0.0), |m|m.restoring_force(
+        let material_force = |opening| -> Result<f64, AcousticRealizeError> {
+            let restoring = self.relaxation.as_ref().map_or(Ok(0.0), |m|m.restoring_force(
                 old.opening_m-self.spec.aperture.rest_opening_m,
-                opening-self.spec.aperture.rest_opening_m,dt))
+                opening-self.spec.aperture.rest_opening_m,dt))?;
+            // A prescribed force is the opposite of a restoring force. This
+            // uses the existing candidate-dependent momentum residual; pressure,
+            // contact and material history are not stepped or corrected later.
+            Ok(if force_n == 0.0 { restoring } else { restoring - force_n })
         };
         let has_memory=self.relaxation.as_ref().is_some_and(|m|!m.branches().is_empty());
-        let (outgoing, opening, velocity) = if self.closure.is_some() || has_memory {
+        let (outgoing, opening, velocity) = if self.closure.is_some() || has_memory || force_n != 0.0 {
             crate::reed_bore::step_profiled_aperture(self.reed,self.spec.density_kg_m3,
                 self.spec.impedance_pa_s_m3,drive.incoming_pressure_pa,drive.upstream_pressure_pa,
                 old.opening_m,old.opening_velocity_m_s,dt,drive.body_flow_m3_s,&self.lay,
                 |opening| self.flow_opening(opening),
-                if has_memory {Some(&material_force)} else {None})?
+                if has_memory || force_n != 0.0 {Some(&material_force)} else {None})?
         } else {
             crate::reed_bore::step_massive_reed(
                 self.reed, self.spec.density_kg_m3, self.spec.impedance_pa_s_m3,
@@ -423,12 +458,13 @@ impl DynamicAperture {
             storage_change_j: energy - self.stored_energy_j(),
             dissipated_energy_j: dt * (dp * jet + damping * vm * vm + contact.dissipated_power) + relaxation_loss_j,
             pressure_work_j: dt * dp * (wave - drive.body_flow_m3_s),
+            mechanical_work_j: if force_n == 0.0 { 0.0 } else { dt * force_n * vm },
             relaxation_energy_j, relaxation_loss_j,
         };
         if ![frame.time_s, frame.bore_pressure_pa, frame.jet_flow_m3_s,
             frame.swept_flow_m3_s, frame.bore_flow_m3_s, frame.flow_residual_m3_s,
             frame.stored_energy_j, frame.storage_change_j, frame.dissipated_energy_j,
-            frame.pressure_work_j, frame.balance_residual_j()].iter().all(|v| v.is_finite())
+            frame.pressure_work_j, frame.mechanical_work_j, frame.balance_residual_j()].iter().all(|v| v.is_finite())
         {
             return Err(AcousticRealizeError::Reed { what: "dynamic aperture observation left the finite set" });
         }

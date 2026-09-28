@@ -2,7 +2,7 @@
 name = "fs-asbuilt"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "As-built ingestion: reality as another chart (addendum Proposal 11). Registers finite scan data to the design by a closed-form rigid fit, retains global fit RMS for advisory screens without calling it transform uncertainty, applies the R8 signal-vs-noise gate, and emits an estimated as-built candidate pending authenticated calibration authority."

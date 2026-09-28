@@ -2,7 +2,7 @@
 name = "fs-dwr"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Dual-weighted-residual goal-oriented adaptivity: enriched-adjoint DWR estimates, Doerfler marking, octree h-refinement loops, anisotropic metric synthesis, wavelet tile thresholding, h-vs-p decision signals."

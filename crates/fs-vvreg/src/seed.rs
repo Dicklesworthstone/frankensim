@@ -21,7 +21,7 @@ const AUTHORED_V1: Edition = Edition::Exact {
 
 /// License for authored spec text (part of this repository).
 const REPO_LICENSE: LicenseState = LicenseState::Spdx {
-    id: "MIT OR Apache-2.0",
+    id: "LicenseRef-FrankenSim-MIT-with-OpenAI-Anthropic-Rider",
 };
 
 const fn tol(atol: f64, rtol: f64) -> AcceptanceEnvelope {

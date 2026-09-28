@@ -63,7 +63,7 @@ fn adaptive_power_design_returns_actual_scaled_watts_and_complete_passing_trajec
     let d=result.get("transient_power_design").unwrap();
     assert!(result.get("transient_fan_speed_design").is_none());
     let multiplier=d.f64_field("selected_power_multiplier").unwrap();
-    close(multiplier,0.7183804512023926,2e-4);
+    close(multiplier,0.7656970024108887,2e-4);
     assert!(d.f64_field("sampled_peak_objective_k").unwrap()<=315.0);
     assert!(315.0-d.f64_field("sampled_peak_objective_k").unwrap()<=1e-5);
     assert!(d.path(&["failed_upper","sampled_peak_objective_k"]).unwrap().as_f64().unwrap()>315.0);

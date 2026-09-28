@@ -366,6 +366,32 @@ fn valid_inventory_path(group: &str, relative: &str) -> bool {
     }
 }
 
+/// Index and HEAD paths of one inventory group, or `None` outside a worktree.
+///
+/// The wildmatch lets `*` cross `/`, so `crates/fs-*/tests/*.rs` also matches
+/// `crates/fs-x/src/m/tests/y.rs`, a path [`valid_inventory_path`] forbids the
+/// recorded list to name. Both git sides are held to the same group shape, or
+/// HEAD-subset-of-recorded is unsatisfiable.
+fn git_group_paths(
+    root: &Path,
+    group: &str,
+    pathspec: &str,
+) -> Result<Option<(Vec<String>, Vec<String>)>, String> {
+    let (Some(index), Some(head)) = (
+        git_tracked_files(root, pathspec)?,
+        git_head_files(root, pathspec)?,
+    ) else {
+        return Ok(None);
+    };
+    let shaped = |paths: Vec<String>| -> Vec<String> {
+        paths
+            .into_iter()
+            .filter(|path| valid_inventory_path(group, path))
+            .collect()
+    };
+    Ok(Some((shaped(index), shaped(head))))
+}
+
 fn inventory_paths(
     root: &Path,
     object: &BTreeMap<String, JsonValue>,
@@ -472,10 +498,7 @@ impl TrackedInventory {
         // which exists nowhere. Both survive other agents staging whatever they
         // like.
         for (group, pathspec, recorded) in groups {
-            let (Some(index_paths), Some(head_paths)) = (
-                git_tracked_files(root, pathspec)?,
-                git_head_files(root, pathspec)?,
-            ) else {
+            let Some((index_paths, head_paths)) = git_group_paths(root, group, pathspec)? else {
                 git_index_verified = false;
                 continue;
             };
@@ -1351,10 +1374,7 @@ mod containment_tests {
             ("contracts", "crates/fs-*/CONTRACT.md"),
             ("integration_tests", "crates/fs-*/tests/*.rs"),
         ] {
-            let (Ok(Some(index)), Ok(Some(head))) = (
-                git_tracked_files(root, pathspec),
-                git_head_files(root, pathspec),
-            ) else {
+            let Ok(Some((index, head))) = git_group_paths(root, group, pathspec) else {
                 continue;
             };
             let recorded = match TrackedInventory::read(root) {

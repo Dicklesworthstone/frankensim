@@ -49,7 +49,7 @@ fn g3_reference_families_use_all_solver_policies_without_load_cancellation(){
     let mut s=study(&tree(1));let ls=laws();let f=forces(s.operator().elasticity(),&ls);let rho=vec![0.5;s.cells()];
     let mut p=|_|ControlFlow::Continue(());let mut c=SolveControl::new(SolveBudget::default(),&mut p);
     let accepted=s.evaluate(&rho,&loads(&f,&ls),&mut c).unwrap();let scales=s.operator().scales().to_vec();
-    let coarse=build(&tree(0),false);let mut reference=None;
+    let coarse=build(&tree(0),false);let mut reference: Option<f64>=None;
     for policy in [GoalPreconditioner3::Identity,GoalPreconditioner3::Jacobi{max_contributions:100_000_000},
         GoalPreconditioner3::TwoLevel{budget:Default::default(),max_diagonal_contributions:100_000_000},GoalPreconditioner3::Multilevel{options:Default::default()}]{
         let extra=if matches!(policy,GoalPreconditioner3::Multilevel{..}){vec![&coarse]}else{Vec::new()};
