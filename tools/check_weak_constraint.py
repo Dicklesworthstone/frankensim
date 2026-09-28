@@ -71,9 +71,9 @@ def main() -> None:
         manifest = prepare(root, Path(folder))
         for profile in ([], ["--release"]):
             base = ["cargo", "+stable", "test", "--offline", "--manifest-path", str(manifest), "-p", "fs-ascent", *profile]
-            subprocess.run([*base, "--lib", "transient::variational::"], check=True)
-            subprocess.run([*base, "--example", "weak_constraint_heat"], check=True)
-        subprocess.run(["cargo", "+stable", "run", "--offline", "--release", "--manifest-path", str(manifest), "-p", "fs-ascent", "--example", "weak_constraint_heat"], check=True)
+            subprocess.run([*base, "--lib", "transient::variational::"], check=True, cwd=manifest.parent)
+            subprocess.run([*base, "--example", "weak_constraint_heat"], check=True, cwd=manifest.parent)
+        subprocess.run(["cargo", "+stable", "run", "--offline", "--release", "--manifest-path", str(manifest), "-p", "fs-ascent", "--example", "weak_constraint_heat"], check=True, cwd=manifest.parent)
 
 
 if __name__ == "__main__":
