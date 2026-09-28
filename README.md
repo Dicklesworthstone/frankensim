@@ -389,7 +389,9 @@ checked between bounded iterations.
 free-boundary 2-D plane-strain elasticity study through the same verb: a
 bilinear level set on a uniform grid, CutFEM on the evolving level set,
 topological-derivative hole nucleation, and an augmented-Lagrangian area
-multiplier. The `bracket-*` variants add a projected hard-area mode, sampled
+multiplier with a scheduled area projection that reaches the target by about
+step 12 and holds it. At mesh level 5 the 32-step bracket ends 21.7% stiffer
+than its first feasible design (61.36 to 48.07 J, same 0.45 area). The `bracket-*` variants add a projected hard-area mode, sampled
 von Mises limits, protected regions and independent load families. Each run
 retains iterates, the final level set, an HTML/JSON report and a structural
 package, and resumes from accepted state. The report states whether the area

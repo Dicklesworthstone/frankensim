@@ -21,7 +21,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 fn source(dir: &Path) -> PathBuf {
     let path = dir.join("study.fsim");
-    fs::write(&path, FIXTURE.replace(":mesh-level 4", ":mesh-level 2")
+    fs::write(&path, FIXTURE.replace(":mesh-level 5", ":mesh-level 2")
         .replace(":max-iterations 32", ":max-iterations 3")
         .replace(":steps 32", ":steps 3")
         .replace(":move-cells 0.35", ":move-cells 0.05")

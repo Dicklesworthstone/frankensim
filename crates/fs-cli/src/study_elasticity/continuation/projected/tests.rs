@@ -5,7 +5,7 @@ const ORIGINAL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../
 const POLICY: &str = "    :constraint-mode projected-stress\n    :area-tolerance-m2 0.0001\n    :max-projection-shift 2.0\n    :max-area-evaluations 64\n    :max-candidates 16\n    :contraction 0.5\n    :min-relative-improvement 0.00000001\n    :cg-poll-iters 1\n    :sampled-stress-limit-pa 1000000000000.0\n    :stress-tolerance-pa 0.0)";
 
 fn source() -> String {
-    ORIGINAL.replace(":mesh-level 4", ":mesh-level 3")
+    ORIGINAL.replace(":mesh-level 5", ":mesh-level 3")
         .replace(":youngs-modulus-pa 70000000000.0", ":youngs-modulus-pa 2.0")
         .replace(":load-traction-pa 1000000.0", ":load-traction-pa 1.0")
         .replace(":volume-fraction 0.45", ":volume-fraction 0.75")

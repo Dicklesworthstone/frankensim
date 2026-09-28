@@ -4,7 +4,7 @@ const FIXTURE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
     "/../../examples/marquee/bracket-2d.fsim"));
 
 fn spec() -> ElasticitySpec {
-    parse(&FIXTURE.replace(":mesh-level 4", ":mesh-level 3")
+    parse(&FIXTURE.replace(":mesh-level 5", ":mesh-level 3")
         .replace(":max-iterations 32", ":max-iterations 3")
         .replace(":steps 32", ":steps 3")
         .replace(":move-cells 0.35", ":move-cells 0.05")
