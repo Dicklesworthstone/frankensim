@@ -73,6 +73,7 @@ pub struct Instrument {
     creep:Vec<relaxation::Prepared>,
     // Actual per-site areas: unison allocation times longitudinal quadrature.
     contact_areas:Vec<f64>,
+    source_rate_n_s_m_p:Vec<f64>,
     contact_solver:Option<contact_solver::Prepared>,
     spatial_dampers:Option<dampers::Prepared>,
     radiation:Option<radiation::Prepared>,
@@ -200,6 +201,7 @@ impl Instrument {
         Ok(Self {saved_q:bank.q.clone(),saved_v:bank.v.clone(),saved_hammers:hammers.clone(),
             saved_contacts:contacts.clone(),hammer_next:hammers.clone(),hammer_free:vec![0.0;courses.len()],
             jack_force:vec![0.0;courses.len()],rest_force:vec![0.0;courses.len()],
+            source_rate_n_s_m_p:vec![0.0;nc],
             bank,courses,laws,hammers,contacts,hammer_models,creep,contact_areas,contact_solver,spatial_dampers:None,radiation:None,output_rate:rate,substeps,sustain:0.0,
             sostenuto:false,una_corda:false,last_damped_midi:88,damper_drag_ns_m:0.4,
             accounting:Accounting::default(),contact_h,force:vec![0.0;nc],gap:vec![0.0;nc],
@@ -207,6 +209,25 @@ impl Instrument {
     }
 
     pub fn sample_rate(&self)->u32{self.output_rate}
+    /// Admit the published per-string R_H only with its conservative K_H law.
+    /// A finite footprint distributes each string's coefficient over its sites.
+    pub fn configure_source_hammer_dissipation(&mut self, per_course:&[f64])->Result<(),String>{
+        if per_course.len()!=self.courses.len()
+            || per_course.iter().any(|r|!r.is_finite()||*r<=0.0)
+            || self.accounting.input_work_j!=0.0
+            || self.hammers.iter().any(|h|h.active||h.held)
+            || self.laws.iter().any(|l|l.crush_fraction!=0.0||l.q!=l.p)
+            || self.creep.iter().any(|c|c.compliance()!=0.0)
+            || self.source_rate_n_s_m_p.iter().any(|r|*r!=0.0) {
+            return Err("source hammer dissipation requires unplayed conservative K_H cards and no Prony memory".into());
+        }
+        for (i,&si) in self.bank.contact_strings.iter().enumerate(){
+            let ci=self.bank.strings[si].course;let c=self.courses[ci];
+            self.source_rate_n_s_m_p[i]=per_course[ci]
+                *self.contact_areas[i]*c.unison as f64/c.felt_area_m2;
+        }
+        Ok(())
+    }
     /// Attach before any excitation. Rows must already be in this bank's
     /// complete mass-loaded basis. No state-reset/replacement while playing.
     pub fn configure_radiation(&mut self,model:&radiation::Model)->Result<(),String>{
@@ -401,7 +422,12 @@ impl Instrument {
                 let volume=self.contact_areas[i]*c.felt_thickness_m;
                 let delta=volume*(felt::stored(&self.laws[ci],end_elastic/c.felt_thickness_m,&state)
                     -felt::stored(&self.laws[ci],start_elastic/c.felt_thickness_m,&old.state));
-                felt_loss+=self.force[i]*(end_elastic-start_elastic)-delta;
+                let contact_loss=self.force[i]*(end_elastic-start_elastic)-delta;
+                if self.source_rate_n_s_m_p[i]>0.0 {
+                    if contact_loss < -1e-12 { return Err(Error::Energy{defect_j:contact_loss}); }
+                    relaxation_loss+=contact_loss;
+                }
+                felt_loss+=contact_loss;
                 self.contacts[i].state=state;
             }
             self.contacts[i].memory=memory;
@@ -510,6 +536,30 @@ mod tests {
         assert!(a.accounting.felt_relaxation_loss_j>0.0);
         assert!(a.accounting.felt_loss_j>=a.accounting.felt_relaxation_loss_j);
         let balance=a.accounting.input_work_j-a.accounting.dissipated_j()-a.energy_j();
+        assert!(balance.abs()<1e-7,"{balance:e}");
+    }
+    #[test]
+    fn published_a4_rate_contact_closes_work_on_three_strings(){
+        let c=super::super::steinway_scale::courses().unwrap()[48];
+        assert_eq!(c.midi,69);assert_eq!(c.unison,3);
+        let material=super::super::steinway_scale::hammer_material_rt0425_damped(&c).unwrap();
+        let rate=super::super::steinway_scale::hammer_relaxation_rt0425(69).unwrap();
+        let mut p=Instrument::new_with_contact_geometry(vec![c],
+            &super::super::board::demonstration(),48_000,4,12,true,vec![material],
+            Some(ShankGeometry::published()),None).unwrap();
+        p.configure_source_hammer_dissipation(&[rate]).unwrap();
+        assert!(p.configure_source_hammer_dissipation(&[rate]).is_err());
+        for r in &p.source_rate_n_s_m_p {assert!((*r/rate-1.0).abs()<1e-12);}
+        p.note_on(69,2.48).unwrap();
+        let mut contact_ticks=0;
+        for _ in 0..2400 {
+            p.step().unwrap();
+            if p.contacts.iter().any(|c|c.force>1e-5) {contact_ticks+=1;}
+        }
+        eprintln!("A4 source R_H contact frames {contact_ticks}");
+        assert!(contact_ticks>0 && contact_ticks<2400,"contact ticks {contact_ticks}");
+        assert!(p.accounting.felt_relaxation_loss_j>0.0);
+        let balance=p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j();
         assert!(balance.abs()<1e-7,"{balance:e}");
     }
     #[test]

@@ -21,10 +21,14 @@ voice stealing, panning law, copied mono signal or decorrelation effect is used.
 Coincident positions deliberately produce identical channels; swapping the
 positions swaps the observations without changing the physical performance.
 
-Both channels retain the existing 2 Pa PCM full-scale. No independent channel
-normalization is performed. The reported peak is across both channels, and
-clips count scalar channel samples. Duration, score event indices, sample rate
-and block-error progress remain frame counts, regardless of channel count.
+Both channels use the same PCM full-scale pressure, defaulting to 2 Pa. Set
+`--pcm-full-scale-pa` above the reported pressure peak when the default range
+is too small; this changes only the PCM conversion, not the physical pressure
+or microphone position. An over-range render refuses before writing a clipped
+WAV. No independent channel normalization is performed. The reported peak is
+across both channels, and clips count scalar channel samples. Duration, score
+event indices, sample rate and block-error progress remain frame counts,
+regardless of channel count.
 Input scale, geometry, hammer cards, damper cards, MIDI/CSV controls, tuning and
 mechanical limits are unchanged. Stereo requires a geometric pressure render;
 `--diagnostic-volume` is not silently promoted to physical spatial sound.
