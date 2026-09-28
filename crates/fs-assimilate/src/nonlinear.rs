@@ -5,6 +5,10 @@
 //! withhold publication when the standardized innovation exceeds a declared
 //! validity gate. The actual covariance update remains owned by `assimilate`.
 
+/// Ensemble estimation for nonlinear models without dense state covariance.
+#[cfg(feature = "ensemble")]
+pub mod ensemble;
+
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 

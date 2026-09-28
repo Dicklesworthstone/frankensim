@@ -234,8 +234,8 @@ impl OperatorGeneralizedAlpha {
     /// Pull back the production structural generalized-alpha step.
     ///
     /// The supplied adjoint preconditioner suits the TRANSPOSED effective
-    /// matrix; no symmetry is assumed. The primal uses the existing Newton
-    /// solver's identity inner preconditioner. All three endpoint seeds matter
+    /// matrix; no symmetry is assumed. The primal uses the model's forward
+    /// preconditioner hook (identity by default). All three endpoint seeds matter
     /// when chaining a trajectory. If initial acceleration was computed from
     /// q/v/parameters, chain its cotangent through that consistency solve;
     /// direct objective and forcing-model terms likewise belong to the caller.

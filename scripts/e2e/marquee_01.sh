@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Actual study/ledger/report/package workflow (q61wp.20): the scalar thermal
 # study, then the free-boundary 2-D elasticity study (plain and projected-area).
-# Elasticity convergence acceptance remains open under q61wp.16 / q61wp.16.1.
+# The plain elasticity study must end on its material-area target (q61wp.16.1).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMMAND="${1:---run}"
@@ -128,9 +128,16 @@ assert ereport['status']==epackage['status']=='ok'
 assert epackage['checker']=='pass' and epackage['checker_authority']=='structural-integrity-only'
 esummary=json.loads((root/ereport['report_json']).read_text())
 assert esummary['iterations_completed']==32 and esummary['final_compliance_j']>0
-# Plain-mode area convergence is NOT asserted: q61wp.16.1 measured that the
-# 32-step endpoint sits inside the multiplier transient. Only its disclosure is.
-assert isinstance(esummary['volume_constraint_satisfied'],bool)
+# The scheduled area projection (q61wp.16.1) must land the canonical bracket
+# on its 0.45 target; before it, the 32-step endpoint fell inside a swing.
+assert esummary['volume_constraint_satisfied'] is True, esummary
+assert abs(esummary['final_material_area_m2']-0.45) <= 0.001, esummary
+# ...and it must actually optimize at that area: the final design is at least
+# 15% stiffer than the first feasible iterate (measured -21.7% at level 5).
+import re
+rows=re.findall(r'<tr><td>(\d+)</td><td>([^<]+)</td><td>([^<]+)</td>',(root/ereport['report_html']).read_text())
+first=next(float(c) for _,c,v in rows if abs(float(v)-0.45)<=0.0045)
+assert esummary['final_compliance_j'] <= 0.85*first, (first, esummary['final_compliance_j'])
 assert (root/epackage['package']).stat().st_size>0
 for name,code in [('elastic-units','study-objective-dimension-mismatch'),('elastic-area','study-volume-fraction-out-of-bounds'),('elastic-band','cli-study-elasticity-load')]:
     assert code in (root/(name+'.stderr')).read_text()
@@ -141,7 +148,7 @@ receipt={'schema':'frankensim.ci.thermal-study-e2e.v1',
          'checks':['real-study','retained-report-svg','package-checker-export','budget-partial','resume-same-trace','wrong-units','wrong-load','wrong-area',
                    'elasticity-study','elasticity-package-checker-export','elasticity-budget-partial','elasticity-resume-same-trace','projected-area-study',
                    'elasticity-wrong-units','elasticity-wrong-area','elasticity-asymmetric-band'],
-         'no_claim':'Scalar normalized thermal radius study and the free-boundary 2-D elasticity study (plain and projected-area). Package export invokes the structural checker. Plain-mode area convergence is disclosed, not asserted (q61wp.16.1). No physical validation or guaranteed PDE bound.'}
+         'no_claim':'Scalar normalized thermal radius study and the free-boundary 2-D elasticity study (plain and projected-area). Package export invokes the structural checker. The plain elasticity study is asserted to end on its area target (q61wp.16.1). No physical validation or guaranteed PDE bound.'}
 (root/'marquee-e2e-summary.json').write_text(json.dumps(receipt,indent=2)+'\n')
 print(root/'marquee-e2e-summary.json')
 PY

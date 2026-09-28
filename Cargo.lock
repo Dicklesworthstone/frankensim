@@ -1023,16 +1023,21 @@ dependencies = [
  "fs-ad",
  "fs-adjoint",
  "fs-alloc",
+ "fs-blake3",
  "fs-casebook",
+ "fs-conduction",
  "fs-couple",
  "fs-dcontact",
  "fs-eproc",
  "fs-exec",
  "fs-feec",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-obs",
  "fs-opt",
+ "fs-plate",
+ "fs-plate-transient",
  "fs-qty",
  "fs-rand",
  "fs-solver",
@@ -2159,8 +2164,21 @@ dependencies = [
  "fs-matdb",
  "fs-material",
  "fs-modal",
+ "fs-plate-transient",
  "fs-qty",
+ "fs-solver",
  "fs-sparse",
+ "fs-time",
+]
+
+[[package]]
+name = "fs-plate-transient"
+version = "0.0.1"
+dependencies = [
+ "fs-plate",
+ "fs-solver",
+ "fs-sparse",
+ "fs-time",
 ]
 
 [[package]]
@@ -2706,6 +2724,7 @@ version = "0.0.1"
 dependencies = [
  "fs-adjoint",
  "fs-cutfem",
+ "fs-dwr",
  "fs-ivl",
  "fs-material",
  "fs-obs",

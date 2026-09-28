@@ -73,6 +73,9 @@ pub(super) fn parse(fields: &[Node]) -> Result<Option<LoadFamily>> {
 }
 
 impl LoadFamily {
+    pub(super) fn dwr_case_count(&self) -> Option<usize> {
+        (self.aggregate == RobustAggregate::WeightedSum).then_some(self.additional.len() + 1)
+    }
     pub(super) fn html(&self, history: &History) -> String {
         let admission = if self.restoration_reduction.is_some() {
             "Every case, including zero-weight cases, contributes to measured worst stress excess during restoration and must meet the unweighted stress limit before compliance descent."
@@ -103,7 +106,7 @@ impl LoadFamily {
         let _ = writeln!(out, "      ))");
     }
 
-    fn cases(&self, spec: &ElasticitySpec) -> Result<Vec<RobustLoadCase>> {
+    pub(super) fn cases(&self, spec: &ElasticitySpec) -> Result<Vec<RobustLoadCase>> {
         let primary = fixture(spec);
         let mut cases = vec![RobustLoadCase::new(DesignBoxEdge::Right,
             0.5 - primary.band, 0.5 + primary.band, [0.0, -primary.load], 1.0)
@@ -197,6 +200,8 @@ pub(super) struct History {
     checkpoint: Vec<u8>,
     solves: usize,
     recovery_solves: usize,
+    // Separates a finished optimizer from an interrupted final assessment.
+    optimizer_terminal: Option<&'static str>,
 }
 
 impl History {
@@ -206,14 +211,16 @@ impl History {
     }
 
     pub(super) fn json_field(&self, family: &LoadFamily) -> String {
+        let terminal = self.optimizer_terminal.map_or_else(String::new,
+            |status| format!(",\"optimizer_terminal\":{}", quoted(status)));
         format!(concat!(",\"load_family\":{{\"schema\":\"independent-loads-v1\",",
             "\"startup_and_recovery\":\"synchronous\",\"aggregate\":{},\"cases\":[{}],\"baseline_cases\":{},\"accepted_cases\":[{}],",
             "\"solves_started\":{},\"max_solves\":{},\"recovery_solves_used\":{},",
-            "\"max_recovery_solves\":{},\"checkpoint_hex\":{}}}"),
+            "\"max_recovery_solves\":{},\"checkpoint_hex\":{}{}}}"),
             quoted(aggregate_name(family.aggregate)), cases_json(&self.cases), states_json(&self.baseline),
             self.accepted.iter().map(|row| states_json(row)).collect::<Vec<_>>().join(","),
             self.solves, family.max_solves, self.recovery_solves, family.max_recovery_solves,
-            quoted(&hex(&self.checkpoint)))
+            quoted(&hex(&self.checkpoint)), terminal)
     }
 
     pub(super) fn read(value: &JsonValue, baseline: &SampledStressEvaluation,
@@ -270,7 +277,15 @@ impl History {
             || recovery_solves > family.max_recovery_solves
         { return Err(malformed("invalid retained independent-solve accounting")); }
         let checkpoint = unhex(value.str_field("checkpoint_hex").ok_or_else(|| malformed("missing multi-load checkpoint"))?)?;
-        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves }))
+        let optimizer_terminal = match value.get("optimizer_terminal") {
+            None => None,
+            Some(value) => match value.as_str() {
+                Some("completed") => Some("completed"),
+                Some("no-feasible-descent") => Some("no-feasible-descent"),
+                _ => return Err(malformed("invalid assessed load-family optimizer terminal")),
+            },
+        };
+        Ok(Some(Self { cases, baseline, accepted, checkpoint, solves, recovery_solves, optimizer_terminal }))
     }
 }
 

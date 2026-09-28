@@ -9,6 +9,8 @@ use fs_exec::Cx;
 use fs_solver::goal::feedback::{FeedbackResidualLimits, FeedbackResidualReport};
 use fs_solver::goal::inverse::spectral::SpectralInverseLimits;
 
+pub(super) mod publication;
+
 use super::{
     MaximumEvidence, PropagatedTerm, SolveRefusal, conduction_error, json_string, number,
     optional_number,

@@ -191,6 +191,24 @@ so converged and stalled are distinguishable outcomes.
   invalid observations without replacing the accepted sample or refunding
   attempted work. This is fixed-mesh numerical recovery; spatial convergence,
   physical damping identification and experimental validation are separate.
+- `examples/enthalpy_calibration.rs` connects the spatial enthalpy solver's
+  discrete adjoint to the existing `SqpState`. Two bounded heater-density
+  pulses act through a localized P1 source in a fixed tetrahedral slab.
+  Twelve cross-section-mean temperature observations at four accepted times
+  contribute to one reverse sweep through 24 stored endpoint linearizations.
+  Each reverse step adds observation seeds to the carried enthalpy derivative,
+  uses the actual transposed spatial tangent, and contracts the consistent
+  nodal source pullback with the heater profile. SQP owns bounds, BFGS,
+  line search, cumulative evaluation limits and the local KKT stop.
+  Geometry, reference mass, phase chart, conductivity and clock stay fixed;
+  chart/conductivity corners refuse through the owning conduction API.
+  `tests/enthalpy_calibration.rs` checks complete history gradients against
+  forward-only differences and recovers both synthetic pulse amplitudes while
+  the final field retains solid, latent and liquid regions. The example uses
+  same-model synthetic observations and a small full-storage trajectory;
+  it makes no experimental-validation, general-identifiability, global-optimum
+  or checkpoint-scaling claim. The added conduction/material dependencies are
+  development-only consumers; the optimizer's production graph is unchanged.
 
 ## Invariants
 

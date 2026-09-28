@@ -121,17 +121,8 @@ pub(super) fn maximum_term(
     let scale_k = reference_k.map_or(nominal_k.abs(), |reference| (nominal_k - reference).abs());
     let requested_k = ALGEBRAIC_ACCURACY_FRACTION * accuracy_rel * scale_k;
     if !data.air_paths.is_empty() {
-        return coupled::maximum_evidence(
-            cx,
-            problem,
-            data.interfaces.as_ref(),
-            &data.air_paths,
-            data.linear,
-            &solved.solution.temperature,
-            &vertices,
-            memory_bytes,
-            config,
-            requested_k,
+        return coupled::publication::polish_rung(
+            cx, solved, &vertices, memory_bytes, config, requested_k,
         );
     }
     let (analysis, control_json, primal_iterations, control_summary, linear_work) = if requested_k

@@ -3,6 +3,12 @@
 
 #[path = "native_uncertainty/compliance.rs"]
 mod compliance;
+#[path = "native_uncertainty/fan_speed.rs"]
+mod fan_speed;
+#[path = "native_uncertainty/qmc.rs"]
+mod qmc;
+#[path = "native_uncertainty/copula.rs"]
+mod copula;
 #[path = "../src/json_read.rs"]
 mod json_read;
 
@@ -174,7 +180,11 @@ impl Fixture {
             panic!("reference fixture uses a declared convection reservoir")
         };
         reference_temperature.value = parameters[1];
-        let source = fs_project::print_sexpr(&project).unwrap();
+        self.solve_project(ordinal, &project)
+    }
+
+    fn solve_project(&self, ordinal: usize, project: &fs_project::ProjectSpec) -> (String, String, f64) {
+        let source = fs_project::print_sexpr(project).unwrap();
         let project_hash = fs_project::parse_sexpr(&source).unwrap().hash().to_hex();
         let project_path = self.dir.join(format!("independent-{ordinal}.fsim"));
         std::fs::write(&project_path, source).unwrap();

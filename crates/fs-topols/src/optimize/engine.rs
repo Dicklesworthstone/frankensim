@@ -260,6 +260,8 @@ impl ComplianceKernel {
         if phi.nodes().iter().any(|v| !v.is_finite()) || !audit.interface_drift_h.is_finite() {
             return Err(invalid_input("level-set evolution or redistancing audit is non-finite"));
         }
+        schedule_material_area(&mut phi, state.volume, settings);
+        load_pad_nodes += retain_cantilever_load_pad(&mut phi, self.support);
         Ok(GeometryTrial { phi, audit, events, load_pad_nodes })
     }
 }

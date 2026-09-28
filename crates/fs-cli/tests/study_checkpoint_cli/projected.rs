@@ -201,3 +201,88 @@ fn a_binding_stress_limit_changes_the_trajectory_exactly_where_the_loose_study_e
     assert_eq!(tight.str_field("status"), Some("no-feasible-descent"));
     assert!(stress(&tight).is_empty());
 }
+
+
+#[test]
+fn projected_volume_dwr_assesses_the_feasible_endpoint_and_reuses_terminal_results() {
+    // G2/G4: assess both an accepted endpoint and a feasible baseline when the
+    // bounded search accepts no update, then reuse that result.
+    const PROJECTED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/marquee/bracket-projected-volume-2d.fsim"));
+    let one = PROJECTED.replace(":steps 2", ":steps 1")
+        .replace(":max-iterations 2", ":max-iterations 1");
+    let assessed = format!(
+        "{}\n  (assessment :type elasticity-dwr :max-solves-per-attempt 2)\n)\n",
+        one.trim_end().strip_suffix(')').unwrap());
+    for (label, status, exit, count) in [
+        ("accepted", "completed", fs_cli::exit::SUCCESS, 1),
+        ("stalled", "no-feasible-descent", fs_cli::exit::REFUSED, 0),
+    ] {
+        let dir = scratch(&format!("projected-dwr-{label}"));
+        let text = if count == 0 {
+            assessed.replace(":min-relative-improvement 0.00000001",
+                ":min-relative-improvement 0.999999")
+                .replace(":max-candidates 16", ":max-candidates 2")
+        } else { assessed.clone() };
+        let input = source(&dir, &text);
+        let db = dir.join("assessed.db");
+        let result = document(&command("study").arg(&input).arg(&db).output().unwrap(), exit);
+        assert_eq!(result.str_field("status"), Some(status));
+        assert_eq!(updates(&result), if count == 0 { 0.0 } else { 1.0 });
+        let state = constraints(&result);
+        let accepted = state.get("accepted").and_then(J::as_array).unwrap();
+        assert_eq!(accepted.len(), count);
+        let final_state = accepted.last().unwrap_or_else(|| state.get("baseline").unwrap());
+        assert_eq!(state.get("area_constraint_satisfied"), Some(&J::Bool(true)));
+        assert!((final_state.f64_field("area_m2").unwrap() - state.f64_field("area_target_m2").unwrap()).abs()
+            <= state.f64_field("area_tolerance_m2").unwrap());
+        if count == 0 {
+            assert_eq!(state.get("terminal_refusals").and_then(J::as_array).unwrap().len(), 2);
+        }
+        let summary = J::parse(std::str::from_utf8(&retained(&db, &result, "report_json")).unwrap()).unwrap();
+        let design = J::parse(std::str::from_utf8(&retained(&db, &result, "design")).unwrap()).unwrap();
+        let dwr = summary.get("goal_error_assessment").unwrap();
+        assert_eq!(dwr.str_field("status"), Some("estimated"));
+        assert_eq!(summary.str_field("status"), Some(status));
+        let snapshot = dwr.str_field("snapshot").unwrap();
+        for actual in [final_state.str_field("snapshot"), summary.str_field("snapshot"), design.str_field("snapshot")] {
+            assert_eq!(actual, Some(snapshot));
+        }
+        for (assessment_key, state_key, summary_key) in [
+            ("coarse_compliance_j", "compliance_j", "final_compliance_j"),
+            ("material_area_m2", "area_m2", "final_material_area_m2"),
+        ] {
+            let actual = dwr.f64_field(assessment_key).unwrap();
+            assert_eq!(Some(actual), final_state.f64_field(state_key));
+            assert_eq!(Some(actual), summary.f64_field(summary_key));
+        }
+        assert_eq!(result.path(&["receipt", "continuation", "goal_error_assessment"]), Some(dwr));
+        assert_eq!(dwr.f64_field("coarse_level"), Some(3.0));
+        assert_eq!(dwr.f64_field("enriched_level"), Some(4.0));
+        assert!(dwr.f64_field("coarse_dofs").unwrap() > 0.0);
+        assert!(dwr.f64_field("enriched_dofs").unwrap() > dwr.f64_field("coarse_dofs").unwrap());
+        for key in ["eta_signed_j", "absolute_indicator_sum_j", "enriched_compliance_j"] {
+            assert!(dwr.f64_field(key).unwrap().is_finite());
+        }
+        let solver = dwr.get("solver").unwrap();
+        assert_eq!(solver.str_field("relative_residual_kind"), Some("recomputed-euclidean"));
+        assert_eq!(solver.f64_field("solves"), Some(2.0));
+        for key in ["coarse_iterations", "enriched_iterations"] {
+            assert!(solver.f64_field(key).unwrap() > 0.0);
+        }
+        for key in ["coarse_relative_residual", "enriched_relative_residual"] {
+            let residual = solver.f64_field(key).unwrap();
+            assert!(residual.is_finite() && (0.0..=1e-12).contains(&residual));
+        }
+        let exported = document(&command("report").arg(run_id(&result)).arg(&db)
+            .output().unwrap(), fs_cli::exit::SUCCESS);
+        assert_eq!(exported.str_field("study_status"), Some(status));
+        let html = String::from_utf8(retained(&db, &result, "report_html")).unwrap();
+        assert!(html.contains("Final compliance goal-error estimate")
+            && html.contains("not certified continuum-error bounds"));
+        let again = document(&command("study").arg("--resume").arg(run_id(&result)).arg(&db)
+            .output().unwrap(), exit);
+        assert_eq!(again, result, "terminal assessment is reused without further solves or candidates");
+        assert_eq!(retained(&db, &again, "report_json"), retained(&db, &result, "report_json"));
+    }
+}

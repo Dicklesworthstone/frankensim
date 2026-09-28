@@ -5,7 +5,11 @@ on:
     paths:
       - 'crates/fs-couple/src/iqn_ils.rs'
       - 'crates/fs-couple/src/iqn_ils/**'
+      - 'crates/fs-airflow/examples/stored_air.rs'
+      - 'crates/fs-airflow/examples/stored_air/**'
+      - 'crates/fs-conduction/src/transient/**'
       - 'crates/fs-math/src/**'
+      - 'crates/fs-blake3/src/**'
       - '.github/workflows/partitioned-coupling.yml'
   workflow_dispatch:
 permissions:
@@ -24,19 +28,64 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Compile and execute the actual coupling and deterministic-math sources
+      - name: Compile and execute the actual coupling, hashing and deterministic-math sources
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal
           rustc --version --verbose
-          # No surrogate implementations or constellation bootstrap: these
-          # production modules depend only on std and the real fs-math crate.
+          # Compile production numerical and hashing owners, not replacements.
           rustc --edition=2024 --crate-type rlib --crate-name fs_math crates/fs-math/src/lib.rs -o "$RUNNER_TEMP/libfs_math.rlib"
+          rustc --edition=2024 --crate-type rlib --crate-name fs_blake3 crates/fs-blake3/src/lib.rs -o "$RUNNER_TEMP/libfs_blake3.rlib"
           # Mount the source DIRECTORY so ordinary Rust module lookup retains
           # iqn_ils/driver.rs and iqn_ils/driver/march.rs, as the real crate does.
           printf '#[path = "%s/crates/fs-couple/src"] pub mod owner { pub mod iqn_ils; }\n' "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/coupling_tests.rs"
-          rustc --edition=2024 --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" -o "$RUNNER_TEMP/coupling-tests"
+          rustc --edition=2024 --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" --extern fs_blake3="$RUNNER_TEMP/libfs_blake3.rlib" -o "$RUNNER_TEMP/coupling-tests"
           "$RUNNER_TEMP/coupling-tests" --nocapture
-          rustc --edition=2024 -O --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" -o "$RUNNER_TEMP/coupling-tests-opt"
+          rustc --edition=2024 -O --test "$RUNNER_TEMP/coupling_tests.rs" --extern fs_math="$RUNNER_TEMP/libfs_math.rlib" --extern fs_blake3="$RUNNER_TEMP/libfs_blake3.rlib" -o "$RUNNER_TEMP/coupling-tests-opt"
           "$RUNNER_TEMP/coupling-tests-opt" --nocapture
+  stored-air-conduction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Materialize the repository's pinned dependencies
+        run: cargo run --manifest-path tools/bootstrap/Cargo.toml
+      - name: Test the real FEM solid and finite-capacity air consumer
+        if: ${{ !cancelled() }}
+        run: cargo test -p fs-airflow --example stored_air
+      - name: Execute sealed-enclosure and file-driven duty histories
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 > "$RUNNER_TEMP/stored-air.csv"
+          head -n 2 "$RUNNER_TEMP/stored-air.csv"
+          tail -n 2 "$RUNNER_TEMP/stored-air.csv"
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --duty-csv crates/fs-airflow/examples/stored_air/duty.csv > "$RUNNER_TEMP/stored-air-duty.csv"
+          tail -n 2 "$RUNNER_TEMP/stored-air-duty.csv"
+      - name: Resume the actual FEM executable from disk and compare its accepted trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --attempts 4 --checkpoint-dir "$RUNNER_TEMP/stored-air-prefix" > "$RUNNER_TEMP/prefix.csv" 2> "$RUNNER_TEMP/prefix.log"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          grep -q 'attempt budget exhausted' "$RUNNER_TEMP/prefix.log"
+          cargo run -p fs-airflow --example stored_air -- --ventilation-w-k 0 --resume "$RUNNER_TEMP/stored-air-prefix" --checkpoint-dir "$RUNNER_TEMP/stored-air-resumed" > "$RUNNER_TEMP/suffix.csv"
+          python3 - <<'PYCODE'
+          import os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          full = (root / 'stored-air.csv').read_bytes().splitlines(keepends=True)
+          prefix = (root / 'prefix.csv').read_bytes().splitlines(keepends=True)
+          suffix = (root / 'suffix.csv').read_bytes().splitlines(keepends=True)
+          assert full and prefix and suffix and full[0] == prefix[0] == suffix[0]
+          assert full == prefix + suffix[1:], 'disk restart changed the accepted FEM trajectory'
+          print('Separate-process FEM checkpoint/restart trace matches uninterrupted execution exactly')
+          PYCODE

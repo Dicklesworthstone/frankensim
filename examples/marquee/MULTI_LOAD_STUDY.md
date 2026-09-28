@@ -60,6 +60,40 @@ baseline solves; neither regions nor extra loads relax the feasibility gates.
 See `PROJECTED_STRESS.md` for those declarations and their discrete scope.
 Omitting `:load-family` keeps the original single-load path unchanged.
 
+## Assess the final weighted compliance
+
+For a `weighted-sum` family, add this top-level section beside `physics`,
+`objective` and `optimizer` in the study declaration:
+
+```lisp
+  (assessment :type elasticity-dwr :max-solves-per-attempt 4)
+```
+
+The allowance must equal **twice the complete case count**, including the
+primary scenario and zero-weight cases. The tracked two-case example therefore
+requires four solves. Each case receives an original-grid and a one-level
+enriched CutFEM solve on the same final bilinear level set, using its own
+traction. The weighted objective is assembled after those independent solves;
+weights retain their declared values. This assessment requires at least
+256 MiB of admitted memory and a mesh level no greater than five.
+
+`goal_error_assessment` reports the signed weighted DWR estimate, weighted
+absolute indicator mass, coarse/enriched objective and residual decomposition,
+with the corresponding evidence for every case. The coarse solves must
+reproduce the retained endpoint's per-case compliance, material area and exact
+geometry fingerprint before an estimate is published. The assessment targets
+the **weighted compliance**, not the sampled-stress constraint. Its signed
+estimate and indicator mass are not certified continuum-error bounds.
+
+Assessment starts only after retaining a feasible optimizer endpoint. A feasible
+baseline at `no-feasible-descent` can be assessed even when no update was accepted.
+Cancellation is checked between the bounded case assessments and before
+publication; an interrupted attempt charges wall time and leaves assessment
+pending. Resuming that endpoint retries assessment without advancing the
+optimizer or spending another recovery family. A completed assessment is reused.
+The `worst-weighted-case` aggregate is not admitted by this assessment because
+its governing case can change with refinement.
+
 ## Restore stress feasibility before optimizing compliance
 
 `bracket-stress-restoration-2d.fsim` declares a bounded repair phase for an

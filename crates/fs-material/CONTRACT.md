@@ -228,6 +228,15 @@ homogenization, the P2 milestone.
   latent plateau or mixed fractions disguised as a one-phase curve. It is not
   a heat-transfer, deformation, remeshing, free-surface, acoustic, or optical
   solver.
+  `temperature_derivative_at_specific_enthalpy` returns the admitted chart's
+  piecewise-linear dT/dh, exactly zero on a latent plateau. Interior knots use
+  the right segment; the upper endpoint uses the left. This is an explicit
+  generalized derivative for semismooth transport, not a smoothed heat capacity
+  or a classical derivative at a corner. Nonfinite/out-of-domain inputs and
+  unrepresentable positive slopes refuse. Signed-zero enthalpy endpoints resolve
+  identically in the state and derivative queries. The focused public derivative
+  tests include independent segment differences, latent plateaus, knot sides,
+  single-phase charts, domain errors and representability boundaries.
   `try_from_heat_capacity` derives that same one-phase chart from positive,
   strictly increasing source `Cp(T)` knots, taking its enthalpy reference at
   the first source temperature. Linear `Cp` segments are integrated exactly

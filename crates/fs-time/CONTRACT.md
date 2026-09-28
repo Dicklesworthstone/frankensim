@@ -54,6 +54,22 @@ where claimed below.
   γ = 1/2 + αm − αf. This is not the structural second-order formulation
   relabeled: state and rate are first-class and the residual is enforced at
   `(t_n + αf h, u_n + αf (u_{n+1}−u_n))`.
+- Both implicit problem traits accept an optional `preconditioner_apply`
+  action for their forward Newton/FGMRES solve. It receives the exact stage
+  state (and first-order stage time), named effective-operator coefficients,
+  and logical outer/inner iteration indices. Structural weights are
+  `((1−αm)/(βh²), (1−αf)γ/(βh), 1−αf)` for mass, damping and tangent;
+  first-order weights are `(αm/(γh), αf)` for mass and tangent. The default
+  remains identity. A callback must completely overwrite its output, bound
+  its own work, and reproduce its policy during checkpoint replay. Invalid
+  output fails before publishing the time step. The explicit adjoint
+  preconditioner is independent; derivatives remain those of the converged
+  physical residual, without differentiating preconditioning or iteration.
+  `tests/first_order_preconditioner.rs` and
+  `tests/structural_preconditioner.rs` cover scale-separated nonsymmetric
+  solves with one Krylov column, independent dense endpoints, exact stage
+  inputs, malformed-output/cancellation atomicity, identity parity, and
+  checkpointed parameter/initial-state gradients against dense differences.
 - `galpha::adjoint::FirstOrderVjp` and
   `OperatorFirstOrderGeneralizedAlpha::step_vjp` differentiate the converged
   first-order residual through an explicit transposed effective-system solve.
@@ -520,9 +536,9 @@ per-relation and aggregate reset-target caps.
   initial terms, all cancellation boundaries and observation/budget refusals.
 - Operator-backed generalized-alpha and IMEX remove the dense storage/API
   ceiling, but no roofline or field-scale iteration-count claim is made.
-  `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity
-  inner preconditioner; an injected nonlinear-preconditioner seam is pending
-  in the shared solver. `OperatorImex2` does accept an injected flexible
+  Both generalized-alpha formulations use model-provided flexible right
+  preconditioning when supplied, including during forward checkpoint replay.
+  `OperatorImex2` accepts an independently injected flexible
   preconditioner. Dense-vs-operator agreement is tolerance-based, not a claim
   that LU and Krylov execute identical floating-point reductions.
 - Public trajectory checkpoints are accepted-step boundaries. Although the

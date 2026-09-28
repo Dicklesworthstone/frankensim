@@ -16,9 +16,9 @@
 use crate::PlateModel;
 use fs_solver::FlexiblePreconditioner;
 use fs_sparse::Csr;
-use fs_time::galpha::SecondOrderProblem;
 use fs_time::galpha::second_order_adjoint::SecondOrderVjp;
 use fs_time::galpha::second_order_adjoint::trajectory::StructuralTrajectoryModel;
+use fs_time::galpha::{SecondOrderOperatorWeights, SecondOrderProblem};
 
 /// Applied generalized forces in the reduced `(w, wx, wy)` coordinates.
 /// Callbacks are pure at a fixed parameter point, overwrite all outputs, and
@@ -259,8 +259,9 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
 
     /// Jacobi preconditioner for the displacement-based generalized-alpha
     /// effective operator (and its transpose) at fixed step and spectral radius.
-    /// The shared primal Newton driver currently uses its own identity inner
-    /// preconditioner; pass this to the trajectory's explicit adjoint argument.
+    /// Pass this to the trajectory's explicit adjoint argument. Forward Newton
+    /// solves automatically use the same diagonal through the model hook, with
+    /// the weights supplied by the integrator at its current step size.
     pub fn effective_preconditioner<C: FnMut() -> bool>(
         &self,
         step: f64,
@@ -277,12 +278,11 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         let alpha_f = rho_inf / (rho_inf + 1.0);
         let gamma = 0.5 - alpha_m + alpha_f;
         let beta = 0.25 * (1.0 - alpha_m + alpha_f) * (1.0 - alpha_m + alpha_f);
-        let inertia = (1.0 - alpha_m) / (beta * step * step);
-        let damping = (1.0 - alpha_f) * gamma / (beta * step);
-        let stiffness = 1.0 - alpha_f;
-        let p = self.parameters;
-        let m_coefficient = p.mass_scale * (inertia + damping * p.mass_damping_per_s);
-        let k_coefficient = p.stiffness_scale * (stiffness + damping * p.stiffness_damping_s);
+        let (m_coefficient, k_coefficient) = self.effective_coefficients(SecondOrderOperatorWeights {
+            mass: (1.0 - alpha_m) / (beta * step * step),
+            damping: (1.0 - alpha_f) * gamma / (beta * step),
+            tangent: 1.0 - alpha_f,
+        });
         if !finite(&[m_coefficient, k_coefficient]) {
             return Err(PlateDynamicsError::InvalidInput(
                 "unrepresentable effective operator coefficients",
@@ -302,6 +302,14 @@ impl<'a, L: PlateLoad + ?Sized> PlateDynamics<'a, L> {
         }
         poll(cancelled)?;
         Ok(PlateJacobi { inverse })
+    }
+
+    fn effective_coefficients(&self, weights: SecondOrderOperatorWeights) -> (f64, f64) {
+        let p = self.parameters;
+        (
+            p.mass_scale * (weights.mass + weights.damping * p.mass_damping_per_s),
+            p.stiffness_scale * (weights.tangent + weights.damping * p.stiffness_damping_s),
+        )
     }
 
     fn action(&self, input: &[f64], output: &mut [f64], mass: f64, stiffness: f64) {
@@ -375,6 +383,37 @@ impl<L: PlateLoad + ?Sized> SecondOrderProblem for PlateDynamics<'_, L> {
     }
     fn tangent_apply(&self, _: &[f64], input: &[f64], output: &mut [f64]) {
         self.internal_force(input, output);
+    }
+    fn preconditioner_apply(
+        &self,
+        _: &[f64],
+        weights: SecondOrderOperatorWeights,
+        _: usize,
+        _: usize,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
+        if residual.len() != self.model.free || output.len() != self.model.free || !finite(residual) {
+            output.fill(f64::NAN);
+            return;
+        }
+        let (mass, stiffness) = self.effective_coefficients(weights);
+        if !finite(&[mass, stiffness]) {
+            output.fill(f64::NAN);
+            return;
+        }
+        for (row, (out, &value)) in output.iter_mut().zip(residual).enumerate() {
+            let diagonal = mass * self.model.m.get(row, row) + stiffness * self.model.k.get(row, row);
+            let inverse = 1.0 / diagonal;
+            if !diagonal.is_finite() || diagonal <= 0.0 || !inverse.is_finite() {
+                output.fill(f64::NAN);
+                return;
+            }
+            *out = value * inverse;
+        }
+        if !finite(output) {
+            output.fill(f64::NAN);
+        }
     }
 }
 

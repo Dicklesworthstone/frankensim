@@ -3,10 +3,8 @@
 #[allow(dead_code)] // Share the concrete spatial experiment, not the dense oracle.
 mod moving;
 
-use fs_plate::{
-    PlateModel,
-    transient::{NoPlateLoad, PlateDynamics, PlateDynamicsError, PlateLoad},
-};
+use fs_plate::PlateModel;
+use fs_plate_transient::{NoPlateLoad, PlateDynamics, PlateDynamicsError, PlateLoad};
 use fs_time::galpha::{
     GeneralizedAlpha, SecondOrderProblem, SecondOrderState, galpha_step,
     initialization::{initial_workspace_components, second_order_acceleration},
@@ -236,15 +234,15 @@ fn plate_admission_cancellation_and_failed_loading_preserve_the_accepted_state()
     let p = moving::dynamics_parameters([1.1, 0.9, 3.0, 2e-4, 0.0]);
     let budget = moving::dynamics_budget(&plate);
     for refused in [
-        fs_plate::transient::PlateDynamicsBudget {
+        fs_plate_transient::PlateDynamicsBudget {
             max_dofs: plate.free - 1,
             ..budget
         },
-        fs_plate::transient::PlateDynamicsBudget {
+        fs_plate_transient::PlateDynamicsBudget {
             max_nonzeros: budget.max_nonzeros - 1,
             ..budget
         },
-        fs_plate::transient::PlateDynamicsBudget {
+        fs_plate_transient::PlateDynamicsBudget {
             max_full_dofs: budget.max_full_dofs - 1,
             ..budget
         },
@@ -273,7 +271,7 @@ fn plate_admission_cancellation_and_failed_loading_preserve_the_accepted_state()
     assert!(matches!(
         PlateDynamics::new(
             &plate,
-            fs_plate::transient::PlateDynamicsParameters {
+            fs_plate_transient::PlateDynamicsParameters {
                 mass_scale: 0.0,
                 ..p
             },

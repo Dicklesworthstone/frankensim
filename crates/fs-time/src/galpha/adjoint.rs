@@ -219,8 +219,8 @@ impl OperatorFirstOrderGeneralizedAlpha {
     /// Pull back a production first-order generalized-alpha step.
     ///
     /// The adjoint preconditioner must approximate the transposed effective
-    /// system; it is never implicitly assumed symmetric. The primal retains
-    /// the existing Newton solver's identity inner preconditioner. Endpoint
+    /// system; it is never implicitly assumed symmetric. The primal uses
+    /// the model's forward preconditioner hook (identity by default). Endpoint
     /// state AND rate seeds are needed when chaining multiple steps. If the
     /// initial rate was computed from the initial state or model parameters,
     /// its returned cotangent must also enter that initialization's chain rule.

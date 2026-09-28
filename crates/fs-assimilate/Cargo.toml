@@ -10,6 +10,10 @@ description = "Data assimilation: checked linear-Gaussian belief updates from in
 [package.metadata.frankensim]
 layer = "L4"
 
+[features]
+# Opt-in ensemble estimation beyond the dense Gaussian state envelope.
+ensemble = []
+
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
@@ -23,3 +27,7 @@ fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "ensemble_heat"
+required-features = ["ensemble"]

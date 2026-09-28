@@ -54,9 +54,12 @@ fn fsim_coupled_budget_uses_published_feedback_and_sealed_reports_replay() {
     let first_dir = scratch();
     let (id, report_bytes, package, conduction) = execute(&first_dir);
     let control = conduction.get("solver_control").unwrap();
-    assert_eq!(control.str_field("schema"), Some("frankensim.cli.coupled-maximum-evidence.v1"));
-    assert_eq!(control.str_field("mode"), Some("assessment-only"));
-    assert_eq!(control.f64_field("primal_iterations"), Some(0.0));
+    assert_eq!(control.str_field("schema"), Some("frankensim.cli.coupled-maximum-publication.v1"));
+    assert_eq!(control.str_field("mode"), Some("physical-goal-correction"));
+    assert_eq!(control.get("correction_supported"), Some(&JsonValue::Bool(true)));
+    assert!(control.f64_field("primal_iterations").unwrap()
+        <= control.f64_field("max_primal_iterations").unwrap());
+    assert_published_cooling(&conduction);
     assert!(control.f64_field("air_paths").unwrap() >= 1.0);
     assert!(control.f64_field("ports").unwrap() >= 1.0);
     assert!(control.f64_field("response_iterations").unwrap()
@@ -89,4 +92,83 @@ fn fsim_coupled_budget_uses_published_feedback_and_sealed_reports_replay() {
     // Export remains a projection of the sealed bytes, not a fresh solve.
     command(&["--json", "report", &id, first_dir.join("run.db").to_str().unwrap()]);
     assert_eq!(report_bytes, std::fs::read(first_dir.join(format!("{id}.report.json"))).unwrap());
+}
+
+fn branch_rows(value: &JsonValue) -> &[JsonValue] {
+    value.get("branches").and_then(JsonValue::as_array)
+        .unwrap_or_else(|| std::slice::from_ref(value))
+}
+
+/// Inspect the actual retained stage, not the correction API's return value.
+/// A changed schema alone must not make an unwired or stale publisher pass.
+fn assert_published_cooling(conduction: &JsonValue) {
+    let control = conduction.get("solver_control").unwrap();
+    assert_eq!(control.get("physical_accepted"), Some(&JsonValue::Bool(true)),
+        "the heatsink fixture must reach the physical publication boundary: {control:?}");
+    let checks = control.f64_field("physical_checks").unwrap();
+    assert!(checks >= 1.0 && checks <= control.f64_field("goal_checks").unwrap() + 1.0);
+    assert!(control.f64_field("physical_rejections").unwrap() <= checks);
+    assert_eq!(control.get("physical_refusal"), Some(&JsonValue::Null));
+    assert_eq!(control.get("candidate_bound_k"), control.get("final_bound_k"));
+    let tolerance = control.f64_field("requested_tolerance_k").unwrap();
+    let meets_goal = control.f64_field("final_bound_k").is_some_and(|bound| bound <= tolerance);
+    assert_eq!(control.get("goal_met"), Some(&JsonValue::Bool(meets_goal)));
+    if control.f64_field("final_bound_k").is_some() {
+        match control.str_field("inverse_method") {
+            Some("state-contraction") => {
+                assert!(control.f64_field("feedback_gain_infinity_upper").unwrap() < 1.0);
+            }
+            Some("port-schur-dominance") => {
+                assert!(control.f64_field("schur_inverse_infinity_upper").unwrap() > 0.0);
+            }
+            other => panic!("a finite coupled bound needs its checked inverse route: {other:?}"),
+        }
+    }
+    let gates = control.get("physical_gates").unwrap();
+    assert!(conduction.path(&["energy", "relative_closure"]).unwrap().as_f64().unwrap()
+        <= gates.f64_field("energy_relative").unwrap());
+
+    let air = conduction.get("conjugate").unwrap();
+    assert_eq!(air.str_field("publication_schema"), Some("frankensim.cli.accepted-cooling.v1"));
+    let history = air.get("initial_exchange").unwrap();
+    let current = branch_rows(air);
+    let previous = branch_rows(history);
+    assert!(!current.is_empty());
+    assert_eq!(current.len(), previous.len());
+    for (branch, old) in current.iter().zip(previous) {
+        // Preserve the original transport inputs, but never its result fields.
+        for key in ["branch", "path", "inlet_k", "flow_m3_s", "mass_flow_kg_s", "air_properties"] {
+            assert!(old.get(key).is_some(), "missing original transport field {key}");
+            assert_eq!(branch.get(key), old.get(key), "changed transport field {key}");
+        }
+        assert_eq!(branch.path(&["acceleration", "method"]).unwrap().as_str(),
+            Some("fgmres-physical-goal-polish"));
+        assert_eq!(branch.f64_field("iterations"), control.f64_field("primal_iterations"));
+        assert_eq!(branch.get("worst_recorded_imbalance_w"), Some(&JsonValue::Null));
+        let limit = branch.f64_field("balance_tolerance_w").unwrap();
+        assert!(branch.f64_field("enthalpy_imbalance_w").unwrap() <= limit);
+        assert!(branch.f64_field("reference_delta_k").unwrap()
+            <= gates.f64_field("reference_k").unwrap());
+        let rows = branch.get("segments").unwrap().as_array().unwrap();
+        let old_rows = old.get("segments").unwrap().as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert_eq!(rows.len(), old_rows.len());
+        let (mut solid_heat, mut air_heat) = (0.0, 0.0);
+        for (row, old_row) in rows.iter().zip(old_rows) {
+            for key in ["target", "order", "card", "htc_w_m2_k", "wetted_area_m2"] {
+                assert!(old_row.get(key).is_some(), "missing segment metadata {key}");
+                assert_eq!(row.get(key), old_row.get(key), "changed segment metadata {key}");
+            }
+            assert!(row.f64_field("wall_temperature_k").unwrap().is_finite());
+            assert!(row.f64_field("imbalance_w").unwrap().abs() <= limit);
+            assert!((row.f64_field("reference_k").unwrap()
+                - row.f64_field("marched_reference_k").unwrap()).abs()
+                <= gates.f64_field("reference_k").unwrap());
+            solid_heat += row.f64_field("solid_heat_rate_w").unwrap();
+            air_heat += row.f64_field("air_heat_rate_w").unwrap();
+        }
+        assert!((solid_heat - branch.f64_field("solid_total_w").unwrap()).abs() <= limit);
+        assert!((air_heat - branch.f64_field("air_total_w").unwrap()).abs() <= limit);
+        assert_eq!(rows.last().unwrap().f64_field("air_out_k"), branch.f64_field("outlet_k"));
+    }
 }

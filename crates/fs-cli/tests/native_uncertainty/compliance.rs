@@ -42,7 +42,7 @@ fn policy_report(fixture: &Fixture, result: &JsonValue, cap: usize) -> (Vec<u8>,
 
 /// Reconstruct the confidence process from published physical observations,
 /// independently of the CLI policy, checkpoint and reporting implementations.
-fn verify_confidence(report: &JsonValue, minimum: usize, target: f64) -> Option<usize> {
+pub(super) fn verify_confidence(report: &JsonValue, minimum: usize, target: f64) -> Option<usize> {
     let compliance = report.get("compliance").unwrap();
     assert_eq!(
         compliance.str_field("method"),

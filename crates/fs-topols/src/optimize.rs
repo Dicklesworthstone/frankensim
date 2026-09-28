@@ -261,6 +261,45 @@ fn mass_stiffness(n: usize) -> (fs_sparse::Csr, fs_sparse::Csr) {
     (mc.assemble(), kc.assemble())
 }
 
+/// Largest material-area change one plain-mode update may target, in the
+/// normalized unit square. About one fixed `move_cells` advection's worth of
+/// area on the tracked bracket (measured about 0.04 per step, q61wp.16.1).
+pub(crate) const AREA_SCHEDULE_STEP: f64 = 0.04;
+
+/// Move a proposed geometry's material area one scheduled step toward the
+/// target: `V_k + clamp(V* - V_k, -q, +q)`, via a common nodal offset
+/// ([`crate::volume::project_material_volume`]; area quadrature only, no PDE).
+///
+/// The augmented-Lagrangian multiplier alone cannot converge the area: the
+/// velocity is normalized by its maximum, so every update moves the boundary a
+/// full `move_cells` step however close the area is, and the multiplier winds
+/// up and overshoots in both directions. The schedule bounds each step, cannot
+/// overshoot `V*`, and holds it once reached (within 1e-3, ten times inside the
+/// study's feasibility band).
+pub(crate) fn schedule_material_area(
+    phi: &mut GridSdf,
+    current_volume: f64,
+    settings: OptimizeSettings,
+) {
+    let target = current_volume
+        + (settings.volfrac - current_volume).clamp(-AREA_SCHEDULE_STEP, AREA_SCHEDULE_STEP);
+    // A common offset beyond the largest nodal magnitude empties or fills the
+    // whole square, so this range always brackets the target. Far-field
+    // redistanced values can lie well outside a fixed guess such as 2.
+    let reach = phi.nodes().iter().fold(0.0_f64, |m, v| m.max(v.abs())) + 1.0;
+    // Best effort: on very coarse grids the cut-quadrature area can jump as a
+    // node changes sign, so no offset may meet the tolerance. The projection
+    // then publishes nothing (it never partially edits `phi`) and the plain
+    // multiplier step stands. Every row still records its measured area, and
+    // the study reports feasibility against its own 1%-of-box band.
+    let _ = crate::volume::project_material_volume(phi, settings.level, &[], crate::volume::VolumeProjectionSettings {
+        target: target.clamp(1e-6, 1.0 - 1e-6),
+        tolerance: 1e-3,
+        max_shift: reach,
+        max_evaluations: 64,
+    });
+}
+
 mod engine;
 pub use engine::optimize_compliance;
 

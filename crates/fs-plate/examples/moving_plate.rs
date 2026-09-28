@@ -1,6 +1,6 @@
 //! A moving transverse force on a meshed clamped plate, with sampled adjoints.
 //!
-//! `cargo run -p fs-plate --features transient --example moving_plate`
+//! `cargo run -p fs-plate --example moving_plate`
 //!
 //! Geometry and material data are explicit illustrative SI inputs. This uses
 //! all assembled DKT displacement/slope DOFs and the shared time integrator.
@@ -8,8 +8,8 @@
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateMesh, PlateModel, PlateSection, assemble,
     loading::{PlateLoadBudget, PlatePointStencil},
-    transient::{PlateDynamics, PlateDynamicsBudget, PlateDynamicsParameters, PlateLoad},
 };
+use fs_plate_transient::{PlateDynamics, PlateDynamicsBudget, PlateDynamicsParameters, PlateLoad};
 use fs_solver::NewtonKrylovConfig;
 use fs_time::galpha::{
     ImplicitSolveConfig, OperatorGeneralizedAlpha, SecondOrderState,

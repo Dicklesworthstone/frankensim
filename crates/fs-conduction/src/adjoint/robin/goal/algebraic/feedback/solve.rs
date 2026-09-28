@@ -2,6 +2,8 @@
 //! FGMRES proposes fields for A-B*C; only the existing outward coupled maximum
 //! enclosure admits them. A frozen-solid residual cannot terminate this solve.
 
+mod adjoint;
+
 use std::cell::RefCell;
 
 use fs_solver::{FgmresState, LinearOp};

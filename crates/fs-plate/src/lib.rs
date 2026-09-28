@@ -39,8 +39,6 @@
 
 pub mod loading;
 pub mod shell;
-#[cfg(feature = "transient")]
-pub mod transient;
 pub use shell::{
     ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,
     generate_bell_shell, generate_cylinder_shell, modes_shell,
