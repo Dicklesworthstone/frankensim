@@ -773,8 +773,8 @@ at least 256 MiB admitted memory for the coarse/enriched state pair and the
 existing bounded mesh-level envelope 2..=5. It authorizes two assessment solves
 per attempt, each capped at 60,000 CG iterations with a 1e-12 recomputed
 Euclidean relative-residual target. Memory is an admission allowance, not
-measured peak RSS. Stress and load-family modes refuse this assessment request
-until their exact problem settings have an assessment owner.
+measured peak RSS. Single-load projected-stress mode still refuses this
+assessment request. An explicit weighted-sum load family is supported below.
 
 The final optimizer update is durably retained before assessment starts.
 Cancellation and lifetime-wall-budget checks bracket the indivisible DWR phase.
@@ -810,6 +810,36 @@ binary regression exercises numerical reporting and final-checkpoint recovery.
 Projected-volume regressions additionally cover a genuinely accepted feasible
 endpoint, a zero-update feasible stall, stops before and after the real DWR
 phase, retry without search/recovery callbacks, and completed-result reuse.
+
+The existing projected-stress independent-load study also accepts this same
+assessment when its aggregate is `weighted-sum`. Its explicit
+`:max-solves-per-attempt` must be exactly twice the declared number of load
+cases (including the primary case and every zero-weight case), so two cases
+require `4`; the native limit of 16 cases caps an attempt at 32 solves.
+Cases are assessed sequentially on the unchanged final level set with the
+same per-case traction support/vector, material and solver as the optimizer.
+The 256 MiB minimum and mesh-level limit 5 apply; only indicator evidence is
+retained between cases, not previous displacement systems. Coarse compliance
+must reproduce every retained case and the weighted sum bitwise before the
+assessment is published. Results retain per-case and weighted coarse/enriched
+compliance, signed estimates, absolute indicator mass and residual breakdowns,
+plus each actual solver residual and iteration count. Weights are not
+probabilities; forces are never summed before equilibrium. Worst-weighted-case
+objectives refuse this linear-sum assessment rather than hiding active-case
+switches. Compliance DWR does not estimate or certify stress error.
+
+Only an area- and sampled-stress-feasible `completed` or `no-feasible-descent`
+endpoint is assessed. A zero-update feasible baseline is eligible. Paused
+optimization, exhausted work during stress restoration and infeasible
+restoration stalls perform no assessment solves; the latter retain an explicit
+assessment refusal with the existing optimizer status. The load-family history
+retains its `optimizer_terminal` before assessment, and cancellation is checked
+before each two-solve case and before final publication. Each case remains
+indivisible. Resumption retries only assessment of the retained endpoint, even
+with zero recovery-solve allowance; it neither restarts candidate search nor
+re-solves optimizer recovery. Interrupted attempt wall time remains charged,
+and completed assessments are reused byte for byte. Numerical assessment
+refusals retain the accepted geometry and permit assessment-only retry.
 
 Every accepted transition retains the source, iteration log, exact parametric
 geometry, SVG/HTML report, JSON summary and format-9 package in one ledger

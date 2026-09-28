@@ -66,7 +66,7 @@ pub(super) struct CurrentDesign {
 impl Evidence {
     pub(super) fn json(&self) -> String {
         let constraints = self.constraint_fields();
-        let goal_error = assessment::json(self.final_dwr.as_ref(), false);
+        let goal_error = assessment::json(self.final_dwr.as_ref(), None);
         format!("{{\"version\":1,\"producer\":\"{}\",\"updates_this_invocation\":{},\"legacy_prefix_updates_replayed\":{},\"mode\":\"accepted-state-continuation\"{constraints}{goal_error}}}",
             self.producer.to_hex(), self.updates, self.legacy_replayed)
     }

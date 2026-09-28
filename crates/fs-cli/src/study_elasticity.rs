@@ -276,7 +276,7 @@ fn canonical(spec: &ElasticitySpec) -> String {
         let _ = writeln!(out, "    :steps {})", spec.steps);
     }
     if spec.final_dwr {
-        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt 2)");
+        let _ = writeln!(out, "  (assessment :type elasticity-dwr :max-solves-per-attempt {})", assessment::max_solves(spec));
     }
     let _ = writeln!(out, ")");
     out
@@ -337,7 +337,7 @@ fn parse(source: &str) -> Result<ElasticitySpec> {
         .ok_or_else(|| fail("cli-study-elasticity-budget", "max-iterations is required"))?;
     let projected = continuation::parse_controls(optimizer_fields,
         base.constraints.as_ref().expect("validated constraints").volume_fraction)?;
-    let final_dwr = assessment::parse(&root)?;
+    let final_dwr = assessment::parse(&root, projected.as_ref())?;
     let mut parsed = ElasticitySpec {
         base,
         canonical: String::new(),
@@ -691,7 +691,8 @@ fn persist(
     let continuation = evidence.json();
     let constraints = evidence.constraint_fields();
     let constraint_html = evidence.constraint_html();
-    let goal_error = assessment::json(evidence.final_dwr.as_ref(), spec.final_dwr);
+    let goal_error = assessment::json(evidence.final_dwr.as_ref(),
+        spec.final_dwr.then(|| assessment::max_solves(spec)));
     let goal_error_html = assessment::html(evidence.final_dwr.as_ref(), spec.final_dwr);
     let no_claim = if spec.projected.is_some() { continuation::PROJECTED_SCOPE } else { NO_CLAIM };
     let count = report.rows.len();

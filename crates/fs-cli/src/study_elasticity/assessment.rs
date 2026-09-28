@@ -7,34 +7,51 @@ use super::*;
 use fs_topols::{ComplianceDwrAssessment, ComplianceDwrStage};
 use std::ops::ControlFlow;
 
+mod multi_load;
+pub(super) use multi_load::run as run_multi_load;
+
 pub(super) enum FinalAssessment {
     Estimated(ComplianceDwrAssessment),
-    Refused(String),
+    Weighted(fs_topols::WeightedComplianceDwrAssessment),
+    Refused { reason: String, max_solves: usize },
 }
 
 const SCOPE: &str = "Estimated compliance goal error on the unchanged final bilinear level set. Signed DWR residual and absolute cell-indicator sum are not certified continuum-error bounds; the latter is marking mass, not an interval radius. Recomputed Euclidean solver residuals establish discrete solve accuracy only. Two bounded solves and residual integration are indivisible between cancellation checks. Each interrupted attempt consumes wall time and may be repeated on resume; a completed assessment is reused. Memory is an admitted allowance, not measured peak RSS. No physical validation or optimum is certified.";
 
-pub(super) fn parse(root: &Node) -> Result<bool> {
+fn solve_limit(projected: Option<&continuation::ProjectedControls>) -> Result<usize> {
+    match projected {
+        Some(continuation::ProjectedControls::Stress(policy)) => policy.dwr_case_count()
+            .map(|count| 2 * count).ok_or_else(|| fail("cli-study-elasticity-assessment",
+                "stress-mode DWR requires an explicit weighted-sum load family; worst-case objectives are not differentiable compliance sums")),
+        _ => Ok(2),
+    }
+}
+
+pub(super) fn max_solves(spec: &ElasticitySpec) -> usize {
+    solve_limit(spec.projected.as_ref()).expect("admitted assessment mode")
+}
+
+pub(super) fn parse(root: &Node, projected: Option<&continuation::ProjectedControls>) -> Result<bool> {
     let Some(fields) = list(root, "study root")?.iter().find_map(|node| {
         let NodeKind::List(fields) = &node.kind else { return None };
         fields.first().is_some_and(|node| matches!(&node.kind,
             NodeKind::Symbol(name) if name == "assessment")).then_some(fields)
     }) else { return Ok(false) };
+    let max_solves = solve_limit(projected)?;
     if !matches!(&field(fields, "type")?.kind, NodeKind::Symbol(kind) if kind == "elasticity-dwr")
-        || integer_node(field(fields, "max-solves-per-attempt")?, "assessment.max-solves-per-attempt")? != 2
+        || integer_node(field(fields, "max-solves-per-attempt")?, "assessment.max-solves-per-attempt")? != max_solves
     {
         return Err(fail("cli-study-elasticity-assessment",
-            "final assessment requires (assessment :type elasticity-dwr :max-solves-per-attempt 2)"));
+            format!("final assessment requires (assessment :type elasticity-dwr :max-solves-per-attempt {max_solves}); each independent load requires two solves")));
     }
     Ok(true)
 }
 
 pub(super) fn validate(spec: &ElasticitySpec) -> Result<()> {
-    if spec.final_dwr && (matches!(&spec.projected, Some(continuation::ProjectedControls::Stress(_)))
-        || spec.memory_bytes < 256 * 1024 * 1024)
+    if spec.final_dwr && spec.memory_bytes < 256 * 1024 * 1024
     {
         return Err(fail("cli-study-elasticity-assessment",
-            "final elasticity DWR requires plain or projected-volume single-load mode and at least 256 MiB admitted memory for coarse and enriched states"));
+            "final elasticity DWR requires at least 256 MiB admitted memory; independent cases are assessed sequentially, retaining indicators but not displacement states"));
     }
     Ok(())
 }
@@ -88,21 +105,22 @@ pub(super) fn run(
                 ControlFlow::Break(stop) => stop,
                 ControlFlow::Continue(()) => "numerical-failure",
             };
-            (status, Some(FinalAssessment::Refused(reason)))
+            (status, Some(FinalAssessment::Refused { reason, max_solves: 2 }))
         }
     }
 }
 
-pub(super) fn json(assessment: Option<&FinalAssessment>, requested: bool) -> String {
+pub(super) fn json(assessment: Option<&FinalAssessment>, requested_solves: Option<usize>) -> String {
     let Some(a) = assessment else {
-        return if requested {
-            ",\"goal_error_assessment\":{\"status\":\"pending\",\"method\":\"elasticity-compliance-dwr\",\"max_solves_per_attempt\":2}".into()
+        return if let Some(max_solves) = requested_solves {
+            format!(",\"goal_error_assessment\":{{\"status\":\"pending\",\"method\":\"elasticity-compliance-dwr\",\"max_solves_per_attempt\":{max_solves}}}")
         } else { String::new() };
     };
     let a = match a {
         FinalAssessment::Estimated(a) => a,
-        FinalAssessment::Refused(reason) => return format!(
-            ",\"goal_error_assessment\":{{\"status\":\"refused\",\"method\":\"elasticity-compliance-dwr\",\"reason\":{},\"max_solves_per_attempt\":2}}",
+        FinalAssessment::Weighted(a) => return multi_load::json(a),
+        FinalAssessment::Refused { reason, max_solves } => return format!(
+            ",\"goal_error_assessment\":{{\"status\":\"refused\",\"method\":\"elasticity-compliance-dwr\",\"reason\":{},\"max_solves_per_attempt\":{max_solves}}}",
             quoted(reason),
         ),
     };
@@ -122,6 +140,7 @@ pub(super) fn html(assessment: Option<&FinalAssessment>, requested: bool) -> Str
         return if requested { "<p>Final compliance goal-error assessment: pending.</p>".into() }
             else { String::new() };
     };
+    if let FinalAssessment::Weighted(a) = a { return multi_load::html(a); }
     let FinalAssessment::Estimated(a) = a else {
         return "<p>Final compliance goal-error assessment: refused. The retained JSON reports the numerical reason; accepted geometry is unchanged.</p>".into();
     };
