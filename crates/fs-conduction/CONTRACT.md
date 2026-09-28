@@ -980,6 +980,30 @@ authority.
   80 axial cells, checking improving front, molten-length and temperature
   discrepancies plus energy closure. This finite comparison does not establish
   a formal spatial or temporal order, or validate liquid-flow physics.
+- `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
+  this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
+  `linearize_accepted` rechecks a supplied endpoint's original Newton target,
+  chart fields and integrated energy balance before attaching its sparse
+  tangent. The linearization owns the endpoint and tangent and borrows only the
+  fixed mesh, so step-local sources and boundaries need not remain alive.
+  Temperature observation seeds become enthalpy seeds by `diag(dT/dh)`;
+  direct enthalpy/history seeds are added before the shared bounded FGMRES
+  transpose solve. For `J_h^T lambda = h_bar`, history receives
+  `M_ref*lambda` and P1 nodal source density receives
+  `dt*M_source^T*lambda`. The source uses the existing consistent tetrahedral
+  integration, while reference storage remains lumped. This explicit `dt`
+  follows the enthalpy residual's joule units. The transpose implements
+  `M_ref+dt*diag(dT/dh)*J_T^T`, sharing the primal conductivity Jacobian.
+  A true transpose residual, exact inner-column cap, allocation-size checks
+  and cancellation gates precede gradient publication. Smooth chart knots
+  and plateau interiors are admitted; temperature slope corners, chart
+  validity endpoints and conductivity slope/validity boundaries refuse an
+  ordinary two-sided gradient. No chart, density, conductivity-parameter,
+  geometry, boundary-control or phase-fraction derivative is inferred.
+  `tests/enthalpy_adjoint.rs` checks nonuniform-slope transpose identities,
+  nonlinear history/source derivatives against five-point forward differences,
+  zero temperature sensitivity on a latent plateau, differentiability policy,
+  and refused/cancelled/tampered inputs.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

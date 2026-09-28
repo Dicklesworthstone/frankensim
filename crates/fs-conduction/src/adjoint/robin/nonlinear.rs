@@ -15,7 +15,7 @@ pub(super) struct TangentSystem {
     pub(super) smooth: bool,
 }
 
-fn material_is_smooth(cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64])
+pub(crate) fn material_is_smooth(cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64])
     -> Result<bool, ConductionError> {
     let mut smooth = true;
     for element in 0..problem.mesh.element_count() {

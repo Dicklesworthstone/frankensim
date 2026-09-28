@@ -23,6 +23,9 @@
 //! Equilibrium density from the chart never changes the stored reference mass.
 //! This does not model expansion, material motion, pressure work or remapping.
 
+/// Implicit endpoint derivatives through the accepted physical balance.
+pub mod adjoint;
+
 use std::{cell::RefCell, fmt};
 
 use fs_exec::Cx;
