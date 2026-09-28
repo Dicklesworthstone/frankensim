@@ -6,6 +6,7 @@
 //! Version 1 admits fixed-count propagation with Monte Carlo
 //! or explicitly replicated randomized Sobol quadrature. Version 2 requires
 //! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
+//! Version 3 adds fixed-count mean controls from predeclared whole-model secants.
 //! An engineering
 //! interval or card tolerance is never silently interpreted as a probability
 //! law. The study inherits units, capabilities, physics seed, versions, memory
@@ -20,12 +21,15 @@ use fs_qty::{Dims, QtyAny};
 use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
-/// Latest native probability-study schema. Version 1 remains admitted with
-/// its original fixed-count semantics and no implicit stopping policy.
-pub const VERSION: u32 = 2;
+pub mod mean_control;
+pub use mean_control::MeanControlPolicy;
+
+/// Latest native probability-study schema. Versions 1 and 2 preserve their
+/// original semantics; version 3 requires an explicit mean-control solve cap.
+pub const VERSION: u32 = 3;
 /// Bounded native-study source size, before parsing.
 pub const MAX_SOURCE_BYTES: usize = 65_536;
-/// Full native import/solve pipelines per study, not scalar callback evaluations.
+/// Full native import/solve sample pipelines, excluding explicitly capped probes.
 pub const MAX_SAMPLES: usize = 256;
 
 /// Exact project field addressed by a random parameter.
@@ -139,6 +143,7 @@ pub struct UncertaintyStudy {
     latent_correlation: Option<Vec<Vec<f64>>>,
     compliance: Option<CompliancePolicy>,
     qmc: Option<QmcLayout>,
+    mean_control: Option<MeanControlPolicy>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -152,7 +157,7 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare uniform inputs with explicit independence or a Gaussian copula; version 1 is fixed-count Monte Carlo or replicated QMC, and version 2 requires a Monte Carlo Bernoulli-mixture compliance policy".into() }
+        hint: "declare uniform inputs with explicit dependence; version 1 is fixed-count, version 2 requires Bernoulli compliance, version 3 requires coordinate-secant mean controls with max-solves".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
@@ -273,11 +278,14 @@ impl UncertaintyStudy {
         let nodes = list(&root)?;
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
         let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
-            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc"])?;
+            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc", "mean-control"])?;
         let version = integer(f["version"])?;
-        if version != 1 && version != u64::from(VERSION) { return Err(error("unsupported study version")); }
-        if (version == 1) == f.contains_key("compliance") {
-            return Err(error("version 1 forbids a compliance policy; version 2 requires one"));
+        if !(1..=u64::from(VERSION)).contains(&version) { return Err(error("unsupported study version")); }
+        if (version == 2) != f.contains_key("compliance") {
+            return Err(error("only version 2 requires and admits a compliance policy"));
+        }
+        if (version == 3) != f.contains_key("mean-control") {
+            return Err(error("only version 3 requires and admits a mean-control policy"));
         }
         let randomized_qmc = match &f["method"].kind {
             NodeKind::Symbol(method) if method == "monte-carlo" => false,
@@ -287,11 +295,11 @@ impl UncertaintyStudy {
         if randomized_qmc != f.contains_key("qmc") {
             return Err(error("quasi-monte-carlo requires an explicit :qmc layout; monte-carlo forbids it"));
         }
-        if randomized_qmc && version != 1 {
-            return Err(error("QMC requires version 1 fixed-count semantics; dependent net points cannot use the version 2 Bernoulli-iid compliance policy"));
+        if randomized_qmc && version == 2 {
+            return Err(error("dependent QMC points cannot use the version 2 Bernoulli-iid compliance policy"));
         }
         let samples = usize::try_from(integer(f["samples"])?).map_err(|_| error("sample count overflow"))?;
-        if !(2..=MAX_SAMPLES).contains(&samples) { return Err(error("samples must be in 2..=256")); }
+        if !(2..=samples).contains(&samples) || samples > MAX_SAMPLES { return Err(error("samples must be in 2..=256")); }
         let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
         let qmc = f.get("qmc").map(|node| qmc_layout(node, samples)).transpose()?;
         let wall_seconds = quantity(f["wall-time"], crate::spec::dims::TIME)?;
@@ -349,12 +357,13 @@ impl UncertaintyStudy {
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
         }
+        let mean_control = f.get("mean-control").map(|node| mean_control::parse(node, &parameters)).transpose()?;
         let qoi = text(f["qoi"])?;
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
-            latent_correlation, compliance, qmc })
+            latent_correlation, compliance, qmc, mean_control })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -377,10 +386,12 @@ impl UncertaintyStudy {
     #[must_use] pub fn latent_correlation(&self) -> Option<&[Vec<f64>]> {
         self.latent_correlation.as_deref()
     }
-    /// Predeclared Bernoulli stopping policy; absent for version-1 fixed-count studies.
+    /// Predeclared Bernoulli stopping policy; absent for fixed-count studies.
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
     /// Explicit randomized Sobol layout; absent for the Monte Carlo method.
     #[must_use] pub const fn qmc(&self) -> Option<QmcLayout> { self.qmc }
+    /// Explicit whole-model mean calibration; absent in versions 1 and 2.
+    #[must_use] pub const fn mean_control(&self) -> Option<MeanControlPolicy> { self.mean_control }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.
@@ -425,6 +436,11 @@ impl UncertaintyStudy {
         for high in [false, true] {
             let values = bound.study.parameters.iter().map(|p| if high { p.high } else { p.low }).collect::<Vec<_>>();
             bound.sample_project(&values)?;
+        }
+        if bound.study.mean_control.is_some() {
+            for ordinal in 0..mean_control::probe_count(&bound.study.parameters) {
+                bound.sample_project(&mean_control::probe(&bound.study.parameters, ordinal)?)?;
+            }
         }
         Ok(bound)
     }
