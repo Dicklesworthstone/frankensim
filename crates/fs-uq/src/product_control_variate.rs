@@ -11,7 +11,7 @@
 //! Standard errors here are descriptive fixed-sample estimates, not confidence
 //! sequences, physical error bounds, or an assertion of variance reduction.
 
-mod checkpoint;
+pub(crate) mod checkpoint;
 
 use core::fmt;
 
@@ -172,40 +172,65 @@ impl UqExecution {
         if self.status == UqStatus::Refused || self.failure.is_some() {
             return Err(UqControlError::RefusedExecution);
         }
-        poll(&mut cancelled)?;
-        if self.values.is_empty() { return Ok(None); }
-        let mut adjusted = Vec::with_capacity(self.values.len());
-        for (ordinal, &value) in self.values.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let parameters = sample_parameters(&self.plan, self.factor.as_deref(), ordinal)
-                .map_err(|_| UqControlError::NumericalRange)?;
-            let mut correction = 0.0;
-            for ((&x, &mean), &gradient) in parameters.iter().zip(&control.means).zip(&control.gradient) {
-                // A zero coefficient must not create 0*infinity in an unused term.
-                if gradient != 0.0 {
-                    correction = finite(gradient.mul_add(finite(x - mean)?, correction))?;
-                }
-            }
-            adjusted.push(finite(value - correction)?);
-        }
-        let (raw_mean, raw_std_dev) = moments(&self.values, &mut cancelled)?;
-        let (mean, std_dev) = moments(&adjusted, &mut cancelled)?;
-        let root_n = (self.values.len() as f64).sqrt();
-        let variance_ratio = raw_std_dev.zip(std_dev).and_then(|(raw, controlled)| {
-            if raw == 0.0 { return None; }
-            let ratio = (controlled / raw).powi(2);
-            ratio.is_finite().then_some(ratio)
-        });
-        poll(&mut cancelled)?;
-        Ok(Some(LinearControlEstimate {
-            n: self.values.len(), raw_mean, mean, raw_std_dev, std_dev,
-            raw_standard_error: raw_std_dev.map(|s| s / root_n),
-            standard_error: std_dev.map(|s| s / root_n), variance_ratio,
-        }))
+        assess_with_parameters(control, &self.values, |ordinal| {
+            sample_parameters(&self.plan, self.factor.as_deref(), ordinal)
+                .map_err(|_| UqControlError::NumericalRange)
+        }, &mut cancelled)
     }
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), UqControlError> {
+// Sampling adapters must check their complete immutable binding and refusal
+// state before entering these helpers. Only the input replay differs; controls,
+// ordered centering and statistical reductions have a single numerical owner.
+pub(crate) fn assess_with_parameters(
+    control: &LinearControlVariate, values: &[f64],
+    sample: impl FnMut(usize) -> Result<Vec<f64>, UqControlError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<LinearControlEstimate>, UqControlError> {
+    poll(cancelled)?;
+    if values.is_empty() { return Ok(None); }
+    let adjusted = adjusted_samples(control, values, sample, cancelled)?;
+    let (raw_mean, raw_std_dev) = moments(values, cancelled)?;
+    let (mean, std_dev) = moments(&adjusted, cancelled)?;
+    let root_n = (values.len() as f64).sqrt();
+    let variance_ratio = raw_std_dev.zip(std_dev).and_then(|(raw, controlled)| {
+        if raw == 0.0 { return None; }
+        let ratio = (controlled / raw).powi(2);
+        ratio.is_finite().then_some(ratio)
+    });
+    poll(cancelled)?;
+    Ok(Some(LinearControlEstimate {
+        n: values.len(), raw_mean, mean, raw_std_dev, std_dev,
+        raw_standard_error: raw_std_dev.map(|s| s / root_n),
+        standard_error: std_dev.map(|s| s / root_n), variance_ratio,
+    }))
+}
+
+pub(crate) fn adjusted_samples(
+    control: &LinearControlVariate, values: &[f64],
+    mut sample: impl FnMut(usize) -> Result<Vec<f64>, UqControlError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>, UqControlError> {
+    let mut adjusted = Vec::with_capacity(values.len());
+    for (ordinal, &value) in values.iter().enumerate() {
+        poll(cancelled)?;
+        let parameters = sample(ordinal)?;
+        if parameters.len() != control.means.len() {
+            return Err(UqControlError::PlanMismatch);
+        }
+        let mut correction = 0.0;
+        for ((&x, &mean), &gradient) in parameters.iter().zip(&control.means).zip(&control.gradient) {
+            // A zero coefficient must not create 0*infinity in an unused term.
+            if gradient != 0.0 {
+                correction = finite(gradient.mul_add(finite(x - mean)?, correction))?;
+            }
+        }
+        adjusted.push(finite(value - correction)?);
+    }
+    Ok(adjusted)
+}
+
+pub(crate) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), UqControlError> {
     if cancelled() { Err(UqControlError::Cancelled) } else { Ok(()) }
 }
 fn finite(value: f64) -> Result<f64, UqControlError> {

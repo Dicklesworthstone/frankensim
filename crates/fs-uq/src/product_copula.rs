@@ -20,6 +20,9 @@ use fs_blake3::{ContentHash, DomainHasher};
 use crate::{CorrelationModel, ParameterUncertainty, UncertaintyKind, UqCheckpointError,
     UqExecution, UqPlan, UqResult};
 
+/// Frozen physical-coordinate mean controls, distinct from latent controls.
+pub mod mean_control;
+
 /// A joint sampler whose evaluator always receives physical uniform values.
 ///
 /// The marginal plan must explicitly use `Independent`: it supplies marginal

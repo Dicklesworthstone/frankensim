@@ -17,14 +17,18 @@
 //! introduced. Conductivity, including its exact `k'(T)` contribution, remains
 //! owned by the existing conduction assembly.
 //!
-//! This first lane admits one immutable enthalpy chart, natural flux/Robin
-//! boundaries and existing finite-resistance contacts. Every Dirichlet row is
+//! Uniform and explicitly assigned heterogeneous reference materials share this
+//! transport kernel, natural flux/Robin boundaries and finite-resistance
+//! contacts. Distinct materials require distinct interface vertices; no nodal
+//! mixture law is inferred. Every Dirichlet row is
 //! refused: temperature on a latent plateau does not determine enthalpy.
 //! Equilibrium density from the chart never changes the stored reference mass.
 //! This does not model expansion, material motion, pressure work or remapping.
 
 /// Implicit endpoint derivatives through the accepted physical balance.
 pub mod adjoint;
+/// Explicit heterogeneous phase charts and frozen reference densities.
+pub mod heterogeneous;
 
 use std::{cell::RefCell, fmt};
 
@@ -189,6 +193,9 @@ pub struct EnthalpyStepSolution {
 pub struct EnthalpyBackwardEuler<'m, 'c> {
     mesh: &'m ConductionMesh,
     curve: &'c EquilibriumEnthalpyPhaseCurve,
+    // Only the heterogeneous wrapper constructs this private override. The
+    // public uniform API, including phase_curve(), keeps its original meaning.
+    nodal_curves: Option<Vec<&'c EquilibriumEnthalpyPhaseCurve>>,
     masses: Vec<f64>,
 }
 
@@ -264,6 +271,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         Ok(Self {
             mesh,
             curve,
+            nodal_curves: None,
             masses,
         })
     }
@@ -278,6 +286,14 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
     #[must_use]
     pub const fn phase_curve(&self) -> &EquilibriumEnthalpyPhaseCurve {
         self.curve
+    }
+
+    // Callers have already admitted the nodal shape. Keep constitutive lookup
+    // common to residuals, Newton tangents, phase reporting and adjoint guards.
+    fn curve_for_vertex(&self, vertex: usize) -> &EquilibriumEnthalpyPhaseCurve {
+        self.nodal_curves
+            .as_ref()
+            .map_or(self.curve, |curves| curves[vertex])
     }
 
     /// Advance from immutable specific-enthalpy history, with current endpoint
@@ -379,7 +395,7 @@ impl StepContext<'_, '_, '_, '_> {
             }
             let state = self
                 .storage
-                .curve
+                .curve_for_vertex(vertex)
                 .state_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
             temperature.push(state.temperature_k());
@@ -421,7 +437,7 @@ impl StepContext<'_, '_, '_, '_> {
             }
             let derivative = self
                 .storage
-                .curve
+                .curve_for_vertex(vertex)
                 .temperature_derivative_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
             let diagonal = finite(
@@ -485,7 +501,7 @@ impl StepContext<'_, '_, '_, '_> {
             storage = finite(storage + self.storage.masses[vertex] * (value - self.old[vertex]))?;
             liquid_mass_fraction.push(
                 self.storage
-                    .curve
+                    .curve_for_vertex(vertex)
                     .state_at_specific_enthalpy(value)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })?
                     .liquid_mass_fraction(),

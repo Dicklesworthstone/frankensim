@@ -97,13 +97,15 @@ jobs:
             }
             build fs_blake3
             build fs_math
+            build fs_eproc --extern fs_math="$out/libfs_math.rlib"
             build fs_obs
             build fs_qty --extern fs_blake3="$out/libfs_blake3.rlib"
             build fs_rand --extern fs_math="$out/libfs_math.rlib"
             build fs_evidence --extern fs_blake3="$out/libfs_blake3.rlib" --extern fs_qty="$out/libfs_qty.rlib" --extern fs_obs="$out/libfs_obs.rlib"
-            printf '#[path = "%s/crates/fs-uq/src"] pub mod owner { pub mod product_plan; pub mod product_execution; pub mod product_checkpoint; pub mod product_copula; }\npub use owner::*;\npub use product_plan::*;\npub use product_execution::UqExecution;\npub use product_checkpoint::UqCheckpointError;\n' "$GITHUB_WORKSPACE" > "$out/tests.rs"
+            printf '#[path = "%s/crates/fs-uq/src"] pub mod owner { pub mod product_plan; pub mod product_execution; pub mod product_checkpoint; pub mod product_copula; pub mod product_control_variate; pub mod product_compliance; pub mod anytime; }\npub use owner::*;\npub use product_plan::*;\npub use product_execution::UqExecution;\npub use product_checkpoint::UqCheckpointError;\npub use product_control_variate::*;\npub use anytime::AnytimeEstimate;\n' "$GITHUB_WORKSPACE" > "$out/tests.rs"
             rustc --edition=2024 -C opt-level="$opt" --test "$out/tests.rs" -L dependency="$out" \
               --extern fs_blake3="$out/libfs_blake3.rlib" --extern fs_math="$out/libfs_math.rlib" \
+              --extern fs_eproc="$out/libfs_eproc.rlib" \
               --extern fs_rand="$out/libfs_rand.rlib" --extern fs_evidence="$out/libfs_evidence.rlib" -o "$out/tests"
             "$out/tests" --nocapture
           done

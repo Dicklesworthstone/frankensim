@@ -261,9 +261,20 @@ reference-output gate, stable red Casebook record, and caught
   FrankenTorch reparameterized-gradient tape through q-EI is the
   named follow-up (the fixed-bank surfaces are already
   differentiable-by-construction when the tape lands).
-- q-NEI (noisy EI) is not implemented — EI with the standardized
-  noise floor covers the deterministic-objective regime shipped
-  here.
+- `noisy::q_noisy_expected_improvement` and `noisy::minimize_noisy`
+  provide fixed-bank joint-posterior q-NEI and a declared-noise BO loop.
+  The incumbent is uncertain, duplicate coordinates share a latent draw,
+  and recommendations use posterior means rather than raw noisy minima.
+  The driver keeps a fixed caller-declared kernel/prior and original
+  observation variances; no noisy-model hyperparameter fitting, replicate
+  value-of-information, sparse history, within-factorization cancellation,
+  cross-ISA guarantee, or statistical certificate is added. Normal-bank
+  columns beyond the Sobol ceiling are a Philox MC tail, not QMC.
+  Both paths inherit `Gp::predict_joint` jitter/fallback semantics. Fourteen
+  focused unit tests and `examples/noisy_design.rs` are present; Rust
+  compilation/execution remains unverified in the authoring environment.
+  Independent Gaussian equation checks are not compiled-test evidence.
+  See `NOISY_BO.md` for configuration, semantics, commands, and limits.
 - No hyperparameter marginalization (point estimates by LML); no
   input warping.
 - The short-study replay receipts cover three finite fixtures

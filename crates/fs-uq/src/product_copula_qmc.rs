@@ -37,6 +37,10 @@ impl GaussianCopulaQmcExecution {
         Ok(Self { marginals: marginal_plan.parameters.clone(), execution })
     }
 
+    // Read-only access for the shared physical mean-control implementation.
+    // Never expose the latent sampler as a mutable physical execution.
+    pub(crate) fn control_source(&self) -> &QmcExecution { &self.execution }
+
     /// Physical marginal supports and units in declaration order.
     #[must_use]
     pub fn marginals(&self) -> &[ParameterUncertainty] { &self.marginals }

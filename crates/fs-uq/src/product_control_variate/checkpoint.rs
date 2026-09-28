@@ -38,12 +38,7 @@ impl LinearControlVariate {
         {
             return Err(UqCheckpointError::IdentityMismatch);
         }
-        let mut bytes = Vec::with_capacity(HEADER_LEN + self.gradient.len() * 8);
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&(self.gradient.len() as u64).to_le_bytes());
-        for value in &self.gradient {
-            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
-        }
+        let mut bytes = encode_header(&self.gradient);
         let identity = bound_model(model_identity, &bytes);
         bytes.extend_from_slice(&execution.checkpoint(identity)?);
         Ok(bytes)
@@ -66,24 +61,7 @@ impl LinearControlVariate {
         bytes: &[u8],
     ) -> Result<(UqExecution, Self), UqCheckpointError> {
         let fresh = UqExecution::new(plan).map_err(UqCheckpointError::InvalidPlan)?;
-        // The admitted plan caps dimensions and samples. Leave at most 1 KiB
-        // for the existing raw framing; its decoder checks the EXACT length.
-        let prefix_len = HEADER_LEN + plan.parameters.len() * 8;
-        if bytes.len() < prefix_len
-            || bytes.len() > prefix_len + 1024 + plan.budget_max_samples * 8
-        {
-            return Err(UqCheckpointError::InvalidEncoding("controlled checkpoint length"));
-        }
-        if &bytes[..8] != MAGIC {
-            return Err(UqCheckpointError::InvalidEncoding("unknown controlled checkpoint version"));
-        }
-        let count = u64::from_le_bytes(bytes[8..HEADER_LEN].try_into().expect("checked header"));
-        if count != plan.parameters.len() as u64 {
-            return Err(UqCheckpointError::InvalidEncoding("control coefficient count"));
-        }
-        let gradient: Vec<f64> = bytes[HEADER_LEN..prefix_len].chunks_exact(8)
-            .map(|chunk| f64::from_bits(u64::from_le_bytes(chunk.try_into().expect("eight bytes"))))
-            .collect();
+        let (gradient, prefix_len) = decode_header(plan.parameters.len(), plan.budget_max_samples, bytes)?;
         let control = fresh.freeze_linear_control_variate(&gradient)
             .map_err(|_| UqCheckpointError::InvalidEncoding("nonfinite control coefficient"))?;
         let identity = bound_model(model_identity, &bytes[..prefix_len]);
@@ -92,7 +70,46 @@ impl LinearControlVariate {
     }
 }
 
-fn bound_model(model: ContentHash, header: &[u8]) -> ContentHash {
+// Shared coefficient envelope. Only call decode_header with dimensions and
+// sample limits taken from a freshly admitted execution, never from the bytes.
+pub(crate) fn encode_header(gradient: &[f64]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(HEADER_LEN + gradient.len() * 8);
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&(gradient.len() as u64).to_le_bytes());
+    for value in gradient {
+        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    bytes
+}
+
+pub(crate) fn decode_header(dimensions: usize, max_samples: usize, bytes: &[u8])
+    -> Result<(Vec<f64>, usize), UqCheckpointError>
+{
+    // The admitted plan caps dimensions and samples. Leave at most 1 KiB
+    // for the existing raw framing; its decoder checks the EXACT length.
+    let prefix_len = HEADER_LEN + dimensions * 8;
+    if bytes.len() < prefix_len
+        || bytes.len() > prefix_len + 1024 + max_samples * 8
+    {
+        return Err(UqCheckpointError::InvalidEncoding("controlled checkpoint length"));
+    }
+    if &bytes[..8] != MAGIC {
+        return Err(UqCheckpointError::InvalidEncoding("unknown controlled checkpoint version"));
+    }
+    let count = u64::from_le_bytes(bytes[8..HEADER_LEN].try_into().expect("checked header"));
+    if count != dimensions as u64 {
+        return Err(UqCheckpointError::InvalidEncoding("control coefficient count"));
+    }
+    let gradient: Vec<f64> = bytes[HEADER_LEN..prefix_len].chunks_exact(8)
+        .map(|chunk| f64::from_bits(u64::from_le_bytes(chunk.try_into().expect("eight bytes"))))
+        .collect();
+    if !gradient.iter().all(|g| g.is_finite()) {
+        return Err(UqCheckpointError::InvalidEncoding("nonfinite control coefficient"));
+    }
+    Ok((gradient, prefix_len))
+}
+
+pub(crate) fn bound_model(model: ContentHash, header: &[u8]) -> ContentHash {
     let mut bytes = Vec::with_capacity(32 + header.len());
     bytes.extend_from_slice(&model.0);
     bytes.extend_from_slice(header);

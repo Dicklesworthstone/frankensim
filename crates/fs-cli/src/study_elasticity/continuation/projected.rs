@@ -60,8 +60,8 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
         family: multi_load::parse(fields)?,
         resolution: stress_mesh::parse(fields)?,
     };
-    if controls.resolution.is_some() && controls.family.is_some() {
-        return Err(malformed("stress mesh-check currently requires the single-load mode; independent-load/restoration checks cannot be silently omitted"));
+    if controls.resolution.is_some() && restoration::reduction(&controls).is_some() {
+        return Err(malformed("multi-load mesh checks do not yet combine with stress restoration"));
     }
     let a = controls.area;
     let s = controls.search;
@@ -183,9 +183,10 @@ impl ConstraintEvidence {
             let _ = write!(html, "<p>{} protected material/void regions are imposed on every intersected cell through its corner nodes. Coverage may extend by less than one cell per side. The phi margin is a field-value margin, not a certified physical clearance or wall thickness.</p>", self.policy.regions.len());
         }
         if let (Some(family), Some(history)) = (&self.policy.family, &self.family) {
-            html.push_str(&family.html(history));
+            html.push_str(&family.html(history, self.policy.resolution));
+        } else {
+            html.push_str(&stress_mesh::html(self.policy.resolution, self.mesh.as_ref()));
         }
-        html.push_str(&stress_mesh::html(self.policy.resolution, self.mesh.as_ref()));
         html
     }
 
@@ -204,9 +205,9 @@ impl ConstraintEvidence {
             self.refusals.iter().map(|v| quoted(v)).collect::<Vec<_>>().join(","), reduction,
             regions::json_field(&self.policy.regions),
             self.family.as_ref().zip(self.policy.family.as_ref())
-                .map_or_else(String::new, |(history, family)| history.json_field(family)),
+                .map_or_else(String::new, |(history, family)| history.json_field(family, self.policy.resolution)),
             restoration::json_field(&self.baseline, &self.accepted, &self.policy)
-                + &stress_mesh::field(self.policy.resolution, self.mesh.as_ref()))
+                + &stress_mesh::field(self.policy.resolution.filter(|_| self.policy.family.is_none()), self.mesh.as_ref()))
     }
 
     fn read(value: &JsonValue, report: &OptimizeReport, requested: &ProjectedControls) -> Result<Self> {
@@ -253,7 +254,14 @@ impl ConstraintEvidence {
             .ok_or_else(|| malformed("invalid candidate refusal"))).collect::<Result<Vec<_>>>()?;
         let family = multi_load::History::read(value, &baseline, &accepted, policy)?;
         restoration::check_retained(value, &baseline, &accepted, policy)?;
-        let mesh = stress_mesh::read(value, policy, &baseline, &accepted)?;
+        let mesh = if policy.family.is_none() {
+            stress_mesh::read(value, policy, &baseline, &accepted)?
+        } else {
+            if value.get("mesh_resolution").is_some() {
+                return Err(malformed("independent-load mesh evidence belongs to the complete load family"));
+            }
+            None
+        };
         Ok(Self { policy: policy.clone(), baseline, accepted, attempts: counts, refusals, family, mesh })
     }
 }

@@ -7,6 +7,9 @@
 #[path = "product_qmc_checkpoint.rs"]
 mod checkpoint;
 
+/// Frozen physical-coordinate mean controls on complete independent replicates.
+pub mod mean_control;
+
 use core::fmt::Display;
 use fs_evidence::Color;
 use fs_rand::qmc::{MAX_SOBOL_DIM, Sobol};
@@ -264,9 +267,25 @@ impl QmcExecution {
 // outside [-scale,scale]; clamping only that rounding overshoot keeps constants
 // at f64::MAX representable without changing the probability domain.
 fn scaled_mean(values: &[f64]) -> f64 {
-    let scale = values.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
-    if scale == 0.0 { return 0.0; }
-    (values.iter().map(|x| x / scale).sum::<f64>() / values.len() as f64).clamp(-1.0, 1.0) * scale
+    scaled_mean_interruptible(values, &mut || false).expect("uncancelled scaled mean")
+}
+
+// The same ordered reduction, with bounded polling for mean-control replay.
+// Inputs are already finite observations or checked adjusted values.
+fn scaled_mean_interruptible(values: &[f64], cancelled: &mut impl FnMut() -> bool)
+    -> Result<f64, crate::product_control_variate::UqControlError>
+{
+    use crate::product_control_variate::{UqControlError, poll};
+    let scale = values.iter().enumerate().try_fold(0.0_f64, |s, (i, x)| {
+        if i % 512 == 0 { poll(cancelled)?; }
+        Ok::<_, UqControlError>(s.max(x.abs()))
+    })?;
+    if scale == 0.0 { return Ok(0.0); }
+    let total = values.iter().enumerate().try_fold(-0.0_f64, |s, (i, x)| {
+        if i % 512 == 0 { poll(cancelled)?; }
+        Ok::<_, UqControlError>(s + x / scale)
+    })?;
+    Ok((total / values.len() as f64).clamp(-1.0, 1.0) * scale)
 }
 
 fn summarize_replicates(values: &[f64]) -> Option<QmcEstimate> {

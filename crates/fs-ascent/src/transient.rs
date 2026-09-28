@@ -17,6 +17,9 @@ pub mod observations;
 pub mod campaign;
 pub mod imex;
 pub mod structural;
+pub mod variational;
+/// Weak-constraint reconstruction with the production stiff IMEX adjoint.
+pub mod imex_variational;
 
 /// One immutable parameter point, including its observation model and data.
 /// `OdeVjp` and `SampleObjective` partials use the SAME decision coordinates as
