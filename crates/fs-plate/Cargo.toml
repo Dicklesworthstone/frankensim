@@ -17,11 +17,6 @@ fs-qty = { path = "../fs-qty" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
-# Spatial dynamics live in fs-plate-transient. A dev-dependency cycle is legal;
-# the optional one closed fs-feec -> fs-couple -> fs-plate -> fs-solver.
-fs-plate-transient = { path = "../fs-plate-transient" }
-fs-time = { path = "../fs-time" }
-fs-solver = { path = "../fs-solver" }
 # Consuming demo for the instrument material database (bead zwzey): a
 # spruce top's modes computed from queried fs-matdb values alone.
 fs-blake3 = { path = "../fs-blake3" }
@@ -31,8 +26,3 @@ fs-matdb = { path = "../fs-matdb" }
 [lints]
 workspace = true
 
-[[test]]
-name = "plate_transient"
-
-[[example]]
-name = "moving_plate"

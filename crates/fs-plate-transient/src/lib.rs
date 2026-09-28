@@ -5,12 +5,9 @@
 //! depends on `fs-plate`. As an optional feature of `fs-plate` it therefore
 //! closed a package cycle that made every workspace cargo command fail. As its
 //! own crate it depends on `fs-plate`, and nothing below it depends back.
-//!
-//! The source still lives at `fs-plate/src/transient.rs`, where it was
-//! written. It reaches `fs-plate` only through the public [`PlateModel`].
+//! It reaches `fs-plate` only through the public [`PlateModel`].
 
 pub use fs_plate::PlateModel;
 
-#[path = "../../fs-plate/src/transient.rs"]
 mod transient;
 pub use transient::*;

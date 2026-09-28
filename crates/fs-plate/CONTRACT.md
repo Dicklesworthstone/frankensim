@@ -194,8 +194,8 @@ None. The shared generalized-alpha dynamics and adjoint adapter moved to the
 `fs-plate-transient` crate on 2026-09-27. As an optional feature here, its
 `fs-time`/`fs-solver` edge closed the package cycle
 `fs-feec -> fs-couple -> fs-plate -> fs-solver -> fs-feec`, and every workspace
-cargo command failed. Its source still lives at `src/transient.rs`, compiled by
-that crate. Moving-load interpolation remains here.
+cargo command failed. Its source, tests and examples moved there on 2026-09-28.
+Moving-load interpolation remains here.
 
 ## Conformance tests
 

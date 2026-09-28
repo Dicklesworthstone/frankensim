@@ -1,7 +1,7 @@
 //! A bounded Newton/FGMRES solve of a meshed plate with physical Jacobi scaling.
 //!
-//! `cargo run -p fs-plate --example preconditioned_plate`
-//! `cargo run -p fs-plate --example preconditioned_plate -- 12`
+//! `cargo run -p fs-plate-transient --example preconditioned_plate`
+//! `cargo run -p fs-plate-transient --example preconditioned_plate -- 12`
 //!
 //! The optional mesh size is 8 (147 free DOFs, default) or 12 (363 free DOFs).
 //!

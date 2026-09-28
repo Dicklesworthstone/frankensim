@@ -12,17 +12,16 @@ workspace cargo command failed. Here the dependency points one way only
 (`fs-plate-transient -> fs-plate`), and nothing under `fs-couple` depends back.
 
 ## Surface
-`PlateDynamics`, its budgets, parameters and load traits, re-exported from the
-source file `crates/fs-plate/src/transient.rs`, which is compiled here through
-`#[path]`. The mathematical contract (M/K/C parameterization, VJP ordering,
+`PlateDynamics`, its budgets, parameters and load traits (`src/transient.rs`,
+moved here from `fs-plate` on 2026-09-28). The mathematical contract (M/K/C parameterization, VJP ordering,
 cancellation and refusal behaviour) is stated in `fs-plate/CONTRACT.md` under
 the transient bullet and is unchanged by the move. The file reaches `fs-plate`
 only through the public `PlateModel`.
 
 ## Tests
-`crates/fs-plate/tests/plate_transient.rs` and the `moving_plate` example stay
-in `fs-plate`, which takes this crate as a dev-dependency (a legal cycle).
-`fs-ascent`'s `plate_calibration` example and test consume it the same way.
+`tests/plate_transient.rs`, `tests/plate_preconditioning.rs` and the
+`moving_plate` / `preconditioned_plate` examples live in this crate.
+`fs-ascent`'s `plate_calibration` example includes `examples/moving_plate.rs`.
 
 The `preconditioned_plate` example accepts mesh size 8 (147 free DOFs) or 12
 (363 free DOFs), comparing physical Jacobi scaling against the default identity

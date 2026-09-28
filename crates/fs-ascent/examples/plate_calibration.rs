@@ -13,7 +13,7 @@
 //! material identification or convergence to a continuum plate solution.
 
 #[allow(dead_code)]
-#[path = "../../fs-plate/examples/moving_plate.rs"]
+#[path = "../../fs-plate-transient/examples/moving_plate.rs"]
 mod moving;
 
 use fs_ascent::sqp::{SqpSample, SqpState, SqpStop};

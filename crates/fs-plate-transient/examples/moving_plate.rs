@@ -1,6 +1,6 @@
 //! A moving transverse force on a meshed clamped plate, with sampled adjoints.
 //!
-//! `cargo run -p fs-plate --example moving_plate`
+//! `cargo run -p fs-plate-transient --example moving_plate`
 //!
 //! Geometry and material data are explicit illustrative SI inputs. This uses
 //! all assembled DKT displacement/slope DOFs and the shared time integrator.
