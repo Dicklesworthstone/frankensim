@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "533d48e24445ff0bd47794fef1d7e92cc98c449fe11ae4a5d9b6e94bcdd9ea24",
+  "manifest_identity": "5e391109c5c6a37d0809d9f7f672b0720b38ad43b68717b56ba14123d643f1b9",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "3f03d23b28993f9d66e835bb1aae427da06e7227dd7c3dd7bc8624d9b5332370",
+    "source_root": "4da2df041127cf7f5245fa34505d7dd3d7cd5014734837f14e683ced0036f766",
     "tracked_file_count": 4847,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -809,7 +809,7 @@
       {"path": "crates/fs-cli/tests/native_uncertainty/copula.rs", "git_mode": "100644", "bytes": 7742, "content_blake3": "b389bfcff1991e0ecfdd071e480698aaced10957d6a2fc5744d2434cd271e0e5"},
       {"path": "crates/fs-cli/tests/native_uncertainty/fan_speed.rs", "git_mode": "100644", "bytes": 5269, "content_blake3": "a138c0d03237752e2ea390311a0dfe6254183bd83f1226cee19ff2e070dd2131"},
       {"path": "crates/fs-cli/tests/native_uncertainty/qmc.rs", "git_mode": "100644", "bytes": 9482, "content_blake3": "3c089f71bb9e3e45e8cec775d7eced54a6c70c9090799d8ff12ddd554a050176"},
-      {"path": "crates/fs-cli/tests/solve.rs", "git_mode": "100644", "bytes": 222582, "content_blake3": "8fe0b08ed428c4f564c5b34747b5a02b74275c7e3e4924279af86746e0fe6a12"},
+      {"path": "crates/fs-cli/tests/solve.rs", "git_mode": "100644", "bytes": 222727, "content_blake3": "972c85d3afcc4fa9e5851ffb52c55d3cf22a79cc5e36a83bf505658338df0c93"},
       {"path": "crates/fs-cli/tests/solve/radiation_product.rs", "git_mode": "100644", "bytes": 16916, "content_blake3": "635cf25190f57ad09db0d24d2699f953e0257288878f5cb1fb57a98ca091eefa"},
       {"path": "crates/fs-cli/tests/step_heatsink.rs", "git_mode": "100644", "bytes": 14571, "content_blake3": "971ea68667c2e2e0e07e277b3d435c2d462388942070ba40ec746b0bf8ceb151"},
       {"path": "crates/fs-cli/tests/study_checkpoint_cli.rs", "git_mode": "100644", "bytes": 13939, "content_blake3": "103dabe5967912f4e166f6aa72ade677a70cb8b232646acb17d3f33eea90908c"},
