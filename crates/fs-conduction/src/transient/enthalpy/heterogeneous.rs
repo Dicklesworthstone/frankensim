@@ -15,12 +15,15 @@ use std::fmt;
 use fs_exec::Cx;
 use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 
+use super::adjoint::{
+    EnthalpyAdjointError, EnthalpyStepGradient, EnthalpyStepLinearization,
+};
 use super::{
     EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig,
     EnthalpyStepSolution, finite, poll,
 };
 use crate::{
-    ConductionMesh, ConductionProblem, ThermalInterfaces, assemble::ASSEMBLY_TILE,
+    ConductionMesh, ConductionProblem, LinearConfig, ThermalInterfaces, assemble::ASSEMBLY_TILE,
 };
 
 /// One immutable constitutive chart and its separately declared storage density.
@@ -290,5 +293,187 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
         self.inner
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
+    }
+}
+
+/// Physical history/source and frozen-reference-density pullbacks of one step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeterogeneousEnthalpyStepGradient {
+    /// Existing history/source gradients and independently checked transpose solve.
+    pub transport: EnthalpyStepGradient,
+    /// Derivative with respect to each tetrahedron's independent reference
+    /// density [kg/m3], holding specific enthalpy history and the chart fixed.
+    pub element_reference_density: Vec<f64>,
+    /// Sum of element derivatives for each declared material-table record.
+    /// Unused material records receive exactly zero, not an inferred effect.
+    pub material_reference_density: Vec<f64>,
+}
+
+/// Rechecked heterogeneous endpoint with a bound reference-storage derivative.
+///
+/// The immutable history difference is captured when the primal is accepted;
+/// density pullbacks cannot accidentally combine another history or assignment
+/// with this tangent. Geometry, phase charts, conductivity and contact data are
+/// frozen. This differentiates reference storage, not density-dependent material
+/// properties, phase-chart knots, geometry motion or material selection.
+#[derive(Debug)]
+pub struct HeterogeneousEnthalpyStepLinearization<'m> {
+    inner: EnthalpyStepLinearization<'m>,
+    mesh: &'m ConductionMesh,
+    specific_enthalpy_change: Vec<f64>,
+    element_material_ids: Vec<usize>,
+    material_count: usize,
+}
+
+impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
+    /// Solve and revalidate a heterogeneous endpoint before attaching gradients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_step(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self
+            .inner
+            .linearize_step(cx, problem, interfaces, old_h, dt_s, config)?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
+    /// Recompute the supplied endpoint's residual, energy and vertex-specific
+    /// chart/branch guards. Public endpoint fields are not acceptance evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_accepted(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let inner = self.inner.linearize_accepted(
+            cx, problem, interfaces, old_h, dt_s, config, accepted,
+        )?;
+        self.bind_linearization(cx, old_h, inner)
+    }
+
+    fn bind_linearization(
+        &self,
+        cx: &Cx<'_>,
+        old_h: &[f64],
+        inner: EnthalpyStepLinearization<'m>,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        let mut specific_enthalpy_change = Vec::with_capacity(old_h.len());
+        for (vertex, (&new, &old)) in inner
+            .primal()
+            .specific_enthalpy_j_kg
+            .iter()
+            .zip(old_h)
+            .enumerate()
+        {
+            if vertex % ASSEMBLY_TILE == 0 {
+                poll(cx, vertex)?;
+            }
+            specific_enthalpy_change.push(finite(new - old)?);
+        }
+        poll(cx, old_h.len())?;
+        Ok(HeterogeneousEnthalpyStepLinearization {
+            inner,
+            mesh: self.inner.mesh,
+            specific_enthalpy_change,
+            element_material_ids: self.element_material_ids.clone(),
+            material_count: self.material_count,
+        })
+    }
+}
+
+impl HeterogeneousEnthalpyStepLinearization<'_> {
+    /// Shared exact endpoint Jacobian, transpose, temperature pullback and
+    /// accepted primal. Retains the existing checked sparse-action interface.
+    #[must_use]
+    pub const fn transport(&self) -> &EnthalpyStepLinearization<'_> {
+        &self.inner
+    }
+
+    /// Rechecked endpoint with the heterogeneous chart-resolved phase fields.
+    #[must_use]
+    pub const fn primal(&self) -> &EnthalpyStepSolution {
+        self.inner.primal()
+    }
+
+    /// Apply `R_rho * direction` at fixed current and previous specific enthalpy.
+    /// This is a RESIDUAL Jacobian action, not an implicit endpoint state JVP.
+    /// Directions are independent reference-density perturbations per element.
+    pub fn apply_reference_density_jacobian(
+        &self,
+        cx: &Cx<'_>,
+        direction: &[f64],
+    ) -> Result<Vec<f64>, EnthalpyAdjointError> {
+        poll(cx, 0)?;
+        if direction.len() != self.mesh.element_count() {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "one reference-density direction per tetrahedron required",
+            ));
+        }
+        let mut output = vec![0.0; self.specific_enthalpy_change.len()];
+        for (element, &density_direction) in direction.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            let mass_direction = finite(self.mesh.element_volume(element) / 4.0 * density_direction)?;
+            for &vertex in &self.mesh.complex().tets[element] {
+                let vertex = vertex as usize;
+                let contribution = finite(mass_direction * self.specific_enthalpy_change[vertex])?;
+                output[vertex] = finite(output[vertex] + contribution)?;
+            }
+        }
+        poll(cx, direction.len())?;
+        Ok(output)
+    }
+
+    /// Solve the physical transpose once, then return source/history gradients
+    /// and `-lambda^T R_rho` for both element and shared material densities.
+    ///
+    /// For each tetrahedron, `dJ/drho_e = -(V_e/4) sum_i lambda_i*(h_i-h_old_i)`.
+    /// Every term uses the bound primal history. No residual is divided by a
+    /// density or a temperature slope, so latent-plateau storage remains valid.
+    /// No partial result is published after cancellation or nonfinite arithmetic.
+    pub fn pullback(
+        &self,
+        cx: &Cx<'_>,
+        seed: &[f64],
+        config: LinearConfig,
+    ) -> Result<HeterogeneousEnthalpyStepGradient, EnthalpyAdjointError> {
+        let transport = self.inner.pullback(cx, seed, config)?;
+        let mut element_reference_density = Vec::with_capacity(self.mesh.element_count());
+        let mut material_reference_density = vec![0.0; self.material_count];
+        for (element, &material) in self.element_material_ids.iter().enumerate() {
+            if element % ASSEMBLY_TILE == 0 {
+                poll(cx, element)?;
+            }
+            let mut sum = 0.0;
+            for &vertex in &self.mesh.complex().tets[element] {
+                let vertex = vertex as usize;
+                let term = finite(
+                    transport.adjoint[vertex] * self.specific_enthalpy_change[vertex],
+                )?;
+                sum = finite(sum + term)?;
+            }
+            let derivative = finite(-self.mesh.element_volume(element) / 4.0 * sum)?;
+            element_reference_density.push(derivative);
+            material_reference_density[material] =
+                finite(material_reference_density[material] + derivative)?;
+        }
+        poll(cx, self.mesh.element_count())?;
+        Ok(HeterogeneousEnthalpyStepGradient {
+            transport,
+            element_reference_density,
+            material_reference_density,
+        })
     }
 }

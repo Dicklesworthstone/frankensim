@@ -522,11 +522,12 @@ fn check_chart(
     storage: &EnthalpyBackwardEuler<'_, '_>,
     h: &[f64],
 ) -> Result<(), EnthalpyAdjointError> {
-    let knots = storage.curve.knots();
     for (vertex, &value) in h.iter().enumerate() {
         if vertex % ASSEMBLY_TILE == 0 {
             poll(cx, vertex)?;
         }
+        let curve = storage.curve_for_vertex(vertex);
+        let knots = curve.knots();
         if let Ok(index) = knots.binary_search_by(|knot| {
             knot.specific_enthalpy_j_kg
                 .partial_cmp(&value)
@@ -539,8 +540,7 @@ fn check_chart(
                 });
             }
             let slope = |h| {
-                storage
-                    .curve
+                curve
                     .temperature_derivative_at_specific_enthalpy(h)
                     .map_err(|source| EnthalpyError::Phase { vertex, source })
             };
