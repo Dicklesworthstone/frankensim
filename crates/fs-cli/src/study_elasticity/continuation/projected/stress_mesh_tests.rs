@@ -40,9 +40,11 @@ fn stress_mesh_source_is_explicit_and_never_silently_ignores_independent_loads()
         assert!(parse_study(&source().replace(a,b)).is_err());
     }
     let family = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/marquee/bracket-multi-load-2d.fsim"));
-    let bad = family.replace("    :load-family", &format!("{CHECK}\n    :load-family"));
-    let error = parse_study(&bad).unwrap_err();
-    assert!(error.message.contains("single-load"));
+    let combined = family.replace("    :load-family", &format!("{CHECK}\n    :load-family"));
+    let combined = parse_study(&combined).unwrap();
+    let policy = stress_controls(&combined).unwrap();
+    assert!(policy.family.is_some() && policy.resolution.is_some());
+    assert_eq!(parse_study(&combined.canonical).unwrap().id, combined.id);
 }
 
 #[test]

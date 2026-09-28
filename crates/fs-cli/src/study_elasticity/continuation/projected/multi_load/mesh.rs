@@ -104,7 +104,7 @@ fn read_report(value: &JsonValue, p: ResolutionPolicy, policy: &Controls,
     let report = MultiLoadResolutionReport { rungs };
     // The numerical owner validates complete finite measurements even when
     // they genuinely fail the requested stress/resolution gates.
-    report.refusal(p, policy.area.target, policy.stress, cases).map_err(|e| malformed(&e.to_string()))?;
+    let _ = report.refusal(p, policy.area.target, policy.stress, cases).map_err(|e| malformed(&e.to_string()))?;
     Ok(report)
 }
 
@@ -183,3 +183,6 @@ pub(super) fn validate_terminal(history: &History, policy: &Controls, status: &s
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
