@@ -1004,6 +1004,11 @@ authority.
   nonlinear history/source derivatives against five-point forward differences,
   zero temperature sensitivity on a latent plateau, differentiability policy,
   and refused/cancelled/tampered inputs.
+  `cargo run -p fs-ascent --example enthalpy_calibration` composes these
+  derivatives through a bounded full-storage spatial trajectory to fit two
+  localized heater pulses from temperature histories using the existing SQP
+  optimizer. The example's synthetic observations and numerical recovery are
+  separate from experimental material validation.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and
