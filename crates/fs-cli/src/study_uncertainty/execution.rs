@@ -25,9 +25,6 @@ fn layout(model: &Model) -> Option<QmcConfig> {
 
 impl Execution {
     pub(super) fn new(model: &Model) -> Result<Self> {
-        if model.bound.study().mean_control().is_some() {
-            return Err(fail("cli-uncertainty-mean-control", "native mean-control preparation must be installed before version 3 can execute"));
-        }
         let plan = plan(model);
         match (model.bound.study().latent_correlation(), layout(model)) {
             (Some(matrix), Some(layout)) => GaussianCopulaQmcExecution::new(&plan, matrix, layout)

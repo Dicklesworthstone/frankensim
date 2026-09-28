@@ -31,6 +31,8 @@ mod legacy;
 mod model;
 use model::{Model, Sample};
 use execution::Execution;
+#[path = "study_uncertainty/mean_control.rs"]
+mod mean_control;
 
 const DRIVER: &str = "native-cooling-uncertainty-v1";
 const RECEIPT_KIND: &str = "study-run-receipt";
@@ -216,6 +218,9 @@ fn rows_json(rows: &[Sample]) -> String {
 }
 fn read_rows(bytes: &[u8]) -> Result<Vec<Sample>> {
     let value = parse(bytes)?;
+    read_rows_value(&value)
+}
+fn read_rows_value(value: &J) -> Result<Vec<Sample>> {
     let rows = value
         .as_array()
         .filter(|r| r.len() <= fs_project::uncertainty::MAX_SAMPLES)
@@ -312,6 +317,7 @@ fn persist(
     ledger: &Ledger,
     execution: &Execution,
     rows: &[Sample],
+    calibration: Option<&mean_control::Calibration>,
     status: &str,
     termination: &str,
     used_wall: f64,
@@ -329,6 +335,19 @@ fn persist(
             "retained child runs disagree with statistical observations",
         ));
     }
+    if calibration.is_some() != model.bound.study().mean_control().is_some()
+        || (n > 0 && calibration.is_some_and(|c| !c.ready()))
+    {
+        return Err(fail("cli-uncertainty-mean-control", "samples require the declared frozen calibration"));
+    }
+    let assessment = calibration.map(|c| c.assessment(execution)).transpose()?.flatten();
+    let control_field = calibration.map_or_else(String::new, |c|
+        format!(",\"mean_control\":{}", c.report(model, assessment.as_ref())));
+    let control_html = assessment.as_ref().map_or_else(String::new, mean_control::Assessment::html);
+    let control_state = calibration.map(|c| c.snapshot(model));
+    let control_budget = model.bound.study().mean_control().map_or_else(String::new, |policy|
+        format!(",\"calibration_max_solves\":{},\"calibration_attempted\":{}",
+            policy.max_solves, calibration.map_or(0, |c| c.attempted)));
     let id = model.identity();
     let report = execution.monte_carlo().map(UqExecution::report);
     let qmc_report = execution.qmc_report();
@@ -370,12 +389,12 @@ fn persist(
     } else {
         "null".into()
     };
-    let failure = execution
-        .rejection_reason()
+    let failure = calibration.and_then(|c| c.failure.clone())
+        .or_else(|| execution.rejection_reason())
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{dependence_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{dependence_field}{control_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -408,7 +427,7 @@ fn persist(
             complete.map_or_else(|| "unavailable".into(), |report| optional(report.probability_of_compliance)))
     };
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p>{statistics_html}{compliance_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native cooling uncertainty</title><body><h1>Native cooling uncertainty</h1><p>Status: {status}; {n}/{} completed samples. Estimated.</p>{statistics_html}{compliance_html}{control_html}<p>{scope}</p><table><tr><th>Sample</th><th>Maximum temperature (K)</th><th>Retained solve</th></tr>{table}</table></body></html>",
         model.bound.study().samples()
     );
     let mut package = EvidencePackage::new(Provenance::new(
@@ -432,10 +451,15 @@ fn persist(
     {
         package = package.with_claim(claim);
     }
+    if status == "completed" && let Some(claim) = assessment.as_ref()
+        .and_then(|a| a.claim(hash_bytes(summary.as_bytes())))
+    {
+        package = package.with_claim(claim);
+    }
     let package = package
         .to_json()
         .map_err(|e| fail("cli-uncertainty-package", e.to_string()))?;
-    let checkpoint = if execution.status() == UqStatus::Refused {
+    let checkpoint = if status == "refused" {
         None
     } else {
         Some(execution.checkpoint(id)?)
@@ -446,7 +470,7 @@ fn persist(
         crate::SOLVE_DRIVER_VERSION
     );
     let budgets = format!(
-        "{{\"samples\":{},\"wall_s\":{},\"consumed_wall_s\":{used_wall}}}",
+        "{{\"samples\":{},\"wall_s\":{},\"consumed_wall_s\":{used_wall}{control_budget}}}",
         model.bound.study().samples(),
         model.bound.study().wall_seconds()
     );
@@ -467,12 +491,17 @@ fn persist(
             ledger.link(op, &previous, EdgeRole::In)?;
         }
         let mut child_receipts = std::collections::BTreeSet::new();
-        for row in rows {
+        for row in rows.iter().chain(calibration.into_iter().flat_map(|c| c.probes.iter())) {
             if child_receipts.insert(row.qoi_receipt) {
                 ledger.link(op, &row.qoi_receipt, EdgeRole::In)?;
             }
         }
         let mut refs = String::new();
+        if let Some(bytes) = &control_state {
+            let a = ledger.put_artifact(mean_control::KIND, bytes.as_bytes(), None)?;
+            ledger.link(op, &a.hash, EdgeRole::Out)?;
+            let _ = write!(refs, ",\"mean_control_state\":{}", quoted(&a.hash.to_hex()));
+        }
         for (key, kind, bytes) in [
             (
                 "observations",
@@ -595,6 +624,13 @@ fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
         }
         artifact(ledger, h, kind, MAX_ARTIFACT_BYTES)?;
     }
+    if value.get("mean_control_state").is_some() {
+        let h = hash_field(&value, "mean_control_state")?;
+        if !ledger.edge_exists(op_id, &h, EdgeRole::Out)? {
+            return Err(fail("cli-uncertainty-run", "missing mean-control lineage"));
+        }
+        artifact(ledger, h, mean_control::KIND, MAX_ARTIFACT_BYTES)?;
+    }
     if value.str_field("status") != Some("refused") {
         let h = hash_field(&value, "checkpoint")?;
         if !ledger.edge_exists(op_id, &h, EdgeRole::Out)? {
@@ -618,6 +654,9 @@ fn drive(
     started: Instant,
     prior: Option<&Loaded>,
 ) -> Result<Outcome> {
+    // Calibration is deterministic and kept out of the sampling stream. On
+    // recovery each probe and the original coefficients are verified first.
+    let mut calibration = mean_control::Calibration::recover(model, ledger, prior)?;
     let (mut execution, mut rows, used_before) = if let Some(old) = prior {
         if hash_field(&old.value, "model")? != model.identity() {
             return Err(fail("cli-uncertainty-resume", "retained model changed"));
@@ -693,14 +732,19 @@ fn drive(
             0.0,
         )
     };
-    let start_count = rows.len();
+    // Version 3's invocation allowance counts both calibration and random
+    // evaluations. Versions 1/2 keep their original sample-only meaning.
+    let start_count = rows.len() + calibration.as_ref().map_or(0, |c| c.probes.len());
     let mut predecessor = prior.map(|old| old.hash);
     let mut interrupted = false;
     loop {
         let used = used_before + started.elapsed().as_secs_f64();
         let execution_status = execution.status();
         let compliance = execution.compliance(model)?;
-        let (status, termination) = if execution_status == UqStatus::Refused {
+        let completed = rows.len() + calibration.as_ref().map_or(0, |c| c.probes.len());
+        let (status, termination) = if calibration.as_ref().is_some_and(|c| c.failure.is_some()) {
+            ("refused", "calibration-refused")
+        } else if execution_status == UqStatus::Refused {
             ("refused", "child-refused")
         } else if compliance
             .as_ref()
@@ -719,8 +763,10 @@ fn drive(
             ("cancelled", "cancelled")
         } else if interrupted {
             ("budget-exhausted", "child-budget")
-        } else if cap.is_some_and(|cap| rows.len() - start_count >= cap) {
-            ("budget-exhausted", "invocation-sample-budget")
+        } else if cap.is_some_and(|cap| completed - start_count >= cap) {
+            ("budget-exhausted", if calibration.is_some() { "invocation-evaluation-budget" } else { "invocation-sample-budget" })
+        } else if calibration.as_ref().is_some_and(|c| c.pending(model)) {
+            ("running", "calibrating")
         } else {
             ("running", "sampling")
         };
@@ -729,6 +775,7 @@ fn drive(
             ledger,
             &execution,
             &rows,
+            calibration.as_ref(),
             status,
             termination,
             used,
@@ -741,6 +788,15 @@ fn drive(
         let remaining =
             (model.bound.study().wall_seconds() - used_before - started.elapsed().as_secs_f64())
                 .max(0.0);
+        if let Some(c) = calibration.as_mut().filter(|c| c.pending(model)) {
+            let point = c.next(model)?;
+            match model.sample(ledger, gate, &point, remaining) {
+                Ok(Some(sample)) => c.accept(model, sample)?,
+                Ok(None) => interrupted = true,
+                Err(error) => c.reject(&error),
+            }
+            continue;
+        }
         let mut accepted = None;
         execution.advance_interruptible(
             1,
