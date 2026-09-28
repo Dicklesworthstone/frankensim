@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 30,
+        SOLVE_DRIVER_VERSION, 31,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3861,10 +3861,10 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     assert!(receipt.contains("outward-coupled-linear-maximum-enclosure"), "{receipt}");
     assert!(!receipt.contains("tolerance-tightening-resolve"), "{receipt}");
     let control = receipt.split("\"solver_control\":").nth(1).unwrap();
-    assert!(control.starts_with("{\"schema\":\"frankensim.cli.coupled-maximum-evidence.v1\""), "{receipt}");
-    assert!(control.contains("\"correction_supported\":false"), "{receipt}");
-    assert!(control.contains("\"candidate_accepted\":false"), "{receipt}");
-    assert_eq!(receipt_number_field(control, "primal_iterations"), 0.0);
+    assert!(control.starts_with("{\"schema\":\"frankensim.cli.coupled-maximum-publication.v1\""), "{receipt}");
+    assert!(control.contains("\"correction_supported\":true"), "{receipt}");
+    assert!(control.contains("\"mode\":\"physical-goal-correction\""), "{receipt}");
+    assert!(receipt_number_field(control, "primal_iterations") <= receipt_number_field(control, "max_primal_iterations"));
     assert!(receipt_number_field(control, "response_iterations")
         <= receipt_number_field(control, "max_response_iterations"));
     let gain = receipt_number_field(control, "feedback_gain_infinity_upper");

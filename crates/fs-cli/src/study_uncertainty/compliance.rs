@@ -7,15 +7,20 @@ use fs_package::Claim;
 use fs_project::uncertainty::CompliancePolicy;
 use fs_uq::{AnytimeEstimate, UqExecution, UqStatus};
 
-use super::{Model, Result, fail, optional, quoted};
+use super::{Model, Result, fail, input_law, optional, quoted};
 
-pub(super) const SCOPE: &str = "Estimated probability of the declared native numerical temperature event under independent uniform input laws. The predeclared Beta(1/2,1/2) Bernoulli likelihood mixture gives a time-uniform mathematical confidence sequence under a fixed conditional success probability. Alpha, threshold, input laws and stopping policy remain fixed across resume. Floating-point inversion is not an outward-rounded certificate. No fixed-count temperature distribution is claimed from a policy-stopped sample. Child engineering uncertainty budgets and verdicts remain unchanged; numerical, geometric, material and physical-model errors are not bounded by this sampling interval. Refused observations are never replaced or skipped, and a refused execution has no probability-confidence claim.";
+const SCOPE: &str = "The predeclared Beta(1/2,1/2) Bernoulli likelihood mixture gives a time-uniform mathematical confidence sequence under a fixed conditional success probability. Alpha, threshold, input laws and stopping policy remain fixed across resume. Floating-point inversion is not an outward-rounded certificate. No fixed-count temperature distribution is claimed from a policy-stopped sample. Child engineering uncertainty budgets and verdicts remain unchanged; numerical, geometric, material and physical-model errors are not bounded by this sampling interval. Refused observations are never replaced or skipped, and a refused execution has no probability-confidence claim.";
+
+pub(super) fn scope(model: &Model) -> String {
+    format!("Estimated probability of the declared native numerical temperature event under {}. {SCOPE}", input_law(model))
+}
 
 pub(super) struct Assessment {
     policy: CompliancePolicy,
     count: usize,
     estimate: Option<AnytimeEstimate>,
     decision: &'static str,
+    scope: String,
 }
 
 pub(super) fn assess(model: &Model, execution: &UqExecution) -> Result<Option<Assessment>> {
@@ -50,6 +55,7 @@ pub(super) fn assess(model: &Model, execution: &UqExecution) -> Result<Option<As
         count,
         estimate,
         decision,
+        scope: scope(model),
     }))
 }
 
@@ -98,9 +104,9 @@ impl Assessment {
             Claim::estimated(
                 "cooling.uncertainty.compliance-probability",
                 format!(
-                    "Empirical frequency {} across {} completed native observations; probability confidence sequence [{}, {}] at predeclared alpha {}. Required probability {}; decision {} after minimum {}. Retained result {}. {SCOPE}",
+                    "Empirical frequency {} across {} completed native observations; probability confidence sequence [{}, {}] at predeclared alpha {}. Required probability {}; decision {} after minimum {}. Retained result {}. {}",
                     estimate.mean, self.count, estimate.lo, estimate.hi, self.policy.alpha,
-                    self.policy.required_probability, self.decision, self.policy.min_samples, report.to_hex()
+                    self.policy.required_probability, self.decision, self.policy.min_samples, report.to_hex(), self.scope
                 ),
                 "predeclared-bernoulli-beta-half-mixture-confidence-sequence",
                 (estimate.mean - estimate.lo).max(estimate.hi - estimate.mean),

@@ -78,6 +78,16 @@ pub(crate) fn parse_controls(fields: &[Node], target: f64) -> Result<Option<Cont
 }
 
 impl Controls {
+    pub(crate) fn dwr_case_count(&self) -> Option<usize> {
+        self.family.as_ref().and_then(|family| family.dwr_case_count())
+    }
+
+    pub(crate) fn dwr_cases(&self, spec: &ElasticitySpec) -> Result<Vec<fs_topols::RobustLoadCase>> {
+        self.family.as_ref().filter(|family| family.dwr_case_count().is_some())
+            .ok_or_else(|| malformed("multi-load DWR requires an explicit weighted-sum load family"))?
+            .cases(spec)
+    }
+
     pub(crate) fn canonical(&self, out: &mut String) {
         let _ = writeln!(out, "    :constraint-mode projected-stress");
         for (key, value) in [("area-tolerance-m2", self.area.tolerance),
@@ -281,7 +291,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
-        projected: None, volume: None };
+        projected: None, volume: None, final_dwr: None };
     let mut predecessor = prior.map(|old| old.hash);
     let mut last = None;
     let mut consumed = 0.0;

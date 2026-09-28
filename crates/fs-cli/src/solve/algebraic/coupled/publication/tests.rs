@@ -89,6 +89,11 @@ fn one_field_drives_the_qoi_bound_physical_report_and_live_air_receipt() {
         assert_eq!(control.str_field("schema"), Some(SCHEMA));
         assert_eq!(control.get("physical_accepted"), Some(&Json::Bool(true)));
         assert_eq!(control.get("candidate_accepted"), Some(&Json::Bool(true)));
+        let gain = control.f64_field("feedback_gain_infinity_upper").unwrap();
+        assert!(gain > 0.0 && gain < 1.0);
+        assert_eq!(control.str_field("inverse_method"), Some("state-contraction"));
+        assert_eq!(control.get("schur_inverse_infinity_upper"), Some(&Json::Null));
+        assert!(control.f64_field("maximum_response_residual_upper").unwrap() >= 0.0);
         assert!(publication.evidence.primal_iterations > 0);
         let receipt = Json::parse(&replacement.conjugate).unwrap();
         assert_eq!(receipt.get("initial_exchange"), Some(&Json::parse(&history).unwrap()));
@@ -147,6 +152,12 @@ fn a_rejected_changed_candidate_never_supplies_the_unchanged_fields_bound() {
             SpectralMaximumControl { initial_shift: 0.001, limits }, gates).unwrap();
         assert!(result.accepted.is_some());
         let initial = result.correction.initial_analysis.algebraic_half_width_k();
+        let original_coupled = result.correction.initial_analysis.coupled();
+        let original_gain = original_coupled.gain_infinity_upper();
+        let original_method = original_coupled.inverse_method().map(|method| method.tag());
+        let original_schur = original_coupled.schur_inverse_infinity_upper();
+        let original_response = original_coupled.response_residual_infinity_upper()
+            .iter().copied().reduce(f64::max);
         assert_ne!(initial, result.correction.solution.solid.analysis.algebraic_half_width_k());
         // Exercise the projector's refusal contract independently of which gate failed.
         result.accepted = None;
@@ -156,6 +167,13 @@ fn a_rejected_changed_candidate_never_supplies_the_unchanged_fields_bound() {
         assert!(output.replacement.is_none());
         let control = Json::parse(output.evidence.control_json.as_ref().unwrap()).unwrap();
         assert_eq!(control.f64_field("final_bound_k"), initial);
+        for key in ["feedback_gain_infinity_upper", "inverse_method",
+            "schur_inverse_infinity_upper", "maximum_response_residual_upper"]
+        { assert!(control.get(key).is_some(), "missing coupled witness {key}"); }
+        assert_eq!(control.f64_field("feedback_gain_infinity_upper"), original_gain);
+        assert_eq!(control.str_field("inverse_method"), original_method);
+        assert_eq!(control.f64_field("schur_inverse_infinity_upper"), original_schur);
+        assert_eq!(control.f64_field("maximum_response_residual_upper"), original_response);
         assert!(output.evidence.primal_iterations > 0);
         assert_eq!(control.get("candidate_accepted"), Some(&Json::Bool(false)));
     });
@@ -175,6 +193,94 @@ fn malformed_history_or_cancellation_cannot_partially_replace_caller_state() {
         gate.request();
         assert!(prepare(cx, f.problem(), None, &f.paths, linear, &original, &f.history(), &vertices,
             64*1024*1024, solid, 1e-7).is_err());
+        assert_eq!(original, saved);
+    });
+}
+
+fn coupled_work(evidence: &MaximumEvidence) -> balance::Work {
+    match &evidence.linear_work {
+        Some(super::super::super::balance::LinearWork::Coupled(work)) => work.clone(),
+        _ => panic!("a physically attempted linear cooling rung must enter adaptive balancing"),
+    }
+}
+
+#[test]
+fn adaptive_retry_keeps_paid_rejections_and_uses_only_the_remaining_primal_allowance() {
+    let f = Fixture::new(false);
+    with_cx(|_, cx| {
+        let original = f.original(cx);
+        let (linear, config) = configs();
+        let vertices: Vec<_> = (0..f.mesh.vertex_count()).collect();
+        let history = f.history();
+        let first = prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-20, 1).unwrap();
+        assert!(first.replacement.is_none(), "one iteration is not a physical solve");
+        let work = coupled_work(&first.evidence);
+        assert_eq!(work.remaining().unwrap(), linear.max_iterations - first.evidence.primal_iterations);
+        let retry = prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-7,
+            work.remaining().unwrap()).unwrap();
+        let accepted = retry.replacement.as_ref().expect("bounded retry is physically admitted");
+        let total = work.accumulate(&coupled_work(&retry.evidence)).unwrap();
+        let bound = crate::solve::algebraic::maximum_bound(&retry.evidence);
+        let merged = total.control(retry.evidence.control_json.as_deref().unwrap(), bound,
+            None, None, || cx.checkpoint().map_err(|_| cancelled())).unwrap();
+        let json = Json::parse(&merged).unwrap();
+        assert_eq!(json.f64_field("primal_iterations"),
+            Some((first.evidence.primal_iterations + retry.evidence.primal_iterations) as f64));
+        assert_eq!(json.f64_field("max_primal_iterations"), Some(linear.max_iterations as f64));
+        assert_eq!(json.f64_field("retarget_calls"), Some(1.0));
+        assert!(json.f64_field("physical_rejections").unwrap() >= 1.0);
+        assert!(json.f64_field("physical_checks").unwrap()
+            <= json.f64_field("goal_checks").unwrap() + json.f64_field("preliminary_goal_checks").unwrap());
+        assert!(json.f64_field("response_iterations").unwrap() <= json.f64_field("max_response_iterations").unwrap());
+        assert!(accepted.solution.report.final_residual <= original.report.residual_threshold);
+        assert!((Json::parse(&accepted.conjugate).unwrap().f64_field("air_total_w").unwrap()-6.0).abs() < 1e-6);
+        assert!(prepare_with_budget(cx, f.problem(), None, &f.paths, linear,
+            &original, &history, &vertices, 64*1024*1024, config, 1e-7,
+            linear.max_iterations + 1).is_err());
+    });
+}
+
+#[test]
+fn repeated_adaptive_finalization_preserves_the_selected_inverse_and_reference_origin() {
+    let f = Fixture::new(true);
+    with_cx(|_, cx| {
+        let publication = prepared(&f, cx, &f.original(cx), &f.history());
+        let work = coupled_work(&publication.evidence);
+        let bound = crate::solve::algebraic::maximum_bound(&publication.evidence).unwrap();
+        assert!(bound > 0.0);
+        let original = publication.evidence.control_json.as_deref().unwrap();
+        let initial = Json::parse(original).unwrap();
+        let first = work.control(original, Some(bound), Some((20.0, 1.0)), None, || Ok(())).unwrap();
+        let second = work.control(&first, Some(bound), Some((0.0, 0.0)), None, || Ok(())).unwrap();
+        let final_control = Json::parse(&second).unwrap();
+        assert_eq!(final_control.get("goal_met"), Some(&Json::Bool(false)));
+        assert_eq!(final_control.f64_field("requested_tolerance_k"), Some(0.0));
+        assert_eq!(final_control.f64_field("last_correction_target_k"), Some(1e-7));
+        for key in ["maximum_interval_k", "final_bound_k", "inverse_method",
+            "feedback_gain_infinity_upper", "analysis_reference_origin"]
+        { assert_eq!(final_control.get(key), initial.get(key), "changed selected witness {key}"); }
+        assert_eq!(final_control.as_object().unwrap().iter().filter(|(key,_)| key == "adaptive_balance").count(), 1);
+    });
+}
+
+#[test]
+fn adaptive_control_cancellation_does_not_publish_a_partially_rewritten_receipt() {
+    let f = Fixture::new(false);
+    with_cx(|gate, cx| {
+        let publication = prepared(&f, cx, &f.original(cx), &f.history());
+        let work = coupled_work(&publication.evidence);
+        let original = publication.evidence.control_json.as_deref().unwrap();
+        let saved = original.to_string();
+        let mut checkpoints = 0;
+        let result = work.control(original, crate::solve::algebraic::maximum_bound(&publication.evidence),
+            Some((10.0, 0.5)), None, || {
+                checkpoints += 1;
+                if checkpoints == 3 { gate.request(); }
+                cx.checkpoint().map_err(|_| cancelled())
+            });
+        assert!(result.is_err());
         assert_eq!(original, saved);
     });
 }

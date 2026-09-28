@@ -15,6 +15,7 @@ use super::{AirPath, ConductionProblem, CoupledGoalError, Cx, LinearConfig,
     maximum_evidence, number, optional_number, policy, spectral_policy};
 
 mod receipt;
+pub(in crate::solve::algebraic) mod balance;
 
 const SCHEMA: &str = "frankensim.cli.coupled-maximum-publication.v1";
 const SCOPE: &str = "full stored linear solid/air correction with independent production-law physical admission; field, Robin boundary and air receipt are published together; assembly, continuum, nonlinear/radiation, flow uncertainty and experimental validation remain outside this bound";
@@ -74,6 +75,21 @@ fn prepare(
     original_fragment: &str, vertices: &[usize], memory_bytes: u64,
     solid_config: LinearGoalAnalysisConfig, requested_k: f64,
 ) -> Result<Publication, SolveRefusal> {
+    prepare_with_budget(cx, problem, interfaces, paths, linear, original,
+        original_fragment, vertices, memory_bytes, solid_config, requested_k,
+        linear.max_iterations)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_with_budget(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    paths: &[AirPath], linear: LinearConfig, original: &ConductionSolution,
+    original_fragment: &str, vertices: &[usize], memory_bytes: u64,
+    solid_config: LinearGoalAnalysisConfig, requested_k: f64, primal_budget: usize,
+) -> Result<Publication, SolveRefusal> {
+    if primal_budget > linear.max_iterations {
+        return Err(error("coupled correction cannot enlarge the original primal allowance"));
+    }
     let feedback = policy(memory_bytes, solid_config, linear);
     let spectral_limits = spectral_policy(memory_bytes, feedback);
     let exchange = ConjugateConfig::default();
@@ -85,7 +101,7 @@ fn prepare(
         balance_relative_tolerance: exchange.balance_relative_tolerance,
     };
     let control = LinearGoalSolveConfig { absolute_tolerance: requested_k,
-        max_primal_iterations: linear.max_iterations, check_every: 8, max_defect_corrections: 2 };
+        max_primal_iterations: primal_budget, check_every: 8, max_defect_corrections: 2 };
     // A dimensioned proposal only: integrated Robin conductance per vertex.
     // Neither this heuristic nor a factorization success grants inverse authority.
     let mut conductance = f64::INFINITY;
@@ -125,7 +141,7 @@ fn prepare(
     }
     if let Some(control) = &mut publication.evidence.control_json {
         control.pop();
-        control.push_str(&format!(",\"analysis_reference_origin\":[{}]}}", references.join(",")));
+        control.push_str(&format!(",\"analysis_reference_origin\":[{}],\"attempt_primal_limit\":{primal_budget}}}", references.join(",")));
     }
     cx.checkpoint().map_err(|_| cancelled())?;
     Ok(publication)
@@ -192,17 +208,28 @@ fn project(
     let primal_iterations = correction.primal_iterations;
     // Preserve the original coupling origin in the replay evidence. Replacing
     // a physical Robin reference changes the rounded RHS, not the modeled air law.
+    // All inverse diagnostics describe the selected PUBLISHED analysis. On a
+    // physical refusal, none of these fields may come from the rejected trial.
+    let coupled = analysis.coupled();
+    let inverse_method = coupled.inverse_method()
+        .map(|method| json_string(method.tag())).unwrap_or_else(|| "null".into());
+    let response_defect = coupled.response_residual_infinity_upper()
+        .iter().copied().reduce(f64::max);
     let mut control_json = control_json;
     control_json.pop();
     control_json.push_str(&format!(
-        ",\"bound_target\":\"pre-correction-stored-affine-system\",\"air_paths\":{},\"ports\":{},\"max_response_iterations\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"bound_status\":{}}}",
+        ",\"bound_target\":\"pre-correction-stored-affine-system\",\"air_paths\":{},\"ports\":{},\"max_response_iterations\":{},\"coupled_residual_infinity_upper\":{},\"solid_inverse_infinity_upper\":{},\"feedback_gain_infinity_upper\":{},\"coupled_inverse_infinity_upper\":{},\"maximum_response_residual_upper\":{},\"inverse_method\":{},\"schur_inverse_infinity_upper\":{},\"bound_status\":{}}}",
         paths.len(), paths.iter().map(|path| path.segments().len()).sum::<usize>(),
-        primal_limit, number(analysis.coupled().residual_infinity_upper())?,
-        optional_number(analysis.coupled().solid_inverse_infinity_upper())?,
-        optional_number(analysis.coupled().coupled_inverse_infinity_upper())?,
-        json_string(&format!("{:?}", analysis.coupled().status()))));
+        primal_limit, number(coupled.residual_infinity_upper())?,
+        optional_number(coupled.solid_inverse_infinity_upper())?,
+        optional_number(coupled.gain_infinity_upper())?,
+        optional_number(coupled.coupled_inverse_infinity_upper())?,
+        optional_number(response_defect)?, inverse_method,
+        optional_number(coupled.schur_inverse_infinity_upper())?,
+        json_string(&format!("{:?}", coupled.status()))));
+    let work = balance::Work::new(&result, requested_k, primal_limit, spectral_limits.max_work_entries);
     let evidence = MaximumEvidence { term: Some(term), control_json: Some(control_json),
-        primal_iterations, linear_work: None };
+        primal_iterations, linear_work: Some(super::super::balance::LinearWork::Coupled(work)) };
     let replacement = match result.accepted.take() {
         Some(accepted) => {
             let conjugate = receipt::rebuild(cx, original_fragment, paths, &accepted, primal_iterations)?;

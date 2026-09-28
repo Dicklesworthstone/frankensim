@@ -188,3 +188,64 @@ fn elasticity_objective_twins_respond_to_the_load_and_the_material_budget() {
     assert!(richer_j < base_j, "more material must end stiffer: {richer_j} vs {base_j}");
     println!("{{\"base_j\":{base_j},\"richer_j\":{richer_j}}}");
 }
+
+
+#[test]
+fn final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work() {
+    let dir = scratch("final-dwr");
+    let path = dir.join("assessed.fsim");
+    let source = FIXTURE.replace(":mesh-level 4", ":mesh-level 3")
+        .replace(":max-iterations 32", ":max-iterations 1")
+        .replace(":steps 32", ":steps 1")
+        .replace(":move-cells 0.35", ":move-cells 0.05")
+        .replace(":nucleation-period 4", ":nucleation-period 0");
+    fs::write(&path, format!(
+        "{}\n  (assessment :type elasticity-dwr :max-solves-per-attempt 2)\n)\n",
+        source.trim_end().strip_suffix(')').unwrap(),
+    )).unwrap();
+    let database = dir.join("assessed.db");
+    let result = document(&command("study").arg(&path).arg(&database)
+        .output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(result.str_field("status"), Some("constraint-unmet"));
+    let summary = J::parse(std::str::from_utf8(
+        &retained(&database, &result, "report_json")).unwrap()).unwrap();
+    let dwr = summary.get("goal_error_assessment").unwrap();
+    assert_eq!(dwr.str_field("status"), Some("estimated"));
+    assert_eq!(dwr.str_field("snapshot"), summary.str_field("snapshot"));
+    assert_eq!(dwr.f64_field("coarse_compliance_j"), summary.f64_field("final_compliance_j"));
+    assert_eq!(dwr.f64_field("material_area_m2"), summary.f64_field("final_material_area_m2"));
+    assert_eq!(dwr.f64_field("enriched_level"), Some(4.0));
+    assert!(dwr.f64_field("enriched_dofs").unwrap() > dwr.f64_field("coarse_dofs").unwrap());
+    for key in ["eta_signed_j", "absolute_indicator_sum_j", "enriched_compliance_j"] {
+        assert!(dwr.f64_field(key).unwrap().is_finite());
+    }
+    let terms = dwr.get("residual_terms_j").unwrap();
+    let parts: Vec<f64> = ["bulk", "nitsche", "outer_traction", "ghost"]
+        .iter().map(|key| terms.f64_field(key).unwrap()).collect();
+    let total: f64 = parts.iter().sum();
+    let scale: f64 = parts.iter().map(|value| value.abs()).sum();
+    assert!((total - dwr.f64_field("eta_signed_j").unwrap()).abs()
+        <= 1e-8 * scale.max(1e-8));
+    assert_eq!(dwr.path(&["solver", "relative_residual_kind"]).and_then(J::as_str),
+        Some("recomputed-euclidean"));
+    for key in ["coarse_relative_residual", "enriched_relative_residual"] {
+        assert!(dwr.path(&["solver", key]).and_then(J::as_f64).unwrap() < 1e-12);
+    }
+    let html = String::from_utf8(retained(&database, &result, "report_html")).unwrap();
+    assert!(html.contains("Final compliance goal-error estimate")
+        && html.contains("not certified continuum-error bounds"));
+
+    // The final optimizer update was already durable before DWR began. Model
+    // losing the assessment publication by resuming that exact predecessor:
+    // assessment repeats, but no geometry update or trajectory replay occurs.
+    let predecessor = result.path(&["receipt", "predecessor"]).and_then(J::as_str).unwrap();
+    let resumed = document(&command("study").arg("--resume").arg(format!("study-{predecessor}"))
+        .arg(&database).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(updates(&resumed), 0.0);
+    for key in ["design", "iterations", "report_json"] {
+        assert_eq!(retained(&database, &result, key), retained(&database, &resumed, key));
+    }
+    let again = document(&command("study").arg("--resume").arg(run_id(&resumed))
+        .arg(&database).output().unwrap(), fs_cli::exit::BUDGET);
+    assert_eq!(again, resumed, "a completed assessment is returned without another solve");
+}

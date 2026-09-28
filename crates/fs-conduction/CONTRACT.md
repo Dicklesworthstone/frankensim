@@ -940,6 +940,75 @@ authority.
   Component uncertainty is a conservative arithmetic sum of stated
   half-widths, not a probabilistic convolution, and no correlation between
   components is modelled.
+- `transient::enthalpy::EnthalpyBackwardEuler` evolves a spatial specific-enthalpy
+  field on the existing P1 tetrahedral mesh. It reuses the existing conductivity,
+  source, Neumann, Robin and finite-contact assembly; temperature-dependent k(T)
+  is evaluated at each actual nonlinear trial. Fixed reference masses are
+  `m_i = sum_e rho0 V_e/4`; equilibrium density changes never create or remove
+  specimen mass. The nodal equilibrium chart returns temperature and liquid
+  fraction, preserving a true isothermal latent plateau without apparent-Cp
+  smoothing. The discrete residual is `m*(h-h_old)+dt*(A(T(h))*T(h)-b)` in joules.
+  Its exact generalized Jacobian is `M+dt*J_T*diag(dT/dh)`, with column scaling;
+  a zero temperature slope leaves a positive mass column. The shared bounded
+  Newton/FGMRES driver uses a physical Picard-Jacobi inverse, and each current
+  tangent is assembled once per Newton attempt. Sparse actions allocate no
+  scratch. Typed chart, spatial, solver, work, cancellation and energy failures
+  return no new state and never mutate the supplied history. The accepted
+  `sum m_i*(h_new_i-h_old_i)` must match independently integrated external heat
+  within the caller's absolute joule tolerance; internal contact cancels from
+  that account. Spatial caps precede mass allocation and checked products bound
+  Newton workspace/work arithmetic. Constitutive, assembly and operator tiles
+  poll Cx, with final polling before publication.
+  This initial lane binds one spatially uniform equilibrium chart and a declared
+  reference density. All Dirichlet rows refuse explicitly: a temperature on a
+  latent plateau does not determine enthalpy. Geometry and energetic internal
+  variables are frozen; there is no material motion, expansion, pressure work,
+  remapping, phase kinetics, vaporization, or implicit radiation law in this API.
+  `tests/enthalpy_transport.rs` compares constant-Cp stepping with the existing
+  temperature solver, latent heating with independent energy formulas and the
+  exact uniform lumped limit, a nonlinear-conductivity endpoint with independent
+  P1 algebra, mixed sensible/latent exchange with an exact one-Newton solution,
+  and immutable-history/cancellation refusals. These are numerical checks,
+  not experimental material validation or interval error bounds.
+  `cargo run -p fs-conduction --example enthalpy_stefan -- 40 120` evolves a
+  melting front in a fixed tetrahedral slab from an initial similarity field
+  and time-dependent boundary flux. The future front is never imposed. The
+  example reports the computed 50% liquid contour, equivalent molten length,
+  nodal temperature RMS discrepancy and independently integrated whole-run
+  heat balance. Its material values are synthetic numerical-reference inputs.
+  `tests/enthalpy_stefan.rs` holds 480 time steps fixed and refines from 40 to
+  80 axial cells, checking improving front, molten-length and temperature
+  discrepancies plus energy closure. This finite comparison does not establish
+  a formal spatial or temporal order, or validate liquid-flow physics.
+- `transient::enthalpy::adjoint` supplies discrete endpoint derivatives for
+  this same spatial enthalpy balance. `linearize_step` solves a real endpoint;
+  `linearize_accepted` rechecks a supplied endpoint's original Newton target,
+  chart fields and integrated energy balance before attaching its sparse
+  tangent. The linearization owns the endpoint and tangent and borrows only the
+  fixed mesh, so step-local sources and boundaries need not remain alive.
+  Temperature observation seeds become enthalpy seeds by `diag(dT/dh)`;
+  direct enthalpy/history seeds are added before the shared bounded FGMRES
+  transpose solve. For `J_h^T lambda = h_bar`, history receives
+  `M_ref*lambda` and P1 nodal source density receives
+  `dt*M_source^T*lambda`. The source uses the existing consistent tetrahedral
+  integration, while reference storage remains lumped. This explicit `dt`
+  follows the enthalpy residual's joule units. The transpose implements
+  `M_ref+dt*diag(dT/dh)*J_T^T`, sharing the primal conductivity Jacobian.
+  A true transpose residual, exact inner-column cap, allocation-size checks
+  and cancellation gates precede gradient publication. Smooth chart knots
+  and plateau interiors are admitted; temperature slope corners, chart
+  validity endpoints and conductivity slope/validity boundaries refuse an
+  ordinary two-sided gradient. No chart, density, conductivity-parameter,
+  geometry, boundary-control or phase-fraction derivative is inferred.
+  `tests/enthalpy_adjoint.rs` checks nonuniform-slope transpose identities,
+  nonlinear history/source derivatives against five-point forward differences,
+  zero temperature sensitivity on a latent plateau, differentiability policy,
+  and refused/cancelled/tampered inputs.
+  `cargo run -p fs-ascent --example enthalpy_calibration` composes these
+  derivatives through a bounded full-storage spatial trajectory to fit two
+  localized heater pulses from temperature histories using the existing SQP
+  optimizer. The example's synthetic observations and numerical recovery are
+  separate from experimental material validation.
 - The Biot-gated `LumpedEnthalpyBody` admits equilibrium solid-liquid phase
   change and latent heat on a caller-supplied, bounded specific-enthalpy curve.
   It couples constant internal power with convection and surface radiation and

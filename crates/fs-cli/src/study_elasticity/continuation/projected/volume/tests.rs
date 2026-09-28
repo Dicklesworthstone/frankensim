@@ -209,3 +209,64 @@ fn public_study_resume_and_exports_use_the_volume_only_example_and_retained_resu
     assert_eq!(repeated.stdout, resumed.stdout, "sealed terminal has no extra solve or new receipt");
     fs::remove_dir_all(&dir).unwrap();
 }
+
+
+#[test]
+fn interrupted_final_dwr_retries_only_assessment_of_the_finished_feasible_endpoint() {
+    use fs_topols::ComplianceDwrStage;
+    for (stalled, stop) in [(false, ComplianceDwrStage::BeforeEstimate),
+        (true, ComplianceDwrStage::BeforePublish)] {
+        let text = source().replace(":steps 2", ":steps 1")
+            .replace(":max-iterations 2", ":max-iterations 1");
+        let text = if stalled {
+            text.replace(":min-relative-improvement 0.00000001", ":min-relative-improvement 0.999999")
+                .replace(":max-candidates 16", ":max-candidates 2")
+        } else { text };
+        let spec = parse(&format!(
+            "{}\n  (assessment :type elasticity-dwr :max-solves-per-attempt 2)\n)\n",
+            text.trim_end().strip_suffix(')').unwrap(),
+        )).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let cancelled = gate();
+        let mut reached = false;
+        let interrupted = drive_observed(&spec, &ledger, None, &cancelled, None, |stage| {
+            if matches!(stage, VolumeStage::Assessment(actual) if actual == stop) {
+                reached = true;
+                cancelled.request();
+            }
+        }).unwrap();
+        assert!(reached, "the real final assessment must reach the requested boundary");
+        assert_eq!(interrupted.status, "cancelled");
+        let terminal = if stalled { "no-feasible-descent" } else { "completed" };
+        let (phi, report, history) = read(&ledger, &interrupted, &spec);
+        assert_eq!(report.rows.len(), if stalled { 0 } else { 1 });
+        assert_eq!(history.optimizer_terminal, Some(terminal));
+        assert!((history.current().volume - 0.75).abs() <= 1e-4);
+        let charged = json(&interrupted).f64_field("consumed_wall_s").unwrap();
+        let pending = document(&linked(&ledger, &json(&interrupted),
+            "report_json", "study-report-json").unwrap()).unwrap();
+        assert_eq!(pending.path(&["goal_error_assessment", "status"]).and_then(JsonValue::as_str),
+            Some("pending"));
+
+        let old = load(&ledger, &interrupted.pointer).unwrap();
+        let resumed = drive_observed(&spec, &ledger, None, &gate(), Some(&old), |stage| {
+            assert!(matches!(stage, VolumeStage::Assessment(_)),
+                "final assessment recovery must not re-project, restore physics or search: {stage:?}");
+        }).unwrap();
+        assert_eq!(resumed.status, terminal);
+        let (resumed_phi, resumed_report, resumed_history) = read(&ledger, &resumed, &spec);
+        assert_eq!(phi.nodes(), resumed_phi.nodes());
+        assert_eq!(report.rows, resumed_report.rows);
+        assert_eq!(history.json(), resumed_history.json());
+        let receipt = json(&resumed);
+        assert_eq!(receipt.path(&["continuation", "updates_this_invocation"])
+            .and_then(JsonValue::as_f64), Some(0.0));
+        assert!(receipt.f64_field("consumed_wall_s").unwrap() >= charged);
+        assert_eq!(receipt.path(&["continuation", "goal_error_assessment", "snapshot"])
+            .and_then(JsonValue::as_str), Some(format!("{:#018x}", history.current().snapshot).as_str()));
+        let old = load(&ledger, &resumed.pointer).unwrap();
+        let reused = drive_observed(&spec, &ledger, None, &gate(), Some(&old),
+            |stage| panic!("completed assessment must be reused without {stage:?}")).unwrap();
+        assert_eq!(reused.receipt, resumed.receipt);
+    }
+}

@@ -53,6 +53,7 @@ pub(super) struct Evidence {
     legacy_replayed: usize,
     projected: Option<projected::ConstraintEvidence>,
     volume: Option<projected::volume::VolumeEvidence>,
+    pub(super) final_dwr: Option<assessment::FinalAssessment>,
 }
 
 /// Reporting projection shared by genuinely measured volume-only and
@@ -65,7 +66,8 @@ pub(super) struct CurrentDesign {
 impl Evidence {
     pub(super) fn json(&self) -> String {
         let constraints = self.constraint_fields();
-        format!("{{\"version\":1,\"producer\":\"{}\",\"updates_this_invocation\":{},\"legacy_prefix_updates_replayed\":{},\"mode\":\"accepted-state-continuation\"{constraints}}}",
+        let goal_error = assessment::json(self.final_dwr.as_ref(), None);
+        format!("{{\"version\":1,\"producer\":\"{}\",\"updates_this_invocation\":{},\"legacy_prefix_updates_replayed\":{},\"mode\":\"accepted-state-continuation\"{constraints}{goal_error}}}",
             self.producer.to_hex(), self.updates, self.legacy_replayed)
     }
 }
@@ -254,7 +256,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
     }
     let start = Instant::now();
     let mut evidence = Evidence { producer: producer_identity()?, updates: 0, legacy_replayed: 0,
-        projected: None, volume: None };
+        projected: None, volume: None, final_dwr: None };
     let mut predecessor = prior.map(|loaded| loaded.hash);
     let mut retained_wall = 0.0;
     let mut last = None;
@@ -296,6 +298,7 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
                 Some("cancelled") => "cancelled",
                 Some("budget-exhausted") => "budget-exhausted",
                 Some("running") => "running",
+                Some("numerical-failure") if spec.final_dwr => "numerical-failure",
                 _ => return Err(malformed("unknown retained study status")),
             };
             last = Some(Outcome { pointer: format!("study-{}", loaded.hash.to_hex()),
@@ -325,12 +328,26 @@ fn drive_observed(spec: &ElasticitySpec, ledger: &Ledger, cap: Option<usize>,
         last = Some(initial);
     }
     loop {
-        let status = if gate.is_requested() { "cancelled" }
+        let mut status = if gate.is_requested() { "cancelled" }
             else if retained_wall + start.elapsed().as_secs_f64() >= spec.wall_s { "budget-exhausted" }
             else if state.next_iteration() == target {
                 if state.is_complete() { iteration_terminal(spec, &report)? } else { "budget-exhausted" }
             } else { "running" };
         if status != "running" {
+            if spec.final_dwr && matches!(status, "completed" | "constraint-unmet") {
+                let expected = assessment::Design::from_report(&report)?;
+                let (assessed_status, result) = assessment::run(
+                    spec, state.geometry(), expected, status, |_| {
+                        match stop_status(gate.is_requested(),
+                            retained_wall + start.elapsed().as_secs_f64(), spec.wall_s) {
+                            Some(stop) => ControlFlow::Break(stop),
+                            None => ControlFlow::Continue(()),
+                        }
+                    },
+                );
+                status = assessed_status;
+                evidence.final_dwr = result;
+            }
             return persist(spec, ledger, state.geometry(), &report, status,
                 retained_wall + start.elapsed().as_secs_f64(), predecessor, &evidence)
                 .map_err(|error| retained_error(error, last.as_ref()));

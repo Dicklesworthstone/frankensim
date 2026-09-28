@@ -2,8 +2,10 @@
 //! physical-model grammar. Every sample changes only explicit project inputs;
 //! geometry, material identities, solver policy and requirements stay intact.
 //!
-//! Version 1 admits fixed-count independent uniform inputs. Version 2 requires
-//! an explicit Bernoulli-mixture policy for sequential probability decisions.
+//! Uniform inputs require explicit independence or a declared Gaussian copula.
+//! Version 1 admits fixed-count propagation with Monte Carlo
+//! or explicitly replicated randomized Sobol quadrature. Version 2 requires
+//! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
 //! An engineering
 //! interval or card tolerance is never silently interpreted as a probability
 //! law. The study inherits units, capabilities, physics seed, versions, memory
@@ -39,6 +41,9 @@ pub enum Target {
     AirInletTemperature,
     /// Prescribed outward flux; negative values still mean inward heating.
     HeatFlux,
+    /// Absolute speed ratio of one explicitly named native fan-system bank.
+    /// The source curve and its admitted speed domain remain unchanged.
+    FanSpeedRatio,
 }
 
 impl Target {
@@ -50,6 +55,7 @@ impl Target {
             Self::ConvectionCoefficient => "W/m^2/K",
             Self::ConvectionTemperature | Self::AirInletTemperature => "K",
             Self::HeatFlux => "W/m^2",
+            Self::FanSpeedRatio => "1",
         }
     }
     fn dims(self) -> Dims {
@@ -59,6 +65,7 @@ impl Target {
             Self::ConvectionCoefficient => dims::HEAT_TRANSFER_COEFFICIENT,
             Self::ConvectionTemperature | Self::AirInletTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
+            Self::FanSpeedRatio => Dims::NONE,
         }
     }
 }
@@ -70,7 +77,7 @@ pub struct UniformParameter {
     pub name: String,
     /// The native field to vary.
     pub target: Target,
-    /// Region, boundary target, or air branch according to `target`.
+    /// Region, boundary target, air branch, or fan-bank identity according to `target`.
     pub entity: String,
     /// Closed distribution support in coherent SI units; equality is deterministic.
     pub low: f64,
@@ -104,6 +111,17 @@ pub struct CompliancePolicy {
     pub min_samples: usize,
 }
 
+/// Fixed randomized-quadrature layout, declared before any native solves.
+/// Replicates use independent Owen scramble keys; points inside a net are
+/// dependent and cannot enter a Bernoulli-iid confidence sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QmcLayout {
+    /// Independently scrambled nets, at least two.
+    pub replicates: usize,
+    /// Power-of-two point count per net, at least two.
+    pub samples_per_replicate: usize,
+}
+
 /// Strictly parsed study. Private fields prevent edits that detach semantics
 /// from the retained canonical declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +136,9 @@ pub struct UncertaintyStudy {
     materials: Vec<String>,
     interfaces: Vec<String>,
     parameters: Vec<UniformParameter>,
+    latent_correlation: Option<Vec<Vec<f64>>>,
     compliance: Option<CompliancePolicy>,
+    qmc: Option<QmcLayout>,
 }
 
 /// A study bound to one admitted base project. Samples are fresh copies, so
@@ -132,7 +152,7 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare independent uniform inputs on the native cooling project; version 1 is fixed-count and version 2 requires an explicit Bernoulli-mixture compliance policy".into() }
+        hint: "declare uniform inputs with explicit independence or a Gaussian copula; version 1 is fixed-count Monte Carlo or replicated QMC, and version 2 requires a Monte Carlo Bernoulli-mixture compliance policy".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
@@ -172,6 +192,8 @@ fn integer(node: &Node) -> Result<u64> {
 }
 fn quantity(node: &Node, dims: Dims) -> Result<f64> {
     match &node.kind {
+        NodeKind::Float(value) if dims == Dims::NONE && value.is_finite() => Ok(*value),
+        NodeKind::Int(value) if dims == Dims::NONE => Ok(*value as f64),
         NodeKind::Qty { value, dims: found, .. } if *found == dims && value.is_finite() => Ok(*value),
         _ => Err(error(format!("expected an explicit finite {} quantity", dims.unit_string()))),
     }
@@ -193,15 +215,55 @@ fn compliance_policy(node: &Node, samples: usize) -> Result<CompliancePolicy> {
     if !(2..=samples).contains(&min_samples) { return Err(error("compliance min-samples must be in 2..=samples")); }
     Ok(CompliancePolicy { required_probability, alpha, min_samples })
 }
+fn qmc_layout(node: &Node, samples: usize) -> Result<QmcLayout> {
+    let nodes = list(node)?;
+    symbol(nodes.first().ok_or_else(|| error("empty QMC layout"))?, "owen-scrambled-sobol")?;
+    let f = fields(&nodes[1..], &["replicates", "samples-per-replicate"])?;
+    let replicates = usize::try_from(integer(f["replicates"])?)
+        .map_err(|_| error("QMC replicate count overflow"))?;
+    let samples_per_replicate = usize::try_from(integer(f["samples-per-replicate"])?)
+        .map_err(|_| error("QMC point count overflow"))?;
+    if !(2..=256).contains(&replicates) || samples_per_replicate < 2
+        || !samples_per_replicate.is_power_of_two()
+        || replicates.checked_mul(samples_per_replicate) != Some(samples) {
+        return Err(error("QMC requires at least two replicates times a power-of-two point count >=2, exactly matching :samples"));
+    }
+    Ok(QmcLayout { replicates, samples_per_replicate })
+}
 fn paths(node: &Node) -> Result<Vec<String>> {
     let nodes = list(node)?;
     if nodes.len() > 32 { return Err(error("at most 32 paths per asset family")); }
     nodes.iter().map(text).collect()
 }
 
+fn latent_correlation(node: &Node, dimension: usize) -> Result<Option<Vec<Vec<f64>>>> {
+    if matches!(&node.kind, NodeKind::Symbol(value) if value == "independent") {
+        return Ok(None);
+    }
+    let nodes = list(node)?;
+    symbol(nodes.first().ok_or_else(|| error("empty dependence declaration"))?, "gaussian-copula")?;
+    let f = fields(&nodes[1..], &["latent-correlation"])?;
+    let rows = list(f["latent-correlation"])?;
+    if rows.len() != dimension {
+        return Err(error("latent correlation matrix must match parameter declaration order, including constant marginals"));
+    }
+    let matrix = rows.iter().map(|row| {
+        let entries = list(row)?;
+        if entries.len() != dimension { return Err(error("latent correlation matrix must be square")); }
+        entries.iter().map(|entry| match entry.kind {
+            NodeKind::Int(value) => Ok(value as f64),
+            NodeKind::Float(value) if value.is_finite() => Ok(value),
+            _ => Err(error("latent correlations must be finite dimensionless numbers")),
+        }).collect::<Result<Vec<_>>>()
+    }).collect::<Result<Vec<_>>>()?;
+    // Numerical symmetry, range, unit-diagonal and PSD admission belong to
+    // fs-uq's copula executor, before any native ledger or physical solve.
+    Ok(Some(matrix))
+}
+
 impl UncertaintyStudy {
     /// Parse using the existing typed FrankenScript AST. Unknown/repeated fields,
-    /// inferred distributions, implicit units, and undeclared independence refuse.
+    /// inferred distributions, implicit units, and undeclared dependence refuse.
     ///
     /// # Errors
     /// Returns a project diagnostic before any file or numerical work.
@@ -211,17 +273,27 @@ impl UncertaintyStudy {
         let nodes = list(&root)?;
         symbol(nodes.first().ok_or_else(|| error("empty study"))?, "fsim-uncertainty-study")?;
         let f = fields_with_optional(&nodes[1..], &["version", "project", "samples", "seed", "wall-time",
-            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance"])?;
+            "method", "correlation", "qoi", "geometry", "materials", "interfaces", "parameters"], &["compliance", "qmc"])?;
         let version = integer(f["version"])?;
         if version != 1 && version != u64::from(VERSION) { return Err(error("unsupported study version")); }
         if (version == 1) == f.contains_key("compliance") {
             return Err(error("version 1 forbids a compliance policy; version 2 requires one"));
         }
-        symbol(f["method"], "monte-carlo")?;
-        symbol(f["correlation"], "independent")?;
+        let randomized_qmc = match &f["method"].kind {
+            NodeKind::Symbol(method) if method == "monte-carlo" => false,
+            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => true,
+            _ => return Err(error("method must be monte-carlo or quasi-monte-carlo")),
+        };
+        if randomized_qmc != f.contains_key("qmc") {
+            return Err(error("quasi-monte-carlo requires an explicit :qmc layout; monte-carlo forbids it"));
+        }
+        if randomized_qmc && version != 1 {
+            return Err(error("QMC requires version 1 fixed-count semantics; dependent net points cannot use the version 2 Bernoulli-iid compliance policy"));
+        }
         let samples = usize::try_from(integer(f["samples"])?).map_err(|_| error("sample count overflow"))?;
         if !(2..=MAX_SAMPLES).contains(&samples) { return Err(error("samples must be in 2..=256")); }
         let compliance = f.get("compliance").map(|node| compliance_policy(node, samples)).transpose()?;
+        let qmc = f.get("qmc").map(|node| qmc_layout(node, samples)).transpose()?;
         let wall_seconds = quantity(f["wall-time"], crate::spec::dims::TIME)?;
         if !(wall_seconds > 0.0 && wall_seconds <= 86_400.0) { return Err(error("wall-time must be in (0, 86400] seconds")); }
         let geometry_nodes = list(f["geometry"])?;
@@ -240,6 +312,10 @@ impl UncertaintyStudy {
         }
         let parameter_nodes = list(f["parameters"])?;
         if parameter_nodes.is_empty() || parameter_nodes.len() > 32 { return Err(error("declare 1..=32 parameters")); }
+        if qmc.is_some() && parameter_nodes.len() > 10 {
+            return Err(error("replicated Sobol QMC supports at most 10 parameters; no Monte Carlo tail fallback"));
+        }
+        let latent_correlation = latent_correlation(f["correlation"], parameter_nodes.len())?;
         let mut parameters = Vec::new();
         let mut names = BTreeSet::new();
         let mut targets = BTreeSet::new();
@@ -254,6 +330,7 @@ impl UncertaintyStudy {
                     "convection-temperature" => Target::ConvectionTemperature,
                     "air-inlet-temperature" => Target::AirInletTemperature,
                     "heat-flux" => Target::HeatFlux,
+                    "fan-speed-ratio" => Target::FanSpeedRatio,
                     _ => return Err(error("unsupported random project field")),
                 },
                 _ => return Err(error("parameter target must be a symbol")),
@@ -267,7 +344,7 @@ impl UncertaintyStudy {
             let high = quantity(p["high"], target.dims())?;
             if low > high || (target == Target::Power && low < 0.0)
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
-                    | Target::AirInletTemperature) && low <= 0.0) {
+                    | Target::AirInletTemperature | Target::FanSpeedRatio) && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
@@ -276,7 +353,8 @@ impl UncertaintyStudy {
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
-            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters, compliance })
+            geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
+            latent_correlation, compliance, qmc })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
@@ -292,8 +370,17 @@ impl UncertaintyStudy {
     #[must_use] pub fn qoi(&self) -> &str { &self.qoi }
     /// Ordered probability laws.
     #[must_use] pub fn parameters(&self) -> &[UniformParameter] { &self.parameters }
+    /// Gaussian-copula correlation of latent standard normals, in parameter
+    /// declaration order; not Pearson correlation of physical uniform inputs.
+    /// Absence means the source explicitly declared independent marginals.
+    /// The statistical executor owns numerical matrix/PSD admission.
+    #[must_use] pub fn latent_correlation(&self) -> Option<&[Vec<f64>]> {
+        self.latent_correlation.as_deref()
+    }
     /// Predeclared Bernoulli stopping policy; absent for version-1 fixed-count studies.
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
+    /// Explicit randomized Sobol layout; absent for the Monte Carlo method.
+    #[must_use] pub const fn qmc(&self) -> Option<QmcLayout> { self.qmc }
     /// Geometry sources, matched by role, not by path order.
     #[must_use] pub fn geometry(&self) -> &[MeshSource] { &self.geometry }
     /// Material pack sources.
@@ -380,6 +467,29 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
     if parameter.target == Target::Power {
         for row in project.power.as_mut().ok_or_else(|| error("missing power map"))? {
             if row.region == parameter.entity { row.watts = QtyAny::new(value, parameter.target.dims()); matches += 1; }
+        }
+    } else if parameter.target == Target::FanSpeedRatio {
+        let system = project.cooling.as_mut().and_then(|c| c.fan_system.as_mut())
+            .ok_or_else(|| error("fan-speed-ratio requires a declared native fan system"))?;
+        // ProjectSpec's structural validation does not replace this family's
+        // admission. Check identities, topology, curves and domains before a
+        // random input can select a bank or repair an invalid base declaration.
+        system.validate().map_err(|e| error(format!("{}: {}", e.code, e.detail)))?;
+        for bank in &mut system.banks {
+            if bank.bank_id == parameter.entity {
+                let (low, high) = bank.speed_ratio_domain;
+                if value < low || value > high {
+                    return Err(error(format!(
+                        "fan speed support for {} exceeds the unchanged declared domain [{low}, {high}]",
+                        parameter.entity
+                    )));
+                }
+                // Absolute ratio relative to the retained source curve, not a
+                // multiplier of the base operating speed or a previous sample.
+                // The ordinary native flow producer owns fan affinity laws.
+                bank.speed_ratio = value;
+                matches += 1;
+            }
         }
     } else {
         let setup = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())

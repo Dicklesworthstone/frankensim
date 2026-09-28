@@ -81,7 +81,8 @@ pub use checkpoint::OptimizeCheckpoint;
 /// The canonical edge type used by independent traction declarations.
 pub use fs_cutfem::DesignBoxEdge;
 pub use evaluated::{
-    EvaluatedFinalState, EvaluatedOptimizeReport, evaluate_compliance_design,
+    ComplianceDwrAssessment, ComplianceDwrStage, EvaluatedFinalState, EvaluatedOptimizeReport,
+    assess_compliance_dwr, assess_compliance_dwr_controlled, evaluate_compliance_design,
     optimize_compliance_evaluated,
 };
 pub use fim::{RedistanceAudit, hausdorff, redistance, zero_crossings};
@@ -95,6 +96,10 @@ pub use projected_stress::{ProjectedStressCheck, ProjectedStressOptimizer, Proje
 pub use robust::{
     RobustAggregate, RobustCandidate, RobustEvaluation, RobustLoadCase, RobustOptimizeReport,
     RobustStop, evaluate_robust_design, optimize_compliance_robust_guarded,
+};
+pub use robust::dwr::{
+    LoadCaseDwrAssessment, WeightedComplianceDwrAssessment, WeightedComplianceDwrStage,
+    assess_weighted_compliance_dwr, assess_weighted_compliance_dwr_controlled,
 };
 pub use robust_descent::{
     RobustDescentReport, optimize_compliance_multi_load, optimize_compliance_multi_load_guarded,

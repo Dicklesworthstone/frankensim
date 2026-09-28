@@ -27,6 +27,9 @@ fs-solver = { path = "../fs-solver" }
 fs-time = { path = "../fs-time", optional = true }
 
 [dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-conduction = { path = "../fs-conduction" }
+fs-material = { path = "../fs-material" }
 fs-plate = { path = "../fs-plate" }
 fs-plate-transient = { path = "../fs-plate-transient" }
 # Physical inverse-design consumers; normal fs-couple use is opt-in above.

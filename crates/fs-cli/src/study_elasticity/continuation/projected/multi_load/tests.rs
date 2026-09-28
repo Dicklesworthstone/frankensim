@@ -139,3 +139,120 @@ fn exhausted_solve_and_recovery_allowances_cannot_be_reset_by_resume() {
     assert_eq!(error.exit, exit::BUDGET);
     assert!(error.message.contains(&seed.pointer));
 }
+
+fn assessed_source(text: &str) -> String {
+    format!("{}\n  (assessment :type elasticity-dwr :max-solves-per-attempt 4)\n)\n",
+        text.trim_end().strip_suffix(')').unwrap())
+}
+
+#[test]
+fn weighted_dwr_requires_exact_family_solve_grant_and_rejects_nonsmooth_objectives() {
+    let text = assessed_source(&source());
+    let spec = study_spec(&text).unwrap();
+    assert!(spec.final_dwr);
+    assert_eq!(study_spec(&spec.canonical).unwrap().id, spec.id);
+    for grant in [2, 3, 6, 33] {
+        assert!(study_spec(&text.replace(":max-solves-per-attempt 4",
+            &format!(":max-solves-per-attempt {grant}"))).is_err());
+    }
+    assert!(study_spec(&text.replace("weighted-sum", "worst-weighted-case")).is_err());
+    assert!(!study_spec(&source()).unwrap().final_dwr);
+}
+
+#[test]
+fn final_weighted_dwr_resumes_only_assessment_of_complete_or_zero_update_endpoints() {
+    use fs_topols::WeightedComplianceDwrStage;
+    for (stalled, boundary) in [(false, WeightedComplianceDwrStage::BeforeCase { case: 1 }),
+        (true, WeightedComplianceDwrStage::BeforePublish)] {
+        let text = source().replace(":steps 2", ":steps 1").replace(":max-iterations 2", ":max-iterations 1")
+            .replace(":max-recovery-solves 64", ":max-recovery-solves 0");
+        let text = if stalled {
+            text.replace(":min-relative-improvement 0.00000001", ":min-relative-improvement 0.999999")
+                .replace(":max-candidates 16", ":max-candidates 2")
+        } else { text };
+        let spec = study_spec(&assessed_source(&text)).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let cancel = gate();
+        let mut reached = false;
+        let interrupted = driver::drive_assessment_observed(&spec, &ledger, None, &cancel, None, |_| {}, |stage| {
+            if stage == boundary { reached = true; cancel.request(); }
+        }).unwrap();
+        assert!(reached, "real case solves must reach the requested phase");
+        assert_eq!(interrupted.status, "cancelled");
+        let terminal = if stalled { "no-feasible-descent" } else { "completed" };
+        let interrupted_json = json(&interrupted);
+        assert_eq!(integer(&interrupted_json, "iterations_completed").unwrap(), if stalled { 0 } else { 1 });
+        assert_eq!(history(&interrupted_json).str_field("optimizer_terminal"), Some(terminal));
+        let charged = interrupted_json.f64_field("consumed_wall_s").unwrap();
+        let pending = document(&linked(&ledger, &interrupted_json, "report_json", "study-report-json").unwrap()).unwrap();
+        assert_eq!(pending.path(&["goal_error_assessment", "status"]).and_then(JsonValue::as_str), Some("pending"));
+        assert_eq!(pending.path(&["goal_error_assessment", "max_solves_per_attempt"]).and_then(JsonValue::as_f64), Some(4.0));
+        let old = load(&ledger, &interrupted.pointer).unwrap();
+        let resumed = driver::drive_assessment_observed(&spec, &ledger, None, &gate(), Some(&old),
+            |stage| panic!("assessment retry must not restart optimization: {stage:?}"), |_| {}).unwrap();
+        assert_eq!(resumed.status, terminal);
+        let receipt = json(&resumed);
+        assert!(receipt.f64_field("consumed_wall_s").unwrap() >= charged);
+        assert_eq!(history(&receipt), history(&interrupted_json), "no study/recovery work refunded or spent");
+        assert_eq!(integer(history(&receipt), "recovery_solves_used").unwrap(), 0);
+        for (key, kind) in [("design", "study-design"), ("iterations", "study-iterations")] {
+            assert_eq!(linked(&ledger, &receipt, key, kind).unwrap(), linked(&ledger, &interrupted_json, key, kind).unwrap());
+        }
+        let (_, retained) = restored(&ledger, &resumed, &spec);
+        let goal = receipt.path(&["continuation", "goal_error_assessment"]).unwrap();
+        assert_eq!(goal.str_field("status"), Some("estimated"));
+        assert_eq!(goal.str_field("aggregate"), Some("weighted-sum"));
+        assert_eq!(goal.f64_field("coarse_compliance_j").unwrap().to_bits(), retained.current().compliance.to_bits());
+        let estimates = goal.get("cases").and_then(JsonValue::as_array).unwrap();
+        let family = retained.family.as_ref().unwrap();
+        let expected = family.accepted.last().unwrap_or(&family.baseline);
+        assert_eq!(estimates.len(), expected.len());
+        for (actual, expected) in estimates.iter().zip(expected) {
+            assert_eq!(actual.f64_field("coarse_compliance_j").unwrap().to_bits(), expected.compliance.to_bits());
+            assert!(actual.f64_field("coarse_relative_residual").unwrap() < 1e-12);
+            assert!(actual.f64_field("enriched_relative_residual").unwrap() < 1e-12);
+        }
+        assert_eq!(goal.path(&["solver", "solves"]).and_then(JsonValue::as_f64), Some(4.0));
+        let old = load(&ledger, &resumed.pointer).unwrap();
+        let again = driver::drive_assessment_observed(&spec, &ledger, None, &gate(), Some(&old),
+            |_| panic!("completed optimizer reused"), |_| panic!("completed DWR reused")).unwrap();
+        assert_eq!(again.receipt, resumed.receipt);
+        if !stalled {
+            // Recover the real receipt immediately after the final update,
+            // before the terminal marker was persisted (a possible crash gap).
+            let pending = load(&ledger, &format!("study-{}",
+                interrupted_json.str_field("predecessor").unwrap())).unwrap();
+            let endpoint = load(&ledger, &format!("study-{}",
+                pending.value.str_field("predecessor").unwrap())).unwrap();
+            assert_eq!(endpoint.value.str_field("status"), Some("running"));
+            assert!(history(&endpoint.value).get("optimizer_terminal").is_none());
+            let recovered = driver::drive_assessment_observed(&spec, &ledger, None, &gate(), Some(&endpoint),
+                |_| panic!("a fully updated feasible endpoint needs no optimizer recovery"), |_| {}).unwrap();
+            assert_eq!(recovered.status, "completed");
+            assert_eq!(history(&json(&recovered)), history(&receipt));
+        }
+    }
+}
+
+#[test]
+fn unfinished_or_infeasible_restoration_never_runs_final_compliance_assessment() {
+    let text = source().replace("      :max-recovery-solves 64\n",
+        "      :max-recovery-solves 64\n      :stress-restoration-reduction 0.999999\n")
+        .replace(":sampled-stress-limit-pa 1000000000000.0", ":sampled-stress-limit-pa 0.000000000001")
+        .replace(":max-candidates 16", ":max-candidates 1");
+    for exhausted in [true, false] {
+        let text = if exhausted { text.replace(":max-solves 512", ":max-solves 2") } else { text.clone() };
+        let spec = study_spec(&assessed_source(&text)).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let out = driver::drive_assessment_observed(&spec, &ledger, None, &gate(), None,
+            |_| {}, |_| panic!("infeasible or unfinished endpoint must not be assessed")).unwrap();
+        assert_eq!(out.status, if exhausted { "budget-exhausted" } else { "no-feasible-descent" });
+        let (_, retained) = restored(&ledger, &out, &spec);
+        assert!(!restoration::feasible(retained.current(), stress_controls(&spec).unwrap()));
+        assert!(retained.family.as_ref().unwrap().optimizer_terminal.is_none());
+        if !exhausted {
+            assert_eq!(json(&out).path(&["continuation", "goal_error_assessment", "status"])
+                .and_then(JsonValue::as_str), Some("refused"));
+        }
+    }
+}

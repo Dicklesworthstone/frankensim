@@ -763,7 +763,83 @@ scalar Poisson/CutFEM radius optimizer. The canonical example is
 and hole boundaries, unit square, dimensionless compliance, fixed hole
 centers and area equality. The executable reader rejects fields that do not
 survive canonical recognition, including ignored geometry or unit declarations.
-Elasticity and free-boundary topology remain unimplemented under q61wp.16.
+The separate free-boundary elasticity producer executes the real level-set
+optimizer; q61wp.16 remains partial against its broader error-control goals.
+
+For the plain or projected-volume single-load `elasticity-2d` producer, append
+`(assessment :type elasticity-dwr :max-solves-per-attempt 2)` after the optimizer
+section to assess the exact final accepted design. This explicit opt-in requires
+at least 256 MiB admitted memory for the coarse/enriched state pair and the
+existing bounded mesh-level envelope 2..=5. It authorizes two assessment solves
+per attempt, each capped at 60,000 CG iterations with a 1e-12 recomputed
+Euclidean relative-residual target. Memory is an admission allowance, not
+measured peak RSS. Single-load projected-stress mode still refuses this
+assessment request. An explicit weighted-sum load family is supported below.
+
+The final optimizer update is durably retained before assessment starts.
+Cancellation and lifetime-wall-budget checks bracket the indivisible DWR phase.
+An interrupted attempt preserves the accepted geometry, records elapsed wall
+time and leaves assessment pending; a numerical refusal retains its reason and
+elapsed charge with `numerical-failure`. Resume can retry assessment on the
+already complete optimizer checkpoint without another geometry update. A
+completed terminal assessment is reused without solving again. Disabled
+assessment leaves existing output unchanged.
+
+The retained report, receipt continuation and HTML expose signed estimated
+goal error, absolute cell-indicator sum, coarse/enriched compliance on the
+same bilinear geometry, residual contribution breakdown, actual solve
+residuals/iterations and geometry identity. Absolute indicator sum is marking
+mass, not an interval radius. No certified continuum-error bound, adaptive
+optimization, physical validation or optimum is claimed. An unmet material
+constraint remains `constraint-unmet` even if error assessment succeeds.
+
+Projected-volume final assessment binds the actual feasible current design,
+including the prepared baseline when a bounded search accepts zero updates.
+The existing constraint evidence records an optional `optimizer_terminal`
+before the assessment starts. This distinguishes a finished
+`no-feasible-descent` search from a paused optimizer: cancellation or numerical
+refusal can retry only the assessment, without repeating projection, optimizer
+recovery solves, candidates or accepted updates. An assessed stalled design
+remains `no-feasible-descent`; estimated numerical error does not establish
+optimization convergence. Prescribed regions and refinement-origin geometry
+are retained unchanged, and the assessment uses the declared final grid.
+Disabled assessment omits this terminal marker and preserves existing behavior.
+
+The `final_dwr_assesses_the_retained_design_and_resume_reuses_completed_work`
+binary regression exercises numerical reporting and final-checkpoint recovery.
+Projected-volume regressions additionally cover a genuinely accepted feasible
+endpoint, a zero-update feasible stall, stops before and after the real DWR
+phase, retry without search/recovery callbacks, and completed-result reuse.
+
+The existing projected-stress independent-load study also accepts this same
+assessment when its aggregate is `weighted-sum`. Its explicit
+`:max-solves-per-attempt` must be exactly twice the declared number of load
+cases (including the primary case and every zero-weight case), so two cases
+require `4`; the native limit of 16 cases caps an attempt at 32 solves.
+Cases are assessed sequentially on the unchanged final level set with the
+same per-case traction support/vector, material and solver as the optimizer.
+The 256 MiB minimum and mesh-level limit 5 apply; only indicator evidence is
+retained between cases, not previous displacement systems. Coarse compliance
+must reproduce every retained case and the weighted sum bitwise before the
+assessment is published. Results retain per-case and weighted coarse/enriched
+compliance, signed estimates, absolute indicator mass and residual breakdowns,
+plus each actual solver residual and iteration count. Weights are not
+probabilities; forces are never summed before equilibrium. Worst-weighted-case
+objectives refuse this linear-sum assessment rather than hiding active-case
+switches. Compliance DWR does not estimate or certify stress error.
+
+Only an area- and sampled-stress-feasible `completed` or `no-feasible-descent`
+endpoint is assessed. A zero-update feasible baseline is eligible. Paused
+optimization, exhausted work during stress restoration and infeasible
+restoration stalls perform no assessment solves; the latter retain an explicit
+assessment refusal with the existing optimizer status. The load-family history
+retains its `optimizer_terminal` before assessment, and cancellation is checked
+before each two-solve case and before final publication. Each case remains
+indivisible. Resumption retries only assessment of the retained endpoint, even
+with zero recovery-solve allowance; it neither restarts candidate search nor
+re-solves optimizer recovery. Interrupted attempt wall time remains charged,
+and completed assessments are reused byte for byte. Numerical assessment
+refusals retain the accepted geometry and permit assessment-only retry.
 
 Every accepted transition retains the source, iteration log, exact parametric
 geometry, SVG/HTML report, JSON summary and format-9 package in one ledger

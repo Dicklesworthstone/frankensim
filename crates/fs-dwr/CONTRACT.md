@@ -44,7 +44,10 @@ that knows the difference.
   `indicators` remains their complete marking sum. Uniform and balanced
   2:1-graded coarse spaces are both supported; mixed-level ghost evidence uses
   fs-cutfem's exact shared-face patches rather than reconstructing separate
-  face geometry in this crate.
+  face geometry in this crate. The estimate also retains each solve's actual
+  recomputed Euclidean relative residual and aggregate CG iteration count.
+  A future non-Euclidean residual is refused by the typed accessor rather than
+  being reported as recomputed algebraic accuracy.
 - `ElasticityGhostMethod::CoarseConsistentEnergy`: the elasticity ghost
   term is the coarse consistent-limit correction `+g_h(u_h,u_h)` on the
   actual coarse ghost-face set, split equally between its two cells. It is
