@@ -570,6 +570,7 @@
     "crates/fs-cli/tests/native_uncertainty/compliance.rs",
     "crates/fs-cli/tests/native_uncertainty/copula.rs",
     "crates/fs-cli/tests/native_uncertainty/fan_speed.rs",
+    "crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs",
     "crates/fs-cli/tests/native_uncertainty/qmc.rs",
     "crates/fs-cli/tests/solve.rs",
     "crates/fs-cli/tests/solve/radiation_product.rs",
