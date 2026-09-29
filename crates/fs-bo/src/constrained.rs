@@ -7,6 +7,11 @@
 
 use crate::gp::Gp;
 
+mod bo;
+pub use bo::{ConstrainedBoConfig, ConstrainedBoError, ConstrainedBoReport,
+    ConstrainedObservation, ConstrainedRecommendation, OutcomeConstraint,
+    OutputFitRecord, minimize_constrained};
+
 /// One modeled upper constraint, `g(x) <= upper_bound`.
 ///
 /// `gp` predicts centered outputs. Supply the bound in those same centered
