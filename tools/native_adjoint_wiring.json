@@ -1,0 +1,40 @@
+{
+  "crates/fs-cli/src/solve.rs": {
+    "git_blob": "239835bfaebf3d897441fb7afe188f64e3f2f279",
+    "edits": [
+      {
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 31;",
+        "new": "/// Version 32 adds opt-in native nominal-adjoint reports on the final field.\npub const SOLVE_DRIVER_VERSION: u32 = 32;"
+      },
+      {
+        "old": "mod adaptive_balance;\nmod algebraic;",
+        "new": "mod adaptive_balance;\nmod nominal_adjoint;\nmod algebraic;"
+      },
+      {
+        "old": "    // A timed partial field is never published: the ordinary staged refusal\n    // retains the last completed pipeline prefix.",
+        "new": "    // Output intent is admitted before geometry/numerical work. Propagation\n    // vertices must not masquerade as the nominal report or repeat its adjoint.\n    let adjoint_requested = nominal_adjoint::requested(spec)?\n        && flow_override.is_none() && htc_scale == 1.0\n        && conductivity_side == 0.0 && geometry_side == 0.0;\n    // A timed partial field is never published: the ordinary staged refusal\n    // retains the last completed pipeline prefix."
+      },
+      {
+        "old": "let adjoint_data = if adaptive_requested || roundoff_wanted {",
+        "new": "let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested {"
+      },
+      {
+        "old": "        adaptive_deadline(deadline)?;\n        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))\n    })?;\n    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =\n        result;",
+        "new": "        adaptive_deadline(deadline)?;\n        // Only the final accepted rung is linearized. No coarse/provisional\n        // field, reconstructed surrogate, or additional primal is published.\n        let nominal_adjoint_fragment = if adjoint_requested {\n            Some(nominal_adjoint::extract(&cx, spec, &solved, &region_ids, &audited, work)?)\n        } else { None };\n        adaptive_deadline(deadline)?;\n        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment))\n    })?;\n    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment) =\n        result;\n    let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,\n        |receipt| format!(\",\\\"nominal_adjoint\\\":{receipt}\"));"
+      },
+      {
+        "old": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},\\\"authority\\\":{},\\\"no_claim\\\":{}}}\",",
+        "new": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},\\\"authority\\\":{},\\\"no_claim\\\":{}{nominal_adjoint_fragment}}}\","
+      }
+    ]
+  },
+  "crates/fs-cli/tests/native_uncertainty.rs": {
+    "git_blob": "472c715806d6d5713129ce87acb837892cc39b8c",
+    "edits": [
+      {
+        "old": "#[path = \"native_uncertainty/copula.rs\"]\nmod copula;",
+        "new": "#[path = \"native_uncertainty/copula.rs\"]\nmod copula;\n#[path = \"native_uncertainty/nominal_adjoint.rs\"]\nmod nominal_adjoint;"
+      }
+    ]
+  }
+}
