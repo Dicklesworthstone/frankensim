@@ -350,7 +350,7 @@ has no discretization estimate, so it stays indeterminate.
 | Command | Purpose |
 |---------|---------|
 | `cargo run -p fs-cli --bin frankensim -- validate <project.fsim>` | Parse a canonical `fs-project` file, report all structural findings, and emit its canonical hash |
-| `frankensim [--json] import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges N \| --step-root ID --target-h H)` | Admit STL/OBJ/PLY or a strict faceted STEP subset through the quarantine path into the ledger |
+| `frankensim [--json] import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges N \| --step-root ID --target-h H)` | Admit STL/OBJ/PLY (one source per geometry row, in declaration order) or a strict faceted STEP subset (one source) through the quarantine path into the ledger |
 | `frankensim [--json] solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]...` | Run the seven durable stages (import-verify, assign, material-resolve, flow-network, conduction, qoi, report); `solve --resume <run-id>` continues a retained run |
 | `frankensim [--json] run <project> <ledger.db> [--materials <pack>]...` | `solve` followed by report and package export |
 | `frankensim [--json] compare <left-run> <right-run> [<ledger.db>]` | Diff two retained runs' receipts without re-running physics |

@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 31,
+        SOLVE_DRIVER_VERSION, 32,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3242,6 +3242,56 @@ fn dump_reference_project_fixture() {
     std::fs::write(dir.join("aa6061.fsmcdpk"), fixture_pack_bytes()).expect("pack writes");
     std::fs::write(dir.join("plate.stl"), tetra_stl()).expect("geometry writes");
     println!("wrote reference fixture to {}", dir.display());
+}
+
+/// Generator for `examples/contact-pair` (bead q61wp.49/.53): the two-body
+/// contact project the refinement oracles below exercise, as a tracked
+/// product example (`import` binds one source per geometry row).
+///
+/// ```text
+/// cargo test -p fs-cli --test solve -- --ignored dump_contact_pair_example
+/// ```
+#[test]
+#[ignore = "generator: writes the tracked example under examples/contact-pair"]
+fn dump_contact_pair_example() {
+    let dir = contact_pair_dir();
+    std::fs::create_dir_all(&dir).expect("example directory");
+    let source = print_sexpr(&contact_refinement_project("auto")).expect("example renders");
+    std::fs::write(dir.join("contact-pair.fsim"), &source).expect("project writes");
+    std::fs::write(dir.join("cold-hot.fsintpk"), interface_pack_bytes()).expect("pack writes");
+    for role in ["cold-body", "hot-body"] {
+        std::fs::copy(
+            format!("{REFERENCE_DATA}/multi-region-{role}.stl"),
+            dir.join(format!("{role}.stl")),
+        )
+        .expect("geometry copies");
+    }
+    println!("wrote contact-pair example to {}", dir.display());
+}
+
+fn contact_pair_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/contact-pair")
+}
+
+#[test]
+fn g0_the_contact_pair_example_is_exactly_what_its_generator_produces() {
+    let dir = contact_pair_dir();
+    let project = std::fs::read_to_string(dir.join("contact-pair.fsim")).expect("tracked project");
+    assert_eq!(
+        project,
+        print_sexpr(&contact_refinement_project("auto")).unwrap(),
+        "regenerate with --ignored dump_contact_pair_example"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cold-hot.fsintpk")).expect("tracked pack"),
+        interface_pack_bytes()
+    );
+    for role in ["cold-body", "hot-body"] {
+        assert_eq!(
+            std::fs::read(dir.join(format!("{role}.stl"))).unwrap(),
+            std::fs::read(format!("{REFERENCE_DATA}/multi-region-{role}.stl")).unwrap()
+        );
+    }
 }
 
 /// Repo-relative path of the tracked reference project (bead

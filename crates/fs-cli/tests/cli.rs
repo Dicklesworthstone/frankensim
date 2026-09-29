@@ -211,7 +211,7 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     assert!(help.stdout.contains("\"command\":\"help\""));
     assert!(
         help.stdout
-            .contains("import <project> <source> <ledger.db>")
+            .contains("import <project> <source>... <ledger.db>")
     );
 
     let duplicate = run(args(&["validate", "x.fsim", "--json", "--json"]));
@@ -929,6 +929,112 @@ fn g1_chip_footprint_power_enters_through_the_declared_surface() {
         (shifted[0] - centre[0]).abs() < 0.01,
         "x barely moves: {centre:?} -> {shifted:?}"
     );
+}
+
+#[test]
+fn g1_the_contact_pair_imports_two_sources_and_conducts_through_the_declared_joint() {
+    // q61wp.49/.53: two bodies, one declared card-backed contact joint, through
+    // the product verbs. `import` binds one source per geometry row in
+    // declaration order. All 5 W generated in the hot body must cross the
+    // joint into the fixed-temperature cold body (its outer faces carry zero
+    // flux), so conservation fixes the contact heat at -5 W and the mean jump
+    // at -0.5 K for R'' = 0.1 m^2 K/W on the unit joint, whatever the mesh.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let example = root.join("examples/contact-pair");
+    let fsim = example.join("contact-pair.fsim");
+    let cold = example.join("cold-body.stl");
+    let hot = example.join("hot-body.stl");
+    let dir = scratch("contact-pair");
+    let import = |first: &std::path::Path, second: &std::path::Path, name: &str| {
+        run(args(&[
+            "--json",
+            "import",
+            fsim.to_string_lossy().as_ref(),
+            first.to_string_lossy().as_ref(),
+            second.to_string_lossy().as_ref(),
+            dir.join(name).to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]))
+    };
+    // Sources bind by declaration order; swapped bytes fail the pinned hash.
+    let swapped = import(&hot, &cold, "swapped.db");
+    assert_eq!(
+        swapped.exit_code,
+        exit::REFUSED,
+        "stdout: {}",
+        swapped.stdout
+    );
+    assert!(
+        swapped.stderr.contains("cli-import-source-hash-mismatch"),
+        "{}",
+        swapped.stderr
+    );
+    let one = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        cold.to_string_lossy().as_ref(),
+        dir.join("one.db").to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert!(
+        one.stderr.contains("cli-import-source-count"),
+        "{}",
+        one.stderr
+    );
+
+    let imported = import(&cold, &hot, "pair.db");
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    assert!(
+        imported.stdout.contains("\"artifact_count\":2"),
+        "{}",
+        imported.stdout
+    );
+    let ledger = dir.join("pair.db");
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        root.join("data/reference-project/aa6061.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+        "--interfaces",
+        example.join("cold-hot.fsintpk").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+    assert!(
+        solved.stdout.contains("\"stages_completed\":7"),
+        "{}",
+        solved.stdout
+    );
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .expect("run id");
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).expect("ledger");
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let text = receipt_text(&ledger, &receipts[4]);
+    let field = |key: &str| number_after(&text, &format!("\"{key}\":"));
+    assert!(text.contains("\"interface\":\"cold-hot-joint\""), "{text}");
+    assert!((field("source_w") - 5.0).abs() < 1e-11, "{text}");
+    assert!((field("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5, "{text}");
+    assert!((field("mean_jump_k") + 0.5).abs() < 2e-6, "{text}");
+    assert!(field("relative_closure") < 1e-6, "{text}");
 }
 
 #[test]

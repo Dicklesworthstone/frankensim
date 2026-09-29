@@ -33,8 +33,8 @@ The v0 grammar is intentionally small:
 
 ```text
 frankensim [--json] validate <project.fsim|project.json>
-frankensim [--json] import <project> <source> <ledger.db> --unit <unit> --max-hole-edges <n>
-frankensim [--json] import <project> <source> <ledger.db> --unit <unit> --step-root <id> --target-h <spacing>
+frankensim [--json] import <project> <source>... <ledger.db> --unit <unit> --max-hole-edges <n>
+frankensim [--json] import <project> <source>... <ledger.db> --unit <unit> --step-root <id> --target-h <spacing>
 frankensim [--json] solve <project.fsim|project.json> <ledger.db>
 frankensim [--json] solve --resume <run-id> <ledger.db>
 frankensim [--json] report <run-id>
@@ -42,6 +42,10 @@ frankensim [--json] package <run-id>
 frankensim [--json] compare <left-run> <right-run> [<ledger.db>]
 ```
 
+`import` takes one source per project geometry row and binds them in
+declaration order; a count mismatch refuses `cli-import-source-count`, and a
+swapped pair refuses on the pinned source hash. A faceted-STEP import names
+one root entity and takes exactly one source.
 `--json` may appear once at any position. Unknown flags, duplicate/missing
 operands, mixed mesh/STEP policies, non-integer repair/root values, and
 non-finite or non-positive STEP spacing are refused. Project inputs are capped

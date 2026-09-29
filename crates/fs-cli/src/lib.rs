@@ -72,7 +72,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -146,7 +146,8 @@ enum Command {
 #[derive(Debug, Clone, PartialEq)]
 struct ImportCommand {
     project: PathBuf,
-    source: PathBuf,
+    /// One raw source per project geometry row, in declaration order.
+    sources: Vec<PathBuf>,
     ledger: PathBuf,
     unit: String,
     policy: ImportPolicy,
@@ -528,14 +529,18 @@ fn solve_usage_diagnostic() -> Diagnostic {
 }
 
 fn parse_import_args(args: &[String]) -> Result<ImportCommand, Diagnostic> {
-    if args.len() < 5 || !is_operand(&args[0]) || !is_operand(&args[1]) || !is_operand(&args[2]) {
+    // `<project> <source>... <ledger.db>`: every operand before the first
+    // flag; the first is the project, the last the ledger, and the ones in
+    // between bind to the project's geometry rows in declaration order.
+    let operands = args.iter().take_while(|arg| is_operand(arg)).count();
+    if operands < 3 || args.len() < operands + 2 {
         return Err(import_usage_diagnostic());
     }
     let mut unit = None;
     let mut max_hole_edges = None;
     let mut step_root = None;
     let mut target_h = None;
-    let mut index = 3usize;
+    let mut index = operands;
     while index < args.len() {
         let flag = &args[index];
         let Some(value) = args.get(index + 1) else {
@@ -593,8 +598,8 @@ fn parse_import_args(args: &[String]) -> Result<ImportCommand, Diagnostic> {
     };
     Ok(ImportCommand {
         project: PathBuf::from(&args[0]),
-        source: PathBuf::from(&args[1]),
-        ledger: PathBuf::from(&args[2]),
+        sources: args[1..operands - 1].iter().map(PathBuf::from).collect(),
+        ledger: PathBuf::from(&args[operands - 1]),
         unit,
         policy,
     })
@@ -604,7 +609,7 @@ fn import_usage_diagnostic() -> Diagnostic {
     Diagnostic::new(
         "import",
         "cli-import-usage",
-        "import requires one project, one raw source, one ledger, one unit, and exactly one format policy",
+        "import requires one project, one raw source per geometry row, one ledger, one unit, and exactly one format policy",
         USAGE,
     )
 }
@@ -679,19 +684,28 @@ fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
             "declare exactly one imported geometry receipt row for this command",
         );
     };
-    if geometry.len() != 1 {
+    if geometry.len() != command.sources.len() {
         return import_refusal(
             mode,
             &project_label,
             "cli-import-source-count",
             format!(
-                "the v0 import command requires exactly one geometry row; the project declares {}",
-                geometry.len()
+                "the project declares {} geometry row(s) but {} source(s) were given",
+                geometry.len(),
+                command.sources.len()
             ),
-            "import one reference enclosure, or use the library orchestration surface for a multi-source project",
+            "pass one source per geometry row, in the project's declaration order",
         );
     }
-    let artifact = &geometry[0];
+    if geometry.len() > 1 && matches!(command.policy, ImportPolicy::FacetedStep { .. }) {
+        return import_refusal(
+            mode,
+            &project_label,
+            "cli-import-source-count",
+            "a faceted-STEP import names one root entity, so it takes exactly one source",
+            "import a multi-source project with mesh sources, or split it",
+        );
+    }
     let declared_memory = decoded
         .spec
         .budgets
@@ -701,11 +715,13 @@ fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
     let source_cap = GeometryImportLimits::DEFAULT
         .max_source_bytes
         .min(declared_memory);
-    let source_bytes =
-        match read_raw_import_source(&command.source, source_cap, mode, &project_label) {
-            Ok(bytes) => bytes,
+    let mut sources = Vec::with_capacity(command.sources.len());
+    for path in &command.sources {
+        match read_raw_import_source(path, source_cap, mode, &project_label) {
+            Ok(bytes) => sources.push(bytes),
             Err(output) => return output,
-        };
+        }
+    }
     let ledger_path = match command.ledger.to_str() {
         Some(path) if !path.is_empty() => path,
         _ => {
@@ -720,27 +736,29 @@ fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
     };
 
     let mut raw = RawGeometryLibrary::new();
-    match command.policy {
-        ImportPolicy::Mesh { max_hole_edges } => {
-            raw.insert_mesh(
-                artifact,
-                command.source.to_string_lossy(),
-                source_bytes,
-                command.unit.clone(),
-                max_hole_edges,
-                Vec::new(),
-            );
-        }
-        ImportPolicy::FacetedStep { root_id, target_h } => {
-            raw.insert_faceted_step(
-                artifact,
-                command.source.to_string_lossy(),
-                source_bytes,
-                root_id,
-                command.unit.clone(),
-                target_h,
-                Vec::new(),
-            );
+    for ((artifact, path), source_bytes) in geometry.iter().zip(&command.sources).zip(sources) {
+        match command.policy {
+            ImportPolicy::Mesh { max_hole_edges } => {
+                raw.insert_mesh(
+                    artifact,
+                    path.to_string_lossy(),
+                    source_bytes,
+                    command.unit.clone(),
+                    max_hole_edges,
+                    Vec::new(),
+                );
+            }
+            ImportPolicy::FacetedStep { root_id, target_h } => {
+                raw.insert_faceted_step(
+                    artifact,
+                    path.to_string_lossy(),
+                    source_bytes,
+                    root_id,
+                    command.unit.clone(),
+                    target_h,
+                    Vec::new(),
+                );
+            }
         }
     }
     let ledger = match fs_ledger::Ledger::open(ledger_path) {
@@ -757,7 +775,7 @@ fn import_path(command: &ImportCommand, mode: OutputMode) -> CommandOutput {
     };
 
     let mut limits = GeometryImportLimits::DEFAULT;
-    limits.max_sources = 1;
+    limits.max_sources = command.sources.len();
     if let Some(budgets) = decoded.spec.budgets.as_ref() {
         let memory_bytes = usize::try_from(budgets.memory_bytes).unwrap_or(usize::MAX);
         limits.max_source_bytes = limits.max_source_bytes.min(memory_bytes);

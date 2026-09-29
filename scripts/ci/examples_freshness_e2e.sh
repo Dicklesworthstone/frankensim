@@ -37,6 +37,10 @@
 #                                exact energy-balance bracket
 #                                T_min <= T_ref + P/(hA) <= T_max with the
 #                                hole walls counted in A.
+#   9. examples/contact-pair    — two sources in one import, a declared
+#                                card-backed contact joint: seven stages
+#                                (the exact -5 W / -0.5 K oracles are the
+#                                G1 test's).
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -57,7 +61,7 @@ BINARY="${FRANKENSIM_BIN:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '3,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'FATAL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -311,6 +315,23 @@ plate_bracket() {
     && awk -v lo="${PLATE_TMIN}" -v hi="${PLATE_TMAX}" 'BEGIN { m = 293.15 + 2.0 / (10.0 * 5.504e-3); exit !(lo <= m && m <= hi) }'
 }
 check "plate-hole brackets the exact mean surface temperature 329.4872 K (T_min ${PLATE_TMIN:-?}, T_max ${PLATE_TMAX:-?})" plate_bracket
+
+# ---- 12. contact pair: two sources, one declared contact joint -------------
+PAIR_DIR="${REPO_ROOT}/examples/contact-pair"
+PAIR="${PAIR_DIR}/contact-pair.fsim"
+check "contact-pair validates ok" validate_ok "${PAIR}"
+pair_solve_completes() {
+  "${BINARY}" --json import "${PAIR}" "${PAIR_DIR}/cold-body.stl" "${PAIR_DIR}/hot-body.stl" "${WORK}/pair.db" --unit m --max-hole-edges 0 > "${WORK}/cpimp.json" 2> "${WORK}/cpimp.err" \
+    && "${BINARY}" --json solve "${PAIR}" "${WORK}/pair.db" --materials "${PACK}" --interfaces "${PAIR_DIR}/cold-hot.fsintpk" > "${WORK}/cps.json" 2> "${WORK}/cps.err"
+}
+check "contact pair imports both sources and solves" pair_solve_completes
+check "contact pair import retained two artifacts" grep -q '"artifact_count":2' "${WORK}/cpimp.json"
+check "contact pair solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/cps.json"
+pair_swapped_refuses() {
+  ! "${BINARY}" --json import "${PAIR}" "${PAIR_DIR}/hot-body.stl" "${PAIR_DIR}/cold-body.stl" "${WORK}/swapped.db" --unit m --max-hole-edges 0 > /dev/null 2> "${WORK}/cpswap.err" \
+    && grep -q 'cli-import-source-hash-mismatch' "${WORK}/cpswap.err"
+}
+check "contact pair refuses swapped sources on the pinned hash" pair_swapped_refuses
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"
