@@ -78,7 +78,7 @@ def prepare(root: Path, out: Path) -> Path:
     source += "pub use stop::{StopReason, StopRule};\npub use lbfgs::{LbfgsError, LbfgsReport, LbfgsState};\n"
     source += alias.group() + "\npub mod transient {\n"
     source += module("variational", "crates/fs-ascent/src/transient/variational.rs") + "}\n"
-    ascent = crate("fs-ascent", source, ("fs-time", "fs-math"))
+    ascent = crate("fs-ascent", source, ("fs-time", "fs-math", "fs-blake3"))
     example = root / "crates/fs-ascent/examples/weak_constraint_heat.rs"
     if not example.is_file():
         raise FileNotFoundError(example)
