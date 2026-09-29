@@ -102,3 +102,7 @@ required-features = ["transient-design"]
 [[example]]
 name = "weak_constraint_heat"
 required-features = ["transient-design"]
+
+[[example]]
+name = "conduction_assimilate"
+required-features = ["conduction-assimilation"]
