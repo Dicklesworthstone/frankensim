@@ -147,7 +147,8 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// so large obtuse-mesh rungs publish a verified coupled solver bound.
 /// Version 31 atomically adopts physically accepted coupled corrections,
 /// rebuilding the field, Robin boundary and live air receipt before export.
-pub const SOLVE_DRIVER_VERSION: u32 = 31;
+/// Version 32 adds opt-in native nominal-adjoint reports on the final field.
+pub const SOLVE_DRIVER_VERSION: u32 = 32;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -186,6 +187,7 @@ const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-soluti
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
 mod adaptive_balance;
+mod nominal_adjoint;
 mod algebraic;
 mod conjugate;
 mod radiation;
@@ -5986,6 +5988,11 @@ fn conduction_solve_receipt(
     conductivity_side: f64,
     geometry_side: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
+    // Output intent is admitted before geometry/numerical work. Propagation
+    // vertices must not masquerade as the nominal report or repeat its adjoint.
+    let adjoint_requested = nominal_adjoint::requested(spec)?
+        && flow_override.is_none() && htc_scale == 1.0
+        && conductivity_side == 0.0 && geometry_side == 0.0;
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
     // numerically without making their identity depend on replay machine speed.
@@ -6482,7 +6489,7 @@ fn conduction_solve_receipt(
                 finite(z)?,
             ))
         };
-        let adjoint_data = if adaptive_requested || roundoff_wanted {
+        let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
             let interfaces = lower_thermal_interfaces(
@@ -6610,10 +6617,18 @@ fn conduction_solve_receipt(
             _ => None,
         };
         adaptive_deadline(deadline)?;
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))
+        // Only the final accepted rung is linearized. No coarse/provisional
+        // field, reconstructed surrogate, or additional primal is published.
+        let nominal_adjoint_fragment = if adjoint_requested {
+            Some(nominal_adjoint::extract(&cx, spec, &solved, &region_ids, &audited, work)?)
+        } else { None };
+        adaptive_deadline(deadline)?;
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment) =
         result;
+    let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,
+        |receipt| format!(",\"nominal_adjoint\":{receipt}"));
     let RungSolved {
         census,
         mesh,
@@ -6765,7 +6780,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),

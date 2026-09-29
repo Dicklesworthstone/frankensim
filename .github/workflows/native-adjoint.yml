@@ -1,0 +1,108 @@
+name: Native thermal adjoint
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fs-cli/src/solve.rs'
+      - 'crates/fs-cli/src/solve/nominal_adjoint*'
+      - 'crates/fs-cli/src/solve/nominal_adjoint/**'
+      - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
+      - 'crates/fs-cli/src/study_uncertainty*'
+      - 'crates/fs-cli/src/study_uncertainty/**'
+      - 'crates/fs-project/src/uncertainty*'
+      - 'crates/fs-project/src/uncertainty/**'
+      - '.github/workflows/native-adjoint.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wire:
+    # One explicitly requested main-only integration of the reviewed large-file
+    # edit. No general mutation endpoint; exact input blobs and anchors required.
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[wire-native-mean-control]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Connect native adjoint calibration and commit directly to main
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          edits = json.loads(pathlib.Path('tools/native_mean_control_wiring.json').read_text())
+          changed = {}
+          for name, rule in edits.items():
+              path = pathlib.Path(name)
+              raw = path.read_bytes()
+              oid = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              if oid != rule['git_blob']:
+                  raise SystemExit(f'{name} changed; manual integration required')
+              text = raw.decode()
+              for edit in rule['edits']:
+                  if text.count(edit['old']) != 1:
+                      raise SystemExit(f'{name}: missing or ambiguous integration anchor')
+                  text = text.replace(edit['old'], edit['new'], 1)
+              changed[path] = text.encode()
+          for path, raw in changed.items():
+              path.write_bytes(raw)
+          PY
+          git diff --check
+          git config user.name 'ChatGPT'
+          git config user.email 'noreply@openai.com'
+          git add -- crates/fs-project/src/uncertainty.rs crates/fs-cli/src/study_uncertainty.rs crates/fs-cli/src/study_uncertainty/model.rs
+          git commit -m 'feat(cli): freeze native nominal adjoints before uncertainty sampling'
+          git push origin HEAD:main
+  native:
+    needs: wire
+    if: always() && (needs.wire.result == 'success' || needs.wire.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Record exact tested source
+        run: git log -1 --format='%H %s'
+      - name: Materialize pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
+            # Same exact-byte checkout repair as uncertainty-propagation.yml.
+            # Do not relax bootstrap integrity or change any dependency pin.
+            python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('../franken_numpy')
+          row = next(r for r in json.loads(pathlib.Path('constellation.lock').read_text())['libraries'] if r['lib'] == 'franken_numpy')
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(root), *args])
+          if git('rev-parse', 'HEAD').decode().strip() != row['git_head'] or git('config', '--local', '--get', 'frankensim.bootstrapIncomplete').strip() != b'true':
+              raise SystemExit('not the incomplete pinned NumPy clone; refusing repair')
+          name = 'legacy_numpy_code/numpy/doc/make.bat'
+          path = root / name
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('expected an ordinary tracked batch file')
+          raw = git('cat-file', 'blob', row['git_head'] + ':' + name)
+          actual = path.read_bytes()
+          if actual == raw or actual.replace(b'\r\n', b'\n') != raw.replace(b'\r\n', b'\n'):
+              raise SystemExit('not a line-ending-only checkout discrepancy')
+          path.write_bytes(raw)
+          git('add', '--', name)
+          if git('rev-parse', ':' + name).strip() != git('rev-parse', row['git_head'] + ':' + name).strip() or path.read_bytes() != raw:
+              raise SystemExit('restoration differs from locked source or index')
+          PY
+            cargo run --manifest-path tools/bootstrap/Cargo.toml
+          fi
+      - name: Test existing and nominal calibration policies
+        run: cargo test --release -p fs-project --lib uncertainty -- --test-threads=1
+      - name: Test actual native adjoint contractions
+        run: cargo test --release -p fs-cli --lib nominal_adjoint -- --test-threads=1
+      - name: Compare native adjoints with physical re-solves
+        run: cargo test --release -p fs-cli --test native_uncertainty nominal_adjoint -- --test-threads=1

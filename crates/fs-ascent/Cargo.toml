@@ -14,11 +14,12 @@ layer = "L4"
 # Opt-in physical inverse design; the default optimizer dependency graph is unchanged.
 equilibrium-design = ["dep:fs-couple"]
 # Opt-in time-series calibration through RK45, IMEX and structural adjoints.
-transient-design = ["dep:fs-time"]
+transient-design = ["dep:fs-time", "dep:fs-blake3"]
 # Spatial state reconstruction through the existing conduction producer.
 conduction-assimilation = ["transient-design", "dep:fs-conduction"]
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-adjoint = { path = "../fs-adjoint" }
 fs-conduction = { path = "../fs-conduction", optional = true }
 fs-couple = { path = "../fs-couple", optional = true }

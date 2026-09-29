@@ -790,8 +790,8 @@ fn drive(
                 .max(0.0);
         if let Some(c) = calibration.as_mut().filter(|c| c.pending(model)) {
             let point = c.next(model)?;
-            match model.sample(ledger, gate, &point, remaining) {
-                Ok(Some(sample)) => c.accept(model, sample)?,
+            match c.sample(model, ledger, gate, &point, remaining) {
+                Ok(Some(sample)) => c.accept(model, ledger, sample)?,
                 Ok(None) => interrupted = true,
                 Err(error) => c.reject(&error),
             }
