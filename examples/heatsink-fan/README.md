@@ -58,7 +58,8 @@ body is what the physics needs.
   a path; declaring a small honest bypass is what lets the operating point
   execute.
 - **Power**: 3 W at duty 1.0 dissipated in the metal region — a volumetric
-  simplification of a chip heating the base, documented as such.
+  simplification of a chip heating the base, documented as such. The
+  chip-footprint twin below removes the simplification.
 
 ## The conduction declaration
 
@@ -135,6 +136,27 @@ axis-aligned 301.99578 K on 713 tets, rotated 301.99562 K on 704 tets, a
 the ladder measured. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
+
+## A chip footprint: heat entering through a declared surface
+
+`heatsink-fan-chip.fsim` is the same project with the 3 W entering where a
+chip actually puts it: through a 20 × 20 mm die contact on the base bottom.
+`heatsink-chip.stl` is `generate_heatsink_stl.py OUT --chip 0.030 0.050 0.020
+0.040` (256 facets on one global tensor grid, so the footprint is a union of
+whole facets). The assembly declares `(surface :parent "heatsink" :name
+"chip" ...)` (fsim v8), a `(box ...)` assignment selects the footprint facets
+(`:tolerance 1e-6` because STL vertices weld at f32), and the power row names
+`chip` instead of `metal`. Solve lowers surface power to a uniform inward
+Neumann flux, watts over the measured footprint area, and carves the
+footprint out of the metal's convection row, so the patch never also
+convects. A surface carrying both a power row and a boundary law is refused
+(`cli-solve-conduction-surface-ambiguous`).
+
+MEASURED 2026-09-29: all seven stages complete; `source_w` 0, 3.0 W in
+through the footprint, 3.0000000021 W out by convection (relative closure
+6.9e-10). The maximum is 302.693 K against 301.996 K for the volumetric
+source: concentrating the heat under the die raises the rise above the
+293.15 K inlet from 8.85 K to 9.54 K (+0.70 K, 8 %).
 
 ## Probability of compliance
 

@@ -244,6 +244,21 @@ pub enum EntityDecl {
         /// Expected identity token.
         expect_id: Option<String>,
     },
+    /// A boundary patch of a part (fsim v8): a named set of exterior faces,
+    /// selected by one geometry assignment. It has no volume, seed or
+    /// material. A `power` row naming a surface is heat entering uniformly
+    /// through it (for example a chip footprint), and its faces take
+    /// precedence over the enclosing region's thermal boundary rows.
+    Surface {
+        /// Parent part's declared name.
+        parent: String,
+        /// Declared name.
+        name: String,
+        /// Display name.
+        display: String,
+        /// Expected identity token.
+        expect_id: Option<String>,
+    },
     /// Interface between two regions.
     Interface {
         /// Parent assembly's declared name.
@@ -269,6 +284,7 @@ impl EntityDecl {
             EntityDecl::Assembly { name, .. }
             | EntityDecl::Part { name, .. }
             | EntityDecl::Region { name, .. }
+            | EntityDecl::Surface { name, .. }
             | EntityDecl::Interface { name, .. } => name,
         }
     }
@@ -278,6 +294,7 @@ impl EntityDecl {
             EntityDecl::Assembly { expect_id, .. }
             | EntityDecl::Part { expect_id, .. }
             | EntityDecl::Region { expect_id, .. }
+            | EntityDecl::Surface { expect_id, .. }
             | EntityDecl::Interface { expect_id, .. } => expect_id.as_deref(),
         }
     }
@@ -2359,6 +2376,26 @@ impl ProjectSpec {
                         None
                     }
                 }
+                EntityDecl::Surface {
+                    parent,
+                    name,
+                    display,
+                    ..
+                } => {
+                    if let (Some(parent_id), Some(&"part")) = (ids.get(parent), kinds.get(parent)) {
+                        Some((
+                            EntityDeclaration::surface(*parent_id, name).with_display_name(display),
+                            "surface",
+                        ))
+                    } else {
+                        out.push(violation(
+                            "project-entity-parent-unknown",
+                            format!("surface `{name}` names parent part `{parent}`, which is not declared above it"),
+                            "declare parents before children; a surface's parent must be a part",
+                        ));
+                        None
+                    }
+                }
                 EntityDecl::Interface {
                     parent,
                     name,
@@ -2483,12 +2520,12 @@ impl ProjectSpec {
                 for boundary in &conduction.boundaries {
                     check_ref(ids, out, "thermal boundary".to_string(), &boundary.target);
                     if let Some(id) = ids.get(&boundary.target)
-                        && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+                        && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface | EntityKind::Surface)
                     {
                         out.push(violation(
                             "project-conduction-boundary-target-kind",
                             format!(
-                                "thermal boundary target `{}` is a {}, not a region or interface",
+                                "thermal boundary target `{}` is a {}, not a region, surface or interface",
                                 boundary.target,
                                 id.kind().label()
                             ),
@@ -2564,7 +2601,7 @@ impl ProjectSpec {
                     ));
                 }
                 if let Some(id) = ids.get(&assignment.target)
-                    && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+                    && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface | EntityKind::Surface)
                 {
                     out.push(violation(
                         "project-assignment-target-kind",
@@ -2604,7 +2641,7 @@ impl ProjectSpec {
             artifacts.insert(assignment.artifact.as_str());
         }
         for (name, id) in ids {
-            if matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+            if matches!(id.kind(), EntityKind::Region | EntityKind::Interface | EntityKind::Surface)
                 && !targets.contains(name.as_str())
             {
                 out.push(violation(

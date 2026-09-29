@@ -42,7 +42,8 @@ fn version_two_binds_declared_bernoulli_policy_and_roundtrips() {
         alpha: 0.05,
         min_samples: 16,
     };
-    assert_eq!(VERSION, 2);
+    // Version-2 documents stay admitted after later bumps (3 at a6800dbc7).
+    assert!(VERSION >= 2);
     assert_eq!(study.compliance(), Some(&policy));
     assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(), study);
     let canonical = study.canonical().to_string();

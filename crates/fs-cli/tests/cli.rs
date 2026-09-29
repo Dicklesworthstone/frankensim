@@ -570,7 +570,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"cc648e2e627c7b1f709a6e21fce35b8ba4588ee6f1ab543b344875ec308572fc\""
+            "\"project_hash\":\"a04dd885560c249cdf6843e87abe1d9bfb9404eac1e185390a8ca7858c4cbc21\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -580,7 +580,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"33b1b4193dafa62ec7c5a4e1aaf73fa86b4f93575572907f8c578b2d883611b7\""
+            "\"project_hash\":\"08149b2b51bce2d1d036b807a63fd85502022575fc01e7798560cfdaced4b073\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -722,11 +722,95 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
     let report = std::fs::read_to_string(dir.join(format!("{run_id}.report.json"))).unwrap();
     let solved = |label: &str| -> f64 {
         let key = format!("declared surface offset {label} = ");
-        let tail = &report[report.find(&key).unwrap_or_else(|| panic!("no {label} vertex in {report}")) + key.len()..];
+        let tail = &report[report
+            .find(&key)
+            .unwrap_or_else(|| panic!("no {label} vertex in {report}"))
+            + key.len()..];
         tail[..tail.find(' ').unwrap()].parse().unwrap()
     };
     let (inward, outward) = (solved("inward"), solved("outward"));
-    assert!(outward < inward, "outward {outward} K must be cooler than inward {inward} K");
+    assert!(
+        outward < inward,
+        "outward {outward} K must be cooler than inward {inward} K"
+    );
+}
+
+#[test]
+fn g1_chip_footprint_power_enters_through_the_declared_surface() {
+    // q61wp.52: the heatsink with its 3 W entering through a 20 x 20 mm die
+    // contact (an fsim v8 `(surface ...)` entity) instead of volumetrically.
+    // The power row names the surface, so solve must lower it to an inward
+    // Neumann flux over exactly the footprint (no volumetric source) and
+    // carve the footprint out of the convection row; the balance then closes
+    // 3 W in through the chip against 3 W out by convection.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan-chip.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink-chip.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("heatsink-chip");
+    let ledger = dir.join("chip.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        solved.exit_code,
+        exit::SUCCESS,
+        "stdout: {} / stderr: {}",
+        solved.stdout,
+        solved.stderr
+    );
+    assert!(
+        solved.stdout.contains("\"stages_completed\":7"),
+        "stdout: {}",
+        solved.stdout
+    );
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .expect("solve result names its run id");
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().expect("utf-8 path")).expect("ledger");
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let text = receipt_text(&ledger, &receipts[4]);
+    assert!(text.contains("\"stage\":\"conduction\""), "{text}");
+    let field = |key: &str| number_after(&text, &format!("\"{key}\":"));
+    assert_eq!(
+        field("source_w"),
+        0.0,
+        "surface power must not become a volumetric source"
+    );
+    assert!(
+        (field("neumann_out_w") + 3.0).abs() < 1e-9,
+        "3 W must enter through the footprint"
+    );
+    assert!(
+        (field("robin_out_w") - 3.0).abs() < 1e-6,
+        "3 W must leave by convection"
+    );
+    assert!(field("relative_closure").abs() < 1e-6);
 }
 
 #[test]

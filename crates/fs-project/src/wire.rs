@@ -896,6 +896,20 @@ fn lower_entity(decl: &EntityDecl) -> Node {
             kw("display"),
             text(display),
         ],
+        EntityDecl::Surface {
+            parent,
+            name,
+            display,
+            ..
+        } => vec![
+            sym("surface"),
+            kw("parent"),
+            text(parent),
+            kw("name"),
+            text(name),
+            kw("display"),
+            text(display),
+        ],
         EntityDecl::Interface {
             parent,
             name,
@@ -921,6 +935,7 @@ fn lower_entity(decl: &EntityDecl) -> Node {
         EntityDecl::Assembly { expect_id, .. }
         | EntityDecl::Part { expect_id, .. }
         | EntityDecl::Region { expect_id, .. }
+        | EntityDecl::Surface { expect_id, .. }
         | EntityDecl::Interface { expect_id, .. } => expect_id,
     };
     if let Some(expected) = expect {
@@ -1983,13 +1998,13 @@ fn read_assembly(body: &[Node], out: &mut Vec<Violation>) -> Vec<EntityDecl> {
             out.push(Violation {
                 code: "project-malformed-clause",
                 what: "`assembly` rows must be entity declaration lists".to_string(),
-                fix: "declare `(assembly-decl ...)`, `(part ...)`, `(region ...)`, or `(interface ...)`".to_string(),
+                fix: "declare `(assembly-decl ...)`, `(part ...)`, `(region ...)`, `(surface ...)`, or `(interface ...)`".to_string(),
             });
             continue;
         };
         let known: &[&str] = match kind {
             "assembly-decl" => &["name", "display", "id"],
-            "part" | "region" => &["parent", "name", "display", "id"],
+            "part" | "region" | "surface" => &["parent", "name", "display", "id"],
             "interface" => &["parent", "name", "display", "from", "to", "id"],
             other => {
                 unknown_field(out, "assembly", other);
@@ -2014,6 +2029,12 @@ fn read_assembly(body: &[Node], out: &mut Vec<Violation>) -> Vec<EntityDecl> {
             },
             "region" => EntityDecl::Region {
                 parent: expect_str(field(&pairs, "parent"), "region.parent", out),
+                name,
+                display,
+                expect_id,
+            },
+            "surface" => EntityDecl::Surface {
+                parent: expect_str(field(&pairs, "parent"), "surface.parent", out),
                 name,
                 display,
                 expect_id,

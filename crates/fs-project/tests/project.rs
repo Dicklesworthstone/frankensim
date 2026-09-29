@@ -833,7 +833,7 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8"
     );
 }
 
@@ -886,7 +886,7 @@ fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8"
     );
 }
 
@@ -910,7 +910,7 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     let receipt = parsed.migration.expect("v4 migration is receipted");
     assert_eq!(receipt.source_version, 4);
     assert_eq!(receipt.target_version, FSIM_VERSION);
-    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8");
     assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
     assert!(
         parsed
@@ -946,7 +946,7 @@ fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
     assert_eq!(parsed.decoded.canonical, current);
     let receipt = parsed.migration.expect("v5 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8");
     assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
     assert!(
         parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
@@ -966,7 +966,7 @@ fn v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset() {
     assert_eq!(parsed.decoded.spec, historical);
     let receipt = parsed.migration.expect("v6 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (6, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7-then-surface-entity-v8");
     assert!(receipt.verifies(v6.as_bytes(), current.as_bytes()));
     assert!(parsed.decoded.spec.geometry.iter().flatten().all(|a| a.surface_offset.is_none()));
 }
@@ -2030,4 +2030,68 @@ fn the_broken_cooling_corpus_logs_every_violation_with_its_fix() {
             panic!("{label}: expected `{expected_code}`, got {findings:?}");
         }
     }
+}
+
+/// The reference project plus a chip-footprint surface on the board part,
+/// selected by a box and carrying the power (fsim v8).
+fn surface_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.assembly.as_mut().expect("assembly").push(EntityDecl::Surface {
+        parent: "board".to_string(),
+        name: "die-footprint".to_string(),
+        display: "CPU die footprint".to_string(),
+        expect_id: None,
+    });
+    spec.assignments.as_mut().expect("assignments").push(GeometryAssignment {
+        artifact: "enclosure".to_string(),
+        target: "die-footprint".to_string(),
+        length_unit: "m".to_string(),
+        selector: MeshSelector::Box { min: [0.01, 0.01, -1e-6], max: [0.03, 0.03, 1e-6], tolerance: 0.0 },
+        allow_overlap: true,
+    });
+    spec.power.as_mut().expect("power")[0].region = "die-footprint".to_string();
+    spec
+}
+
+#[test]
+fn surface_entities_round_trip_validate_and_refuse_misuse() {
+    let spec = surface_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(surface :parent \"board\" :name \"die-footprint\" :display \"CPU die footprint\")"), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    // A surface needs a geometry assignment, like a region or interface.
+    let mut unbound = surface_project();
+    unbound.assignments.as_mut().unwrap().retain(|a| a.target != "die-footprint");
+    assert!(unbound.validate().iter().any(|v| v.code == "project-assignment-target-unbound"), "{:?}", unbound.validate());
+    // A surface's parent must be a part, never a region.
+    let mut orphan = surface_project();
+    if let Some(EntityDecl::Surface { parent, .. }) = orphan.assembly.as_mut().unwrap().last_mut() {
+        *parent = "cpu".to_string();
+    }
+    assert!(orphan.validate().iter().any(|v| v.code == "project-entity-parent-unknown"), "{:?}", orphan.validate());
+    // A surface is not a volume: it needs no conduction seed (no seed rule fires).
+    assert!(!spec.validate().iter().any(|v| v.code.starts_with("project-conduction-seed")));
+}
+
+#[test]
+fn v7_envelopes_migrate_to_v8_and_refuse_a_pre_v8_surface() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v7 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_ne!(v7, current);
+    let parsed = parse_sexpr_migrating(&v7).expect("v7 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v7 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (7, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "surface-entity-v8");
+    assert!(receipt.verifies(v7.as_bytes(), current.as_bytes()));
+    let with_surface = print_sexpr(&surface_project()).expect("renders");
+    let false_v7 = with_surface
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_eq!(parse_sexpr_migrating(&false_v7).expect_err("v7 never carried a surface").code, "fsim-migration-payload");
 }
