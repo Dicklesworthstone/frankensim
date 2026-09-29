@@ -2270,6 +2270,41 @@ struct SolveEngine<'a> {
     progress: Vec<String>,
 }
 
+/// The terminal run-receipt bytes: a pure function of the run, its project,
+/// the terminal status and the driver state, so a re-attested run can name
+/// its retained receipt without writing it again.
+fn run_receipt_json(
+    run: SolveRunId,
+    project_hash: ContentHash,
+    status_name: &str,
+    detail: &str,
+    state: &SolveDriverState,
+) -> String {
+    let mut stages_json = String::new();
+    for (index, stage) in state.completed.iter().enumerate() {
+        if index > 0 {
+            stages_json.push(',');
+        }
+        let name = SolveStage::from_ordinal(stage.ordinal).map_or("unknown", SolveStage::name);
+        let _ = write!(
+            stages_json,
+            "{{\"stage\":{},\"op\":{},\"receipt\":{}}}",
+            json_string(name),
+            stage.op_id,
+            json_string(&stage.receipt.to_hex()),
+        );
+    }
+    format!(
+        "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"status\":{}{detail},\"stages\":[{stages_json}],\"consumed_wall_s\":{},\"consumed_core_s\":{},\"no_claim\":\"stage receipts carry their own authority; this record is run bookkeeping\"}}",
+        json_string(SOLVE_RUN_RECEIPT_SCHEMA),
+        json_string(&run.to_hex()),
+        json_string(&project_hash.to_hex()),
+        json_string(status_name),
+        state.consumed_wall_s,
+        state.consumed_core_s,
+    )
+}
+
 /// Execute a fresh solve run against a validated project.
 ///
 /// `canonical_source` must be the project's canonical s-expression render
@@ -2366,6 +2401,31 @@ fn run_solve_inner<'a>(
     .map_err(|error| invocation_work_refusal(Some(run), None, error))?;
     work.checkpoint(SolveEvidencePhase::ProjectIdentityDerive, None, 1)
         .map_err(|_| cancelled_fresh_refusal(run, None))?;
+    // Identical inputs name the same run. When that run already completed
+    // every stage, driving it again would retain a second complete chain
+    // (its driver state differs in wall seconds) and every export would
+    // then refuse on two competing checkpoints. Re-attest the sealed history
+    // instead and return it: same identity, same receipt, nothing written.
+    // Any other discovery outcome (no run, a partial or refused one) drives
+    // fresh, as before.
+    if let Ok(retained) = load_latest_state(ledger, run, work, ResumeProof::SealedEvidence)
+        && retained.state.completed.len() >= SolveStage::ALL.len()
+    {
+        let receipt = hash_bytes(
+            run_receipt_json(run, project_hash, "completed", "", &retained.state).as_bytes(),
+        );
+        let retained_receipt = ledger
+            .artifact_info(&receipt)
+            .map_err(|error| resume_ledger("reading the retained run receipt failed", error))?
+            .is_some_and(|info| info.kind == RUN_RECEIPT_KIND);
+        return Ok(SolveOutcome {
+            run: run.to_hex(),
+            status: SolveRunStatus::Completed,
+            stages: Vec::new(),
+            prior_stages: u32::try_from(retained.state.completed.len()).unwrap_or(u32::MAX),
+            run_receipt: retained_receipt.then(|| receipt.to_hex()),
+        });
+    }
     let mut engine =
         SolveEngine::open(ledger, work, clock, project, cards, project_hash, run, None)?;
     let state = SolveDriverState {
@@ -3292,29 +3352,8 @@ impl<'a> SolveEngine<'a> {
             ),
             SolveRunStatus::Cancelled => ("cancelled", String::new()),
         };
-        let mut stages_json = String::new();
-        for (index, stage) in state.completed.iter().enumerate() {
-            if index > 0 {
-                stages_json.push(',');
-            }
-            let name = SolveStage::from_ordinal(stage.ordinal).map_or("unknown", SolveStage::name);
-            let _ = write!(
-                stages_json,
-                "{{\"stage\":{},\"op\":{},\"receipt\":{}}}",
-                json_string(name),
-                stage.op_id,
-                json_string(&stage.receipt.to_hex()),
-            );
-        }
-        let receipt_json = format!(
-            "{{\"schema\":{},\"run\":{},\"project_hash\":{},\"status\":{}{detail},\"stages\":[{stages_json}],\"consumed_wall_s\":{},\"consumed_core_s\":{},\"no_claim\":\"stage receipts carry their own authority; this record is run bookkeeping\"}}",
-            json_string(SOLVE_RUN_RECEIPT_SCHEMA),
-            json_string(&self.run.to_hex()),
-            json_string(&self.project_hash.to_hex()),
-            json_string(status_name),
-            state.consumed_wall_s,
-            state.consumed_core_s,
-        );
+        let receipt_json =
+            run_receipt_json(self.run, self.project_hash, status_name, &detail, state);
         let ir = format!(
             "{{\"schema\":{},\"stage\":\"terminal\",\"ordinal\":{},\"run\":{},\"project\":{},\"driver_version\":{}}}",
             json_string(SOLVE_STAGE_SCHEMA),

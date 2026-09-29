@@ -716,6 +716,67 @@ fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
             .unwrap_or_else(|error| panic!("{} was not exported: {error}", path.display()));
         assert!(!bytes.is_empty(), "{} is empty", path.display());
     }
+    // A repeat solve of identical inputs re-attests the retained run instead
+    // of driving a second chain: before 2026-09-29 the second chain (same
+    // run, different wall seconds) made every later export refuse with
+    // `cli-solve-resume-identity` on two competing complete checkpoints.
+    let first_receipt = output
+        .stdout
+        .split("\"run_receipt\":\"")
+        .nth(1)
+        .map(|rest| rest[..64].to_string());
+    let again = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(again.exit_code, exit::SUCCESS, "stderr: {}", again.stderr);
+    assert!(
+        again.stdout.contains(&format!("\"run\":\"{run_id}\"")),
+        "{}",
+        again.stdout
+    );
+    assert!(
+        again.stdout.contains("\"stages_completed\":7"),
+        "{}",
+        again.stdout
+    );
+    if let Some(receipt) = &first_receipt {
+        assert!(
+            again.stdout.contains(receipt.as_str()),
+            "re-attest must name the retained run receipt: {}",
+            again.stdout
+        );
+    }
+    let exported = run(args(&[
+        "--json",
+        "report",
+        run_id,
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        exported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        exported.stderr
+    );
+    let rerun = run(args(&[
+        "--json",
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(rerun.exit_code, exit::SUCCESS, "stderr: {}", rerun.stderr);
+    assert!(
+        rerun.stdout.contains("\"checker\":\"pass\""),
+        "{}",
+        rerun.stdout
+    );
     // The declared surface offset moves T_max the physical way: more wetted
     // area and thicker fins (outward) cool the part at fixed watts, and the
     // inward bound heats it.
