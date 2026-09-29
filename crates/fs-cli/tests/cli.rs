@@ -1035,6 +1035,49 @@ fn g1_the_contact_pair_imports_two_sources_and_conducts_through_the_declared_joi
     assert!((field("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5, "{text}");
     assert!((field("mean_jump_k") + 0.5).abs() < 2e-6, "{text}");
     assert!(field("relative_closure") < 1e-6, "{text}");
+
+    // f85xj.6.8: `report` exports the published field as VTU, byte-for-byte
+    // the artifact the conduction receipt names; the independent checker
+    // reads it and its extrema and cell count are the receipt's own.
+    let exported = run(args(&[
+        "--json",
+        "report",
+        run_id,
+        dir.join("pair.db").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        exported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        exported.stderr
+    );
+    assert!(
+        exported.stdout.contains("\"field_vtu\":"),
+        "{}",
+        exported.stdout
+    );
+    let vtu = std::fs::read(dir.join(format!("{run_id}.field.vtu"))).expect("field exported");
+    let named = text
+        .split("\"field_artifact\":\"")
+        .nth(1)
+        .map(|rest| &rest[..64])
+        .expect("receipt names the field");
+    assert_eq!(fs_blake3::hash_bytes(&vtu).to_hex(), named);
+    let checked =
+        fs_viz::vtu::VtuChecker::check(std::str::from_utf8(&vtu).unwrap()).expect("VTU checks");
+    assert_eq!(checked.num_cells as f64, field("elements"));
+    let (_, [t_lo, t_hi]) = checked
+        .array_extrema
+        .iter()
+        .find(|(name, _)| name == "temperature")
+        .expect("temperature array")
+        .clone();
+    let temperature = text
+        .split("\"temperature\":{\"unit\":\"K\",")
+        .nth(1)
+        .expect("receipt temperature object");
+    assert_eq!(t_lo, number_after(temperature, "\"min\":"));
+    assert_eq!(t_hi, number_after(temperature, "\"max\":"));
 }
 
 #[test]

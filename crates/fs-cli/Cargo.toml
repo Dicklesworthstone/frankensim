@@ -48,6 +48,7 @@ fs-solver = { path = "../fs-solver" }
 fs-topols = { path = "../fs-topols" }
 fs-topopt = { path = "../fs-topopt", features = ["cutfem-marquee"], optional = true }
 fs-uq = { path = "../fs-uq" }
+fs-viz = { path = "../fs-viz" }
 
 [features]
 # The numerical 3-D CutFEM study retains the underlying frontier feature gate.

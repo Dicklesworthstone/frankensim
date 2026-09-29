@@ -1089,7 +1089,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 32,
+        SOLVE_DRIVER_VERSION, 33,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

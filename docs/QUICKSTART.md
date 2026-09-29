@@ -125,8 +125,11 @@ cargo run -p fs-cli --bin frankensim -- --json package "${RUN}" "${WORK}/heatsin
 ls "${WORK}"
 ```
 
-Expected: `<run>.report.html`, `<run>.report.json` and `<run>.fspkg` in
-`${WORK}`; the `report` result on stdout carries `"verdict":"indeterminate"` and
+Expected: `<run>.report.html`, `<run>.report.json`, `<run>.field.vtu` and
+`<run>.fspkg` in `${WORK}`. The `.field.vtu` is the published tetrahedral
+mesh with nodal `temperature` (K) and per-cell `region_label`; open it in
+ParaView or VisIt. It is byte-for-byte the artifact the conduction receipt
+names as `field_artifact`; the `report` result on stdout carries `"verdict":"indeterminate"` and
 `"authority":"projection-of-retained-receipts"` and
 `"verification":"sealed-evidence"` (exports re-hash the sealed receipts and
 lineage; only `solve --resume` replays the physics); the package result carries

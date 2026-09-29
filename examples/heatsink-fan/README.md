@@ -109,6 +109,13 @@ import-verify → assign → material-resolve → flow-network → conduction �
   three in the ledger; `report` / `package` export exactly those bytes and
   refuse an unknown run without writing anything.
 
+`report` also writes `<run>.field.vtu`: the solved mesh with nodal
+`temperature` and per-cell `region_label`, byte-for-byte the conduction
+receipt's `field_artifact`. Open it in ParaView to see where the heat goes.
+MEASURED 2026-09-29 with an independent reader (meshio): 246 points, 685
+tets, T in [301.9660, 301.9958] K (the maximum is the QoI), and tet volumes
+summing to 5.2800007e-5 m³ against the analytic 52.8 cm³.
+
 Read the HTML: every number cites the receipt hash it was copied from, and
 the uncertainty table prints `NO-DATA` where nothing was measured. See
 `heatsink-fan-ladder.fsim` for the same project with `(solver :fidelity

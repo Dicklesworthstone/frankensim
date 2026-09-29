@@ -167,6 +167,8 @@ report_ok() {
   (cd "${WORK}" && "${BINARY}" --json report "${RUN_ID}" "${WORK}/ledger.db" > "${WORK}/rep.json" 2> "${WORK}/rep.err")
 }
 check "report exports the retained HTML and JSON twin" report_ok
+check "report exports the published field as VTU (mesh + nodal temperature)" \
+  grep -q '<DataArray[^>]*Name="temperature"' "${WORK}/${RUN_ID}.field.vtu"
 check "report export names the retained content hash" grep -q '"content_hash":"' "${WORK}/rep.json"
 check "report verdict is the retained Estimated/indeterminate one" grep -q '"verdict":"indeterminate"' "${WORK}/rep.json"
 

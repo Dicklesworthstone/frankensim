@@ -36,6 +36,8 @@ pub(crate) struct LoadedExport {
 pub(crate) struct ReportExport {
     pub(crate) html_path: PathBuf,
     pub(crate) json_path: PathBuf,
+    /// The published conduction field (ParaView-readable VTU), when retained.
+    pub(crate) field_path: Option<PathBuf>,
     pub(crate) content_hash: String,
     pub(crate) verdict: String,
     pub(crate) stages_completed: usize,
@@ -176,6 +178,7 @@ mod tests {
             report_html: b"<html>fixture</html>".to_vec(),
             report_json: b"{\"requirements\":[{\"outcome\":\"indeterminate\"}]}".to_vec(),
             package_json: package_json.into_bytes(),
+            field_vtu: None,
         };
         let package_root = EvidencePackage::from_json(
             std::str::from_utf8(&export.package_json).expect("fixture package is UTF-8"),
@@ -574,15 +577,24 @@ pub(crate) fn export_report(
         .to_string();
     let html_path = loaded.dir.join(format!("{run}.report.html"));
     let json_path = loaded.dir.join(format!("{run}.report.json"));
+    let field = loaded
+        .export
+        .field_vtu
+        .as_ref()
+        .map(|bytes| (loaded.dir.join(format!("{run}.field.vtu")), bytes));
     // The two representations are one product. Refuse every conflict visible
     // at invocation time before publishing either path; write_retained uses
     // create_new so a concurrent creator is never overwritten. Two independent
     // filesystem paths are not a transactional pair: a concurrent creator can
     // still make the second path conflict after the first path is published.
-    for (path, bytes) in [
+    let outputs: Vec<(&PathBuf, &Vec<u8>)> = [
         (&html_path, &loaded.export.report_html),
         (&json_path, &loaded.export.report_json),
-    ] {
+    ]
+    .into_iter()
+    .chain(field.as_ref().map(|(path, bytes)| (path, *bytes)))
+    .collect();
+    for &(path, bytes) in &outputs {
         retained_compatible(path, bytes).map_err(|why| {
             refuse(
                 mode,
@@ -595,10 +607,7 @@ pub(crate) fn export_report(
             )
         })?;
     }
-    for (path, bytes) in [
-        (&html_path, &loaded.export.report_html),
-        (&json_path, &loaded.export.report_json),
-    ] {
+    for &(path, bytes) in &outputs {
         write_retained(path, bytes).map_err(|why| {
             refuse(
                 mode,
@@ -611,9 +620,11 @@ pub(crate) fn export_report(
             )
         })?;
     }
+    let field_path = field.map(|(path, _)| path);
     Ok(ReportExport {
         html_path,
         json_path,
+        field_path,
         verification: loaded.export.verification,
         content_hash,
         verdict,
@@ -644,6 +655,10 @@ pub fn report_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -
             push_json_string(&mut out, &export.html_path.to_string_lossy());
             out.push_str(",\"report_json\":");
             push_json_string(&mut out, &export.json_path.to_string_lossy());
+            if let Some(field) = &export.field_path {
+                out.push_str(",\"field_vtu\":");
+                push_json_string(&mut out, &field.to_string_lossy());
+            }
             out.push_str(",\"content_hash\":");
             push_json_string(&mut out, &export.content_hash);
             out.push_str(",\"verdict\":");

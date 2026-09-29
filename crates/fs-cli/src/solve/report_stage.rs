@@ -891,6 +891,9 @@ pub(crate) struct CompletedRunExport {
     pub(crate) report_json: Vec<u8>,
     /// Retained evidence package bytes (format-9 JSON).
     pub(crate) package_json: Vec<u8>,
+    /// The published conduction field as VTU, named by the conduction
+    /// receipt's `field_artifact` and re-hashed on read.
+    pub(crate) field_vtu: Option<Vec<u8>>,
 }
 
 /// Locate a completed run through the resume loader and return the exact
@@ -1029,6 +1032,49 @@ pub(crate) fn load_completed_run(
             "the report op did not retain all of html, json twin, and package".to_string(),
         ));
     };
+    let mut field_vtu = None;
+    if let Some(conduction) = state
+        .completed
+        .get(SolveStage::Conduction.ordinal() as usize)
+        .filter(|completed| completed.ordinal == SolveStage::Conduction.ordinal())
+    {
+        let receipt = ledger
+            .get_artifact(&conduction.receipt)
+            .map_err(|error| ledger_refusal(format!("reading the conduction receipt failed: {error}")))?
+            .ok_or_else(|| ledger_refusal("the conduction receipt is not retained".to_string()))?;
+        let named = std::str::from_utf8(&receipt)
+            .ok()
+            .and_then(|text| text.split("\"field_artifact\":\"").nth(1))
+            .and_then(|rest| rest.get(..64))
+            .map(str::to_string);
+        if let Some(named) = named {
+            let edges = ledger
+                .op_artifact_edges_bounded(conduction.op_id, EDGE_SCAN_CAP)
+                .map_err(|error| {
+                    ledger_refusal(format!("reading the conduction op edges failed: {error}"))
+                })?;
+            for edge in &edges.edges {
+                if edge.role != EdgeRole::Out || edge.artifact.to_hex() != named {
+                    continue;
+                }
+                let bytes = ledger
+                    .get_artifact(&edge.artifact)
+                    .map_err(|error| ledger_refusal(format!("reading the field failed: {error}")))?
+                    .ok_or_else(|| ledger_refusal("the published field is not retained".to_string()))?;
+                if hash_bytes(&bytes) != edge.artifact {
+                    return Err(ledger_refusal(
+                        "the retained field does not hash to its recorded identity".to_string(),
+                    ));
+                }
+                field_vtu = Some(bytes);
+            }
+            if field_vtu.is_none() {
+                return Err(ledger_refusal(format!(
+                    "the conduction receipt names field {named}, which its op did not retain"
+                )));
+            }
+        }
+    }
     let stages = state
         .completed
         .iter()
@@ -1048,6 +1094,7 @@ pub(crate) fn load_completed_run(
         report_html,
         report_json,
         package_json,
+        field_vtu,
         verification: ResumeProof::SealedEvidence.as_str(),
     })
 }

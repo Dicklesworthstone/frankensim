@@ -148,7 +148,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 31 atomically adopts physically accepted coupled corrections,
 /// rebuilding the field, Robin boundary and live air receipt before export.
 /// Version 32 adds opt-in native nominal-adjoint reports on the final field.
-pub const SOLVE_DRIVER_VERSION: u32 = 32;
+/// Version 33 retains the published mesh and field as VTU beside the solution
+/// and names it in the conduction receipt (`field_artifact`).
+pub const SOLVE_DRIVER_VERSION: u32 = 33;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -164,6 +166,9 @@ const STAGE_RECEIPT_KIND: &str = "solve-stage-receipt";
 const RUN_RECEIPT_KIND: &str = "solve-run-receipt";
 const MATERIAL_USAGE_KIND: &str = "solve-material-usage-receipt";
 const CONDUCTION_SOLUTION_KIND: &str = "solve-conduction-solution";
+/// The published mesh and field as ParaView-readable VTU (fs-viz), retained
+/// beside the solution so `report` exports exactly these bytes.
+pub(crate) const CONDUCTION_FIELD_VTU_KIND: &str = "solve-conduction-field-vtu";
 const CONDUCTION_INTERFACE_EVIDENCE_KIND: &str = "solve-conduction-interface-evidence";
 const IMPORT_SUMMARY_KIND: &str = "geometry-import-run-receipt";
 const IMPORT_RAW_KIND: &str = "geometry-source";
@@ -6667,6 +6672,39 @@ fn conduction_solve_receipt(
     )
     .into_bytes();
     let solution_artifact = hash_bytes(&solution_bytes);
+    // The published mesh, its nodal temperatures and each element's region
+    // label as deterministic VTU (round-trip-exact `{:.17e}` coordinates), so
+    // the field opens in ParaView/VisIt from the run's own retained bytes.
+    let field_vtu = {
+        let mut grid = fs_viz::vtu::UnstructuredGrid::new();
+        for &[x, y, z] in mesh.positions() {
+            grid.add_point(x, y, z);
+        }
+        for tet in &mesh.complex().tets {
+            grid.add_tetra(tet[0] as usize, tet[1] as usize, tet[2] as usize, tet[3] as usize);
+        }
+        grid.add_array(
+            fs_viz::vtu::DataArray::new_point_scalar("temperature", solution.temperature.clone())
+                .with_unit("K"),
+        );
+        grid.add_array(fs_viz::vtu::DataArray::new_cell_int32(
+            "region_label",
+            element_regions
+                .iter()
+                .map(|&label| i32::try_from(label).unwrap_or(i32::MAX))
+                .collect(),
+        ));
+        fs_viz::vtu::VtuWriter::write_ascii(&grid)
+            .map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-field",
+                    format!("the published field does not form a valid VTU grid: {error:?}"),
+                    "report the driver defect; the published mesh and field must agree",
+                )
+            })?
+            .into_bytes()
+    };
+    let field_artifact = hash_bytes(&field_vtu);
     let finite = |name: &str, value: f64| {
         canonical_f64(value).ok_or_else(|| {
             conduction_error(
@@ -6770,7 +6808,7 @@ fn conduction_solve_receipt(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
          \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{},\"quality\":{}}},\
-         \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\
+         \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\"field_artifact\":{},\
          \"temperature\":{{\"unit\":\"K\",\"min\":{},\"max\":{}}},\
          \"interfaces\":{{\"pair_count\":{},\"evidence_artifact\":{},\"fluxes\":[{}]}},\
          \"solver\":{{\"iterations\":{},\"stop_reason\":{},\"final_residual\":{},\
@@ -6793,6 +6831,7 @@ fn conduction_solve_receipt(
             .element_material_identity
             .expect("heterogeneous assignment"),
         json_string(&solution_artifact.to_hex()),
+        json_string(&field_artifact.to_hex()),
         finite("temperature.min", min_temperature)?,
         finite("temperature.max", max_temperature)?,
         interface_pair_count,
@@ -6832,7 +6871,8 @@ fn conduction_solve_receipt(
     );
     let charge = solution_bytes
         .len()
-        .checked_add(receipt.len())
+        .checked_add(field_vtu.len())
+        .and_then(|bytes| bytes.checked_add(receipt.len()))
         .and_then(|bytes| bytes.checked_add(interface_evidence.as_ref().map_or(0, Vec::len)))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| {
@@ -6848,11 +6888,18 @@ fn conduction_solve_receipt(
         .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, u64::MAX)
         .map_err(|_| cancelled())?;
-    let mut artifacts = vec![RetainedSideArtifact {
-        kind: CONDUCTION_SOLUTION_KIND,
-        artifact: solution_artifact,
-        bytes: solution_bytes,
-    }];
+    let mut artifacts = vec![
+        RetainedSideArtifact {
+            kind: CONDUCTION_SOLUTION_KIND,
+            artifact: solution_artifact,
+            bytes: solution_bytes,
+        },
+        RetainedSideArtifact {
+            kind: CONDUCTION_FIELD_VTU_KIND,
+            artifact: field_artifact,
+            bytes: field_vtu,
+        },
+    ];
     if let (Some(artifact), Some(bytes)) = (interface_evidence_artifact, interface_evidence) {
         artifacts.push(RetainedSideArtifact {
             kind: CONDUCTION_INTERFACE_EVIDENCE_KIND,
@@ -9078,7 +9125,7 @@ fn sealed_conduction_outputs(
                     ));
                 }
             }
-            CONDUCTION_INTERFACE_EVIDENCE_KIND => {}
+            CONDUCTION_INTERFACE_EVIDENCE_KIND | CONDUCTION_FIELD_VTU_KIND => {}
             other => {
                 return Err(resume_identity(format!(
                     "the sealed conduction output {} has kind `{other}`, not a conduction output kind",

@@ -42,6 +42,11 @@ frankensim [--json] package <run-id>
 frankensim [--json] compare <left-run> <right-run> [<ledger.db>]
 ```
 
+`report` (and `run`) also export `<run>.field.vtu` (driver v33+): the
+published tetrahedral mesh with nodal `temperature` and per-cell
+`region_label`. The bytes are the conduction stage's retained
+`solve-conduction-field-vtu` artifact, which the conduction receipt names as
+`field_artifact`, and they are re-hashed on export.
 `import` takes one source per project geometry row and binds them in
 declaration order; a count mismatch refuses `cli-import-source-count`, and a
 swapped pair refuses on the pinned source hash. A faceted-STEP import names

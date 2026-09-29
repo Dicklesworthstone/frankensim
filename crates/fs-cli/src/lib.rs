@@ -1122,6 +1122,10 @@ fn run_workflow_path(
             push_json_string(&mut out, &report.html_path.to_string_lossy());
             out.push_str(",\"report_json\":");
             push_json_string(&mut out, &report.json_path.to_string_lossy());
+            if let Some(field) = &report.field_path {
+                out.push_str(",\"field_vtu\":");
+                push_json_string(&mut out, &field.to_string_lossy());
+            }
             out.push_str(",\"report_content_hash\":");
             push_json_string(&mut out, &report.content_hash);
             out.push_str(",\"verdict\":");
