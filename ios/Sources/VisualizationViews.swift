@@ -5,7 +5,6 @@ struct NativeSimulationCanvas: View {
     let accent: Color
     let isRunning: Bool
     var frameOverride: Int?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         result: SimulationResult?,
@@ -20,29 +19,26 @@ struct NativeSimulationCanvas: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1 / 24, paused: result == nil || reduceMotion)) { timeline in
-            Canvas(opaque: true, colorMode: .linear, rendersAsynchronously: true) { context, size in
-                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(ForgeTheme.background))
-                drawGrid(in: &context, size: size)
-                if let result {
-                    let frame = frameOverride ?? displayedFrame(for: result, date: timeline.date)
-                    switch result.shape {
-                    case .grid, .gridFrames:
-                        drawField(result, frame: frame, context: &context, size: size)
-                    case .xyzPath:
-                        drawSpatialPath(result, date: timeline.date, context: &context, size: size)
-                    case .triangles:
-                        drawTriangles(result, date: timeline.date, context: &context, size: size)
-                    case .signal:
-                        drawSignal(result, context: &context, size: size)
-                    case .campaign:
-                        drawCampaign(result, context: &context, size: size)
-                    case .pcm:
-                        drawPCM(result, context: &context, size: size)
-                    }
-                } else if !isRunning {
-                    drawIdle(in: &context, size: size)
+        Canvas(opaque: true, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(ForgeTheme.background))
+            drawGrid(in: &context, size: size)
+            if let result {
+                switch result.shape {
+                case .grid, .gridFrames:
+                    drawField(result, frame: frameOverride ?? 0, context: &context, size: size)
+                case .xyzPath:
+                    drawSpatialPath(result, context: &context, size: size)
+                case .triangles:
+                    drawTriangles(result, context: &context, size: size)
+                case .signal:
+                    drawSignal(result, context: &context, size: size)
+                case .campaign:
+                    drawCampaign(result, context: &context, size: size)
+                case .pcm:
+                    drawPCM(result, context: &context, size: size)
                 }
+            } else if !isRunning {
+                drawIdle(in: &context, size: size)
             }
         }
         .overlay(alignment: .topLeading) {
@@ -68,11 +64,6 @@ struct NativeSimulationCanvas: View {
         .shadow(color: accent.opacity(0.13), radius: 28)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(result == nil ? "Simulation canvas ready" : "Rendered native simulation result")
-    }
-
-    private func displayedFrame(for result: SimulationResult, date: Date) -> Int {
-        guard result.frames > 1, !reduceMotion else { return max(0, result.frames - 1) }
-        return Int(date.timeIntervalSinceReferenceDate * 9) % result.frames
     }
 
     private func drawGrid(in context: inout GraphicsContext, size: CGSize) {
@@ -110,15 +101,15 @@ struct NativeSimulationCanvas: View {
         }
     }
 
-    private func drawSpatialPath(_ result: SimulationResult, date: Date, context: inout GraphicsContext, size: CGSize) {
+    private func drawSpatialPath(_ result: SimulationResult, context: inout GraphicsContext, size: CGSize) {
         let count = result.values.count / 3
         guard count > 1 else { return }
-        let fraction = reduceMotion ? 1 : 0.42 + 0.58 * (0.5 + 0.5 * sin(date.timeIntervalSinceReferenceDate * 0.55))
-        let visible = max(2, Int(Double(count) * fraction))
-        let strideBy = max(1, visible / 2_800)
+        // The entire trajectory must share one projection. Rescaling a moving
+        // prefix made the attractor jump and change shape on every frame.
+        let strideBy = max(1, count / 2_800)
         var points = [(Double, Double)]()
-        points.reserveCapacity(visible / strideBy)
-        for index in Swift.stride(from: 0, to: visible, by: strideBy) {
+        points.reserveCapacity(count / strideBy)
+        for index in Swift.stride(from: 0, to: count, by: strideBy) {
             let x = result.values[index * 3]
             let z = result.values[index * 3 + 2]
             if x.isFinite, z.isFinite { points.append((x, z)) }
@@ -126,13 +117,12 @@ struct NativeSimulationCanvas: View {
         drawNormalizedPath(points, context: &context, size: size, glow: true)
     }
 
-    private func drawTriangles(_ result: SimulationResult, date: Date, context: inout GraphicsContext, size: CGSize) {
+    private func drawTriangles(_ result: SimulationResult, context: inout GraphicsContext, size: CGSize) {
         guard result.values.count >= 18, result.values.first != 0 else { return }
         let triangleCount = (result.values.count - 1) / 18
-        let visible = reduceMotion ? triangleCount : max(1, Int(Double(triangleCount) * (0.68 + 0.32 * abs(sin(date.timeIntervalSinceReferenceDate * 0.45)))))
         let strideBy = max(1, triangleCount / 1_500)
         var triangles = [[(Double, Double)]]()
-        for triangle in Swift.stride(from: 0, to: min(visible, triangleCount), by: strideBy) {
+        for triangle in Swift.stride(from: 0, to: triangleCount, by: strideBy) {
             let base = 1 + triangle * 18
             var points = [(Double, Double)]()
             for vertex in 0..<3 {
