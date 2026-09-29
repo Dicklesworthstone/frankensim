@@ -23,8 +23,8 @@
         "new": "        adaptive_deadline(deadline)?;\n        // Only the final accepted rung is linearized. No coarse/provisional\n        // field, reconstructed surrogate, or additional primal is published.\n        let nominal_adjoint_fragment = if adjoint_requested {\n            Some(nominal_adjoint::extract(&cx, spec, &solved, &region_ids, &audited, work)?)\n        } else { None };\n        adaptive_deadline(deadline)?;\n        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment))\n    })?;\n    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment) =\n        result;\n    let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,\n        |receipt| format!(\",\\\"nominal_adjoint\\\":{receipt}\"));"
       },
       {
-        "old": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},\\\"authority\\\":{},\\\"no_claim\\\":{}}}\",",
-        "new": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},\\\"authority\\\":{},\\\"no_claim\\\":{}{nominal_adjoint_fragment}}}\","
+        "old": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},{}\\\"authority\\\":{},\\\"no_claim\\\":{}}}\",",
+        "new": "         \\\"adaptive\\\":{},\\\"conjugate\\\":{},\\\"radiation\\\":{},\\\"solver_control\\\":{},{}\\\"authority\\\":{},\\\"no_claim\\\":{}{nominal_adjoint_fragment}}}\","
       }
     ]
   },
