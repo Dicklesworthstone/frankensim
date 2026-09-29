@@ -132,6 +132,13 @@ fn checkpoint(keep_going: &mut dyn FnMut() -> bool) -> Result<(), HeteroFitError
     if keep_going() { Ok(()) } else { Err(HeteroFitError::Cancelled) }
 }
 
+// An exact duplicate with two noiseless observations makes C singular for
+// EVERY kernel. Do not let a rounded positive Cholesky pivot admit it.
+pub(crate) fn zero_noise_duplicates(x: &[Vec<f64>], noise: &[f64]) -> bool {
+    noise.iter().enumerate().any(|(i, v)| *v == 0.0
+        && (0..i).any(|j| noise[j] == 0.0 && x[i] == x[j]))
+}
+
 struct Evaluation {
     model: Gp,
     gradient: Vec<f64>,
@@ -246,6 +253,7 @@ pub fn fit_heteroscedastic_controlled(x: &[Vec<f64>], y: &[f64], noise: &[f64], 
 {
     config.validate(initial)?;
     validate_data(x, y, noise, initial.lengthscales.len())?;
+    if zero_noise_duplicates(x, noise) { return Err(HeteroFitError::InvalidInitialModel); }
     let mut best = evaluate(x, y, noise, initial.clone(), keep_going)?
         .ok_or(HeteroFitError::InvalidInitialModel)?;
     let initial_lml = best.model.lml;

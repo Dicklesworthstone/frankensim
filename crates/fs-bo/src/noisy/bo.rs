@@ -172,6 +172,23 @@ pub fn minimize_noisy(
     iters: usize,
     config: &NoisyBoConfig,
 ) -> NoisyBoReport {
+    config.run_with_model(f, dim, n_init, iters, &mut |x, observations, _| {
+        Ok::<_, std::convert::Infallible>(fit(x, observations, config))
+    }).unwrap_or_else(|never| match never {})
+}
+
+impl NoisyBoConfig {
+    // Shared acquisition/history engine. Model fitting happens only at complete
+    // batch boundaries; a failed fit cannot launch another objective callback.
+    pub(crate) fn run_with_model<E>(
+        &self,
+        f: &mut dyn FnMut(&[f64]) -> NoisyObservation,
+        dim: usize,
+        n_init: usize,
+        iters: usize,
+        fit_model: &mut dyn FnMut(&[Vec<f64>], &[NoisyObservation], usize) -> Result<Gp, E>,
+    ) -> Result<NoisyBoReport, E> {
+    let config = self;
     validate(dim, n_init, iters, config);
     let (lo, hi) = config.bounds;
     let sobol = fs_rand::qmc::Sobol::scrambled(dim, config.seed);
@@ -184,7 +201,7 @@ pub fn minimize_noisy(
         observations.push(evaluate(f, &input, config.prior_mean));
         x.push(input);
     }
-    let mut gp = fit(&x, &observations, config);
+    let mut gp = fit_model(&x, &observations, 0)?;
     let mut incumbent_trace = vec![recommend(&gp, &x, config.prior_mean)];
     for iteration in 0..iters {
         let seed = config.seed ^ 0x4E45_4942 ^ (iteration as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -210,10 +227,11 @@ pub fn minimize_noisy(
             observations.push(evaluate(f, &input, config.prior_mean));
             x.push(input);
         }
-        gp = fit(&x, &observations, config);
+        gp = fit_model(&x, &observations, iteration + 1)?;
         incumbent_trace.push(recommend(&gp, &x, config.prior_mean));
     }
-    NoisyBoReport { x, observations, incumbent_trace }
+    Ok(NoisyBoReport { x, observations, incumbent_trace })
+    }
 }
 
 #[cfg(test)]

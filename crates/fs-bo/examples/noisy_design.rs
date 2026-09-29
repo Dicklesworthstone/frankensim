@@ -1,12 +1,24 @@
-//! Declared heteroscedastic objective noise, fixed-prior q-NEI, and posterior
-//! design recommendations. Synthetic numerical example, not a physical model.
+//! Declared heteroscedastic objective noise, q-NEI, and posterior design
+//! recommendations. Synthetic numerical example, not a physical model.
 //!
 //! cargo run -p fs-bo --example noisy_design
+//! cargo run -p fs-bo --example noisy_design -- --learn-kernel
 
+use fs_bo::hyper::HeteroFitConfig;
+use fs_bo::learning::{NoisyLearningConfig, minimize_noisy_with_learning};
 use fs_bo::noisy::{NoisyBoConfig, NoisyObservation, minimize_noisy};
 use fs_bo::{Kernel, Matern};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut arguments = std::env::args().skip(1);
+    let learn = match arguments.next().as_deref() {
+        None => false,
+        Some("--learn-kernel") => true,
+        _ => return Err("usage: noisy_design [--learn-kernel]".into()),
+    };
+    if arguments.next().is_some() {
+        return Err("usage: noisy_design [--learn-kernel]".into());
+    }
     let config = NoisyBoConfig {
         bounds: (0.0, 1.0),
         kernel: Kernel {
@@ -35,7 +47,28 @@ fn main() {
             noise_variance: amplitude * amplitude / 3.0,
         }
     };
-    let result = minimize_noisy(&mut objective, 1, 6, 6, &config);
+    let result = if learn {
+        let learning = NoisyLearningConfig {
+            refit_every: 2,
+            fit: HeteroFitConfig {
+                lengthscale_bounds: vec![(0.03, 2.0)],
+                signal_bounds: (1e-4, 1.0),
+                starts: 3, max_iterations: 40, max_evaluations: 100,
+                gradient_tolerance: 1e-7, seed: 2026,
+            },
+        };
+        let learned = minimize_noisy_with_learning(&mut objective, 1, 6, 6, &config, &learning)?;
+        for fit in &learned.fits {
+            println!("refit_after_batches={} observations={} lengthscale={:.8} signal_variance={:.8} lml_gain={:.8} likelihood_probes={}",
+                fit.after_batches, fit.observation_count, fit.kernel.lengthscales[0],
+                fit.kernel.signal, fit.lml - fit.initial_lml, fit.evaluations);
+        }
+        println!("likelihood_probes={} posterior_only_fits={}",
+            learned.likelihood_evaluations, learned.posterior_only_fits);
+        learned.report
+    } else {
+        minimize_noisy(&mut objective, 1, 6, 6, &config)
+    };
     for (batch, incumbent) in result.incumbent_trace.iter().enumerate() {
         println!(
             "batch={batch} x={:.8} posterior_mean={:.8} posterior_variance={:.8}",
@@ -43,4 +76,5 @@ fn main() {
         );
     }
     println!("evaluations={} (model estimates, not certificates)", result.x.len());
+    Ok(())
 }

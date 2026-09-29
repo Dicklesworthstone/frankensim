@@ -60,19 +60,84 @@ variance. It is deliberately not a monotone raw-minimum trace: later data can
 revise an earlier recommendation. Posterior means and variances are model
 estimates, not bounds or certificates.
 
-The driver is synchronous and dense, with the full observation history as its
-baseline. Work limits cover initialization, batch count, sample-bank size, and
-CMA-ES restart/evaluation counts; no within-factorization cancellation,
-statistical stopping, sparse-baseline approximation, or automatic noisy-model
-hyperparameter training is added. Replay requires the same configuration and
-callback outcomes, not just the optimizer seed. No cross-ISA or optimizer
-quality claim is inferred from the existing deterministic BO goldens.
+The fixed-kernel driver is synchronous and dense, with the full observation
+history as its baseline. Work limits cover initialization, batch count,
+sample-bank size, and CMA-ES restart/evaluation counts; no within-factorization
+cancellation, statistical stopping, or sparse-baseline approximation is added.
+Optional kernel learning is described below. Replay requires the same
+configuration and callback outcomes, not just the optimizer seed. No cross-ISA
+or optimizer quality claim is inferred from the deterministic BO goldens.
 
-Fourteen focused unit tests are included across the acquisition and driver:
-correlated-Gaussian and noiseless-limit comparisons; a noisy-outlier case;
-near-coincident covariance; duplicate-coordinate identity; normal-bank replay;
-input refusals; exact callback/history accounting; per-observation variance
-retention; posterior recommendations; and sequential/batched execution paths.
-These test sources were added without a local Rust toolchain: compilation and
-Rust test execution remain unverified. Independent Python Gaussian calculations
-check selected equations, not the compiled Rust implementation.
+Fourteen focused unit tests are included across the acquisition and fixed-kernel
+driver: correlated-Gaussian and noiseless-limit comparisons; a noisy-outlier
+case; near-coincident covariance; duplicate-coordinate identity; normal-bank
+replay; input refusals; exact callback/history accounting; per-observation
+variance retention; posterior recommendations; and sequential/batched execution
+paths. These test sources were added without a local Rust toolchain: compilation
+and Rust test execution remain unverified. Independent Python Gaussian
+calculations check selected equations, not the compiled Rust implementation.
+
+## Learning the kernel without replacing the observation noise
+
+`fs_bo::learning::minimize_noisy_with_learning` is an opt-in consumer of the
+same acquisition/history engine. The existing fixed-kernel function and its
+configuration remain unchanged. Enable the example's learning lane with:
+
+```bash
+cargo run -p fs-bo --example noisy_design -- --learn-kernel
+cargo test -p fs-bo --lib hyper
+cargo test -p fs-bo --lib learning
+```
+
+Supply a `NoisyLearningConfig` containing a positive `refit_every` and a
+`HeteroFitConfig`. Declare one lengthscale interval per input dimension and a
+signal-VARIANCE interval in squared objective units. Endpoints are positive
+physical values, not logarithms; equal endpoints freeze a parameter. The
+initial kernel must lie inside these intervals. Declare the number of starts,
+maximum local iterations per start, total likelihood evaluations per refit,
+projected-gradient tolerance, and seed explicitly. The first start is always
+the previous selected kernel; subsequent starts use independently keyed Philox
+samples in the log box. Neither noise nor the prior mean is learned.
+
+Learning occurs after initialization and each `refit_every` completed batches,
+including the final batch when it lands on that cadence. Other stages still
+condition the latest kernel on ALL observations. A refit reuses its winning GP
+instead of spending an extra factorization outside the declared allowance.
+The example learns after 0, 2, 4 and 6 completed batches, with at most 400
+likelihood probes total, and has three ordinary posterior-only conditioning
+fits. It still makes exactly 18 objective calls on success.
+
+The reusable `hyper::fit_heteroscedastic` entry point accepts centered values
+and the original per-observation variances. It computes analytic Matérn
+half/three-halves/five-halves likelihood gradients using the existing training
+Cholesky. Bounded projected Armijo steps and seeded restarts retain the best
+finite evaluated likelihood. Rejected likelihood probes count against the
+same allowance. Exhausted budgets return the retained model and its projected
+log-gradient residual, not a convergence claim. A singular initial model
+refuses without inventing noise; exact duplicated noiseless constraints are
+rejected before a rounded Cholesky pivot can admit them. Noisy replicates are
+not deduplicated in the likelihood.
+
+`NoisyLearnedReport` preserves the original objective report plus each refit's
+observation count, selected kernel, warm-start and selected likelihoods,
+resolved seed, spent likelihood probes, and projected residual. Likelihoods
+are compared only within the SAME data prefix. The total likelihood-probe
+count is separate from ordinary posterior-only fits and acquisition work.
+
+Nine learner tests cover finite-difference gradients, a hand-derived signal
+optimum, heteroscedastic posterior parity, frozen bounds, budget limits,
+best-restart retention, invalid/singular input, cancellation and replay. Six
+consumer tests cover fixed-kernel trajectory parity at a one-probe allowance,
+cadence and warm starts, complete-data conditioning, replay, admission before
+callbacks, and initialization-only learning. All 15 new Rust tests remain
+unexecuted in the authoring environment: DSR, RCH and Cargo are absent.
+Independent Python checks matched the three kernel-gradient fixtures to central
+differences within 4.9e-11 and recovered signal variance 1.9999999534 for the
+one-point analytic optimum 2. These are equation checks, not Rust test receipts.
+
+The learner's controlled API accepts a continuation hook before fits, between
+inverse-column solves and between search steps; a dense Cholesky or one column
+solve is not preemptible. The BO driver remains synchronous. Point-estimate
+kernel fitting does not add hyperparameter marginalization, replicate
+value-of-information, statistical certification, sparse history or an
+all-objective performance guarantee.
