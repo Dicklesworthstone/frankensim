@@ -4431,6 +4431,40 @@ fn g3_flow_network_missing_optional_declarations_refuse_with_typed_codes() {
     }
 }
 
+/// A solid cooled only by declared coefficients declares no air network at
+/// all. The flow-network stage retains that absence as its receipt (no
+/// operating point, none claimed) instead of refusing, and the run completes;
+/// a partial air declaration still refuses, as the test above pins.
+#[test]
+fn g3_a_project_without_any_air_network_completes_with_a_not_declared_flow_receipt() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    let cooling = spec.cooling.as_mut().expect("cooling");
+    cooling.fan_system = None;
+    cooling.airflow_leakage = None;
+    cooling.vents = Vec::new();
+    cooling.fans = Vec::new();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let outcome = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decoded,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect("a project without an air network solves");
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    assert_eq!(receipts.len(), 7);
+    let flow = String::from_utf8(artifact_bytes(&ledger, &receipts[3])).unwrap();
+    assert_balanced_json(&flow);
+    assert!(flow.contains("\"status\":\"not-declared\""), "{flow}");
+    assert!(!flow.contains("operating_point"), "{flow}");
+}
+
 /// Missing `cooling` or `envelope` sections are project-validation findings,
 /// so the flow-network stage's own codes for them are shadowed by earlier
 /// guards. This pins the shadowing at its actual reachable boundary: the

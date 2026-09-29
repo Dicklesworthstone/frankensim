@@ -28,6 +28,15 @@
 #                                precision): imports, solves all seven
 #                                stages, and its T_max matches the
 #                                axis-aligned body's within 1 mK.
+#   7. heatsink-fan-chip        — the same heatsink with its 3 W entering
+#                                through a declared 20 x 20 mm surface
+#                                (fsim v8): seven stages, and hotter than
+#                                the volumetric source.
+#   8. examples/plate-hole      — a genus-1 body (square through-hole),
+#                                no air network: seven stages, and the
+#                                exact energy-balance bracket
+#                                T_min <= T_ref + P/(hA) <= T_max with the
+#                                hole walls counted in A.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -48,7 +57,7 @@ BINARY="${FRANKENSIM_BIN:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'FATAL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -243,6 +252,65 @@ rotation_invariant() {
     && awk -v a="${AXIS_TMAX}" -v r="${ROTATED_TMAX}" 'BEGIN { d = a - r; if (d < 0) d = -d; exit !(d <= 0.001) }'
 }
 check "rotated T_max matches the axis-aligned body within 1 mK (axis ${AXIS_TMAX:-?} K, rotated ${ROTATED_TMAX:-?} K)" rotation_invariant
+
+# ---- 10. chip footprint: heat entering through a declared surface -----------
+# The heatsink with its 3 W entering through a 20 x 20 mm die contact (an
+# fsim v8 `(surface ...)` entity lowered to an inward Neumann flux). The
+# concentrated source must run hotter than the volumetric one: MEASURED
+# 2026-09-29 302.693 K vs 301.996 K.
+CHIP="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan-chip.fsim"
+CHIP_STL="${REPO_ROOT}/examples/heatsink-fan/heatsink-chip.stl"
+check "heatsink-fan-chip validates ok" validate_ok "${CHIP}"
+chip_solve_completes() {
+  "${BINARY}" --json import "${CHIP}" "${CHIP_STL}" "${WORK}/chip.db" --unit m --max-hole-edges 0 > "${WORK}/cimp.json" 2> "${WORK}/cimp.err" \
+    && "${BINARY}" --json solve "${CHIP}" "${WORK}/chip.db" --materials "${PACK}" > "${WORK}/cs.json" 2> "${WORK}/cs.err"
+}
+check "chip-footprint heatsink imports and solves" chip_solve_completes
+check "chip solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/cs.json"
+CHIP_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/cs.json" | head -1 | cut -d'"' -f4)"
+chip_report_ok() {
+  (cd "${WORK}" && "${BINARY}" --json report "${CHIP_RUN}" "${WORK}/chip.db" > "${WORK}/crep.json" 2> "${WORK}/crep.err")
+}
+check "chip report exports" chip_report_ok
+CHIP_TMAX="$(t_max_of "${WORK}/${CHIP_RUN}.report.json")"
+chip_hotter() {
+  test -n "${AXIS_TMAX}" && test -n "${CHIP_TMAX}" \
+    && awk -v a="${AXIS_TMAX}" -v c="${CHIP_TMAX}" 'BEGIN { exit !(c > a) }'
+}
+check "chip footprint runs hotter than the volumetric source (volumetric ${AXIS_TMAX:-?} K, chip ${CHIP_TMAX:-?} K)" chip_hotter
+
+# ---- 11. plate with a through-hole: a genus-1 body, no air network ---------
+# generate_plate_hole_stl.py asserts the analytic volume (9.024 cm^3), area
+# (5504 mm^2, hole walls included) and Euler characteristic 0. With no fan,
+# vent or leakage the flow-network stage retains a not-declared receipt. At
+# steady state all 2 W leave by h = 10 W/m^2/K convection, so the
+# area-weighted mean surface temperature is EXACTLY 293.15 + 2/(10 A) =
+# 329.4872 K and must lie between T_min and T_max. A body whose hole was lost
+# (A = 5600 mm^2) has mean 328.864 K and a T_max below the bracket. MEASURED
+# 2026-09-29: T_min 329.4643, T_max 329.4992 K on 180 tets.
+PLATE="${REPO_ROOT}/examples/plate-hole/plate-hole.fsim"
+PLATE_STL="${REPO_ROOT}/examples/plate-hole/plate-hole.stl"
+check "plate-hole validates ok" validate_ok "${PLATE}"
+plate_solve_completes() {
+  "${BINARY}" --json import "${PLATE}" "${PLATE_STL}" "${WORK}/plate.db" --unit m --max-hole-edges 0 > "${WORK}/pimp.json" 2> "${WORK}/pimp.err" \
+    && "${BINARY}" --json solve "${PLATE}" "${WORK}/plate.db" --materials "${PACK}" > "${WORK}/ps.json" 2> "${WORK}/ps.err"
+}
+check "plate-hole imports and solves" plate_solve_completes
+check "plate-hole solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/ps.json"
+PLATE_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ps.json" | head -1 | cut -d'"' -f4)"
+plate_report_ok() {
+  (cd "${WORK}" && "${BINARY}" --json report "${PLATE_RUN}" "${WORK}/plate.db" > "${WORK}/prep.json" 2> "${WORK}/prep.err")
+}
+check "plate-hole report exports" plate_report_ok
+check "plate-hole flow stage retains the declared absence of an air network" \
+  grep -q 'declared-absence-of-an-air-network' "${WORK}/${PLATE_RUN}.report.json"
+PLATE_TMAX="$(t_max_of "${WORK}/${PLATE_RUN}.report.json")"
+PLATE_TMIN="$(grep -oE '"temperature_min": ?"[0-9.]+"' "${WORK}/${PLATE_RUN}.report.json" | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+plate_bracket() {
+  test -n "${PLATE_TMIN}" && test -n "${PLATE_TMAX}" \
+    && awk -v lo="${PLATE_TMIN}" -v hi="${PLATE_TMAX}" 'BEGIN { m = 293.15 + 2.0 / (10.0 * 5.504e-3); exit !(lo <= m && m <= hi) }'
+}
+check "plate-hole brackets the exact mean surface temperature 329.4872 K (T_min ${PLATE_TMIN:-?}, T_max ${PLATE_TMAX:-?})" plate_bracket
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"

@@ -199,6 +199,10 @@ const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
 const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
 const FLOW_NETWORK_AUTHORITY: &str =
     "lossless-project-lowering-plus-interval-certified-operating-point";
+const FLOW_NETWORK_UNDECLARED_AUTHORITY: &str = "declared-absence-of-an-air-network";
+const FLOW_NETWORK_UNDECLARED_NO_CLAIM: &str = "the project declares no fan, fan system, vent, \
+    airflow leakage or airflow-derived boundary, so no operating point exists and none is \
+    claimed; every thermal boundary coefficient is the declared one";
 const FLOW_NETWORK_NO_CLAIM: &str = "the stage proves the declared fan system lowered losslessly \
     and the enclosure network produced an interval-certified nominal operating point under the \
     declared orifice/leakage models; it does not authenticate manufacturer curve data, system \
@@ -3085,7 +3089,7 @@ impl<'a> SolveEngine<'a> {
 
     fn stage_flow_network(&mut self, context: &mut StageContext) -> Result<String, SolveRefusal> {
         let (receipt, handoff) = flow_network_receipt(self.spec, self.run, self.work, false)?;
-        context.flow_network = Some(handoff);
+        context.flow_network = handoff;
         Ok(receipt)
     }
 
@@ -3943,7 +3947,7 @@ fn flow_network_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<(String, FlowNetworkHandoff), SolveRefusal> {
+) -> Result<(String, Option<FlowNetworkHandoff>), SolveRefusal> {
     let stage = SolveStage::FlowNetwork;
     let cancelled = || {
         if resume {
@@ -3965,6 +3969,37 @@ fn flow_network_receipt(
             "declare the cooling section; the flow-network stage consumes declared fans, vents, and leakage",
         )
     })?;
+    // A project with no air network at all (a solid cooled only by declared
+    // coefficients) has nothing for this stage to certify: it retains that
+    // absence as its receipt and hands conduction no operating point. Any
+    // partial air declaration still refuses below; the stage never infers.
+    let airflow_law = cooling.conduction.as_ref().is_some_and(|setup| {
+        setup
+            .boundaries
+            .iter()
+            .any(|row| matches!(row.condition, ThermalBoundaryCondition::AirflowConvection { .. }))
+    });
+    if cooling.fans.is_empty()
+        && cooling.vents.is_empty()
+        && cooling.fan_system.is_none()
+        && cooling.airflow_leakage.is_none()
+        && !airflow_law
+    {
+        let receipt = format!(
+            "{{\"schema\":{},\"run\":{},\"stage\":{},\"status\":\"not-declared\",\
+             \"vent_count\":0,\"authority\":{},\"no_claim\":{}}}",
+            json_string(FLOW_NETWORK_RECEIPT_SCHEMA),
+            json_string(&run.to_hex()),
+            json_string(stage.name()),
+            json_string(FLOW_NETWORK_UNDECLARED_AUTHORITY),
+            json_string(FLOW_NETWORK_UNDECLARED_NO_CLAIM),
+        );
+        work.charge(u64::try_from(receipt.len()).unwrap_or(u64::MAX))
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        work.checkpoint(phase, None, u64::MAX)
+            .map_err(|_| cancelled())?;
+        return Ok((receipt, None));
+    }
     let fan_system = cooling.fan_system.as_ref().ok_or_else(|| {
         SolveRefusal::staged(
             "cli-solve-flow-network-no-fan-system",
@@ -4167,10 +4202,10 @@ fn flow_network_receipt(
         .map_err(|_| cancelled())?;
     Ok((
         receipt,
-        FlowNetworkHandoff {
+        Some(FlowNetworkHandoff {
             operating,
             air_density_kg_m3: air_density,
-        },
+        }),
     ))
 }
 
@@ -7184,7 +7219,7 @@ fn propagate_declared_inputs(
         let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
         let product = conduction_solve_receipt(
             ledger, project, cards, context, run, work, resume, available_wall_s,
-            Some(&handoff), htc_scale, conductivity_side, geometry_side,
+            handoff.as_ref(), htc_scale, conductivity_side, geometry_side,
         )?;
         region_maximum(&product.qoi_inputs, region, work)
     };
@@ -9533,7 +9568,7 @@ fn validate_resume_candidate(
                     .map_err(|_| cancelled_resume_refusal(run))?;
                     let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
                         |(receipt, handoff)| {
-                            context.flow_network = Some(handoff);
+                            context.flow_network = handoff;
                             receipt
                         },
                     );
