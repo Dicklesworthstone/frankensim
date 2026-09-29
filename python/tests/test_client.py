@@ -222,6 +222,23 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
 
             budget_terms = report["budget_terms"]
             self.assertEqual(len(budget_terms), 8)
+
+            # An indeterminate requirement states what would decide it: the
+            # unmeasured terms, and how large they may be combined before it
+            # fails (the budget total is a conservative linear sum).
+            requirement = requirements[0]
+            unmeasured = [t["kind"] for t in budget_terms if t["value"] is None]
+            self.assertEqual(requirement["unmeasured_terms"], unmeasured)
+            if requirement["outcome"] == "indeterminate":
+                measured = sum(t["value"] for t in budget_terms if t["value"] is not None)
+                expected = (requirement["nominal_margin"]
+                            - requirement["required_margin"] - measured)
+                self.assertAlmostEqual(requirement["decision_headroom"], expected, places=5)
+                html = report_path.with_name(
+                    report_path.name.replace(".report.json", ".report.html")).read_text()
+                self.assertIn("What would decide temperature-max", html)
+            else:
+                self.assertIsNone(requirement["decision_headroom"])
             for term in budget_terms:
                 self.assertEqual(term["qoi"], "temperature-max")
                 # fs-airflow's term receipt states (interval / negligible /

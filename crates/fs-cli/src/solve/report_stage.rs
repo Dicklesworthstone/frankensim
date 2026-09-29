@@ -547,6 +547,8 @@ pub(super) fn report_receipt(
         .ok_or_else(|| shape_error(qoi_stage, "missing `budget[0].terms`"))?;
     let mut budget_items = Vec::with_capacity(terms.len());
     let mut measured_terms = 0usize;
+    let mut measured_half_width = 0.0f64;
+    let mut unmeasured_terms = Vec::new();
     let mut discretization_half_width: Option<f64> = None;
     let mut parameters_half_width: Option<f64> = None;
     let radiation_sensitivity = qoi.value.path(&["model_form_sensitivity", "radiation"])
@@ -602,8 +604,11 @@ pub(super) fn report_receipt(
                 format!("term `{kind}` is `{term_state}` but carries no magnitude"),
             ));
         }
-        if value.is_some() {
+        if let Some(value) = value {
             measured_terms += 1;
+            measured_half_width += value;
+        } else {
+            unmeasured_terms.push(kind.to_string());
         }
         if kind == "discretization" && term_state == "interval" {
             discretization_half_width = value;
@@ -679,6 +684,9 @@ pub(super) fn report_receipt(
             nominal_margin,
             unit: "kelvin".to_string(),
             outcome: outcome.to_string(),
+            decision_headroom: (outcome == "indeterminate" && !unmeasured_terms.is_empty())
+                .then(|| nominal_margin - required_margin - measured_half_width),
+            unmeasured_terms,
         });
     if let Some(convergence) = ladder_convergence(&conduction.value, qoi_name, qoi_unit, qoi_value)
     {

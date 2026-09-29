@@ -135,7 +135,10 @@ names as `field_artifact`; the `report` result on stdout carries `"verdict":"ind
 lineage; only `solve --resume` replays the physics); the package result carries
 `"checker":"pass"`. Open the HTML: every number cites the receipt hash it was
 copied from, and the uncertainty table prints NO-DATA where nothing was
-measured. Exporting twice is idempotent; an unknown run refuses without
+measured. For an indeterminate verdict it also states what would decide it:
+the unmeasured terms and how large they would have to be, combined, to fail
+the requirement (24.78 K on this body, all of it discretization, which the
+ladder variant below measures at 1.1 mK). Exporting twice is idempotent; an unknown run refuses without
 writing anything:
 
 ```bash
