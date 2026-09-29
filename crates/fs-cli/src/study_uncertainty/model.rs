@@ -12,6 +12,8 @@ use fs_project::DecodedProject;
 use fs_project::uncertainty::{BoundStudy, UncertaintyStudy};
 
 use super::{Result, artifact, fail, quoted};
+
+mod adjoint;
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,
