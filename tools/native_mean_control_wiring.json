@@ -1,0 +1,37 @@
+{
+  "crates/fs-project/src/uncertainty.rs": {
+    "git_blob": "408de6232093f968907b45546758e1b00a61a0cb",
+    "edits": [
+      {
+        "old": "//! Version 3 adds fixed-count mean controls from predeclared whole-model secants.",
+        "new": "//! Version 3 adds fixed-count mean controls from support secants or one nominal adjoint."
+      },
+      {
+        "old": "version 3 requires coordinate-secant mean controls with max-solves",
+        "new": "version 3 requires coordinate-secant or nominal-adjoint mean controls with max-solves"
+      },
+      {
+        "old": "        if bound.study.mean_control.is_some() {\n            for ordinal in 0..mean_control::probe_count(&bound.study.parameters) {\n                bound.sample_project(&mean_control::probe(&bound.study.parameters, ordinal)?)?;\n            }\n        }",
+        "new": "        if let Some(policy) = bound.study.mean_control {\n            for ordinal in 0..policy.probe_count(&bound.study.parameters) {\n                bound.sample_project(&policy.probe(&bound.study.parameters, ordinal)?)?;\n            }\n        }"
+      }
+    ]
+  },
+  "crates/fs-cli/src/study_uncertainty/model.rs": {
+    "git_blob": "a0f8df19b50e60e61f64deb99acdde3819cc602d",
+    "edits": [
+      {
+        "old": "use super::{Result, artifact, fail, quoted};",
+        "new": "use super::{Result, artifact, fail, quoted};\n\nmod adjoint;"
+      }
+    ]
+  },
+  "crates/fs-cli/src/study_uncertainty.rs": {
+    "git_blob": "8347797ebbcc2636f991b0cf17fed774910293e1",
+    "edits": [
+      {
+        "old": "            match model.sample(ledger, gate, &point, remaining) {\n                Ok(Some(sample)) => c.accept(model, sample)?,",
+        "new": "            match c.sample(model, ledger, gate, &point, remaining) {\n                Ok(Some(sample)) => c.accept(model, ledger, sample)?,"
+      }
+    ]
+  }
+}

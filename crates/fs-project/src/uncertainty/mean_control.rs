@@ -1,36 +1,75 @@
-//! Deterministic whole-model probes for a pre-sampling mean control.
-//! These are support secants, NOT adjoints or samples from the joint law.
+//! Deterministic pre-sampling mean controls. Secants retain complete native
+//! endpoint solves; nominal adjoints use one native solve at marginal means.
 
 use super::{Node, UniformParameter, Result, error, fields, integer, list, symbol};
 
+/// Chosen before any probability observations; never selected for a favorable result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeanControlMethod {
+    CoordinateSecant,
+    NominalAdjoint,
+}
+impl MeanControlMethod {
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self { Self::CoordinateSecant => "coordinate-secant", Self::NominalAdjoint => "nominal-adjoint" }
+    }
+}
+
 /// Explicit additional native-solve allowance for frozen mean coefficients.
-/// Two solves per nonconstant coordinate, holding other coordinates at their
-/// analytic marginal means. No probes for singleton marginals. The whole study
-/// wall budget includes this work. A failed probe refuses the requested control.
+/// The whole study wall budget includes calibration. A failed probe refuses the
+/// requested control; it never switches method or enters the probability sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeanControlPolicy {
     /// Original lifetime cap for completed or terminally refused probes, 0..=64.
     pub max_solves: usize,
+    pub method: MeanControlMethod,
+}
+impl MeanControlPolicy {
+    /// No calibration is necessary when every centered input is identically zero.
+    #[must_use]
+    pub fn probe_count(self, parameters: &[UniformParameter]) -> usize {
+        match self.method {
+            MeanControlMethod::CoordinateSecant => probe_count(parameters),
+            MeanControlMethod::NominalAdjoint => usize::from(parameters.iter().any(|p| p.low != p.high)),
+        }
+    }
+    /// Exact predeclared calibration point, never a random draw.
+    pub fn probe(self, parameters: &[UniformParameter], ordinal: usize) -> Result<Vec<f64>> {
+        match self.method {
+            MeanControlMethod::CoordinateSecant => probe(parameters, ordinal),
+            MeanControlMethod::NominalAdjoint if ordinal == 0 && self.probe_count(parameters) == 1 => Ok(means(parameters)),
+            MeanControlMethod::NominalAdjoint => Err(error("nominal adjoint probe ordinal exceeds its plan")),
+        }
+    }
 }
 
 pub(super) fn parse(node: &Node, parameters: &[UniformParameter]) -> Result<MeanControlPolicy> {
     let nodes = list(node)?;
-    symbol(nodes.first().ok_or_else(|| error("empty mean-control policy"))?, "coordinate-secant")?;
+    let name = nodes.first().ok_or_else(|| error("empty mean-control policy"))?;
+    let method = if symbol(name, "coordinate-secant").is_ok() { MeanControlMethod::CoordinateSecant }
+        else { symbol(name, "nominal-adjoint")?; MeanControlMethod::NominalAdjoint };
     let f = fields(&nodes[1..], &["max-solves"])?;
     let max_solves = usize::try_from(integer(f["max-solves"])?).map_err(|_| error("probe cap overflow"))?;
-    let required = probe_count(parameters);
-    if max_solves > 64 || required > max_solves {
-        return Err(error("coordinate secants require two probes per nonconstant input within max-solves <=64"));
+    let policy = MeanControlPolicy { max_solves, method };
+    if max_solves > 64 || policy.probe_count(parameters) > max_solves {
+        return Err(error("mean-control probes must fit max-solves <=64: two per variable for secants, one total for nominal adjoints"));
     }
     for p in parameters {
-        if p.low != p.high && !(p.high - p.low).is_finite() {
-            return Err(error("mean-control support width is not finite"));
+        if p.low == p.high { continue; }
+        match method {
+            MeanControlMethod::CoordinateSecant if !(p.high - p.low).is_finite() =>
+                return Err(error("mean-control support width is not finite")),
+            MeanControlMethod::NominalAdjoint if matches!(p.target,
+                super::Target::AirInletTemperature | super::Target::FanSpeedRatio) =>
+                return Err(error("nominal adjoint does not yet supply air-inlet or fan-speed derivatives; explicitly select coordinate-secant for those controls")),
+            _ => {},
         }
     }
-    Ok(MeanControlPolicy { max_solves })
+    Ok(policy)
 }
 
-/// Number of predeclared whole-model calibration solves, never random draws.
+/// Number of predeclared whole-model SECANT solves, never random draws.
 #[must_use]
 pub fn probe_count(parameters: &[UniformParameter]) -> usize {
     parameters.iter().filter(|p| p.low != p.high).count() * 2
@@ -42,10 +81,9 @@ pub fn means(parameters: &[UniformParameter]) -> Vec<f64> {
     parameters.iter().map(|p| p.low.midpoint(p.high)).collect()
 }
 
-/// Exact next probe: low then high for each nonconstant coordinate in order.
-/// These points can be off a singular copula's support. They are declared
-/// deterministic model probes, not probability observations or new input laws.
-/// The native project must separately admit every point before physics.
+/// Exact next secant probe: low then high for each nonconstant coordinate.
+/// Points may be off a singular copula's support; these are deterministic model
+/// probes, not probability observations. The project separately admits each.
 pub fn probe(parameters: &[UniformParameter], ordinal: usize) -> Result<Vec<f64>> {
     let variable = ordinal / 2;
     let index = parameters.iter().enumerate().filter(|(_, p)| p.low != p.high)
@@ -112,7 +150,7 @@ mod tests {
     #[test]
     fn policy_versions_and_exact_probe_allowances_are_admitted() {
         let s=UncertaintyStudy::parse(STUDY).unwrap();
-        assert_eq!(s.mean_control(),Some(MeanControlPolicy{max_solves:4}));
+        assert_eq!(s.mean_control(),Some(MeanControlPolicy{max_solves:4,method:MeanControlMethod::CoordinateSecant}));
         assert_eq!(UncertaintyStudy::parse(s.canonical()).unwrap(),s);
         for text in [STUDY.replace(":version 3",":version 1"),
             STUDY.replace(":max-solves 4",":max-solves 3"),
@@ -146,5 +184,29 @@ mod tests {
             low:f64::MAX/2.0,high:f64::MAX}];
         assert!(means(&p)[0].is_finite());
         assert_eq!(coefficients(&p,&[0.0,0.0]).unwrap(),[0.0]);
+    }
+    #[test]
+    fn nominal_adjoint_uses_one_mean_point_for_all_physical_parameters() {
+        let text=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 1");
+        let s=UncertaintyStudy::parse(&text).unwrap();
+        let policy=s.mean_control().unwrap();
+        assert_eq!(policy.method,MeanControlMethod::NominalAdjoint);
+        assert_eq!(policy.probe_count(s.parameters()),1);
+        assert_eq!(policy.probe(s.parameters(),0).unwrap(),[4.0,300.0]);
+        assert!(policy.probe(s.parameters(),1).is_err());
+        assert!(UncertaintyStudy::parse(&text.replace(":max-solves 1",":max-solves 0")).is_err());
+        assert_eq!(UncertaintyStudy::parse(s.canonical()).unwrap(),s);
+    }
+    #[test]
+    fn nominal_singletons_skip_calibration_and_unsupported_variables_refuse() {
+        let text=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 0")
+            .replace(":high 6W",":high 2W").replace(":high 310K",":high 290K");
+        let s=UncertaintyStudy::parse(&text).unwrap();
+        assert_eq!(s.mean_control().unwrap().probe_count(s.parameters()),0);
+        let unsupported=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 1")
+            .replace("convection-temperature","air-inlet-temperature");
+        assert!(UncertaintyStudy::parse(&unsupported).is_err());
+        let accepted=unsupported.replace(":high 310K",":high 290K");
+        assert!(UncertaintyStudy::parse(&accepted).is_ok());
     }
 }

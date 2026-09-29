@@ -100,3 +100,91 @@ fn native_convection_coefficients_match_fresh_boundary_resolves() {
             "{target}: adjoint {derivative} vs native physical finite difference {difference}");
     }
 }
+
+fn study_text(copula: bool, qmc: bool, controlled: bool) -> String {
+    let mut text = STUDY.to_string();
+    if qmc { text = text.replace("monte-carlo", "quasi-monte-carlo :qmc (owen-scrambled-sobol :replicates 2 :samples-per-replicate 2)"); }
+    if copula { text = text.replace("independent", "(gaussian-copula :latent-correlation ((1 0.5) (0.5 1)))"); }
+    if controlled { text = text.replace(":version 1", ":version 3 :mean-control (nominal-adjoint :max-solves 1)"); }
+    text
+}
+
+#[test]
+fn nominal_adjoint_mean_control_uses_one_native_calibration_for_all_four_samplers() {
+    for (copula, qmc) in [(false,false),(true,false),(false,true),(true,true)] {
+        let raw = Fixture::new();
+        std::fs::write(raw.sources.join("study.fsim"),study_text(copula,qmc,false)).unwrap();
+        let raw_result = raw.study(None,fs_cli::exit::SUCCESS);
+        let (_, raw_report) = raw.report(&raw_result);
+        let fixture = Fixture::new();
+        std::fs::write(fixture.sources.join("study.fsim"),study_text(copula,qmc,true)).unwrap();
+        let result = fixture.study(None,fs_cli::exit::SUCCESS);
+        let (_, report) = fixture.report(&result);
+        assert_eq!(rows(&report),rows(&raw_report),"control must not change any raw physical solve");
+        assert_eq!(report.get("statistics"),raw_report.get("statistics"));
+        assert_eq!(report.get("qmc"),raw_report.get("qmc"));
+        let control = report.get("mean_control").unwrap();
+        assert_eq!(control.str_field("method"),Some("nominal-adjoint"));
+        assert_eq!(control.f64_field("probe_solves_planned"),Some(1.0));
+        assert_eq!(control.f64_field("probe_solves_completed"),Some(1.0));
+        let estimate=control.get("estimate").unwrap();
+        assert_eq!(estimate.f64_field("samples_in_estimate"),Some(4.0));
+        // The reference model is affine in power and ambient, including its
+        // spatial field. A correct nominal control removes its sample variation.
+        assert!(estimate.f64_field("variance_ratio").unwrap() < 1e-4,"{estimate:?}");
+    }
+}
+
+#[test]
+fn nominal_adjoint_checkpoint_retains_calibration_and_resumes_without_original_files() {
+    let full=Fixture::new();
+    let text=study_text(true,true,true);
+    std::fs::write(full.sources.join("study.fsim"),&text).unwrap();
+    let complete=full.study(None,fs_cli::exit::SUCCESS);
+    let (expected, _)=full.report(&complete);
+    let fixture=Fixture::new();
+    std::fs::write(fixture.sources.join("study.fsim"),text).unwrap();
+    let prefix=fixture.study(Some("1"),fs_cli::exit::BUDGET);
+    let (_, prefix_report)=fixture.report(&prefix);
+    assert!(rows(&prefix_report).is_empty(),"the one allowed solve is calibration, not a random observation");
+    let frozen=prefix_report.get("mean_control").unwrap().get("calibration").unwrap().clone();
+    std::fs::rename(&fixture.sources,fixture.dir.join("relocated-sources")).unwrap();
+    let one=fixture.resume(prefix.str_field("run").unwrap(),Some("1"),fs_cli::exit::BUDGET);
+    let (_, one_report)=fixture.report(&one);
+    assert_eq!(rows(&one_report).len(),1);
+    assert_eq!(one_report.get("mean_control").unwrap().get("calibration"),Some(&frozen));
+    let final_result=fixture.resume(one.str_field("run").unwrap(),None,fs_cli::exit::SUCCESS);
+    let (actual, _)=fixture.report(&final_result);
+    assert_eq!(actual,expected,"split quadrature must preserve the exact coefficient/sample history");
+    assert_eq!(fixture.resume(final_result.str_field("run").unwrap(),None,fs_cli::exit::SUCCESS),final_result);
+}
+
+#[test]
+fn nominal_adjoint_zero_width_inputs_need_no_calibration_and_no_fake_observations() {
+    let fixture=Fixture::new();
+    let text=study_text(false,false,true).replace(":max-solves 1",":max-solves 0")
+        .replace(":high 6W",":high 4W").replace(":high 300K",":high 294K");
+    std::fs::write(fixture.sources.join("study.fsim"),text).unwrap();
+    let empty=fixture.study(Some("0"),fs_cli::exit::BUDGET);
+    let (_, report)=fixture.report(&empty);
+    assert!(rows(&report).is_empty());
+    let control=report.get("mean_control").unwrap();
+    assert_eq!(control.f64_field("probe_solves_completed"),Some(0.0));
+    assert_eq!(control.get("gradient").unwrap().as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect::<Vec<_>>(),[0.0,0.0]);
+    assert!(control.get("calibration").unwrap().get("probes").unwrap().as_array().unwrap().is_empty());
+    let result=fixture.resume(empty.str_field("run").unwrap(),None,fs_cli::exit::SUCCESS);
+    let (_, report)=fixture.report(&result);
+    assert_eq!(rows(&report).len(),4);
+}
+
+#[test]
+fn unsupported_nominal_fan_derivative_is_refused_before_ledger_creation() {
+    let fixture=Fixture::new();
+    let text=study_text(false,false,true).replace(
+        "(uniform :name \"power\" :target power :entity \"air\" :low 4W :high 6W)",
+        "(uniform :name \"fan\" :target fan-speed-ratio :entity \"fixture-bank\" :low 0.8 :high 1.2)");
+    assert!(text.contains(":target fan-speed-ratio"));
+    std::fs::write(fixture.sources.join("study.fsim"),text).unwrap();
+    fixture.study(None,fs_cli::exit::REFUSED);
+    assert!(!fixture.ledger.exists());
+}
