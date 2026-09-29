@@ -1326,6 +1326,8 @@ struct RungSolved {
     interface_evidence: Option<Vec<u8>>,
     conjugate_fragment: Option<String>,
     radiation_fragment: Option<String>,
+    /// Powered-surface evidence (fsim v8), `None` when no surface carries power.
+    surface_fragment: Option<String>,
     adjoint_data: Option<RungAdjointData>,
     algebraic: algebraic::MaximumEvidence,
 }
@@ -6364,6 +6366,48 @@ fn conduction_solve_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
+        let surface_fragment = if surface_heat_inputs.watts.is_empty() {
+            None
+        } else {
+            // Each powered surface's measured area and delivered watts, plus
+            // the hottest vertex: the footprint falsifiers (area equals the
+            // declared patch; moving the patch moves the hot spot).
+            let areas = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+                &interface_faces, &derived_boundary, &surface_heat_inputs)?.target_area_m2;
+            let finite = |value: f64| {
+                canonical_f64(value).ok_or_else(|| {
+                    conduction_error(
+                        "cli-solve-conduction-nonfinite",
+                        format!("surface heat evidence is non-finite ({value})"),
+                        "report the solver defect; non-finite evidence is never published",
+                    )
+                })
+            };
+            let mut rows = Vec::new();
+            for (name, &watts) in &surface_heat_inputs.watts {
+                let area = areas.get(name).copied().unwrap_or(f64::NAN);
+                rows.push(format!(
+                    "{{\"name\":{},\"watts\":{},\"area_m2\":{},\"flux_w_per_m2\":{}}}",
+                    json_string(name),
+                    finite(watts)?,
+                    finite(area)?,
+                    finite(watts / area)?,
+                ));
+            }
+            let hottest = solution
+                .temperature
+                .iter()
+                .enumerate()
+                .fold(0, |best, (index, &t)| if t > solution.temperature[best] { index } else { best });
+            let [x, y, z] = mesh.positions()[hottest];
+            Some(format!(
+                "{{\"surfaces\":[{}],\"hottest_vertex_m\":[{},{},{}]}}",
+                rows.join(","),
+                finite(x)?,
+                finite(y)?,
+                finite(z)?,
+            ))
+        };
         let adjoint_data = if adaptive_requested || roundoff_wanted {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
@@ -6389,6 +6433,7 @@ fn conduction_solve_receipt(
             interface_evidence,
             conjugate_fragment,
             radiation_fragment,
+            surface_fragment,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
         };
@@ -6504,6 +6549,7 @@ fn conduction_solve_receipt(
         interface_evidence,
         conjugate_fragment,
         radiation_fragment,
+        surface_fragment,
         adjoint_data: _,
         algebraic,
     } = solved;
@@ -6645,7 +6691,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -6687,6 +6733,11 @@ fn conduction_solve_receipt(
         conjugate_fragment.as_deref().unwrap_or("null"),
         radiation_fragment.as_deref().unwrap_or("null"),
         algebraic.control_json.as_deref().unwrap_or("null"),
+        // Absent (not null) without powered surfaces: pre-v8 receipts keep
+        // their exact bytes.
+        surface_fragment
+            .map(|fragment| format!("\"surface_heat\":{fragment},"))
+            .unwrap_or_default(),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
     );

@@ -156,7 +156,14 @@ MEASURED 2026-09-29: all seven stages complete; `source_w` 0, 3.0 W in
 through the footprint, 3.0000000021 W out by convection (relative closure
 6.9e-10). The maximum is 302.693 K against 301.996 K for the volumetric
 source: concentrating the heat under the die raises the rise above the
-293.15 K inlet from 8.85 K to 9.54 K (+0.70 K, 8 %).
+293.15 K inlet from 8.85 K to 9.54 K (+0.70 K, 8 %). The conduction receipt's
+`surface_heat` block records each powered surface's measured area (400 mm²
+to 1e-6, the f32 weld) and the hottest vertex. Shifting the box 20 mm in y
+on the same STL moves the hot spot from (38, 30, 0) mm to (44, 0, 0) mm. The
+G1 test `g1_chip_footprint_power_enters_through_the_declared_surface` checks
+all of this. Surfaces do not depend on the selector kind, so a STEP body's
+named face group should serve through `(named-group ...)`; that path is not
+yet exercised end to end.
 
 ## Probability of compliance
 

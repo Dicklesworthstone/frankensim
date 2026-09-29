@@ -742,60 +742,82 @@ fn g1_chip_footprint_power_enters_through_the_declared_surface() {
     // The power row names the surface, so solve must lower it to an inward
     // Neumann flux over exactly the footprint (no volumetric source) and
     // carve the footprint out of the convection row; the balance then closes
-    // 3 W in through the chip against 3 W out by convection.
+    // 3 W in through the chip against 3 W out by convection. Falsifiers: the
+    // measured patch area is the declared 400 mm^2, and moving the footprint
+    // (same STL, box shifted -20 mm in y onto another whole-facet patch of
+    // the generator's grid) moves the hot spot with it.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fsim = root.join("examples/heatsink-fan/heatsink-fan-chip.fsim");
     let stl = root.join("examples/heatsink-fan/heatsink-chip.stl");
     let pack = root.join("data/reference-project/aa6061.fsmcdpk");
     let dir = scratch("heatsink-chip");
-    let ledger = dir.join("chip.db");
-    let imported = run(args(&[
-        "--json",
-        "import",
-        fsim.to_string_lossy().as_ref(),
-        stl.to_string_lossy().as_ref(),
-        ledger.to_string_lossy().as_ref(),
-        "--unit",
-        "m",
-        "--max-hole-edges",
-        "0",
-    ]));
-    assert_eq!(
-        imported.exit_code,
-        exit::SUCCESS,
-        "stderr: {}",
-        imported.stderr
-    );
-    let solved = run(args(&[
-        "--json",
-        "solve",
-        fsim.to_string_lossy().as_ref(),
-        ledger.to_string_lossy().as_ref(),
-        "--materials",
-        pack.to_string_lossy().as_ref(),
-    ]));
-    assert_eq!(
-        solved.exit_code,
-        exit::SUCCESS,
-        "stdout: {} / stderr: {}",
-        solved.stdout,
-        solved.stderr
-    );
-    assert!(
-        solved.stdout.contains("\"stages_completed\":7"),
-        "stdout: {}",
-        solved.stdout
-    );
-    let run_id = solved
-        .stdout
-        .split("\"run\":\"")
-        .nth(1)
-        .and_then(|rest| rest.get(..64))
-        .expect("solve result names its run id");
-    let ledger = fs_ledger::Ledger::open(ledger.to_str().expect("utf-8 path")).expect("ledger");
-    let receipts = stage_receipt_hashes(&ledger, run_id);
-    let text = receipt_text(&ledger, &receipts[4]);
-    assert!(text.contains("\"stage\":\"conduction\""), "{text}");
+    let solve_chip = |project: &std::path::Path, tag: &str| -> String {
+        let ledger = dir.join(format!("{tag}.db"));
+        let imported = run(args(&[
+            "--json",
+            "import",
+            project.to_string_lossy().as_ref(),
+            stl.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]));
+        assert_eq!(
+            imported.exit_code,
+            exit::SUCCESS,
+            "stderr: {}",
+            imported.stderr
+        );
+        let solved = run(args(&[
+            "--json",
+            "solve",
+            project.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--materials",
+            pack.to_string_lossy().as_ref(),
+        ]));
+        assert_eq!(
+            solved.exit_code,
+            exit::SUCCESS,
+            "stdout: {} / stderr: {}",
+            solved.stdout,
+            solved.stderr
+        );
+        assert!(
+            solved.stdout.contains("\"stages_completed\":7"),
+            "stdout: {}",
+            solved.stdout
+        );
+        let run_id = solved
+            .stdout
+            .split("\"run\":\"")
+            .nth(1)
+            .and_then(|rest| rest.get(..64))
+            .expect("solve result names its run id");
+        let ledger = fs_ledger::Ledger::open(ledger.to_str().expect("utf-8 path")).expect("ledger");
+        let receipts = stage_receipt_hashes(&ledger, run_id);
+        let text = receipt_text(&ledger, &receipts[4]);
+        assert!(text.contains("\"stage\":\"conduction\""), "{text}");
+        text
+    };
+    let hottest = |text: &str| -> [f64; 3] {
+        let tail = text
+            .split("\"hottest_vertex_m\":[")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no hottest vertex in {text}"));
+        let mut xyz = tail[..tail.find(']').unwrap()]
+            .split(',')
+            .map(|v| v.parse::<f64>().unwrap());
+        [
+            xyz.next().unwrap(),
+            xyz.next().unwrap(),
+            xyz.next().unwrap(),
+        ]
+    };
+
+    let text = solve_chip(&fsim, "centre");
     let field = |key: &str| number_after(&text, &format!("\"{key}\":"));
     assert_eq!(
         field("source_w"),
@@ -811,6 +833,41 @@ fn g1_chip_footprint_power_enters_through_the_declared_surface() {
         "3 W must leave by convection"
     );
     assert!(field("relative_closure").abs() < 1e-6);
+    // f32-welded STL corners move the area by ~1e-7 relative.
+    assert!((field("area_m2") / 4e-4 - 1.0).abs() < 1e-6, "{text}");
+    let centre = hottest(&text);
+    assert!(
+        (0.02..=0.04).contains(&centre[1]) && centre[2] < 1e-6,
+        "{centre:?}"
+    );
+
+    let declared = std::fs::read_to_string(&fsim).unwrap();
+    let footprint = "(box :min (vec3 0.03 0.02 -1e-6) :max (vec3 0.05 0.04 1e-6)";
+    assert_eq!(declared.matches(footprint).count(), 1);
+    let moved = dir.join("heatsink-fan-chip-moved.fsim");
+    std::fs::write(
+        &moved,
+        declared.replace(
+            footprint,
+            "(box :min (vec3 0.03 0.0 -1e-6) :max (vec3 0.05 0.02 1e-6)",
+        ),
+    )
+    .unwrap();
+    let text = solve_chip(&moved, "moved");
+    assert!(
+        (number_after(&text, "\"area_m2\":") / 4e-4 - 1.0).abs() < 1e-6,
+        "{text}"
+    );
+    let shifted = hottest(&text);
+    assert!(
+        shifted[1] <= 0.02 && shifted[2] < 1e-6,
+        "hot spot {shifted:?} did not follow the footprint"
+    );
+    eprintln!("chip hot spot: centre {centre:?} -> moved {shifted:?}");
+    assert!(
+        (shifted[0] - centre[0]).abs() < 0.01,
+        "x barely moves: {centre:?} -> {shifted:?}"
+    );
 }
 
 #[test]
