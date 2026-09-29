@@ -179,6 +179,9 @@ class EngineeringReport:
     content_hash: str
     html_path: str
     json_path: str
+    # The solved mesh + nodal temperature as ParaView-readable VTU.
+    field_vtu_path: str = ""
+    verdict: str = ""
     qois: List[QoiItem] = field(default_factory=list)
     exit_code: int = 0
     diagnostics: List[Diagnostic] = field(default_factory=list)

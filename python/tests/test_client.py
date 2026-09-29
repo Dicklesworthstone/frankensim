@@ -139,6 +139,43 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(comp.qoi_diffs[0].classification, "same")
             self.assertIn("identical runs", comp.summary)
 
+    def test_report_names_the_files_the_binary_exports(self):
+        # The client once read `html_report`/`json_twin`/`project_name`, keys
+        # the report verb never emits, so every path came back "". Execute
+        # against the real binary and check each path exists.
+        example = self.repo_root / "examples" / "contact-pair"
+        fsim = example / "contact-pair.fsim"
+        sources = [example / "cold-body.stl", example / "hot-body.stl"]
+        interfaces = example / "cold-hot.fsintpk"
+        if not (fsim.exists() and interfaces.exists() and self.pack.exists()
+                and Path(self.client.binary_path).is_file()):
+            self.skipTest("contact-pair fixtures or frankensim binary unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "python_report_ledger.db"
+            imported = self.client.import_mesh(
+                project_path=fsim,
+                source_path=sources,
+                ledger_path=ledger,
+                unit="m",
+                max_hole_edges=0,
+            )
+            self.assertEqual(imported.artifact_count, 2)
+            solved = self.client.solve(
+                project_path=fsim,
+                ledger_path=ledger,
+                materials=[self.pack],
+                interfaces=[interfaces],
+            )
+            self.assertEqual(solved.stages_completed, 7)
+            report = self.client.report(solved.run_id, ledger_path=ledger)
+            for path in (report.html_path, report.json_path, report.field_vtu_path):
+                self.assertTrue(path and Path(path).is_file(), path)
+            self.assertTrue(report.field_vtu_path.endswith(".field.vtu"))
+            self.assertEqual(report.project_name, "solve-reference")
+            self.assertEqual(report.verdict, "indeterminate")
+            self.assertEqual(len(report.content_hash), 64)
+
     def test_run_exposes_retained_qoi_vocabulary(self):
         if not (
             self.reference_fsim.exists()
@@ -187,7 +224,9 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(len(budget_terms), 8)
             for term in budget_terms:
                 self.assertEqual(term["qoi"], "temperature-max")
-                self.assertIn(term["state"], {"measured", "no-data"})
+                # fs-airflow's term receipt states (interval / negligible /
+                # gap), with gap projected as no-data in the report.
+                self.assertIn(term["state"], {"interval", "negligible", "no-data"})
                 if term["state"] == "no-data":
                     self.assertIsNone(term["value"])
                 else:
