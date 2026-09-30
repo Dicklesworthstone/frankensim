@@ -8,12 +8,12 @@
 //! not import arbitrary meshes or certify physical validity/identifiability.
 //! `--substeps N` refines solver time only; observation knots and priors stay fixed.
 use fs_ascent::conduction_assimilation::{ConductionWindowConfig, ConductionWindowModel, ConductionWindowPolicy};
+use fs_ascent::conduction_assimilation::substeps::{ConductionSubsteps, SubstepLimits};
 use fs_ascent::transient::variational::{WeakConstraintWindow, WindowControl, WindowObjective};
 use fs_ascent::transient::variational::joint::{JointEvaluation, JointWindow, JointWindowStudy, ParameterFamily};
 use fs_ascent::transient::variational::study::StudySettings;
 use fs_ascent::{LbfgsReport, StopReason};
 use fs_ascent::transient::variational::intervals::IntervalScheme;
-use fs_ascent::transient::variational::intervals::substeps::{CheckpointedIntervals, SubstepBudget, SubstepGrid};
 use fs_conduction::{ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
     LinearConfig, ScalarField, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::fixtures::{box_grid, on_box_face};
@@ -41,6 +41,9 @@ fn config() -> ConductionWindowConfig {
     ConductionWindowConfig { step: StepConfig { linear: LinearConfig {
         tolerance:1e-11,max_iterations:2000,restart:24 }, energy_tolerance_j:1e-8 },
         nonlinear:None,max_vertices:128,max_elements:1024,max_intervals:8,max_parameters:2 }
+}
+fn substep_limits() -> SubstepLimits {
+    SubstepLimits { max_steps:256,max_record_components:4096,checkpoints:6,replayed_steps:512 }
 }
 #[derive(Debug,Clone,Copy)]
 struct Reading { time:f64,node:usize,value:f64,sigma:f64 }
@@ -122,11 +125,13 @@ impl<'a> ParameterFamily for Family<'a> {
 fn synthetic(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,substeps:usize)->Result<Vec<Reading>,Error> {
     let times=[0.0,0.25,0.5,1.0];let mut state=vec![300.0;domain.mesh.vertex_count()];let mut rows=Vec::new();
     let source=ScalarField::nodal("synthetic heater",state.len(),domain.profile.iter().map(|v|2000.0*v).collect())?;
-    let grid=SubstepGrid::uniform(&times,substeps,256)?;
+    let base=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,&times,config(),&mut||false)?;
+    let refined=ConductionSubsteps::new(base,&vec![substeps;times.len()-1],substep_limits(),&mut||false)?;
     for (k,&time) in times.iter().enumerate() {
         if k>0 {
-            for step in grid.knot_indices()[k-1]..grid.knot_indices()[k] {
-                let dt=grid.fine_times()[step+1]-grid.fine_times()[step];
+            let fine=refined.substep_times(k-1).ok_or("missing synthetic substep clock")?;
+            for step in fine.windows(2) {
+                let dt=step[1]-step[0];
                 state=engine.advance(cx,ConductionProblem {mesh:&domain.mesh,boundary:&domain.boundary,
                     material:&domain.material,element_materials:None,source:&source},None,&state,dt,config().step)?.temperature;
             }
@@ -141,11 +146,9 @@ fn fit(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,rows:&[Reading],model
     if rows.is_empty() || rows.len()>256 || !model_sigma.is_finite() || model_sigma<=0.0 || !(1..=32).contains(&substeps) {return Err("invalid fit inputs".into());}
     let mut times=vec![0.0];
     for r in rows {if r.time>*times.last().unwrap() {times.push(r.time);}}
-    let mut numerical=config();
+    let numerical=config();
     if times.len()<2 || times.len()-1>numerical.max_intervals {return Err("too many observation intervals".into());}
-    let grid=SubstepGrid::uniform(&times,substeps,256)?;
-    numerical.max_intervals=256; // Fine solver intervals, not optimization knots.
-    let policy=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,grid.fine_times(),numerical,&mut||false)?;
+    let policy=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,&times,numerical,&mut||false)?;
     let n=policy.dimension();let mut samples=Vec::new();
     for r in rows {
         let frame=times.binary_search_by(|t|t.total_cmp(&r.time)).map_err(|_|"observation not on the admitted clock")?;
@@ -160,9 +163,8 @@ fn fit(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,rows:&[Reading],model
     let (before,evaluation,report)=if substeps==1 {
         run_study(&joint,policy.clone())?
     } else {
-        run_study(&joint,CheckpointedIntervals::new(policy.clone(),grid,SubstepBudget {
-            max_state_components:128,max_parameters:2,checkpoints:6,replayed_substeps:512,
-        }))?
+        run_study(&joint,ConductionSubsteps::new(policy.clone(),
+            &vec![substeps;times.len()-1],substep_limits(),&mut||false)?)?
     };
     let fields=evaluation.window.states.chunks(n).map(|x|policy.expand_field(x)).collect::<Result<Vec<_>,_>>()?;
     Ok(Fit {before,evaluation,fields,times,report})

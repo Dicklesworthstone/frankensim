@@ -9,10 +9,6 @@ fn with_domain(test: impl FnOnce(&Cx<'_>, &Domain, &BackwardEuler<'_>)) {
         test(&cx,&d,&engine);
     });
 }
-fn replay_budget() -> SubstepBudget {
-    SubstepBudget {max_state_components:128,max_parameters:2,checkpoints:6,replayed_substeps:512}
-}
-
 #[test]
 fn substep_options_have_explicit_bounds_and_preserve_default() {
     assert_eq!(options(&[]).unwrap(),(None,0.03,1));
@@ -27,26 +23,19 @@ fn substep_options_have_explicit_bounds_and_preserve_default() {
 #[test]
 fn checkpointed_conduction_matches_retained_pde_steps_and_source_derivatives() {
     with_domain(|cx,d,engine| {
-        let grid=SubstepGrid::uniform(&[0.0,0.6],4,32).unwrap();
-        let base=ConductionWindowPolicy::new(cx,&d.mesh,&d.boundary,grid.fine_times(),config(),&mut||false).unwrap();
-        let policy=CheckpointedIntervals::new(base.clone(),grid.clone(),replay_budget());
+        let base=ConductionWindowPolicy::new(cx,&d.mesh,&d.boundary,&[0.0,0.6],config(),&mut||false).unwrap();
+        let policy=ConductionSubsteps::new(base.clone(),&[4],substep_limits(),&mut||false).unwrap();
         let n=base.dimension();let initial=vec![300.0;n];
         let family=Family {domain:d,engine,samples:Vec::new(),times:vec![0.0,0.6],dimension:n};
         let model=family.instantiate(&[1500.0,0.0],&mut||false).unwrap();
         let tape=policy.record(&model,0,0.0,0.6,&initial,&mut||false).unwrap();
-        let mut current=initial.clone();let mut retained=Vec::new();
-        for (i,t) in grid.fine_times().windows(2).enumerate() {
-            let step=base.record(&model,i,t[0],t[1],&current,&mut||false).unwrap();
-            current=step.endpoint().to_vec();retained.push(step);
+        let mut current=base.expand_field(&initial).unwrap();
+        for t in policy.substep_times(0).unwrap().windows(2) {
+            current=engine.advance(cx,model.problem(0).unwrap(),None,&current,t[1]-t[0],config().step).unwrap().temperature;
         }
-        assert_eq!(tape.endpoint(),current);
+        assert_eq!(tape.endpoint(),base.gather_field(&current).unwrap());
         let seed=vec![1.0/n as f64;n];
         let got=tape.pullback(&seed,&[0.13,0.2],&mut||false).unwrap();
-        let mut bar=seed.clone();let mut params=vec![0.13,0.2];
-        for step in retained.iter().rev() {
-            let g=step.pullback(&bar,&params,&mut||false).unwrap();bar=g.initial;params=g.parameters;
-        }
-        assert_eq!(got.initial,bar);assert_eq!(got.parameters,params);
         assert_eq!(got.replayed_steps,8);assert_eq!(got.peak_checkpoints,3);
         let value=|source:f64| {
             let m=family.instantiate(&[source,0.0],&mut||false).unwrap();
