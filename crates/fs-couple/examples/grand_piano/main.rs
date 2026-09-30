@@ -132,11 +132,13 @@ This assumes an infinite baffle, with no lid/room scattering or air backreaction
 Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
 latency, in addition to acoustic travel time. Histories persist across blocks.
---bridge-trace-csv requires one --note and a geometric pressure render. It
+--bridge-trace-csv requires --note or an isolated --performance and geometric pressure. It
 writes that key's modeled vertical bridge velocity, a centered-difference
 acceleration, and the left pressure sample on the same output clock. The
 acceleration is a diagnostic derivative of output-rate velocity, not a sensor
-model; pressure retains its filter and travel-time delay.
+model; pressure retains its filter and travel-time delay. Performance traces
+require exactly one scheduled hammer launch or jack pulse, with releases only
+for that key. --note remains a sustain/restrike demo, not a long isolated strike.
 --modal-pressure-csv requires the same single-note geometric render. It writes
 each loaded-board mode's delayed pressure at each receiver on the WAV clock;
 the signed modal sum reconstructs the pressure, including cancellation. Modes
@@ -343,14 +345,14 @@ impl Options {
             return Err("--observer-gain requires --diagnostic-volume for a geometric board".into());
         }
         if options.bridge_trace_csv.is_some()
-            && (options.render.is_none() || options.note.is_none()
+            && (options.render.is_none() || (options.note.is_none() && options.performance.is_none())
                 || !geometric || options.diagnostic_volume) {
-            return Err("--bridge-trace-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+            return Err("--bridge-trace-csv requires --render, --note or an isolated --performance, and geometric pressure without --diagnostic-volume".into());
         }
         if options.modal_pressure_csv.is_some()
-            && (options.render.is_none() || options.note.is_none()
+            && (options.render.is_none() || (options.note.is_none() && options.performance.is_none())
                 || !geometric || options.diagnostic_volume) {
-            return Err("--modal-pressure-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+            return Err("--modal-pressure-csv requires --render, --note or an isolated --performance, and geometric pressure without --diagnostic-volume".into());
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
@@ -577,11 +579,6 @@ fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
     stretching: Option<&linear::string_stretching::Specification>) -> Result<(), String> {
-    let key = study_key(&scale, options.note)?;
-    let observed_course = options.bridge_trace_csv.as_ref().map(|_| {
-        scale.iter().position(|c| c.midi == key)
-            .ok_or_else(|| format!("bridge observation key {key} is absent"))
-    }).transpose()?;
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
@@ -603,6 +600,14 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
     }};
+    let key = if options.performance.is_some()
+        && (options.bridge_trace_csv.is_some() || options.modal_pressure_csv.is_some()) {
+        score.single_excitation_key()?
+    } else { study_key(&scale, options.note)? };
+    let observed_course = options.bridge_trace_csv.as_ref().map(|_| {
+        scale.iter().position(|c| c.midi == key)
+            .ok_or_else(|| format!("bridge observation key {key} is absent"))
+    }).transpose()?;
     let piano = prepare_instrument_with_string_material(scale, modes, options, stretching)?;
     let bridge_row = observed_course.map(|course| {
         piano.bank.strings.iter().find(|s|
@@ -853,6 +858,9 @@ mod render_tests {
         let accepted = options(&["--preset", "steinway-d", "--render", "a.wav",
             "--note", "69", "--bridge-trace-csv", "paired.csv"]).unwrap();
         assert_eq!(accepted.bridge_trace_csv.as_deref(), Some("paired.csv"));
+        let isolated = options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--performance", "held.performance", "--bridge-trace-csv", "paired.csv"]).unwrap();
+        assert_eq!(isolated.performance.as_deref(), Some("held.performance"));
         for args in [
             vec!["--preset", "steinway-d", "--note", "69", "--bridge-trace-csv", "paired.csv"],
             vec!["--preset", "steinway-d", "--render", "a.wav", "--bridge-trace-csv", "paired.csv"],
@@ -874,6 +882,8 @@ mod render_tests {
             "--bridge-trace-csv", "bridge.csv", "--microphone-right", "0.775,1,1"])
             .unwrap();
         assert_eq!(accepted.modal_pressure_csv.as_deref(), Some("modal.csv"));
+        assert!(options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--performance", "held.performance", "--modal-pressure-csv", "modal.csv"]).is_ok());
         for args in [
             vec!["--preset", "steinway-d", "--note", "69", "--modal-pressure-csv", "modal.csv"],
             vec!["--preset", "steinway-d", "--render", "a.wav", "--modal-pressure-csv", "modal.csv"],

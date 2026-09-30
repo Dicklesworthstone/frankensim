@@ -73,8 +73,14 @@ checks are NOT a general self-intersection, nonmanifold-vertex, component-overla
 or fluid-accessibility certificate; those remain input responsibilities. Do not
 supply intersecting, nested or inaccessible closed pieces as independent bodies.
 
-The current dense BEM budget is 2048 acoustic triangles and 128 input modes,
-with a bounded structural-projection product. Each requested frequency must
+The current dense BEM budget is 2048 acoustic triangles and 128 input modes.
+Structural motion projection uses a source-triangle bounding tree and keeps a
+3,000,000-work cap on tree visits, triangle bounds and exact facet checks;
+the old acoustic-panel × structural-triangle estimate no longer rejects a
+spatially sparse, separately resolved pair. For acoustic meshes of at least
+1024 panels, independent frequencies use at most four scoped workers, capped
+at 768 MiB of estimated dense matrix working set. Results return in the
+original frequency order. Each requested frequency must
 meet the declared minimum panels/wavelength (at least six); negative radiation
 power beyond roundoff and nonfinite diagnostics refuse. The reported condition
 number lower bound is not a condition-number certificate. Refine the input
