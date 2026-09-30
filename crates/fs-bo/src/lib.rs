@@ -27,6 +27,8 @@ pub mod mf;
 /// Joint-posterior noisy expected improvement for stochastic objectives.
 pub mod noisy;
 pub mod sparse;
+/// Resumable ask/tell studies for externally executed noisy simulations.
+pub mod study;
 pub mod turbo;
 
 pub use acq::{expected_improvement, normal_bank, phi_cdf, phi_inv, q_expected_improvement};
