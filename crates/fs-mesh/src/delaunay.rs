@@ -173,6 +173,12 @@ pub(crate) struct Mesh {
     epoch: u32,
     hint: u32,
     pub stats: DelaunayStats,
+    /// Vertex sets of the tets the LAST successful insertion killed (its
+    /// cavity), recorded before their slots are reused, and the ids of the
+    /// tets it created: the exact delta callers need to keep an edge index
+    /// current without rescanning the whole mesh.
+    pub last_killed: Vec<[u32; 4]>,
+    pub last_created: Vec<u32>,
 }
 
 impl Mesh {
@@ -473,6 +479,8 @@ impl Mesh {
                 }
             }
         }
+        self.last_killed.clear();
+        self.last_killed.extend(cavity.iter().map(|&t| self.tets[t as usize]));
         for &t in &cavity {
             self.kill(t);
         }
@@ -509,6 +517,7 @@ impl Mesh {
             }
         }
         debug_assert!(facet_map.is_empty(), "cavity boundary must close");
+        self.last_created.clone_from(&created);
         self.hint = *created
             .iter()
             .find(|&&t| !self.is_ghost(t))
@@ -639,6 +648,8 @@ pub(crate) fn bootstrap_mesh(points: &[Point3]) -> Result<(Mesh, [u32; 4], Vec<u
             points_in: points.len() as u64,
             ..DelaunayStats::default()
         },
+        last_killed: Vec::new(),
+        last_created: Vec::new(),
     };
     let quad = bootstrap_quad(&mesh.points, &order).ok_or(MeshError::DegenerateInput)?;
     init_first_tet(&mut mesh, quad);
