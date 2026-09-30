@@ -9,6 +9,8 @@ cargo run -p fs-couple --bin music_render -- \
 This runs the supplied free striker and two-mode receiver at **192 kHz**, then
 filters the observer pressure before producing **48 kHz** PCM. It uses the same
 contact, modal integrator, force scheduler and WAV encoder as the ordinary path.
+Both striker examples now declare the same 0.9 m/s launch and keep the 0.1 m
+contact-penetration ceiling unchanged.
 The causal decimator is the former grand-piano implementation, now shared as
 `fs_couple::pcm_wav::decimate::Decimator`; the piano example re-exports it rather
 than retaining a duplicate filter. Its coefficient arithmetic is unchanged.

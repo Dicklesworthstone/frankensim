@@ -57,10 +57,13 @@ The force gate uses `ATOL + RTOL * max(applied_force, constitutive_force)`.
 The network's energy budget and tolerances apply to **network plus contact**,
 including contact dissipation and only the actual external actuator work.
 
-Every component uses `retain-state`. Contact-loaded static preload is refused:
-settling only the linear network would omit the contact reaction. Supply an
-explicit initial state or simulate the loading history. The chosen model keeps
-positive-frequency flexible modes; it is not a free rigid-body hammer model.
+`retain-state` preserves an explicit initial state. Versions 3 and 4 also admit
+`static-preload` on every component with zero authored Q/V; the initializer
+solves the complete network and contact reactions together. Mixed
+retain/preload initialization and nonzero authored Q/V on a preload refuse.
+See [CONTACT_PRELOAD.md](CONTACT_PRELOAD.md) for the admitted joint solve and
+its limits. The chosen model keeps positive-frequency flexible modes; it is
+not a free rigid-body hammer model.
 
 ## Execution and limitations
 

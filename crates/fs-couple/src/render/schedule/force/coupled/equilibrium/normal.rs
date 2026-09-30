@@ -42,8 +42,11 @@ pub(super) fn solve_joint(
                 if i != j { free = finite(free - compliance[i*p+j]*reactions[j])?; }
             }
             let mut local = config_at(i);
-            if local.force_absolute_tolerance_n*0.125 > 0.0 { local.force_absolute_tolerance_n *= 0.125; }
-            if local.force_relative_tolerance*0.125 > 0.0 { local.force_relative_tolerance *= 0.125; }
+            // Leave room for the later check on restored, rounded modal states.
+            // This tightens only the scratch root solve; admission still uses
+            // the caller's unmodified force tolerances below and in preload.
+            if local.force_absolute_tolerance_n*0.0625 > 0.0 { local.force_absolute_tolerance_n *= 0.0625; }
+            if local.force_relative_tolerance*0.0625 > 0.0 { local.force_relative_tolerance *= 0.0625; }
             let evaluate = |reaction: f64| -> Result<(f64, f64), ModalCouplingError> {
                 poll(gate)?;
                 let x = finite(free - compliance[i*p+i]*reaction)?;
