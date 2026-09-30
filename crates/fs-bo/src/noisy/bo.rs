@@ -178,6 +178,52 @@ pub fn minimize_noisy(
 }
 
 impl NoisyBoConfig {
+    pub(crate) fn validate_study(&self, dim: usize, n_init: usize, iters: usize) {
+        validate(dim, n_init, iters, self);
+    }
+
+    pub(crate) fn initial_design(&self, dim: usize, n_init: usize) -> Vec<Vec<f64>> {
+        let (lo, hi) = self.bounds;
+        let sobol = fs_rand::qmc::Sobol::scrambled(dim, self.seed);
+        let mut point = vec![0.0; dim];
+        (0..n_init).map(|index| {
+            sobol.point(u32::try_from(index + 1).expect("validated initial count"), &mut point);
+            point.iter().map(|u| (hi - lo).mul_add(*u, lo)).collect()
+        }).collect()
+    }
+
+    pub(crate) fn study_incumbent(&self, gp: &Gp, x: &[Vec<f64>]) -> NoisyIncumbent {
+        recommend(gp, x, self.prior_mean)
+    }
+
+    // One seed policy and acquisition engine for callback and ask/tell studies.
+    // Cancellation is checked between greedy slots, not inside a CMA-ES search.
+    pub(crate) fn select_batch(&self, gp: &Gp, x: &[Vec<f64>], dim: usize,
+        iteration: usize, keep_going: &mut dyn FnMut() -> bool) -> Option<Vec<Vec<f64>>>
+    {
+        if !keep_going() { return None; }
+        let seed = self.seed ^ 0x4E45_4942 ^ (iteration as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let width = x.len() + self.q; // admitted by total-count validation
+        let bank = joint_normal_bank(self.mc_samples, width, seed);
+        let mut batch: Vec<Vec<f64>> = Vec::new();
+        for slot in 0..self.q {
+            if !keep_going() { return None; }
+            let active_width = x.len() + slot + 1;
+            let mut prefix = Vec::with_capacity(self.mc_samples * active_width);
+            for row in bank.chunks_exact(width) {
+                prefix.extend_from_slice(&row[..active_width]);
+            }
+            let candidate = argmax(&|input: &[f64]| {
+                let mut trial = batch.clone();
+                trial.push(input.to_vec());
+                q_noisy_expected_improvement(gp, x, &trial, &prefix)
+            }, dim, self, seed ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            batch.push(candidate);
+        }
+        if !keep_going() { return None; }
+        Some(batch)
+    }
+
     // Shared acquisition/history engine. Model fitting happens only at complete
     // batch boundaries; a failed fit cannot launch another objective callback.
     pub(crate) fn run_with_model<E>(
@@ -190,39 +236,17 @@ impl NoisyBoConfig {
     ) -> Result<NoisyBoReport, E> {
     let config = self;
     validate(dim, n_init, iters, config);
-    let (lo, hi) = config.bounds;
-    let sobol = fs_rand::qmc::Sobol::scrambled(dim, config.seed);
-    let mut point = vec![0.0; dim];
     let mut x = Vec::new();
     let mut observations = Vec::new();
-    for index in 0..n_init {
-        sobol.point(u32::try_from(index + 1).expect("validated initial count"), &mut point);
-        let input: Vec<f64> = point.iter().map(|u| (hi - lo).mul_add(*u, lo)).collect();
+    for input in config.initial_design(dim, n_init) {
         observations.push(evaluate(f, &input, config.prior_mean));
         x.push(input);
     }
     let mut gp = fit_model(&x, &observations, 0)?;
     let mut incumbent_trace = vec![recommend(&gp, &x, config.prior_mean)];
     for iteration in 0..iters {
-        let seed = config.seed ^ 0x4E45_4942 ^ (iteration as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let width = x.len() + config.q; // admitted by total-count validation
-        let bank = joint_normal_bank(config.mc_samples, width, seed);
-        let mut batch: Vec<Vec<f64>> = Vec::new();
-        for slot in 0..config.q {
-            let active_width = x.len() + slot + 1;
-            // Preserve row stride and common random numbers as the batch grows.
-            // Extract only once per slot, not on every acquisition evaluation.
-            let mut prefix = Vec::with_capacity(config.mc_samples * active_width);
-            for row in bank.chunks_exact(width) {
-                prefix.extend_from_slice(&row[..active_width]);
-            }
-            let candidate = argmax(&|input: &[f64]| {
-                let mut trial = batch.clone();
-                trial.push(input.to_vec());
-                q_noisy_expected_improvement(&gp, &x, &trial, &prefix)
-            }, dim, config, seed ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-            batch.push(candidate);
-        }
+        let batch = config.select_batch(&gp, &x, dim, iteration, &mut || true)
+            .expect("unconditional continuation");
         for input in batch {
             observations.push(evaluate(f, &input, config.prior_mean));
             x.push(input);

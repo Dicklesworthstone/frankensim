@@ -87,19 +87,23 @@ the default callback explicitly declares parameter-independent physical inputs.
 Direct sensor derivatives belong to `WindowObjective::parameter_partials`.
 
 A base `ConductionWindowPolicy` interval is one backward-Euler step. For several
-steps per reconstruction interval, create a `SubstepGrid` from the coarse
-measurement times and construct the base conduction policy on `grid.fine_times()`.
-Wrap that policy with `CheckpointedIntervals::new(base, grid, budget)` from
-`transient::variational::intervals::substeps`. Pass the wrapper to the same
-`WeakConstraintStudy` or `JointWindowStudy`; build the window and its priors on
-`grid.knot_times()`, not on every solver substep. `SubstepGrid::new` also admits
-an explicit nonuniform fine grid with declared knot indices.
+steps per reconstruction interval, keep that base policy on the COARSE
+observation clock and wrap it with
+`conduction_assimilation::substeps::ConductionSubsteps`. The wrapper receives
+one positive subdivision count per observation interval plus explicit
+`SubstepLimits`. Pass it to the same `WeakConstraintStudy` or
+`JointWindowStudy`; the window, controls and model-error priors stay on the
+coarse clock.
 
-With the wrapper, `problem(k)` and `parameter_pullback(k, ...)` receive the
-GLOBAL FINE-STEP index. Source/boundary schedules must supply those same indices
-on replay. Do not reinterpret k as the observation interval or evaluate a
-fresh random load during a repeated step. `SubstepBudget` bounds state/parameter
-dimensions, parked outer checkpoints and inner record calls per reverse sweep;
+Existing models keep their original schedule semantics: `problem(interval)` and
+`parameter_pullback(interval, ...)` still receive the observation-interval
+index even after numerical refinement. A source or boundary schedule that
+changes inside an observation interval can instead override
+`problem_at(ConductionSubstep)` and
+`parameter_pullback_at(ConductionSubstep, ...)`. That context carries the
+original interval, LOCAL substep index, and exact start/end times, and replay
+uses the identical context. Do not evaluate fresh random loads during replay.
+The shared checkpoint engine bounds parked states and reverse record calls;
 each conduction solve retains its own work limits. The example admits at most
 256 fine steps, six parked outer states, and 512 reverse fine-record calls per
 coarse interval. Its optimizer evaluation count is not a count of PDE solves.
