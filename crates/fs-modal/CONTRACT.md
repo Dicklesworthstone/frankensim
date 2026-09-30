@@ -18,6 +18,12 @@ Bead frankensim-fsim-vibration-eig-jw6yq.
   integer-LCG start vectors, RESTART-WITH-DEFLATION so degenerate clusters
   are recovered), and certifies each value with the M⁻¹-norm residual
   bound. One symbolic analysis serves every shift (union pattern).
+  `SliceOptions.mass_diagonal_equilibration` is opt-in (default `false`):
+  the sparse solve uses congruent coordinates `x = D y`, where
+  `D_ii = 1/sqrt(M_ii)`. It preserves the pencil eigenvalues and inertia;
+  returned modes and residual certificates are computed against original
+  `K` and `M`. Unrepresentable scales or transformed entries refuse with
+  `FS-MODAL-EQUILIBRATION` rather than changing pivot tolerances.
 - `ModePair { lambda, phi, residual, interval }` — `φᵀMφ = 1` enforced;
   `interval = λ̂ ± ‖Kφ − λ̂Mφ‖_{M⁻¹}` contains at least one TRUE pencil
   eigenvalue (SPD-M reduction argument; see crate docs).
@@ -40,8 +46,8 @@ Bead frankensim-fsim-vibration-eig-jw6yq.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,
-  window-unresolved (the count-certificate mutation gate), quadratic-eig
-  failure.
+  window-unresolved (the count-certificate mutation gate), unrepresentable
+  mass-coordinate equilibration, quadratic-eig failure.
 
 ## Invariants
 1. A returned `SliceReport` satisfies `modes.len() == expected ==

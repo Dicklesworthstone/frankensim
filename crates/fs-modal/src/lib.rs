@@ -61,6 +61,12 @@ pub enum ModalError {
         /// dense path, which stops at the first failing pivot).
         negative: usize,
     },
+    /// A requested mass-diagonal coordinate change cannot be represented
+    /// with finite positive factors or finite transformed matrix entries.
+    Equilibration {
+        /// First mass row or transformed matrix row that cannot be represented.
+        index: usize,
+    },
     /// A sparse factorization stage failed.
     Factor {
         /// The shift at which (K − σM) was being factored (NaN for the mass
@@ -107,6 +113,10 @@ impl core::fmt::Display for ModalError {
             ModalError::MassNotSpd { negative } => write!(
                 f,
                 "FS-MODAL-MASS-NOT-SPD: mass matrix has {negative} negative eigenvalue(s)"
+            ),
+            ModalError::Equilibration { index } => write!(
+                f,
+                "FS-MODAL-EQUILIBRATION: nonpositive or unrepresentable mass-coordinate scale at row {index}"
             ),
             ModalError::Factor { shift, source } => {
                 write!(f, "FS-MODAL-FACTOR at shift {shift}: {source}")
@@ -203,6 +213,10 @@ pub struct SliceOptions {
     pub ldlt: LdltOptions,
     /// Fill-reducing ordering.
     pub ordering: DirectOrdering,
+    /// Solve in the congruent coordinates x = D y, D_ii = 1/sqrt(M_ii).
+    /// This changes conditioning but neither the eigenvalues nor the inertia
+    /// count; certificates are recomputed in the original coordinates.
+    pub mass_diagonal_equilibration: bool,
 }
 
 impl Default for SliceOptions {
@@ -213,6 +227,7 @@ impl Default for SliceOptions {
             ritz_tol: 1e-10,
             ldlt: LdltOptions::default(),
             ordering: DirectOrdering::Amd,
+            mass_diagonal_equilibration: false,
         }
     }
 }
@@ -248,6 +263,39 @@ fn shifted_pencil(k: &Csr, m: &Csr, sigma: f64) -> Csr {
         }
     }
     coo.assemble()
+}
+
+fn mass_coordinate_scales(m: &Csr) -> Result<Vec<f64>, ModalError> {
+    let mut scales = Vec::with_capacity(m.nrows());
+    for r in 0..m.nrows() {
+        let (cols, vals) = m.row(r);
+        let diagonal = cols.binary_search(&r).ok().map(|i| vals[i]);
+        let Some(diagonal) = diagonal.filter(|v| v.is_finite() && *v > 0.0) else {
+            return Err(ModalError::Equilibration { index: r });
+        };
+        let scale = diagonal.sqrt().recip();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(ModalError::Equilibration { index: r });
+        }
+        scales.push(scale);
+    }
+    Ok(scales)
+}
+
+fn congruence_scaled(a: &Csr, scales: &[f64]) -> Result<Csr, ModalError> {
+    let n = a.nrows();
+    let mut coo = Coo::new(n, n);
+    for r in 0..n {
+        let (cols, vals) = a.row(r);
+        for (&c, &v) in cols.iter().zip(vals) {
+            let value = (v * scales[r]) * scales[c];
+            if !value.is_finite() || (v != 0.0 && value == 0.0) {
+                return Err(ModalError::Equilibration { index: r });
+            }
+            coo.push(r, c, value);
+        }
+    }
+    Ok(coo.assemble())
 }
 
 /// Deterministic pseudo-random fill for start vectors: integer LCG only —
@@ -486,8 +534,19 @@ pub fn slice_window(
         });
     }
 
+    let scales = if opts.mass_diagonal_equilibration {
+        Some(mass_coordinate_scales(m)?)
+    } else {
+        None
+    };
+    let scaled = scales
+        .as_ref()
+        .map(|scale| Ok((congruence_scaled(k, scale)?, congruence_scaled(m, scale)?)))
+        .transpose()?;
+    let (work_k, work_m) = scaled.as_ref().map_or((k, m), |(ks, ms)| (ks, ms));
+
     // One symbolic analysis serves every shift (union pattern).
-    let a_lo = shifted_pencil(k, m, lo);
+    let a_lo = shifted_pencil(work_k, work_m, lo);
     let p_sym = SymbolicLdlt::analyze(&a_lo, opts.ordering)
         .map_err(|source| ModalError::Factor { shift: lo, source })?;
     let mut factorizations = 0usize;
@@ -502,7 +561,7 @@ pub fn slice_window(
     };
 
     let f_lo = factor_at(lo, &a_lo, &mut factorizations)?;
-    let a_hi = shifted_pencil(k, m, hi);
+    let a_hi = shifted_pencil(work_k, work_m, hi);
     let f_hi = factor_at(hi, &a_hi, &mut factorizations)?;
     let below_low = f_lo.inertia().negative;
     let below_high = f_hi.inertia().negative;
@@ -536,7 +595,7 @@ pub fn slice_window(
     let mut last_err = None;
     for &fr in &fractions {
         let sigma = fr.mul_add(hi - lo, lo);
-        let a_mid = shifted_pencil(k, m, sigma);
+        let a_mid = shifted_pencil(work_k, work_m, sigma);
         match factor_at(sigma, &a_mid, &mut factorizations) {
             Ok(f) => {
                 chosen = Some((sigma, f));
@@ -566,7 +625,7 @@ pub fn slice_window(
         opts.max_lanczos
     };
 
-    let mut apply_m = |x: &[f64], y: &mut [f64]| m.spmv(x, y);
+    let mut apply_m = |x: &[f64], y: &mut [f64]| work_m.spmv(x, y);
     let mut solve_shifted = |b: &[f64], out: &mut [f64]| {
         let x = f_mid.solve(b);
         out.copy_from_slice(&x);
@@ -619,6 +678,11 @@ pub fn slice_window(
     let mut modes: Vec<ModePair> = Vec::with_capacity(expected);
     let mut scratch = vec![0.0f64; n];
     for (lambda, mut phi) in converged {
+        if let Some(scales) = &scales {
+            for (coordinate, scale) in phi.iter_mut().zip(scales) {
+                *coordinate *= scale;
+            }
+        }
         m.spmv(&phi, &mut scratch);
         let mnorm: f64 = phi
             .iter()
@@ -979,6 +1043,59 @@ mod tests {
         (1..=n)
             .map(|i| 2.0 - 2.0 * (i as f64 * std::f64::consts::PI / (n as f64 + 1.0)).cos())
             .collect()
+    }
+
+    #[test]
+    fn mass_coordinate_equilibration_preserves_the_original_pencil_certificates() {
+        // This is one generalized pencil written in coordinates with very
+        // different units. Its exact eigenvalues remain the tridiagonal ones.
+        let n = 12;
+        let coordinates = [0.2, 0.5, 1.0, 2.0, 5.0];
+        let scale: Vec<f64> = (0..n).map(|i| coordinates[i % coordinates.len()]).collect();
+        let mut k_coo = Coo::new(n, n);
+        let mut m_coo = Coo::new(n, n);
+        for i in 0..n {
+            k_coo.push(i, i, 2.0 / scale[i].powi(2));
+            m_coo.push(i, i, 1.0 / scale[i].powi(2));
+            if i + 1 < n {
+                let coupling = -1.0 / (scale[i] * scale[i + 1]);
+                k_coo.push(i, i + 1, coupling);
+                k_coo.push(i + 1, i, coupling);
+            }
+        }
+        let k = k_coo.assemble();
+        let m = m_coo.assemble();
+        let truth = analytic_tridiag(n);
+        let window = (
+            f64::midpoint(truth[0], truth[1]),
+            f64::midpoint(truth[5], truth[6]),
+        );
+        for mass_diagonal_equilibration in [false, true] {
+            let options = SliceOptions {
+                mass_diagonal_equilibration,
+                ..SliceOptions::default()
+            };
+            let report = slice_window(&k, &m, window, &options).expect("certified slice");
+            assert_eq!(report.expected, 5);
+            assert_eq!(report.below_low, 1);
+            for (mode, expected) in report.modes.iter().zip(&truth[1..6]) {
+                // The analytic cosine is itself evaluated in f64; allow its
+                // rounding interval to overlap the computed residual interval.
+                let oracle_roundoff = 4.0 * f64::EPSILON * expected.abs().max(1.0);
+                assert!(
+                    mode.interval.0 <= *expected + oracle_roundoff
+                        && *expected - oracle_roundoff <= mode.interval.1,
+                    "equilibrated={mass_diagonal_equilibration}, lambda={}, interval={:?}, analytic={expected}",
+                    mode.lambda,
+                    mode.interval
+                );
+                assert!((mode.lambda - expected).abs() < 1e-12);
+                let mut mass_phi = vec![0.0; n];
+                m.spmv(&mode.phi, &mut mass_phi);
+                let mass_norm: f64 = mode.phi.iter().zip(&mass_phi).map(|(a, b)| a * b).sum();
+                assert!((mass_norm - 1.0).abs() < 1e-10);
+            }
+        }
     }
 
     #[test]
