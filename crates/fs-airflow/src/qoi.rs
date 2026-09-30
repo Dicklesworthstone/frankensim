@@ -975,6 +975,23 @@ pub fn extract_junction_maximum_qoi(
     extract_junction_maximum_qoi_with_terms(mesh, solution, junction_region, discretization, &[])
 }
 
+/// Extract only the enclosure pressure-drop QoI from a solved operating point.
+///
+/// For product callers that request the pressure drop without the reporting
+/// surface or fan-efficiency declarations the full family needs. The value,
+/// evidence, identity and exactly-eight-term budget (the certified pressure
+/// interval as the boundary-conditions term, every other source a named
+/// `Unknown`) are exactly the ones [`extract_thermal_qois`] emits.
+///
+/// # Errors
+/// Refuses a malformed operating point or budget construction.
+pub fn extract_pressure_drop_qoi(
+    operating_point: &OperatingPoint,
+) -> Result<ThermalQoi<Pressure>, QoiError> {
+    validate_operating_point(operating_point)?;
+    pressure_drop_qoi(operating_point, operating_identity(operating_point))
+}
+
 /// [`extract_junction_maximum_qoi`] with caller-retained measured terms.
 ///
 /// Each receipt populates exactly its own source; every source without one

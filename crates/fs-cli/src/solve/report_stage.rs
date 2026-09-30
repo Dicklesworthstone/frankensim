@@ -528,6 +528,32 @@ pub(super) fn report_receipt(
     let qoi_unit = required_str(qoi_stage, qoi_row, "unit")?;
     let qoi_color = required_str(qoi_stage, qoi_row, "color")?;
     let qoi_identity = required_str(qoi_stage, qoi_row, "identity")?;
+    // Additional scalar rows (driver v35+: `pressure-drop`) ride beside the
+    // decision QoI: rendered and packaged as Estimated, never composed into
+    // the requirement.
+    let mut additional = Vec::new();
+    for row in qoi
+        .value
+        .get("qoi")
+        .and_then(JsonValue::as_array)
+        .map_or(&[][..], |rows| rows.get(1..).unwrap_or(&[]))
+    {
+        let color = required_str(qoi_stage, row, "color")?;
+        if color != "estimated" {
+            return Err(shape_error(
+                qoi_stage,
+                format!("additional QoI colour `{color}` is not the estimate-only producer's colour"),
+            ));
+        }
+        additional.push((
+            required_str(qoi_stage, row, "name")?.to_string(),
+            required_f64(qoi_stage, row, "value")?,
+            required_str(qoi_stage, row, "unit")?.to_string(),
+            required_str(qoi_stage, row, "identity")?.to_string(),
+            row.f64_field("boundary_conditions_half_width"),
+            row.str_field("source").unwrap_or("").to_string(),
+        ));
+    }
     if qoi_color != "estimated" {
         return Err(shape_error(
             qoi_stage,
@@ -688,6 +714,28 @@ pub(super) fn report_receipt(
                 .then(|| nominal_margin - required_margin - measured_half_width),
             unmeasured_terms,
         });
+    for (name, value, unit, identity, half_width, source) in &additional {
+        report = report.with_qoi(QoiReportItem {
+            name: name.clone(),
+            description: match half_width {
+                Some(half_width) => format!(
+                    "{source}; certified operating interval half-width {half_width} {unit} (boundary-conditions term, the only measured one); reported beside the decision QoI, no requirement composed"
+                ),
+                None => format!("{source}; reported beside the decision QoI, no requirement composed"),
+            },
+            nominal_value: *value,
+            unit: unit.clone(),
+            color: Color::Estimated {
+                estimator: QOI_RECEIPT_SCHEMA.to_string(),
+                dispersion: f64::NAN,
+            },
+            discretization_error: f64::NAN,
+            parameter_uncertainty: f64::NAN,
+            surrogate_error: f64::NAN,
+            total_uncertainty_budget: f64::NAN,
+            source_root: identity.clone(),
+        });
+    }
     if let Some(convergence) = ladder_convergence(&conduction.value, qoi_name, qoi_unit, qoi_value)
     {
         report = report.with_convergence(convergence);
@@ -801,6 +849,18 @@ pub(super) fn report_receipt(
         QOI_RECEIPT_SCHEMA,
         f64::INFINITY,
     ));
+    let mut package = package;
+    for (name, value, unit, identity, _, source) in &additional {
+        package = package.with_claim(Claim::estimated(
+            format!("qoi.{}", identity_token(name)),
+            format!(
+                "{name} = {value} {unit}; {source}, estimate-only, no requirement composed (identity {identity}, receipt {})",
+                qoi.completed.receipt.to_hex()
+            ),
+            QOI_RECEIPT_SCHEMA,
+            f64::INFINITY,
+        ));
+    }
     let package_root = package.try_merkle_root().map_err(|error| {
         report_error(
             "cli-solve-report-package",
@@ -842,7 +902,7 @@ pub(super) fn report_receipt(
     let json_hash = hash_bytes(&json_bytes);
     let package_hash = hash_bytes(&package_bytes);
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"report\",\"project_hash\":{},\"report_html\":{},\"report_json\":{},\"report_content_hash\":{},\"package\":{},\"package_root\":{},\"checker\":{{\"passed\":true,\"protocol\":{}}},\"qoi_count\":1,\"verdict\":{},\"budget_terms_measured\":{measured_terms},\"budget_terms_total\":{},\"sources\":{{\"qoi_receipt\":{},\"conduction_receipt\":{},\"material_receipt\":{}}},\"authority\":\"projection-of-retained-receipts\",\"no_claim\":\"the report and package project retained stage receipts and add no physical, numerical, or validation authority; every claim keeps the colour its producer recorded (Estimated, unbounded dispersion)\"}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"report\",\"project_hash\":{},\"report_html\":{},\"report_json\":{},\"report_content_hash\":{},\"package\":{},\"package_root\":{},\"checker\":{{\"passed\":true,\"protocol\":{}}},\"qoi_count\":{},\"verdict\":{},\"budget_terms_measured\":{measured_terms},\"budget_terms_total\":{},\"sources\":{{\"qoi_receipt\":{},\"conduction_receipt\":{},\"material_receipt\":{}}},\"authority\":\"projection-of-retained-receipts\",\"no_claim\":\"the report and package project retained stage receipts and add no physical, numerical, or validation authority; every claim keeps the colour its producer recorded (Estimated, unbounded dispersion)\"}}",
         json_string(REPORT_RECEIPT_SCHEMA),
         json_string(&run_hex),
         json_string(&project_hash.to_hex()),
@@ -852,6 +912,7 @@ pub(super) fn report_receipt(
         json_string(&package_hash.to_hex()),
         json_string(&package_root.to_hex()),
         fs_checker::CHECKER_PROTOCOL_VERSION,
+        1 + additional.len(),
         json_string(outcome),
         terms.len(),
         json_string(&qoi.completed.receipt.to_hex()),

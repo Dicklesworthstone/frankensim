@@ -152,7 +152,8 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// and names it in the conduction receipt (`field_artifact`).
 /// Version 34 states, for an indeterminate requirement, the unmeasured terms
 /// and the combined magnitude that would flip it to fail (report bytes).
-pub const SOLVE_DRIVER_VERSION: u32 = 34;
+/// Version 35 admits a `pressure-drop` scalar output beside the decision QoI.
+pub const SOLVE_DRIVER_VERSION: u32 = 35;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -918,7 +919,10 @@ fn has_declared_temperature_maximum(spec: &ProjectSpec) -> bool {
         .count();
     let has_unsupported_scalar = outputs.iter().any(|output| {
         output.kind == "scalar"
-            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+            && !matches!(
+                QoiSemanticId::parse(&output.name),
+                Some(QoiSemanticId::JunctionMaximum | QoiSemanticId::PressureDrop)
+            )
     });
     matching_outputs == 1
         && !has_unsupported_scalar
@@ -4339,9 +4343,18 @@ fn qoi_receipt(
             "declare one scalar `temperature-max` output; other QoI families need their own authoritative declarations",
         ));
     }
+    // Additional scalars ride beside the decision QoI with their own budgets;
+    // requirements stay on the temperature maximum.
+    let pressure_drop_requested = outputs.iter().any(|output| {
+        output.kind == "scalar"
+            && QoiSemanticId::parse(&output.name) == Some(QoiSemanticId::PressureDrop)
+    });
     if let Some(unsupported) = outputs.iter().find(|output| {
         output.kind == "scalar"
-            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+            && !matches!(
+                QoiSemanticId::parse(&output.name),
+                Some(QoiSemanticId::JunctionMaximum | QoiSemanticId::PressureDrop)
+            )
     }) {
         return Err(qoi_error(
             "cli-solve-qoi-unsupported-output",
@@ -4797,8 +4810,65 @@ fn qoi_receipt(
         }
         _ => json_string("unknown"),
     };
+    // The pressure drop is the flow-network stage's certified operating
+    // pressure as fs-airflow's registered QoI: same value and evidence, with
+    // the pressure interval as its boundary-conditions term.
+    let mut additional_rows = String::new();
+    if pressure_drop_requested {
+        let handoff = context.flow_network.as_ref().ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-pressure-drop-no-air-network",
+                "a `pressure-drop` output is declared but the project declares no air network",
+                "declare the fan system, vents and leakage, or remove the pressure-drop output",
+            )
+        })?;
+        let qoi = fs_airflow::qoi::extract_pressure_drop_qoi(&handoff.operating).map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-pressure-drop",
+                format!("pressure-drop extraction refused: {error}"),
+                "report the operating-point evidence defect",
+            )
+        })?;
+        let color = fs_evidence::color_of(&qoi.evidence.numerical, &qoi.evidence.model).rank();
+        if color != ColorRank::Estimated {
+            return Err(qoi_error(
+                "cli-solve-qoi-authority",
+                format!("the pressure drop unexpectedly carries colour {color:?}"),
+                "do not promote this producer without the separately admitted evidence path",
+            ));
+        }
+        let pascal = |name: &str, value: f64| {
+            canonical_f64(value).ok_or_else(|| {
+                qoi_error(
+                    "cli-solve-qoi-nonfinite",
+                    format!("pressure-drop field `{name}` is non-finite ({value})"),
+                    "report the operating-point evidence defect",
+                )
+            })
+        };
+        let half_width = match qoi
+            .uncertainty
+            .term(EngineeringUncertaintyKind::BoundaryConditions)
+            .value()
+        {
+            TermValue::IntervalBound { upper, .. } => pascal("half_width", *upper)?,
+            _ => "null".to_string(),
+        };
+        let _ = write!(
+            additional_rows,
+            ",{{\"name\":\"pressure-drop\",\"semantic\":{},\"region\":null,\"value\":{},\"unit\":\"pascal\",\
+             \"color\":\"estimated\",\"identity\":{},\"interval\":[{},{}],\"boundary_conditions_half_width\":{},\
+             \"source\":\"flow-network operating point\"}}",
+            json_string(QoiSemanticId::PressureDrop.as_str()),
+            pascal("value", qoi.evidence.value.value())?,
+            json_string(&qoi.uncertainty.content_id().to_hex()),
+            pascal("lo", qoi.evidence.numerical.lo)?,
+            pascal("hi", qoi.evidence.numerical.hi)?,
+            half_width,
+        );
+    }
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}{}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
         json_string(QOI_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         json_string(&row.query_name),
@@ -4807,6 +4877,7 @@ fn qoi_receipt(
         nominal,
         witness,
         json_string(&row.identity_hash.to_hex()),
+        additional_rows,
         json_string(&evaluation.requirement_id),
         limit,
         required_margin,
@@ -4844,7 +4915,7 @@ fn qoi_receipt(
     Ok(QoiStageProduct {
         receipt,
         progress: QoiProgressSummary {
-            qoi_count: extracted.rows.len(),
+            qoi_count: extracted.rows.len() + usize::from(pressure_drop_requested),
             verdict: evaluation.outcome.as_str(),
             weakest_term: Some(match terms.len() - measured_terms {
                 8 => "all-eight-no-data",

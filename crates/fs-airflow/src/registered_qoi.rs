@@ -130,7 +130,11 @@ impl QoiSemanticId {
                 Some(Self::SurfaceTemperatureStdDev)
             }
 
-            "airflow.pressure_drop" | "pressure_drop" | "delta_p" | "system_resistance" => {
+            "airflow.pressure_drop"
+            | "pressure_drop"
+            | "pressure-drop"
+            | "delta_p"
+            | "system_resistance" => {
                 Some(Self::PressureDrop)
             }
 

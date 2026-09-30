@@ -1081,6 +1081,104 @@ fn g1_the_contact_pair_imports_two_sources_and_conducts_through_the_declared_joi
 }
 
 #[test]
+fn g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop() {
+    // q61wp.83 first slice: the heatsink example's declared decision is
+    // "compare fan operating points". It now requests `pressure-drop` beside
+    // `temperature-max`, and `compare` diffs both. The exact falsifier is the fan
+    // affinity law: against the quadratic orifice/leakage network, the
+    // operating pressure scales with speed squared, so 0.7 -> 0.9 must raise the
+    // pressure drop by (0.9/0.7)^2 while the faster air cools the part.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("fan-speed-decision");
+    let ledger = dir.join("fans.db");
+    let fast = dir.join("heatsink-fan-0p9.fsim");
+    let declared = std::fs::read_to_string(&fsim).unwrap();
+    assert_eq!(declared.matches(":speed-ratio 0.7").count(), 1);
+    std::fs::write(
+        &fast,
+        declared.replace(":speed-ratio 0.7", ":speed-ratio 0.9"),
+    )
+    .unwrap();
+    let mut runs = Vec::new();
+    for project in [&fsim, &fast] {
+        let imported = run(args(&[
+            "--json",
+            "import",
+            project.to_string_lossy().as_ref(),
+            stl.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]));
+        assert_eq!(
+            imported.exit_code,
+            exit::SUCCESS,
+            "stderr: {}",
+            imported.stderr
+        );
+        let solved = run(args(&[
+            "--json",
+            "solve",
+            project.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--materials",
+            pack.to_string_lossy().as_ref(),
+        ]));
+        assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+        runs.push(
+            solved
+                .stdout
+                .split("\"run\":\"")
+                .nth(1)
+                .and_then(|rest| rest.get(..64))
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let compared = run(args(&[
+        "--json",
+        "compare",
+        &runs[0],
+        &runs[1],
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        compared.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        compared.stderr
+    );
+    let diff = |name: &str| -> (f64, f64) {
+        let row = compared
+            .stdout
+            .split(&format!("\"name\":\"{name}\""))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {name} diff in {}", compared.stdout));
+        (
+            number_after(row, "\"nominal_left\":"),
+            number_after(row, "\"nominal_right\":"),
+        )
+    };
+    let (dp_slow, dp_fast) = diff("pressure-drop");
+    let ratio = 0.9_f64 / 0.7;
+    let affinity = ratio * ratio;
+    assert!(
+        (dp_fast / dp_slow / affinity - 1.0).abs() < 1e-9,
+        "pressure drop {dp_slow} -> {dp_fast} Pa is not the affinity-law ratio {affinity}"
+    );
+    let (t_slow, t_fast) = diff("temperature-max");
+    assert!(
+        t_fast < t_slow,
+        "faster air must cool the part: {t_slow} -> {t_fast} K"
+    );
+}
+
+#[test]
 fn g0_package_missing_ledger_fails_closed() {
     let output = run(args(&[
         "package",
