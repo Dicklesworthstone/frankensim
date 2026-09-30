@@ -19,7 +19,7 @@ fn direct() -> ContactModalSystem {
     let budget = ModalAcousticTimeBudget { nyquist_guard_fraction:0.9,
         maximum_abs_displacement_m_sqrt_kg:1.0, maximum_abs_velocity_m_sqrt_kg_per_s:1000.0,
         maximum_total_energy_j:1000.0, maximum_abs_pressure_pa:1000.0 };
-    let striker = ModalAcousticTimeModel::try_free_mass(48_000,0.04,0.0,1.0,budget).unwrap();
+    let striker = ModalAcousticTimeModel::try_free_mass(48_000,0.04,0.0,0.9,budget).unwrap();
     let receiver = ModalAcousticTimeModel::try_new(48_000,vec![
         ModalAcousticMode {angular_frequency_rad_s:800.0,damping_ratio:0.01,pressure_per_modal_velocity:C64::new(1.0,0.0)},
         ModalAcousticMode {angular_frequency_rad_s:1800.0,damping_ratio:0.02,pressure_per_modal_velocity:C64::new(0.4,0.0)},
@@ -40,7 +40,9 @@ fn direct() -> ContactModalSystem {
 fn waveform(text:&str,block:usize) -> Vec<f64> {
     let performance=ModalPerformance::from_bytes(text.as_bytes(),block).unwrap();
     let mut out=vec![0.0;performance.info().samples as usize];let mut r=performance.into_renderer();
-    for chunk in out.chunks_mut(block) {r.block(chunk).unwrap();}
+    for (index,chunk) in out.chunks_mut(block).enumerate() {
+        r.block(chunk).unwrap_or_else(|error| panic!("render block {index} at sample {}: {error:?}",index*block));
+    }
     out
 }
 fn command(input:&Path,out:&Path,block:usize) -> Output {
@@ -82,13 +84,13 @@ fn free_mass_input_is_explicit_complete_and_cannot_request_undefined_preload() {
         INPUT.replace("voice free-mass 1 1","voice free-mass 2 1"),
         INPUT.replace("voice free-mass 1 1","voice free-mass 1 0"),
         INPUT.replace("voice free-mass 1 1","voice free-mass 1 65537"),
-        INPUT.replace("mass 0.04 0 1","mass -0.04 0 1"),
-        INPUT.replace("mass 0.04 0 1","mass 0 0 1"),
-        INPUT.replace("mass 0.04 0 1","mass NaN 0 1"),
-        INPUT.replace("mass 0.04 0 1","mass 0.04 0 inf"),
-        INPUT.replace("mass 0.04 0 1","mass 0.04 0"),
-        INPUT.replace("mass 0.04 0 1","mass 0.04 0 1 99"),
-        INPUT.replace("mass 0.04 0 1","mode 0 0 0 0 0 0"),
+        INPUT.replace("mass 0.04 0 0.9","mass -0.04 0 0.9"),
+        INPUT.replace("mass 0.04 0 0.9","mass 0 0 0.9"),
+        INPUT.replace("mass 0.04 0 0.9","mass NaN 0 0.9"),
+        INPUT.replace("mass 0.04 0 0.9","mass 0.04 0 inf"),
+        INPUT.replace("mass 0.04 0 0.9","mass 0.04 0"),
+        INPUT.replace("mass 0.04 0 0.9","mass 0.04 0 0.9 99"),
+        INPUT.replace("mass 0.04 0 0.9","mode 0 0 0 0 0 0"),
         INPUT.replace("mode 800 0.01","mode 0 0.01"),
         INPUT.replace("voice retain-state 2 1","voice static-preload 2 1"),
     ] {assert!(ModalPerformance::from_bytes(text.as_bytes(),37).is_err(),"{text}");}
@@ -108,10 +110,10 @@ fn receiver_sound_depends_on_collision_mass_and_launch_velocity() {
         INPUT.replace("0.0005 1 authored-free-striker","1 1 authored-free-striker")] {
         assert!(waveform(&text,37).iter().all(|p|*p==0.0));
     }
-    let slow=INPUT.replace("mass 0.04 0 1","mass 0.04 0 0.5");
+    let slow=INPUT.replace("mass 0.04 0 0.9","mass 0.04 0 0.5");
     // A physical mass change must also change its conjugate attachment/port
     // normalization. Shapes are never silently reinterpreted by the reader.
-    let heavy=INPUT.replace("mass 0.04 0 1","mass 0.16 0 1")
+    let heavy=INPUT.replace("mass 0.04 0 0.9","mass 0.16 0 0.9")
         .replace("port 0 5","port 0 2.5").replace("contact_left 0 5","contact_left 0 2.5");
     for text in [slow,heavy] {
         let changed=waveform(&text,37);
@@ -136,7 +138,7 @@ fn actual_command_streams_the_strike_preserves_tail_and_refuses_invalid_or_exist
         assert!(!command(&input,&out,block).status.success());assert_eq!(std::fs::read(&out).unwrap(),bytes);
         assert_eq!(std::fs::read_to_string(out.with_extension("provenance.json")).unwrap(),metadata);
     }
-    std::fs::write(&input,INPUT.replace("mass 0.04 0 1","mass -1 0 1")).unwrap();
+    std::fs::write(&input,INPUT.replace("mass 0.04 0 0.9","mass -1 0 0.9")).unwrap();
     let out=dir.join("invalid.wav");assert!(!command(&input,&out,37).status.success());
     assert!(!out.exists());assert!(!out.with_extension("provenance.json").exists());
 }

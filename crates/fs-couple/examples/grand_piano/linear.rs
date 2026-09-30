@@ -31,6 +31,7 @@ use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
 use fs_material::visco::GeneralizedMaxwell;
 use fs_math::{c64::C64, det};
 use super::geometry::Course;
+use super::steinway_scale;
 
 /// Spatial damper pads in these same mass-normalized moving-bridge coordinates.
 #[path = "dampers.rs"]
@@ -255,6 +256,17 @@ impl Bank {
     pub fn new_with_transverse_bridge(courses: &[Course], board: &[BoardMode], rate: u32,
         band_hz: f64, max_modes: usize, damping: bool, secondary: Option<&[Vec<f64>]>)
         -> Result<Self, String> {
+        Self::new_with_string_damping(courses, board, rate, band_hz, max_modes,
+            damping, secondary, false)
+    }
+
+    /// Use RT-0425's per-note intrinsic string loss on the existing scalar
+    /// stiff-string modes. The source's transverse rate and strain-rate terms
+    /// project to zeta = R_u/omega + eta_u*omega in this reduced model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_string_damping(courses: &[Course], board: &[BoardMode], rate: u32,
+        band_hz: f64, max_modes: usize, damping: bool, secondary: Option<&[Vec<f64>]>,
+        rt0425_string_damping: bool) -> Result<Self, String> {
         let r = board.len();
         if courses.is_empty() || courses.len() > 88 || !(1..=MAX_BOARD_MODES).contains(&r)
             || !(1..=MAX_STRING_MODES).contains(&max_modes) || rate < 8_000
@@ -318,7 +330,10 @@ impl Bank {
                         let damper_shape = det::sin(n as f64*PI*0.35)/det::sqrt(card.modal_mass_kg());
                         let k = n as f64*PI/card.length_m;
                         let bend_fraction = card.flexural_rigidity_nm2*k*k/(tension + card.flexural_rigidity_nm2*k*k);
-                        let zeta = if damping { 0.30/omega + 0.5*bending.loss_factor(omega)*bend_fraction } else { 0.0 };
+                        let zeta = if !damping { 0.0 } else if rt0425_string_damping {
+                            let (r_u, eta_u) = steinway_scale::string_damping_rt0425(c.midi)?;
+                            r_u/omega + eta_u*omega
+                        } else { 0.30/omega + 0.5*bending.loss_factor(omega)*bend_fraction };
                         oscillator.push(ModalAcousticMode { angular_frequency_rad_s: omega,
                             damping_ratio: zeta, pressure_per_modal_velocity: C64::new(0.0,0.0) });
                         modes.push(StringMode { omega, beta, a: omega*omega*beta,
@@ -598,6 +613,24 @@ impl Bank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn published_string_loss_is_used_by_the_prepared_bank_without_changing_frequencies() {
+        let c = super::super::steinway_scale::courses().unwrap()[48]; // A4
+        let board = super::super::board::demonstration();
+        let old = Bank::new(&[c], &board, 192_000, 21_600.0, 4, true).unwrap();
+        let source = Bank::new_with_string_damping(&[c], &board, 192_000,
+            21_600.0, 4, true, None, true).unwrap();
+        assert_eq!(old.modes[0].omega, source.modes[0].omega);
+        let omega = source.modes[0].omega;
+        let (r_u, eta_u) = steinway_scale::string_damping_rt0425(69).unwrap();
+        let expected = transitions(192_000, &[ModalAcousticMode {
+            angular_frequency_rad_s: omega,
+            damping_ratio: r_u / omega + eta_u * omega,
+            pressure_per_modal_velocity: C64::new(0.0, 0.0),
+        }]).unwrap();
+        assert!((source.transition[0].vv - expected[0].vv).abs() < 1e-14);
+        assert!((source.transition[0].vv - old.transition[0].vv).abs() > 1e-12);
+    }
     fn bank(damped:bool)->Bank{
         let scale=super::super::geometry::demonstration_scale().unwrap();
         Bank::new(&[scale[48]],&super::super::board::demonstration(),192_000,21_600.0,12,damped).unwrap()

@@ -252,8 +252,23 @@ nonphysical D/mass inputs, stale topology and invalid connectivity.
 - The eccentricity model is the parallel-axis rigidity `EI + EAe²` acting
   through plate bending curvature; it does not model the membrane force
   the offset beam induces in the plate (requires membrane DOFs).
-- Lumped mass only; consistent mass is a recorded follow-up (frequencies
-  converge at the tested rates regardless).
+- Lumped transverse and rotary mass remains the default. An explicit
+  `PlateChart::assemble_consistent_transverse_mass` option uses the exact P1
+  triangle integral for transverse panel inertia while retaining lumped
+  slope and stiffener inertia. It preserves total rigid-translation mass;
+  consistent DKT rotary-field and beam inertia remain follow-ups. A second
+  opt-in, `PlateChart::assemble_edge_cubic_transverse_mass`, integrates a
+  cubic Bernstein deflection field whose edges reproduce nodal Hermite values
+  and tangential slopes. Its symmetric interior control reproduces quadratic
+  fields but is an explicit reconstruction, since DKT does not specify an
+  interior deflection field. The existing rotary and stiffener inertia laws
+  remain. `edge_cubic_transverse_shape` evaluates that same field at a supplied
+  barycentric point; `edge_cubic_transverse_mean_shape` gives its exact area
+  mean. They allow reciprocal point effort/motion and exact volume projection
+  without silently returning to P1 after assembly. For this chosen interior
+  control, the positive three-point triangle rule samples exactly that area
+  mean, although it is not a general cubic integration rule. Neither option
+  alone certifies Model D high-band bridge convergence.
 - Uniform isotropic pre-tension only (scalar T); tensor/nonuniform
   prestress fields join the soundboard-downbearing consumer.
 - No damping: pencils are (K, M); the viscoelastic bead supplies per-mode

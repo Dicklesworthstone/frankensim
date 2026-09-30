@@ -1,7 +1,7 @@
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 use fs_couple::render::schedule::force::coupled::{CoupledModalSystem, ModalAttachment, ModalCouplingConfig, ModalCouplingError};
 use fs_couple::render::schedule::force::coupled::contact::{ContactModalSystem, ModalContact, ModalContactConfig};
-use fs_couple::render::schedule::force::coupled::contact::multiple::{MultiContactConfig, MultiContactModalSystem};
+use fs_couple::render::schedule::force::coupled::contact::multiple::{MultiContactConfig, MultiContactModalSystem, MAX_NORMAL_CONTACTS};
 use fs_dcontact::Obstacle;
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
@@ -163,7 +163,7 @@ fn singleton_and_contact_order_permutations_agree_within_declared_solver_accurac
 #[test]
 fn contact_count_setup_and_physical_admission_precede_allocation_or_motion() {
     let make=||network(vec![mode(48000,300.0,0.0,0.0,0.0),mode(48000,800.0,0.0,0.0,1.0)]);
-    for c in [MultiContactConfig {max_contacts:0,..multiple()},MultiContactConfig {max_contacts:33,..multiple()},
+    for c in [MultiContactConfig {max_contacts:0,..multiple()},MultiContactConfig {max_contacts:MAX_NORMAL_CONTACTS+1,..multiple()},
         MultiContactConfig {max_sweeps:0,..multiple()},MultiContactConfig {max_setup_terms:6,..multiple()}] {
         assert!(MultiContactModalSystem::new(make(),vec![contact(0,1,0.0,3e6,1.5,0.0)],c,&CancelGate::new()).is_err());
     }

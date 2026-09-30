@@ -7,7 +7,8 @@ use super::{board_geometry::motion::MotionSurface, linear::Bank};
 use fs_bem::{helmholtz::{self, Medium}, panel3d::SpherePanels,
     radiation_policy::GeometryPolicy, near_field::FirstOrder};
 use fs_math::c64::C64;
-use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU};
+use std::{collections::{BTreeMap,BTreeSet},f64::consts::TAU,
+    sync::atomic::{AtomicUsize,Ordering}};
 
 #[path = "exterior_section_skin.rs"]
 mod section_skin;
@@ -23,6 +24,17 @@ pub const RATE:u32=48_000;
 pub const MAX_OBJ_BYTES:usize=32*1024*1024;
 pub const MAX_SPEC_BYTES:usize=64*1024;
 pub const MAX_PANELS:usize=2048;
+const MAX_PROJECTION_WORK:usize=3_000_000;
+// Each Helmholtz worker owns two dense complex matrices and one LU image.
+// Bound their aggregate working set independently of the panel-count gate.
+const MAX_FREQUENCY_WORKERS:usize=4;
+const MAX_FREQUENCY_DENSE_BYTES:usize=768*1024*1024;
+
+struct FrequencySample {
+    pressure:Vec<Vec<C64>>, // input-major, receiver-major
+    minimum_ppw:f64,
+    maximum_condition_lower_bound:f64,
+}
 
 #[derive(Debug)]
 pub struct Specification {
@@ -143,9 +155,7 @@ impl Boundary {
         if text.len()>MAX_OBJ_BYTES {return Err("acoustic OBJ exceeds its byte budget".into());}
         let obj=fs_io::obj::read_obj_document(text).map_err(|e|e.to_string())?;
         let count=obj.soup.triangles.len();
-        if count>MAX_PANELS || count.checked_mul(motion.mesh.tris.len()).is_none_or(|v|v>3_000_000) {
-            return Err("acoustic mesh exceeds 2048 panels or the cold projection-work budget".into());
-        }
+        if count>MAX_PANELS {return Err("acoustic mesh exceeds 2048 panels".into());}
         let mut moving=vec![false;count];let mut used=BTreeSet::new();
         for region in &obj.regions {
             let matches:Vec<_>=spec.rules.iter().filter(|(label,_)|region.has_label(label)).collect();
@@ -170,15 +180,22 @@ impl Boundary {
         let radius=triangles.iter().flatten().map(|&p|norm(sub(p,center))).fold(0.0_f64,f64::max);
         let surface=SpherePanels::from_triangles(triangles.clone()).map_err(|e|e.to_string())?;
         let mut weights=vec![vec![0.;count];motion.shapes.len()];
+        let mut projection_work=0usize;
         for (face,tri) in triangles.iter().enumerate() {
             if !moving[face] {continue;}
             let normal=surface.normals()[face];
             // Admit all corners, not only a centroid that could span a hole.
             // Input nonoverlap and topology remain the source mesh's contract.
-            for &point in tri {motion.normal_weights(point,normal,spec.offset_m)?;}
+            for &point in tri {
+                let (_, work)=motion.normal_weights_with_work(point,normal,spec.offset_m)?;
+                projection_work=projection_work.saturating_add(work);
+                if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
+            }
             for bary in [[2./3.,1./6.,1./6.],[1./6.,2./3.,1./6.],[1./6.,1./6.,2./3.]] {
                 let point=std::array::from_fn(|c|(0..3).map(|i|bary[i]*tri[i][c]).sum());
-                let row=motion.normal_weights(point,normal,spec.offset_m)?;
+                let (row,work)=motion.normal_weights_with_work(point,normal,spec.offset_m)?;
+                projection_work=projection_work.saturating_add(work);
+                if projection_work>MAX_PROJECTION_WORK {return Err("acoustic skin exceeds bounded projection-work budget".into());}
                 for (out,value) in weights.iter_mut().zip(row) {out[face]+=value/3.;}
             }
         }
@@ -212,8 +229,21 @@ impl Boundary {
     }
     fn sample_grid_plan(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,min_ppw:f64,plan:ReceiverSet<'_>)
         ->Result<Samples,String> {
+        let panels=self.surface.areas().len();
+        let dense_bytes=panels.checked_mul(panels).and_then(|n|n.checked_mul(3*std::mem::size_of::<C64>()))
+            .ok_or("exterior dense-work size overflow")?;
+        let memory_workers=(MAX_FREQUENCY_DENSE_BYTES/dense_bytes.max(1)).max(1);
+        let workers=if panels>=1024 {
+            std::thread::available_parallelism().map_or(1,|n|n.get())
+                .min(MAX_FREQUENCY_WORKERS).min(memory_workers).min(omega.len().max(1))
+        } else {1};
+        self.sample_grid_plan_with_workers(omega,receivers,medium,min_ppw,plan,workers)
+    }
+    fn sample_grid_plan_with_workers(&self,omega:&[f64],receivers:&[[f64;3]],medium:Medium,
+        min_ppw:f64,plan:ReceiverSet<'_>,workers:usize)->Result<Samples,String> {
         let count=self.weights.len();let panels=self.surface.areas().len();
-        if count==0 || count>super::linear::MAX_BOARD_MODES || panels>MAX_PANELS
+        if workers==0 || workers>MAX_FREQUENCY_WORKERS || count==0
+            || count>super::linear::MAX_BOARD_MODES || panels>MAX_PANELS
             || !(1..=2).contains(&receivers.len()) || omega.is_empty() || omega.len()>257
             || omega.iter().enumerate().any(|(i,w)|!w.is_finite() || *w<=0.
                 || (i>0 && *w<=omega[i-1]))
@@ -229,7 +259,7 @@ impl Boundary {
         let delays_s=plan.delays_s().to_vec();
         let mut values=vec![vec![Vec::with_capacity(omega.len());count];receivers.len()];
         let mut minimum_ppw=f64::INFINITY;let mut maximum_condition_lower_bound=0.0_f64;
-        for &w in omega {
+        let sample_at=|w:f64|->Result<FrequencySample,String> {
             let k=w/medium.sound_speed;
             let evaluation=plan.prepare(k)?;
             let fields:Vec<Vec<C64>>=self.weights.iter().map(|r|r.iter().map(|b|C64::new(0.,b/w)).collect()).collect();
@@ -237,7 +267,10 @@ impl Boundary {
             let formulation=policy.formulation(k).map_err(|e|e.to_string())?;
             let solutions=policy.solve_batch(k,medium,&refs)
                 .map_err(|e|format!("exterior solve at {} Hz ({formulation:?}): {e}",w/TAU))?;
-            for (input,solution) in solutions.iter().enumerate() {
+            let mut pressure_rows=Vec::with_capacity(count);
+            let mut frequency_ppw=f64::INFINITY;
+            let mut frequency_condition=0.0_f64;
+            for solution in &solutions {
                 if !solution.panels_per_wavelength.is_finite() || solution.panels_per_wavelength<min_ppw
                     || !solution.condition_lower_bound.is_finite()
                     || !solution.radiated_power_roundoff_interval.1.is_finite()
@@ -246,13 +279,58 @@ impl Boundary {
                         w/TAU,solution.panels_per_wavelength,solution.condition_lower_bound,
                         solution.radiated_power_roundoff_interval));
                 }
-                minimum_ppw=minimum_ppw.min(solution.panels_per_wavelength);
-                maximum_condition_lower_bound=maximum_condition_lower_bound.max(solution.condition_lower_bound);
+                frequency_ppw=frequency_ppw.min(solution.panels_per_wavelength);
+                frequency_condition=frequency_condition.max(solution.condition_lower_bound);
                 let pressure=evaluation.pressure(solution)?;
-                for (channel,p) in pressure.into_iter().enumerate() {
+                if pressure.len()!=receivers.len() {return Err("exterior receiver pressure count differs".into());}
+                for &p in &pressure {
                     if !p.re.is_finite() || !p.im.is_finite() {return Err("exterior receiver pressure is nonfinite".into());}
-                    values[channel][input].push(p);
                 }
+                pressure_rows.push(pressure);
+            }
+            if pressure_rows.len()!=count {return Err("exterior modal response count differs".into());}
+            Ok(FrequencySample {pressure:pressure_rows,minimum_ppw:frequency_ppw,
+                maximum_condition_lower_bound:frequency_condition})
+        };
+        let samples=if workers==1 {
+            omega.iter().copied().map(sample_at).collect::<Result<Vec<_>,_>>()?
+        } else {
+            let earliest_error=AtomicUsize::new(usize::MAX);
+            std::thread::scope(|scope| {
+                let mut tasks=Vec::with_capacity(workers);
+                for worker in 0..workers {
+                    let solve=&sample_at;
+                    let earliest_error=&earliest_error;
+                    tasks.push(scope.spawn(move || {
+                        let mut rows=Vec::new();
+                        for i in (worker..omega.len()).step_by(workers) {
+                            if i>earliest_error.load(Ordering::Relaxed) {break;}
+                            let row=solve(omega[i]);
+                            if row.is_err() {earliest_error.fetch_min(i,Ordering::Relaxed);}
+                            rows.push((i,row));
+                        }
+                        rows
+                    }));
+                }
+                let mut ordered:Vec<Option<Result<FrequencySample,String>>>=
+                    (0..omega.len()).map(|_|None).collect();
+                let mut panicked=false;
+                for task in tasks {
+                    match task.join() {
+                        Ok(rows)=>for (i,row) in rows {ordered[i]=Some(row);},
+                        Err(_)=>panicked=true,
+                    }
+                }
+                if panicked {return Err("exterior frequency worker panicked".into());}
+                ordered.into_iter().map(|row|row.unwrap_or_else(||Err("exterior frequency result missing".to_string())))
+                    .collect::<Result<Vec<_>,String>>()
+            })?
+        };
+        for sample in samples {
+            minimum_ppw=minimum_ppw.min(sample.minimum_ppw);
+            maximum_condition_lower_bound=maximum_condition_lower_bound.max(sample.maximum_condition_lower_bound);
+            for (input,pressure) in sample.pressure.into_iter().enumerate() {
+                for (channel,p) in pressure.into_iter().enumerate() {values[channel][input].push(p);}
             }
         }
         Ok(Samples {omega:omega.to_vec(),values,delays_s,minimum_ppw,maximum_condition_lower_bound})
@@ -381,6 +459,23 @@ pub(crate) mod tests {
         let c=lid.sample_grid(&[TAU*100.,TAU*200.],&receivers,spec.medium,6.).unwrap();
         assert!((c.values[0][0][1]-a.values[0][0][1]).abs()>1e-6*a.values[0][0][1].abs());
         assert!(b.sample_grid(&[TAU*100.],&[[0.05,0.05,0.]],spec.medium,6.).is_err());
+    }
+    #[test]
+    fn parallel_frequency_sweep_matches_serial_output_exactly() {
+        let spec=Specification::read(&specification()).unwrap();
+        let b=Boundary::from_obj(&box_obj("skin",[0.,0.,-0.01],[0.1,0.1,0.02]),&spec,&motion()).unwrap();
+        let receivers=[[0.05,0.05,1.],[0.05,0.05,-1.]];
+        let omega=[TAU*100.,TAU*200.,TAU*300.];
+        let run=|workers| b.sample_grid_plan_with_workers(&omega,&receivers,spec.medium,6.,
+            ReceiverSet::new(&b,&receivers,spec.medium,false).unwrap(),workers).unwrap();
+        let serial=run(1);let parallel=run(2);
+        assert_eq!(serial.values,parallel.values);
+        assert_eq!(serial.minimum_ppw,parallel.minimum_ppw);
+        assert_eq!(serial.maximum_condition_lower_bound,parallel.maximum_condition_lower_bound);
+        let unresolved=[TAU*100.,TAU*50_000.];
+        let error=|workers| b.sample_grid_plan_with_workers(&unresolved,&receivers,spec.medium,6.,
+            ReceiverSet::new(&b,&receivers,spec.medium,false).unwrap(),workers).err().unwrap();
+        assert_eq!(error(1),error(2));
     }
 }
 

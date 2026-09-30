@@ -1,6 +1,6 @@
 use super::*;
 use super::super::{tests as fixtures, exterior_geometry, playback, engine, performance,
-    exterior_audio, prepare_controlled_body, bake, run};
+    exterior_audio, prepare_controlled_body, bake, run, steinway_d};
 use std::{io::Write, sync::atomic::{AtomicU64, Ordering}};
 
 fn spec_text() -> String {
@@ -14,6 +14,25 @@ fn scene(continuous: bool) -> super::super::Scene {
     let controls=playback::Controls::from_texts(&courses,None,None,Some("estimated")).unwrap();
     prepare_controlled_body(&source,courses,None,Specification::read(&spec_text()).unwrap(),
         &playback::Options::default(),controls,continuous).unwrap()
+}
+#[test]
+fn coarse_closed_skin_projects_onto_a_finer_source_board_without_all_pairs_work() {
+    let spec = Specification::read(include_str!("model-d-section-skin.fspe")).unwrap();
+    let keys: Vec<u8> = (21..=108).collect();
+    let coarse_source = steinway_d::build(4).unwrap().geometry;
+    let fine_source = steinway_d::build(18).unwrap().geometry;
+    let coarse = board_geometry::BoardGeometry::read(&coarse_source).unwrap()
+        .prepare_with_motion(&keys,spec.board_band_hz).unwrap();
+    let fine = board_geometry::BoardGeometry::read(&fine_source).unwrap()
+        .prepare_with_motion(&keys,spec.board_band_hz).unwrap();
+    let skin = Skin::continuous_from_source(coarse.motion.as_ref().unwrap(),&coarse_source,
+        spec.offset_m,250_000).unwrap();
+    assert_eq!(skin.triangles.len(),1788);
+    assert!(skin.triangles.len()*fine.motion.as_ref().unwrap().mesh.tris.len()>3_000_000);
+    let projected = super::super::Boundary::from_obj(&skin.obj(),&spec,
+        fine.motion.as_ref().unwrap()).unwrap();
+    assert_eq!(projected.surface.areas().len(),1788);
+    assert!(projected.weights.iter().flatten().any(|value|value.abs()>0.0));
 }
 fn balance(p:&engine::Instrument) {
     assert!((p.accounting.input_work_j-p.energy_j()-p.accounting.dissipated_j()).abs()<1e-7);

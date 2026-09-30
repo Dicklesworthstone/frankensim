@@ -43,6 +43,24 @@ point-contact waveform. `--dampers pads.fspd` uses the supplied spatial viscous
 pads from `DAMPERS.md`; `--dampers estimated` explicitly selects the existing
 approximate spans and drag values. These are not new measured Steinway data.
 
+With the `steinway-d` scale and source hammer cards, opt-in
+`--rt0425-hammer-stiffness` selects the already implemented published per-string
+felt stiffness. Adding `--rt0425-hammer-dissipation` replaces the estimated
+Prony/crush loss with the published per-note R_H relaxation term. The second
+flag requires the first; supplied `--hammers` cards and other scales refuse.
+Both `render` and `render-loaded` use the same contact mechanics and retain
+their original acoustic distinction. The default hammer law is unchanged.
+These source values are not calibration of this particular piano or recording;
+compare bridge motion and pressure at held-out keys before accepting them.
+
+`--rt0425-string-damping` independently selects the report's per-key `R_u`
+and `eta_u` intrinsic string losses for the `steinway-d` scale. The existing
+scalar stiff-string modes use a reduced damping projection; the flag does not
+import the report's complete higher-order string model. It reaches both
+one-way and radiation-loaded playback, including finite hammer footprints,
+while the estimated common loss remains the default. Harmonic `response` and
+`admittance` do not accept the playback flag.
+
 All supplied cards must cover EVERY admitted scale key, not just the notes in
 the score. Missing files, incomplete cards, duplicate options and invalid
 budgets refuse before structural/BEM preparation; no source-default fallback
