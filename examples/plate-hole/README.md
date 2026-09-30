@@ -33,3 +33,12 @@ to lie between the solved minimum and maximum. If the hole were lost
 329.4643 K, T_max 329.4992 K on 180 tets, energy closure 5e-11. The
 freshness lane (`scripts/ci/examples_freshness_e2e.sh`, section 11) checks
 the bracket on every run.
+
+The project also asks for that mean directly. It declares a `skin` surface
+(fsim v9) covering every exterior face, and requests
+`(qoi :name "surface-mean-temperature" :kind "scalar" :region "skin")`.
+The product's exact P1 face-integral mean then has to equal the energy
+balance, not just fall inside a bracket. MEASURED 2026-09-30: 329.48721035 K
+against 329.48720930 K, a difference of 1.05e-6 K at solver tolerance 1e-6.
+`g1_surface_mean_over_the_whole_skin_equals_the_energy_balance_exactly`
+checks it to 5e-6 K.

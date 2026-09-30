@@ -155,7 +155,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 35 admits a `pressure-drop` scalar output beside the decision QoI.
 /// Version 36 admits `fan-power` (fsim v9 fan efficiency) and gives every
 /// additional row one shape: value, unit, certified `interval`, source.
-pub const SOLVE_DRIVER_VERSION: u32 = 36;
+/// Version 37 admits the surface family (mean, spread, std-dev) over a
+/// declared surface named by the output's `:region` (fsim v9).
+pub const SOLVE_DRIVER_VERSION: u32 = 37;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -927,6 +929,9 @@ fn has_declared_temperature_maximum(spec: &ProjectSpec) -> bool {
                     QoiSemanticId::JunctionMaximum
                         | QoiSemanticId::PressureDrop
                         | QoiSemanticId::FanPower
+                        | QoiSemanticId::SurfaceMeanTemperature
+                        | QoiSemanticId::SurfaceTemperatureSpread
+                        | QoiSemanticId::SurfaceTemperatureStdDev
                 )
             )
     });
@@ -1306,6 +1311,8 @@ struct QoiStageInputs {
     solver_algebraic: Option<PropagatedTerm>,
     /// Paired model comparison; this is never used as an error bound.
     radiation_sensitivity: Option<radiation::RadiationSensitivity>,
+    /// Boundary-face slots of every declared surface on the published mesh.
+    surface_slots: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug)]
@@ -1351,6 +1358,8 @@ struct RungSolved {
     radiation_fragment: Option<String>,
     /// Powered-surface evidence (fsim v8), `None` when no surface carries power.
     surface_fragment: Option<String>,
+    /// Boundary-face slots of every declared surface on this rung's mesh.
+    surface_slots: BTreeMap<String, Vec<usize>>,
     adjoint_data: Option<RungAdjointData>,
     algebraic: algebraic::MaximumEvidence,
 }
@@ -4366,6 +4375,9 @@ fn qoi_receipt(
                     QoiSemanticId::JunctionMaximum
                         | QoiSemanticId::PressureDrop
                         | QoiSemanticId::FanPower
+                        | QoiSemanticId::SurfaceMeanTemperature
+                        | QoiSemanticId::SurfaceTemperatureSpread
+                        | QoiSemanticId::SurfaceTemperatureStdDev
                 )
             )
     }) {
@@ -4828,6 +4840,7 @@ fn qoi_receipt(
     // the pressure interval as its boundary-conditions term.
     let mut additional_rows = String::new();
     let mut push_row = |name: &str,
+                        region: Option<&str>,
                         semantic: QoiSemanticId,
                         value: f64,
                         numerical: &fs_evidence::NumericalCertificate,
@@ -4854,15 +4867,21 @@ fn qoi_receipt(
         };
         let _ = write!(
             additional_rows,
-            ",{{\"name\":{},\"semantic\":{},\"region\":null,\"value\":{},\"unit\":{},\
-             \"color\":\"estimated\",\"identity\":{},\"interval\":[{},{}],\"source\":{}}}",
+            ",{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":{},\
+             \"color\":\"estimated\",\"identity\":{},\"interval\":{},\"source\":{}}}",
             json_string(name),
             json_string(semantic.as_str()),
+            region.map_or_else(|| "null".to_string(), json_string),
             finite("value", value)?,
             json_string(semantic.units()),
             json_string(&identity.to_hex()),
-            finite("lo", numerical.lo)?,
-            finite("hi", numerical.hi)?,
+            // An estimate without a numerical bound carries (-inf, inf):
+            // stated as no interval, never refused and never invented.
+            if numerical.lo.is_finite() && numerical.hi.is_finite() {
+                format!("[{},{}]", finite("lo", numerical.lo)?, finite("hi", numerical.hi)?)
+            } else {
+                "null".to_string()
+            },
             json_string(source),
         );
         Ok(())
@@ -4887,6 +4906,7 @@ fn qoi_receipt(
         })?;
         push_row(
             "pressure-drop",
+            None,
             QoiSemanticId::PressureDrop,
             qoi.evidence.value.value(),
             &qoi.evidence.numerical,
@@ -4923,6 +4943,7 @@ fn qoi_receipt(
         })?;
         push_row(
             "fan-power",
+            None,
             QoiSemanticId::FanPower,
             fan_spec.evidence.value.value(),
             &fan_spec.evidence.numerical,
@@ -4930,6 +4951,69 @@ fn qoi_receipt(
             fan_spec.uncertainty.content_id(),
             "dp * Q / eta over the operating envelope and the cited efficiency interval",
         )?;
+    }
+    // Surface family: each requested output names a declared surface whose
+    // exterior faces the conduction stage located on the published mesh.
+    let mut surface_rows = 0usize;
+    for output in outputs.iter().filter(|output| output.kind == "scalar") {
+        let semantic = match QoiSemanticId::parse(&output.name) {
+            Some(
+                family @ (QoiSemanticId::SurfaceMeanTemperature
+                | QoiSemanticId::SurfaceTemperatureSpread
+                | QoiSemanticId::SurfaceTemperatureStdDev),
+            ) => family,
+            _ => continue,
+        };
+        let region = output.region.as_deref().ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-surface-region",
+                format!("surface output `{}` names no `:region`", output.name),
+                "name the declared `(surface ...)` the family is taken over",
+            )
+        })?;
+        let slots = inputs.surface_slots.get(region).filter(|slots| !slots.is_empty()).ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-surface-region",
+                format!("surface `{region}` has no exterior face on the published mesh"),
+                "select a nonempty exterior patch for the surface's assignment",
+            )
+        })?;
+        let surface = fs_airflow::qoi::SurfaceRegion::try_new(region, slots.clone())
+            .and_then(|surface| {
+                fs_airflow::qoi::extract_surface_uniformity(&inputs.mesh, &inputs.solution, &surface)
+            })
+            .map_err(|error| {
+                qoi_error(
+                    "cli-solve-qoi-surface",
+                    format!("surface QoI `{}` refused: {error}", output.name),
+                    "report the conduction-to-QoI handoff defect",
+                )
+            })?;
+        let (record, source) = match semantic {
+            QoiSemanticId::SurfaceMeanTemperature => (
+                &surface.mean_temperature,
+                "exact P1 face-integral area mean over the declared surface",
+            ),
+            QoiSemanticId::SurfaceTemperatureSpread => (
+                &surface.spread,
+                "maximum minus minimum surface-vertex temperature",
+            ),
+            _ => (
+                &surface.face_mean_standard_deviation,
+                "area-weighted standard deviation of face-mean temperatures",
+            ),
+        };
+        push_row(
+            &output.name,
+            Some(region),
+            semantic,
+            record.evidence.value.value(),
+            &record.evidence.numerical,
+            &record.evidence.model,
+            record.uncertainty.content_id(),
+            source,
+        )?;
+        surface_rows += 1;
     }
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}{}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
@@ -4981,7 +5065,8 @@ fn qoi_receipt(
         progress: QoiProgressSummary {
             qoi_count: extracted.rows.len()
                 + usize::from(pressure_drop_requested)
-                + usize::from(fan_power_requested),
+                + usize::from(fan_power_requested)
+                + surface_rows,
             verdict: evaluation.outcome.as_str(),
             weakest_term: Some(match terms.len() - measured_terms {
                 8 => "all-eight-no-data",
@@ -5652,6 +5737,9 @@ fn surface_heat(spec: &ProjectSpec) -> Result<SurfaceHeat, SolveRefusal> {
 struct ConductionBoundaryLowering {
     boundary: fs_conduction::ThermalBoundary,
     target_area_m2: BTreeMap<String, f64>,
+    /// Exterior boundary-face slots of every declared surface (fsim v8),
+    /// for surface-scoped QoIs.
+    surface_slots: BTreeMap<String, Vec<usize>>,
 }
 
 /// Lower the declared boundary laws. An `AirflowConvection` law lowers to a
@@ -5854,6 +5942,22 @@ fn conduction_boundary(
                 )
             })?;
     }
+    let mut surface_slots = BTreeMap::new();
+    for name in &surface_heat.names {
+        let parents = parents_of(name)?;
+        let slots = mesh
+            .boundary()
+            .iter()
+            .enumerate()
+            .filter(|(_, face)| {
+                let key = coordinate_face_key(mesh.positions(), face.vertices);
+                !interface_faces.contains(&key)
+                    && parent_by_boundary.get(&key).is_some_and(|parent| parents.contains(parent))
+            })
+            .map(|(slot, _)| slot)
+            .collect::<Vec<_>>();
+        surface_slots.insert(name.clone(), slots);
+    }
     for (name, &watts) in &surface_heat.watts {
         let parents = parents_of(name)?;
         let in_surface = |face: &fs_conduction::BoundaryFace| {
@@ -5901,6 +6005,7 @@ fn conduction_boundary(
     Ok(ConductionBoundaryLowering {
         boundary,
         target_area_m2,
+        surface_slots,
     })
 }
 
@@ -6591,6 +6696,12 @@ fn conduction_solve_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
+        let surface_slots = if surface_heat_inputs.names.is_empty() {
+            BTreeMap::new()
+        } else {
+            conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+                &interface_faces, &derived_boundary, &surface_heat_inputs)?.surface_slots
+        };
         let surface_fragment = if surface_heat_inputs.watts.is_empty() {
             None
         } else {
@@ -6659,6 +6770,7 @@ fn conduction_solve_receipt(
             conjugate_fragment,
             radiation_fragment,
             surface_fragment,
+            surface_slots,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
         };
@@ -6783,6 +6895,7 @@ fn conduction_solve_receipt(
         conjugate_fragment,
         radiation_fragment,
         surface_fragment,
+        surface_slots,
         adjoint_data: _,
         algebraic,
     } = solved;
@@ -7060,6 +7173,7 @@ fn conduction_solve_receipt(
             roundoff,
             solver_algebraic,
             radiation_sensitivity: None,
+            surface_slots,
         },
     })
 }

@@ -1232,6 +1232,75 @@ fn g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop() {
 }
 
 #[test]
+fn g1_surface_mean_over_the_whole_skin_equals_the_energy_balance_exactly() {
+    // q61wp.83 slice 3: the surface family over a declared surface. The
+    // plate-hole example declares a `skin` surface covering every exterior
+    // face (hole walls included) and requests its area mean. All 2 W leave
+    // by uniform h = 10 W/m^2/K convection to 293.15 K, so the area mean is
+    // EXACTLY 293.15 + P/(h A) with A = 5504 mm^2 from the generator. The P1
+    // face-integral mean and the Robin flux integral see the same field, so
+    // only the solver tolerance separates them.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/plate-hole/plate-hole.fsim");
+    let stl = root.join("examples/plate-hole/plate-hole.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("plate-hole-skin");
+    let ledger = dir.join("plate.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .unwrap();
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let qoi = receipt_text(&ledger, &receipts[5]);
+    let row = qoi
+        .split("\"name\":\"surface-mean-temperature\"")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no surface-mean row in {qoi}"));
+    assert!(row.contains("\"region\":\"skin\""), "{row}");
+    let mean = number_after(row, "\"value\":");
+    let exact = 293.15 + 2.0 / (10.0 * 5.504e-3);
+    // TOLERANCE 5e-6 K: MEASURED 2026-09-30 diff 1.05e-6 K (solver
+    // tolerance-rel 1e-6 on a 36 K rise), ~5x headroom.
+    eprintln!(
+        "skin mean {mean} K vs exact {exact} K (diff {:e})",
+        mean - exact
+    );
+    assert!(
+        (mean - exact).abs() < 5e-6,
+        "skin mean {mean} K is not the energy balance {exact} K"
+    );
+}
+
+#[test]
 fn g0_package_missing_ledger_fails_closed() {
     let output = run(args(&[
         "package",

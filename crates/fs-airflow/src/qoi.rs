@@ -1012,6 +1012,46 @@ pub fn extract_fan_power_qoi(
     )
 }
 
+/// Extract only the surface-uniformity family (area mean, spread, face-mean
+/// standard deviation) over one declared reporting surface: the same records
+/// [`extract_thermal_qois`] emits, without the junction, pressure or fan
+/// declarations the full family needs.
+///
+/// # Errors
+/// Refuses an invalid or unconverged solution, a boundary-face slot outside
+/// the mesh, or malformed evidence/budget construction.
+pub fn extract_surface_uniformity(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    surface_region: &SurfaceRegion,
+) -> Result<SurfaceUniformity, QoiError> {
+    validate_solution(mesh, solution)?;
+    if let Some(&face) = surface_region
+        .boundary_faces()
+        .iter()
+        .find(|&&face| face >= mesh.boundary().len())
+    {
+        return Err(QoiError::invalid(
+            "surface region",
+            format!(
+                "boundary-face slot {face} is outside {} boundary faces",
+                mesh.boundary().len()
+            ),
+        ));
+    }
+    let solution_id = solution_identity(mesh, solution);
+    let temperature_model = conduction_model(solution);
+    let parameter_term = material_parameter_term(solution, solution_id)?;
+    surface_uniformity(
+        mesh,
+        solution,
+        surface_region,
+        solution_id,
+        &temperature_model,
+        &parameter_term,
+    )
+}
+
 /// [`extract_junction_maximum_qoi`] with caller-retained measured terms.
 ///
 /// Each receipt populates exactly its own source; every source without one
