@@ -75,12 +75,18 @@ fn coincident_partial_poles_keep_each_independent_bridge_coordinate_and_reciproc
     let m=model(true,false);let hz=m.bank.modes[0].omega/TAU;
     let a=compare(&m,hz,69,None);let b=compare(&m,hz,72,None);
     assert_eq!(a.retained_string_poles,2);assert_eq!(b.retained_string_poles,2);
-    for relative in [-1e-9,1e-9] {
-        let nearby=compare(&m,hz*(1.0+relative),69,None);
-        let scale=a.string_displacement.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
-        for (x,y) in nearby.string_displacement.iter().zip(&a.string_displacement) {
-            assert!((*x-*y).abs()<1e-5*scale);
-        }
+    let below=compare(&m,hz*(1.0-1e-9),69,None);
+    let above=compare(&m,hz*(1.0+1e-9),69,None);
+    let scale=a.string_displacement.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    for ((lo,at),hi) in below.string_displacement.iter()
+        .zip(&a.string_displacement).zip(&above.string_displacement) {
+        // A lossless antiresonance can have a steep first derivative. Check
+        // that the two independently full-pencil-verified perturbations have
+        // the same local slope, without imposing an artificial linewidth.
+        let span=(*hi-*lo).abs();
+        let curvature=(*hi+*lo-at.scale(2.0)).abs();
+        assert!(curvature<0.01*span+1e-8*scale,
+            "coincident-pole response has a nonsmooth local perturbation: {curvature:e} vs {span:e}");
     }
     // Work-conjugate ports remain reciprocal. At the exact partial the bridge
     // may be an antiresonance, so avoid dividing by its near-zero velocity.

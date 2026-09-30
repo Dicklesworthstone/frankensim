@@ -173,7 +173,26 @@ pub fn build_with_rt0425_contacts(divisions: usize) -> Result<Preset,String> {
 }
 
 fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Preset,String> {
-    if !(4..=24).contains(&divisions) { return Err("Model D mesh divisions must be 4..24".into()); }
+    if !(4..=32).contains(&divisions) { return Err("Model D mesh divisions must be 4..32".into()); }
+    build_inner(divisions, published_contacts, None)
+}
+
+#[cfg(test)]
+pub(crate) fn build_probe(divisions: usize) -> Result<Preset,String> {
+    if !(33..=64).contains(&divisions) { return Err("research mesh divisions must be 33..64".into()); }
+    build_inner(divisions, false, None)
+}
+
+#[cfg(test)]
+pub(crate) fn build_probe_refined(divisions: usize, maximum_station_gap: f64) -> Result<Preset,String> {
+    if !(33..=64).contains(&divisions) || !maximum_station_gap.is_finite()
+        || maximum_station_gap<=0. {
+        return Err("invalid research mesh divisions or row gap".into());
+    }
+    build_inner(divisions, false, Some(maximum_station_gap))
+}
+
+fn build_inner(divisions: usize, published_contacts: bool, maximum_station_gap: Option<f64>) -> Result<Preset,String> {
     let curves=[LONG_BRIDGE,BASS_BRIDGE,CUTOFF];
     let mut levels:Vec<f64>=OUTLINE.iter().copied().map(station).collect();
     levels.extend(RIBS.iter().map(|r|r.0));
@@ -182,6 +201,16 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
     let mut extra=Vec::new();
     for p in levels.windows(2) { if p[1]-p[0]>55.0 {extra.push((p[0]+p[1])*0.5);} }
     levels.extend(extra); levels.sort_by(f64::total_cmp);
+    if let Some(maximum_gap)=maximum_station_gap {
+        let mut refined=Vec::new();
+        for pair in levels.windows(2) {
+            let segments=((pair[1]-pair[0])/maximum_gap).ceil() as usize;
+            for index in 1..segments {
+                refined.push(pair[0]+(pair[1]-pair[0])*index as f64/segments as f64);
+            }
+        }
+        levels.extend(refined); levels.sort_by(f64::total_cmp);
+    }
     let mut xy=Vec::new(); let mut rows=Vec::new();
     for t in levels {
         let ends=intersections(OUTLINE,t,true);
@@ -206,18 +235,40 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
         rows.push(row);
     }
     let mut tris=Vec::new();
-    // Merge the normalized abscissae of adjacent rows: a conforming strip
-    // triangulation, including one-node end caps, with no T-junctions.
+    // Each bridge/cut-off beam between rows must also be a triangle edge.
+    // Partition the strip at features shared by both rows, then merge the
+    // normalized abscissae within each partition. Merging entire rows lets
+    // the chosen diagonal cross a structural beam, disconnecting its span
+    // from the plate interior except at the two endpoint nodes.
     for pair in rows.windows(2) {
-        let (a,b)=(&pair[0].nodes,&pair[1].nodes);let(mut i,mut j)=(0,0);
-        while i+1<a.len()||j+1<b.len() {
-            let next=|ids:&[usize],k:usize| {
-                if k+1==ids.len(){f64::INFINITY}else{
-                    (xy[ids[k+1]][0]-xy[ids[0]][0])/(xy[*ids.last().unwrap()][0]-xy[ids[0]][0])
+        let (a,b)=(&pair[0].nodes,&pair[1].nodes);
+        let mut cuts=vec![(0,0)];
+        for k in 0..3 {
+            if let (Some(left),Some(right))=(pair[0].features[k],pair[1].features[k]) {
+                let ia=a.iter().position(|&node|node==left).ok_or("missing upper feature node")?;
+                let ib=b.iter().position(|&node|node==right).ok_or("missing lower feature node")?;
+                cuts.push((ia,ib));
+            }
+        }
+        cuts.push((a.len()-1,b.len()-1));
+        cuts.sort_unstable();cuts.dedup();
+        for limits in cuts.windows(2) {
+            let ((a0,b0),(a1,b1))=(limits[0],limits[1]);
+            if b0>b1 {return Err("structural feature edges cross inside a sweep strip".into());}
+            let (left,right)=(&a[a0..=a1],&b[b0..=b1]);
+            let (mut i,mut j)=(0,0);
+            while i+1<left.len()||j+1<right.len() {
+                let next=|ids:&[usize],k:usize| {
+                    if k+1==ids.len(){f64::INFINITY}else{
+                        (xy[ids[k+1]][0]-xy[ids[0]][0])/(xy[*ids.last().unwrap()][0]-xy[ids[0]][0])
+                    }
+                };
+                if next(left,i)<=next(right,j) {
+                    append_triangle(&mut tris,&xy,left[i],left[i+1],right[j]);i+=1;
+                } else {
+                    append_triangle(&mut tris,&xy,left[i],right[j+1],right[j]);j+=1;
                 }
-            };
-            if next(a,i)<=next(b,j) {append_triangle(&mut tris,&xy,a[i],a[i+1],b[j]);i+=1;}
-            else {append_triangle(&mut tris,&xy,a[i],b[j+1],b[j]);j+=1;}
+            }
         }
     }
     let mut edges:BTreeMap<(usize,usize),usize>=BTreeMap::new();
@@ -248,6 +299,11 @@ fn build_with_contacts(divisions: usize, published_contacts: bool) -> Result<Pre
                     else {(0.026,0.044-0.022*u,12.6e9,0.9e9,705.,if k==0{"maple_long_bridge"}else{"maple_bass_bridge"},1.)};
                 beams.push(Beam{a,b,width:w,height:h,z:side*0.5*(thickness(mid)+h),e,g,rho,group:name.into()});
             }
+        }
+    }
+    for beam in &beams {
+        if !edges.contains_key(&(beam.a.min(beam.b),beam.a.max(beam.b))) {
+            return Err("structural beam crosses a panel triangle interior".into());
         }
     }
     let contacts = if published_contacts {
@@ -324,12 +380,50 @@ mod tests {
         assert_eq!(p.geometry,build(6).unwrap().geometry);
     }
     #[test]
+    fn generated_bridge_contacts_lie_on_conforming_structural_edges() {
+        for divisions in [6, 12, 24, 28, 32] {
+            for published in [false, true] {
+                let p=build_with_contacts(divisions,published).unwrap();
+                super::super::board_geometry::BoardGeometry::read(&p.geometry).unwrap();
+                let mut edges=std::collections::BTreeSet::new();
+                for row in p.geometry.lines().filter(|row|row.starts_with("triangle,")) {
+                    let nodes=row.split(',').skip(2).take(3)
+                        .map(|x|x.parse::<usize>().unwrap()).collect::<Vec<_>>();
+                    for pair in [(nodes[0],nodes[1]),(nodes[1],nodes[2]),(nodes[2],nodes[0])] {
+                        edges.insert((pair.0.min(pair.1),pair.0.max(pair.1)));
+                    }
+                }
+                let mut beam_count=0;
+                for row in p.geometry.lines().filter(|row|row.starts_with("stiffener,")) {
+                    let nodes=row.split(',').rev().take(2)
+                        .map(|x|x.parse::<usize>().unwrap()).collect::<Vec<_>>();
+                    assert!(edges.contains(&(nodes[0].min(nodes[1]),nodes[0].max(nodes[1]))),
+                        "mesh={divisions} published={published}: beam crosses panel: {row}");
+                    beam_count+=1;
+                }
+                assert!(beam_count>0);
+                let mut count=0;
+                for row in p.geometry.lines().filter(|row|row.starts_with("bridge,")) {
+                    let weights=row.split(',').skip(3).map(|x|x.parse::<f64>().unwrap()).collect::<Vec<_>>();
+                    assert_eq!(weights.len(),3);
+                    assert!(weights.iter().any(|w|w.abs()<1e-8),
+                        "mesh={divisions} published={published}: contact inside triangle: {row}");
+                    count+=1;
+                }
+                assert_eq!(count,88);
+            }
+        }
+    }
+    #[test]
     fn source_scale_and_bounds_are_physical() {
         let spacing=(LAST_RIB-FIRST_RIB)/16.*scale()/(1.+SLOPE*SLOPE).sqrt();
         assert!((spacing-SPACING_M).abs()<1e-14);
         for p in OUTLINE {let q=si(*p);assert!((0.0..1.56).contains(&q[0]));assert!((0.0..2.74).contains(&q[1]));}
         assert_eq!(RIBS.len(),17);
-        assert!(build(0).is_err());assert!(build(25).is_err());
+        assert!(build(0).is_err());assert!(build(33).is_err());
+        let fine=build(32).unwrap();
+        super::super::board_geometry::BoardGeometry::read(&fine.geometry).unwrap();
+        assert_eq!(fine.geometry.lines().filter(|l|l.starts_with("bridge,")).count(),88);
     }
     #[test]
     fn rt0425_contacts_cover_published_keys_and_remain_on_reconstructed_bridges() {

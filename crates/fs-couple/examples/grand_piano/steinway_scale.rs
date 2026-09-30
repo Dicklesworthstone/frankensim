@@ -154,6 +154,15 @@ pub fn hammer_relaxation_rt0425(midi: u8) -> Result<f64, String> {
     Ok(k * det::pow(10.0, -0.04366 * i - 2.294))
 }
 
+/// RT-0425 section 3.2 equation (6): transverse string loss rate [1/s] and
+/// strain-rate coefficient [s]. The four unlisted end keys use the published
+/// formula as an explicit extrapolation, just as the scale does.
+pub fn string_damping_rt0425(midi: u8) -> Result<(f64, f64), String> {
+    if !(21..=108).contains(&midi) { return Err("string damping key outside A0..C8".into()); }
+    let i = f64::from(midi - 20);
+    Ok(((5.0e-3 * i - 0.015).max(0.0), 2.78e-11 * i + 1.5274e-9))
+}
+
 fn hammer_material_with_allocation(c: &Course, per_string: bool)
     -> Result<(WoolFelt, GeneralizedMaxwell), String> {
     c.validate()?;
@@ -215,6 +224,21 @@ pub fn courses() -> Result<Vec<Course>, String> {
 mod tests {
     use super::*;
     use fs_material::Uniaxial;
+    #[test]
+    fn published_string_loss_rates_match_report_and_name_end_extrapolation() {
+        let c1 = string_damping_rt0425(24).unwrap();
+        let a4 = string_damping_rt0425(69).unwrap();
+        let b7 = string_damping_rt0425(107).unwrap();
+        assert!((c1.0 - 0.005).abs() < 1e-14);
+        assert!((a4.0 - 0.230).abs() < 1e-14);
+        assert!((b7.0 - 0.420).abs() < 1e-14);
+        assert!((c1.1 - 1.6386e-9).abs() < 1e-20);
+        assert!((a4.1 - 2.8896e-9).abs() < 1e-20);
+        assert!((b7.1 - 3.9460e-9).abs() < 1e-20);
+        assert_eq!(string_damping_rt0425(21).unwrap().0, 0.0);
+        assert!(string_damping_rt0425(20).is_err());
+        assert!(string_damping_rt0425(109).is_err());
+    }
     #[test]
     fn published_scale_break_and_tensions_are_not_smoothed_or_retuned() {
         let s = courses().unwrap();

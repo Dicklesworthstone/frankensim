@@ -51,7 +51,7 @@ pub struct BoardGeometry {
     damping_ratio: f64,
 }
 
-/// One degree-two triangle quadrature point for the P1 surface displacement.
+/// One degree-two triangle or subtriangle quadrature point for P1 displacement.
 /// These are bare-board coordinates; the coupled bank owns their mass-loading
 /// transformation. Areas sum to the panel area, not to its bounding rectangle.
 #[derive(Clone, Debug)]
@@ -242,14 +242,54 @@ impl BoardGeometry {
     /// placed oscillators for missing geometry. All retained modes have SI,
     /// mass-normalized work-conjugate bridge force/displacement projections.
     pub fn prepare(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
-        self.prepare_inner(keys, upper_hz, false)
+        self.prepare_inner(keys, upper_hz, false, false, false, false)
+    }
+    /// Use the same physical pencil in mass-equilibrated coordinates. This
+    /// is an opt-in numerical trial; it does not alter geometry or materials.
+    pub fn prepare_mass_equilibrated(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, false, true, false, false)
+    }
+    /// Use exact P1 transverse panel inertia; slope and beam inertia remain
+    /// lumped. This is an opt-in structural discretization trial.
+    pub fn prepare_consistent_transverse_mass(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        mass_equilibrated: bool,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, false, mass_equilibrated, true, false)
+    }
+    /// Integrate the opt-in cubic edge-compatible transverse field and use
+    /// its matching reciprocal bridge and radiation-sample shapes. The
+    /// currently reconstructed board still requires independent convergence
+    /// and measured acoustic validation before this can be a default.
+    pub fn prepare_edge_cubic_transverse_mass(
+        &self, keys: &[u8], upper_hz: f64, mass_equilibrated: bool,
+    ) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, false, mass_equilibrated, false, true)
     }
     /// Retain full-vector nodal motion for a finite acoustic skin. The same
     /// eigensolve supplies mechanics and acoustics, including repeated modes.
     pub fn prepare_with_motion(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
-        self.prepare_inner(keys, upper_hz, true)
+        self.prepare_inner(keys, upper_hz, true, false, false, false)
     }
-    fn prepare_inner(&self, keys: &[u8], upper_hz: f64, retain_motion: bool) -> Result<PreparedBoard, String> {
+    /// Retain the same full-vector skin motion while solving the unchanged
+    /// geometric board pencil in mass-equilibrated coordinates.
+    pub fn prepare_with_motion_mass_equilibrated(&self, keys: &[u8], upper_hz: f64) -> Result<PreparedBoard, String> {
+        self.prepare_inner(keys, upper_hz, true, true, false, false)
+    }
+    fn prepare_inner(
+        &self,
+        keys: &[u8],
+        upper_hz: f64,
+        retain_motion: bool,
+        mass_equilibrated: bool,
+        consistent_transverse_mass: bool,
+        edge_cubic_transverse_mass: bool,
+    ) -> Result<PreparedBoard, String> {
+        if consistent_transverse_mass && edge_cubic_transverse_mass {
+            return Err("choose one transverse panel mass law".into());
+        }
         if !upper_hz.is_finite() || upper_hz <= 0.0 || upper_hz > 80_000.0 {
             return Err("invalid soundboard frequency ceiling".into());
         }
@@ -263,9 +303,22 @@ impl BoardGeometry {
             }
         }
         if keys.is_empty() { return Err("empty key set".into()); }
-        let model = self.chart.assemble(&self.stiffeners, &self.supports).map_err(|e| e.to_string())?;
+        let model = if edge_cubic_transverse_mass {
+            self.chart
+                .assemble_edge_cubic_transverse_mass(&self.stiffeners, &self.supports)
+        } else if consistent_transverse_mass {
+            self.chart
+                .assemble_consistent_transverse_mass(&self.stiffeners, &self.supports)
+        } else {
+            self.chart.assemble(&self.stiffeners, &self.supports)
+        }
+        .map_err(|e| e.to_string())?;
         if model.free == 0 { return Err("all soundboard degrees of freedom are constrained".into()); }
-        let report = fs_plate::modes(&model, (0.0, (TAU * upper_hz).powi(2)), &SliceOptions::default())
+        let modal_options = SliceOptions {
+            mass_diagonal_equilibration: mass_equilibrated,
+            ..SliceOptions::default()
+        };
+        let report = fs_plate::modes(&model, (0.0, (TAU * upper_hz).powi(2)), &modal_options)
             .map_err(|e| e.to_string())?;
         if report.below_low != 0 { return Err("unstable soundboard has negative stiffness eigenvalues".into()); }
         if report.modes.is_empty() || report.modes.len() > MAX_BOARD_MODES {
@@ -273,9 +326,21 @@ impl BoardGeometry {
         }
         let mesh = &self.chart.mesh;
         let mut volume_weights = vec![0.0; mesh.nodes.len()];
+        let mut cubic_volume_shape = vec![0.0; model.free];
         for tri in &mesh.tris {
             let area = triangle_area(mesh, *tri);
-            for &node in tri { volume_weights[node] += area / 3.0; }
+            if edge_cubic_transverse_mass {
+                let x=tri.map(|node|mesh.nodes[node].0);
+                let y=tri.map(|node|mesh.nodes[node].1);
+                let mean=fs_plate::edge_cubic_transverse_mean_shape(&x,&y);
+                for local in 0..9 {
+                    if let Some(index)=model.dof_map[3*tri[local/3]+local%3] {
+                        cubic_volume_shape[index]+=area*mean[local];
+                    }
+                }
+            } else {
+                for &node in tri { volume_weights[node] += area / 3.0; }
+            }
         }
         let mut modes = Vec::with_capacity(report.modes.len());
         let mut intervals = Vec::with_capacity(report.modes.len());
@@ -302,9 +367,18 @@ impl BoardGeometry {
             let mut bridge = [0.0; 88];
             for site in &self.bridge_sites {
                 let tri = mesh.tris[site.triangle];
-                bridge[usize::from(site.midi - 21)] = (0..3).map(|i| site.weights[i] * w(tri[i])).sum();
+                bridge[usize::from(site.midi - 21)] = if edge_cubic_transverse_mass {
+                    let shape=cubic_triangle_shape(mesh,tri,site.weights);
+                    local_shape_displacement(&model,&pair.phi,tri,&shape)
+                } else {
+                    (0..3).map(|i| site.weights[i] * w(tri[i])).sum()
+                };
             }
-            let volume: f64 = volume_weights.iter().enumerate().map(|(node, area)| area * w(node)).sum();
+            let volume: f64 = if edge_cubic_transverse_mass {
+                cubic_volume_shape.iter().zip(&pair.phi).map(|(shape,value)|shape*value).sum()
+            } else {
+                volume_weights.iter().enumerate().map(|(node, area)| area * w(node)).sum()
+            };
             if !volume.is_finite() || bridge.iter().any(|x| !x.is_finite()) {
                 return Err("soundboard port projection overflow".into());
             }
@@ -314,6 +388,9 @@ impl BoardGeometry {
             });
             intervals.push((det::sqrt(pair.interval.0) / TAU, det::sqrt(pair.interval.1) / TAU));
         }
+        // The chosen symmetric cubic interior rule makes this positive
+        // three-point rule reproduce its exact area mean; fs-plate proves
+        // that identity for every local displacement DOF.
         let mut surface = Vec::with_capacity(3 * mesh.tris.len());
         for tri in &mesh.tris {
             let area = triangle_area(mesh, *tri) / 3.0;
@@ -324,9 +401,16 @@ impl BoardGeometry {
                     position[0] += weights[i] * mesh.nodes[tri[i]].0;
                     position[1] += weights[i] * mesh.nodes[tri[i]].1;
                 }
-                let shape = report.modes.iter().map(|pair| (0..3)
-                    .map(|i| weights[i] * nodal_displacement(&model, &pair.phi, tri[i])).sum())
-                    .collect();
+                let cubic_shape=edge_cubic_transverse_mass
+                    .then(||cubic_triangle_shape(mesh,*tri,weights));
+                let shape = report.modes.iter().map(|pair| {
+                    if let Some(coefficients)=&cubic_shape {
+                        local_shape_displacement(&model,&pair.phi,*tri,coefficients)
+                    } else {
+                        (0..3).map(|i| weights[i]
+                            *nodal_displacement(&model,&pair.phi,tri[i])).sum()
+                    }
+                }).collect();
                 surface.push(SurfaceSample { position_m: position, area_m2: area, mode_shape: shape });
             }
         }
@@ -342,8 +426,18 @@ impl BoardGeometry {
         } else {None};
         let mass = self.mass_kg();
         if !mass.is_finite() || mass <= 0.0 { return Err("board mass overflow".into()); }
+        let mut provenance = self.provenance.clone();
+        if consistent_transverse_mass {
+            provenance.push_str("; exact P1 transverse panel mass; lumped slope/beam mass");
+        }
+        if edge_cubic_transverse_mass {
+            provenance.push_str("; opt-in cubic edge-compatible panel mass and bridge/surface fields; lumped rotary/beam inertia");
+        }
+        if mass_equilibrated {
+            provenance.push_str("; mass-diagonal solver equilibration");
+        }
         Ok(PreparedBoard {
-            modes, surface, motion, provenance: self.provenance.clone(), area_m2: mesh.total_area(),
+            modes, surface, motion, provenance, area_m2: mesh.total_area(),
             mass_kg: mass, frequency_intervals_hz: intervals, free_dofs: model.free,
         })
     }
@@ -367,6 +461,15 @@ impl BoardGeometry {
 
 fn nodal_displacement(model: &PlateModel, phi: &[f64], node: usize) -> f64 {
     model.dof_map[3 * node].map_or(0.0, |i| phi[i])
+}
+fn cubic_triangle_shape(mesh: &PlateMesh, tri: [usize; 3], weights: [f64; 3]) -> [f64; 9] {
+    let x=tri.map(|node|mesh.nodes[node].0);
+    let y=tri.map(|node|mesh.nodes[node].1);
+    fs_plate::edge_cubic_transverse_shape(&x,&y,weights)
+}
+fn local_shape_displacement(model: &PlateModel, phi: &[f64], tri: [usize; 3], shape: &[f64; 9]) -> f64 {
+    (0..9).map(|local|model.dof_map[3*tri[local/3]+local%3]
+        .map_or(0.0,|index|shape[local]*phi[index])).sum()
 }
 fn triangle_area(mesh: &PlateMesh, tri: [usize; 3]) -> f64 {
     let (a, b, c) = (mesh.nodes[tri[0]], mesh.nodes[tri[1]], mesh.nodes[tri[2]]);
@@ -497,6 +600,323 @@ mod tests {
         for point in &full.surface {
             let row=motion.normal_weights(point.position_m,[0.,0.,1.],0.).unwrap();
             for (a,b) in row.iter().zip(&point.mode_shape) {assert!((a-b).abs()<1e-11);}
+        }
+    }
+
+    /// Research probe only: inspect the complete FE pencil above the runtime
+    /// budget before considering a score/bridge-local reduction. A one-frequency
+    /// ranking is deliberately not an admission rule for playable dynamics.
+    #[test]
+    #[ignore = "expensive Model D high-band eigenanalysis on the reviewed build host"]
+    fn model_d_high_band_bridge_port_participation() {
+        use fs_math::c64::C64;
+        let divisions=std::env::var("FS_PIANO_PROBE_MESH_DIVISIONS")
+            .map_or(Ok(24),|value|value.parse::<usize>()).unwrap();
+        assert!([22,24,28,32,36,40,48,56,64].contains(&divisions));
+        let row_gap=std::env::var("FS_PIANO_PROBE_ROW_GAP")
+            .ok().map(|value|value.parse::<f64>().unwrap());
+        assert!(row_gap.is_none() || divisions>32);
+        let preset=if let Some(gap)=row_gap {super::super::steinway_d::build_probe_refined(divisions,gap)}
+            else if divisions<=32 {super::super::steinway_d::build(divisions)}
+            else {super::super::steinway_d::build_probe(divisions)}.unwrap();
+        if let Ok(path)=std::env::var("FS_PIANO_PROBE_DUMP_GEOMETRY") {
+            use std::io::Write;
+            let mut file=std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(&path).expect("new research geometry path");
+            file.write_all(preset.geometry.as_bytes()).expect("research geometry write");
+            println!("MODEL_D_GEOMETRY path={path} bytes={}",preset.geometry.len());
+            if std::env::var("FS_PIANO_PROBE_EXPORT_ONLY").as_deref()==Ok("1") {return;}
+        }
+        let geometry=BoardGeometry::read(&preset.geometry).unwrap();
+        println!("MODEL_D_MESH mesh={divisions} row_gap={row_gap:?} nodes={} triangles={}",
+            geometry.chart.mesh.nodes.len(),geometry.chart.mesh.tris.len());
+        assert_eq!(geometry.bridge_sites.len(),88);
+        assert!(geometry.bridge_sites.iter().all(|site|
+            site.weights.iter().any(|weight|weight.abs()<1e-8)));
+        let mut quality=geometry.chart.mesh.tris.iter().enumerate().map(|(index,triangle)| {
+            let points=triangle.map(|node|geometry.chart.mesh.nodes[node]);
+            let side=|a:(f64,f64),b:(f64,f64)|(a.0-b.0).powi(2)+(a.1-b.1).powi(2);
+            let sum=side(points[0],points[1])+side(points[1],points[2])+side(points[2],points[0]);
+            let twice_area=((points[1].0-points[0].0)*(points[2].1-points[0].1)
+                -(points[1].1-points[0].1)*(points[2].0-points[0].0)).abs();
+            (2.*det::sqrt(3.)*twice_area/sum,index)
+        }).collect::<Vec<_>>();
+        quality.sort_by(|a,b|a.0.total_cmp(&b.0));
+        println!("MESH_QUALITY mesh={divisions} triangles={} min={:.9e} p01={:.9e} median={:.9e}",
+            quality.len(),quality[0].0,quality[quality.len()/100].0,quality[quality.len()/2].0);
+        for &(shape,index) in quality.iter().take(3) {
+            let triangle=geometry.chart.mesh.tris[index];
+            println!("WORST_TRIANGLE mesh={divisions} index={index} quality={shape:.9e} nodes={triangle:?} points={:?}",
+                triangle.map(|node|geometry.chart.mesh.nodes[node]));
+        }
+        let consistent_mass=std::env::var("FS_PIANO_PROBE_CONSISTENT_MASS").as_deref()==Ok("1");
+        let edge_cubic_mass=std::env::var("FS_PIANO_PROBE_EDGE_CUBIC_MASS").as_deref()==Ok("1");
+        let edge_cubic_port=std::env::var("FS_PIANO_PROBE_EDGE_CUBIC_PORT").as_deref()==Ok("1");
+        assert!(!(consistent_mass && edge_cubic_mass));
+        assert!(!edge_cubic_port || edge_cubic_mass);
+        let model=if edge_cubic_mass {
+            geometry.chart.assemble_edge_cubic_transverse_mass(&geometry.stiffeners,&geometry.supports)
+        } else if consistent_mass {
+            geometry.chart.assemble_consistent_transverse_mass(&geometry.stiffeners,&geometry.supports)
+        } else {
+            geometry.chart.assemble(&geometry.stiffeners,&geometry.supports)
+        }.unwrap();
+        let report=fs_plate::modes(&model,(0.,(TAU*2200.).powi(2)),&SliceOptions {
+            mass_diagonal_equilibration:true,..SliceOptions::default()
+        }).unwrap();
+        assert_eq!(report.below_low,0);
+        assert_eq!(report.expected,report.modes.len());
+        println!("MODEL_D_PENCIL mesh={divisions} mass={} modes={}",
+            if edge_cubic_mass {"edge_cubic"} else if consistent_mass {"exact_p1"} else {"lumped"},
+            report.modes.len());
+        assert!(report.modes.len()>100);
+        // The original cap probe is still binding through mesh 56. Mesh 64
+        // has a measured 127-mode default slice and is a convergence probe,
+        // not an expected over-cap refusal.
+        if !consistent_mass && !edge_cubic_mass && divisions<=56 {
+            assert!(report.modes.len()>MAX_BOARD_MODES);
+        }
+        let retained=report.modes.len().min(MAX_BOARD_MODES);
+        let port=|phi:&[f64],key:u8| {
+            let site=geometry.bridge_sites.iter().find(|site|site.midi==key).unwrap();
+            let triangle=geometry.chart.mesh.tris[site.triangle];
+            if edge_cubic_port {
+                let active=site.weights.iter().enumerate()
+                    .filter(|(_,weight)|**weight>1e-8).map(|(i,_)|i).collect::<Vec<_>>();
+                if active.len()==2 {
+                    let (i,j)=(active[0],active[1]);
+                    let (ni,nj)=(triangle[i],triangle[j]);
+                    let t=site.weights[j]/(site.weights[i]+site.weights[j]);
+                    let (pi,pj)=(geometry.chart.mesh.nodes[ni],geometry.chart.mesh.nodes[nj]);
+                    let slope=|node:usize| {
+                        let dx=model.dof_map[3*node+1].map_or(0.,|index|phi[index]);
+                        let dy=model.dof_map[3*node+2].map_or(0.,|index|phi[index]);
+                        dx*(pj.0-pi.0)+dy*(pj.1-pi.1)
+                    };
+                    return (2.*t*t*t-3.*t*t+1.)*nodal_displacement(&model,phi,ni)
+                        +(t*t*t-2.*t*t+t)*slope(ni)
+                        +(-2.*t*t*t+3.*t*t)*nodal_displacement(&model,phi,nj)
+                        +(t*t*t-t*t)*slope(nj);
+                }
+            }
+            (0..3).map(|i|site.weights[i]*nodal_displacement(&model,phi,triangle[i])).sum::<f64>()
+        };
+        for (drive,receive) in [(60,60),(69,69),(84,84),(84,69),(69,60),(84,60)] {
+            for sample in 0..=120 {
+                let hz=1200.+sample as f64*1000./120.;
+                let omega=TAU*hz;
+                let mobility=report.modes.iter().fold(C64::ZERO,|total,pair| {
+                    let natural=det::sqrt(pair.lambda);
+                    total+C64::new(0.,-omega)
+                        .scale(port(&pair.phi,drive)*port(&pair.phi,receive))
+                        /C64::new(natural*natural-omega*omega,
+                            -2.*geometry.damping_ratio*natural*omega)
+                });
+                println!("MOBILITY_GRID mesh={divisions} drive={drive} receive={receive} hz={hz:.9} re={:.17e} im={:.17e}",mobility.re,mobility.im);
+            }
+        }
+        for (drive,receive,hz) in [(84,84,2110.),(84,69,2110.),(69,69,880.)] {
+            let omega=TAU*hz;
+            let mut terms:Vec<_>=report.modes.iter().enumerate().map(|(index,pair)| {
+                let natural=det::sqrt(pair.lambda);
+                let denominator=C64::new(natural*natural-omega*omega,
+                    -2.*geometry.damping_ratio*natural*omega);
+                let transfer=C64::new(0.,-omega)
+                    .scale(port(&pair.phi,drive)*port(&pair.phi,receive))/denominator;
+                (index,natural/TAU,transfer)
+            }).collect();
+            let full=terms.iter().fold(C64::ZERO,|total,term|total+term.2);
+            let low=terms.iter().filter(|term|term.1<=1200.)
+                .fold(C64::ZERO,|total,term|total+term.2);
+            assert!(full.re.is_finite() && full.im.is_finite() && full.abs()>0.);
+            if drive==receive {assert!(full.re>=0.);}
+            terms.sort_by(|a,b|b.2.abs().total_cmp(&a.2.abs()).then(a.0.cmp(&b.0)));
+            if drive==84 && receive==69 {
+                for (index,natural,transfer) in terms.iter().take(12) {
+                    println!("PORT_MODE mesh={divisions} index={index} hz={natural:.9} re={:.17e} im={:.17e} magnitude={:.17e}",
+                        transfer.re,transfer.im,transfer.abs());
+                }
+                for (index,natural,transfer) in terms.iter().filter(|term|(90..=100).contains(&term.0)) {
+                    println!("CLUSTER_MODE mesh={divisions} index={index} hz={natural:.9} re={:.17e} im={:.17e}",
+                        transfer.re,transfer.im);
+                }
+            }
+            let total_abs=terms.iter().map(|term|term.2.abs()).sum::<f64>();
+            let count_99=terms.iter().scan(0.,|sum,term|{*sum+=term.2.abs();Some(*sum)})
+                .position(|sum|sum>=0.99*total_abs).unwrap()+1;
+            let omitted_bound=terms[retained..].iter().map(|term|term.2.abs()).sum::<f64>();
+            let reduced=terms[..retained].iter().fold(C64::ZERO,|total,term|total+term.2);
+            println!("mesh={divisions} full_modes={} drive={drive} receive={receive} hz={hz} Y_re={:.9e} Y_im={:.9e} |Y|={:.9e} low_1200_relative_error={:.6} top128_relative_error={:.6} omitted_absolute_bound_relative={:.6} terms_for_99pct_absolute={count_99}",
+                report.modes.len(),full.re,full.im,full.abs(),(full-low).abs()/full.abs(),
+                (full-reduced).abs()/full.abs(),omitted_bound/full.abs());
+        }
+        let mut source_bounds:Vec<_>=report.modes.iter().enumerate().map(|(index,pair)| {
+            let drive=port(&pair.phi,84).abs();
+            let maximum_receiver=(21..=108).map(|key|port(&pair.phi,key).abs())
+                .fold(0.0_f64,f64::max);
+            let natural=det::sqrt(pair.lambda);
+            (index,drive*maximum_receiver/(2.*geometry.damping_ratio*natural))
+        }).collect();
+        source_bounds.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let total_bound=source_bounds.iter().map(|entry|entry.1).sum::<f64>();
+        let omitted=source_bounds[retained..].iter().map(|entry|entry.1).sum::<f64>();
+        let count_99=source_bounds.iter().scan(0.,|sum,entry|{*sum+=entry.1;Some(*sum)})
+            .position(|sum|sum>=0.99*total_bound).unwrap()+1;
+        println!("C6 drive to every bridge: top128 omitted global absolute mobility bound={omitted:.9e} m/(N s), bound fraction={:.6}, terms_for_99pct_bound={count_99}",
+            omitted/total_bound);
+        let selected: BTreeSet<_>=source_bounds[..retained].iter().map(|entry|entry.0).collect();
+        for receive in [84,69] {
+            let omega=TAU*2110.;
+            let mut full=C64::ZERO;
+            let mut reduced=C64::ZERO;
+            for (index,pair) in report.modes.iter().enumerate() {
+                let natural=det::sqrt(pair.lambda);
+                let term=C64::new(0.,-omega)
+                    .scale(port(&pair.phi,84)*port(&pair.phi,receive))
+                    /C64::new(natural*natural-omega*omega,
+                        -2.*geometry.damping_ratio*natural*omega);
+                full=full+term;
+                if selected.contains(&index) {reduced=reduced+term;}
+            }
+            println!("C6 source-bound top128 at 2110 Hz to key {receive}: relative complex error={:.6}, common all-receiver bound/full={:.6}",
+                (full-reduced).abs()/full.abs(),omitted/full.abs());
+        }
+    }
+
+    /// Compare the complete bridge projection of nearby high-band modes on
+    /// two conforming meshes. Nearest frequency alone can misidentify a mode
+    /// when a tight cluster changes order or rotates its shape.
+    #[test]
+    #[ignore = "two expensive exact-P1 Model D eigenanalyses on the reviewed build host"]
+    fn model_d_high_band_bridge_mode_match() {
+        let mut banks=Vec::new();
+        let mut fields=Vec::new();
+        for divisions in [40,48] {
+            let preset=super::super::steinway_d::build_probe(divisions).unwrap();
+            let geometry=BoardGeometry::read(&preset.geometry).unwrap();
+            assert!(geometry.bridge_sites.iter().map(|site|site.midi).eq(21..=108));
+            let model=geometry.chart.assemble_consistent_transverse_mass(
+                &geometry.stiffeners,&geometry.supports).unwrap();
+            let report=fs_plate::modes(&model,(0.,(TAU*2200.).powi(2)),&SliceOptions {
+                mass_diagonal_equilibration:true,..SliceOptions::default()
+            }).unwrap();
+            assert_eq!(report.below_low,0);
+            assert_eq!(report.expected,report.modes.len());
+            assert!(report.modes.len()>100);
+            let bank=report.modes.iter().map(|mode| {
+                let bridge=geometry.bridge_sites.iter().map(|site| {
+                    let triangle=geometry.chart.mesh.tris[site.triangle];
+                    (0..3).map(|corner|site.weights[corner]
+                        *nodal_displacement(&model,&mode.phi,triangle[corner]))
+                        .sum::<f64>()
+                }).collect::<Vec<_>>();
+                let norm=det::sqrt(bridge.iter().map(|value|value*value).sum::<f64>());
+                assert!(norm>0. && norm.is_finite());
+                let c6=bridge[84-21];
+                let a4=bridge[69-21];
+                (det::sqrt(mode.lambda)/TAU,bridge,norm,c6,a4)
+            }).collect::<Vec<_>>();
+            banks.push(bank);
+            fields.push((geometry,model,report.modes[95].phi.clone()));
+        }
+        let (coarse,fine)=(&banks[0],&banks[1]);
+        for i in 90..=100 {
+            let mut matches=(90..=100).map(|j| {
+                let dot=coarse[i].1.iter().zip(&fine[j].1)
+                    .map(|(left,right)|left*right).sum::<f64>();
+                (j,(dot/(coarse[i].2*fine[j].2)).abs())
+            }).collect::<Vec<_>>();
+            matches.sort_by(|a,b|b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            for &(j,score) in matches.iter().take(3) {
+                println!("BRIDGE_MODE_MATCH old={i} old_hz={:.9} old_c6={:.17e} old_a4={:.17e} new={j} new_hz={:.9} new_c6={:.17e} new_a4={:.17e} abs_cosine={score:.9}",
+                    coarse[i].0,coarse[i].3,coarse[i].4,fine[j].0,fine[j].3,fine[j].4);
+            }
+        }
+        for key in 79..=89 {
+            let station=key-21;
+            println!("C6_NEIGHBOR key={key} old_mode95={:.17e} new_mode95={:.17e}",
+                coarse[95].1[station],fine[95].1[station]);
+        }
+        let position=|(geometry,_,_):&(BoardGeometry,PlateModel,Vec<f64>),key:u8| -> [f64;2] {
+            let site=geometry.bridge_sites.iter().find(|site|site.midi==key).unwrap();
+            let triangle=geometry.chart.mesh.tris[site.triangle];
+            std::array::from_fn(|axis| (0..3).map(|corner| {
+                let node=geometry.chart.mesh.nodes[triangle[corner]];
+                site.weights[corner]*if axis==0 {node.0} else {node.1}
+            }).sum::<f64>())
+        };
+        let (c6,next)=(position(&fields[0],84),position(&fields[0],85));
+        for key in 79..=89 {
+            let a=position(&fields[0],key);
+            let b=position(&fields[1],key);
+            assert!((a[0]-b[0]).abs()<1e-10 && (a[1]-b[1]).abs()<1e-10);
+        }
+        let delta=[next[0]-c6[0],next[1]-c6[1]];
+        let length=det::sqrt(delta[0]*delta[0]+delta[1]*delta[1]);
+        assert!(length>0.);
+        let normal=[-delta[1]/length,delta[0]/length];
+        let sign=if coarse[95].1.iter().zip(&fine[95].1)
+            .map(|(a,b)|a*b).sum::<f64>()<0. {-1.} else {1.};
+        for fraction in [0.,0.25,0.5,0.75,1.] {
+            for offset in [-0.02,0.,0.02] {
+                let point=[c6[0]+fraction*delta[0]+offset*normal[0],
+                    c6[1]+fraction*delta[1]+offset*normal[1]];
+                let values=fields.iter().enumerate().map(|(index,(geometry,model,phi))| {
+                    let stencil=fs_plate::loading::PlatePointStencil::locate(
+                        &geometry.chart.mesh,model,point,
+                        fs_plate::loading::PlateLoadBudget {
+                            max_nodes:20_000,max_triangles:40_000,
+                        }).unwrap();
+                    let zero=vec![0.;phi.len()];
+                    let displacement=stencil.sample(phi,&zero).unwrap().displacement;
+                    if index==0 {displacement/coarse[95].2}
+                    else {sign*displacement/fine[95].2}
+                }).collect::<Vec<_>>();
+                println!("C6_LOCAL_FIELD fraction={fraction:.2} offset_m={offset:.3} x_m={:.9} y_m={:.9} old={:.17e} new={:.17e}",
+                    point[0],point[1],values[0],values[1]);
+            }
+        }
+    }
+
+    /// Independent smooth-plate reference at the same modal rank as the C6
+    /// instability. It separates DKT/mass discretization error from the
+    /// irregular source outline, beams and bridge stations.
+    #[test]
+    #[ignore = "six expensive high-band analytic-plate eigenanalyses"]
+    fn high_band_dkt_reference_plate() {
+        let (a,b,e,nu,h,rho)=(1.7,1.0,11.0e9,0.30,0.008,380.0);
+        let section=PlateSection::isotropic(e,nu,h,rho).unwrap();
+        let d=section.d[0];
+        let mut exact=(1..=30).flat_map(|m| (1..=30).map(move |n| {
+            let k=std::f64::consts::PI.powi(2)
+                *((m*m) as f64/(a*a)+(n*n) as f64/(b*b));
+            k*det::sqrt(d/(rho*h))/TAU
+        })).collect::<Vec<_>>();
+        exact.sort_by(f64::total_cmp);
+        for nx in [40,48] {
+            let ny=(nx as f64/a).round() as usize;
+            let chart=PlateChart::from_mesh(
+                PlateMesh::rectangle(a,b,nx,ny),section.clone()).unwrap();
+            let opts=AssemblyOptions {
+                pretension:0.,support:EdgeSupport::SimplySupported,
+            };
+            for (mass,model) in [
+                ("lumped",chart.assemble(&[],&opts).unwrap()),
+                ("exact_p1",chart.assemble_consistent_transverse_mass(&[],&opts).unwrap()),
+                ("edge_cubic",chart.assemble_edge_cubic_transverse_mass(&[],&opts).unwrap()),
+            ] {
+                let report=fs_plate::modes(&model,(0.,(TAU*2400.).powi(2)),&SliceOptions {
+                    mass_diagonal_equilibration:true,..SliceOptions::default()
+                }).unwrap();
+                assert_eq!(report.below_low,0);
+                assert_eq!(report.expected,report.modes.len());
+                assert!(report.modes.len()>100);
+                for rank in [20,50,95,100] {
+                    let actual=det::sqrt(report.modes[rank].lambda)/TAU;
+                    println!("ANALYTIC_DKT nx={nx} ny={ny} mass={mass} rank={rank} exact_hz={:.9} actual_hz={actual:.9} relative_error={:.9}",
+                        exact[rank],(actual-exact[rank]).abs()/exact[rank]);
+                }
+            }
         }
     }
 

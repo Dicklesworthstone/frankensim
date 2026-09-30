@@ -169,6 +169,15 @@ impl Instrument {
         modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
         shank_geometry:Option<ShankGeometry>,footprints:Option<&hammer_footprint::Specification>,
         secondary:Option<(&[Vec<f64>],&[f64])>)->Result<Self,String> {
+        Self::new_with_string_damping(courses,board,rate,substeps,modes_per_string,damping,
+            materials,shank_geometry,footprints,secondary,false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_string_damping(courses:Vec<Course>,board:&[BoardMode],rate:u32,substeps:usize,
+        modes_per_string:usize,damping:bool,materials:Vec<(WoolFelt,GeneralizedMaxwell)>,
+        shank_geometry:Option<ShankGeometry>,footprints:Option<&hammer_footprint::Specification>,
+        secondary:Option<(&[Vec<f64>],&[f64])>,rt0425_string_damping:bool)->Result<Self,String> {
         if secondary.is_some_and(|(_,ratios)| ratios.len()!=courses.len()
             || ratios.iter().any(|r|!r.is_finite() || !(0.0..=10.0).contains(r))) {
             return Err("two-plane piano needs explicit finite lateral damper ratios for every course".into());
@@ -187,10 +196,10 @@ impl Instrument {
         }
         let mechanics_rate=rate.checked_mul(substeps as u32).ok_or("mechanics rate overflow")?;
         let bank=match footprints {
-            Some(spec)=>Bank::new_with_hammer_footprints_and_transverse_bridge(&courses,board,mechanics_rate,
-                0.45*f64::from(rate),modes_per_string,damping,spec,secondary.map(|s|s.0))?,
-            None=>Bank::new_with_transverse_bridge(&courses,board,mechanics_rate,0.45*f64::from(rate),
-                modes_per_string,damping,secondary.map(|s|s.0))?,
+            Some(spec)=>Bank::new_with_hammer_footprints_and_string_damping(&courses,board,mechanics_rate,
+                0.45*f64::from(rate),modes_per_string,damping,spec,secondary.map(|s|s.0),rt0425_string_damping)?,
+            None=>Bank::new_with_string_damping(&courses,board,mechanics_rate,0.45*f64::from(rate),
+                modes_per_string,damping,secondary.map(|s|s.0),rt0425_string_damping)?,
         };
         let contact_solver=contact_solver::Prepared::new(&bank,&courses)?;
         let nc=bank.contact_strings.len();let dt=1.0/f64::from(mechanics_rate);
