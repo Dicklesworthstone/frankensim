@@ -136,8 +136,18 @@ impl Bank {
     pub fn new_with_hammer_footprints_and_transverse_bridge(courses: &[Course], board: &[super::BoardMode],
         rate: u32, band_hz: f64, max_modes: usize, damping: bool,
         spec: &Specification, secondary: Option<&[Vec<f64>]>) -> Result<Self, String> {
+        Self::new_with_hammer_footprints_and_string_damping(courses, board, rate,
+            band_hz, max_modes, damping, spec, secondary, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_hammer_footprints_and_string_damping(courses: &[Course], board: &[super::BoardMode],
+        rate: u32, band_hz: f64, max_modes: usize, damping: bool,
+        spec: &Specification, secondary: Option<&[Vec<f64>]>,
+        rt0425_string_damping: bool) -> Result<Self, String> {
         spec.validate(courses)?;
-        let mut bank = Self::new_with_transverse_bridge(courses,board,rate,band_hz,max_modes,damping,secondary)?;
+        let mut bank = Self::new_with_string_damping(courses,board,rate,band_hz,max_modes,
+            damping,secondary,rt0425_string_damping)?;
         bank.configure_hammer_footprints(spec, courses)?;
         Ok(bank)
     }

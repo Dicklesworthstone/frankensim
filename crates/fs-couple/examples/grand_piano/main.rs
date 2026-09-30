@@ -19,11 +19,12 @@ mod hammer_materials;
 const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--preset steinway-d] [--board board.csv | --board-geometry panel.fsb|panel.fss]
     [--rt0425-bridge-contacts] [--rt0425-hammer-stiffness]
-    [--rt0425-hammer-dissipation]
+    [--rt0425-hammer-dissipation] [--rt0425-string-damping]
+    [--equilibrate-board-mass] [--consistent-board-mass | --edge-cubic-board-mass]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
     [--dampers estimated | pads.fspd] [--string-stretching axial.fspx]
     [--concert-pitch 430..450 | --raw-tensions]
-    [--mesh-divisions 4..24] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
+    [--mesh-divisions 4..32] [--dump-geometry panel.fsb] [--dump-obj soundboard.obj]
     [--board-band-hz Hz] [--performance events.csv] [--observer-gain Pa/(m^3/s)]
     [--midi performance.mid] [--midi-channel 1..16]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
@@ -46,6 +47,17 @@ onto this approximate board's bridges; four end keys remain extrapolated.
 --rt0425-hammer-stiffness applies the source K_H to each unison string.
 --rt0425-hammer-dissipation requires that stiffness and uses the published
 per-key R_H d(e^p)/dt instead of estimated crush and Prony relaxation.
+--rt0425-string-damping uses the published per-key R_u and eta_u for the
+preset scale's intrinsic string losses instead of the estimated common law.
+--equilibrate-board-mass solves a flat geometric board in mass-diagonal
+coordinates, then certifies modes in the original SI coordinates. It is an
+opt-in numerical trial, not a different soundboard or a tuned piano preset.
+--consistent-board-mass integrates the flat panel's P1 transverse inertia
+exactly; slope and beam inertia remain lumped. It is an opt-in numerical
+trial, not a measured Model D material correction.
+--edge-cubic-board-mass integrates a declared cubic panel displacement field
+and applies that same field at bridge and acoustic surface samples. This is
+an opt-in numerical trial; slope and beam inertia remain lumped.
 These opt-in corrections have not passed a perceptual similarity gate.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
@@ -120,11 +132,13 @@ This assumes an infinite baffle, with no lid/room scattering or air backreaction
 Pressure uses every mechanics substep and causal anti-alias filtering before
 output-rate propagation. At 4x oversampling the filter adds 44 audio samples of
 latency, in addition to acoustic travel time. Histories persist across blocks.
---bridge-trace-csv requires one --note and a geometric pressure render. It
+--bridge-trace-csv requires --note or an isolated --performance and geometric pressure. It
 writes that key's modeled vertical bridge velocity, a centered-difference
 acceleration, and the left pressure sample on the same output clock. The
 acceleration is a diagnostic derivative of output-rate velocity, not a sensor
-model; pressure retains its filter and travel-time delay.
+model; pressure retains its filter and travel-time delay. Performance traces
+require exactly one scheduled hammer launch or jack pulse, with releases only
+for that key. --note remains a sustain/restrike demo, not a long isolated strike.
 --modal-pressure-csv requires the same single-note geometric render. It writes
 each loaded-board mode's delayed pressure at each receiver on the WAV clock;
 the signed modal sum reconstructs the pressure, including cancellation. Modes
@@ -144,7 +158,8 @@ struct Options {
     midi: Option<String>, midi_mapping: midi::Mapping,
     concert_pitch: Option<f64>, raw_tensions: bool,
     rt0425_bridge_contacts: bool, rt0425_hammer_stiffness: bool,
-    rt0425_hammer_dissipation: bool,
+    rt0425_hammer_dissipation: bool, rt0425_string_damping: bool,
+    equilibrate_board_mass: bool, consistent_board_mass: bool, edge_cubic_board_mass: bool,
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
@@ -158,7 +173,8 @@ impl Default for Options {
         Self { render: None, scale: None, board: None, board_geometry: None,
             performance: None, preset: None, hammers: None, hammer_footprints: None, dampers: None, concert_pitch: None, raw_tensions: false,
             rt0425_bridge_contacts: false, rt0425_hammer_stiffness: false,
-            rt0425_hammer_dissipation: false,
+            rt0425_hammer_dissipation: false, rt0425_string_damping: false,
+            equilibrate_board_mass: false, consistent_board_mass: false, edge_cubic_board_mass: false,
             string_stretching: None,
             midi: None, midi_mapping: midi::Mapping::default(),
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
@@ -182,6 +198,10 @@ impl Options {
             if flag == "--rt0425-bridge-contacts" { options.rt0425_bridge_contacts = true; continue; }
             if flag == "--rt0425-hammer-stiffness" { options.rt0425_hammer_stiffness = true; continue; }
             if flag == "--rt0425-hammer-dissipation" { options.rt0425_hammer_dissipation = true; continue; }
+            if flag == "--rt0425-string-damping" { options.rt0425_string_damping = true; continue; }
+            if flag == "--equilibrate-board-mass" { options.equilibrate_board_mass = true; continue; }
+            if flag == "--consistent-board-mass" { options.consistent_board_mass = true; continue; }
+            if flag == "--edge-cubic-board-mass" { options.edge_cubic_board_mass = true; continue; }
             if flag == "--midi-half-pedal" { options.midi_mapping.continuous_sustain = true; continue; }
             let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
             let invalid = || format!("invalid value for {flag}: {value}");
@@ -253,6 +273,10 @@ impl Options {
             || (options.rt0425_hammer_dissipation && !options.rt0425_hammer_stiffness) {
             return Err("RT-0425 contacts need the preset board; hammer stiffness needs a preset render without --hammers; hammer dissipation also requires source stiffness".into());
         }
+        if options.rt0425_string_damping && (options.preset.is_none()
+            || options.scale.is_some() || options.render.is_none()) {
+            return Err("RT-0425 string damping requires a preset render without a supplied scale".into());
+        }
         if options.hammers.is_some() && options.render.is_none() {
             return Err("--hammers requires --render; material input is not an export-only option".into());
         }
@@ -266,10 +290,10 @@ impl Options {
             s.trim().is_empty() || s.starts_with("--") || options.render.is_none()) {
             return Err("--string-stretching requires --render and a complete nonempty specification path".into());
         }
-        if !(4..=24).contains(&options.mesh_divisions)
+        if !(4..=32).contains(&options.mesh_divisions)
             || (!options.uses_preset_board() && (seen.contains("--mesh-divisions")
                 || options.dump_geometry.is_some() || options.dump_obj.is_some())) {
-            return Err("mesh/export controls require --preset steinway-d without a supplied board override; divisions must be 4..24".into());
+            return Err("mesh/export controls require --preset steinway-d without a supplied board override; divisions must be 4..32".into());
         }
         if seen.contains("--board-band-hz") && options.board_geometry.is_none() && options.preset.is_none() {
             return Err("--board-band-hz requires --board-geometry or --preset".into());
@@ -300,6 +324,17 @@ impl Options {
             return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
+        if options.equilibrate_board_mass && !geometric {
+            return Err("--equilibrate-board-mass requires a flat geometric board".into());
+        }
+        if options.consistent_board_mass && (!geometric || (options.render.is_none()
+            && options.dump_board.is_none())) {
+            return Err("--consistent-board-mass requires a flat geometric board solve for --render or --dump-board".into());
+        }
+        if options.edge_cubic_board_mass && (!geometric || options.consistent_board_mass
+            || (options.render.is_none() && options.dump_board.is_none())) {
+            return Err("--edge-cubic-board-mass requires a flat geometric board solve for --render or --dump-board and excludes --consistent-board-mass".into());
+        }
         if [options.microphone,options.microphone_right].iter().flatten()
             .any(|p| p.iter().any(|x|!x.is_finite()) || p[2]<0.05)
             || ((options.microphone.is_some() || options.microphone_right.is_some())
@@ -310,14 +345,14 @@ impl Options {
             return Err("--observer-gain requires --diagnostic-volume for a geometric board".into());
         }
         if options.bridge_trace_csv.is_some()
-            && (options.render.is_none() || options.note.is_none()
+            && (options.render.is_none() || (options.note.is_none() && options.performance.is_none())
                 || !geometric || options.diagnostic_volume) {
-            return Err("--bridge-trace-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+            return Err("--bridge-trace-csv requires --render, --note or an isolated --performance, and geometric pressure without --diagnostic-volume".into());
         }
         if options.modal_pressure_csv.is_some()
-            && (options.render.is_none() || options.note.is_none()
+            && (options.render.is_none() || (options.note.is_none() && options.performance.is_none())
                 || !geometric || options.diagnostic_volume) {
-            return Err("--modal-pressure-csv requires --render, --note, and geometric pressure without --diagnostic-volume".into());
+            return Err("--modal-pressure-csv requires --render, --note or an isolated --performance, and geometric pressure without --diagnostic-volume".into());
         }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
@@ -415,9 +450,9 @@ fn prepare_instrument_with_admitted_materials(scale: Vec<geometry::Course>, mode
                 steinway_scale::hammer_material_rt0425
             } else { steinway_scale::hammer_material }).collect::<Result<Vec<_>,_>>()?,
         };
-        engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
+        engine::Instrument::new_with_string_damping(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, Some(engine::ShankGeometry::published()),
-            footprints.as_ref())
+            footprints.as_ref(), None, options.rt0425_string_damping)
     } else if let Some(materials) = imported {
         engine::Instrument::new_with_contact_geometry(scale, modes, options.sample_rate,
             options.substeps, options.modes, true, materials, None, footprints.as_ref())
@@ -437,11 +472,21 @@ fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<line
         None => Ok(board::demonstration()),
     }
 }
-fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64)
+fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64,
+    equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool)
     -> Result<board_geometry::PreparedBoard, String> {
     if crowned_board::is_crowned(text) {
+        if equilibrate_mass || consistent_mass || edge_cubic_mass {
+            return Err("flat-board mass controls require a flat geometric board".into());
+        }
         crowned_board::CrownedBoard::read(text)?.prepare(keys, band_hz)
-    } else { board_geometry::BoardGeometry::read(text)?.prepare(keys, band_hz) }
+    } else {
+        let geometry=board_geometry::BoardGeometry::read(text)?;
+        if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
+        else if consistent_mass { geometry.prepare_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
+        else if equilibrate_mass { geometry.prepare_mass_equilibrated(keys,band_hz) }
+        else { geometry.prepare(keys,band_hz) }
+    }
 }
 /// Export only the admitted keys. An absent measurement must not become an
 /// apparently measured zero bridge coefficient when the table is re-imported.
@@ -534,11 +579,6 @@ fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
     stretching: Option<&linear::string_stretching::Specification>) -> Result<(), String> {
-    let key = study_key(&scale, options.note)?;
-    let observed_course = options.bridge_trace_csv.as_ref().map(|_| {
-        scale.iter().position(|c| c.midi == key)
-            .ok_or_else(|| format!("bridge observation key {key} is absent"))
-    }).transpose()?;
     let keys: Vec<u8> = scale.iter().map(|c| c.midi).collect();
     let rate = options.sample_rate;
     let count = (options.duration * f64::from(rate)).round() as u32;
@@ -560,6 +600,14 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
         None => performance::Performance::demonstration(&keys, rate, u64::from(count),
             options.note, options.velocity)?,
     }};
+    let key = if options.performance.is_some()
+        && (options.bridge_trace_csv.is_some() || options.modal_pressure_csv.is_some()) {
+        score.single_excitation_key()?
+    } else { study_key(&scale, options.note)? };
+    let observed_course = options.bridge_trace_csv.as_ref().map(|_| {
+        scale.iter().position(|c| c.midi == key)
+            .ok_or_else(|| format!("bridge observation key {key} is absent"))
+    }).transpose()?;
     let piano = prepare_instrument_with_string_material(scale, modes, options, stretching)?;
     let bridge_row = observed_course.map(|course| {
         piano.bank.strings.iter().find(|s|
@@ -706,7 +754,8 @@ fn run() -> Result<(), String> {
     let (modes, board_source, surface) = if let Some(text) = &geometry_text {
         let start = std::time::Instant::now();
         let prepared = prepare_geometric_board(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
-            options.board_band_hz)?;
+            options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
+            options.edge_cubic_board_mass)?;
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
@@ -736,6 +785,9 @@ fn run() -> Result<(), String> {
     }
     if options.preset.is_some() {
         println!("Published shank geometry -> rigid rotation + bending; reciprocal jack port and 1.5 mm let-off. Linearized action fragment; damping/backcheck estimated.");
+        println!("String damping: {}.", if options.rt0425_string_damping {
+            "RT-0425 per-key R_u and eta_u projected onto scalar stiff-string modes; four end keys extrapolated"
+        } else { "estimated common rate and authored Maxwell bending spectrum" });
     }
     println!("Source authority belongs to the inputs, not the model name; imported files are not independently certified measurements.");
     if let Some(path) = &options.dump_scale {
@@ -777,6 +829,15 @@ mod render_tests {
         Options::parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
     }
     #[test]
+    fn rt0425_string_damping_requires_the_preset_scale_and_a_render() {
+        assert!(options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--rt0425-string-damping"]).unwrap().rt0425_string_damping);
+        assert!(options(&["--preset", "steinway-d", "--rt0425-string-damping"]).is_err());
+        assert!(options(&["--render", "a.wav", "--rt0425-string-damping"]).is_err());
+        assert!(options(&["--preset", "steinway-d", "--scale", "custom.csv",
+            "--render", "a.wav", "--rt0425-string-damping"]).is_err());
+    }
+    #[test]
     fn pcm_pressure_scale_is_explicit_and_overrange_refuses_before_write() {
         assert_eq!(options(&[]).unwrap().pcm_full_scale_pa, 2.0);
         let o = options(&["--render", "piano.wav", "--pcm-full-scale-pa", "4"]).unwrap();
@@ -797,6 +858,9 @@ mod render_tests {
         let accepted = options(&["--preset", "steinway-d", "--render", "a.wav",
             "--note", "69", "--bridge-trace-csv", "paired.csv"]).unwrap();
         assert_eq!(accepted.bridge_trace_csv.as_deref(), Some("paired.csv"));
+        let isolated = options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--performance", "held.performance", "--bridge-trace-csv", "paired.csv"]).unwrap();
+        assert_eq!(isolated.performance.as_deref(), Some("held.performance"));
         for args in [
             vec!["--preset", "steinway-d", "--note", "69", "--bridge-trace-csv", "paired.csv"],
             vec!["--preset", "steinway-d", "--render", "a.wav", "--bridge-trace-csv", "paired.csv"],
@@ -818,6 +882,8 @@ mod render_tests {
             "--bridge-trace-csv", "bridge.csv", "--microphone-right", "0.775,1,1"])
             .unwrap();
         assert_eq!(accepted.modal_pressure_csv.as_deref(), Some("modal.csv"));
+        assert!(options(&["--preset", "steinway-d", "--render", "a.wav",
+            "--performance", "held.performance", "--modal-pressure-csv", "modal.csv"]).is_ok());
         for args in [
             vec!["--preset", "steinway-d", "--note", "69", "--modal-pressure-csv", "modal.csv"],
             vec!["--preset", "steinway-d", "--render", "a.wav", "--modal-pressure-csv", "modal.csv"],
@@ -1008,13 +1074,29 @@ mod render_tests {
     #[test]
     fn source_preset_renders_and_exports_without_conflicting_board_inputs() {
         let o = options(&["--preset", "steinway-d", "--render", "d.wav", "--board-band-hz", "350",
-            "--dump-geometry", "d.fsb", "--dump-obj", "d.obj", "--mesh-divisions", "12"]).unwrap();
+            "--dump-geometry", "d.fsb", "--dump-obj", "d.obj", "--mesh-divisions", "12",
+            "--equilibrate-board-mass", "--consistent-board-mass"]).unwrap();
         assert_eq!(o.preset.as_deref(), Some("steinway-d"));
         assert_eq!(o.mesh_divisions, 12);
+        assert!(o.equilibrate_board_mass);
+        assert!(o.consistent_board_mass);
+        assert!(options(&["--preset", "steinway-d", "--consistent-board-mass"]).is_err());
+        assert!(options(&["--render", "d.wav", "--consistent-board-mass"]).is_err());
+        let cubic = options(&["--preset", "steinway-d", "--render", "d.wav",
+            "--edge-cubic-board-mass"]).unwrap();
+        assert!(cubic.edge_cubic_board_mass);
+        for args in [
+            vec!["--preset", "steinway-d", "--edge-cubic-board-mass"],
+            vec!["--render", "d.wav", "--edge-cubic-board-mass"],
+            vec!["--preset", "steinway-d", "--render", "d.wav",
+                "--edge-cubic-board-mass", "--consistent-board-mass"],
+        ] { assert!(options(&args).is_err()); }
         for args in [vec!["--preset", "unknown"],vec!["--preset", "steinway-d", "--board", "b.csv"],
             vec!["--preset", "steinway-d", "--board-geometry", "b.fsb", "--dump-obj", "d.obj"],vec!["--dump-obj", "d.obj"],
             vec!["--preset", "steinway-d", "--dump-obj", "d.obj", "--render", "d.obj"],
-            vec!["--preset", "steinway-d", "--mesh-divisions", "3"]] {assert!(options(&args).is_err());}
+            vec!["--preset", "steinway-d", "--mesh-divisions", "3"],
+            vec!["--preset", "steinway-d", "--mesh-divisions", "33"],
+            vec!["--equilibrate-board-mass"]] {assert!(options(&args).is_err());}
     }
     #[test]
     fn physical_microphone_and_diagnostic_observer_are_not_silently_mixed() {
@@ -1030,6 +1112,48 @@ mod render_tests {
             vec!["--preset","steinway-d","--render","d.wav","--microphone","0,0,1","--diagnostic-volume"]] {
             assert!(options(&args).is_err());
         }
+    }
+    #[test]
+    fn mass_equilibration_admits_the_refined_source_board() {
+        let source = steinway_d::build(20).unwrap();
+        let keys: Vec<u8> = (21..=108).collect();
+        let prepared = prepare_geometric_board(&source.geometry, &keys, 1200.0, true, false, false)
+            .expect("mass-equilibrated mesh-20 source board");
+        assert_eq!(prepared.free_dofs, 4236);
+        assert_eq!(prepared.modes.len(), 43);
+        assert!(prepared.frequency_intervals_hz.iter().all(|(lo, hi)|
+            lo.is_finite() && hi.is_finite() && *lo > 0.0 && *lo <= *hi && *hi <= 1200.0));
+    }
+    #[test]
+    fn consistent_panel_mass_reaches_the_real_board_solve_without_changing_geometry() {
+        let source = steinway_d::build(8).unwrap();
+        let keys: Vec<u8> = (21..=108).collect();
+        let lumped = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, false).unwrap();
+        let consistent = prepare_geometric_board(&source.geometry, &keys, 400.0, true, true, false).unwrap();
+        let cubic = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, true).unwrap();
+        assert_eq!(lumped.area_m2, consistent.area_m2);
+        assert_eq!(lumped.mass_kg, consistent.mass_kg);
+        assert_eq!(lumped.free_dofs, consistent.free_dofs);
+        assert_eq!(lumped.area_m2, cubic.area_m2);
+        assert_eq!(lumped.mass_kg, cubic.mass_kg);
+        assert_eq!(lumped.free_dofs, cubic.free_dofs);
+        assert!(cubic.provenance.contains("cubic edge-compatible panel mass"));
+        assert!(!cubic.modes.is_empty());
+        assert_ne!(lumped.modes[0].frequency_hz, cubic.modes[0].frequency_hz);
+        assert_eq!(cubic.surface.len(), lumped.surface.len());
+        let sampled_area = cubic.surface.iter().map(|sample| sample.area_m2).sum::<f64>();
+        assert!((sampled_area - cubic.area_m2).abs() < 1e-11);
+        for (index, mode) in cubic.modes.iter().enumerate() {
+            let sampled_volume = cubic.surface.iter()
+                .map(|sample| sample.area_m2 * sample.mode_shape[index]).sum::<f64>();
+            assert!((sampled_volume - mode.volume).abs() < 1e-11,
+                "mode {index} acoustic surface and exact volume disagree");
+        }
+        assert!(consistent.provenance.contains("exact P1 transverse panel mass"));
+        assert!(lumped.provenance.contains("mass-diagonal solver equilibration"));
+        assert!(!lumped.provenance.contains("exact P1 transverse panel mass"));
+        assert!(!lumped.modes.is_empty() && !consistent.modes.is_empty());
+        assert_ne!(lumped.modes[0].frequency_hz, consistent.modes[0].frequency_hz);
     }
     #[test]
     fn preset_tunes_tension_not_geometry_and_raw_source_is_available() {

@@ -42,7 +42,13 @@ fn second_direction_is_reciprocal_and_not_a_second_hammer_or_retuned_string() {
     }
     let second=c.modes.clone();
     for n in 0..1000 {step(&mut b,if n<100 {0.2}else{0.});}
-    assert!(b.q[second].iter().any(|v|v.abs()>1e-12),"unstruck transverse motion must receive bridge work");
+    let secondary_motion=b.q[second].iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    let mut doubled=pair(0.12,true);
+    for n in 0..1000 {step(&mut doubled,if n<100 {0.2}else{0.});}
+    let doubled_motion=doubled.q[doubled.strings[1].modes.clone()].iter()
+        .map(|v|v.abs()).fold(0.0_f64,f64::max);
+    assert!(secondary_motion>0.0 && (1.9..2.1).contains(&(doubled_motion/secondary_motion)),
+        "unstruck transverse motion must scale with reciprocal bridge coupling: {secondary_motion:e} -> {doubled_motion:e}");
 }
 #[test]
 fn mass_completion_retains_the_full_vector_kinetic_energy_and_port_work() {

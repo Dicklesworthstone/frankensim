@@ -24,13 +24,19 @@ pub struct Options {
     pub dampers: Option<String>,
     pub string_stretching: Option<String>,
     pub rigid_assembly: Option<String>,
+    pub equilibrate_board_mass: bool,
+    pub rt0425_hammer_stiffness: bool,
+    pub rt0425_hammer_dissipation: bool,
+    pub rt0425_string_damping: bool,
 }
 impl Default for Options {
     fn default() -> Self {
         Self { substeps: 4, modes: 24, midi: None, performance: None,
             midi_mapping: midi::Mapping::default(), note: None, velocity: None,
             mapping_explicit: false, hammers: None,
-            hammer_footprints: None, dampers: None, string_stretching: None, rigid_assembly: None }
+            hammer_footprints: None, dampers: None, string_stretching: None, rigid_assembly: None,
+            equilibrate_board_mass: false, rt0425_hammer_stiffness: false,
+            rt0425_hammer_dissipation: false, rt0425_string_damping: false }
     }
 }
 impl Options {
@@ -51,6 +57,22 @@ impl Options {
             if flag == "--midi-half-pedal" {
                 result.midi_mapping.continuous_sustain = true;
                 result.mapping_explicit = true;
+                continue;
+            }
+            if flag == "--equilibrate-board-mass" {
+                result.equilibrate_board_mass = true;
+                continue;
+            }
+            if flag == "--rt0425-hammer-stiffness" {
+                result.rt0425_hammer_stiffness = true;
+                continue;
+            }
+            if flag == "--rt0425-hammer-dissipation" {
+                result.rt0425_hammer_dissipation = true;
+                continue;
+            }
+            if flag == "--rt0425-string-damping" {
+                result.rt0425_string_damping = true;
                 continue;
             }
             if !["--modes", "--substeps", "--hammers", "--hammer-footprints", "--dampers", "--string-stretching", "--rigid-assembly",
@@ -96,12 +118,17 @@ impl Options {
         if options.midi.is_some() || options.performance.is_some() || options.note.is_some()
             || options.velocity.is_some() || options.hammers.is_some()
             || options.hammer_footprints.is_some() || options.dampers.is_some()
-            || options.string_stretching.is_some() {
+            || options.string_stretching.is_some() || options.rt0425_hammer_stiffness
+            || options.rt0425_hammer_dissipation || options.rt0425_string_damping {
             return Err("response/admittance accept --modes, --substeps and --rigid-assembly, not playback controls".into());
         }
         Ok(options)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if (self.rt0425_hammer_stiffness && self.hammers.is_some())
+            || (self.rt0425_hammer_dissipation && !self.rt0425_hammer_stiffness) {
+            return Err("RT-0425 hammer stiffness requires source hammers; dissipation also requires that stiffness".into());
+        }
         if self.rigid_assembly.as_ref().is_some_and(|p| p.trim().is_empty()) {
             return Err("--rigid-assembly requires a nonempty assembly path".into());
         }
@@ -130,9 +157,14 @@ impl Options {
         Ok(())
     }
     pub fn report(&self, piano: &engine::Instrument) -> String {
-        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
+        format!("Mechanical rate {} Hz ({} substeps/output frame); string partial ceiling {}, retained {} coordinates including duplex; {} contact sites. Hammer cards: {}; hammer law: {}; string damping: {}; hammer faces: {}; dampers: {}; nonlinear string extension: {} (selection: {}). These are retention/work budgets, not convergence or real-time certificates.",
             piano.bank.rate, self.substeps, self.modes, piano.bank.modes.len(),
             piano.bank.contact_strings.len(), self.hammers.as_deref().unwrap_or("source defaults"),
+            if self.rt0425_hammer_dissipation { "RT-0425 per-string K_H and R_H" }
+            else if self.rt0425_hammer_stiffness { "RT-0425 per-string K_H" }
+            else { "original allocation" },
+            if self.rt0425_string_damping { "RT-0425 per-key R_u and eta_u, reduced-mode projection" }
+            else { "estimated common law" },
             self.hammer_footprints.as_deref().unwrap_or("point"),
             self.dampers.as_deref().unwrap_or("point"), piano.bank.has_string_stretching(),
             self.string_stretching.as_deref().unwrap_or("inline or original linear image"))
@@ -146,6 +178,8 @@ pub struct Controls {
     footprints: Option<linear::hammer_footprint::Specification>,
     dampers: Option<linear::dampers::Specification>,
     stretching: Option<linear::string_stretching::Specification>,
+    source_hammer_rates: Option<Vec<f64>>,
+    source_hammer_stiffness: bool,
 }
 impl Controls {
     pub fn load(options: &Options, courses: &[Course]) -> Result<Self, String> {
@@ -160,6 +194,17 @@ impl Controls {
             None => None,
         };
         let mut controls = Self::from_texts(courses, hammers.as_deref(), footprints.as_deref(), dampers.as_deref())?;
+        if options.rt0425_hammer_stiffness {
+            controls.materials = courses.iter().map(if options.rt0425_hammer_dissipation {
+                steinway_scale::hammer_material_rt0425_damped
+            } else { steinway_scale::hammer_material_rt0425 }).collect::<Result<_,_>>()?;
+            controls.source_hammer_stiffness = true;
+            if options.rt0425_hammer_dissipation {
+                controls.source_hammer_rates = Some(courses.iter()
+                    .map(|c| steinway_scale::hammer_relaxation_rt0425(c.midi))
+                    .collect::<Result<_,_>>()?);
+            }
+        }
         // Parse the COMPLETE material file before structure/BEM preparation.
         // An absent or invalid supplied file cannot select the linear image.
         controls.stretching = options.string_stretching.as_deref().map(|path|
@@ -182,7 +227,8 @@ impl Controls {
             Some(text) => Some(linear::dampers::Specification::read(text, courses)?),
             None => None,
         };
-        Ok(Self { materials, footprints, dampers, stretching: None })
+        Ok(Self { materials, footprints, dampers, stretching: None,
+            source_hammer_rates: None, source_hammer_stiffness: false })
     }
     /// Cold inline equivalent of --string-stretching, through the SAME owner.
     /// Explicit per-key EA is independent of tension, EI and winding mass.
@@ -197,13 +243,21 @@ impl Controls {
     pub fn instrument(self, courses: Vec<Course>, board: &[linear::BoardMode], options: &Options)
         -> Result<engine::Instrument, String> {
         options.validate()?;
+        if options.rt0425_hammer_stiffness != self.source_hammer_stiffness
+            || options.rt0425_hammer_dissipation != self.source_hammer_rates.is_some() {
+            return Err("RT-0425 hammer controls were not admitted before structural preparation".into());
+        }
         if options.string_stretching.is_some() && self.stretching.is_none() {
             return Err("supplied string stretching controls were not admitted; no linear fallback".into());
         }
-        let mut piano = engine::Instrument::new_with_contact_geometry(courses, board, RATE,
+        let mut piano = engine::Instrument::new_with_string_damping(courses, board, RATE,
             options.substeps, options.modes, true, self.materials,
-            Some(engine::ShankGeometry::published()), self.footprints.as_ref())?;
+            Some(engine::ShankGeometry::published()), self.footprints.as_ref(),
+            None, options.rt0425_string_damping)?;
         if let Some(dampers) = &self.dampers { piano.configure_dampers(dampers)?; }
+        if let Some(rates) = &self.source_hammer_rates {
+            piano.configure_source_hammer_dissipation(rates)?;
+        }
         if let Some(stretching) = &self.stretching { piano.configure_string_stretching(stretching)?; }
         Ok(piano)
     }
@@ -228,13 +282,71 @@ mod tests {
         assert_eq!((new.substeps, new.modes), (16, 512));
         assert_eq!(new.midi.as_deref(), Some("score.mid"));
         assert!(Options::harmonic(&["--modes".into(),"128".into()]).is_ok());
+        assert!(Options::harmonic(&["--equilibrate-board-mass".into()]).unwrap().equilibrate_board_mass);
         assert!(Options::harmonic(&["--dampers".into(),"estimated".into()]).is_err());
         for args in [vec!["--modes", "0"], vec!["--modes", "513"], vec!["--modes", "NaN"],
             vec!["--substeps", "0"], vec!["--substeps", "17"], vec!["--modes"],
             vec!["--modes", "24", "--modes", "48"], vec!["one.mid", "two.mid"],
-            vec!["--hammers", "--dampers", "estimated"], vec!["--unknown", "value"]] {
+            vec!["--hammers", "--dampers", "estimated"], vec!["--unknown", "value"],
+            vec!["--equilibrate-board-mass", "--equilibrate-board-mass"]] {
             assert!(parse(&args).is_err(), "accepted {args:?}");
         }
+    }
+    #[test]
+    fn published_hammer_flags_reach_played_contact_without_changing_the_default() {
+        let c = course();
+        let base = Options::default();
+        let stiffness = parse(&["--rt0425-hammer-stiffness"]).unwrap();
+        let damped = parse(&["--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation"]).unwrap();
+        assert!(parse(&["--rt0425-hammer-dissipation"]).is_err());
+        assert!(parse(&["--rt0425-hammer-stiffness", "--hammers", "cards.fsh"]).is_err());
+        assert!(Options::harmonic(&["--rt0425-hammer-stiffness".into()]).is_err());
+        assert!(parse(&["--rt0425-hammer-stiffness", "--rt0425-hammer-stiffness"]).is_err());
+        let build = |o: &Options| Controls::load(o, &[c]).unwrap()
+            .instrument(vec![c], &super::super::board::demonstration(), o).unwrap();
+        let mut default = build(&base);
+        let mut previous = Controls::from_texts(&[c], None, None, None).unwrap()
+            .instrument(vec![c], &super::super::board::demonstration(), &base).unwrap();
+        let mut stiff = build(&stiffness);
+        let mut relax = build(&damped);
+        for piano in [&mut default, &mut previous, &mut stiff, &mut relax] {
+            piano.note_on(69, 2.48).unwrap();
+        }
+        for _ in 0..2400 {
+            for piano in [&mut default, &mut previous, &mut stiff, &mut relax] {
+                piano.step().unwrap();
+            }
+        }
+        assert_eq!(default.bank.q, previous.bank.q);
+        assert_eq!(default.accounting.felt_loss_j, previous.accounting.felt_loss_j);
+        assert_ne!(stiff.bank.q, default.bank.q);
+        assert_ne!(relax.bank.q, stiff.bank.q);
+        assert!(relax.accounting.felt_relaxation_loss_j > 0.0);
+        for piano in [&default, &stiff, &relax] {
+            assert!(piano.accounting.felt_loss_j > 0.0);
+            assert!((piano.accounting.input_work_j - piano.energy_j()
+                - piano.accounting.dissipated_j()).abs() < 1e-7);
+        }
+    }
+    #[test]
+    fn published_string_damping_reaches_the_exterior_instrument() {
+        let c = course();
+        let source = parse(&["--rt0425-string-damping"]).unwrap();
+        assert!(Options::harmonic(&["--rt0425-string-damping".into()]).is_err());
+        let build = |options: &Options| Controls::load(options, &[c]).unwrap()
+            .instrument(vec![c], &super::super::board::demonstration(), options).unwrap();
+        let mut old = build(&Options::default());
+        let mut new = build(&source);
+        assert_eq!(old.bank.modes[0].omega, new.bank.modes[0].omega);
+        old.note_on(69, 2.48).unwrap();
+        new.note_on(69, 2.48).unwrap();
+        for _ in 0..2400 { old.step().unwrap(); new.step().unwrap(); }
+        assert_ne!(old.bank.q, new.bank.q);
+        for piano in [&old, &new] {
+            assert!((piano.accounting.input_work_j - piano.energy_j()
+                - piano.accounting.dissipated_j()).abs() < 1e-7);
+        }
+        assert!(source.report(&new).contains("RT-0425 per-key R_u and eta_u"));
     }
     #[test]
     fn bass_retention_can_reach_the_output_band_without_retuning_or_aliasing() {

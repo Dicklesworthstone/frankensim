@@ -33,14 +33,25 @@ piano_exterior response BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUST
 piano_exterior render BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
 piano_exterior render-loaded BOARD.fsb|BOARD.fss SCALE.csv|steinway-d BODY.obj ACOUSTICS.fspe OUTPUT.wav SECONDS [PERFORMANCE.mid]
     [--modes 1..512] [--substeps 1..16] [--rigid-assembly ASSEMBLY.fspr]
+    [--equilibrate-board-mass]
     [--hammers materials.fsh] [--hammer-footprints faces.fshp]
+    [--rt0425-hammer-stiffness] [--rt0425-hammer-dissipation]
+    [--rt0425-string-damping]
     [--dampers estimated|pads.fspd]
     [--performance events.csv | --midi performance.mid]
     [--midi-channel 1..16] [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--note 21..108] [--velocity m/s]
 These playback options apply to both render and render-loaded.
-response and admittance also accept --modes/--substeps and --rigid-assembly after the output path,
+The RT-0425 hammer flags require the steinway-d scale and no supplied hammer
+cards. Dissipation also requires RT-0425 stiffness. They select the already
+implemented per-string K_H and published R_H contact laws, not output EQ.
+The RT-0425 string flag requires the steinway-d scale and projects published
+per-key R_u and eta_u onto the existing reduced string modes; it is opt-in.
+response and admittance also accept --modes/--substeps, --rigid-assembly and
+--equilibrate-board-mass after the output path,
 so harmonic comparisons can use the SAME retained string/board system.
+Mass equilibration is an opt-in numerical solve for a flat geometric board;
+it leaves geometry, materials, mode cap and original residual admission unchanged.
 admittance alone accepts --lossless-structure to remove the existing wood and
 string material damping for a declared conservative-structure comparison.
 It retains the complete complex radiation load and all original modes. Near
@@ -147,8 +158,16 @@ fn prepare_controlled_body(board_text:&str,courses:Vec<geometry::Course>,obj:Opt
     let rigid=options.rigid_assembly.as_deref().map(Assembly::load).transpose()?;
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     let board=if crowned_board::is_crowned(board_text) {
+        if options.equilibrate_board_mass {
+            return Err("--equilibrate-board-mass requires a flat geometric board".into());
+        }
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
-    } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
+    } else {
+        let geometry=board_geometry::BoardGeometry::read(board_text)?;
+        if options.equilibrate_board_mass {
+            geometry.prepare_with_motion_mass_equilibrated(&keys,spec.board_band_hz)?
+        } else {geometry.prepare_with_motion(&keys,spec.board_band_hz)?}
+    };
     let piano=controls.instrument(courses,&board.modes,options)?;
     let (bare,description)=section_skin::boundary(obj,board_text,&spec,
         board.motion.as_ref().ok_or("missing full-vector structural motion")?,continuous)?;
@@ -181,6 +200,8 @@ fn admittance_options(args:&[String])->Result<(playback::Options,bool),String> {
         if flag=="--lossless-structure" {
             if !damping {return Err("duplicate --lossless-structure".into());}
             damping=false;
+        } else if flag=="--equilibrate-board-mass" {
+            numeric.push(flag.clone());
         } else {
             numeric.push(flag.clone());
             let value=args.next().filter(|s|!s.starts_with("--"))
@@ -205,8 +226,16 @@ fn admittance_controlled_body(board_text:&str,courses:&[geometry::Course],obj:Op
     let keys:Vec<_>=courses.iter().map(|c|c.midi).collect();
     if !keys.contains(&drive) {return Err("admittance drive key is absent from the scale".into());}
     let board=if crowned_board::is_crowned(board_text) {
+        if options.equilibrate_board_mass {
+            return Err("--equilibrate-board-mass requires a flat geometric board".into());
+        }
         crowned_board::CrownedBoard::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?
-    } else {board_geometry::BoardGeometry::read(board_text)?.prepare_with_motion(&keys,spec.board_band_hz)?};
+    } else {
+        let geometry=board_geometry::BoardGeometry::read(board_text)?;
+        if options.equilibrate_board_mass {
+            geometry.prepare_with_motion_mass_equilibrated(&keys,spec.board_band_hz)?
+        } else {geometry.prepare_with_motion(&keys,spec.board_band_hz)?}
+    };
     let model=bridge_response::BridgeResponse::new(courses,&board.modes,RATE*options.substeps as u32,
         0.45*f64::from(RATE),options.modes,damping)?;
     let (bare,description)=section_skin::boundary(obj,board_text,spec,
@@ -275,6 +304,10 @@ fn run(args:&[String])->Result<(),String> {
                     (Some(mesh_render::frames(&tail[0])?),playback::Options::parse(&tail[1..])?),
                 _=>return Err(USAGE.into()),
             };
+            if (options.rt0425_hammer_stiffness || options.rt0425_string_damping)
+                && strings!="steinway-d" {
+                return Err("RT-0425 source laws require the steinway-d source scale".into());
+            }
             if std::path::Path::new(output).exists() {return Err("output must be a fresh path".into());}
             let spec=Specification::read(&read_bounded(spec,exterior_geometry::MAX_SPEC_BYTES)?)?;
             if command=="render-loaded" && spec.frequencies<33 {
@@ -324,6 +357,36 @@ mod tests {
             assert!(run(&args).is_err());
         }
     }
+    #[test]
+    fn published_laws_require_the_source_scale_at_the_cli_boundary() {
+        for flag in ["--rt0425-hammer-stiffness", "--rt0425-string-damping"] {
+            let args=["render","missing.fsb","other-scale.csv","missing.obj",
+                "missing.fspe","unused.wav","0.05",flag].map(str::to_owned);
+            assert!(run(&args).unwrap_err().contains("steinway-d source scale"));
+        }
+        assert!(playback::Options::harmonic(&["--rt0425-hammer-stiffness".into()]).is_err());
+    }
+    #[test]
+    fn admittance_accepts_the_same_opt_in_board_scaling_as_response() {
+        let (options,damping)=admittance_options(&[
+            "--equilibrate-board-mass".into(), "--modes".into(), "24".into(),
+            "--lossless-structure".into()]).unwrap();
+        assert!(options.equilibrate_board_mass);
+        assert_eq!(options.modes,24);
+        assert!(!damping);
+        assert!(admittance_options(&[
+            "--equilibrate-board-mass".into(), "--equilibrate-board-mass".into()]).is_err());
+    }
+    #[test]
+    fn opt_in_board_scaling_reaches_the_exterior_scene_and_is_reported() {
+        let (board,courses,obj,spec)=small_source_inputs();
+        let options=playback::Options::parse(&["--equilibrate-board-mass".into()]).unwrap();
+        let controls=playback::Controls::from_texts(&courses,None,None,None).unwrap();
+        let scene=prepare_controlled_body(&board,courses,Some(&obj),spec,&options,controls,false).unwrap();
+        assert!(scene.board.provenance.contains("mass-diagonal solver equilibration"));
+        assert!(!scene.board.modes.is_empty());
+        assert!(!scene.boundary.surface.areas().is_empty());
+    }
     pub(super) fn small_source_inputs()->(String,Vec<geometry::Course>,String,Specification) {
         let mut board=String::from("frankensim-board-geometry-si-v1\nsource,estimated,soft-panel acoustic integration NOT Steinway geometry\nsupport,clamped\npretension,0\ndamping,0.01\n");
         for (i,p) in [[0.,0.],[0.1,0.],[0.1,0.1],[0.,0.1],[0.05,0.05]].iter().enumerate() {
@@ -365,6 +428,34 @@ mod tests {
         assert!(residual.abs()<1e-7);
         let data=audio.wav.windows(4).position(|w|w==b"data").unwrap()+8;
         for frame in audio.wav[data..].chunks_exact(4) {assert_eq!(&frame[..2],&frame[2..]);}
+    }
+
+    #[test]
+    fn published_hammer_contact_reaches_finite_body_pcm_and_passive_loss() {
+        let options=playback::Options::parse(&[
+            "--rt0425-hammer-stiffness".into(), "--rt0425-hammer-dissipation".into()]).unwrap();
+        for loaded in [false,true] {
+            let (board,courses,obj,spec)=small_source_inputs();
+            let (_,_,_,baseline_spec)=small_source_inputs();
+            let controls=playback::Controls::load(&options,&courses).unwrap();
+            let mut selected=prepare_controlled_body(&board,courses.clone(),Some(&obj),spec,
+                &options,controls,false).unwrap();
+            let mut baseline=prepare(&board,courses,&obj,baseline_spec).unwrap();
+            let (baked,_,_)=bake(&mut selected,loaded).unwrap();
+            bake(&mut baseline,loaded).unwrap();
+            let score=||performance::Performance::read(
+                "sample,event,key,value\n0,note_on,69,2.48\n1200,note_off,69,0\n",
+                &[69],2400).unwrap();
+            let source=exterior_audio::render(&mut selected.piano,score(),2400,&baked,2.).unwrap();
+            let old=exterior_audio::render(&mut baseline.piano,score(),2400,&baked,2.).unwrap();
+            assert_ne!(source.wav,old.wav);
+            assert!(selected.piano.accounting.felt_relaxation_loss_j>0.0);
+            assert!(source.peak_pa>0.0);
+            assert_eq!(selected.piano.has_radiation(),loaded);
+            let defect=selected.piano.accounting.input_work_j-selected.piano.energy_j()
+                -selected.piano.accounting.dissipated_j();
+            assert!(defect.abs()<1e-7);
+        }
     }
 
     #[test]
