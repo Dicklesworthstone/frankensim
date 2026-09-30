@@ -130,7 +130,7 @@ fn disabled_or_unreachable_contact_cannot_excite_the_unforced_receiver() {
 }
 
 #[test]
-fn contact_records_reject_malformed_shapes_budgets_and_unimplemented_preloads() {
+fn contact_records_reject_malformed_shapes_budgets_and_inconsistent_preloads() {
     for (end, _) in INPUT.match_indices('\n') {
         if end+1 < INPUT.len() {
             assert!(ModalPerformance::from_bytes(&INPUT.as_bytes()[..end+1], 37).is_err());
@@ -146,7 +146,8 @@ fn contact_records_reject_malformed_shapes_budgets_and_unimplemented_preloads() 
         INPUT.replace("1.5 0.2 0.0005", "1.5 -0.2 0.0005"),
         INPUT.replace("contact 300000000", "contact NaN"),
         INPUT.replace("authored:two-flexible-bodies", &"s".repeat(1025)),
-        INPUT.replace("voice retain-state", "voice static-preload")
+        INPUT.replace("voice retain-state", "voice static-preload"),
+        INPUT.replacen("voice retain-state", "voice static-preload", 1)
             .replace("mode 800 0 0 0 0 1", "mode 800 0 0 0 0 0"),
         format!("{INPUT}contact 1 1 0 0 1 ignored\n"),
     ] {

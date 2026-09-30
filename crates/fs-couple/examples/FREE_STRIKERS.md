@@ -6,7 +6,7 @@ cargo run -p fs-couple --bin music_render -- \
   /tmp/free-striker.wav --block 37
 ```
 
-The example launches a 40-gram mass at 1 m/s across a 0.5 mm gap toward a
+The example launches a 40-gram mass at 0.9 m/s across a 0.5 mm gap toward a
 supplied two-mode resonator. The striker has **zero stiffness**, not a low
 artificial natural frequency. Contact decelerates it and excites the initially
 resting receiver. It rebounds and coasts; the later 1 N force at sample 300,
@@ -14,6 +14,9 @@ released at sample 340, acts on the striker only. Only the receiver contributes
 pressure. Disabling contact, or moving its gap out of reach, produces silence.
 The model and contact coefficients are illustrative authored inputs, not a
 measured hammer, mallet, material pair, or calibrated instrument.
+The 0.1-second performance remains inside its declared 0.1 m contact-penetration
+ceiling through the final sample; the former 1 m/s example exceeded that limit
+near sample 4,699 and correctly refused rather than producing a WAV.
 
 ## Explicit physical mass input
 
@@ -60,7 +63,8 @@ attachment directions, collision discovery, rigid impulses, or inferred gravity.
 The contact remains compliant and time-discretized. Refine the timestep for
 contact accuracy; the linear modal bandwidth guard does not eliminate nonlinear
 aliasing. Free-body acoustic radiation and measured real-time performance are
-not claimed. Existing input/output hashes and the WAV encoder are unchanged.
+not claimed. The hash scheme and WAV encoder are unchanged; changing this
+example's launch card changes its input and WAV hashes.
 
 Focused native checks (not executed in the authoring environment):
 

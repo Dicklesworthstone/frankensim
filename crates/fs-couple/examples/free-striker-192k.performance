@@ -6,7 +6,7 @@ limits 0.9 1 1000 1000 1000
 compile_limits 16 64
 voices 2
 voice free-mass 1 1
-mass 0.04 0 1
+mass 0.04 0 0.9
 port 0 5
 voice retain-state 2 1
 mode 800 0.01 1 0 0 0
