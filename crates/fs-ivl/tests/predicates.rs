@@ -5,6 +5,7 @@
 
 use fs_ivl::{
     Sign, Stage, incircle, insphere, orient2d, orient2d_sos, orient2d_with_stage, orient3d,
+    orient3d_with_stage,
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -285,4 +286,29 @@ fn pd_006_stage_a_filter_threshold_is_load_bearing_on_inexact_determinants() {
         "pd-006",
         &format!("{in_band} inexact-determinant cases pinned the stage-A threshold"),
     );
+}
+
+/// Axis-aligned coplanarity is decided at the filter: four points sharing
+/// one coordinate EXACTLY are coplanar, so the sign is zero without the
+/// allocating exact stage. One ulp off the plane is not coplanar and must
+/// still resolve (and to the right side) through the full decision.
+#[test]
+fn pd_axis_coplanar_points_resolve_zero_at_the_filter() {
+    let z = 0.1_f64 + 0.2; // not dyadic: shared bits, not a nice value
+    let (a, b, c) = ([0.3, 0.7, z], [1.9, 0.2, z], [0.4, 2.3, z]);
+    for d in [[5.5, -3.25, z], [0.3, 0.7, z], [1e-300, 7e12, z]] {
+        assert_eq!(orient3d_with_stage(a, b, c, d), (Sign::Zero, Stage::Filtered));
+    }
+    for axis in 0..3 {
+        let mut pts = [[0.2, 1.7, 3.1], [2.9, 0.4, 5.3], [1.1, 4.4, 0.6], [6.0, 0.8, 2.2]];
+        for p in &mut pts {
+            p[axis] = z;
+        }
+        assert_eq!(orient3d_with_stage(pts[0], pts[1], pts[2], pts[3]).0, Sign::Zero);
+    }
+    let above = [0.8, 0.9, f64::from_bits(z.to_bits() + 1)];
+    let below = [0.8, 0.9, f64::from_bits(z.to_bits() - 1)];
+    let (up, down) = (orient3d(a, b, c, above), orient3d(a, b, c, below));
+    assert_ne!(up, Sign::Zero);
+    assert_eq!(down, up.flip());
 }

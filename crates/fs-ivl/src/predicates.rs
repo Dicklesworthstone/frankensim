@@ -241,6 +241,20 @@ pub fn orient3d_with_stage(
     let bdz = pb[2] - pd[2];
     let cdz = pc[2] - pd[2];
     assert_finite_arithmetic("orient3d", &[adx, bdx, cdx, ady, bdy, cdy, adz, bdz, cdz]);
+    // Axis-aligned coplanarity, decided exactly: for finite floats `x - y`
+    // is zero iff `x == y` (gradual underflow), so three zero differences on
+    // one axis mean all four points share that coordinate and lie in one
+    // axis-aligned plane: the determinant is exactly zero. This is the common
+    // CAD case (flat faces aligned with the axes), and the float filter
+    // cannot decide it, so without this every such test paid the allocating
+    // exact expansion stage. MEASURED 2026-09-30: the hull-convexity audit on
+    // an 8.6k-facet plate spent two thirds of a mesh there.
+    if (adx == 0.0 && bdx == 0.0 && cdx == 0.0)
+        || (ady == 0.0 && bdy == 0.0 && cdy == 0.0)
+        || (adz == 0.0 && bdz == 0.0 && cdz == 0.0)
+    {
+        return (Sign::Zero, Stage::Filtered);
+    }
 
     let bdxcdy = bdx * cdy;
     let cdxbdy = cdx * bdy;
