@@ -480,6 +480,47 @@ struct MeshIndex {
     faces: FaceApexes,
     vertex_faces: BTreeMap<u32, Vec<[u32; 3]>>,
     by_x: Vec<(f64, u32)>,
+    /// Points already entered in `by_x` (every pushed point, inserted or
+    /// not, exactly as a rebuild enumerates them).
+    points_seen: usize,
+}
+
+/// One kernel insertion's effect on the real tets: the killed and created
+/// vertex sets, captured at insertion time (later insertions reuse slots).
+struct InsertionDelta {
+    killed: Vec<[u32; 4]>,
+    created: Vec<[u32; 4]>,
+}
+
+impl InsertionDelta {
+    fn capture(tetra: &Tetrahedralization) -> Self {
+        InsertionDelta {
+            killed: tetra.mesh.last_killed.clone(),
+            created: tetra
+                .mesh
+                .last_created
+                .iter()
+                .map(|&t| tetra.mesh.tets[t as usize])
+                .collect(),
+        }
+    }
+}
+
+fn tet_faces(tet: [u32; 4]) -> [([u32; 3], u32); 4] {
+    let mut out = [([0u32; 3], 0u32); 4];
+    for (skip, slot) in out.iter_mut().enumerate() {
+        let mut f = [0u32; 3];
+        let mut j = 0;
+        for (i, &v) in tet.iter().enumerate() {
+            if i != skip {
+                f[j] = v;
+                j += 1;
+            }
+        }
+        f.sort_unstable();
+        *slot = (f, tet[skip]);
+    }
+    out
 }
 
 impl MeshIndex {
@@ -499,11 +540,95 @@ impl MeshIndex {
             .map(|(i, p)| (p[0], u32::try_from(i).expect("point count fits u32")))
             .collect();
         by_x.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let points_seen = tetra.mesh.points.len();
         MeshIndex {
             faces,
             vertex_faces,
             by_x,
+            points_seen,
         }
+    }
+
+    /// Bring the index to the mesh state after `deltas`, exactly as a fresh
+    /// [`MeshIndex::build`] would see it (apex slots compared as a set, which
+    /// is how every consumer reads them). Rebuilding after each facet's
+    /// Steiner insertion made facet recovery O(insertions x tets): MEASURED
+    /// 2026-09-30 at a third of a 16.6k-facet mesh.
+    fn apply(&mut self, tetra: &Tetrahedralization, deltas: &mut Vec<InsertionDelta>) {
+        for delta in deltas.drain(..) {
+            for &tet in delta.killed.iter().filter(|tet| tet[3] != GHOST) {
+                for (face, apex) in tet_faces(tet) {
+                    let Some(slots) = self.faces.get_mut(&face) else {
+                        continue;
+                    };
+                    if slots[0] == apex {
+                        slots[0] = slots[1];
+                        slots[1] = GHOST;
+                    } else if slots[1] == apex {
+                        slots[1] = GHOST;
+                    }
+                    if slots[0] == GHOST {
+                        self.faces.remove(&face);
+                        for v in face {
+                            if let Some(list) = self.vertex_faces.get_mut(&v) {
+                                list.retain(|f| *f != face);
+                                if list.is_empty() {
+                                    self.vertex_faces.remove(&v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for &tet in delta.created.iter().filter(|tet| tet[3] != GHOST) {
+                for (face, apex) in tet_faces(tet) {
+                    match self.faces.get_mut(&face) {
+                        Some(slots) => slots[1] = apex,
+                        None => {
+                            self.faces.insert(face, [apex, GHOST]);
+                            for v in face {
+                                self.vertex_faces.entry(v).or_default().push(face);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (i, p) in tetra.mesh.points.iter().enumerate().skip(self.points_seen) {
+            let entry = (p[0], u32::try_from(i).expect("point count fits u32"));
+            let at = self
+                .by_x
+                .partition_point(|e| e.0.total_cmp(&entry.0).then(e.1.cmp(&entry.1)).is_lt());
+            self.by_x.insert(at, entry);
+        }
+        self.points_seen = tetra.mesh.points.len();
+        debug_assert!(self.matches(&MeshIndex::build(tetra)), "incremental mesh index diverged");
+    }
+
+    /// Equality as the consumers read the index (debug cross-check).
+    fn matches(&self, other: &MeshIndex) -> bool {
+        let set = |slots: &[u32; 2]| {
+            let mut s = *slots;
+            s.sort_unstable();
+            s
+        };
+        let sorted = |map: &BTreeMap<u32, Vec<[u32; 3]>>| -> Vec<(u32, Vec<[u32; 3]>)> {
+            map.iter()
+                .map(|(v, list)| {
+                    let mut list = list.clone();
+                    list.sort_unstable();
+                    (*v, list)
+                })
+                .collect()
+        };
+        self.faces.len() == other.faces.len()
+            && self
+                .faces
+                .iter()
+                .zip(&other.faces)
+                .all(|((fa, sa), (fb, sb))| fa == fb && set(sa) == set(sb))
+            && sorted(&self.vertex_faces) == sorted(&other.vertex_faces)
+            && self.by_x == other.by_x
     }
 
     /// The vertices whose x coordinate lies in `[lo, hi]`, in index order
@@ -1774,13 +1899,14 @@ pub fn recover_facets_with_points(
         // 188 facets over 1137 tets, one Steiner point inserted and 188 full
         // face maps built per pass for it.
         let mut mesh_dirty = false;
+        let mut deltas: Vec<InsertionDelta> = Vec::new();
         for fid in pending {
             let loop_verts = &facets[fid];
             let Some(w) = work[fid].as_mut() else {
                 continue;
             };
             if mesh_dirty {
-                index = MeshIndex::build(tetra);
+                index.apply(tetra, &mut deltas);
                 mesh_dirty = false;
             }
             if satisfied(&tetra.mesh.points, &index, loop_verts, w).is_some() {
@@ -1941,6 +2067,7 @@ pub fn recover_facets_with_points(
                         stats.steiner_inserted += 1;
                         by_bits.insert(bits, new_idx);
                         // The next facet needs a fresh face set.
+                        deltas.push(InsertionDelta::capture(tetra));
                         mesh_dirty = true;
                         if on_constraint {
                             constraint_splits += 1;
