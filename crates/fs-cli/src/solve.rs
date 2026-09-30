@@ -6223,6 +6223,43 @@ fn lower_thermal_interfaces(
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
+/// Volumetricize through a one-entry, per-thread memo of the last result.
+///
+/// Meshing is a deterministic function of the PLC and the policy, and the
+/// declared-input propagation re-solves the SAME geometry (boundary,
+/// parameter and geometry vertices move values or, for geometry, positions on
+/// the already-built topology). Re-meshing it for every vertex was over half
+/// of a solve's wall time on a 3k-facet body. The key is the exact input
+/// (float `Debug` is round-trip exact), so a hit returns the byte-identical
+/// complex a fresh call would build; a requested cancellation is still
+/// honoured before the cached complex is returned.
+fn volumetricize_memo(
+    positions: Vec<[f64; 3]>,
+    regions: Vec<fs_mesh::RegionSpec>,
+    policy: fs_mesh::VolumetricPolicy,
+    cx: &fs_exec::Cx<'_>,
+) -> Result<fs_mesh::AuditedLabeledTetComplex, fs_mesh::VolumetricError> {
+    type Memo = Option<(ContentHash, fs_mesh::AuditedLabeledTetComplex)>;
+    thread_local! {
+        static MEMO: std::cell::RefCell<Memo> = const { std::cell::RefCell::new(None) };
+    }
+    let key = hash_bytes(format!("{:?}", (&positions, &regions, &policy)).as_bytes());
+    let hit = MEMO.with(|memo| {
+        memo.borrow()
+            .as_ref()
+            .filter(|(cached, _)| *cached == key)
+            .map(|(_, audited)| audited.clone())
+    });
+    if let Some(audited) = hit {
+        cx.checkpoint()
+            .map_err(|_| fs_mesh::VolumetricError::Mesh(fs_mesh::MeshError::Cancelled))?;
+        return Ok(audited);
+    }
+    let audited = fs_mesh::volumetricize(fs_mesh::UnverifiedPlc::new(positions, regions), policy, cx)?;
+    MEMO.with(|memo| *memo.borrow_mut() = Some((key, audited.clone())));
+    Ok(audited)
+}
+
 fn conduction_solve_receipt(
     ledger: &Ledger,
     spec: &ProjectSpec,
@@ -6398,11 +6435,7 @@ fn conduction_solve_receipt(
             max_tets,
             refinement,
         };
-        let audited = fs_mesh::volumetricize(
-            fs_mesh::UnverifiedPlc::new(positions, regions.clone()),
-            policy,
-            &cx,
-        )
+        let audited = volumetricize_memo(positions, regions.clone(), policy, &cx)
         .map_err(|error| match error {
             fs_mesh::VolumetricError::Mesh(fs_mesh::MeshError::Cancelled) => cancelled(),
             other => conduction_error(
@@ -6577,6 +6610,13 @@ fn conduction_solve_receipt(
             radiation::solve(&cx, problem, interfaces.as_ref(), config, radiation.as_ref())
             .map_err(|error| match error {
                 fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
+                fs_conduction::ConductionError::OutsideTemperatureSpan { temperature, low, high } => conduction_error(
+                    "cli-solve-conduction-material-span",
+                    format!(
+                        "the solution leaves the declared material validity span [{low}, {high}] K: the solver was driven to {temperature} K and every admissible step stalled at the span edge, so the design runs outside the range its conductivity card covers"
+                    ),
+                    "the part is too hot (or cold) for the declared range: add cooling or reduce power, or widen the binding's temp-lo/temp-hi only as far as the card is valid",
+                ),
                 other => conduction_error(
                     "cli-solve-conduction-solve",
                     format!("steady heterogeneous conduction solve refused: {other}"),
