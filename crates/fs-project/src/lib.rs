@@ -42,7 +42,7 @@ pub const STUDY_FSIM_VERSION: u32 = 1;
 /// artifact, with a mandatory basis and source (bead q61wp.79); the solve stage
 /// propagates it into the Geometry budget term. Version-6 documents declare
 /// none and migrate without inventing one.
-pub const FSIM_VERSION: u32 = 8;
+pub const FSIM_VERSION: u32 = 9;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,

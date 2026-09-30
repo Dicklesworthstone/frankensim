@@ -31,35 +31,40 @@ pub enum MigrationRule {
     /// rewrites only the envelope/schema declarations and records the
     /// semantic steps; no fan system, seed, boundary law, or channel geometry
     /// is invented.
-    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
+    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 2 to current: the cooling section gained the optional
     /// `(conduction ...)` subsection at v3 (bead frankensim-s93ej.3) and the
     /// optional `(airflow-convection ...)` boundary law at v4 and radiation at v5. Existing
     /// version-2 documents carry no implicit conduction inputs and remain
     /// semantically unchanged after the receipted envelope rewrite.
-    CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
+    CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 3 to current: the conduction boundary grammar gains the optional
     /// `(airflow-convection ...)` law (bead frankensim-s93ej.3, conjugate
     /// exchange). A version-3 document names no such boundary, so no branch,
     /// inlet, channel geometry, correlation, or v5 radiation is invented by the rewrite.
-    ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
+    ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 4 to current adds optional ambient surface radiation (v5) and
     /// the optional material conductivity tolerance (v6). Existing files carry
     /// no emissivity, radiative reservoir or tolerance; none is inferred.
-    ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
+    ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 5 to 6 adds the optional declared conductivity tolerance on a
     /// material binding. A version-5 document declares none, and the rewrite
     /// never invents one: undeclared stays undeclared, not zero.
-    MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
+    MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 6 to 7 adds the optional declared surface-offset band on a
     /// geometry artifact. A version-6 document declares none; none is invented.
-    GeometryToleranceV7ThenSurfaceEntityV8,
+    GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
     /// Version 7 to current: schema v8 adds the optional assembly `(surface
     /// ...)` entity, a named boundary patch of a part (for example a chip
     /// footprint) that geometry assignments select and `power` rows may name
     /// for surface heat input. A version-7 document declares no surfaces, so
     /// only the envelope/schema declarations are rewritten.
-    SurfaceEntityV8,
+    SurfaceEntityV8ThenFanEfficiencyV9,
+    /// Version 8 to current: schema v9 adds the optional cooling
+    /// `(fan-efficiency ...)` citation (fan input power) and an optional
+    /// `:region` on output requests (surface QoIs). A version-8 document
+    /// declares neither, so only the envelope/schema declarations move.
+    FanEfficiencyV9,
 }
 
 impl MigrationRule {
@@ -68,19 +73,20 @@ impl MigrationRule {
     pub const fn label(self) -> &'static str {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
-            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => {
-                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8"
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => {
+                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
             }
-            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => {
-                "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8"
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => {
+                "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
             }
-            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => {
-                "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8"
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => {
+                "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
             }
-            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8",
-            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8",
-            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8 => "geometry-tolerance-v7-then-surface-entity-v8",
-            MigrationRule::SurfaceEntityV8 => "surface-entity-v8",
+            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9",
+            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9",
+            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9",
+            MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9 => "surface-entity-v8-then-fan-efficiency-v9",
+            MigrationRule::FanEfficiencyV9 => "fan-efficiency-v9",
         }
     }
 
@@ -89,13 +95,14 @@ impl MigrationRule {
     pub const fn source_version(self) -> u32 {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => 0,
-            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => 1,
-            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => 2,
-            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => 3,
-            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => 4,
-            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8 => 5,
-            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8 => 6,
-            MigrationRule::SurfaceEntityV8 => 7,
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 1,
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 2,
+            MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 3,
+            MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 4,
+            MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 5,
+            MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9 => 6,
+            MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9 => 7,
+            MigrationRule::FanEfficiencyV9 => 8,
         }
     }
 }
@@ -196,13 +203,14 @@ pub fn migrate_envelope(
 ) -> Result<MigratedProject, ProjectError> {
     let rule = match declared_version {
         0 => MigrationRule::SyntheticV0EnvelopeRewrite,
-        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
-        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
-        3 => MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
-        4 => MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
-        5 => MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8,
-        6 => MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8,
-        7 => MigrationRule::SurfaceEntityV8,
+        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        3 => MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        4 => MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        5 => MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        6 => MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9,
+        7 => MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9,
+        8 => MigrationRule::FanEfficiencyV9,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -234,13 +242,14 @@ pub fn migrate_envelope(
     let envelope_rewritten = format!("{new_prefix}{rest}");
     let migrated = match rule {
         MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
-        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8
-        | MigrationRule::SurfaceEntityV8 => {
+        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::ConductionAirflowConvectionV4ThenAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::ConductionAmbientRadiationV5ThenMaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::MaterialToleranceV6ThenGeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::GeometryToleranceV7ThenSurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::SurfaceEntityV8ThenFanEfficiencyV9
+        | MigrationRule::FanEfficiencyV9 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
@@ -277,6 +286,34 @@ pub fn migrate_envelope(
         });
     }
     if declared_version > 0
+        && decoded
+            .spec
+            .cooling
+            .as_ref()
+            .is_some_and(|cooling| cooling.fan_efficiency.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates fan-efficiency declarations but its payload declares one"),
+            hint: "declare the efficiency in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && decoded
+            .spec
+            .outputs
+            .iter()
+            .flatten()
+            .any(|output| output.region.is_some())
+    {
+        return Err(ProjectError {
+            code: "fsim-migration-payload",
+            detail: format!("schema version {declared_version} predates output regions but its payload declares one"),
+            hint: "declare the output region in a current-version project; migration only preserves historical intent".to_string(),
+        });
+    }
+    if declared_version > 0
+        && declared_version < 8
         && decoded
             .spec
             .assembly

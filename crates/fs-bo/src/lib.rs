@@ -16,6 +16,8 @@ pub mod acq;
 #[cfg(feature = "tape-acq")]
 pub mod acq_grad;
 pub mod bo;
+/// Joint latent feasibility and reference-capped noisy design improvement.
+pub mod constrained;
 pub mod gp;
 /// Bounded kernel learning that preserves declared per-observation noise.
 pub mod hyper;

@@ -12,6 +12,11 @@ use fs_project::DecodedProject;
 use fs_project::uncertainty::{BoundStudy, UncertaintyStudy};
 
 use super::{Result, artifact, fail, quoted};
+
+// `model` is itself loaded through `#[path]`, so an undecorated child would
+// resolve beside model.rs, not under model/.
+#[path = "model/adjoint.rs"]
+mod adjoint;
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,

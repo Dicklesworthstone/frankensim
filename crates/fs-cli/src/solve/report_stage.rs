@@ -528,6 +528,34 @@ pub(super) fn report_receipt(
     let qoi_unit = required_str(qoi_stage, qoi_row, "unit")?;
     let qoi_color = required_str(qoi_stage, qoi_row, "color")?;
     let qoi_identity = required_str(qoi_stage, qoi_row, "identity")?;
+    // Additional scalar rows (driver v35+: `pressure-drop`) ride beside the
+    // decision QoI: rendered and packaged as Estimated, never composed into
+    // the requirement.
+    let mut additional = Vec::new();
+    for row in qoi
+        .value
+        .get("qoi")
+        .and_then(JsonValue::as_array)
+        .map_or(&[][..], |rows| rows.get(1..).unwrap_or(&[]))
+    {
+        let color = required_str(qoi_stage, row, "color")?;
+        if color != "estimated" {
+            return Err(shape_error(
+                qoi_stage,
+                format!("additional QoI colour `{color}` is not the estimate-only producer's colour"),
+            ));
+        }
+        additional.push((
+            required_str(qoi_stage, row, "name")?.to_string(),
+            required_f64(qoi_stage, row, "value")?,
+            required_str(qoi_stage, row, "unit")?.to_string(),
+            required_str(qoi_stage, row, "identity")?.to_string(),
+            row.get("interval")
+                .and_then(JsonValue::as_array)
+                .and_then(|pair| Some((pair.first()?.as_f64()?, pair.get(1)?.as_f64()?))),
+            row.str_field("source").unwrap_or("").to_string(),
+        ));
+    }
     if qoi_color != "estimated" {
         return Err(shape_error(
             qoi_stage,
@@ -547,6 +575,8 @@ pub(super) fn report_receipt(
         .ok_or_else(|| shape_error(qoi_stage, "missing `budget[0].terms`"))?;
     let mut budget_items = Vec::with_capacity(terms.len());
     let mut measured_terms = 0usize;
+    let mut measured_half_width = 0.0f64;
+    let mut unmeasured_terms = Vec::new();
     let mut discretization_half_width: Option<f64> = None;
     let mut parameters_half_width: Option<f64> = None;
     let radiation_sensitivity = qoi.value.path(&["model_form_sensitivity", "radiation"])
@@ -602,8 +632,11 @@ pub(super) fn report_receipt(
                 format!("term `{kind}` is `{term_state}` but carries no magnitude"),
             ));
         }
-        if value.is_some() {
+        if let Some(value) = value {
             measured_terms += 1;
+            measured_half_width += value;
+        } else {
+            unmeasured_terms.push(kind.to_string());
         }
         if kind == "discretization" && term_state == "interval" {
             discretization_half_width = value;
@@ -679,7 +712,32 @@ pub(super) fn report_receipt(
             nominal_margin,
             unit: "kelvin".to_string(),
             outcome: outcome.to_string(),
+            decision_headroom: (outcome == "indeterminate" && !unmeasured_terms.is_empty())
+                .then(|| nominal_margin - required_margin - measured_half_width),
+            unmeasured_terms,
         });
+    for (name, value, unit, identity, half_width, source) in &additional {
+        report = report.with_qoi(QoiReportItem {
+            name: name.clone(),
+            description: match half_width {
+                Some((lo, hi)) => format!(
+                    "{source}; interval [{lo}, {hi}] {unit}; reported beside the decision QoI, no requirement composed"
+                ),
+                None => format!("{source}; reported beside the decision QoI, no requirement composed"),
+            },
+            nominal_value: *value,
+            unit: unit.clone(),
+            color: Color::Estimated {
+                estimator: QOI_RECEIPT_SCHEMA.to_string(),
+                dispersion: f64::NAN,
+            },
+            discretization_error: f64::NAN,
+            parameter_uncertainty: f64::NAN,
+            surrogate_error: f64::NAN,
+            total_uncertainty_budget: f64::NAN,
+            source_root: identity.clone(),
+        });
+    }
     if let Some(convergence) = ladder_convergence(&conduction.value, qoi_name, qoi_unit, qoi_value)
     {
         report = report.with_convergence(convergence);
@@ -793,6 +851,18 @@ pub(super) fn report_receipt(
         QOI_RECEIPT_SCHEMA,
         f64::INFINITY,
     ));
+    let mut package = package;
+    for (name, value, unit, identity, _, source) in &additional {
+        package = package.with_claim(Claim::estimated(
+            format!("qoi.{}", identity_token(name)),
+            format!(
+                "{name} = {value} {unit}; {source}, estimate-only, no requirement composed (identity {identity}, receipt {})",
+                qoi.completed.receipt.to_hex()
+            ),
+            QOI_RECEIPT_SCHEMA,
+            f64::INFINITY,
+        ));
+    }
     let package_root = package.try_merkle_root().map_err(|error| {
         report_error(
             "cli-solve-report-package",
@@ -834,7 +904,7 @@ pub(super) fn report_receipt(
     let json_hash = hash_bytes(&json_bytes);
     let package_hash = hash_bytes(&package_bytes);
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"report\",\"project_hash\":{},\"report_html\":{},\"report_json\":{},\"report_content_hash\":{},\"package\":{},\"package_root\":{},\"checker\":{{\"passed\":true,\"protocol\":{}}},\"qoi_count\":1,\"verdict\":{},\"budget_terms_measured\":{measured_terms},\"budget_terms_total\":{},\"sources\":{{\"qoi_receipt\":{},\"conduction_receipt\":{},\"material_receipt\":{}}},\"authority\":\"projection-of-retained-receipts\",\"no_claim\":\"the report and package project retained stage receipts and add no physical, numerical, or validation authority; every claim keeps the colour its producer recorded (Estimated, unbounded dispersion)\"}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"report\",\"project_hash\":{},\"report_html\":{},\"report_json\":{},\"report_content_hash\":{},\"package\":{},\"package_root\":{},\"checker\":{{\"passed\":true,\"protocol\":{}}},\"qoi_count\":{},\"verdict\":{},\"budget_terms_measured\":{measured_terms},\"budget_terms_total\":{},\"sources\":{{\"qoi_receipt\":{},\"conduction_receipt\":{},\"material_receipt\":{}}},\"authority\":\"projection-of-retained-receipts\",\"no_claim\":\"the report and package project retained stage receipts and add no physical, numerical, or validation authority; every claim keeps the colour its producer recorded (Estimated, unbounded dispersion)\"}}",
         json_string(REPORT_RECEIPT_SCHEMA),
         json_string(&run_hex),
         json_string(&project_hash.to_hex()),
@@ -844,6 +914,7 @@ pub(super) fn report_receipt(
         json_string(&package_hash.to_hex()),
         json_string(&package_root.to_hex()),
         fs_checker::CHECKER_PROTOCOL_VERSION,
+        1 + additional.len(),
         json_string(outcome),
         terms.len(),
         json_string(&qoi.completed.receipt.to_hex()),
@@ -891,6 +962,9 @@ pub(crate) struct CompletedRunExport {
     pub(crate) report_json: Vec<u8>,
     /// Retained evidence package bytes (format-9 JSON).
     pub(crate) package_json: Vec<u8>,
+    /// The published conduction field as VTU, named by the conduction
+    /// receipt's `field_artifact` and re-hashed on read.
+    pub(crate) field_vtu: Option<Vec<u8>>,
 }
 
 /// Locate a completed run through the resume loader and return the exact
@@ -1029,6 +1103,49 @@ pub(crate) fn load_completed_run(
             "the report op did not retain all of html, json twin, and package".to_string(),
         ));
     };
+    let mut field_vtu = None;
+    if let Some(conduction) = state
+        .completed
+        .get(SolveStage::Conduction.ordinal() as usize)
+        .filter(|completed| completed.ordinal == SolveStage::Conduction.ordinal())
+    {
+        let receipt = ledger
+            .get_artifact(&conduction.receipt)
+            .map_err(|error| ledger_refusal(format!("reading the conduction receipt failed: {error}")))?
+            .ok_or_else(|| ledger_refusal("the conduction receipt is not retained".to_string()))?;
+        let named = std::str::from_utf8(&receipt)
+            .ok()
+            .and_then(|text| text.split("\"field_artifact\":\"").nth(1))
+            .and_then(|rest| rest.get(..64))
+            .map(str::to_string);
+        if let Some(named) = named {
+            let edges = ledger
+                .op_artifact_edges_bounded(conduction.op_id, EDGE_SCAN_CAP)
+                .map_err(|error| {
+                    ledger_refusal(format!("reading the conduction op edges failed: {error}"))
+                })?;
+            for edge in &edges.edges {
+                if edge.role != EdgeRole::Out || edge.artifact.to_hex() != named {
+                    continue;
+                }
+                let bytes = ledger
+                    .get_artifact(&edge.artifact)
+                    .map_err(|error| ledger_refusal(format!("reading the field failed: {error}")))?
+                    .ok_or_else(|| ledger_refusal("the published field is not retained".to_string()))?;
+                if hash_bytes(&bytes) != edge.artifact {
+                    return Err(ledger_refusal(
+                        "the retained field does not hash to its recorded identity".to_string(),
+                    ));
+                }
+                field_vtu = Some(bytes);
+            }
+            if field_vtu.is_none() {
+                return Err(ledger_refusal(format!(
+                    "the conduction receipt names field {named}, which its op did not retain"
+                )));
+            }
+        }
+    }
     let stages = state
         .completed
         .iter()
@@ -1048,6 +1165,7 @@ pub(crate) fn load_completed_run(
         report_html,
         report_json,
         package_json,
+        field_vtu,
         verification: ResumeProof::SealedEvidence.as_str(),
     })
 }

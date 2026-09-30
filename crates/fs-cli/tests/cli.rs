@@ -125,6 +125,7 @@ fn valid_project() -> ProjectSpec {
             airflow_leakage: None,
             fan_system: None,
             conduction: None,
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -162,6 +163,7 @@ fn valid_project() -> ProjectSpec {
         outputs: Some(vec![OutputRequest {
             name: "temperature-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
@@ -211,7 +213,7 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     assert!(help.stdout.contains("\"command\":\"help\""));
     assert!(
         help.stdout
-            .contains("import <project> <source> <ledger.db>")
+            .contains("import <project> <source>... <ledger.db>")
     );
 
     let duplicate = run(args(&["validate", "x.fsim", "--json", "--json"]));
@@ -570,7 +572,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"a04dd885560c249cdf6843e87abe1d9bfb9404eac1e185390a8ca7858c4cbc21\""
+            "\"project_hash\":\"83dac601c333198d438b9aa9d1d96fbdd164c336597177ce7fcad5ed95cf15a7\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -580,7 +582,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"08149b2b51bce2d1d036b807a63fd85502022575fc01e7798560cfdaced4b073\""
+            "\"project_hash\":\"734931b3d10a44786bebc5b799465dd7662219a13144a4db608875c73c71a8a8\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -932,6 +934,373 @@ fn g1_chip_footprint_power_enters_through_the_declared_surface() {
 }
 
 #[test]
+fn g1_the_contact_pair_imports_two_sources_and_conducts_through_the_declared_joint() {
+    // q61wp.49/.53: two bodies, one declared card-backed contact joint, through
+    // the product verbs. `import` binds one source per geometry row in
+    // declaration order. All 5 W generated in the hot body must cross the
+    // joint into the fixed-temperature cold body (its outer faces carry zero
+    // flux), so conservation fixes the contact heat at -5 W and the mean jump
+    // at -0.5 K for R'' = 0.1 m^2 K/W on the unit joint, whatever the mesh.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let example = root.join("examples/contact-pair");
+    let fsim = example.join("contact-pair.fsim");
+    let cold = example.join("cold-body.stl");
+    let hot = example.join("hot-body.stl");
+    let dir = scratch("contact-pair");
+    let import = |first: &std::path::Path, second: &std::path::Path, name: &str| {
+        run(args(&[
+            "--json",
+            "import",
+            fsim.to_string_lossy().as_ref(),
+            first.to_string_lossy().as_ref(),
+            second.to_string_lossy().as_ref(),
+            dir.join(name).to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]))
+    };
+    // Sources bind by declaration order; swapped bytes fail the pinned hash.
+    let swapped = import(&hot, &cold, "swapped.db");
+    assert_eq!(
+        swapped.exit_code,
+        exit::REFUSED,
+        "stdout: {}",
+        swapped.stdout
+    );
+    assert!(
+        swapped.stderr.contains("cli-import-source-hash-mismatch"),
+        "{}",
+        swapped.stderr
+    );
+    let one = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        cold.to_string_lossy().as_ref(),
+        dir.join("one.db").to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert!(
+        one.stderr.contains("cli-import-source-count"),
+        "{}",
+        one.stderr
+    );
+
+    let imported = import(&cold, &hot, "pair.db");
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    assert!(
+        imported.stdout.contains("\"artifact_count\":2"),
+        "{}",
+        imported.stdout
+    );
+    let ledger = dir.join("pair.db");
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        root.join("data/reference-project/aa6061.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+        "--interfaces",
+        example.join("cold-hot.fsintpk").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+    assert!(
+        solved.stdout.contains("\"stages_completed\":7"),
+        "{}",
+        solved.stdout
+    );
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .expect("run id");
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).expect("ledger");
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let text = receipt_text(&ledger, &receipts[4]);
+    let field = |key: &str| number_after(&text, &format!("\"{key}\":"));
+    assert!(text.contains("\"interface\":\"cold-hot-joint\""), "{text}");
+    assert!((field("source_w") - 5.0).abs() < 1e-11, "{text}");
+    assert!((field("heat_rate_a_to_b_w") + 5.0).abs() < 2e-5, "{text}");
+    assert!((field("mean_jump_k") + 0.5).abs() < 2e-6, "{text}");
+    assert!(field("relative_closure") < 1e-6, "{text}");
+
+    // f85xj.6.8: `report` exports the published field as VTU, byte-for-byte
+    // the artifact the conduction receipt names; the independent checker
+    // reads it and its extrema and cell count are the receipt's own.
+    let exported = run(args(&[
+        "--json",
+        "report",
+        run_id,
+        dir.join("pair.db").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        exported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        exported.stderr
+    );
+    assert!(
+        exported.stdout.contains("\"field_vtu\":"),
+        "{}",
+        exported.stdout
+    );
+    let vtu = std::fs::read(dir.join(format!("{run_id}.field.vtu"))).expect("field exported");
+    let named = text
+        .split("\"field_artifact\":\"")
+        .nth(1)
+        .map(|rest| &rest[..64])
+        .expect("receipt names the field");
+    assert_eq!(fs_blake3::hash_bytes(&vtu).to_hex(), named);
+    let checked =
+        fs_viz::vtu::VtuChecker::check(std::str::from_utf8(&vtu).unwrap()).expect("VTU checks");
+    assert_eq!(checked.num_cells as f64, field("elements"));
+    let (_, [t_lo, t_hi]) = checked
+        .array_extrema
+        .iter()
+        .find(|(name, _)| name == "temperature")
+        .expect("temperature array")
+        .clone();
+    let temperature = text
+        .split("\"temperature\":{\"unit\":\"K\",")
+        .nth(1)
+        .expect("receipt temperature object");
+    assert_eq!(t_lo, number_after(temperature, "\"min\":"));
+    assert_eq!(t_hi, number_after(temperature, "\"max\":"));
+}
+
+#[test]
+fn g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop() {
+    // q61wp.83 first slice: the heatsink example's declared decision is
+    // "compare fan operating points". It now requests `pressure-drop` beside
+    // `temperature-max`, and `compare` diffs both. The exact falsifier is the fan
+    // affinity law: against the quadratic orifice/leakage network, the
+    // operating pressure scales with speed squared, so 0.7 -> 0.9 must raise the
+    // pressure drop by (0.9/0.7)^2 while the faster air cools the part.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("fan-speed-decision");
+    let ledger = dir.join("fans.db");
+    let fast = dir.join("heatsink-fan-0p9.fsim");
+    let declared = std::fs::read_to_string(&fsim).unwrap();
+    assert_eq!(declared.matches(":speed-ratio 0.7").count(), 1);
+    std::fs::write(
+        &fast,
+        declared.replace(":speed-ratio 0.7", ":speed-ratio 0.9"),
+    )
+    .unwrap();
+    let mut runs = Vec::new();
+    for project in [&fsim, &fast] {
+        let imported = run(args(&[
+            "--json",
+            "import",
+            project.to_string_lossy().as_ref(),
+            stl.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]));
+        assert_eq!(
+            imported.exit_code,
+            exit::SUCCESS,
+            "stderr: {}",
+            imported.stderr
+        );
+        let solved = run(args(&[
+            "--json",
+            "solve",
+            project.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--materials",
+            pack.to_string_lossy().as_ref(),
+        ]));
+        assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+        runs.push(
+            solved
+                .stdout
+                .split("\"run\":\"")
+                .nth(1)
+                .and_then(|rest| rest.get(..64))
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let compared = run(args(&[
+        "--json",
+        "compare",
+        &runs[0],
+        &runs[1],
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        compared.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        compared.stderr
+    );
+    let diff = |name: &str| -> (f64, f64) {
+        let row = compared
+            .stdout
+            .split(&format!("\"name\":\"{name}\""))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no {name} diff in {}", compared.stdout));
+        (
+            number_after(row, "\"nominal_left\":"),
+            number_after(row, "\"nominal_right\":"),
+        )
+    };
+    let (dp_slow, dp_fast) = diff("pressure-drop");
+    let ratio = 0.9_f64 / 0.7;
+    let affinity = ratio * ratio;
+    assert!(
+        (dp_fast / dp_slow / affinity - 1.0).abs() < 1e-9,
+        "pressure drop {dp_slow} -> {dp_fast} Pa is not the affinity-law ratio {affinity}"
+    );
+    let (t_slow, t_fast) = diff("temperature-max");
+    assert!(
+        t_fast < t_slow,
+        "faster air must cool the part: {t_slow} -> {t_fast} K"
+    );
+    // Fan input power dp * Q / eta scales with speed cubed at fixed efficiency.
+    let (p_slow, p_fast) = diff("fan-power");
+    assert!(
+        (p_fast / p_slow / (affinity * ratio) - 1.0).abs() < 1e-9,
+        "fan power {p_slow} -> {p_fast} W is not the cube-law ratio"
+    );
+
+    // Fan power without a cited efficiency refuses by name; it never
+    // assumes 100 % or any default.
+    let start = declared
+        .find("(fan-efficiency ")
+        .expect("example cites a fan efficiency");
+    let end = start + declared[start..].find(')').unwrap() + 1;
+    let uncited = dir.join("heatsink-fan-uncited.fsim");
+    std::fs::write(
+        &uncited,
+        format!("{}{}", declared[..start].trim_end(), &declared[end..]),
+    )
+    .unwrap();
+    let imported = run(args(&[
+        "--json",
+        "import",
+        uncited.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let refused = run(args(&[
+        "--json",
+        "solve",
+        uncited.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert!(
+        refused
+            .stderr
+            .contains("cli-solve-qoi-fan-power-no-efficiency"),
+        "stderr: {}",
+        refused.stderr
+    );
+}
+
+#[test]
+fn g1_surface_mean_over_the_whole_skin_equals_the_energy_balance_exactly() {
+    // q61wp.83 slice 3: the surface family over a declared surface. The
+    // plate-hole example declares a `skin` surface covering every exterior
+    // face (hole walls included) and requests its area mean. All 2 W leave
+    // by uniform h = 10 W/m^2/K convection to 293.15 K, so the area mean is
+    // EXACTLY 293.15 + P/(h A) with A = 5504 mm^2 from the generator. The P1
+    // face-integral mean and the Robin flux integral see the same field, so
+    // only the solver tolerance separates them.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/plate-hole/plate-hole.fsim");
+    let stl = root.join("examples/plate-hole/plate-hole.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("plate-hole-skin");
+    let ledger = dir.join("plate.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .unwrap();
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let qoi = receipt_text(&ledger, &receipts[5]);
+    let row = qoi
+        .split("\"name\":\"surface-mean-temperature\"")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no surface-mean row in {qoi}"));
+    assert!(row.contains("\"region\":\"skin\""), "{row}");
+    let mean = number_after(row, "\"value\":");
+    let exact = 293.15 + 2.0 / (10.0 * 5.504e-3);
+    // TOLERANCE 5e-6 K: MEASURED 2026-09-30 diff 1.05e-6 K (solver
+    // tolerance-rel 1e-6 on a 36 K rise), ~5x headroom.
+    eprintln!(
+        "skin mean {mean} K vs exact {exact} K (diff {:e})",
+        mean - exact
+    );
+    assert!(
+        (mean - exact).abs() < 5e-6,
+        "skin mean {mean} K is not the energy balance {exact} K"
+    );
+}
+
+#[test]
 fn g0_package_missing_ledger_fails_closed() {
     let output = run(args(&[
         "package",
@@ -1241,7 +1610,9 @@ fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() 
         }
     }
     let end = end.expect("balanced conduction form");
-    let stripped = format!("{}{}", &source[..start], &source[end..]).replace(" )", ")");
+    let stripped = format!("{}{}", &source[..start], &source[end..])
+        .replace(" )", ")")
+        .replace("  (", " (");
     let dir = scratch("run-no-conduction");
     let fsim = dir.join("heatsink-no-conduction.fsim");
     std::fs::write(&fsim, stripped.trim_end()).expect("scratch project");

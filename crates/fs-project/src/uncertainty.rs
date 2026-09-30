@@ -6,7 +6,7 @@
 //! Version 1 admits fixed-count propagation with Monte Carlo
 //! or explicitly replicated randomized Sobol quadrature. Version 2 requires
 //! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
-//! Version 3 adds fixed-count mean controls from predeclared whole-model secants.
+//! Version 3 adds fixed-count mean controls from support secants or one nominal adjoint.
 //! An engineering
 //! interval or card tolerance is never silently interpreted as a probability
 //! law. The study inherits units, capabilities, physics seed, versions, memory
@@ -157,7 +157,7 @@ pub struct BoundStudy {
 type Result<T> = std::result::Result<T, ProjectError>;
 fn error(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-uncertainty", detail: detail.into(),
-        hint: "declare uniform inputs with explicit dependence; version 1 is fixed-count, version 2 requires Bernoulli compliance, version 3 requires coordinate-secant mean controls with max-solves".into() }
+        hint: "declare uniform inputs with explicit dependence; version 1 is fixed-count, version 2 requires Bernoulli compliance, version 3 requires coordinate-secant or nominal-adjoint mean controls with max-solves".into() }
 }
 fn list(node: &Node) -> Result<&[Node]> {
     match &node.kind { NodeKind::List(values) => Ok(values), _ => Err(error("expected a list")) }
@@ -437,9 +437,9 @@ impl UncertaintyStudy {
             let values = bound.study.parameters.iter().map(|p| if high { p.high } else { p.low }).collect::<Vec<_>>();
             bound.sample_project(&values)?;
         }
-        if bound.study.mean_control.is_some() {
-            for ordinal in 0..mean_control::probe_count(&bound.study.parameters) {
-                bound.sample_project(&mean_control::probe(&bound.study.parameters, ordinal)?)?;
+        if let Some(policy) = bound.study.mean_control {
+            for ordinal in 0..policy.probe_count(&bound.study.parameters) {
+                bound.sample_project(&policy.probe(&bound.study.parameters, ordinal)?)?;
             }
         }
         Ok(bound)

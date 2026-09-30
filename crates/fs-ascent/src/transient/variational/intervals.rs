@@ -14,6 +14,9 @@ use fs_time::adaptive::adjoint::trajectory::{
     RecordedRk45, RecordingStatus, TrajectoryGradient,
 };
 
+/// Checkpointed fine solver steps inside unchanged reconstruction knots.
+pub mod substeps;
+
 /// A completed interval map. No partial forward state may be exposed as a tape.
 /// The transpose action differentiates this exact map, not the solver stopping
 /// decisions. Derivatives of start/end times and numerical policy are excluded.

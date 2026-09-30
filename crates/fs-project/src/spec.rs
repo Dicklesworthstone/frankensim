@@ -739,6 +739,22 @@ pub struct Cooling {
     /// loadable for older projects but makes the conduction solve stage a
     /// typed gap; no seed or boundary condition is inferred.
     pub conduction: Option<ConductionSetup>,
+    /// Optional cited fan total-efficiency interval (schema v9). A
+    /// `fan-power` output needs it; absence is a declaration, never 100 %.
+    pub fan_efficiency: Option<FanEfficiency>,
+}
+
+/// A cited fan total efficiency `total +/- half_width`, inside `(0, 1]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FanEfficiency {
+    /// Nominal total efficiency.
+    pub total: f64,
+    /// Absolute half-width of the declared interval.
+    pub half_width: f64,
+    /// Human-readable citation.
+    pub source: String,
+    /// Stable citation identifier.
+    pub source_id: String,
 }
 
 /// The operating envelope.
@@ -956,6 +972,9 @@ pub struct OutputRequest {
     pub name: String,
     /// Kind: `"scalar"`, `"field"`, or `"report"`.
     pub kind: String,
+    /// Optional scope (schema v9): a declared `(surface ...)` entity for the
+    /// surface temperature family.
+    pub region: Option<String>,
 }
 
 /// One receipted default: the lenient wire spelling applied a documented
@@ -1484,6 +1503,32 @@ impl ProjectSpec {
                         "use one of `scalar`, `field`, `report`",
                     ));
                 }
+            }
+        }
+        if let Some(efficiency) = self.cooling.as_ref().and_then(|cooling| cooling.fan_efficiency.as_ref()) {
+            let low = efficiency.total - efficiency.half_width;
+            let high = efficiency.total + efficiency.half_width;
+            if !(efficiency.total.is_finite()
+                && efficiency.half_width.is_finite()
+                && efficiency.half_width >= 0.0
+                && low > 0.0
+                && high <= 1.0)
+            {
+                out.push(violation(
+                    "project-fan-efficiency-range",
+                    format!(
+                        "fan efficiency {} +/- {} leaves (0, 1]",
+                        efficiency.total, efficiency.half_width
+                    ),
+                    "declare a total efficiency whose whole interval lies inside (0, 1]",
+                ));
+            }
+            if efficiency.source.trim().is_empty() || efficiency.source_id.trim().is_empty() {
+                out.push(violation(
+                    "project-fan-efficiency-source",
+                    "fan efficiency carries no citation",
+                    "cite the efficiency with a non-empty `:source` and `:source-id`",
+                ));
             }
         }
         if let Some(budgets) = &self.budgets
@@ -2428,6 +2473,17 @@ impl ProjectSpec {
     }
 
     fn check_references(&self, ids: &BTreeMap<String, EntityId>, out: &mut Vec<Violation>) {
+        for output in self.outputs.iter().flatten() {
+            if let Some(region) = &output.region
+                && !ids.get(region).is_some_and(|id| id.kind() == EntityKind::Surface)
+            {
+                out.push(violation(
+                    "project-output-region",
+                    format!("output `{}` names region `{region}`, which is not a declared surface", output.name),
+                    "declare `(surface :parent <part> :name ...)` in the assembly and name it here",
+                ));
+            }
+        }
         if self.assembly.is_none() {
             return;
         }

@@ -118,23 +118,34 @@ impl QoiSemanticId {
             | "surface_mean"
             | "surface_mean_temp"
             | "case_mean_temp"
-            | "t_surface_mean" => Some(Self::SurfaceMeanTemperature),
+            | "t_surface_mean"
+            | "surface-mean-temperature" => Some(Self::SurfaceMeanTemperature),
 
             "thermal.surface_spread"
             | "surface_spread"
             | "surface_temp_spread"
             | "case_spread"
-            | "delta_t_surface" => Some(Self::SurfaceTemperatureSpread),
+            | "delta_t_surface"
+            | "surface-temperature-spread" => Some(Self::SurfaceTemperatureSpread),
 
-            "thermal.surface_std_dev" | "surface_std_dev" | "surface_temperature_std_dev" => {
+            "thermal.surface_std_dev"
+            | "surface_std_dev"
+            | "surface_temperature_std_dev"
+            | "surface-temperature-std-dev" => {
                 Some(Self::SurfaceTemperatureStdDev)
             }
 
-            "airflow.pressure_drop" | "pressure_drop" | "delta_p" | "system_resistance" => {
+            "airflow.pressure_drop"
+            | "pressure_drop"
+            | "pressure-drop"
+            | "delta_p"
+            | "system_resistance" => {
                 Some(Self::PressureDrop)
             }
 
-            "airflow.fan_power" | "fan_power" | "fan_input_power" | "p_fan" => Some(Self::FanPower),
+            "airflow.fan_power" | "fan_power" | "fan-power" | "fan_input_power" | "p_fan" => {
+                Some(Self::FanPower)
+            }
 
             "thermal.thermal_margin" | "thermal_margin" | "margin" | "junction_margin" => {
                 Some(Self::ThermalMargin)

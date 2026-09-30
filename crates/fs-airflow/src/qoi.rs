@@ -975,6 +975,83 @@ pub fn extract_junction_maximum_qoi(
     extract_junction_maximum_qoi_with_terms(mesh, solution, junction_region, discretization, &[])
 }
 
+/// Extract only the enclosure pressure-drop QoI from a solved operating point.
+///
+/// For product callers that request the pressure drop without the reporting
+/// surface or fan-efficiency declarations the full family needs. The value,
+/// evidence, identity and exactly-eight-term budget (the certified pressure
+/// interval as the boundary-conditions term, every other source a named
+/// `Unknown`) are exactly the ones [`extract_thermal_qois`] emits.
+///
+/// # Errors
+/// Refuses a malformed operating point or budget construction.
+pub fn extract_pressure_drop_qoi(
+    operating_point: &OperatingPoint,
+) -> Result<ThermalQoi<Pressure>, QoiError> {
+    validate_operating_point(operating_point)?;
+    pressure_drop_qoi(operating_point, operating_identity(operating_point))
+}
+
+/// Extract only the fan input-power QoI `dp * Q / eta` from a solved
+/// operating point and a cited efficiency interval: the same value, evidence
+/// and budget [`extract_thermal_qois`] emits (the operating envelope as the
+/// boundary-conditions term, the efficiency interval as the parameters term).
+///
+/// # Errors
+/// Refuses a malformed operating point or an unordered power interval.
+pub fn extract_fan_power_qoi(
+    operating_point: &OperatingPoint,
+    spec: &FanPowerSpec,
+) -> Result<ThermalQoi<Power>, QoiError> {
+    validate_operating_point(operating_point)?;
+    fan_power_qoi(
+        operating_point,
+        spec,
+        operating_identity(operating_point),
+        fan_power_identity(spec),
+    )
+}
+
+/// Extract only the surface-uniformity family (area mean, spread, face-mean
+/// standard deviation) over one declared reporting surface: the same records
+/// [`extract_thermal_qois`] emits, without the junction, pressure or fan
+/// declarations the full family needs.
+///
+/// # Errors
+/// Refuses an invalid or unconverged solution, a boundary-face slot outside
+/// the mesh, or malformed evidence/budget construction.
+pub fn extract_surface_uniformity(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    surface_region: &SurfaceRegion,
+) -> Result<SurfaceUniformity, QoiError> {
+    validate_solution(mesh, solution)?;
+    if let Some(&face) = surface_region
+        .boundary_faces()
+        .iter()
+        .find(|&&face| face >= mesh.boundary().len())
+    {
+        return Err(QoiError::invalid(
+            "surface region",
+            format!(
+                "boundary-face slot {face} is outside {} boundary faces",
+                mesh.boundary().len()
+            ),
+        ));
+    }
+    let solution_id = solution_identity(mesh, solution);
+    let temperature_model = conduction_model(solution);
+    let parameter_term = material_parameter_term(solution, solution_id)?;
+    surface_uniformity(
+        mesh,
+        solution,
+        surface_region,
+        solution_id,
+        &temperature_model,
+        &parameter_term,
+    )
+}
+
 /// [`extract_junction_maximum_qoi`] with caller-retained measured terms.
 ///
 /// Each receipt populates exactly its own source; every source without one

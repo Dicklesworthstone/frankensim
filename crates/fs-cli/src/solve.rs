@@ -147,7 +147,17 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// so large obtuse-mesh rungs publish a verified coupled solver bound.
 /// Version 31 atomically adopts physically accepted coupled corrections,
 /// rebuilding the field, Robin boundary and live air receipt before export.
-pub const SOLVE_DRIVER_VERSION: u32 = 31;
+/// Version 32 adds opt-in native nominal-adjoint reports on the final field.
+/// Version 33 retains the published mesh and field as VTU beside the solution
+/// and names it in the conduction receipt (`field_artifact`).
+/// Version 34 states, for an indeterminate requirement, the unmeasured terms
+/// and the combined magnitude that would flip it to fail (report bytes).
+/// Version 35 admits a `pressure-drop` scalar output beside the decision QoI.
+/// Version 36 admits `fan-power` (fsim v9 fan efficiency) and gives every
+/// additional row one shape: value, unit, certified `interval`, source.
+/// Version 37 admits the surface family (mean, spread, std-dev) over a
+/// declared surface named by the output's `:region` (fsim v9).
+pub const SOLVE_DRIVER_VERSION: u32 = 37;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -163,6 +173,9 @@ const STAGE_RECEIPT_KIND: &str = "solve-stage-receipt";
 const RUN_RECEIPT_KIND: &str = "solve-run-receipt";
 const MATERIAL_USAGE_KIND: &str = "solve-material-usage-receipt";
 const CONDUCTION_SOLUTION_KIND: &str = "solve-conduction-solution";
+/// The published mesh and field as ParaView-readable VTU (fs-viz), retained
+/// beside the solution so `report` exports exactly these bytes.
+pub(crate) const CONDUCTION_FIELD_VTU_KIND: &str = "solve-conduction-field-vtu";
 const CONDUCTION_INTERFACE_EVIDENCE_KIND: &str = "solve-conduction-interface-evidence";
 const IMPORT_SUMMARY_KIND: &str = "geometry-import-run-receipt";
 const IMPORT_RAW_KIND: &str = "geometry-source";
@@ -186,6 +199,7 @@ const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-soluti
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
 mod adaptive_balance;
+mod nominal_adjoint;
 mod algebraic;
 mod conjugate;
 mod radiation;
@@ -199,6 +213,10 @@ const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
 const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
 const FLOW_NETWORK_AUTHORITY: &str =
     "lossless-project-lowering-plus-interval-certified-operating-point";
+const FLOW_NETWORK_UNDECLARED_AUTHORITY: &str = "declared-absence-of-an-air-network";
+const FLOW_NETWORK_UNDECLARED_NO_CLAIM: &str = "the project declares no fan, fan system, vent, \
+    airflow leakage or airflow-derived boundary, so no operating point exists and none is \
+    claimed; every thermal boundary coefficient is the declared one";
 const FLOW_NETWORK_NO_CLAIM: &str = "the stage proves the declared fan system lowered losslessly \
     and the enclosure network produced an interval-certified nominal operating point under the \
     declared orifice/leakage models; it does not authenticate manufacturer curve data, system \
@@ -905,7 +923,17 @@ fn has_declared_temperature_maximum(spec: &ProjectSpec) -> bool {
         .count();
     let has_unsupported_scalar = outputs.iter().any(|output| {
         output.kind == "scalar"
-            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+            && !matches!(
+                QoiSemanticId::parse(&output.name),
+                Some(
+                    QoiSemanticId::JunctionMaximum
+                        | QoiSemanticId::PressureDrop
+                        | QoiSemanticId::FanPower
+                        | QoiSemanticId::SurfaceMeanTemperature
+                        | QoiSemanticId::SurfaceTemperatureSpread
+                        | QoiSemanticId::SurfaceTemperatureStdDev
+                )
+            )
     });
     matching_outputs == 1
         && !has_unsupported_scalar
@@ -1283,6 +1311,8 @@ struct QoiStageInputs {
     solver_algebraic: Option<PropagatedTerm>,
     /// Paired model comparison; this is never used as an error bound.
     radiation_sensitivity: Option<radiation::RadiationSensitivity>,
+    /// Boundary-face slots of every declared surface on the published mesh.
+    surface_slots: BTreeMap<String, Vec<usize>>,
 }
 
 #[derive(Debug)]
@@ -1328,6 +1358,8 @@ struct RungSolved {
     radiation_fragment: Option<String>,
     /// Powered-surface evidence (fsim v8), `None` when no surface carries power.
     surface_fragment: Option<String>,
+    /// Boundary-face slots of every declared surface on this rung's mesh.
+    surface_slots: BTreeMap<String, Vec<usize>>,
     adjoint_data: Option<RungAdjointData>,
     algebraic: algebraic::MaximumEvidence,
 }
@@ -3085,7 +3117,7 @@ impl<'a> SolveEngine<'a> {
 
     fn stage_flow_network(&mut self, context: &mut StageContext) -> Result<String, SolveRefusal> {
         let (receipt, handoff) = flow_network_receipt(self.spec, self.run, self.work, false)?;
-        context.flow_network = Some(handoff);
+        context.flow_network = handoff;
         Ok(receipt)
     }
 
@@ -3943,7 +3975,7 @@ fn flow_network_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<(String, FlowNetworkHandoff), SolveRefusal> {
+) -> Result<(String, Option<FlowNetworkHandoff>), SolveRefusal> {
     let stage = SolveStage::FlowNetwork;
     let cancelled = || {
         if resume {
@@ -3965,6 +3997,37 @@ fn flow_network_receipt(
             "declare the cooling section; the flow-network stage consumes declared fans, vents, and leakage",
         )
     })?;
+    // A project with no air network at all (a solid cooled only by declared
+    // coefficients) has nothing for this stage to certify: it retains that
+    // absence as its receipt and hands conduction no operating point. Any
+    // partial air declaration still refuses below; the stage never infers.
+    let airflow_law = cooling.conduction.as_ref().is_some_and(|setup| {
+        setup
+            .boundaries
+            .iter()
+            .any(|row| matches!(row.condition, ThermalBoundaryCondition::AirflowConvection { .. }))
+    });
+    if cooling.fans.is_empty()
+        && cooling.vents.is_empty()
+        && cooling.fan_system.is_none()
+        && cooling.airflow_leakage.is_none()
+        && !airflow_law
+    {
+        let receipt = format!(
+            "{{\"schema\":{},\"run\":{},\"stage\":{},\"status\":\"not-declared\",\
+             \"vent_count\":0,\"authority\":{},\"no_claim\":{}}}",
+            json_string(FLOW_NETWORK_RECEIPT_SCHEMA),
+            json_string(&run.to_hex()),
+            json_string(stage.name()),
+            json_string(FLOW_NETWORK_UNDECLARED_AUTHORITY),
+            json_string(FLOW_NETWORK_UNDECLARED_NO_CLAIM),
+        );
+        work.charge(u64::try_from(receipt.len()).unwrap_or(u64::MAX))
+            .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+        work.checkpoint(phase, None, u64::MAX)
+            .map_err(|_| cancelled())?;
+        return Ok((receipt, None));
+    }
     let fan_system = cooling.fan_system.as_ref().ok_or_else(|| {
         SolveRefusal::staged(
             "cli-solve-flow-network-no-fan-system",
@@ -4167,10 +4230,10 @@ fn flow_network_receipt(
         .map_err(|_| cancelled())?;
     Ok((
         receipt,
-        FlowNetworkHandoff {
+        Some(FlowNetworkHandoff {
             operating,
             air_density_kg_m3: air_density,
-        },
+        }),
     ))
 }
 
@@ -4295,9 +4358,28 @@ fn qoi_receipt(
             "declare one scalar `temperature-max` output; other QoI families need their own authoritative declarations",
         ));
     }
+    // Additional scalars ride beside the decision QoI with their own budgets;
+    // requirements stay on the temperature maximum.
+    let requested_family = |family: QoiSemanticId| {
+        outputs.iter().any(|output| {
+            output.kind == "scalar" && QoiSemanticId::parse(&output.name) == Some(family)
+        })
+    };
+    let pressure_drop_requested = requested_family(QoiSemanticId::PressureDrop);
+    let fan_power_requested = requested_family(QoiSemanticId::FanPower);
     if let Some(unsupported) = outputs.iter().find(|output| {
         output.kind == "scalar"
-            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+            && !matches!(
+                QoiSemanticId::parse(&output.name),
+                Some(
+                    QoiSemanticId::JunctionMaximum
+                        | QoiSemanticId::PressureDrop
+                        | QoiSemanticId::FanPower
+                        | QoiSemanticId::SurfaceMeanTemperature
+                        | QoiSemanticId::SurfaceTemperatureSpread
+                        | QoiSemanticId::SurfaceTemperatureStdDev
+                )
+            )
     }) {
         return Err(qoi_error(
             "cli-solve-qoi-unsupported-output",
@@ -4753,8 +4835,188 @@ fn qoi_receipt(
         }
         _ => json_string("unknown"),
     };
+    // The pressure drop is the flow-network stage's certified operating
+    // pressure as fs-airflow's registered QoI: same value and evidence, with
+    // the pressure interval as its boundary-conditions term.
+    let mut additional_rows = String::new();
+    let mut push_row = |name: &str,
+                        region: Option<&str>,
+                        semantic: QoiSemanticId,
+                        value: f64,
+                        numerical: &fs_evidence::NumericalCertificate,
+                        model: &fs_evidence::ModelEvidence,
+                        identity: ContentHash,
+                        source: &str|
+     -> Result<(), SolveRefusal> {
+        let color = fs_evidence::color_of(numerical, model).rank();
+        if color != ColorRank::Estimated {
+            return Err(qoi_error(
+                "cli-solve-qoi-authority",
+                format!("`{name}` unexpectedly carries colour {color:?}"),
+                "do not promote this producer without the separately admitted evidence path",
+            ));
+        }
+        let finite = |field: &str, value: f64| {
+            canonical_f64(value).ok_or_else(|| {
+                qoi_error(
+                    "cli-solve-qoi-nonfinite",
+                    format!("`{name}` field `{field}` is non-finite ({value})"),
+                    "report the operating-point evidence defect",
+                )
+            })
+        };
+        let _ = write!(
+            additional_rows,
+            ",{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":{},\
+             \"color\":\"estimated\",\"identity\":{},\"interval\":{},\"source\":{}}}",
+            json_string(name),
+            json_string(semantic.as_str()),
+            region.map_or_else(|| "null".to_string(), json_string),
+            finite("value", value)?,
+            json_string(semantic.units()),
+            json_string(&identity.to_hex()),
+            // An estimate without a numerical bound carries (-inf, inf):
+            // stated as no interval, never refused and never invented.
+            if numerical.lo.is_finite() && numerical.hi.is_finite() {
+                format!("[{},{}]", finite("lo", numerical.lo)?, finite("hi", numerical.hi)?)
+            } else {
+                "null".to_string()
+            },
+            json_string(source),
+        );
+        Ok(())
+    };
+    let air_network = |name: &str| {
+        context.flow_network.as_ref().ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-no-air-network",
+                format!("a `{name}` output is declared but the project declares no air network"),
+                "declare the fan system, vents and leakage, or remove the output",
+            )
+        })
+    };
+    if pressure_drop_requested {
+        let handoff = air_network("pressure-drop")?;
+        let qoi = fs_airflow::qoi::extract_pressure_drop_qoi(&handoff.operating).map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-pressure-drop",
+                format!("pressure-drop extraction refused: {error}"),
+                "report the operating-point evidence defect",
+            )
+        })?;
+        push_row(
+            "pressure-drop",
+            None,
+            QoiSemanticId::PressureDrop,
+            qoi.evidence.value.value(),
+            &qoi.evidence.numerical,
+            &qoi.evidence.model,
+            qoi.uncertainty.content_id(),
+            "flow-network operating pressure (certified interval)",
+        )?;
+    }
+    if fan_power_requested {
+        let handoff = air_network("fan-power")?;
+        let efficiency = spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.fan_efficiency.as_ref())
+            .ok_or_else(|| {
+                qoi_error(
+                    "cli-solve-qoi-fan-power-no-efficiency",
+                    "a `fan-power` output is declared but the cooling section cites no fan efficiency",
+                    "declare `(fan-efficiency :total ... :half-width ... :source ... :source-id ...)` under cooling",
+                )
+            })?;
+        let fan_spec = fs_airflow::qoi::FanPowerSpec::try_new(
+            efficiency.total,
+            efficiency.half_width,
+            fs_airflow::SourceProvenance::new(efficiency.source.clone(), efficiency.source_id.clone()),
+        )
+        .and_then(|fan_spec| fs_airflow::qoi::extract_fan_power_qoi(&handoff.operating, &fan_spec))
+        .map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-fan-power",
+                format!("fan-power extraction refused: {error}"),
+                "declare an efficiency interval inside (0, 1] and a valid operating point",
+            )
+        })?;
+        push_row(
+            "fan-power",
+            None,
+            QoiSemanticId::FanPower,
+            fan_spec.evidence.value.value(),
+            &fan_spec.evidence.numerical,
+            &fan_spec.evidence.model,
+            fan_spec.uncertainty.content_id(),
+            "dp * Q / eta over the operating envelope and the cited efficiency interval",
+        )?;
+    }
+    // Surface family: each requested output names a declared surface whose
+    // exterior faces the conduction stage located on the published mesh.
+    let mut surface_rows = 0usize;
+    for output in outputs.iter().filter(|output| output.kind == "scalar") {
+        let semantic = match QoiSemanticId::parse(&output.name) {
+            Some(
+                family @ (QoiSemanticId::SurfaceMeanTemperature
+                | QoiSemanticId::SurfaceTemperatureSpread
+                | QoiSemanticId::SurfaceTemperatureStdDev),
+            ) => family,
+            _ => continue,
+        };
+        let region = output.region.as_deref().ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-surface-region",
+                format!("surface output `{}` names no `:region`", output.name),
+                "name the declared `(surface ...)` the family is taken over",
+            )
+        })?;
+        let slots = inputs.surface_slots.get(region).filter(|slots| !slots.is_empty()).ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-surface-region",
+                format!("surface `{region}` has no exterior face on the published mesh"),
+                "select a nonempty exterior patch for the surface's assignment",
+            )
+        })?;
+        let surface = fs_airflow::qoi::SurfaceRegion::try_new(region, slots.clone())
+            .and_then(|surface| {
+                fs_airflow::qoi::extract_surface_uniformity(&inputs.mesh, &inputs.solution, &surface)
+            })
+            .map_err(|error| {
+                qoi_error(
+                    "cli-solve-qoi-surface",
+                    format!("surface QoI `{}` refused: {error}", output.name),
+                    "report the conduction-to-QoI handoff defect",
+                )
+            })?;
+        let (record, source) = match semantic {
+            QoiSemanticId::SurfaceMeanTemperature => (
+                &surface.mean_temperature,
+                "exact P1 face-integral area mean over the declared surface",
+            ),
+            QoiSemanticId::SurfaceTemperatureSpread => (
+                &surface.spread,
+                "maximum minus minimum surface-vertex temperature",
+            ),
+            _ => (
+                &surface.face_mean_standard_deviation,
+                "area-weighted standard deviation of face-mean temperatures",
+            ),
+        };
+        push_row(
+            &output.name,
+            Some(region),
+            semantic,
+            record.evidence.value.value(),
+            &record.evidence.numerical,
+            &record.evidence.model,
+            record.uncertainty.content_id(),
+            source,
+        )?;
+        surface_rows += 1;
+    }
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}{}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
         json_string(QOI_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         json_string(&row.query_name),
@@ -4763,6 +5025,7 @@ fn qoi_receipt(
         nominal,
         witness,
         json_string(&row.identity_hash.to_hex()),
+        additional_rows,
         json_string(&evaluation.requirement_id),
         limit,
         required_margin,
@@ -4800,7 +5063,10 @@ fn qoi_receipt(
     Ok(QoiStageProduct {
         receipt,
         progress: QoiProgressSummary {
-            qoi_count: extracted.rows.len(),
+            qoi_count: extracted.rows.len()
+                + usize::from(pressure_drop_requested)
+                + usize::from(fan_power_requested)
+                + surface_rows,
             verdict: evaluation.outcome.as_str(),
             weakest_term: Some(match terms.len() - measured_terms {
                 8 => "all-eight-no-data",
@@ -5471,6 +5737,9 @@ fn surface_heat(spec: &ProjectSpec) -> Result<SurfaceHeat, SolveRefusal> {
 struct ConductionBoundaryLowering {
     boundary: fs_conduction::ThermalBoundary,
     target_area_m2: BTreeMap<String, f64>,
+    /// Exterior boundary-face slots of every declared surface (fsim v8),
+    /// for surface-scoped QoIs.
+    surface_slots: BTreeMap<String, Vec<usize>>,
 }
 
 /// Lower the declared boundary laws. An `AirflowConvection` law lowers to a
@@ -5673,6 +5942,22 @@ fn conduction_boundary(
                 )
             })?;
     }
+    let mut surface_slots = BTreeMap::new();
+    for name in &surface_heat.names {
+        let parents = parents_of(name)?;
+        let slots = mesh
+            .boundary()
+            .iter()
+            .enumerate()
+            .filter(|(_, face)| {
+                let key = coordinate_face_key(mesh.positions(), face.vertices);
+                !interface_faces.contains(&key)
+                    && parent_by_boundary.get(&key).is_some_and(|parent| parents.contains(parent))
+            })
+            .map(|(slot, _)| slot)
+            .collect::<Vec<_>>();
+        surface_slots.insert(name.clone(), slots);
+    }
     for (name, &watts) in &surface_heat.watts {
         let parents = parents_of(name)?;
         let in_surface = |face: &fs_conduction::BoundaryFace| {
@@ -5720,6 +6005,7 @@ fn conduction_boundary(
     Ok(ConductionBoundaryLowering {
         boundary,
         target_area_m2,
+        surface_slots,
     })
 }
 
@@ -5951,6 +6237,11 @@ fn conduction_solve_receipt(
     conductivity_side: f64,
     geometry_side: f64,
 ) -> Result<ConductionStageProduct, SolveRefusal> {
+    // Output intent is admitted before geometry/numerical work. Propagation
+    // vertices must not masquerade as the nominal report or repeat its adjoint.
+    let adjoint_requested = nominal_adjoint::requested(spec)?
+        && flow_override.is_none() && htc_scale == 1.0
+        && conductivity_side == 0.0 && geometry_side == 0.0;
     // A timed partial field is never published: the ordinary staged refusal
     // retains the last completed pipeline prefix. Successful receipts replay
     // numerically without making their identity depend on replay machine speed.
@@ -6405,6 +6696,12 @@ fn conduction_solve_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
+        let surface_slots = if surface_heat_inputs.names.is_empty() {
+            BTreeMap::new()
+        } else {
+            conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+                &interface_faces, &derived_boundary, &surface_heat_inputs)?.surface_slots
+        };
         let surface_fragment = if surface_heat_inputs.watts.is_empty() {
             None
         } else {
@@ -6447,7 +6744,7 @@ fn conduction_solve_receipt(
                 finite(z)?,
             ))
         };
-        let adjoint_data = if adaptive_requested || roundoff_wanted {
+        let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested {
             let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
             let interfaces = lower_thermal_interfaces(
@@ -6473,6 +6770,7 @@ fn conduction_solve_receipt(
             conjugate_fragment,
             radiation_fragment,
             surface_fragment,
+            surface_slots,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
         };
@@ -6575,10 +6873,18 @@ fn conduction_solve_receipt(
             _ => None,
         };
         adaptive_deadline(deadline)?;
-        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff))
+        // Only the final accepted rung is linearized. No coarse/provisional
+        // field, reconstructed surrogate, or additional primal is published.
+        let nominal_adjoint_fragment = if adjoint_requested {
+            Some(nominal_adjoint::extract(&cx, spec, &solved, &region_ids, &audited, work)?)
+        } else { None };
+        adaptive_deadline(deadline)?;
+        Ok((audited, solved, region_ids, rungs, estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment))
     })?;
-    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff) =
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate, adaptive_fragment, adaptive_discretization, roundoff, nominal_adjoint_fragment) =
         result;
+    let nominal_adjoint_fragment = nominal_adjoint_fragment.map_or_else(String::new,
+        |receipt| format!(",\"nominal_adjoint\":{receipt}"));
     let RungSolved {
         census,
         mesh,
@@ -6589,6 +6895,7 @@ fn conduction_solve_receipt(
         conjugate_fragment,
         radiation_fragment,
         surface_fragment,
+        surface_slots,
         adjoint_data: _,
         algebraic,
     } = solved;
@@ -6617,6 +6924,39 @@ fn conduction_solve_receipt(
     )
     .into_bytes();
     let solution_artifact = hash_bytes(&solution_bytes);
+    // The published mesh, its nodal temperatures and each element's region
+    // label as deterministic VTU (round-trip-exact `{:.17e}` coordinates), so
+    // the field opens in ParaView/VisIt from the run's own retained bytes.
+    let field_vtu = {
+        let mut grid = fs_viz::vtu::UnstructuredGrid::new();
+        for &[x, y, z] in mesh.positions() {
+            grid.add_point(x, y, z);
+        }
+        for tet in &mesh.complex().tets {
+            grid.add_tetra(tet[0] as usize, tet[1] as usize, tet[2] as usize, tet[3] as usize);
+        }
+        grid.add_array(
+            fs_viz::vtu::DataArray::new_point_scalar("temperature", solution.temperature.clone())
+                .with_unit("K"),
+        );
+        grid.add_array(fs_viz::vtu::DataArray::new_cell_int32(
+            "region_label",
+            element_regions
+                .iter()
+                .map(|&label| i32::try_from(label).unwrap_or(i32::MAX))
+                .collect(),
+        ));
+        fs_viz::vtu::VtuWriter::write_ascii(&grid)
+            .map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-field",
+                    format!("the published field does not form a valid VTU grid: {error:?}"),
+                    "report the driver defect; the published mesh and field must agree",
+                )
+            })?
+            .into_bytes()
+    };
+    let field_artifact = hash_bytes(&field_vtu);
     let finite = |name: &str, value: f64| {
         canonical_f64(value).ok_or_else(|| {
             conduction_error(
@@ -6720,7 +7060,7 @@ fn conduction_solve_receipt(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
          \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{},\"quality\":{}}},\
-         \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\
+         \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\"field_artifact\":{},\
          \"temperature\":{{\"unit\":\"K\",\"min\":{},\"max\":{}}},\
          \"interfaces\":{{\"pair_count\":{},\"evidence_artifact\":{},\"fluxes\":[{}]}},\
          \"solver\":{{\"iterations\":{},\"stop_reason\":{},\"final_residual\":{},\
@@ -6730,7 +7070,7 @@ fn conduction_solve_receipt(
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
-         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}}}",
+         \"adaptive\":{},\"conjugate\":{},\"radiation\":{},\"solver_control\":{},{}\"authority\":{},\"no_claim\":{}{nominal_adjoint_fragment}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -6743,6 +7083,7 @@ fn conduction_solve_receipt(
             .element_material_identity
             .expect("heterogeneous assignment"),
         json_string(&solution_artifact.to_hex()),
+        json_string(&field_artifact.to_hex()),
         finite("temperature.min", min_temperature)?,
         finite("temperature.max", max_temperature)?,
         interface_pair_count,
@@ -6782,7 +7123,8 @@ fn conduction_solve_receipt(
     );
     let charge = solution_bytes
         .len()
-        .checked_add(receipt.len())
+        .checked_add(field_vtu.len())
+        .and_then(|bytes| bytes.checked_add(receipt.len()))
         .and_then(|bytes| bytes.checked_add(interface_evidence.as_ref().map_or(0, Vec::len)))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| {
@@ -6798,11 +7140,18 @@ fn conduction_solve_receipt(
         .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, u64::MAX)
         .map_err(|_| cancelled())?;
-    let mut artifacts = vec![RetainedSideArtifact {
-        kind: CONDUCTION_SOLUTION_KIND,
-        artifact: solution_artifact,
-        bytes: solution_bytes,
-    }];
+    let mut artifacts = vec![
+        RetainedSideArtifact {
+            kind: CONDUCTION_SOLUTION_KIND,
+            artifact: solution_artifact,
+            bytes: solution_bytes,
+        },
+        RetainedSideArtifact {
+            kind: CONDUCTION_FIELD_VTU_KIND,
+            artifact: field_artifact,
+            bytes: field_vtu,
+        },
+    ];
     if let (Some(artifact), Some(bytes)) = (interface_evidence_artifact, interface_evidence) {
         artifacts.push(RetainedSideArtifact {
             kind: CONDUCTION_INTERFACE_EVIDENCE_KIND,
@@ -6824,6 +7173,7 @@ fn conduction_solve_receipt(
             roundoff,
             solver_algebraic,
             radiation_sensitivity: None,
+            surface_slots,
         },
     })
 }
@@ -7184,7 +7534,7 @@ fn propagate_declared_inputs(
         let (_, handoff) = flow_network_receipt(project, run, work, resume)?;
         let product = conduction_solve_receipt(
             ledger, project, cards, context, run, work, resume, available_wall_s,
-            Some(&handoff), htc_scale, conductivity_side, geometry_side,
+            handoff.as_ref(), htc_scale, conductivity_side, geometry_side,
         )?;
         region_maximum(&product.qoi_inputs, region, work)
     };
@@ -9028,7 +9378,7 @@ fn sealed_conduction_outputs(
                     ));
                 }
             }
-            CONDUCTION_INTERFACE_EVIDENCE_KIND => {}
+            CONDUCTION_INTERFACE_EVIDENCE_KIND | CONDUCTION_FIELD_VTU_KIND => {}
             other => {
                 return Err(resume_identity(format!(
                     "the sealed conduction output {} has kind `{other}`, not a conduction output kind",
@@ -9533,7 +9883,7 @@ fn validate_resume_candidate(
                     .map_err(|_| cancelled_resume_refusal(run))?;
                     let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
                         |(receipt, handoff)| {
-                            context.flow_network = Some(handoff);
+                            context.flow_network = handoff;
                             receipt
                         },
                     );

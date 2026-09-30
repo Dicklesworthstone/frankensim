@@ -172,6 +172,7 @@ fn project_for_receipt(format: &str, source_hash: u64, parser_version: &str) -> 
             airflow_leakage: None,
             fan_system: None,
             conduction: None,
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -209,6 +210,7 @@ fn project_for_receipt(format: &str, source_hash: u64, parser_version: &str) -> 
         outputs: Some(vec![OutputRequest {
             name: "temperature-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
