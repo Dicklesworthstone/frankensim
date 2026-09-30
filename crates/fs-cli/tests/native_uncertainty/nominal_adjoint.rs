@@ -4,6 +4,7 @@ use super::*;
 fn request(project: &mut fs_project::ProjectSpec) {
     project.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
         name: "temperature-max-adjoint".into(), kind: "report".into(),
+        region: None,
     });
 }
 

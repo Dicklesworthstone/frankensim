@@ -153,7 +153,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Version 34 states, for an indeterminate requirement, the unmeasured terms
 /// and the combined magnitude that would flip it to fail (report bytes).
 /// Version 35 admits a `pressure-drop` scalar output beside the decision QoI.
-pub const SOLVE_DRIVER_VERSION: u32 = 35;
+/// Version 36 admits `fan-power` (fsim v9 fan efficiency) and gives every
+/// additional row one shape: value, unit, certified `interval`, source.
+pub const SOLVE_DRIVER_VERSION: u32 = 36;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -921,7 +923,11 @@ fn has_declared_temperature_maximum(spec: &ProjectSpec) -> bool {
         output.kind == "scalar"
             && !matches!(
                 QoiSemanticId::parse(&output.name),
-                Some(QoiSemanticId::JunctionMaximum | QoiSemanticId::PressureDrop)
+                Some(
+                    QoiSemanticId::JunctionMaximum
+                        | QoiSemanticId::PressureDrop
+                        | QoiSemanticId::FanPower
+                )
             )
     });
     matching_outputs == 1
@@ -4345,15 +4351,22 @@ fn qoi_receipt(
     }
     // Additional scalars ride beside the decision QoI with their own budgets;
     // requirements stay on the temperature maximum.
-    let pressure_drop_requested = outputs.iter().any(|output| {
-        output.kind == "scalar"
-            && QoiSemanticId::parse(&output.name) == Some(QoiSemanticId::PressureDrop)
-    });
+    let requested_family = |family: QoiSemanticId| {
+        outputs.iter().any(|output| {
+            output.kind == "scalar" && QoiSemanticId::parse(&output.name) == Some(family)
+        })
+    };
+    let pressure_drop_requested = requested_family(QoiSemanticId::PressureDrop);
+    let fan_power_requested = requested_family(QoiSemanticId::FanPower);
     if let Some(unsupported) = outputs.iter().find(|output| {
         output.kind == "scalar"
             && !matches!(
                 QoiSemanticId::parse(&output.name),
-                Some(QoiSemanticId::JunctionMaximum | QoiSemanticId::PressureDrop)
+                Some(
+                    QoiSemanticId::JunctionMaximum
+                        | QoiSemanticId::PressureDrop
+                        | QoiSemanticId::FanPower
+                )
             )
     }) {
         return Err(qoi_error(
@@ -4814,14 +4827,57 @@ fn qoi_receipt(
     // pressure as fs-airflow's registered QoI: same value and evidence, with
     // the pressure interval as its boundary-conditions term.
     let mut additional_rows = String::new();
-    if pressure_drop_requested {
-        let handoff = context.flow_network.as_ref().ok_or_else(|| {
+    let mut push_row = |name: &str,
+                        semantic: QoiSemanticId,
+                        value: f64,
+                        numerical: &fs_evidence::NumericalCertificate,
+                        model: &fs_evidence::ModelEvidence,
+                        identity: ContentHash,
+                        source: &str|
+     -> Result<(), SolveRefusal> {
+        let color = fs_evidence::color_of(numerical, model).rank();
+        if color != ColorRank::Estimated {
+            return Err(qoi_error(
+                "cli-solve-qoi-authority",
+                format!("`{name}` unexpectedly carries colour {color:?}"),
+                "do not promote this producer without the separately admitted evidence path",
+            ));
+        }
+        let finite = |field: &str, value: f64| {
+            canonical_f64(value).ok_or_else(|| {
+                qoi_error(
+                    "cli-solve-qoi-nonfinite",
+                    format!("`{name}` field `{field}` is non-finite ({value})"),
+                    "report the operating-point evidence defect",
+                )
+            })
+        };
+        let _ = write!(
+            additional_rows,
+            ",{{\"name\":{},\"semantic\":{},\"region\":null,\"value\":{},\"unit\":{},\
+             \"color\":\"estimated\",\"identity\":{},\"interval\":[{},{}],\"source\":{}}}",
+            json_string(name),
+            json_string(semantic.as_str()),
+            finite("value", value)?,
+            json_string(semantic.units()),
+            json_string(&identity.to_hex()),
+            finite("lo", numerical.lo)?,
+            finite("hi", numerical.hi)?,
+            json_string(source),
+        );
+        Ok(())
+    };
+    let air_network = |name: &str| {
+        context.flow_network.as_ref().ok_or_else(|| {
             qoi_error(
-                "cli-solve-qoi-pressure-drop-no-air-network",
-                "a `pressure-drop` output is declared but the project declares no air network",
-                "declare the fan system, vents and leakage, or remove the pressure-drop output",
+                "cli-solve-qoi-no-air-network",
+                format!("a `{name}` output is declared but the project declares no air network"),
+                "declare the fan system, vents and leakage, or remove the output",
             )
-        })?;
+        })
+    };
+    if pressure_drop_requested {
+        let handoff = air_network("pressure-drop")?;
         let qoi = fs_airflow::qoi::extract_pressure_drop_qoi(&handoff.operating).map_err(|error| {
             qoi_error(
                 "cli-solve-qoi-pressure-drop",
@@ -4829,43 +4885,51 @@ fn qoi_receipt(
                 "report the operating-point evidence defect",
             )
         })?;
-        let color = fs_evidence::color_of(&qoi.evidence.numerical, &qoi.evidence.model).rank();
-        if color != ColorRank::Estimated {
-            return Err(qoi_error(
-                "cli-solve-qoi-authority",
-                format!("the pressure drop unexpectedly carries colour {color:?}"),
-                "do not promote this producer without the separately admitted evidence path",
-            ));
-        }
-        let pascal = |name: &str, value: f64| {
-            canonical_f64(value).ok_or_else(|| {
+        push_row(
+            "pressure-drop",
+            QoiSemanticId::PressureDrop,
+            qoi.evidence.value.value(),
+            &qoi.evidence.numerical,
+            &qoi.evidence.model,
+            qoi.uncertainty.content_id(),
+            "flow-network operating pressure (certified interval)",
+        )?;
+    }
+    if fan_power_requested {
+        let handoff = air_network("fan-power")?;
+        let efficiency = spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.fan_efficiency.as_ref())
+            .ok_or_else(|| {
                 qoi_error(
-                    "cli-solve-qoi-nonfinite",
-                    format!("pressure-drop field `{name}` is non-finite ({value})"),
-                    "report the operating-point evidence defect",
+                    "cli-solve-qoi-fan-power-no-efficiency",
+                    "a `fan-power` output is declared but the cooling section cites no fan efficiency",
+                    "declare `(fan-efficiency :total ... :half-width ... :source ... :source-id ...)` under cooling",
                 )
-            })
-        };
-        let half_width = match qoi
-            .uncertainty
-            .term(EngineeringUncertaintyKind::BoundaryConditions)
-            .value()
-        {
-            TermValue::IntervalBound { upper, .. } => pascal("half_width", *upper)?,
-            _ => "null".to_string(),
-        };
-        let _ = write!(
-            additional_rows,
-            ",{{\"name\":\"pressure-drop\",\"semantic\":{},\"region\":null,\"value\":{},\"unit\":\"pascal\",\
-             \"color\":\"estimated\",\"identity\":{},\"interval\":[{},{}],\"boundary_conditions_half_width\":{},\
-             \"source\":\"flow-network operating point\"}}",
-            json_string(QoiSemanticId::PressureDrop.as_str()),
-            pascal("value", qoi.evidence.value.value())?,
-            json_string(&qoi.uncertainty.content_id().to_hex()),
-            pascal("lo", qoi.evidence.numerical.lo)?,
-            pascal("hi", qoi.evidence.numerical.hi)?,
-            half_width,
-        );
+            })?;
+        let fan_spec = fs_airflow::qoi::FanPowerSpec::try_new(
+            efficiency.total,
+            efficiency.half_width,
+            fs_airflow::SourceProvenance::new(efficiency.source.clone(), efficiency.source_id.clone()),
+        )
+        .and_then(|fan_spec| fs_airflow::qoi::extract_fan_power_qoi(&handoff.operating, &fan_spec))
+        .map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-fan-power",
+                format!("fan-power extraction refused: {error}"),
+                "declare an efficiency interval inside (0, 1] and a valid operating point",
+            )
+        })?;
+        push_row(
+            "fan-power",
+            QoiSemanticId::FanPower,
+            fan_spec.evidence.value.value(),
+            &fan_spec.evidence.numerical,
+            &fan_spec.evidence.model,
+            fan_spec.uncertainty.content_id(),
+            "dp * Q / eta over the operating envelope and the cited efficiency interval",
+        )?;
     }
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}{}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":{},\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":{}}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
@@ -4915,7 +4979,9 @@ fn qoi_receipt(
     Ok(QoiStageProduct {
         receipt,
         progress: QoiProgressSummary {
-            qoi_count: extracted.rows.len() + usize::from(pressure_drop_requested),
+            qoi_count: extracted.rows.len()
+                + usize::from(pressure_drop_requested)
+                + usize::from(fan_power_requested),
             verdict: evaluation.outcome.as_str(),
             weakest_term: Some(match terms.len() - measured_terms {
                 8 => "all-eight-no-data",

@@ -414,7 +414,7 @@ per-schema compatibility and deprecation rules, is
 
 | Frozen schema | Owner | Version | If an older document appears |
 |---------------|-------|---------|------------------------------|
-| `.fsim` project schema | `fs-project` | 8 | migrates, with a receipt |
+| `.fsim` project schema | `fs-project` | 9 | migrates, with a receipt |
 | `.fsim` study schema | `fs-project` | 1 | no predecessor yet |
 | Evidence-package format | `fs-package` | 9 | refused by name |
 | Checker protocol | `fs-checker` | 7 | refused by name |

@@ -125,6 +125,7 @@ fn valid_project() -> ProjectSpec {
             airflow_leakage: None,
             fan_system: None,
             conduction: None,
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -162,6 +163,7 @@ fn valid_project() -> ProjectSpec {
         outputs: Some(vec![OutputRequest {
             name: "temperature-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
@@ -570,7 +572,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"a04dd885560c249cdf6843e87abe1d9bfb9404eac1e185390a8ca7858c4cbc21\""
+            "\"project_hash\":\"83dac601c333198d438b9aa9d1d96fbdd164c336597177ce7fcad5ed95cf15a7\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -580,7 +582,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"08149b2b51bce2d1d036b807a63fd85502022575fc01e7798560cfdaced4b073\""
+            "\"project_hash\":\"734931b3d10a44786bebc5b799465dd7662219a13144a4db608875c73c71a8a8\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -1176,6 +1178,57 @@ fn g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop() {
         t_fast < t_slow,
         "faster air must cool the part: {t_slow} -> {t_fast} K"
     );
+    // Fan input power dp * Q / eta scales with speed cubed at fixed efficiency.
+    let (p_slow, p_fast) = diff("fan-power");
+    assert!(
+        (p_fast / p_slow / (affinity * ratio) - 1.0).abs() < 1e-9,
+        "fan power {p_slow} -> {p_fast} W is not the cube-law ratio"
+    );
+
+    // Fan power without a cited efficiency refuses by name; it never
+    // assumes 100 % or any default.
+    let start = declared
+        .find("(fan-efficiency ")
+        .expect("example cites a fan efficiency");
+    let end = start + declared[start..].find(')').unwrap() + 1;
+    let uncited = dir.join("heatsink-fan-uncited.fsim");
+    std::fs::write(
+        &uncited,
+        format!("{}{}", declared[..start].trim_end(), &declared[end..]),
+    )
+    .unwrap();
+    let imported = run(args(&[
+        "--json",
+        "import",
+        uncited.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let refused = run(args(&[
+        "--json",
+        "solve",
+        uncited.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert!(
+        refused
+            .stderr
+            .contains("cli-solve-qoi-fan-power-no-efficiency"),
+        "stderr: {}",
+        refused.stderr
+    );
 }
 
 #[test]
@@ -1488,7 +1541,9 @@ fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() 
         }
     }
     let end = end.expect("balanced conduction form");
-    let stripped = format!("{}{}", &source[..start], &source[end..]).replace(" )", ")");
+    let stripped = format!("{}{}", &source[..start], &source[end..])
+        .replace(" )", ")")
+        .replace("  (", " (");
     let dir = scratch("run-no-conduction");
     let fsim = dir.join("heatsink-no-conduction.fsim");
     std::fs::write(&fsim, stripped.trim_end()).expect("scratch project");

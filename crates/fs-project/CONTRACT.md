@@ -171,8 +171,15 @@ bindings; it runs no solves and admits no scenarios itself.
   thermal boundary row may target it. Migration from v7 is an envelope
   rewrite; a pre-v8 payload that declares a surface is refused
   (`fsim-migration-payload`).
+- The cooling section may cite a fan total efficiency (schema v9,
+  `(fan-efficiency :total :half-width :source :source-id)`). The whole
+  interval must lie inside (0, 1] (`project-fan-efficiency-range`) and the
+  citation must be non-empty (`project-fan-efficiency-source`). An
+  `OutputRequest` may carry `:region`, which must name a declared surface
+  (`project-output-region`). Migration from v8 is an envelope rewrite; a
+  pre-v9 payload declaring either is refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 8 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 9 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.

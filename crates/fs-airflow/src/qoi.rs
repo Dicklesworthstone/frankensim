@@ -992,6 +992,26 @@ pub fn extract_pressure_drop_qoi(
     pressure_drop_qoi(operating_point, operating_identity(operating_point))
 }
 
+/// Extract only the fan input-power QoI `dp * Q / eta` from a solved
+/// operating point and a cited efficiency interval: the same value, evidence
+/// and budget [`extract_thermal_qois`] emits (the operating envelope as the
+/// boundary-conditions term, the efficiency interval as the parameters term).
+///
+/// # Errors
+/// Refuses a malformed operating point or an unordered power interval.
+pub fn extract_fan_power_qoi(
+    operating_point: &OperatingPoint,
+    spec: &FanPowerSpec,
+) -> Result<ThermalQoi<Power>, QoiError> {
+    validate_operating_point(operating_point)?;
+    fan_power_qoi(
+        operating_point,
+        spec,
+        operating_identity(operating_point),
+        fan_power_identity(spec),
+    )
+}
+
 /// [`extract_junction_maximum_qoi`] with caller-retained measured terms.
 ///
 /// Each receipt populates exactly its own source; every source without one

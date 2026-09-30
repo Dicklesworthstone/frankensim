@@ -488,6 +488,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
                 topology: fs_project::fansystem::FanSystemTopology::Single,
             }),
             conduction: None,
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -525,6 +526,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
         outputs: Some(vec![OutputRequest {
             name: "temperature-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
@@ -1089,7 +1091,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 35,
+        SOLVE_DRIVER_VERSION, 36,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 

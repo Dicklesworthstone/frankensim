@@ -18,7 +18,7 @@ impl Model {
             return Err(invalid("nominal calibration requires one unambiguous adjoint report output"));
         }
         if requests.is_empty() {
-            outputs.push(fs_project::spec::OutputRequest { name: OUTPUT.into(), kind: "report".into() });
+            outputs.push(fs_project::spec::OutputRequest { name: OUTPUT.into(), kind: "report".into(), region: None });
         }
         let text = fs_project::print_sexpr(&spec).map_err(project_error)?;
         let base = fs_project::parse_sexpr(&text).map_err(project_error)?;

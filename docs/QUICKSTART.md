@@ -13,7 +13,7 @@ command here drifts from what the product actually does, a lane breaks.
 
 FrankenSim is fail-closed by design. `validate` reports every structural
 finding about your project and never guesses. A green validate means the
-file is a well-formed project under the frozen schema (`.fsim` v8) — not that
+file is a well-formed project under the frozen schema (`.fsim` v9) — not that
 physics has been solved. A solve runs seven durable stages — import-verify,
 assign, material-resolve, flow-network, conduction, qoi, report — and every
 number it retains carries an evidence colour and a no-claim. Today every

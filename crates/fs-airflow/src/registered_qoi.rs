@@ -138,7 +138,9 @@ impl QoiSemanticId {
                 Some(Self::PressureDrop)
             }
 
-            "airflow.fan_power" | "fan_power" | "fan_input_power" | "p_fan" => Some(Self::FanPower),
+            "airflow.fan_power" | "fan_power" | "fan-power" | "fan_input_power" | "p_fan" => {
+                Some(Self::FanPower)
+            }
 
             "thermal.thermal_margin" | "thermal_margin" | "margin" | "junction_margin" => {
                 Some(Self::ThermalMargin)

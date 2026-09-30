@@ -83,21 +83,27 @@ body is what the physics needs.
   retained receipt, not this file; read the receipt.
 - **Requirement and output**: a sourced `temperature-max` limit of
   353.15 K with a 5 K margin on `metal`, and the matching scalar output.
-- **Pressure drop**: a second scalar output, `pressure-drop`. It is the flow
-  network's certified operating pressure, reported (and packaged) beside the
-  decision QoI with its own budget. No requirement is composed on it.
+- **Pressure drop and fan power**: two more scalar outputs. `pressure-drop`
+  is the flow network's certified operating pressure. `fan-power` is
+  dp * Q / eta, using the cited `(fan-efficiency :total 0.25 :half-width 0.05
+  ...)`, an illustrative value and not this fan's datasheet. Both are
+  reported and packaged beside the decision QoI with their own certified
+  intervals; no requirement is composed on them. A `fan-power` request with
+  no cited efficiency refuses (`cli-solve-qoi-fan-power-no-efficiency`); it
+  never assumes 100 %.
 
 ## The decision this example exists for: compare fan operating points
 
 Solve the project, then solve a copy with `:speed-ratio 0.9`, into the same
 ledger, and `compare` the two runs. MEASURED 2026-09-30: `temperature-max`
 goes from 301.9958 to 301.0340 K (−0.96 K), and `pressure-drop` goes from
-3.9663 to 6.5565 Pa (+65.306 %). The pressure ratio is exactly (0.9/0.7)²,
-which the fan affinity law requires against this quadratic orifice and
-leakage network. The G1 test
+3.9663 to 6.5565 Pa (+65.306 %), and `fan-power` goes from 0.02071 to 0.04402 W
+(+112.54 %). So 0.023 W more fan input buys 0.96 K. The fan affinity law fixes
+both ratios exactly against this quadratic orifice and leakage network:
+(0.9/0.7)² for pressure and (0.9/0.7)³ for power. The G1 test
 `g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop`
-checks that ratio to 1e-9. Fan input power needs a cited fan-efficiency
-declaration that the schema does not have yet (bead q61wp.83).
+checks both to 1e-9, and checks that fan power refuses without a cited
+efficiency.
 
 ## What solve does with this
 

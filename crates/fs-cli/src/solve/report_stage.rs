@@ -550,7 +550,9 @@ pub(super) fn report_receipt(
             required_f64(qoi_stage, row, "value")?,
             required_str(qoi_stage, row, "unit")?.to_string(),
             required_str(qoi_stage, row, "identity")?.to_string(),
-            row.f64_field("boundary_conditions_half_width"),
+            row.get("interval")
+                .and_then(JsonValue::as_array)
+                .and_then(|pair| Some((pair.first()?.as_f64()?, pair.get(1)?.as_f64()?))),
             row.str_field("source").unwrap_or("").to_string(),
         ));
     }
@@ -718,8 +720,8 @@ pub(super) fn report_receipt(
         report = report.with_qoi(QoiReportItem {
             name: name.clone(),
             description: match half_width {
-                Some(half_width) => format!(
-                    "{source}; certified operating interval half-width {half_width} {unit} (boundary-conditions term, the only measured one); reported beside the decision QoI, no requirement composed"
+                Some((lo, hi)) => format!(
+                    "{source}; interval [{lo}, {hi}] {unit}; reported beside the decision QoI, no requirement composed"
                 ),
                 None => format!("{source}; reported beside the decision QoI, no requirement composed"),
             },
