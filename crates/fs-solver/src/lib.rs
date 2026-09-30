@@ -24,6 +24,7 @@ pub mod checked_cg;
 /// Outward residual evaluation and checked discrete algebraic goal bounds.
 pub mod goal;
 pub mod krylov;
+pub mod least_squares;
 pub mod lsqr;
 pub mod mixed;
 pub mod nonlinear;
