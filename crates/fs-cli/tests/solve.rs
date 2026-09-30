@@ -488,6 +488,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
                 topology: fs_project::fansystem::FanSystemTopology::Single,
             }),
             conduction: None,
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -525,6 +526,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
         outputs: Some(vec![OutputRequest {
             name: "temperature-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
@@ -1089,7 +1091,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 31,
+        SOLVE_DRIVER_VERSION, 37,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3244,6 +3246,56 @@ fn dump_reference_project_fixture() {
     println!("wrote reference fixture to {}", dir.display());
 }
 
+/// Generator for `examples/contact-pair` (bead q61wp.49/.53): the two-body
+/// contact project the refinement oracles below exercise, as a tracked
+/// product example (`import` binds one source per geometry row).
+///
+/// ```text
+/// cargo test -p fs-cli --test solve -- --ignored dump_contact_pair_example
+/// ```
+#[test]
+#[ignore = "generator: writes the tracked example under examples/contact-pair"]
+fn dump_contact_pair_example() {
+    let dir = contact_pair_dir();
+    std::fs::create_dir_all(&dir).expect("example directory");
+    let source = print_sexpr(&contact_refinement_project("auto")).expect("example renders");
+    std::fs::write(dir.join("contact-pair.fsim"), &source).expect("project writes");
+    std::fs::write(dir.join("cold-hot.fsintpk"), interface_pack_bytes()).expect("pack writes");
+    for role in ["cold-body", "hot-body"] {
+        std::fs::copy(
+            format!("{REFERENCE_DATA}/multi-region-{role}.stl"),
+            dir.join(format!("{role}.stl")),
+        )
+        .expect("geometry copies");
+    }
+    println!("wrote contact-pair example to {}", dir.display());
+}
+
+fn contact_pair_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/contact-pair")
+}
+
+#[test]
+fn g0_the_contact_pair_example_is_exactly_what_its_generator_produces() {
+    let dir = contact_pair_dir();
+    let project = std::fs::read_to_string(dir.join("contact-pair.fsim")).expect("tracked project");
+    assert_eq!(
+        project,
+        print_sexpr(&contact_refinement_project("auto")).unwrap(),
+        "regenerate with --ignored dump_contact_pair_example"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cold-hot.fsintpk")).expect("tracked pack"),
+        interface_pack_bytes()
+    );
+    for role in ["cold-body", "hot-body"] {
+        assert_eq!(
+            std::fs::read(dir.join(format!("{role}.stl"))).unwrap(),
+            std::fs::read(format!("{REFERENCE_DATA}/multi-region-{role}.stl")).unwrap()
+        );
+    }
+}
+
 /// Repo-relative path of the tracked reference project (bead
 /// frankensim-58fbi).
 fn reference_project_dir() -> std::path::PathBuf {
@@ -4429,6 +4481,40 @@ fn g3_flow_network_missing_optional_declarations_refuse_with_typed_codes() {
             "{code}: the refused flow stage publishes no receipt"
         );
     }
+}
+
+/// A solid cooled only by declared coefficients declares no air network at
+/// all. The flow-network stage retains that absence as its receipt (no
+/// operating point, none claimed) instead of refusing, and the run completes;
+/// a partial air declaration still refuses, as the test above pins.
+#[test]
+fn g3_a_project_without_any_air_network_completes_with_a_not_declared_flow_receipt() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    let cooling = spec.cooling.as_mut().expect("cooling");
+    cooling.fan_system = None;
+    cooling.airflow_leakage = None;
+    cooling.vents = Vec::new();
+    cooling.fans = Vec::new();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let outcome = run_solve(
+        &ledger,
+        &CancelGate::new_clock_free(),
+        &mut benign_clock(),
+        &decoded,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect("a project without an air network solves");
+    assert_eq!(outcome.status, SolveRunStatus::Completed);
+    let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+    assert_eq!(receipts.len(), 7);
+    let flow = String::from_utf8(artifact_bytes(&ledger, &receipts[3])).unwrap();
+    assert_balanced_json(&flow);
+    assert!(flow.contains("\"status\":\"not-declared\""), "{flow}");
+    assert!(!flow.contains("operating_point"), "{flow}");
 }
 
 /// Missing `cooling` or `envelope` sections are project-validation findings,

@@ -132,12 +132,49 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertTrue(comp.same_project)
             self.assertEqual(len(comp.project_hash_left), 64)
             self.assertEqual(comp.project_hash_left, comp.project_hash_right)
-            self.assertEqual(comp.qoi_count, 1)
-            self.assertEqual(len(comp.qoi_diffs), 1)
+            self.assertEqual(comp.qoi_count, 3)
+            self.assertEqual(len(comp.qoi_diffs), 3)
             self.assertEqual(comp.qoi_diffs[0].name, "temperature-max")
             self.assertEqual(comp.qoi_diffs[0].delta, 0.0)
             self.assertEqual(comp.qoi_diffs[0].classification, "same")
             self.assertIn("identical runs", comp.summary)
+
+    def test_report_names_the_files_the_binary_exports(self):
+        # The client once read `html_report`/`json_twin`/`project_name`, keys
+        # the report verb never emits, so every path came back "". Execute
+        # against the real binary and check each path exists.
+        example = self.repo_root / "examples" / "contact-pair"
+        fsim = example / "contact-pair.fsim"
+        sources = [example / "cold-body.stl", example / "hot-body.stl"]
+        interfaces = example / "cold-hot.fsintpk"
+        if not (fsim.exists() and interfaces.exists() and self.pack.exists()
+                and Path(self.client.binary_path).is_file()):
+            self.skipTest("contact-pair fixtures or frankensim binary unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "python_report_ledger.db"
+            imported = self.client.import_mesh(
+                project_path=fsim,
+                source_path=sources,
+                ledger_path=ledger,
+                unit="m",
+                max_hole_edges=0,
+            )
+            self.assertEqual(imported.artifact_count, 2)
+            solved = self.client.solve(
+                project_path=fsim,
+                ledger_path=ledger,
+                materials=[self.pack],
+                interfaces=[interfaces],
+            )
+            self.assertEqual(solved.stages_completed, 7)
+            report = self.client.report(solved.run_id, ledger_path=ledger)
+            for path in (report.html_path, report.json_path, report.field_vtu_path):
+                self.assertTrue(path and Path(path).is_file(), path)
+            self.assertTrue(report.field_vtu_path.endswith(".field.vtu"))
+            self.assertEqual(report.project_name, "solve-reference")
+            self.assertEqual(report.verdict, "indeterminate")
+            self.assertEqual(len(report.content_hash), 64)
 
     def test_run_exposes_retained_qoi_vocabulary(self):
         if not (
@@ -185,9 +222,28 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
 
             budget_terms = report["budget_terms"]
             self.assertEqual(len(budget_terms), 8)
+
+            # An indeterminate requirement states what would decide it: the
+            # unmeasured terms, and how large they may be combined before it
+            # fails (the budget total is a conservative linear sum).
+            requirement = requirements[0]
+            unmeasured = [t["kind"] for t in budget_terms if t["value"] is None]
+            self.assertEqual(requirement["unmeasured_terms"], unmeasured)
+            if requirement["outcome"] == "indeterminate":
+                measured = sum(t["value"] for t in budget_terms if t["value"] is not None)
+                expected = (requirement["nominal_margin"]
+                            - requirement["required_margin"] - measured)
+                self.assertAlmostEqual(requirement["decision_headroom"], expected, places=5)
+                html = report_path.with_name(
+                    report_path.name.replace(".report.json", ".report.html")).read_text()
+                self.assertIn("What would decide temperature-max", html)
+            else:
+                self.assertIsNone(requirement["decision_headroom"])
             for term in budget_terms:
                 self.assertEqual(term["qoi"], "temperature-max")
-                self.assertIn(term["state"], {"measured", "no-data"})
+                # fs-airflow's term receipt states (interval / negligible /
+                # gap), with gap projected as no-data in the report.
+                self.assertIn(term["state"], {"interval", "negligible", "no-data"})
                 if term["state"] == "no-data":
                     self.assertIsNone(term["value"])
                 else:

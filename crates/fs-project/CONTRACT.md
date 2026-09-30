@@ -163,8 +163,23 @@ bindings; it runs no solves and admits no scenarios itself.
   uniform normal-offset half-width in metres with a mandatory basis and
   source, all three keys or none. The solve stage propagates it into the
   Geometry budget term.
+- The assembly may declare `EntityDecl::Surface` (schema v8,
+  `(surface :parent :name :display)`): a named exterior boundary patch of a
+  part, identity kind `Surface`. It needs one geometry assignment (for
+  example a `(box ...)` footprint), and has no conduction seed or material.
+  A `power` row naming a surface is heat entering uniformly through it. A
+  thermal boundary row may target it. Migration from v7 is an envelope
+  rewrite; a pre-v8 payload that declares a surface is refused
+  (`fsim-migration-payload`).
+- The cooling section may cite a fan total efficiency (schema v9,
+  `(fan-efficiency :total :half-width :source :source-id)`). The whole
+  interval must lie inside (0, 1] (`project-fan-efficiency-range`) and the
+  citation must be non-empty (`project-fan-efficiency-source`). An
+  `OutputRequest` may carry `:region`, which must name a declared surface
+  (`project-output-region`). Migration from v8 is an envelope rewrite; a
+  pre-v9 payload declaring either is refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 7 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 9 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.

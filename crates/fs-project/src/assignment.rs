@@ -461,7 +461,7 @@ pub fn resolve_geometry_assignments(
 
     let mut expected_targets = BTreeSet::new();
     for (name, id) in &ids {
-        if matches!(id.kind(), EntityKind::Region | EntityKind::Interface) {
+        if matches!(id.kind(), EntityKind::Region | EntityKind::Interface | EntityKind::Surface) {
             expected_targets.insert(name.as_str());
         }
     }
@@ -480,7 +480,7 @@ pub fn resolve_geometry_assignments(
             ));
             continue;
         };
-        if !matches!(id.kind(), EntityKind::Region | EntityKind::Interface) {
+        if !matches!(id.kind(), EntityKind::Region | EntityKind::Interface | EntityKind::Surface) {
             result.violations.push(violation(
                 "project-assignment-target-kind",
                 format!(

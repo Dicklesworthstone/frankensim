@@ -58,7 +58,8 @@ body is what the physics needs.
   a path; declaring a small honest bypass is what lets the operating point
   execute.
 - **Power**: 3 W at duty 1.0 dissipated in the metal region — a volumetric
-  simplification of a chip heating the base, documented as such.
+  simplification of a chip heating the base, documented as such. The
+  chip-footprint twin below removes the simplification.
 
 ## The conduction declaration
 
@@ -82,6 +83,27 @@ body is what the physics needs.
   retained receipt, not this file; read the receipt.
 - **Requirement and output**: a sourced `temperature-max` limit of
   353.15 K with a 5 K margin on `metal`, and the matching scalar output.
+- **Pressure drop and fan power**: two more scalar outputs. `pressure-drop`
+  is the flow network's certified operating pressure. `fan-power` is
+  dp * Q / eta, using the cited `(fan-efficiency :total 0.25 :half-width 0.05
+  ...)`, an illustrative value and not this fan's datasheet. Both are
+  reported and packaged beside the decision QoI with their own certified
+  intervals; no requirement is composed on them. A `fan-power` request with
+  no cited efficiency refuses (`cli-solve-qoi-fan-power-no-efficiency`); it
+  never assumes 100 %.
+
+## The decision this example exists for: compare fan operating points
+
+Solve the project, then solve a copy with `:speed-ratio 0.9`, into the same
+ledger, and `compare` the two runs. MEASURED 2026-09-30: `temperature-max`
+goes from 301.9958 to 301.0340 K (−0.96 K), and `pressure-drop` goes from
+3.9663 to 6.5565 Pa (+65.306 %), and `fan-power` goes from 0.02071 to 0.04402 W
+(+112.54 %). So 0.023 W more fan input buys 0.96 K. The fan affinity law fixes
+both ratios exactly against this quadratic orifice and leakage network:
+(0.9/0.7)² for pressure and (0.9/0.7)³ for power. The G1 test
+`g1_compare_answers_the_heatsink_fan_speed_decision_with_pressure_drop`
+checks both to 1e-9, and checks that fan power refuses without a cited
+efficiency.
 
 ## What solve does with this
 
@@ -107,6 +129,13 @@ import-verify → assign → material-resolve → flow-network → conduction �
   twin, and a format-9 evidence package (Estimated claims only), seals all
   three in the ledger; `report` / `package` export exactly those bytes and
   refuse an unknown run without writing anything.
+
+`report` also writes `<run>.field.vtu`: the solved mesh with nodal
+`temperature` and per-cell `region_label`, byte-for-byte the conduction
+receipt's `field_artifact`. Open it in ParaView to see where the heat goes.
+MEASURED 2026-09-29 with an independent reader (meshio): 246 points, 685
+tets, T in [301.9660, 301.9958] K (the maximum is the QoI), and tet volumes
+summing to 5.2800007e-5 m³ against the analytic 52.8 cm³.
 
 Read the HTML: every number cites the receipt hash it was copied from, and
 the uncertainty table prints `NO-DATA` where nothing was measured. See
@@ -135,6 +164,34 @@ axis-aligned 301.99578 K on 713 tets, rotated 301.99562 K on 704 tets, a
 the ladder measured. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
+
+## A chip footprint: heat entering through a declared surface
+
+`heatsink-fan-chip.fsim` is the same project with the 3 W entering where a
+chip actually puts it: through a 20 × 20 mm die contact on the base bottom.
+`heatsink-chip.stl` is `generate_heatsink_stl.py OUT --chip 0.030 0.050 0.020
+0.040` (256 facets on one global tensor grid, so the footprint is a union of
+whole facets). The assembly declares `(surface :parent "heatsink" :name
+"chip" ...)` (fsim v8), a `(box ...)` assignment selects the footprint facets
+(`:tolerance 1e-6` because STL vertices weld at f32), and the power row names
+`chip` instead of `metal`. Solve lowers surface power to a uniform inward
+Neumann flux, watts over the measured footprint area, and carves the
+footprint out of the metal's convection row, so the patch never also
+convects. A surface carrying both a power row and a boundary law is refused
+(`cli-solve-conduction-surface-ambiguous`).
+
+MEASURED 2026-09-29: all seven stages complete; `source_w` 0, 3.0 W in
+through the footprint, 3.0000000021 W out by convection (relative closure
+6.9e-10). The maximum is 302.693 K against 301.996 K for the volumetric
+source: concentrating the heat under the die raises the rise above the
+293.15 K inlet from 8.85 K to 9.54 K (+0.70 K, 8 %). The conduction receipt's
+`surface_heat` block records each powered surface's measured area (400 mm²
+to 1e-6, the f32 weld) and the hottest vertex. Shifting the box 20 mm in y
+on the same STL moves the hot spot from (38, 30, 0) mm to (44, 0, 0) mm. The
+G1 test `g1_chip_footprint_power_enters_through_the_declared_surface` checks
+all of this. Surfaces do not depend on the selector kind, so a STEP body's
+named face group should serve through `(named-group ...)`; that path is not
+yet exercised end to end.
 
 ## Probability of compliance
 

@@ -94,6 +94,14 @@ pub struct RequirementReportItem {
     pub unit: String,
     /// Producer-recorded outcome (`indeterminate`, `pass`, `fail`, ...).
     pub outcome: String,
+    /// Budget terms with no measured magnitude (`no-data`), in budget order.
+    pub unmeasured_terms: Vec<String>,
+    /// For an indeterminate outcome: how large the unmeasured terms may be,
+    /// combined, before the requirement fails. The budget total is a
+    /// conservative linear sum, so this is nominal margin minus required
+    /// margin minus the measured half-widths. `None` when nothing is
+    /// unmeasured.
+    pub decision_headroom: Option<f64>,
 }
 
 /// One term of the engineering uncertainty budget.
@@ -445,6 +453,19 @@ impl EngineeringReport {
                 );
             }
             html.push_str("</table>\n");
+            for r in &self.requirements {
+                let Some(headroom) = r.decision_headroom else {
+                    continue;
+                };
+                let _ = write!(
+                    html,
+                    "<p><strong>What would decide {}:</strong> the unmeasured terms ({}) would have to exceed {} {} combined to make this requirement fail; below that it passes. Nothing in this run measured them.</p>\n",
+                    escape_html(&r.qoi),
+                    escape_html(&r.unmeasured_terms.join(", ")),
+                    html_num(headroom),
+                    escape_html(&r.unit)
+                );
+            }
         }
 
         // 2b. Engineering uncertainty budget terms
@@ -738,7 +759,7 @@ impl EngineeringReport {
             }
             let _ = write!(
                 json,
-                "    {{\"id\": \"{}\", \"qoi\": \"{}\", \"region\": \"{}\", \"effective_limit\": {}, \"required_margin\": {}, \"nominal_margin\": {}, \"unit\": \"{}\", \"outcome\": \"{}\"}}",
+                "    {{\"id\": \"{}\", \"qoi\": \"{}\", \"region\": \"{}\", \"effective_limit\": {}, \"required_margin\": {}, \"nominal_margin\": {}, \"unit\": \"{}\", \"outcome\": \"{}\", \"unmeasured_terms\": [{}], \"decision_headroom\": {}}}",
                 escape_json(&r.id),
                 escape_json(&r.qoi),
                 escape_json(&r.region),
@@ -746,7 +767,13 @@ impl EngineeringReport {
                 json_num(r.required_margin),
                 json_num(r.nominal_margin),
                 escape_json(&r.unit),
-                escape_json(&r.outcome)
+                escape_json(&r.outcome),
+                r.unmeasured_terms
+                    .iter()
+                    .map(|term| format!("\"{}\"", escape_json(term)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                r.decision_headroom.map_or_else(|| "null".to_string(), json_num)
             );
         }
         json.push_str("\n  ],\n");

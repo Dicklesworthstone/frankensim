@@ -458,6 +458,7 @@ mod wire_surface {
                 airflow_leakage: None,
                 fan_system: Some(super::single_system()),
                 conduction: None,
+                fan_efficiency: None,
             }),
             envelope: Some(Envelope {
                 ambient_lo: kelvin(273.15),
@@ -495,6 +496,7 @@ mod wire_surface {
             outputs: Some(vec![OutputRequest {
                 name: "t-junction-max".to_string(),
                 kind: "scalar".to_string(),
+                region: None,
             }]),
         }
     }
@@ -544,7 +546,7 @@ mod wire_surface {
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(
             migrated.receipt.rule.label(),
-            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
+            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
         );
         let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
         assert!(

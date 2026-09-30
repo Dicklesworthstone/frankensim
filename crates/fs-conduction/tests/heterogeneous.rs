@@ -343,6 +343,47 @@ fn temperature_dependent_layer_refuses_outside_its_span() {
     );
 }
 
+/// An admissible start whose SOLUTION lies beyond the card's span: the
+/// Newton iterate is pinned at the span edge and every admissible step
+/// stalls. The refusal must name the span (the design runs outside the
+/// card), never the generic "Armijo backtracking failed" it used to report.
+/// Exact 1-D answer: T(x) = 300 + q/(2k) (2Lx - x^2), max 300 + q L^2/(2k) =
+/// 350 K for q = 50 W/m^3, L = 2 m, k = 2, against a 320 K ceiling.
+#[test]
+fn a_solution_beyond_the_material_span_refuses_by_span_not_line_search() {
+    let (complex, positions) = box_grid([8, 1, 1], [2.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).expect("mesh");
+    let material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(290.0, 2.0), (320.0, 2.0)]).expect("curve"),
+    );
+    let source = ScalarField::Uniform(50.0);
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "anchor",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(300.0).expect("bc"),
+        )
+        .expect("anchor")
+        .adiabatic_remainder()
+        .finish()
+        .expect("boundary");
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
+    let err = with_cx(|cx| solve(cx, problem, SolveConfig::default()).expect_err("beyond span"));
+    match err {
+        ConductionError::OutsideTemperatureSpan { temperature, high, .. } => {
+            assert_eq!(high, 320.0);
+            assert!(temperature > high, "the refusal names the driven temperature {temperature}");
+        }
+        other => panic!("expected the span refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn anisotropic_layers_keep_the_x_series_interface() {
     let length = 2.0;

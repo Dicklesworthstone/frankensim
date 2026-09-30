@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .exceptions import (
     FrankenSimError,
@@ -229,7 +229,7 @@ class FrankenSimClient:
     def import_mesh(
         self,
         project_path: Union[str, Path],
-        source_path: Union[str, Path],
+        source_path: Union[str, Path, Sequence[Union[str, Path]]],
         ledger_path: Union[str, Path],
         unit: str = "m",
         max_hole_edges: Optional[int] = None,
@@ -238,11 +238,20 @@ class FrankenSimClient:
         strict: bool = True,
         timeout_s: Optional[float] = None,
     ) -> ImportResult:
-        """Import CAD / STL geometry into durable ledger."""
+        """Import CAD / STL geometry into durable ledger.
+
+        ``source_path`` may be a sequence: one source per project geometry
+        row, in declaration order (a multi-body project).
+        """
+        sources = (
+            [source_path]
+            if isinstance(source_path, (str, Path))
+            else list(source_path)
+        )
         args = [
             "import",
             str(project_path),
-            str(source_path),
+            *[str(source) for source in sources],
             str(ledger_path),
             "--unit",
             unit,
@@ -340,15 +349,26 @@ class FrankenSimClient:
 
         exit_code, data, diagnostics, _, stderr_raw = self._execute(args, timeout_s=timeout_s)
 
-        html_file = data.get("html_report", "")
-        json_file = data.get("json_twin", "")
+        html_file = data.get("report_html", "")
+        json_file = data.get("report_json", "")
+        # The verb's result names the files; the project name lives in the
+        # exported JSON twin, which is the retained report itself.
+        project_name = ""
+        if json_file:
+            try:
+                with open(json_file, encoding="utf-8") as twin:
+                    project_name = json.load(twin).get("project_name", "")
+            except (OSError, ValueError):
+                project_name = ""
 
         result = EngineeringReport(
             run_id=run_id,
-            project_name=data.get("project_name", ""),
+            project_name=project_name,
             content_hash=data.get("content_hash", ""),
             html_path=html_file,
             json_path=json_file,
+            field_vtu_path=data.get("field_vtu", ""),
+            verdict=data.get("verdict", ""),
             exit_code=exit_code,
             diagnostics=diagnostics,
         )

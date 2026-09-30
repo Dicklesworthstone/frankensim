@@ -16,6 +16,8 @@ pub mod acq;
 #[cfg(feature = "tape-acq")]
 pub mod acq_grad;
 pub mod bo;
+/// Joint latent feasibility and reference-capped noisy design improvement.
+pub mod constrained;
 pub mod gp;
 /// Bounded kernel learning that preserves declared per-observation noise.
 pub mod hyper;
@@ -25,6 +27,8 @@ pub mod mf;
 /// Joint-posterior noisy expected improvement for stochastic objectives.
 pub mod noisy;
 pub mod sparse;
+/// Resumable ask/tell studies for externally executed noisy simulations.
+pub mod study;
 pub mod turbo;
 
 pub use acq::{expected_improvement, normal_bank, phi_cdf, phi_inv, q_expected_improvement};

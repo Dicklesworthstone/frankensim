@@ -425,7 +425,7 @@ pub fn resolve_bindings(
             EntityDecl::Interface { name, from, to, .. } => {
                 interface_sides.insert(name.as_str(), (from.as_str(), to.as_str()));
             }
-            EntityDecl::Assembly { .. } | EntityDecl::Part { .. } => {}
+            EntityDecl::Assembly { .. } | EntityDecl::Part { .. } | EntityDecl::Surface { .. } => {}
         }
     }
 

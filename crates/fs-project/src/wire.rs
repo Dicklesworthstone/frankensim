@@ -23,6 +23,7 @@ use crate::FSIM_VERSION;
 use crate::spec::{
     AirflowLeakage, Budgets, ConductionRadiation, ConductionRegion, ConductionSetup,
     ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan,
+    FanEfficiency,
     FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
     InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialTolerance, Metadata, SurfaceOffset,
     OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RadiatingSurface,
@@ -774,6 +775,19 @@ fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), Proj
     if let Some(conduction) = &cooling.conduction {
         cooling_sections.push(lower_conduction(conduction)?);
     }
+    if let Some(efficiency) = &cooling.fan_efficiency {
+        cooling_sections.push(list(vec![
+            sym("fan-efficiency"),
+            kw("total"),
+            float(efficiency.total),
+            kw("half-width"),
+            float(efficiency.half_width),
+            kw("source"),
+            text(&efficiency.source),
+            kw("source-id"),
+            text(&efficiency.source_id),
+        ]));
+    }
     sections.push(list(cooling_sections));
     Ok(())
 }
@@ -846,13 +860,18 @@ fn lower_operations(spec: &ProjectSpec, sections: &mut Vec<Node>) -> Result<(), 
     if let Some(outputs) = &spec.outputs {
         let mut items = vec![sym("outputs")];
         for output in outputs {
-            items.push(list(vec![
+            let mut row = vec![
                 sym("qoi"),
                 kw("name"),
                 text(&output.name),
                 kw("kind"),
                 text(&output.kind),
-            ]));
+            ];
+            if let Some(region) = &output.region {
+                row.push(kw("region"));
+                row.push(text(region));
+            }
+            items.push(list(row));
         }
         sections.push(list(items));
     }
@@ -896,6 +915,20 @@ fn lower_entity(decl: &EntityDecl) -> Node {
             kw("display"),
             text(display),
         ],
+        EntityDecl::Surface {
+            parent,
+            name,
+            display,
+            ..
+        } => vec![
+            sym("surface"),
+            kw("parent"),
+            text(parent),
+            kw("name"),
+            text(name),
+            kw("display"),
+            text(display),
+        ],
         EntityDecl::Interface {
             parent,
             name,
@@ -921,6 +954,7 @@ fn lower_entity(decl: &EntityDecl) -> Node {
         EntityDecl::Assembly { expect_id, .. }
         | EntityDecl::Part { expect_id, .. }
         | EntityDecl::Region { expect_id, .. }
+        | EntityDecl::Surface { expect_id, .. }
         | EntityDecl::Interface { expect_id, .. } => expect_id,
     };
     if let Some(expected) = expect {
@@ -1983,13 +2017,13 @@ fn read_assembly(body: &[Node], out: &mut Vec<Violation>) -> Vec<EntityDecl> {
             out.push(Violation {
                 code: "project-malformed-clause",
                 what: "`assembly` rows must be entity declaration lists".to_string(),
-                fix: "declare `(assembly-decl ...)`, `(part ...)`, `(region ...)`, or `(interface ...)`".to_string(),
+                fix: "declare `(assembly-decl ...)`, `(part ...)`, `(region ...)`, `(surface ...)`, or `(interface ...)`".to_string(),
             });
             continue;
         };
         let known: &[&str] = match kind {
             "assembly-decl" => &["name", "display", "id"],
-            "part" | "region" => &["parent", "name", "display", "id"],
+            "part" | "region" | "surface" => &["parent", "name", "display", "id"],
             "interface" => &["parent", "name", "display", "from", "to", "id"],
             other => {
                 unknown_field(out, "assembly", other);
@@ -2014,6 +2048,12 @@ fn read_assembly(body: &[Node], out: &mut Vec<Violation>) -> Vec<EntityDecl> {
             },
             "region" => EntityDecl::Region {
                 parent: expect_str(field(&pairs, "parent"), "region.parent", out),
+                name,
+                display,
+                expect_id,
+            },
+            "surface" => EntityDecl::Surface {
+                parent: expect_str(field(&pairs, "parent"), "surface.parent", out),
                 name,
                 display,
                 expect_id,
@@ -2325,6 +2365,7 @@ fn read_cooling(
     let mut vents = Vec::new();
     let mut leakage = None;
     let mut airflow_leakage = None;
+    let mut fan_efficiency = None;
     let mut fan_system = None;
     let mut conduction = None;
     for node in body {
@@ -2394,13 +2435,22 @@ fn read_cooling(
             Some(("conduction", inner)) => {
                 conduction = read_conduction(inner, out);
             }
+            Some(("fan-efficiency", inner)) => {
+                let pairs = read_pairs(inner, "fan-efficiency", &["total", "half-width", "source", "source-id"], out);
+                fan_efficiency = Some(FanEfficiency {
+                    total: expect_float(field(&pairs, "total"), "fan-efficiency.total", out),
+                    half_width: expect_float(field(&pairs, "half-width"), "fan-efficiency.half-width", out),
+                    source: expect_str(field(&pairs, "source"), "fan-efficiency.source", out),
+                    source_id: expect_str(field(&pairs, "source-id"), "fan-efficiency.source-id", out),
+                });
+            }
             _ => {
                 out.push(Violation {
                     code: "project-unknown-field",
                     what: "`cooling` carries an unknown subsection".to_string(),
                     fix: "cooling contains exactly `(fans ...)`, `(vents ...)`, \
                           `(leakage ...)`, `(airflow-leakage ...)`, `(fan-system ...)`, \
-                          and optionally `(conduction ...)`"
+                          and optionally `(conduction ...)` and `(fan-efficiency ...)`"
                         .to_string(),
                 });
             }
@@ -2421,6 +2471,7 @@ fn read_cooling(
         airflow_leakage,
         fan_system,
         conduction,
+        fan_efficiency,
     })
 }
 
@@ -3228,10 +3279,11 @@ fn read_outputs(body: &[Node], out: &mut Vec<Violation>) -> Vec<OutputRequest> {
             });
             continue;
         };
-        let pairs = read_pairs(inner, "qoi", &["name", "kind"], out);
+        let pairs = read_pairs(inner, "qoi", &["name", "kind", "region"], out);
         outputs.push(OutputRequest {
             name: expect_str(field(&pairs, "name"), "qoi.name", out),
             kind: expect_str(field(&pairs, "kind"), "qoi.kind", out),
+            region: field(&pairs, "region").map(|node| expect_str(Some(node), "qoi.region", out)),
         });
     }
     outputs

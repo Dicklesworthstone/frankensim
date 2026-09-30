@@ -4,8 +4,8 @@ Bootstrap to a first validated project in about 15 minutes on a warm
 machine (measured: Apple M4 Pro, pinned nightly toolchain, siblings already
 materialized; the first cold build takes longer because it compiles the
 workspace). Every command below is executed continuously by
-`scripts/ci/examples_freshness_e2e.sh` (22 checks) and
-`scripts/ci/solve_stage_producers_e2e.sh` (66 checks), and the same facts are
+`scripts/ci/examples_freshness_e2e.sh` and
+`scripts/ci/solve_stage_producers_e2e.sh`, and the same facts are
 pinned by the fs-cli G0/G1 battery (`crates/fs-cli/tests/cli.rs`), so if a
 command here drifts from what the product actually does, a lane breaks.
 
@@ -13,7 +13,7 @@ command here drifts from what the product actually does, a lane breaks.
 
 FrankenSim is fail-closed by design. `validate` reports every structural
 finding about your project and never guesses. A green validate means the
-file is a well-formed project under the frozen schema (`.fsim` v4) — not that
+file is a well-formed project under the frozen schema (`.fsim` v9) — not that
 physics has been solved. A solve runs seven durable stages — import-verify,
 assign, material-resolve, flow-network, conduction, qoi, report — and every
 number it retains carries an evidence colour and a no-claim. Today every
@@ -125,14 +125,20 @@ cargo run -p fs-cli --bin frankensim -- --json package "${RUN}" "${WORK}/heatsin
 ls "${WORK}"
 ```
 
-Expected: `<run>.report.html`, `<run>.report.json` and `<run>.fspkg` in
-`${WORK}`; the report JSON carries `"verdict":"indeterminate"` and
+Expected: `<run>.report.html`, `<run>.report.json`, `<run>.field.vtu` and
+`<run>.fspkg` in `${WORK}`. The `.field.vtu` is the published tetrahedral
+mesh with nodal `temperature` (K) and per-cell `region_label`; open it in
+ParaView or VisIt. It is byte-for-byte the artifact the conduction receipt
+names as `field_artifact`; the `report` result on stdout carries `"verdict":"indeterminate"` and
 `"authority":"projection-of-retained-receipts"` and
 `"verification":"sealed-evidence"` (exports re-hash the sealed receipts and
 lineage; only `solve --resume` replays the physics); the package result carries
 `"checker":"pass"`. Open the HTML: every number cites the receipt hash it was
 copied from, and the uncertainty table prints NO-DATA where nothing was
-measured. Exporting twice is idempotent; an unknown run refuses without
+measured. For an indeterminate verdict it also states what would decide it:
+the unmeasured terms and how large they would have to be, combined, to fail
+the requirement (24.78 K on this body, all of it discretization, which the
+ladder variant below measures at 1.1 mK). Exporting twice is idempotent; an unknown run refuses without
 writing anything:
 
 ```bash

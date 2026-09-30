@@ -296,6 +296,7 @@ fn reference_project() -> ProjectSpec {
                 adiabatic_remainder: false,
                 radiation: None,
             }),
+            fan_efficiency: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(273.15),
@@ -333,6 +334,7 @@ fn reference_project() -> ProjectSpec {
         outputs: Some(vec![OutputRequest {
             name: "t-junction-max".to_string(),
             kind: "scalar".to_string(),
+            region: None,
         }]),
     }
 }
@@ -833,7 +835,7 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
     );
 }
 
@@ -886,7 +888,7 @@ fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
     );
 }
 
@@ -910,7 +912,7 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     let receipt = parsed.migration.expect("v4 migration is receipted");
     assert_eq!(receipt.source_version, 4);
     assert_eq!(receipt.target_version, FSIM_VERSION);
-    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
     assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
     assert!(
         parsed
@@ -946,7 +948,7 @@ fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
     assert_eq!(parsed.decoded.canonical, current);
     let receipt = parsed.migration.expect("v5 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
     assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
     assert!(
         parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
@@ -966,7 +968,7 @@ fn v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset() {
     assert_eq!(parsed.decoded.spec, historical);
     let receipt = parsed.migration.expect("v6 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (6, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7");
+    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
     assert!(receipt.verifies(v6.as_bytes(), current.as_bytes()));
     assert!(parsed.decoded.spec.geometry.iter().flatten().all(|a| a.surface_offset.is_none()));
 }
@@ -2030,4 +2032,128 @@ fn the_broken_cooling_corpus_logs_every_violation_with_its_fix() {
             panic!("{label}: expected `{expected_code}`, got {findings:?}");
         }
     }
+}
+
+/// The reference project plus a chip-footprint surface on the board part,
+/// selected by a box and carrying the power (fsim v8).
+fn surface_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    spec.assembly.as_mut().expect("assembly").push(EntityDecl::Surface {
+        parent: "board".to_string(),
+        name: "die-footprint".to_string(),
+        display: "CPU die footprint".to_string(),
+        expect_id: None,
+    });
+    spec.assignments.as_mut().expect("assignments").push(GeometryAssignment {
+        artifact: "enclosure".to_string(),
+        target: "die-footprint".to_string(),
+        length_unit: "m".to_string(),
+        selector: MeshSelector::Box { min: [0.01, 0.01, -1e-6], max: [0.03, 0.03, 1e-6], tolerance: 0.0 },
+        allow_overlap: true,
+    });
+    spec.power.as_mut().expect("power")[0].region = "die-footprint".to_string();
+    spec
+}
+
+#[test]
+fn surface_entities_round_trip_validate_and_refuse_misuse() {
+    let spec = surface_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(surface :parent \"board\" :name \"die-footprint\" :display \"CPU die footprint\")"), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    // A surface needs a geometry assignment, like a region or interface.
+    let mut unbound = surface_project();
+    unbound.assignments.as_mut().unwrap().retain(|a| a.target != "die-footprint");
+    assert!(unbound.validate().iter().any(|v| v.code == "project-assignment-target-unbound"), "{:?}", unbound.validate());
+    // A surface's parent must be a part, never a region.
+    let mut orphan = surface_project();
+    if let Some(EntityDecl::Surface { parent, .. }) = orphan.assembly.as_mut().unwrap().last_mut() {
+        *parent = "cpu".to_string();
+    }
+    assert!(orphan.validate().iter().any(|v| v.code == "project-entity-parent-unknown"), "{:?}", orphan.validate());
+    // A surface is not a volume: it needs no conduction seed (no seed rule fires).
+    assert!(!spec.validate().iter().any(|v| v.code.starts_with("project-conduction-seed")));
+}
+
+#[test]
+fn v7_envelopes_migrate_to_v8_and_refuse_a_pre_v8_surface() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v7 = current
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_ne!(v7, current);
+    let parsed = parse_sexpr_migrating(&v7).expect("v7 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v7 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (7, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "surface-entity-v8-then-fan-efficiency-v9");
+    assert!(receipt.verifies(v7.as_bytes(), current.as_bytes()));
+    let with_surface = print_sexpr(&surface_project()).expect("renders");
+    let false_v7 = with_surface
+        .replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 7", 1)
+        .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 7", 1);
+    assert_eq!(parse_sexpr_migrating(&false_v7).expect_err("v7 never carried a surface").code, "fsim-migration-payload");
+}
+
+/// The surface project plus a cited fan efficiency and a surface-scoped
+/// output (fsim v9).
+fn fan_efficiency_project() -> ProjectSpec {
+    let mut spec = surface_project();
+    spec.cooling.as_mut().expect("cooling").fan_efficiency = Some(fs_project::spec::FanEfficiency {
+        total: 0.3,
+        half_width: 0.05,
+        source: "illustrative fan datasheet".to_string(),
+        source_id: "fan-efficiency-example-v1".to_string(),
+    });
+    spec.outputs.as_mut().expect("outputs").push(OutputRequest {
+        name: "surface-mean-temperature".to_string(),
+        kind: "scalar".to_string(),
+        region: Some("die-footprint".to_string()),
+    });
+    spec
+}
+
+#[test]
+fn fan_efficiency_and_output_regions_round_trip_validate_and_refuse_misuse() {
+    let spec = fan_efficiency_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(fan-efficiency :total 0.3 :half-width 0.05 :source \"illustrative fan datasheet\" :source-id \"fan-efficiency-example-v1\")"), "{sexpr}");
+    assert!(sexpr.contains(":region \"die-footprint\")"), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let code_of = |mutate: fn(&mut ProjectSpec)| {
+        let mut bad = fan_efficiency_project();
+        mutate(&mut bad);
+        bad.validate().into_iter().map(|v| v.code).collect::<Vec<_>>()
+    };
+    assert!(code_of(|s| s.outputs.as_mut().unwrap().last_mut().unwrap().region = Some("cpu".to_string()))
+        .contains(&"project-output-region"));
+    assert!(code_of(|s| s.cooling.as_mut().unwrap().fan_efficiency.as_mut().unwrap().half_width = 0.3)
+        .contains(&"project-fan-efficiency-range"));
+    assert!(code_of(|s| s.cooling.as_mut().unwrap().fan_efficiency.as_mut().unwrap().source_id = " ".to_string())
+        .contains(&"project-fan-efficiency-source"));
+}
+
+#[test]
+fn v8_envelopes_migrate_to_v9_and_refuse_pre_v9_payloads() {
+    let historical = surface_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let down = |text: &str| {
+        text.replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 8", 1)
+            .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 8", 1)
+    };
+    let v8 = down(&current);
+    assert_ne!(v8, current);
+    let parsed = parse_sexpr_migrating(&v8).expect("a v8 surface project migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("v8 migration is receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (8, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "fan-efficiency-v9");
+    assert!(receipt.verifies(v8.as_bytes(), current.as_bytes()));
+    let false_v8 = down(&print_sexpr(&fan_efficiency_project()).expect("renders"));
+    assert_eq!(parse_sexpr_migrating(&false_v8).expect_err("v8 never carried a fan efficiency").code, "fsim-migration-payload");
 }

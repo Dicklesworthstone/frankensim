@@ -141,6 +141,58 @@ fn edge_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 2]> {
     edges
 }
 
+/// Live real-tet count per edge: an edge exists iff its count is positive.
+/// Kept current across insertions from the kernel's recorded cavity delta
+/// (killed vertex sets out, created tets in) instead of rebuilding the whole
+/// edge set after every Steiner point, which made segment recovery
+/// O(Steiner x tets): MEASURED 2026-09-30, 1907 midpoints on a 5644-facet
+/// perforated plate rebuilt a ~39k-edge set each time (a third of a solve).
+struct EdgeCounts(BTreeMap<[u32; 2], u32>);
+
+impl EdgeCounts {
+    fn new(tetra: &Tetrahedralization) -> Self {
+        let mut counts = Self(BTreeMap::new());
+        for tet in tetra.tets() {
+            counts.apply(tet, true);
+        }
+        counts
+    }
+
+    fn apply(&mut self, tet: [u32; 4], add: bool) {
+        if tet.contains(&GHOST) {
+            return;
+        }
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                let (a, b) = (tet[i], tet[j]);
+                let key = if a < b { [a, b] } else { [b, a] };
+                if add {
+                    *self.0.entry(key).or_insert(0) += 1;
+                } else if let Some(count) = self.0.get_mut(&key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.0.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Account for the kernel's last successful insertion.
+    fn apply_last_insertion(&mut self, tetra: &Tetrahedralization) {
+        for &tet in &tetra.mesh.last_killed {
+            self.apply(tet, false);
+        }
+        for &t in &tetra.mesh.last_created {
+            self.apply(tetra.mesh.tets[t as usize], true);
+        }
+    }
+
+    fn contains(&self, key: &[u32; 2]) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
 /// Recover every PLC segment as a chain of mesh edges. Segment
 /// endpoints are indices into the ORIGINAL input points (before any
 /// Steiner insertion).
@@ -161,7 +213,7 @@ pub fn recover_segments(
         ..RecoveryStats::default()
     };
     let mut table = Correspondence::default();
-    let mut edges = edge_set(tetra);
+    let mut edges = EdgeCounts::new(tetra);
     // Coordinate-bits index: a bisection midpoint that ALREADY exists
     // as a vertex (segments crossing at a shared midpoint — the four
     // body diagonals of a box all meet at its center) is ADOPTED, not
@@ -249,7 +301,11 @@ pub fn recover_segments(
                     stats.steiner_inserted += 1;
                     stats.max_depth_used = stats.max_depth_used.max(depth + 1);
                     by_bits.insert(bits, new_idx);
-                    edges = edge_set(tetra);
+                    edges.apply_last_insertion(tetra);
+                    debug_assert!(
+                        edges.0.keys().copied().eq(edge_set(tetra)),
+                        "incremental edge index diverged from a full rebuild"
+                    );
                     if std::env::var_os("FS_MESH_TRACE_MIDPOINTS").is_some() && edges.contains(&key)
                     {
                         eprintln!(

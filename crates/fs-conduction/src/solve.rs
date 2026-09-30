@@ -735,7 +735,14 @@ impl<'m> ConductionSolver<'m> {
         Ok(provenance)
     }
 
-    fn merit(&self, cx: &Cx<'_>, free: &[f64]) -> Result<Option<f64>, ConductionError> {
+    /// `Ok(Err(span))` when the trial leaves the material's sampled span:
+    /// it has no merit value, and the span refusal is kept so a failed line
+    /// search can say WHY every full step was rejected.
+    fn merit(
+        &self,
+        cx: &Cx<'_>,
+        free: &[f64],
+    ) -> Result<Result<f64, ConductionError>, ConductionError> {
         let full = self.dofs.scatter(free);
         match assemble_operator_scaled_with_interfaces(
             cx,
@@ -748,8 +755,8 @@ impl<'m> ConductionSolver<'m> {
             self.interfaces,
             self.element_materials,
         ) {
-            Ok(system) => Ok(Some(norm2(&residual(&system, &self.dofs, &full)))),
-            Err(ConductionError::OutsideTemperatureSpan { .. }) => Ok(None),
+            Ok(system) => Ok(Ok(norm2(&residual(&system, &self.dofs, &full)))),
+            Err(span @ ConductionError::OutsideTemperatureSpan { .. }) => Ok(Err(span)),
             Err(other) => Err(other),
         }
     }
@@ -900,6 +907,11 @@ impl<'m> ConductionSolver<'m> {
         };
         let mut alpha = 1.0f64;
         let mut backtracks = 0usize;
+        // The span refusal of the FULL step, if any. When the line search
+        // then fails, the iterate is pinned against the material's validity
+        // span with the solution beyond it: that, not "Armijo failed", is
+        // the finding (the design runs outside the card's range).
+        let mut full_step_span = None;
         loop {
             let candidate: Vec<f64> = self
                 .state
@@ -908,13 +920,18 @@ impl<'m> ConductionSolver<'m> {
                 .zip(direction)
                 .map(|(x, d)| alpha.mul_add(*d, *x))
                 .collect();
-            let admissible = self.merit(cx, &candidate)?;
-            if let Some(trial) = admissible
-                && trial <= armijo_c.mul_add(-alpha, 1.0) * base_residual
-            {
-                return Ok((candidate, alpha, backtracks));
+            match self.merit(cx, &candidate)? {
+                Ok(trial) if trial <= armijo_c.mul_add(-alpha, 1.0) * base_residual => {
+                    return Ok((candidate, alpha, backtracks));
+                }
+                Ok(_) => {}
+                Err(span) if backtracks == 0 => full_step_span = Some(span),
+                Err(_) => {}
             }
             if backtracks >= budget {
+                if let Some(span) = full_step_span {
+                    return Err(span);
+                }
                 return Err(ConductionError::LineSearchFailed {
                     iteration: self.state.iteration,
                     backtracks,

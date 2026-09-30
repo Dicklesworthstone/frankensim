@@ -141,3 +141,70 @@ solve is not preemptible. The BO driver remains synchronous. Point-estimate
 kernel fitting does not add hyperparameter marginalization, replicate
 value-of-information, statistical certification, sparse history or an
 all-objective performance guarantee.
+
+## Resumable external simulation jobs
+
+`fs_bo::study::NoisyStudy` separates fixed-kernel optimization from execution
+of expensive simulations. It shares the callback driver's initial design,
+greedy acquisition, common random numbers and incumbent selection. Construct
+it with a caller-assigned study ID and the same dimension, initial count,
+batch count and `NoisyBoConfig`. The basic lifecycle is:
+
+```rust,ignore
+let mut study = NoisyStudy::new(study_id, dim, n_init, batches, &config);
+while !study.is_complete() {
+    for request in study.ask() {
+        let observation = run_simulation(&request.x);
+        study.tell(&request, observation)?;
+    }
+    study.advance()?;
+}
+```
+
+An external dispatcher may execute jobs concurrently and return responses in
+any order. `ask()` is a read-only view of unanswered jobs, not a dispatch queue:
+keep an in-flight ID set so polling does not launch duplicate simulations.
+Each request binds the caller's study ID, its eventual history index and the
+exact coordinate bits. Return it unchanged. A repeated identical response is
+idempotent, even after its batch closes; changed values or variances refuse.
+Foreign, unknown, modified or invalid responses do not consume the request.
+Simulation failure is not a fake objective value: retry an unanswered request
+with the same identity. Study IDs are association keys, not credentials.
+
+`tell()` never invokes numerical work. `advance()` refuses incomplete batches;
+when complete, it fits the ordered history and selects the next batch. Until
+that entire transition succeeds, `report()` remains the last modeled prefix
+and `pending()` retains ALL current results. An empty `ask()` is therefore not
+proof of completion: it can mean the received batch still needs `advance()`.
+Use `is_complete()` to distinguish successful finalization.
+
+`clone()` checkpoints include partially received batches. A cancelled or failed
+advance cannot discard simulation results or publish half a proposed batch.
+The continuation hook checks before/after fitting and between greedy slots;
+one dense fit or one slot's bounded CMA-ES search remains non-preemptible.
+Retries may repeat that numerical work, but not the received simulations.
+`work()` counts all model-fit and acquisition-batch ATTEMPTS, including failed
+or cancelled advances; it does not claim low-level operation counts or measure
+external simulation work. The caller separately owns simulation cancellation.
+
+```bash
+cargo run -p fs-bo --example external_noisy_design
+cargo test -p fs-bo --lib study
+cargo test -p fs-bo --lib noisy
+cargo test -p fs-bo --lib learning
+```
+
+The example delivers synthetic results in reverse order and checkpoints one
+partial batch; observation noise is keyed by logical job identity rather than
+completion order. Six new tests cover callback-trajectory parity for q=1/q=2,
+partial checkpoint replay, delivery retries, invalid request/result handling,
+mid-acquisition cancellation, and retained singular-model failures. These Rust
+tests and the example remain uncompiled and unexecuted in the authoring
+environment, which has no DSR, RCH or Rust toolchain.
+
+This API is fixed-kernel batch BO, not pending-point/fantasy asynchronous BO.
+It does not yet integrate the learned-kernel driver's state, provide a durable
+checkpoint wire format, coordinate external job leases, or guarantee cross-ISA
+replay. Independent simulations must return the same values and variances for
+matching job identities to reproduce the same study.
+

@@ -6,11 +6,14 @@
 //! `--nodes` prints the exact mesh indices used by `time_s,node,temperature_k,sigma_k`.
 //! Without a CSV this runs labeled, noiseless synthetic observations. It does
 //! not import arbitrary meshes or certify physical validity/identifiability.
+//! `--substeps N` refines solver time only; observation knots and priors stay fixed.
 use fs_ascent::conduction_assimilation::{ConductionWindowConfig, ConductionWindowModel, ConductionWindowPolicy};
+use fs_ascent::conduction_assimilation::substeps::{ConductionSubsteps, SubstepLimits};
 use fs_ascent::transient::variational::{WeakConstraintWindow, WindowControl, WindowObjective};
 use fs_ascent::transient::variational::joint::{JointEvaluation, JointWindow, JointWindowStudy, ParameterFamily};
 use fs_ascent::transient::variational::study::StudySettings;
 use fs_ascent::{LbfgsReport, StopReason};
+use fs_ascent::transient::variational::intervals::IntervalScheme;
 use fs_conduction::{ConductionError, ConductionMesh, ConductionProblem, ConductivityModel,
     LinearConfig, ScalarField, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::fixtures::{box_grid, on_box_face};
@@ -38,6 +41,9 @@ fn config() -> ConductionWindowConfig {
     ConductionWindowConfig { step: StepConfig { linear: LinearConfig {
         tolerance:1e-11,max_iterations:2000,restart:24 }, energy_tolerance_j:1e-8 },
         nonlinear:None,max_vertices:128,max_elements:1024,max_intervals:8,max_parameters:2 }
+}
+fn substep_limits() -> SubstepLimits {
+    SubstepLimits { max_steps:256,max_record_components:4096,checkpoints:6,replayed_steps:512 }
 }
 #[derive(Debug,Clone,Copy)]
 struct Reading { time:f64,node:usize,value:f64,sigma:f64 }
@@ -116,23 +122,33 @@ impl<'a> ParameterFamily for Family<'a> {
             times:self.times.clone(),dimension:self.dimension})
     }
 }
-fn synthetic(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>)->Result<Vec<Reading>,Error> {
+fn synthetic(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,substeps:usize)->Result<Vec<Reading>,Error> {
     let times=[0.0,0.25,0.5,1.0];let mut state=vec![300.0;domain.mesh.vertex_count()];let mut rows=Vec::new();
     let source=ScalarField::nodal("synthetic heater",state.len(),domain.profile.iter().map(|v|2000.0*v).collect())?;
+    let base=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,&times,config(),&mut||false)?;
+    let refined=ConductionSubsteps::new(base,&vec![substeps;times.len()-1],substep_limits(),&mut||false)?;
     for (k,&time) in times.iter().enumerate() {
-        if k>0 {state=engine.advance(cx,ConductionProblem {mesh:&domain.mesh,boundary:&domain.boundary,
-            material:&domain.material,element_materials:None,source:&source},None,&state,time-times[k-1],config().step)?.temperature;}
+        if k>0 {
+            let fine=refined.substep_times(k-1).ok_or("missing synthetic substep clock")?;
+            for step in fine.windows(2) {
+                let dt=step[1]-step[0];
+                state=engine.advance(cx,ConductionProblem {mesh:&domain.mesh,boundary:&domain.boundary,
+                    material:&domain.material,element_materials:None,source:&source},None,&state,dt,config().step)?.temperature;
+            }
+        }
         // Includes a fixed-boundary sensor: it informs bias but not a free state.
         for node in [4,13,22,40] {rows.push(Reading {time,node,value:state[node]+0.08,sigma:0.02});}
     }
     Ok(rows)
 }
 struct Fit { before:f64,evaluation:JointEvaluation,fields:Vec<Vec<f64>>,times:Vec<f64>,report:LbfgsReport }
-fn fit(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,rows:&[Reading],model_sigma:f64)->Result<Fit,Error> {
-    if rows.is_empty() || rows.len()>256 || !model_sigma.is_finite() || model_sigma<=0.0 {return Err("invalid fit inputs".into());}
+fn fit(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,rows:&[Reading],model_sigma:f64,substeps:usize)->Result<Fit,Error> {
+    if rows.is_empty() || rows.len()>256 || !model_sigma.is_finite() || model_sigma<=0.0 || !(1..=32).contains(&substeps) {return Err("invalid fit inputs".into());}
     let mut times=vec![0.0];
     for r in rows {if r.time>*times.last().unwrap() {times.push(r.time);}}
-    let policy=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,&times,config(),&mut||false)?;
+    let numerical=config();
+    if times.len()<2 || times.len()-1>numerical.max_intervals {return Err("too many observation intervals".into());}
+    let policy=ConductionWindowPolicy::new(cx,&domain.mesh,&domain.boundary,&times,numerical,&mut||false)?;
     let n=policy.dimension();let mut samples=Vec::new();
     for r in rows {
         let frame=times.binary_search_by(|t|t.total_cmp(&r.time)).map_err(|_|"observation not on the admitted clock")?;
@@ -143,25 +159,40 @@ fn fit(cx:&Cx<'_>,domain:&Domain,engine:&BackwardEuler<'_>,rows:&[Reading],model
     let window=WeakConstraintWindow::new(&times,&vec![300.0;n*times.len()],&vec![1.0;n],&vec![0.1;n],
         &vec![model_sigma;n*(times.len()-1)],10_000)?;
     let joint=JointWindow::new(&window,&family,&[1000.0,0.0],&[1000.0,0.1],&[2000.0,0.2],6)?;
-    let settings=StudySettings {memory:17,gradient_tolerance:1e-5,max_evaluations:2500,max_optimizer_components:100_000};
-    let mut control=WindowControl::new(2500,20_000,100_000);
-    let mut study=JointWindowStudy::new(&joint,&vec![0.0;joint.control_dimension()],policy.clone(),settings,&mut control,&mut||false)?;
-    let before=study.accepted().value;let report=study.run(500,&mut control,&mut||false)?;
-    let evaluation=study.accepted().clone();
+    // The default retains the original one-step numerical/gradient path.
+    let (before,evaluation,report)=if substeps==1 {
+        run_study(&joint,policy.clone())?
+    } else {
+        run_study(&joint,ConductionSubsteps::new(policy.clone(),
+            &vec![substeps;times.len()-1],substep_limits(),&mut||false)?)?
+    };
     let fields=evaluation.window.states.chunks(n).map(|x|policy.expand_field(x)).collect::<Result<Vec<_>,_>>()?;
     Ok(Fit {before,evaluation,fields,times,report})
 }
-fn options(args:&[String])->Result<(Option<&str>,f64),String> {
-    let mut path=None;let mut sigma=None;let mut i=0;
+fn run_study<F:ParameterFamily,S:IntervalScheme<F::Model>>(joint:&JointWindow<'_,F>,policy:S)
+    ->Result<(f64,JointEvaluation,LbfgsReport),Error>
+{
+    let settings=StudySettings {memory:17,gradient_tolerance:1e-5,max_evaluations:2500,max_optimizer_components:100_000};
+    let mut control=WindowControl::new(2500,20_000,100_000);
+    let mut study=JointWindowStudy::new(joint,&vec![0.0;joint.control_dimension()],policy,settings,&mut control,&mut||false)?;
+    let before=study.accepted().value;let report=study.run(500,&mut control,&mut||false)?;
+    Ok((before,study.accepted().clone(),report))
+}
+fn options(args:&[String])->Result<(Option<&str>,f64,usize),String> {
+    let mut path=None;let mut sigma=None;let mut substeps=None;let mut i=0;
     while i<args.len() {
         if args[i]=="--model-sigma" && sigma.is_none() {
             let value:f64=args.get(i+1).ok_or("--model-sigma needs a scale in kelvin")?.parse().map_err(|_|"invalid model sigma")?;
             if !value.is_finite() || value<=0.0 {return Err("model sigma must be positive and finite".into());}
             sigma=Some(value);i+=2;
+        } else if args[i]=="--substeps" && substeps.is_none() {
+            let value:usize=args.get(i+1).ok_or("--substeps needs an integer")?.parse().map_err(|_|"invalid substep count")?;
+            if !(1..=32).contains(&value) {return Err("substeps must be in 1..=32".into());}
+            substeps=Some(value);i+=2;
         } else if !args[i].starts_with("--") && path.is_none() {path=Some(args[i].as_str());i+=1;}
-        else {return Err("usage: conduction_assimilate [readings.csv] [--model-sigma kelvin] or --nodes".into());}
+        else {return Err("usage: conduction_assimilate [readings.csv] [--model-sigma kelvin] [--substeps 1..32] or --nodes".into());}
     }
-    Ok((path,sigma.unwrap_or(0.03)))
+    Ok((path,sigma.unwrap_or(0.03),substeps.unwrap_or(1)))
 }
 fn main()->Result<(),Error> {
     let args:Vec<_>=std::env::args().skip(1).collect();let domain=Domain::new()?;
@@ -170,21 +201,23 @@ fn main()->Result<(),Error> {
         for (node,p) in domain.mesh.positions().iter().enumerate() {println!("{node},{},{},{},{}",p[0],p[1],p[2],on_box_face(p[0],0.0));}
         return Ok(());
     }
-    let (path,sigma)=options(&args)?;
+    let (path,sigma,substeps)=options(&args)?;
     let gate=CancelGate::new_clock_free();
     ArenaPool::new(ArenaConfig::default()).scope(|arena|->Result<(),Error> {
         let cx=Cx::new(&gate,arena,StreamKey {seed:61,kernel_id:820,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic);
         let engine=BackwardEuler::uniform(&cx,&domain.mesh,VolumetricHeatCapacity::declared(1000.0)?)?;
         let (rows,source)=if let Some(path)=path {let mut text=String::new();std::fs::File::open(path)?.take(65_537).read_to_string(&mut text)?;
             (parse(&text,domain.mesh.vertex_count())?,"csv")
-        } else {(synthetic(&cx,&domain,&engine)?,"synthetic-noiseless")};
-        let result=fit(&cx,&domain,&engine,&rows,sigma)?;let e=&result.evaluation;
+        } else {(synthetic(&cx,&domain,&engine,substeps)?,"synthetic-noiseless")};
+        let result=fit(&cx,&domain,&engine,&rows,sigma,substeps)?;let e=&result.evaluation;
         println!("source={source} solver=P1-backward-Euler stop={:?} iterations={} evaluations={} model_sigma_k={sigma}",
             result.report.reason,result.report.iters,result.report.evals);
         println!("source_amplitude_w_m3={:.9} sensor_bias_k={:.9} objective_before={:.9e} objective_after={:.9e}",
             e.parameters[0],e.parameters[1],result.before,e.value);
         println!("observation_loss={:.9e} background_loss={:.9e} model_loss={:.9e} parameter_loss={:.9e}",
             e.window.observation_value,e.window.background_value,e.window.model_value,e.parameter_penalty);
+        println!("substeps_per_interval={substeps} native_forward_steps={} native_replayed_steps={} controls={}",
+            e.window.accepted_steps,e.window.replayed_steps,e.controls.len());
         println!("time_s,node,x_m,y_m,z_m,reconstructed_temperature_k");
         for (&time,field) in result.times.iter().zip(&result.fields) {for (node,p) in domain.mesh.positions().iter().enumerate() {
             println!("{time},{node},{},{},{},{:.9}",p[0],p[1],p[2],field[node]);
@@ -212,7 +245,7 @@ mod tests {
         ArenaPool::new(ArenaConfig::default()).scope(|arena| {
             let cx=Cx::new(&gate,arena,StreamKey {seed:61,kernel_id:820,tile:0,iteration:0},Budget::INFINITE,ExecMode::Deterministic);
             let engine=BackwardEuler::uniform(&cx,&d.mesh,VolumetricHeatCapacity::declared(1000.0).unwrap()).unwrap();
-            let rows=synthetic(&cx,&d,&engine).unwrap();let got=fit(&cx,&d,&engine,&rows,0.03).unwrap();
+            let rows=synthetic(&cx,&d,&engine,1).unwrap();let got=fit(&cx,&d,&engine,&rows,0.03,1).unwrap();
             assert_eq!(got.report.reason,StopReason::GradNorm);
             assert!(got.evaluation.value<got.before*0.001);
             assert!((got.evaluation.parameters[0]-2000.0).abs()<10.0);
@@ -227,3 +260,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "conduction_assimilate/substeps_tests.rs"]
+mod substeps_tests;

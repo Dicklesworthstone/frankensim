@@ -9,6 +9,8 @@ mod fan_speed;
 mod qmc;
 #[path = "native_uncertainty/copula.rs"]
 mod copula;
+#[path = "native_uncertainty/nominal_adjoint.rs"]
+mod nominal_adjoint;
 #[path = "../src/json_read.rs"]
 mod json_read;
 
