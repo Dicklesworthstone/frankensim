@@ -1,6 +1,7 @@
 //! Spatial temperature reconstruction using the production P1 conduction solve.
 //!
-//! Each window interval is ONE backward-Euler step, including consistent heat
+//! The base policy takes one backward-Euler step per interval; `substeps`
+//! separates numerical resolution from observation times. Both use consistent heat
 //! capacity, boundary loads, optional matching contacts and optional k(T).
 //! Only free nodal temperatures are controls: prescribed values are lifted in
 //! the primal and have zero tangent/cotangent, never optimized or penalized as
@@ -20,6 +21,21 @@ use fs_exec::Cx;
 use fs_time::adaptive::adjoint::trajectory::TrajectoryGradient;
 use crate::transient::variational::{WindowError, intervals::{IntervalScheme, IntervalTape}};
 
+/// Bounded multistep forecasts with checkpointed production adjoints.
+pub mod substeps;
+
+/// Exact endpoint context shared by a substep's forward and derivative calls.
+/// `interval` indexes observation knots; `index` indexes numerical steps inside
+/// that interval. Data is evaluated at the endpoint, as required by backward
+/// Euler. A discontinuous schedule must align with this explicitly fixed grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConductionSubstep {
+    pub interval: usize,
+    pub index: usize,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// Immutable model data for a parameter point. The capacity object and all
 /// problems must use the policy's EXACT mesh. `problem(k)` supplies endpoint
 /// material/source/boundary data for interval k; no time interpolation occurs.
@@ -34,6 +50,12 @@ use crate::transient::variational::{WindowError, intervals::{IntervalScheme, Int
 pub trait ConductionWindowModel {
     fn engine(&self) -> &BackwardEuler<'_>;
     fn problem(&self, interval: usize) -> Result<ConductionProblem<'_>, ConductionError>;
+    /// Endpoint data for a refined numerical step. The default freezes the
+    /// original interval data. Override for a prescribed source/Robin schedule;
+    /// a changing Dirichlet lift remains unsupported. Replay uses identical times.
+    fn problem_at(&self, step: ConductionSubstep) -> Result<ConductionProblem<'_>, ConductionError> {
+        self.problem(step.interval)
+    }
     fn interfaces(&self) -> Option<&ThermalInterfaces> { None }
     fn parameter_count(&self) -> usize { 0 }
     fn parameter_pullback(&self, _interval: usize, _cx: &Cx<'_>,
@@ -41,6 +63,14 @@ pub trait ConductionWindowModel {
         parameters: &mut [f64]) -> Result<(), ConductionError>
     {
         parameters.fill(0.0); Ok(())
+    }
+    /// Parameter action for exactly the endpoint data supplied by `problem_at`.
+    /// Override together with that method when a schedule is parameterized.
+    fn parameter_pullback_at(&self, time: ConductionSubstep, cx: &Cx<'_>,
+        step: &StepLinearization<'_>, nodal_load_adjoint: &[f64],
+        parameters: &mut [f64]) -> Result<(), ConductionError>
+    {
+        self.parameter_pullback(time.interval, cx, step, nodal_load_adjoint, parameters)
     }
 }
 
@@ -157,6 +187,7 @@ pub struct ConductionInterval<'a, 'cx, M> {
     end: f64,
     interval: usize,
     parameters: usize,
+    substep: Option<ConductionSubstep>,
 }
 impl<M> ConductionInterval<'_, '_, M> {
     /// The actual forward producer report, including discrete energy closure.
@@ -179,8 +210,26 @@ impl<'cx, M: ConductionWindowModel> IntervalScheme<M> for ConductionWindowPolicy
         if interval >= self.times.len()-1 || start != self.times[interval] || end != self.times[interval+1]
             || model.parameter_count() > self.config.max_parameters
         { return Err(WindowError::Invalid("conduction interval or parameter cap mismatch")); }
+        self.record_step(model, interval, start, end, initial, None, cancelled)
+    }
+}
+impl<'cx> ConductionWindowPolicy<'_, 'cx> {
+    // Shared one-step producer. The public base policy keeps its old data and
+    // arithmetic path; refinement supplies only a different fixed time context.
+    #[allow(clippy::too_many_arguments)]
+    fn record_step<'a, M: ConductionWindowModel>(&'a self, model: &'a M,
+        interval: usize, start: f64, end: f64, initial: &[f64],
+        substep: Option<ConductionSubstep>, cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<ConductionInterval<'a, 'cx, M>, WindowError> {
+        poll(cancelled)?;
+        if !start.is_finite() || !end.is_finite() || end <= start || !(end-start).is_finite()
+            || model.parameter_count() > self.config.max_parameters
+        { return Err(WindowError::Invalid("invalid conduction numerical step")); }
         let old = self.expand_field(initial)?;
-        let problem = model.problem(interval).map_err(|e| refusal(interval, "endpoint problem", e))?;
+        let problem = match substep {
+            Some(time) => model.problem_at(time),
+            None => model.problem(interval),
+        }.map_err(|e| refusal(interval, "endpoint problem", e))?;
         self.admit_problem(problem)?;
         poll(cancelled)?;
         let step = model.engine().linearize_step(self.cx, problem, model.interfaces(), &old,
@@ -189,9 +238,10 @@ impl<'cx, M: ConductionWindowModel> IntervalScheme<M> for ConductionWindowPolicy
         let endpoint = self.gather_field(&step.primal().temperature)?;
         poll(cancelled)?;
         Ok(ConductionInterval { step, model, cx: self.cx, dofs: &self.dofs,
-            endpoint, end, interval, parameters: model.parameter_count() })
+            endpoint, end, interval, parameters: model.parameter_count(), substep })
     }
 }
+
 impl<M: ConductionWindowModel> IntervalTape for ConductionInterval<'_, '_, M> {
     fn endpoint(&self) -> &[f64] { &self.endpoint }
     fn end_time(&self) -> f64 { self.end }
@@ -213,9 +263,12 @@ impl<M: ConductionWindowModel> IntervalTape for ConductionInterval<'_, '_, M> {
         let history = self.step.previous_temperature_pullback(self.cx, &gradient.nodal_load)
             .map_err(|e| refusal(self.interval, "conduction history", e))?;
         let mut parameters = zeros(self.parameters)?; parameters.fill(f64::NAN);
-        self.model.parameter_pullback(self.interval, self.cx, &self.step,
-            &gradient.nodal_load, &mut parameters)
-            .map_err(|e| refusal(self.interval, "conduction parameter derivative", e))?;
+        match self.substep {
+            Some(time) => self.model.parameter_pullback_at(time, self.cx, &self.step,
+                &gradient.nodal_load, &mut parameters),
+            None => self.model.parameter_pullback(self.interval, self.cx, &self.step,
+                &gradient.nodal_load, &mut parameters),
+        }.map_err(|e| refusal(self.interval, "conduction parameter derivative", e))?;
         poll(cancelled)?;
         if !finite(&parameters) { return Err(WindowError::NonFinite("conduction parameter derivatives")); }
         for (value, partial) in parameters.iter_mut().zip(direct) { *value += partial; }
