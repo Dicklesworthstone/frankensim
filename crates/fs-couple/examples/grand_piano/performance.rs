@@ -105,6 +105,26 @@ impl Performance {
         Ok(Self { events, cursor: 0 })
     }
 
+    /// Identify an isolated diagnostic input without consuming or changing it.
+    /// One scheduled hammer launch or jack pulse is required; key releases and
+    /// global pedal controls are retained. This does not count physical contacts.
+    pub fn single_excitation_key(&self) -> Result<u8, String> {
+        let mut key = None;
+        for event in &self.events {
+            if let Control::NoteOn { key: next, .. } | Control::JackOn { key: next, .. } = event.control {
+                if key.replace(next).is_some() {
+                    return Err("isolated pressure traces require exactly one scheduled excitation; chords and restrikes are not isolated".into());
+                }
+            }
+        }
+        let key = key.ok_or("isolated pressure traces require exactly one scheduled excitation")?;
+        if self.events.iter().any(|event|
+            matches!(event.control, Control::NoteOff { key: released } if released != key)) {
+            return Err("isolated pressure traces cannot release a different key".into());
+        }
+        Ok(key)
+    }
+
     /// Dispatch BEFORE the sample's mechanical step. Equal-time events retain
     /// file order, including note-off/pedal transitions. A skipped event refuses
     /// rather than applying it at the wrong time or silently discarding it.
@@ -167,6 +187,31 @@ impl Performance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_trace_selects_the_scheduled_key_without_changing_controls() {
+        for launch in ["note_on,60,2.48", "jack_staccato,60,70"] {
+            let text = format!("{HEADER}\n0,sustain,0,0\n100,{launch}\n100,sostenuto,0,1\n200,note_off,60,0\n");
+            let p = Performance::read(&text, &[60, 69], 96_000).unwrap();
+            let before = p.events.clone();
+            assert_eq!(p.single_excitation_key().unwrap(), 60);
+            assert_eq!(p.events, before);
+            assert_eq!(p.cursor, 0);
+        }
+    }
+
+    #[test]
+    fn isolated_trace_refuses_empty_chord_restrike_and_foreign_release() {
+        for rows in ["0,sustain,0,1", "0,note_on,60,2\n0,note_on,69,2",
+            "0,note_on,60,2\n48000,note_on,60,2",
+            "0,note_on,60,2\n48000,jack_legato,60,30",
+            "0,note_on,60,2\n100,note_off,69,0"] {
+            let p = Performance::read(&format!("{HEADER}\n{rows}\n"), &[60, 69], 96_000).unwrap();
+            assert!(p.single_excitation_key().is_err(), "accepted {rows}");
+        }
+        let demo = Performance::demonstration(&[69], 48_000, 96_000, Some(69), None).unwrap();
+        assert!(demo.single_excitation_key().is_err());
+    }
 
     #[test]
     fn decoded_controls_are_validated_without_reordering_same_time_edges() {
