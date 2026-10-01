@@ -1106,31 +1106,95 @@ impl LabeledTetComplex {
         // a mesh whose census (1662 slivers under 5°, radius-edge 1661) the
         // conduction floor refuses either way.
         let mut sliver_attempts = 0u32;
+        // The face map and each tet's (flat, zero-volume) classification are
+        // kept CURRENT across commits from an index diff of the tet array,
+        // instead of rebuilt and re-measured (dihedrals, atan) over every tet
+        // per sweep: a commit touches a handful of slots, and the rescan made
+        // repair O(commits x tets). MEASURED 2026-09-30: a third of a
+        // 16.6k-facet oblique plate's mesh. Lists stay in index order, as a
+        // rebuild produces them, so every decision is the rescan's.
+        let classify = |positions: &[[f64; 3]], tet: [u32; 4]| {
+            (is_flat(positions, tet), volume_flat(positions, tet))
+        };
+        let mut flat_of: Vec<(bool, bool)> =
+            self.tets.iter().map(|tet| classify(&self.positions, *tet)).collect();
+        let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
+        for (index, tet) in self.tets.iter().enumerate() {
+            for face in tet_sorted_faces(*tet) {
+                by_face.entry(face).or_default().push(index);
+            }
+        }
+        let mut snapshot = self.tets.clone();
         'sweeps: loop {
             report.rounds += 1;
+            // Bring the face map and classifications to the current tets.
+            for index in 0..snapshot.len().max(self.tets.len()) {
+                let (old, new) = (snapshot.get(index).copied(), self.tets.get(index).copied());
+                if old == new {
+                    continue;
+                }
+                if let Some(old) = old {
+                    for face in tet_sorted_faces(old) {
+                        if let Some(list) = by_face.get_mut(&face) {
+                            list.retain(|&i| i != index);
+                            if list.is_empty() {
+                                by_face.remove(&face);
+                            }
+                        }
+                    }
+                }
+                if let Some(new) = new {
+                    for face in tet_sorted_faces(new) {
+                        let list = by_face.entry(face).or_default();
+                        let at = list.partition_point(|&i| i < index);
+                        list.insert(at, index);
+                    }
+                    if index < flat_of.len() {
+                        flat_of[index] = classify(&self.positions, new);
+                    } else {
+                        flat_of.push(classify(&self.positions, new));
+                    }
+                }
+            }
+            flat_of.truncate(self.tets.len());
+            snapshot.clone_from(&self.tets);
+            debug_assert!(
+                {
+                    let mut rebuilt: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
+                    for (index, tet) in self.tets.iter().enumerate() {
+                        for face in tet_sorted_faces(*tet) {
+                            rebuilt.entry(face).or_default().push(index);
+                        }
+                    }
+                    rebuilt == by_face
+                        && self
+                            .tets
+                            .iter()
+                            .zip(&flat_of)
+                            .all(|(tet, cached)| classify(&self.positions, *tet) == *cached)
+                },
+                "incremental repair state diverged from a rescan"
+            );
             // Walls are re-read per sweep: dropping a boundary flat tet moves
             // two wall faces (see `drop_boundary_flat`).
             let walls: BTreeSet<[u32; 3]> =
                 self.source_faces.iter().map(|(face, _)| *face).collect();
-            let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
-            for (index, tet) in self.tets.iter().enumerate() {
-                for face in tet_sorted_faces(*tet) {
-                    by_face.entry(face).or_default().push(index);
-                }
-            }
             // Candidates for this sweep, ZERO-VOLUME FIRST (`false < true`):
             // a fatal tet must not be starved of fresh face maps by the
             // sliver budget (MEASURED: sharing one queue left 53 zero-volume
             // tets on the 128-segment cylinder where priority leaves 1).
             let mut candidates: Vec<(bool, usize)> = (0..self.tets.len())
                 .filter_map(|index| {
-                    let tet = self.tets[index];
-                    let mut key = tet;
-                    key.sort_unstable();
-                    if gave_up.contains(&key) || !is_flat(&self.positions, tet) {
+                    let (flat, zero_volume) = flat_of[index];
+                    if !flat {
                         return None;
                     }
-                    Some((!volume_flat(&self.positions, tet), index))
+                    let mut key = self.tets[index];
+                    key.sort_unstable();
+                    if gave_up.contains(&key) {
+                        return None;
+                    }
+                    Some((!zero_volume, index))
                 })
                 .collect();
             candidates.sort_unstable();
