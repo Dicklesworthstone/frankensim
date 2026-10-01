@@ -2001,6 +2001,7 @@ impl ProjectSpec {
                         boundary.condition,
                         ThermalBoundaryCondition::Convection { .. }
                             | ThermalBoundaryCondition::AirflowConvection { .. }
+                            | ThermalBoundaryCondition::NaturalConvection { .. }
                     )
             }) {
                 out.push(violation(

@@ -1404,6 +1404,96 @@ fn g1_a_passive_heatsink_converges_on_the_natural_convection_card() {
 }
 
 #[test]
+fn g1_a_passive_heatsink_also_radiates_and_runs_cooler() {
+    // A fanless heatsink sheds a comparable share by radiation. The gray
+    // reference surface on the metal augments the natural-convection row: the
+    // fixed point must still converge on the CONVECTIVE part, the convective
+    // and radiative watts must account for all 3 W, and the part must run
+    // cooler than with natural convection alone.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let natural =
+        std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-natural.fsim")).unwrap();
+    let law_end = ":correlation \"convection.churchill-chu-vertical-plate\"))";
+    assert_eq!(natural.matches(law_end).count(), 1);
+    let radiating = natural.replace(
+        law_end,
+        ":correlation \"convection.churchill-chu-vertical-plate\")) :radiation (radiation :surfaces (surfaces (surface :name \"gray-metal\" :target \"metal\" :card \"63485429663ba24d53d67a7d3b03ab0611f17f1e3e445e6a1ef4f636093a6e4f\" :query-temperature 300.0K :reservoir-temperature 293.15K)) :max-iterations 128 :temperature-tolerance 1e-8K :heat-tolerance 1e-7kg·m^2·s^-3 :relaxation 0.5)",
+    );
+    let dir = scratch("heatsink-natural-radiating");
+    let fsim = dir.join("heatsink-natural-radiating.fsim");
+    std::fs::write(&fsim, &radiating).unwrap();
+    let ledger = dir.join("rad.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        root.join("examples/heatsink-fan/heatsink.stl")
+            .to_string_lossy()
+            .as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        root.join("data/reference-project/aa6061.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+        "--materials",
+        root.join("data/reference-project/gray-surface.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+    ]));
+    assert_eq!(
+        solved.exit_code,
+        exit::SUCCESS,
+        "stdout {} stderr {}",
+        solved.stdout,
+        solved.stderr
+    );
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .unwrap();
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let text = receipt_text(&ledger, &receipts[4]);
+    let law = text
+        .split("\"natural_convection\":")
+        .nth(1)
+        .expect("natural block");
+    let convective = number_after(law, "\"heat_rate_w\":");
+    let radiative = number_after(&text, "\"radiative_out_w\":");
+    let maximum = number_after(&text, "\"max\":");
+    eprintln!(
+        "natural+radiation: convective {convective} W, radiative {radiative} W, T_max {maximum} K"
+    );
+    assert!(radiative > 0.0 && convective > 0.0, "{text}");
+    assert!(
+        (convective + radiative - 3.0).abs() < 1e-5,
+        "the two exits carry all 3 W: {convective} + {radiative}"
+    );
+    assert!(
+        maximum < 316.73,
+        "radiation must cool the passive part below 316.74 K, got {maximum}"
+    );
+}
+
+#[test]
 fn g0_package_missing_ledger_fails_closed() {
     let output = run(args(&[
         "package",
