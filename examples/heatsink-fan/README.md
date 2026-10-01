@@ -196,6 +196,29 @@ all of this. Surfaces do not depend on the selector kind, so a STEP body's
 named face group should serve through `(named-group ...)`; that path is not
 yet exercised end to end.
 
+## Without the fan: natural convection
+
+`heatsink-fan/heatsink-natural.fsim` is the same body and the same 3 W with no
+air network at all. Its one boundary row is
+`(natural-convection :target "metal" :characteristic-length 0.06m
+:ambient-temperature 293.15K :correlation "convection.churchill-chu-vertical-plate")`
+(fsim v10). The buoyant coefficient depends on how hot the wall gets, so the
+conduction stage iterates: solve, read the metal's area-mean wall
+temperature from the Robin decomposition, re-evaluate the Churchill-Chu card
+at that difference, and repeat until h moves by less than 1e-10. The card is
+never extrapolated. Air properties are the frozen 300 K set; density is
+ideal-gas at the film temperature and β = 1/T_film. The receipt's
+`natural_convection` block records everything.
+
+MEASURED 2026-10-01: 16 iterations, h = 5.90 W/m²K, Ra = 4.55e5 (laminar),
+Nu = 13.47, a mean wall-to-ambient difference of 23.57 K, and T_max = 316.74 K
+against 301.996 K with the fan at 70 %. So the fan buys about 15 K at 3 W.
+Doubling the power to 6 W raises the difference 1.76×, not 2×, because h grows
+with the difference (Nu ∝ Ra^¼ would give 2^0.8 = 1.74). The G1 test
+`g1_a_passive_heatsink_converges_on_the_natural_convection_card` checks all
+3 W leaving through the law, Nu against an independently written
+Churchill-Chu formula, h = Nu k / L, and the sub-linear power response.
+
 ## Probability of compliance
 
 `heatsink-compliance.fsim` asks a probability question of this same project.

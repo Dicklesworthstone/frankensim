@@ -642,6 +642,21 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
                 kw("reference-temperature"),
                 qty(*reference_temperature)?,
             ]),
+            ThermalBoundaryCondition::NaturalConvection {
+                characteristic_length,
+                ambient_temperature,
+                correlation,
+            } => list(vec![
+                sym("natural-convection"),
+                kw("target"),
+                text(&boundary.target),
+                kw("characteristic-length"),
+                qty(*characteristic_length)?,
+                kw("ambient-temperature"),
+                qty(*ambient_temperature)?,
+                kw("correlation"),
+                text(correlation),
+            ]),
             ThermalBoundaryCondition::AirflowConvection {
                 branch,
                 order,
@@ -2672,10 +2687,38 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
                             },
                         });
                     }
+                    Some(("natural-convection", b_body)) => {
+                        let b_pairs = read_pairs(
+                            b_body,
+                            "natural-convection",
+                            &["target", "characteristic-length", "ambient-temperature", "correlation"],
+                            out,
+                        );
+                        boundaries.push(ThermalBoundary {
+                            target: expect_str(field(&b_pairs, "target"), "conduction.boundary.target", out),
+                            condition: ThermalBoundaryCondition::NaturalConvection {
+                                characteristic_length: expect_qty(
+                                    field(&b_pairs, "characteristic-length"),
+                                    "conduction.boundary.characteristic-length",
+                                    out,
+                                ),
+                                ambient_temperature: expect_qty(
+                                    field(&b_pairs, "ambient-temperature"),
+                                    "conduction.boundary.ambient-temperature",
+                                    out,
+                                ),
+                                correlation: expect_str(
+                                    field(&b_pairs, "correlation"),
+                                    "conduction.boundary.correlation",
+                                    out,
+                                ),
+                            },
+                        });
+                    }
                     _ => {
                         out.push(Violation {
                         code: "project-malformed-clause",
-                        what: "`conduction.boundaries` rows must be `(fixed-temperature ...)`, `(heat-flux ...)`, `(convection ...)`, or `(airflow-convection ...)`".to_string(),
+                        what: "`conduction.boundaries` rows must be `(fixed-temperature ...)`, `(heat-flux ...)`, `(convection ...)`, `(airflow-convection ...)`, or `(natural-convection ...)`".to_string(),
                         fix: "declare one of the supported thermal boundary condition types".to_string(),
                     });
                     }

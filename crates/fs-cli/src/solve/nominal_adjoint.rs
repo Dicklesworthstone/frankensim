@@ -203,6 +203,8 @@ pub(super) fn extract(
             B::HeatFlux { .. } => rows.push(row("heat-flux", &declared.target, ordinal, "W/m^2", value[2])?),
             B::FixedTemperature { .. } => missing.push(unsupported("fixed-temperature", &declared.target,
                 "prescribed values require their complete lift derivative")),
+            B::NaturalConvection { .. } => missing.push(unsupported("natural-convection-ambient", &declared.target,
+                "the coefficient's dependence on the wall temperature is not contracted")),
             B::AirflowConvection { branch, .. } => missing.push(unsupported("air-inlet-temperature", branch,
                 "full temperature feedback is retained, but inlet and hydraulic parameter contractions are not implemented")),
         }
