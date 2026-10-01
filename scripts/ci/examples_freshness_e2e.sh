@@ -24,8 +24,8 @@
 #                                (interval), the report's convergence
 #                                section present. Minutes in a debug build.
 #   6. heatsink-fan-rotated     — the same project on the shell rotated
-#                                35/21 deg (every facet oblique, f32 import
-#                                precision): imports, solves all seven
+#                                35/21 deg (every facet oblique, full-precision
+#                                ASCII import): imports, solves all seven
 #                                stages, and its T_max matches the
 #                                axis-aligned body's within 1 mK.
 #   7. heatsink-fan-chip        — the same heatsink with its 3 W entering
@@ -41,6 +41,9 @@
 #                                card-backed contact joint: seven stages
 #                                (the exact -5 W / -0.5 K oracles are the
 #                                G1 test's).
+#  10. examples/perforated-plate — the mesher complexity gate: an 8652-facet
+#                                OBLIQUE plate generated in the work dir,
+#                                imported, solved (7 stages) in < 120 s.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -61,7 +64,7 @@ BINARY="${FRANKENSIM_BIN:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '3,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'FATAL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -223,11 +226,12 @@ check "ladder verdict is the Estimated satisfied decision of the complete budget
 # ---- 9. the rotated twin: rotation invariance of the whole product path -----
 # The same shell rotated 35 deg about z and 21 deg about x and translated
 # (generate_heatsink_stl.py --rotate 35 21 --shift 0.1 0.2 0.05): every facet
-# oblique, imported at fs-io's f32 weld precision. It must import, mesh
+# oblique, imported at the file's full ASCII precision. It must import, mesh
 # (fs-mesh CONTRACT items 18-23), solve every stage, and reproduce the
 # axis-aligned body's maximum temperature on a different mesh within the
-# discretization scale. TOLERANCE 1 mK: MEASURED 2026-09-03 (binary of that
-# day, axis 713 tets vs rotated 704 tets) |dT_max| = 0.157 mK on a rise of
+# discretization scale. TOLERANCE 1 mK: MEASURED 2026-09-30 after the f64
+# ASCII import, axis 301.99571 K vs rotated 301.99605 K, |dT_max| = 0.34 mK
+# (2026-09-03 under the f32 import: 713 vs 704 tets, 0.157 mK) on a rise of
 # 8.85 K, ~6x headroom, and the ladder's data-range discretization bound on
 # this body is 1.1 mK — two meshes of one body agreeing better than that
 # bound is the honest expectation.
@@ -241,7 +245,7 @@ check "rotated twin imports into its own ledger" rotated_import_ok
 rotated_solve_completes() {
   "${BINARY}" --json solve "${ROTATED}" "${WORK}/rotated.db" --materials "${PACK}" > "${WORK}/rs.json" 2> "${WORK}/rs.err"
 }
-check "rotated twin solves every stage (oblique facets, f32 import precision)" rotated_solve_completes
+check "rotated twin solves every stage (oblique facets, full-precision import)" rotated_solve_completes
 check "rotated solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/rs.json"
 ROTATED_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/rs.json" | head -1 | cut -d'"' -f4)"
 rotated_report_ok() {
@@ -334,6 +338,32 @@ pair_swapped_refuses() {
     && grep -q 'cli-import-source-hash-mismatch' "${WORK}/cpswap.err"
 }
 check "contact pair refuses swapped sources on the pinned hash" pair_swapped_refuses
+
+# ---- 13. complexity gate: 8652-facet oblique perforated plate ---------------
+# generate_perforated_stl.py 20 --rotate is deterministic, so the project
+# pins its source hash and the lane generates the ~3 MB STL instead of
+# tracking it. TOLERANCE 120 s wall for the solve: MEASURED 2026-09-30 23.8 s
+# conduction (~5x headroom on a shared host). Before that day's mesher fixes
+# this body refused outright (f32-import slivers), and a 5644-facet
+# axis-aligned plate took 199 s.
+PERF_DIR="${REPO_ROOT}/examples/perforated-plate"
+PERF="${PERF_DIR}/perforated-plate-rotated.fsim"
+check "perforated-plate-rotated validates ok" validate_ok "${PERF}"
+perf_generate() {
+  python3 "${PERF_DIR}/generate_perforated_stl.py" 20 "${WORK}/perforated.stl" --rotate > /dev/null
+}
+check "perforated plate generator writes the pinned 8652-facet body" perf_generate
+perf_solve_in_budget() {
+  "${BINARY}" --json import "${PERF}" "${WORK}/perforated.stl" "${WORK}/perf.db" --unit m --max-hole-edges 0 > "${WORK}/pfimp.json" 2> "${WORK}/pfimp.err" || return 1
+  local start end
+  start=$(date +%s)
+  "${BINARY}" --json solve "${PERF}" "${WORK}/perf.db" --materials "${PACK}" > "${WORK}/pfs.json" 2> "${WORK}/pfs.err" || return 1
+  end=$(date +%s)
+  log perf "{\"facets\":8652,\"solve_wall_s\":$((end - start))}"
+  [[ $((end - start)) -lt 120 ]]
+}
+check "8652-facet oblique plate imports and solves within 120 s" perf_solve_in_budget
+check "oblique plate solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/pfs.json"
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"

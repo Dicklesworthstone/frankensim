@@ -1377,6 +1377,8 @@
     "crates/fs-solver/tests/goal_inverse.rs",
     "crates/fs-solver/tests/goal_residual.rs",
     "crates/fs-solver/tests/ladder_probe.rs",
+    "crates/fs-solver/tests/least_squares.rs",
+    "crates/fs-solver/tests/lsqr.rs",
     "crates/fs-solver/tests/metamorphic.rs",
     "crates/fs-solver/tests/multilevel.rs",
     "crates/fs-solver/tests/nonlinear_block_battery.rs",

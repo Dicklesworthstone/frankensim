@@ -242,7 +242,12 @@ L6. Consumers: the P4 frame flagship (AISC catalogs), fs-fab.
    and one triangle, every position coordinate is finite, and every triangle
    index is in range, OBJ and PLY re-import bitwise-identical f64 positions;
    STL agrees to f32 precision (documented lossy: positions only, welded by
-   exact coordinate match, normals recomputed). The PLY statement additionally
+   exact coordinate match, normals recomputed). Binary STL is f32 by format
+   and widens to f64 exactly. ASCII STL coordinates are parsed as f64, so the
+   file's decimal precision is kept rather than rounded to f32 (2026-09-30).
+   f32 rounding turned the exactly coplanar facets of oblique (rotated)
+   bodies into 1e-7-noisy point clouds, and the mesher then refused them on
+   sliver dihedrals. The PLY statement additionally
    requires the emitted document to remain within the reader's documented
    aggregate and per-item envelopes; the infallible writer does not itself
    enforce these source or import preconditions.

@@ -896,7 +896,7 @@ fn g1_chip_footprint_power_enters_through_the_declared_surface() {
         "3 W must leave by convection"
     );
     assert!(field("relative_closure").abs() < 1e-6);
-    // f32-welded STL corners move the area by ~1e-7 relative.
+    // The STL carries six-decimal coordinates; the area is exact to roundoff.
     assert!((field("area_m2") / 4e-4 - 1.0).abs() < 1e-6, "{text}");
     let centre = hottest(&text);
     assert!(
