@@ -41,6 +41,9 @@
 #                                card-backed contact joint: seven stages
 #                                (the exact -5 W / -0.5 K oracles are the
 #                                G1 test's).
+#  10. examples/perforated-plate — the mesher complexity gate: an 8652-facet
+#                                OBLIQUE plate generated in the work dir,
+#                                imported, solved (7 stages) in < 120 s.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -61,7 +64,7 @@ BINARY="${FRANKENSIM_BIN:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '3,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'FATAL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -335,6 +338,32 @@ pair_swapped_refuses() {
     && grep -q 'cli-import-source-hash-mismatch' "${WORK}/cpswap.err"
 }
 check "contact pair refuses swapped sources on the pinned hash" pair_swapped_refuses
+
+# ---- 13. complexity gate: 8652-facet oblique perforated plate ---------------
+# generate_perforated_stl.py 20 --rotate is deterministic, so the project
+# pins its source hash and the lane generates the ~3 MB STL instead of
+# tracking it. TOLERANCE 120 s wall for the solve: MEASURED 2026-09-30 23.8 s
+# conduction (~5x headroom on a shared host). Before that day's mesher fixes
+# this body refused outright (f32-import slivers), and a 5644-facet
+# axis-aligned plate took 199 s.
+PERF_DIR="${REPO_ROOT}/examples/perforated-plate"
+PERF="${PERF_DIR}/perforated-plate-rotated.fsim"
+check "perforated-plate-rotated validates ok" validate_ok "${PERF}"
+perf_generate() {
+  python3 "${PERF_DIR}/generate_perforated_stl.py" 20 "${WORK}/perforated.stl" --rotate > /dev/null
+}
+check "perforated plate generator writes the pinned 8652-facet body" perf_generate
+perf_solve_in_budget() {
+  "${BINARY}" --json import "${PERF}" "${WORK}/perforated.stl" "${WORK}/perf.db" --unit m --max-hole-edges 0 > "${WORK}/pfimp.json" 2> "${WORK}/pfimp.err" || return 1
+  local start end
+  start=$(date +%s)
+  "${BINARY}" --json solve "${PERF}" "${WORK}/perf.db" --materials "${PACK}" > "${WORK}/pfs.json" 2> "${WORK}/pfs.err" || return 1
+  end=$(date +%s)
+  log perf "{\"facets\":8652,\"solve_wall_s\":$((end - start))}"
+  [[ $((end - start)) -lt 120 ]]
+}
+check "8652-facet oblique plate imports and solves within 120 s" perf_solve_in_budget
+check "oblique plate solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/pfs.json"
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"
