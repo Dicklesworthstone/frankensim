@@ -24,8 +24,8 @@
 #                                (interval), the report's convergence
 #                                section present. Minutes in a debug build.
 #   6. heatsink-fan-rotated     — the same project on the shell rotated
-#                                35/21 deg (every facet oblique, f32 import
-#                                precision): imports, solves all seven
+#                                35/21 deg (every facet oblique, full-precision
+#                                ASCII import): imports, solves all seven
 #                                stages, and its T_max matches the
 #                                axis-aligned body's within 1 mK.
 #   7. heatsink-fan-chip        — the same heatsink with its 3 W entering
@@ -223,11 +223,12 @@ check "ladder verdict is the Estimated satisfied decision of the complete budget
 # ---- 9. the rotated twin: rotation invariance of the whole product path -----
 # The same shell rotated 35 deg about z and 21 deg about x and translated
 # (generate_heatsink_stl.py --rotate 35 21 --shift 0.1 0.2 0.05): every facet
-# oblique, imported at fs-io's f32 weld precision. It must import, mesh
+# oblique, imported at the file's full ASCII precision. It must import, mesh
 # (fs-mesh CONTRACT items 18-23), solve every stage, and reproduce the
 # axis-aligned body's maximum temperature on a different mesh within the
-# discretization scale. TOLERANCE 1 mK: MEASURED 2026-09-03 (binary of that
-# day, axis 713 tets vs rotated 704 tets) |dT_max| = 0.157 mK on a rise of
+# discretization scale. TOLERANCE 1 mK: MEASURED 2026-09-30 after the f64
+# ASCII import, axis 301.99571 K vs rotated 301.99605 K, |dT_max| = 0.34 mK
+# (2026-09-03 under the f32 import: 713 vs 704 tets, 0.157 mK) on a rise of
 # 8.85 K, ~6x headroom, and the ladder's data-range discretization bound on
 # this body is 1.1 mK — two meshes of one body agreeing better than that
 # bound is the honest expectation.
@@ -241,7 +242,7 @@ check "rotated twin imports into its own ledger" rotated_import_ok
 rotated_solve_completes() {
   "${BINARY}" --json solve "${ROTATED}" "${WORK}/rotated.db" --materials "${PACK}" > "${WORK}/rs.json" 2> "${WORK}/rs.err"
 }
-check "rotated twin solves every stage (oblique facets, f32 import precision)" rotated_solve_completes
+check "rotated twin solves every stage (oblique facets, full-precision import)" rotated_solve_completes
 check "rotated solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/rs.json"
 ROTATED_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/rs.json" | head -1 | cut -d'"' -f4)"
 rotated_report_ok() {

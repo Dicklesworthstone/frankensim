@@ -158,10 +158,12 @@ volume, 379 tets, smallest dihedral 1.6°; fs-mesh `CONTRACT.md` items 18–23
 record the kernel, recovery, repair and import-orientation defects this one
 body found) and of the product path: `heatsink-fan-rotated.fsim` is the same
 project on the rotated shell, and the freshness lane solves both and requires
-the two maximum temperatures to agree within 1 mK. MEASURED 2026-09-03:
-axis-aligned 301.99578 K on 713 tets, rotated 301.99562 K on 704 tets, a
-0.16 mK difference on an 8.85 K rise, inside the 1.1 mK discretization bound
-the ladder measured. See
+the two maximum temperatures to agree within 1 mK. MEASURED 2026-09-30
+(ASCII STL imported at full f64 precision): axis-aligned 301.99571 K, rotated
+301.99605 K, a 0.34 mK difference on an 8.85 K rise, inside the 1.1 mK
+discretization bound the ladder measured. Under the earlier f32 import it was
+0.16 mK, but f32 rounding made larger oblique bodies unmeshable: a rotated
+perforated plate with 460 facets refused on 14 slivers, and it now meshes. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
 
@@ -173,7 +175,7 @@ chip actually puts it: through a 20 × 20 mm die contact on the base bottom.
 0.040` (256 facets on one global tensor grid, so the footprint is a union of
 whole facets). The assembly declares `(surface :parent "heatsink" :name
 "chip" ...)` (fsim v8), a `(box ...)` assignment selects the footprint facets
-(`:tolerance 1e-6` because STL vertices weld at f32), and the power row names
+(`:tolerance 1e-6`, a margin above the file's six-decimal coordinates), and the power row names
 `chip` instead of `metal`. Solve lowers surface power to a uniform inward
 Neumann flux, watts over the measured footprint area, and carves the
 footprint out of the metal's convection row, so the patch never also
@@ -182,11 +184,12 @@ convects. A surface carrying both a power row and a boundary law is refused
 
 MEASURED 2026-09-29: all seven stages complete; `source_w` 0, 3.0 W in
 through the footprint, 3.0000000021 W out by convection (relative closure
-6.9e-10). The maximum is 302.693 K against 301.996 K for the volumetric
-source: concentrating the heat under the die raises the rise above the
-293.15 K inlet from 8.85 K to 9.54 K (+0.70 K, 8 %). The conduction receipt's
-`surface_heat` block records each powered surface's measured area (400 mm²
-to 1e-6, the f32 weld) and the hottest vertex. Shifting the box 20 mm in y
+6.9e-10). Re-measured 2026-09-30 after ASCII STL import moved to f64: the
+maximum is 302.687 K against 301.996 K for the volumetric source.
+Concentrating the heat under the die raises the rise above the 293.15 K inlet
+from 8.85 K to 9.54 K (+0.69 K, 8 %). The conduction receipt's `surface_heat`
+block records each powered surface's measured area (400 mm²) and the hottest
+vertex. Shifting the box 20 mm in y
 on the same STL moves the hot spot from (38, 30, 0) mm to (44, 0, 0) mm. The
 G1 test `g1_chip_footprint_power_enters_through_the_declared_surface` checks
 all of this. Surfaces do not depend on the selector kind, so a STEP body's

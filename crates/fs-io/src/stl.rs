@@ -21,8 +21,8 @@ fn f32_le(bytes: &[u8], at: usize) -> Result<f32, IoError> {
 
 /// Weld exactly-equal vertex positions into an indexed soup (STL stores
 /// per-facet corners; bitwise-equal coordinates weld — no tolerance).
-fn weld(corners: &[[f32; 3]]) -> Soup {
-    let mut index: BTreeMap<[u32; 3], u32> = BTreeMap::new();
+fn weld(corners: &[[f64; 3]]) -> Soup {
+    let mut index: BTreeMap<[u64; 3], u32> = BTreeMap::new();
     let mut positions = Vec::new();
     let mut triangles = Vec::new();
     let (tris, _rest) = corners.as_chunks::<3>();
@@ -31,11 +31,7 @@ fn weld(corners: &[[f32; 3]]) -> Soup {
         for (slot, c) in ids.iter_mut().zip(tri) {
             let key = [c[0].to_bits(), c[1].to_bits(), c[2].to_bits()];
             *slot = *index.entry(key).or_insert_with(|| {
-                positions.push(Point3::new(
-                    f64::from(c[0]),
-                    f64::from(c[1]),
-                    f64::from(c[2]),
-                ));
+                positions.push(Point3::new(c[0], c[1], c[2]));
                 u32::try_from(positions.len() - 1).expect("element cap")
             });
         }
@@ -81,24 +77,25 @@ fn read_binary(bytes: &[u8]) -> Result<Soup, IoError> {
                     what: format!("non-finite vertex in facet {f}"),
                 });
             }
-            corners.push([x, y, z]);
+            // f32 -> f64 is exact and injective: binary welding is unchanged.
+            corners.push([f64::from(x), f64::from(y), f64::from(z)]);
         }
     }
     Ok(weld(&corners))
 }
 
 fn read_ascii(text: &str) -> Result<Soup, IoError> {
-    let mut corners: Vec<[f32; 3]> = Vec::new();
+    let mut corners: Vec<[f64; 3]> = Vec::new();
     for (ln, line) in text.lines().enumerate() {
         let mut it = line.split_whitespace();
         if it.next() == Some("vertex") {
-            let mut v = [0.0f32; 3];
+            let mut v = [0.0f64; 3];
             for slot in &mut v {
                 let tok = it.next().ok_or(IoError::Malformed {
                     at: ln + 1,
                     what: "vertex needs three coordinates".to_string(),
                 })?;
-                *slot = tok.parse::<f32>().map_err(|_| IoError::Malformed {
+                *slot = tok.parse::<f64>().map_err(|_| IoError::Malformed {
                     at: ln + 1,
                     what: format!("bad coordinate {tok:?}"),
                 })?;
