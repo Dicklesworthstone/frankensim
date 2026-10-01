@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "2be00075fa10e289febcb2610c4fb96d8af19a60a561a9e5e9e581edd90091dd",
+  "manifest_identity": "67ab68c51e76b9047827299ca343651931483ff442fd049907363ee83d24ae2e",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "27891c793eadf04d4c0317e890c1e11faa0598abb3adaf17a5496a80c9b60ce4",
+    "source_root": "efb53606acf6c98b1df9c224257bcee95c6985569a04536e2987d82350a57f6d",
     "tracked_file_count": 4925,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2713,7 +2713,7 @@
       {"path": "crates/fs-mesh/src/rounded_cylinder.rs", "git_mode": "100644", "bytes": 21070, "content_blake3": "da0f567dcc0f3c09023752b69cfa0fcb8c0cbf0b05a4b9009525afb15f3b24ec"},
       {"path": "crates/fs-mesh/src/tet_refinement.rs", "git_mode": "100644", "bytes": 8976, "content_blake3": "0e74f7dbb1b19144f5fe1880c0d291f0b50c2434e41a18e0015670b8b1008338"},
       {"path": "crates/fs-mesh/src/uniform.rs", "git_mode": "100644", "bytes": 12000, "content_blake3": "af6383d865fb4b49b300f7652f264805e581bdb904e06187a86eec6d26f1cdaf"},
-      {"path": "crates/fs-mesh/src/volumetric.rs", "git_mode": "100644", "bytes": 99294, "content_blake3": "42d8c9c5bb64ccc2bc6d71a8ec98ac9fd0d1073ee09bdb4e884359ade6f2991f"},
+      {"path": "crates/fs-mesh/src/volumetric.rs", "git_mode": "100644", "bytes": 102353, "content_blake3": "59a466b5395a87a0c25efe46b2ad9275ae57d47156ac4bccb6483e34e6f77a42"},
       {"path": "crates/fs-mesh/tests/adaptivity.rs", "git_mode": "100644", "bytes": 25484, "content_blake3": "4de6e6ee2541f3e221ac20dfaf5eba63507cf9405f8c7e07bddf64933a4060e7"},
       {"path": "crates/fs-mesh/tests/body_corpus.rs", "git_mode": "100644", "bytes": 24834, "content_blake3": "397ac9c285a4ff853dca71715e53ca9dc73f420dcc4f667f7b6a76f3d4892b6c"},
       {"path": "crates/fs-mesh/tests/comb_prism.rs", "git_mode": "100644", "bytes": 12604, "content_blake3": "c7ecddd49089373e25ee4acdb7b1d85b5c7c8c6e74796af67c5110f2b59ead32"},
