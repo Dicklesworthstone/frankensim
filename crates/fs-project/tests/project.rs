@@ -835,7 +835,7 @@ fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
+        "cooling-conduction-v3-then-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
     );
 }
 
@@ -888,7 +888,7 @@ fn v3_envelopes_migrate_to_current_without_inventing_airflow_convection() {
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
     assert_eq!(
         migrated.receipt.rule.label(),
-        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9"
+        "conduction-airflow-convection-v4-then-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10"
     );
 }
 
@@ -912,7 +912,7 @@ fn v4_envelopes_migrate_to_v5_without_inventing_radiation() {
     let receipt = parsed.migration.expect("v4 migration is receipted");
     assert_eq!(receipt.source_version, 4);
     assert_eq!(receipt.target_version, FSIM_VERSION);
-    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
+    assert_eq!(receipt.rule.label(), "conduction-ambient-radiation-v5-then-material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
     assert!(receipt.verifies(v4.as_bytes(), current.as_bytes()));
     assert!(
         parsed
@@ -948,7 +948,7 @@ fn v5_envelopes_migrate_to_v6_without_inventing_a_material_tolerance() {
     assert_eq!(parsed.decoded.canonical, current);
     let receipt = parsed.migration.expect("v5 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (5, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
+    assert_eq!(receipt.rule.label(), "material-tolerance-v6-then-geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
     assert!(receipt.verifies(v5.as_bytes(), current.as_bytes()));
     assert!(
         parsed.decoded.spec.materials.iter().flatten().all(|b| b.conductivity_tolerance.is_none()),
@@ -968,7 +968,7 @@ fn v6_envelopes_migrate_to_v7_without_inventing_a_surface_offset() {
     assert_eq!(parsed.decoded.spec, historical);
     let receipt = parsed.migration.expect("v6 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (6, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9");
+    assert_eq!(receipt.rule.label(), "geometry-tolerance-v7-then-surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
     assert!(receipt.verifies(v6.as_bytes(), current.as_bytes()));
     assert!(parsed.decoded.spec.geometry.iter().flatten().all(|a| a.surface_offset.is_none()));
 }
@@ -2089,7 +2089,7 @@ fn v7_envelopes_migrate_to_v8_and_refuse_a_pre_v8_surface() {
     assert_eq!(parsed.decoded.spec, historical);
     let receipt = parsed.migration.expect("v7 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (7, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "surface-entity-v8-then-fan-efficiency-v9");
+    assert_eq!(receipt.rule.label(), "surface-entity-v8-then-fan-efficiency-v9-then-natural-convection-v10");
     assert!(receipt.verifies(v7.as_bytes(), current.as_bytes()));
     let with_surface = print_sexpr(&surface_project()).expect("renders");
     let false_v7 = with_surface
@@ -2152,8 +2152,65 @@ fn v8_envelopes_migrate_to_v9_and_refuse_pre_v9_payloads() {
     assert_eq!(parsed.decoded.spec, historical);
     let receipt = parsed.migration.expect("v8 migration is receipted");
     assert_eq!((receipt.source_version, receipt.target_version), (8, FSIM_VERSION));
-    assert_eq!(receipt.rule.label(), "fan-efficiency-v9");
+    assert_eq!(receipt.rule.label(), "fan-efficiency-v9-then-natural-convection-v10");
     assert!(receipt.verifies(v8.as_bytes(), current.as_bytes()));
     let false_v8 = down(&print_sexpr(&fan_efficiency_project()).expect("renders"));
     assert_eq!(parse_sexpr_migrating(&false_v8).expect_err("v8 never carried a fan efficiency").code, "fsim-migration-payload");
+}
+
+/// The reference project with its convection law replaced by a natural-
+/// convection law (fsim v10).
+fn natural_project() -> ProjectSpec {
+    let mut spec = reference_project();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().expect("conduction");
+    setup.boundaries[0].condition = ThermalBoundaryCondition::NaturalConvection {
+        characteristic_length: QtyAny::new(0.06, fs_project::spec::dims::LENGTH),
+        ambient_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+        correlation: "convection.churchill-chu-vertical-plate".to_string(),
+    };
+    spec
+}
+
+#[test]
+fn natural_convection_laws_round_trip_validate_and_refuse_misuse() {
+    let spec = natural_project();
+    let sexpr = print_sexpr(&spec).expect("renders");
+    assert!(sexpr.contains("(natural-convection :target "), "{sexpr}");
+    assert!(sexpr.contains(":correlation \"convection.churchill-chu-vertical-plate\""), "{sexpr}");
+    assert_eq!(parse_sexpr(&sexpr).expect("canonical").spec, spec);
+    assert_eq!(parse_json(&print_json(&spec).expect("json")).expect("canonical json").spec, spec);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let mut cold = natural_project();
+    if let ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } =
+        &mut cold.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition
+    {
+        ambient_temperature.value = 200.0;
+    }
+    assert!(cold.validate().iter().any(|v| v.code == "project-conduction-natural-ambient-envelope"));
+    let mut flat = natural_project();
+    if let ThermalBoundaryCondition::NaturalConvection { characteristic_length, .. } =
+        &mut flat.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition
+    {
+        characteristic_length.value = 0.0;
+    }
+    assert!(flat.validate().iter().any(|v| v.code == "project-conduction-natural-range"));
+}
+
+#[test]
+fn v9_envelopes_migrate_to_v10_and_refuse_a_pre_v10_natural_law() {
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("renders");
+    let down = |text: &str| {
+        text.replacen(&format!("(fsim-project :version {FSIM_VERSION}"), "(fsim-project :version 9", 1)
+            .replacen(&format!("(versions :schema {FSIM_VERSION}"), "(versions :schema 9", 1)
+    };
+    let v9 = down(&current);
+    let parsed = parse_sexpr_migrating(&v9).expect("v9 migrates");
+    assert_eq!(parsed.decoded.spec, historical);
+    let receipt = parsed.migration.expect("receipted");
+    assert_eq!((receipt.source_version, receipt.target_version), (9, FSIM_VERSION));
+    assert_eq!(receipt.rule.label(), "natural-convection-v10");
+    assert!(receipt.verifies(v9.as_bytes(), current.as_bytes()));
+    let false_v9 = down(&print_sexpr(&natural_project()).expect("renders"));
+    assert_eq!(parse_sexpr_migrating(&false_v9).expect_err("v9 had no natural law").code, "fsim-migration-payload");
 }

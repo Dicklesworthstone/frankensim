@@ -202,6 +202,7 @@ mod adaptive_balance;
 mod nominal_adjoint;
 mod algebraic;
 mod conjugate;
+mod natural;
 mod radiation;
 mod report_stage;
 pub(crate) use report_stage::{CompletedRunExport, load_completed_run};
@@ -1358,6 +1359,8 @@ struct RungSolved {
     radiation_fragment: Option<String>,
     /// Powered-surface evidence (fsim v8), `None` when no surface carries power.
     surface_fragment: Option<String>,
+    /// Natural-convection fixed point (fsim v10), `None` without such laws.
+    natural_fragment: Option<String>,
     /// Boundary-face slots of every declared surface on this rung's mesh.
     surface_slots: BTreeMap<String, Vec<usize>>,
     adjoint_data: Option<RungAdjointData>,
@@ -5901,6 +5904,19 @@ fn conduction_boundary(
                 coefficient,
                 reference_temperature,
             } => fs_conduction::ThermalBc::robin(coefficient.value, reference_temperature.value),
+            ThermalBoundaryCondition::NaturalConvection { .. } => {
+                let (htc, t_ref) = derived.get(&row.target).copied().ok_or_else(|| {
+                    conduction_error(
+                        "cli-solve-conduction-natural-underived",
+                        format!(
+                            "natural convection on `{}` has no derived coefficient; the fixed point did not run",
+                            row.target
+                        ),
+                        "report the driver defect; a derived Robin row is never invented",
+                    )
+                })?;
+                fs_conduction::ThermalBc::robin(htc, t_ref)
+            }
             ThermalBoundaryCondition::AirflowConvection { .. } => {
                 let (htc, t_ref) = derived.get(&row.target).copied().ok_or_else(|| {
                     conduction_error(
@@ -6625,7 +6641,76 @@ fn conduction_solve_receipt(
             })
         };
         let laws = conjugate::airflow_laws(setup)?;
-        let (solid, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty() {
+        let natural_laws = natural::natural_laws(setup)?;
+        if !natural_laws.is_empty() && !laws.is_empty() {
+            return Err(conduction_error(
+                "cli-solve-conduction-natural-with-airflow",
+                "a project mixing natural-convection and airflow-convection laws is not yet supported",
+                "declare one convection regime per project",
+            ));
+        }
+        let mut natural_fragment = None;
+        let (solid, conjugate_fragment, derived_boundary, air_paths) = if laws.is_empty()
+            && !natural_laws.is_empty()
+        {
+            // Natural convection: h depends on the solved wall-to-ambient
+            // difference; Picard on the card until every h settles.
+            let pressure_pa = spec.envelope.as_ref().map_or(101_325.0, |e| e.pressure.value);
+            let mut htc = natural::initial_coefficients(&natural_laws, pressure_pa)?;
+            let mut iterations = 0usize;
+            loop {
+                iterations += 1;
+                let derived: BTreeMap<String, (f64, f64)> = natural_laws
+                    .iter()
+                    .map(|law| (law.target.clone(), (htc[&law.target], law.ambient_k)))
+                    .collect();
+                let solution = solve_once(&derived)?;
+                let mut next = BTreeMap::new();
+                let mut converged = Vec::with_capacity(natural_laws.len());
+                let mut worst = 0.0f64;
+                for law in &natural_laws {
+                    let flux = solution
+                        .convective_robin_fluxes()
+                        .iter()
+                        .find(|flux| flux.region == law.target)
+                        .ok_or_else(|| {
+                            conduction_error(
+                                "cli-solve-conduction-natural-region",
+                                format!("the conduction report has no Robin decomposition for `{}`", law.target),
+                                "report the driver defect; every natural-convection target lowers to a Robin region",
+                            )
+                        })?;
+                    let coefficient = natural::coefficient(
+                        law,
+                        flux.mean_wall_temperature_k - law.ambient_k,
+                        pressure_pa,
+                    )?;
+                    let current = htc[&law.target];
+                    worst = worst.max((coefficient.htc_w_m2_k - current).abs() / current);
+                    next.insert(law.target.clone(), coefficient.htc_w_m2_k);
+                    converged.push(natural::Converged {
+                        law: law.clone(),
+                        coefficient,
+                        mean_wall_k: flux.mean_wall_temperature_k,
+                        heat_rate_w: flux.heat_rate_w,
+                    });
+                }
+                if worst <= natural::TOLERANCE_REL {
+                    natural_fragment = Some(natural::receipt_fragment(&converged, iterations)?);
+                    break (solution, None, derived, Vec::new());
+                }
+                if iterations >= natural::MAX_ITERATIONS {
+                    return Err(conduction_error(
+                        "cli-solve-conduction-natural-unconverged",
+                        format!(
+                            "the natural-convection fixed point moved h by {worst:e} (relative) after {iterations} iterations"
+                        ),
+                        "report the driver defect with the project; the map is a strong contraction for heated walls",
+                    ));
+                }
+                htc = next;
+            }
+        } else if laws.is_empty() {
             (solve_once(&BTreeMap::new())?, None, BTreeMap::new(), Vec::new())
         } else {
             let handoff = flow_override.or(context.flow_network.as_ref()).ok_or_else(|| {
@@ -6810,6 +6895,7 @@ fn conduction_solve_receipt(
             conjugate_fragment,
             radiation_fragment,
             surface_fragment,
+            natural_fragment,
             surface_slots,
             adjoint_data,
             algebraic: algebraic::MaximumEvidence::default(),
@@ -6935,6 +7021,7 @@ fn conduction_solve_receipt(
         conjugate_fragment,
         radiation_fragment,
         surface_fragment,
+        natural_fragment,
         surface_slots,
         adjoint_data: _,
         algebraic,
@@ -7155,9 +7242,15 @@ fn conduction_solve_receipt(
         algebraic.control_json.as_deref().unwrap_or("null"),
         // Absent (not null) without powered surfaces: pre-v8 receipts keep
         // their exact bytes.
-        surface_fragment
-            .map(|fragment| format!("\"surface_heat\":{fragment},"))
-            .unwrap_or_default(),
+        format!(
+            "{}{}",
+            surface_fragment
+                .map(|fragment| format!("\"surface_heat\":{fragment},"))
+                .unwrap_or_default(),
+            natural_fragment
+                .map(|fragment| format!("\"natural_convection\":{fragment},"))
+                .unwrap_or_default()
+        ),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
     );
@@ -7517,6 +7610,9 @@ fn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec
                 }
                 ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {
                     inlet_temperature.value = temperature_k;
+                }
+                ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => {
+                    ambient_temperature.value = temperature_k;
                 }
                 _ => {}
             }

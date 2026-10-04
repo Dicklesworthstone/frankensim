@@ -178,8 +178,16 @@ bindings; it runs no solves and admits no scenarios itself.
   `OutputRequest` may carry `:region`, which must name a declared surface
   (`project-output-region`). Migration from v8 is an envelope rewrite; a
   pre-v9 payload declaring either is refused.
+- A thermal boundary may be `NaturalConvection` (schema v10,
+  `(natural-convection :target :characteristic-length :ambient-temperature
+  :correlation)`): its coefficient is derived at solve time from the named
+  natural-convection card at the solved mean wall-to-ambient difference. The
+  length must be positive (`project-conduction-natural-range`) and the
+  ambient inside the envelope (`project-conduction-natural-ambient-envelope`).
+  Migration from v9 is an envelope rewrite; a pre-v10 payload declaring one is
+  refused.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 9 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 10 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.

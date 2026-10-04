@@ -572,7 +572,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // real verb while retaining the original fixture bytes.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"83dac601c333198d438b9aa9d1d96fbdd164c336597177ce7fcad5ed95cf15a7\""
+            "\"project_hash\":\"d3b7c322ee44da3f165dd07902d3c6d943ba26b4a475464f8c43486b0c32cf1b\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -582,7 +582,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"734931b3d10a44786bebc5b799465dd7662219a13144a4db608875c73c71a8a8\""
+            "\"project_hash\":\"6c6eb9783a8fe6a1a0278e51d658c592f505a907b6a71d3c569165244297b863\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -1297,6 +1297,199 @@ fn g1_surface_mean_over_the_whole_skin_equals_the_energy_balance_exactly() {
     assert!(
         (mean - exact).abs() < 5e-6,
         "skin mean {mean} K is not the energy balance {exact} K"
+    );
+}
+
+#[test]
+fn g1_a_passive_heatsink_converges_on_the_natural_convection_card() {
+    // fsim v10: the same heatsink with no fan, cooled by buoyant air through
+    // the Churchill-Chu vertical-plate card. The coefficient depends on the
+    // solved wall-to-ambient difference, so the stage iterates to a fixed
+    // point. Independent checks: all declared power leaves through the law;
+    // the receipt's Nu is the Churchill-Chu formula, written out here
+    // independently, at the receipt's own Ra; h = Nu k / L; and doubling the
+    // power raises the difference by LESS than 2x (h grows with it).
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-natural.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("heatsink-natural");
+    let solve = |project: &std::path::Path, tag: &str| -> String {
+        let ledger = dir.join(format!("{tag}.db"));
+        let imported = run(args(&[
+            "--json",
+            "import",
+            project.to_string_lossy().as_ref(),
+            stl.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--unit",
+            "m",
+            "--max-hole-edges",
+            "0",
+        ]));
+        assert_eq!(
+            imported.exit_code,
+            exit::SUCCESS,
+            "stderr: {}",
+            imported.stderr
+        );
+        let solved = run(args(&[
+            "--json",
+            "solve",
+            project.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+            "--materials",
+            pack.to_string_lossy().as_ref(),
+        ]));
+        assert_eq!(solved.exit_code, exit::SUCCESS, "stderr: {}", solved.stderr);
+        let run_id = solved
+            .stdout
+            .split("\"run\":\"")
+            .nth(1)
+            .and_then(|rest| rest.get(..64))
+            .unwrap()
+            .to_string();
+        let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+        let receipts = stage_receipt_hashes(&ledger, &run_id);
+        receipt_text(&ledger, &receipts[4])
+    };
+    let text = solve(&fsim, "three");
+    let law = text
+        .split("\"natural_convection\":")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no natural_convection block in {text}"));
+    let field = |key: &str| number_after(law, &format!("\"{key}\":"));
+    let (htc, delta_t, rayleigh, nusselt) = (
+        field("htc_w_m2_k"),
+        field("delta_t_k"),
+        field("rayleigh"),
+        field("nusselt"),
+    );
+    eprintln!(
+        "natural: h {htc} W/m2K, dT {delta_t} K, Ra {rayleigh:e}, Nu {nusselt}, iterations {}",
+        field("iterations")
+    );
+    assert!(
+        (field("heat_rate_w") - 3.0).abs() < 1e-6,
+        "all 3 W must leave by natural convection: {law}"
+    );
+    // Churchill & Chu (1975), full-range vertical plate, Pr = 0.707.
+    let pr = 0.707_f64;
+    let shape = (1.0 + (0.492 / pr).powf(9.0 / 16.0)).powf(8.0 / 27.0);
+    let root_nu = 0.825 + 0.387 * rayleigh.powf(1.0 / 6.0) / shape;
+    let churchill_chu = root_nu * root_nu;
+    assert!(
+        (nusselt / churchill_chu - 1.0).abs() < 1e-9,
+        "Nu {nusselt} vs Churchill-Chu {churchill_chu}"
+    );
+    assert!(
+        (htc / (nusselt * 26.3e-3 / 0.06) - 1.0).abs() < 1e-12,
+        "h = Nu k / L"
+    );
+    assert!(delta_t > 0.0 && field("iterations") < 80.0);
+
+    let declared = std::fs::read_to_string(&fsim).unwrap();
+    assert_eq!(declared.matches(":watts 3.0kg").count(), 1);
+    let doubled = dir.join("heatsink-natural-6w.fsim");
+    std::fs::write(&doubled, declared.replace(":watts 3.0kg", ":watts 6.0kg")).unwrap();
+    let text = solve(&doubled, "six");
+    let law = text.split("\"natural_convection\":").nth(1).unwrap();
+    let delta_6 = number_after(law, "\"delta_t_k\":");
+    let ratio = delta_6 / delta_t;
+    eprintln!("natural: dT 3 W {delta_t} K, 6 W {delta_6} K, ratio {ratio}");
+    assert!(
+        ratio > 1.0 && ratio < 2.0,
+        "doubling power must raise dT by less than 2x: {ratio}"
+    );
+}
+
+#[test]
+fn g1_a_passive_heatsink_also_radiates_and_runs_cooler() {
+    // A fanless heatsink sheds a comparable share by radiation. The gray
+    // reference surface on the metal augments the natural-convection row: the
+    // fixed point must still converge on the CONVECTIVE part, the convective
+    // and radiative watts must account for all 3 W, and the part must run
+    // cooler than with natural convection alone.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let natural =
+        std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-natural.fsim")).unwrap();
+    let law_end = ":correlation \"convection.churchill-chu-vertical-plate\"))";
+    assert_eq!(natural.matches(law_end).count(), 1);
+    let radiating = natural.replace(
+        law_end,
+        ":correlation \"convection.churchill-chu-vertical-plate\")) :radiation (radiation :surfaces (surfaces (surface :name \"gray-metal\" :target \"metal\" :card \"63485429663ba24d53d67a7d3b03ab0611f17f1e3e445e6a1ef4f636093a6e4f\" :query-temperature 300.0K :reservoir-temperature 293.15K)) :max-iterations 128 :temperature-tolerance 1e-8K :heat-tolerance 1e-7kg·m^2·s^-3 :relaxation 0.5)",
+    );
+    let dir = scratch("heatsink-natural-radiating");
+    let fsim = dir.join("heatsink-natural-radiating.fsim");
+    std::fs::write(&fsim, &radiating).unwrap();
+    let ledger = dir.join("rad.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        root.join("examples/heatsink-fan/heatsink.stl")
+            .to_string_lossy()
+            .as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        root.join("data/reference-project/aa6061.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+        "--materials",
+        root.join("data/reference-project/gray-surface.fsmcdpk")
+            .to_string_lossy()
+            .as_ref(),
+    ]));
+    assert_eq!(
+        solved.exit_code,
+        exit::SUCCESS,
+        "stdout {} stderr {}",
+        solved.stdout,
+        solved.stderr
+    );
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .unwrap();
+    let ledger = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+    let receipts = stage_receipt_hashes(&ledger, run_id);
+    let text = receipt_text(&ledger, &receipts[4]);
+    let law = text
+        .split("\"natural_convection\":")
+        .nth(1)
+        .expect("natural block");
+    let convective = number_after(law, "\"heat_rate_w\":");
+    let radiative = number_after(&text, "\"radiative_out_w\":");
+    let maximum = number_after(&text, "\"max\":");
+    eprintln!(
+        "natural+radiation: convective {convective} W, radiative {radiative} W, T_max {maximum} K"
+    );
+    assert!(radiative > 0.0 && convective > 0.0, "{text}");
+    assert!(
+        (convective + radiative - 3.0).abs() < 1e-5,
+        "the two exits carry all 3 W: {convective} + {radiative}"
+    );
+    assert!(
+        maximum < 316.73,
+        "radiation must cool the passive part below 316.74 K, got {maximum}"
     );
 }
 

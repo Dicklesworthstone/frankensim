@@ -365,6 +365,31 @@ perf_solve_in_budget() {
 check "8652-facet oblique plate imports and solves within 120 s" perf_solve_in_budget
 check "oblique plate solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/pfs.json"
 
+# ---- 14. passive heatsink: natural convection by fixed point (fsim v10) ----
+# Same body and 3 W, no fan: the Churchill-Chu card's coefficient is
+# iterated against the solved wall temperature. MEASURED 2026-10-01: 16
+# iterations, h 5.90 W/m2K, T_max 316.74 K. The passive part must run hotter
+# than the fan-cooled one, and the receipt must record the converged law.
+NATURAL="${REPO_ROOT}/examples/heatsink-fan/heatsink-natural.fsim"
+check "heatsink-natural validates ok" validate_ok "${NATURAL}"
+natural_solve_completes() {
+  "${BINARY}" --json import "${NATURAL}" "${REPO_ROOT}/examples/heatsink-fan/heatsink.stl" "${WORK}/natural.db" --unit m --max-hole-edges 0 > "${WORK}/nimp.json" 2> "${WORK}/nimp.err" \
+    && "${BINARY}" --json solve "${NATURAL}" "${WORK}/natural.db" --materials "${PACK}" > "${WORK}/ns.json" 2> "${WORK}/ns.err"
+}
+check "passive heatsink imports and solves" natural_solve_completes
+check "passive heatsink solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/ns.json"
+NATURAL_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ns.json" | head -1 | cut -d'"' -f4)"
+natural_report_ok() {
+  (cd "${WORK}" && "${BINARY}" --json report "${NATURAL_RUN}" "${WORK}/natural.db" > "${WORK}/nrep.json" 2> "${WORK}/nrep.err")
+}
+check "passive heatsink report exports" natural_report_ok
+NATURAL_TMAX="$(t_max_of "${WORK}/${NATURAL_RUN}.report.json")"
+natural_hotter() {
+  test -n "${AXIS_TMAX}" && test -n "${NATURAL_TMAX}" \
+    && awk -v a="${AXIS_TMAX}" -v n="${NATURAL_TMAX}" 'BEGIN { exit !(n > a + 5.0) }'
+}
+check "the passive heatsink runs more than 5 K hotter than the fan-cooled one (fan ${AXIS_TMAX:-?} K, passive ${NATURAL_TMAX:-?} K)" natural_hotter
+
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"
 if [[ "${FAILURES}" -gt 0 ]]; then

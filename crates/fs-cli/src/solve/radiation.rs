@@ -58,6 +58,7 @@ pub(super) fn lower(
                     boundary.condition,
                     ThermalBoundaryCondition::Convection { .. }
                         | ThermalBoundaryCondition::AirflowConvection { .. }
+                        | ThermalBoundaryCondition::NaturalConvection { .. }
                 )
         }) {
             return Err(conduction_error(

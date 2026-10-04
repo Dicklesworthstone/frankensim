@@ -651,6 +651,20 @@ pub enum ThermalBoundaryCondition {
         /// domain gates the derivation at solve time.
         correlation: String,
     },
+    /// Buoyancy-driven convection to still ambient air (schema v10): the
+    /// coefficient is DERIVED at solve time from the named natural-convection
+    /// card (for example `convection.churchill-chu-vertical-plate`) at the
+    /// solved mean wall-to-ambient difference, by fixed-point iteration. The
+    /// card's own validity domain (Rayleigh range) gates the derivation.
+    NaturalConvection {
+        /// Card characteristic length (vertical-plate height) (m).
+        characteristic_length: QtyAny,
+        /// Quiescent ambient air temperature (K); must lie inside the
+        /// operating envelope's ambient range.
+        ambient_temperature: QtyAny,
+        /// `fs-convection` natural-convection card name.
+        correlation: String,
+    },
 }
 
 /// One thermal boundary, keyed by an existing geometry-assignment target.
@@ -1763,6 +1777,54 @@ impl ProjectSpec {
                                 ));
                             }
                         }
+                        ThermalBoundaryCondition::NaturalConvection {
+                            characteristic_length,
+                            ambient_temperature,
+                            correlation,
+                        } => {
+                            has_anchor = true;
+                            let target = &boundary.target;
+                            for (what, qty, dims) in [
+                                ("characteristic length", characteristic_length, dims::LENGTH),
+                                ("ambient temperature", ambient_temperature, dims::TEMPERATURE),
+                            ] {
+                                check_dims(
+                                    out,
+                                    "project-conduction-boundary-dims",
+                                    &format!("natural convection {what} on `{target}`"),
+                                    *qty,
+                                    dims,
+                                );
+                                if !(qty.value.is_finite() && qty.value > 0.0) {
+                                    out.push(violation(
+                                        "project-conduction-natural-range",
+                                        format!("natural convection {what} on `{target}` is {}", qty.value),
+                                        "declare a finite positive quantity",
+                                    ));
+                                }
+                            }
+                            if let Some(envelope) = &self.envelope
+                                && ambient_temperature.value.is_finite()
+                                && !(envelope.ambient_lo.value..=envelope.ambient_hi.value)
+                                    .contains(&ambient_temperature.value)
+                            {
+                                out.push(violation(
+                                    "project-conduction-natural-ambient-envelope",
+                                    format!(
+                                        "natural convection ambient {} K on `{target}` lies outside the operating envelope",
+                                        ambient_temperature.value
+                                    ),
+                                    "declare an ambient temperature inside the envelope's ambient range",
+                                ));
+                            }
+                            if correlation.is_empty() {
+                                out.push(violation(
+                                    "project-conduction-natural-correlation",
+                                    format!("natural convection on `{target}` names no correlation card"),
+                                    "name an fs-convection natural-convection card",
+                                ));
+                            }
+                        }
                         ThermalBoundaryCondition::AirflowConvection {
                             branch,
                             order,
@@ -1939,6 +2001,7 @@ impl ProjectSpec {
                         boundary.condition,
                         ThermalBoundaryCondition::Convection { .. }
                             | ThermalBoundaryCondition::AirflowConvection { .. }
+                            | ThermalBoundaryCondition::NaturalConvection { .. }
                     )
             }) {
                 out.push(violation(

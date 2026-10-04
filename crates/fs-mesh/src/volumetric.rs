@@ -1802,7 +1802,16 @@ impl LabeledTetComplex {
             .iter()
             .map(|r| (r.id, region_soup(&self.positions, r)))
             .collect();
-        let seeds: BTreeMap<RegionId, [f64; 3]> = regions.iter().map(|r| (r.id, r.seed)).collect();
+        // Each seed's winding is a pure function of its own region's surface:
+        // computed once here, not once per retained tet (it was half of the
+        // winding work in a 16.6k-facet audit).
+        let seed_winding: BTreeMap<RegionId, f64> = regions
+            .iter()
+            .map(|r| {
+                let soup = &soups[&r.id];
+                (r.id, winding_exact(soup, Point3::new(r.seed[0], r.seed[1], r.seed[2])))
+            })
+            .collect();
         let kinds: BTreeMap<RegionId, RegionKind> =
             regions.iter().map(|r| (r.id, r.kind)).collect();
         let mut producer_vol: BTreeMap<RegionId, f64> = BTreeMap::new();
@@ -1823,8 +1832,7 @@ impl LabeledTetComplex {
             let centroid = tet_centroid(&self.positions, *tet);
             for (id, soup) in &soups {
                 let at_q = winding_exact(soup, Point3::new(centroid[0], centroid[1], centroid[2]));
-                let seed = seeds[id];
-                let at_s = winding_exact(soup, Point3::new(seed[0], seed[1], seed[2]));
+                let at_s = seed_winding[id];
                 let match_seed = (at_q - at_s).abs() < 0.25;
                 if *id == region && !match_seed {
                     if std::env::var_os("FS_MESH_TRACE_AUDIT").is_some() {
