@@ -50,3 +50,23 @@ radiation backreaction or measured SPL/realism claim. Stereo does not enlarge
 the board's structural bandwidth or validate its mesh. Native regressions
 compare both channels to independent mono receivers, mechanical/work identity,
 block partitioning, coincident receivers, fault framing and PCM layout.
+
+`--acoustic-refinement-levels 0..3` independently refines the flat P1 board's
+Rayleigh integration. Each level splits a structural triangle into four
+equal-area acoustic cells, retaining the positive three-point rule and evaluating
+the same signed P1 modal displacement on each cell. Structural nodes, mass,
+eigenpairs, bridge projections, source dynamics and total radiating area stay
+fixed. Level zero preserves the original points and floating-point path.
+The existing 120,000-point receiver budget still refuses oversized requests
+before eigenanalysis. This option excludes crowned/cubic displacement fields
+and diagnostic volume output. It provides a spatial integration convergence
+test; it does not extend structural bandwidth or establish a measured piano
+match. Compare successive levels at fixed source controls and microphone
+positions before interpreting pressure changes as improved accuracy.
+
+`--receiver-pressure-csv receivers.csv` exports total unquantized pressure
+with `sample,time_s,pressure_left_pa` and, for stereo, `pressure_right_pa`.
+It reads the same completed pressure buffer encoded into the WAV, so it adds
+no observer or mechanical step and allocates no per-mode history. It also
+supports music. Use `--modal-pressure-csv` when signed mode attribution is
+needed; use this smaller export for repeated receiver and PCM comparisons.

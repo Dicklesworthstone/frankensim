@@ -49,6 +49,8 @@ pub struct BoardGeometry {
     bridge_sites: Vec<BridgeSite>,
     /// Authored or measured modal damping ratio, not a fitted geometry result.
     damping_ratio: f64,
+    /// Acoustic integration only; the structural mesh and eigensolve stay fixed.
+    acoustic_refinement_levels: usize,
 }
 
 /// One degree-two triangle or subtriangle quadrature point for P1 displacement.
@@ -234,7 +236,21 @@ impl BoardGeometry {
                 pretension: pretension.ok_or("missing explicit pretension (use zero for none)")?,
             },
             bridge_sites: sites, damping_ratio: damping.ok_or("missing explicit damping ratio")?,
+            acoustic_refinement_levels: 0,
         })
+    }
+
+    /// Uniformly subdivide each P1 radiating triangle into 4^levels cells,
+    /// with the existing positive degree-two rule on every cell. This changes
+    /// observation quadrature alone, not the structural mesh or modal basis.
+    /// The unchanged shared receiver admits at most 120,000 surface samples.
+    /// Cubic displacement and crowned boards require their own matching rule.
+    pub fn with_acoustic_refinement(mut self, levels: usize) -> Result<Self, String> {
+        if levels > 3 || self.chart.mesh.tris.len() * 3 * 4usize.pow(levels as u32) > 120_000 {
+            return Err("acoustic refinement exceeds level 3 or the 120000-point receiver budget".into());
+        }
+        self.acoustic_refinement_levels = levels;
+        Ok(self)
     }
 
     /// Compute the complete certified slice (0, upper_hz]. Refuse an over-budget
@@ -289,6 +305,9 @@ impl BoardGeometry {
     ) -> Result<PreparedBoard, String> {
         if consistent_transverse_mass && edge_cubic_transverse_mass {
             return Err("choose one transverse panel mass law".into());
+        }
+        if edge_cubic_transverse_mass && self.acoustic_refinement_levels != 0 {
+            return Err("acoustic refinement currently requires P1 transverse displacement".into());
         }
         if !upper_hz.is_finite() || upper_hz <= 0.0 || upper_hz > 80_000.0 {
             return Err("invalid soundboard frequency ceiling".into());
@@ -391,11 +410,11 @@ impl BoardGeometry {
         // The chosen symmetric cubic interior rule makes this positive
         // three-point rule reproduce its exact area mean; fs-plate proves
         // that identity for every local displacement DOF.
-        let mut surface = Vec::with_capacity(3 * mesh.tris.len());
+        let quadrature = acoustic_triangle_weights(self.acoustic_refinement_levels);
+        let mut surface = Vec::with_capacity(quadrature.len() * mesh.tris.len());
         for tri in &mesh.tris {
-            let area = triangle_area(mesh, *tri) / 3.0;
-            for weights in [[2.0/3.0, 1.0/6.0, 1.0/6.0],
-                [1.0/6.0, 2.0/3.0, 1.0/6.0], [1.0/6.0, 1.0/6.0, 2.0/3.0]] {
+            let area = triangle_area(mesh, *tri) / quadrature.len() as f64;
+            for &weights in &quadrature {
                 let mut position = [0.0; 3];
                 for i in 0..3 {
                     position[0] += weights[i] * mesh.nodes[tri[i]].0;
@@ -436,6 +455,10 @@ impl BoardGeometry {
         if mass_equilibrated {
             provenance.push_str("; mass-diagonal solver equilibration");
         }
+        if self.acoustic_refinement_levels != 0 {
+            provenance.push_str(&format!("; P1 acoustic-only refinement level {} ({} surface samples)",
+                self.acoustic_refinement_levels, surface.len()));
+        }
         Ok(PreparedBoard {
             modes, surface, motion, provenance, area_m2: mesh.total_area(),
             mass_kg: mass, frequency_intervals_hz: intervals, free_dofs: model.free,
@@ -457,6 +480,27 @@ impl BoardGeometry {
         }
         mass
     }
+}
+
+/// Equal-area barycentric subdivision. Level zero deliberately returns the
+/// original coordinates directly, preserving the original floating-point path.
+fn acoustic_triangle_weights(levels: usize) -> Vec<[f64; 3]> {
+    let rule = [[2.0/3.0, 1.0/6.0, 1.0/6.0],
+        [1.0/6.0, 2.0/3.0, 1.0/6.0], [1.0/6.0, 1.0/6.0, 2.0/3.0]];
+    if levels == 0 { return rule.to_vec(); }
+    let mut cells = vec![[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]];
+    for _ in 0..levels {
+        let mut children = Vec::with_capacity(4 * cells.len());
+        for [a,b,c] in cells {
+            let midpoint = |x: [f64; 3], y: [f64; 3]| std::array::from_fn(|i| 0.5*(x[i]+y[i]));
+            let ab = midpoint(a,b); let bc = midpoint(b,c); let ca = midpoint(c,a);
+            children.extend([[a,ab,ca],[ab,b,bc],[ca,bc,c],[ab,bc,ca]]);
+        }
+        cells = children;
+    }
+    cells.iter().flat_map(|cell| rule.map(|weights|
+        std::array::from_fn(|i| (0..3).map(|j| weights[j]*cell[j][i]).sum())))
+        .collect()
 }
 
 fn nodal_displacement(model: &PlateModel, phi: &[f64], node: usize) -> f64 {
@@ -586,6 +630,51 @@ mod tests {
             let volume=p.surface.iter().map(|s|s.area_m2*s.mode_shape[i]).sum::<f64>();
             assert!((volume-m.volume).abs()<1e-12);
         }
+    }
+    #[test]
+    fn acoustic_refinement_preserves_mechanics_area_and_signed_volume() {
+        let original=BoardGeometry::read(&fixture()).unwrap().prepare(&[69],300.0).unwrap();
+        for level in 0..=3 {
+            let refined=BoardGeometry::read(&fixture()).unwrap().with_acoustic_refinement(level)
+                .unwrap().prepare(&[69],300.0).unwrap();
+            assert_eq!(refined.surface.len(),original.surface.len()*4usize.pow(level as u32));
+            assert_eq!(refined.frequency_intervals_hz,original.frequency_intervals_hz);
+            assert_eq!(refined.mass_kg,original.mass_kg); assert_eq!(refined.free_dofs,original.free_dofs);
+            assert!((refined.surface.iter().map(|p|p.area_m2).sum::<f64>()-original.area_m2).abs()<1e-12);
+            for (i,(a,b)) in original.modes.iter().zip(&refined.modes).enumerate() {
+                assert_eq!(a.frequency_hz,b.frequency_hz); assert_eq!(a.bridge,b.bridge);
+                assert_eq!(a.volume,b.volume); assert_eq!(a.damping_ratio,b.damping_ratio);
+                let integrated=refined.surface.iter().map(|p|p.area_m2*p.mode_shape[i]).sum::<f64>();
+                assert!((integrated-b.volume).abs()<1e-12);
+            }
+            if level==0 {
+                assert_eq!(refined.provenance,original.provenance);
+                for (a,b) in original.surface.iter().zip(&refined.surface) {
+                    assert_eq!(a.position_m,b.position_m); assert_eq!(a.area_m2,b.area_m2);
+                    assert_eq!(a.mode_shape,b.mode_shape);
+                }
+            }
+        }
+        assert!(BoardGeometry::read(&fixture()).unwrap().with_acoustic_refinement(4).is_err());
+        let refined=BoardGeometry::read(&fixture()).unwrap().with_acoustic_refinement(1).unwrap();
+        assert!(refined.prepare_edge_cubic_transverse_mass(&[69],300.0,false).is_err());
+    }
+    #[test]
+    fn refined_acoustic_rule_integrates_independent_barycentric_moments() {
+        for level in 0..=3 {
+            let points=acoustic_triangle_weights(level);
+            let mean=|f:fn([f64;3])->f64| points.iter().map(|&p|f(p)).sum::<f64>()/points.len() as f64;
+            assert!(points.iter().all(|p|p.iter().all(|&x|x>0.0)
+                && (p.iter().sum::<f64>()-1.0).abs()<1e-14));
+            assert!((mean(|p|p[0])-1.0/3.0).abs()<1e-14);
+            assert!((mean(|p|p[0]*p[0])-1.0/6.0).abs()<1e-14);
+            assert!((mean(|p|p[0]*p[1])-1.0/12.0).abs()<1e-14);
+        }
+    }
+    #[test]
+    fn acoustic_point_budget_refuses_before_structural_preparation() {
+        let source=super::super::steinway_d::build(32).unwrap();
+        assert!(BoardGeometry::read(&source.geometry).unwrap().with_acoustic_refinement(3).is_err());
     }
     #[test]
     fn retained_motion_uses_the_same_modal_basis_without_changing_ordinary_preparation() {

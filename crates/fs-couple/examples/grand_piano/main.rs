@@ -29,9 +29,11 @@ const USAGE: &str = "grand_piano [--render piano.wav] [--scale strings.csv]
     [--midi performance.mid] [--midi-channel 1..16]
     [--midi-velocity-max-m-s V] [--midi-half-pedal]
     [--microphone x_m,y_m,z_m] [--microphone-right x_m,y_m,z_m] [--diagnostic-volume]
+    [--acoustic-refinement-levels 0..3]
     [--note 21..108] [--velocity m/s] [--duration seconds]
     [--bridge-trace-csv paired.csv]
     [--modal-pressure-csv modal.csv]
+    [--receiver-pressure-csv receivers.csv]
     [--sample-rate Hz] [--substeps 1..16] [--modes 1..512]
     [--pcm-full-scale-pa positive-Pa]
     [--dump-scale strings.csv] [--dump-board board.csv]
@@ -59,6 +61,10 @@ trial, not a measured Model D material correction.
 and applies that same field at bridge and acoustic surface samples. This is
 an opt-in numerical trial; slope and beam inertia remain lumped.
 These opt-in corrections have not passed a perceptual similarity gate.
+--acoustic-refinement-levels uniformly subdivides flat P1 radiating triangles
+for Rayleigh integration only. It preserves the structural mesh, modes and
+bridge mechanics. Level 0 is unchanged; the 120000-point receiver budget still
+applies. Crowned/cubic fields and diagnostic-volume output are excluded.
 It uses Chabassier/Durufle's wrapped-string MODEL table (84 notes plus four
 estimated extensions), separate per-key hammer force and relaxation cards, and
 published shank geometry reduced to rigid rotation plus one bending coordinate.
@@ -143,6 +149,8 @@ for that key. --note remains a sustain/restrike demo, not a long isolated strike
 each loaded-board mode's delayed pressure at each receiver on the WAV clock;
 the signed modal sum reconstructs the pressure, including cancellation. Modes
 are indexed in the loaded basis, not identified as bare-board eigenfrequencies.
+--receiver-pressure-csv writes unquantized total Pa at each physical receiver
+on the WAV clock, for isolated notes or music, without allocating modal traces.
 --diagnostic-volume retains the old volume-velocity observer; --observer-gain
 applies only to that diagnostic, not to physical microphone pressure.
 --pcm-full-scale-pa declares the pressure mapped to PCM full scale (default 2 Pa).
@@ -163,8 +171,9 @@ struct Options {
     mesh_divisions: usize, dump_geometry: Option<String>, dump_obj: Option<String>,
     board_band_hz: f64, observer_gain: f64,
     microphone: Option<[f64; 3]>, microphone_right: Option<[f64; 3]>, diagnostic_volume: bool,
+    acoustic_refinement_levels: usize,
     dump_scale: Option<String>, dump_board: Option<String>,
-    bridge_trace_csv: Option<String>, modal_pressure_csv: Option<String>,
+    bridge_trace_csv: Option<String>, modal_pressure_csv: Option<String>, receiver_pressure_csv: Option<String>,
     note: Option<u8>, velocity: Option<f64>, duration: f64,
     sample_rate: u32, substeps: usize, modes: usize, pcm_full_scale_pa: f64, help: bool,
 }
@@ -180,7 +189,8 @@ impl Default for Options {
             mesh_divisions: 8, dump_geometry: None, dump_obj: None,
             board_band_hz: 400.0, observer_gain: 10_000.0, dump_scale: None,
             microphone: None, microphone_right: None, diagnostic_volume: false,
-            dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None,
+            acoustic_refinement_levels: 0,
+            dump_board: None, bridge_trace_csv: None, modal_pressure_csv: None, receiver_pressure_csv: None,
             note: None, velocity: None, duration: 6.0,
             sample_rate: 48_000, substeps: 4, modes: 24, pcm_full_scale_pa: 2.0, help: false }
     }
@@ -235,11 +245,13 @@ impl Options {
                     if flag=="--microphone" {options.microphone=position;} else {options.microphone_right=position;}
                 }
                 "--board-band-hz" => options.board_band_hz = value.parse().map_err(|_| invalid())?,
+                "--acoustic-refinement-levels" => options.acoustic_refinement_levels = value.parse().map_err(|_| invalid())?,
                 "--observer-gain" => options.observer_gain = value.parse().map_err(|_| invalid())?,
                 "--dump-scale" => options.dump_scale = Some(value.clone()),
                 "--dump-board" => options.dump_board = Some(value.clone()),
                 "--bridge-trace-csv" => options.bridge_trace_csv = Some(value.clone()),
                 "--modal-pressure-csv" => options.modal_pressure_csv = Some(value.clone()),
+                "--receiver-pressure-csv" => options.receiver_pressure_csv = Some(value.clone()),
                 "--note" => options.note = Some(value.parse().map_err(|_| invalid())?),
                 "--velocity" => options.velocity = Some(value.parse().map_err(|_| invalid())?),
                 "--duration" => options.duration = value.parse().map_err(|_| invalid())?,
@@ -324,6 +336,11 @@ impl Options {
             return Err("MIDI controls require --midi, channel 1..16 and finite maximum hammer velocity in (0,8] m/s".into());
         }
         let geometric = options.preset.is_some() || options.board_geometry.is_some();
+        if options.acoustic_refinement_levels > 3 || (seen.contains("--acoustic-refinement-levels")
+            && (!geometric || options.render.is_none() || options.diagnostic_volume
+                || options.edge_cubic_board_mass)) {
+            return Err("--acoustic-refinement-levels requires a flat P1 geometric pressure render and levels 0..3".into());
+        }
         if options.equilibrate_board_mass && !geometric {
             return Err("--equilibrate-board-mass requires a flat geometric board".into());
         }
@@ -354,6 +371,10 @@ impl Options {
                 || !geometric || options.diagnostic_volume) {
             return Err("--modal-pressure-csv requires --render, --note or an isolated --performance, and geometric pressure without --diagnostic-volume".into());
         }
+        if options.receiver_pressure_csv.is_some()
+            && (options.render.is_none() || !geometric || options.diagnostic_volume) {
+            return Err("--receiver-pressure-csv requires a geometric pressure render without --diagnostic-volume".into());
+        }
         // Do not overwrite the very measurements that a render was asked to use.
         let inputs = [options.scale.as_ref(), options.board.as_ref(),
             options.board_geometry.as_ref(), options.performance.as_ref(), options.hammers.as_ref(), options.hammer_footprints.as_ref(), options.midi.as_ref(),
@@ -361,7 +382,7 @@ impl Options {
             options.string_stretching.as_ref()];
         let outputs = [options.render.as_ref(), options.dump_scale.as_ref(), options.dump_board.as_ref(),
             options.dump_geometry.as_ref(), options.dump_obj.as_ref(), options.bridge_trace_csv.as_ref(),
-            options.modal_pressure_csv.as_ref()];
+            options.modal_pressure_csv.as_ref(), options.receiver_pressure_csv.as_ref()];
         for (i, output) in outputs.iter().enumerate() {
             if let Some(path) = output {
                 if path.is_empty() || inputs.iter().flatten().any(|input| input == path)
@@ -473,15 +494,16 @@ fn load_board(text: Option<&str>, scale: &[geometry::Course]) -> Result<Vec<line
     }
 }
 fn prepare_geometric_board(text: &str, keys: &[u8], band_hz: f64,
-    equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool)
+    equilibrate_mass: bool, consistent_mass: bool, edge_cubic_mass: bool, acoustic_refinement_levels: usize)
     -> Result<board_geometry::PreparedBoard, String> {
     if crowned_board::is_crowned(text) {
-        if equilibrate_mass || consistent_mass || edge_cubic_mass {
+        if equilibrate_mass || consistent_mass || edge_cubic_mass || acoustic_refinement_levels != 0 {
             return Err("flat-board mass controls require a flat geometric board".into());
         }
         crowned_board::CrownedBoard::read(text)?.prepare(keys, band_hz)
     } else {
-        let geometry=board_geometry::BoardGeometry::read(text)?;
+        let geometry=board_geometry::BoardGeometry::read(text)?
+            .with_acoustic_refinement(acoustic_refinement_levels)?;
         if edge_cubic_mass { geometry.prepare_edge_cubic_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if consistent_mass { geometry.prepare_consistent_transverse_mass(keys,band_hz,equilibrate_mass) }
         else if equilibrate_mass { geometry.prepare_mass_equilibrated(keys,band_hz) }
@@ -575,6 +597,22 @@ fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
         writeln!(out).map_err(|e| format!("{path}: {e}"))?;
     }
     out.flush().map_err(|e| format!("{path}: {e}"))
+}
+fn write_receiver_pressure(out: &mut impl std::io::Write, pressure: &[f64],
+    rate: u32, channels: usize) -> Result<(), String> {
+    if !(1..=2).contains(&channels) || rate == 0 || pressure.len()%channels != 0
+        || pressure.iter().any(|p|!p.is_finite()) {
+        return Err("receiver pressure needs complete finite mono/stereo frames and a positive clock".into());
+    }
+    write!(out,"sample,time_s,pressure_left_pa").map_err(|e|e.to_string())?;
+    if channels==2 {write!(out,",pressure_right_pa").map_err(|e|e.to_string())?;}
+    writeln!(out).map_err(|e|e.to_string())?;
+    for (sample,frame) in pressure.chunks_exact(channels).enumerate() {
+        write!(out,"{sample},{:.17e}",sample as f64/f64::from(rate)).map_err(|e|e.to_string())?;
+        for value in frame {write!(out,",{value:.17e}").map_err(|e|e.to_string())?;}
+        writeln!(out).map_err(|e|e.to_string())?;
+    }
+    out.flush().map_err(|e|e.to_string())
 }
 fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: &[linear::BoardMode],
     surface: Option<&[board_geometry::SurfaceSample]>, options: &Options,
@@ -698,6 +736,12 @@ fn render_with_string_material(path: &str, scale: Vec<geometry::Course>, modes: 
         write_modal_pressure(csv, modal, &pressure, rate, channels, modal_modes)?;
         println!("Loaded-board modal pressure at key {key}: {csv}; signed contributions at each physical receiver on the WAV clock. Basis indices are not bare-board eigenfrequencies.");
     }
+    if let Some(csv)=&options.receiver_pressure_csv {
+        let file=std::fs::File::create(csv).map_err(|e|format!("{csv}: {e}"))?;
+        write_receiver_pressure(&mut std::io::BufWriter::new(file),&pressure,rate,channels)
+            .map_err(|e|format!("{csv}: {e}"))?;
+        println!("Total receiver pressure: {csv}; unquantized Pa, same frames and channels as WAV, no modal trace allocation.");
+    }
     if stream.microphone().is_some() {
         println!("Computed half-space pressure in Pa; PCM full scale {} Pa, no peak normalization. Infinite baffle; no room/lid scattering, radiation loading or measured-SPL calibration.", options.pcm_full_scale_pa);
     } else {
@@ -755,7 +799,7 @@ fn run() -> Result<(), String> {
         let start = std::time::Instant::now();
         let prepared = prepare_geometric_board(text, &scale.iter().map(|c| c.midi).collect::<Vec<_>>(),
             options.board_band_hz, options.equilibrate_board_mass, options.consistent_board_mass,
-            options.edge_cubic_board_mass)?;
+            options.edge_cubic_board_mass, options.acoustic_refinement_levels)?;
         let model_name = if crowned_board::is_crowned(text) { "Crowned shell" } else { "Flat plate" };
         println!("{model_name} {:.6} m^2, {:.6} kg (panel+ribs/bridges), {} free DOFs, {} modes in (0,{}] Hz; preparation {:.6} s.",
             prepared.area_m2, prepared.mass_kg, prepared.free_dofs, prepared.modes.len(),
@@ -950,6 +994,56 @@ mod render_tests {
         }
     }
     #[test]
+    fn acoustic_refinement_is_an_explicit_bounded_pressure_control() {
+        let ordinary=options(&["--preset","steinway-d","--render","p.wav"]).unwrap();
+        assert_eq!(ordinary.acoustic_refinement_levels,0);
+        let refined=options(&["--preset","steinway-d","--render","p.wav",
+            "--acoustic-refinement-levels","2"]).unwrap();
+        assert_eq!(refined.acoustic_refinement_levels,2);
+        for args in [vec!["--acoustic-refinement-levels","1"],
+            vec!["--render","p.wav","--acoustic-refinement-levels","1"],
+            vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","4"],
+            vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--diagnostic-volume"],
+            vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--edge-cubic-board-mass"],
+            vec!["--preset","steinway-d","--render","p.wav","--acoustic-refinement-levels","1","--acoustic-refinement-levels","2"]] {
+            assert!(options(&args).is_err(),"accepted {args:?}");
+        }
+    }
+    #[test]
+    fn compact_receiver_csv_retains_frame_channel_order_and_physical_units() {
+        for channels in [1,2] {
+            let values=[0.125,-0.25,0.5,-1.0]; let mut output=Vec::new();
+            write_receiver_pressure(&mut output,&values,48_000,channels).unwrap();
+            let text=String::from_utf8(output).unwrap(); let mut lines=text.lines();
+            assert_eq!(lines.next().unwrap(),if channels==1 {
+                "sample,time_s,pressure_left_pa"
+            } else {"sample,time_s,pressure_left_pa,pressure_right_pa"});
+            for (sample,line) in lines.enumerate() {
+                let fields=line.split(',').collect::<Vec<_>>();
+                assert_eq!(fields[0].parse::<usize>().unwrap(),sample);
+                assert_eq!(fields[1].parse::<f64>().unwrap(),sample as f64/48_000.0);
+                for channel in 0..channels {
+                    assert_eq!(fields[2+channel].parse::<f64>().unwrap(),values[sample*channels+channel]);
+                }
+            }
+        }
+        for (values,rate,channels) in [(&[0.0][..],48_000,2),(&[f64::NAN][..],48_000,1),
+            (&[0.0][..],0,1),(&[0.0][..],48_000,0)] {
+            let mut output=Vec::new();
+            assert!(write_receiver_pressure(&mut output,values,rate,channels).is_err());
+            assert!(output.is_empty());
+        }
+        assert!(options(&["--preset","steinway-d","--midi","score.mid","--render","p.wav",
+            "--receiver-pressure-csv","receivers.csv"]).is_ok());
+        for args in [vec!["--receiver-pressure-csv","receivers.csv"],
+            vec!["--render","p.wav","--receiver-pressure-csv","receivers.csv"],
+            vec!["--preset","steinway-d","--render","p.wav","--diagnostic-volume","--receiver-pressure-csv","receivers.csv"],
+            vec!["--preset","steinway-d","--render","p.wav","--receiver-pressure-csv","p.wav"],
+            vec!["--preset","steinway-d","--midi","score.mid","--render","p.wav","--receiver-pressure-csv","score.mid"]] {
+            assert!(options(&args).is_err(),"accepted {args:?}");
+        }
+    }
+    #[test]
     fn midi_options_compose_with_physical_inputs_without_overwriting_the_score() {
         let o = options(&["--preset", "steinway-d", "--midi", "score.mid", "--render", "piano.wav",
             "--midi-channel", "16", "--midi-velocity-max-m-s", "2", "--midi-half-pedal",
@@ -1117,7 +1211,7 @@ mod render_tests {
     fn mass_equilibration_admits_the_refined_source_board() {
         let source = steinway_d::build(20).unwrap();
         let keys: Vec<u8> = (21..=108).collect();
-        let prepared = prepare_geometric_board(&source.geometry, &keys, 1200.0, true, false, false)
+        let prepared = prepare_geometric_board(&source.geometry, &keys, 1200.0, true, false, false, 0)
             .expect("mass-equilibrated mesh-20 source board");
         assert_eq!(prepared.free_dofs, 4236);
         assert_eq!(prepared.modes.len(), 43);
@@ -1128,9 +1222,9 @@ mod render_tests {
     fn consistent_panel_mass_reaches_the_real_board_solve_without_changing_geometry() {
         let source = steinway_d::build(8).unwrap();
         let keys: Vec<u8> = (21..=108).collect();
-        let lumped = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, false).unwrap();
-        let consistent = prepare_geometric_board(&source.geometry, &keys, 400.0, true, true, false).unwrap();
-        let cubic = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, true).unwrap();
+        let lumped = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, false, 0).unwrap();
+        let consistent = prepare_geometric_board(&source.geometry, &keys, 400.0, true, true, false, 0).unwrap();
+        let cubic = prepare_geometric_board(&source.geometry, &keys, 400.0, true, false, true, 0).unwrap();
         assert_eq!(lumped.area_m2, consistent.area_m2);
         assert_eq!(lumped.mass_kg, consistent.mass_kg);
         assert_eq!(lumped.free_dofs, consistent.free_dofs);

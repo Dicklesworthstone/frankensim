@@ -46,12 +46,13 @@ fn board_override_never_allows_conflicting_export_or_silent_preset_fallback() {
         let mut args=vec!["--preset","steinway-d","--board-geometry","supplied.fss"];
         args.extend(extra);assert!(options(&args).is_err(),"accepted {args:?}");
     }
-    assert!(prepare_geometric_board("not a supplied board",&[69],400.,false,false,false).is_err());
-    assert!(prepare_geometric_board(&shell(),&[60,69],400.,false,false,false).is_err());
-    assert!(prepare_geometric_board(&shell(),&[69],400.,true,false,false).is_err());
-    assert!(prepare_geometric_board(&shell(),&[69],400.,false,true,false).is_err());
-    assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,true).is_err());
-    assert!(prepare_geometric_board(&shell().replace("pretension,0","pretension,10"),&[69],400.,false,false,false).is_err());
+    assert!(prepare_geometric_board("not a supplied board",&[69],400.,false,false,false,0).is_err());
+    assert!(prepare_geometric_board(&shell(),&[60,69],400.,false,false,false,0).is_err());
+    assert!(prepare_geometric_board(&shell(),&[69],400.,true,false,false,0).is_err());
+    assert!(prepare_geometric_board(&shell(),&[69],400.,false,true,false,0).is_err());
+    assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,true,0).is_err());
+    assert!(prepare_geometric_board(&shell(),&[69],400.,false,false,false,1).is_err());
+    assert!(prepare_geometric_board(&shell().replace("pretension,0","pretension,10"),&[69],400.,false,false,false,0).is_err());
 }
 
 #[test]
@@ -60,7 +61,7 @@ fn crowned_geometry_custom_felt_and_spatial_release_share_the_existing_main_audi
         "--render","piano.wav","--hammers","felt.fsh","--dampers","estimated",
         "--concert-pitch","442","--modes","12","--microphone","0.3,0.7,1.2"]).unwrap();
     let course=selected_scale(None,&o).unwrap()[48];
-    let board=prepare_geometric_board(&shell(),&[69],o.board_band_hz,false,false,false).unwrap();
+    let board=prepare_geometric_board(&shell(),&[69],o.board_band_hz,false,false,false,0).unwrap();
     let card="frankensim-hammer-materials-v1\nfelt,69,400000,0.2,2.5,3.2,0.25,0.8,2500000\n";
     let run=|split:bool| {
         let mut piano=prepare_instrument_with_hammers(vec![course],&board.modes,&o,Some(card)).unwrap();
