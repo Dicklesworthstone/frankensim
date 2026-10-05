@@ -44,7 +44,8 @@ fn independent_bank_speed_derivatives_match_production_series_and_parallel_resol
         for (topology,r) in [(A::Series,400.0),(A::Parallel,20.0)] {
             let bs = banks();
             let q = physical(&bs,topology,r);
-            let actual = gradient(cx,&bs,topology,Q::new(q),network(r).equivalent_resistance(),1e-8,12).unwrap();
+            let resistance = network(r).equivalent_resistance();
+            let actual = gradient(cx,&bs,topology,Q::new(q),resistance,1e-8,12).unwrap();
             assert!(actual.relative_residual < 1e-8);
             assert!((actual.log_flow_per_log_speed.iter().sum::<f64>()-1.0).abs()<1e-8);
             for i in 0..bs.len() {
@@ -58,7 +59,7 @@ fn independent_bank_speed_derivatives_match_production_series_and_parallel_resol
                 assert!(value>0.0 && value<1.0,"one independent bank is not the whole fan system");
             }
             let reversed: Vec<_>=bs.iter().rev().cloned().collect();
-            let other=gradient(cx,&reversed,topology,Q::new(q),LossResistance::new(r),1e-8,12).unwrap();
+            let other=gradient(cx,&reversed,topology,Q::new(q),resistance,1e-8,12).unwrap();
             assert_eq!(actual.log_flow_per_log_speed,other.log_flow_per_log_speed.into_iter().rev().collect::<Vec<_>>());
             for scale in [0.8,1.2] {
                 let scaled:Vec<_>=bs.iter().map(|b| at_speed(b,b.speed_ratio()*scale)).collect();

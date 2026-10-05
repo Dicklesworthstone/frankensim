@@ -1,6 +1,9 @@
 //! Real native fan/network/thermal re-solves and pre-sampling calibration.
 use super::*;
 
+#[path = "fan_speed/multibank.rs"]
+mod multibank;
+
 fn speed(project: &mut fs_project::ProjectSpec, value: f64) {
     project.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks[0].speed_ratio=value;
 }
