@@ -98,10 +98,56 @@ pub fn pullback_ambient_radiation(
     nodal_weights: &[f64],
     max_feedback_entries: usize,
 ) -> Result<AmbientRadiationGradient, ConductionError> {
+    pullback(cx, problem, interfaces, linear, temperature, regions,
+        convective_mean_slopes_w_m2_k2, None, patches, nodal_weights, max_feedback_entries)
+}
+
+impl AmbientRadiationGradient {
+    /// Differentiate coupled convection references, optionally with radiation.
+    ///
+    /// `reference_feedback` is the row-major m-by-m partial of each ORIGINAL
+    /// convective reference with respect to all selected wall means, in K/K.
+    /// The caller evaluates these references at the retained field before
+    /// calling (for example by marching the actual fixed-flow air paths).
+    /// Radiation supplies its OWN secant and weighted-reference derivatives;
+    /// only h_c/(h_c+h_rad) of the convective-reference feedback enters the
+    /// combined Robin reference. Adding the unweighted air matrix is wrong.
+    /// Empty patches admit nonlinear solid/air coupling without radiation.
+    ///
+    /// Returned convection references are partials of independent additive
+    /// offsets of the convective law through the full state Jacobian. Air
+    /// inlet controls must chain these through the inlet-to-reference map.
+    /// A physical air h or flow control must ALSO differentiate that map;
+    /// `log_htc` alone does not supply such a derivative. No hydraulics,
+    /// temperature-dependent air properties, or radiative heat into air is
+    /// inferred. Smooth k(T), matching contact and both state feedbacks share
+    /// one transposed solve. Four nodal factor vectors per region must fit
+    /// `max_feedback_entries`; at most 64 regions and 4096 coefficients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_with_reference_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        convective_mean_slopes_w_m2_k2: &[f64], reference_feedback: &[f64],
+        patches: &[AmbientRadiationPatch], nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
+        pullback(cx, problem, interfaces, linear, temperature, regions,
+            convective_mean_slopes_w_m2_k2, Some(reference_feedback), patches,
+            nodal_weights, max_feedback_entries)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pullback(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    linear: LinearConfig, temperature: &[f64], regions: &[&str],
+    convective_mean_slopes_w_m2_k2: &[f64], reference_feedback: Option<&[f64]>,
+    patches: &[AmbientRadiationPatch], nodal_weights: &[f64], max_feedback_entries: usize,
+) -> Result<AmbientRadiationGradient, ConductionError> {
     poll(cx, 0)?;
     let n = problem.mesh.vertex_count();
-    if regions.len() > 64 || patches.is_empty() || patches.len() > 64
-        || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))
+    let factors = if reference_feedback.is_some() { 4 } else { 2 };
+    if regions.len() > 64 || (patches.is_empty() && reference_feedback.is_none()) || patches.len() > 64
+        || n.checked_mul(factors).and_then(|v| v.checked_mul(regions.len()))
             .is_none_or(|v| v > max_feedback_entries)
     {
         return Err(invalid("ambient adjoint exceeds the factor-entry/64-region limit or has no patches"));
@@ -116,6 +162,15 @@ pub fn pullback_ambient_radiation(
     {
         if i % 512 == 0 { poll(cx, i)?; }
         finite(value, "ambient adjoint input")?;
+    }
+    if let Some(feedback) = reference_feedback {
+        if feedback.len() != regions.len()*regions.len() {
+            return Err(invalid("coupled convection reference matrix has the wrong region count"));
+        }
+        for (i, &value) in feedback.iter().enumerate() {
+            if i % 512 == 0 { poll(cx, i)?; }
+            finite(value, "convective reference feedback")?;
+        }
     }
     let mut seen = BTreeSet::new();
     for &name in regions {
@@ -179,9 +234,23 @@ pub fn pullback_ambient_radiation(
     }
     let combined = problem.boundary.with_uniform_robin_replacements(&replacements)?;
     let combined_problem = ConductionProblem { boundary: &combined, ..problem };
-    let mut gradient = RobinResponse::pullback_mean_robin(cx, combined_problem, interfaces,
-        linear, temperature, regions, &h_slopes, &reference_slopes, nodal_weights,
-        max_feedback_entries)?;
+    let mut gradient = if let Some(feedback) = reference_feedback {
+        let m = regions.len();
+        let mut combined_feedback = Vec::with_capacity(feedback.len());
+        for (i, &(hc, _, h, _)) in physical.iter().enumerate() {
+            poll(cx, i)?;
+            for &entry in &feedback[i*m..(i+1)*m] {
+                combined_feedback.push(finite((hc/h)*entry, "combined convective feedback")?);
+            }
+        }
+        RobinResponse::pullback_mean_robin_with_reference_feedback(cx, combined_problem,
+            interfaces, linear, temperature, regions, &h_slopes, &reference_slopes,
+            &combined_feedback, nodal_weights, max_feedback_entries)?
+    } else {
+        RobinResponse::pullback_mean_robin(cx, combined_problem, interfaces,
+            linear, temperature, regions, &h_slopes, &reference_slopes, nodal_weights,
+            max_feedback_entries)?
+    };
     let mut reservoirs = Vec::with_capacity(patches.len());
     let mut emissivities = Vec::with_capacity(patches.len());
     for (j, patch) in patches.iter().enumerate() {

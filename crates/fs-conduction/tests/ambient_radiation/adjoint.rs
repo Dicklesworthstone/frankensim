@@ -153,3 +153,105 @@ fn radiation_adjoint_rechecks_the_physical_field_and_respects_limits() {
             Err(ConductionError::Cancelled { .. }))));
     });
 }
+
+const TRANSFER: [f64; 4] = [0.15, 0.05, 0.30, 0.20];
+struct CoupledState {
+    mesh: ConductionMesh, boundary: ThermalBoundary, material: ConductivityModel,
+    source: ScalarField, patches: Vec<AmbientRadiationPatch>, temperature: Vec<f64>,
+}
+impl CoupledState {
+    fn problem(&self) -> ConductionProblem<'_> {
+        ConductionProblem { mesh: &self.mesh, boundary: &self.boundary,
+            material: &self.material, element_materials: None, source: &self.source }
+    }
+    fn weights(&self) -> Vec<f64> {
+        let mut weights = vec![0.0; self.temperature.len()];
+        *weights.last_mut().unwrap() = 1.0;
+        weights
+    }
+}
+
+// An independently iterated two-trace physical FEM with local gray radiation
+// and cross-trace reference feedback. The nonuniform wall, full k(T), and
+// prescribed nodes distinguish this from a lumped or frozen-solid comparison.
+fn coupled_physical(cx: &fs_exec::Cx<'_>, c: Controls, radiation: bool) -> CoupledState {
+    let (complex, positions) = box_grid([3, 2, 2], [1.0; 3]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let material = ConductivityModel::isotropic(ConductivityTable::declared_curve(
+        vec![(250.0, 6.0), (500.0, 16.0)]).unwrap());
+    let source = ScalarField::Nodal(mesh.positions().iter().map(|p| c.density+500.0*p[1]).collect());
+    let patches = if radiation { vec![patch(c.epsilon, c.reservoir),
+        AmbientRadiationPatch::new("second", patch(0.5,430.0).emissivity().clone(),430.0).unwrap()]
+    } else { Vec::new() };
+    let mut means = [350.0; 2];
+    for _ in 0..160 {
+        let references = [c.reference+TRANSFER[0]*(means[0]-300.0)+TRANSFER[1]*(means[1]-300.0),
+            305.0+TRANSFER[2]*(means[0]-300.0)+TRANSFER[3]*(means[1]-300.0)];
+        let h = [c.h, 7.0];
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region("hot", |f| on_box_face(f.centroid[0],0.0), ThermalBc::dirichlet(400.0).unwrap()).unwrap()
+            .region("cooler", |f| on_box_face(f.centroid[0],1.0) && f.centroid[1]<0.5,
+                ThermalBc::robin(h[0],references[0]).unwrap()).unwrap()
+            .region("second", |f| on_box_face(f.centroid[0],1.0) && f.centroid[1]>=0.5,
+                ThermalBc::robin(h[1],references[1]).unwrap()).unwrap()
+            .adiabatic_remainder().finish().unwrap();
+        let mut replacements = Vec::new();
+        for (i, patch) in patches.iter().enumerate() {
+            let hr = patch.secant_coefficient_w_m2_k(means[i]).unwrap();
+            let total = h[i]+hr;
+            let reference = h[i]/total*references[i]+hr/total*patch.ambient_temperature_k();
+            let index = boundary.region_names().iter().position(|r| r==patch.region()).unwrap();
+            replacements.push((index,total,reference));
+        }
+        let combined = boundary.with_uniform_robin_replacements(&replacements).unwrap();
+        let mut cfg = controls(); cfg.stop.residual_rtol = 1e-12;
+        let solved = fs_conduction::solve(cx, ConductionProblem { mesh: &mesh, boundary: &combined,
+            material: &material, element_materials: None, source: &source },cfg).unwrap();
+        let mut next = [0.0; 2];
+        for (i, name) in ["cooler","second"].into_iter().enumerate() {
+            next[i] = solved.report.robin_fluxes.iter().find(|r| r.region==name).unwrap().mean_wall_temperature_k;
+        }
+        if (next[0]-means[0]).abs().max((next[1]-means[1]).abs()) < 1e-10 {
+            return CoupledState { mesh, boundary, material, source, patches, temperature: solved.temperature };
+        }
+        for i in 0..2 { means[i] = 0.5*(means[i]+next[i]); }
+    }
+    panic!("coupled physical fixture did not converge");
+}
+
+#[test]
+fn coupled_radiation_adjoint_keeps_cross_reference_and_material_feedback() {
+    with_cx(|cx| {
+        for radiation in [false,true] {
+            let base = coupled_physical(cx, nominal(), radiation);
+            let before = base.temperature.clone();
+            let gradient = AmbientRadiationGradient::pullback_with_reference_feedback(cx,
+                base.problem(), None, linear(), &base.temperature, &["cooler","second"],
+                &[0.0;2], &TRANSFER, &base.patches, &base.weights(), 8*base.mesh.vertex_count()).unwrap();
+            assert_eq!(base.temperature,before);
+            let g = &gradient.convection;
+            let density = base.mesh.complex().tets.iter().enumerate().map(|(e,tet)|
+                base.mesh.element_volume(e)/4.0*tet.iter().map(|&v| g.nodal_load[v as usize]).sum::<f64>()).sum::<f64>();
+            let mut analytic = vec![density,g.log_htc[0]/nominal().h,g.references[0]];
+            if radiation { analytic.extend([gradient.reservoir_temperatures[0],gradient.emissivities[0]]); }
+            for (i, (&actual, step)) in analytic.iter().zip([0.25,0.001,0.01,0.01,0.0001]).enumerate() {
+                let perturb = |sign: f64| {
+                    let mut c = nominal();
+                    let value = match i { 0=>&mut c.density,1=>&mut c.h,2=>&mut c.reference,
+                        3=>&mut c.reservoir,_=>&mut c.epsilon };
+                    *value += sign*step;
+                    *coupled_physical(cx,c,radiation).temperature.last().unwrap()
+                };
+                close(actual,(perturb(1.0)-perturb(-1.0))/(2.0*step));
+            }
+            let frozen = AmbientRadiationGradient::pullback_with_reference_feedback(cx,
+                base.problem(), None, linear(), &base.temperature, &["cooler","second"],
+                &[0.0;2], &[0.0;4], &base.patches, &base.weights(), 8*base.mesh.vertex_count()).unwrap();
+            assert!((g.references[0]-frozen.convection.references[0]).abs() > 1e-3*g.references[0].abs(),
+                "freezing cross-reference feedback must give a detectably wrong derivative");
+            assert!(AmbientRadiationGradient::pullback_with_reference_feedback(cx,
+                base.problem(), None, linear(), &base.temperature, &["cooler","second"],
+                &[0.0;2], &TRANSFER[..3], &base.patches, &base.weights(), 8*base.mesh.vertex_count()).is_err());
+        }
+    });
+}

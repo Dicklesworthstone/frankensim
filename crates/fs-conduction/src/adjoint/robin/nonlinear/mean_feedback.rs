@@ -115,13 +115,54 @@ impl RobinResponse {
         slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
         nodal_weights: &[f64], max_feedback_entries: usize,
     ) -> Result<RobinGradient, ConductionError> {
+        Self::pullback_mean_robin_inner(cx, problem, interfaces, linear, temperature,
+            regions, slopes_w_m2_k2, reference_slopes, None, nodal_weights, max_feedback_entries)
+    }
+
+    /// Include reference feedback between DIFFERENT mean-temperature regions.
+    ///
+    /// `reference_feedback[i*m+j]` is the ADDITIONAL partial of reference i
+    /// with respect to wall mean j, in K/K, in the exact `regions` order.
+    /// Diagonal entries add to `reference_slopes`; do not supply a local
+    /// derivative twice. Coefficient slopes remain local to their own means.
+    /// The complete tangent is J_local - sum_i h_i M_i 1 (D_i W), including
+    /// prescribed-node contributions to the state but zero prescribed-node
+    /// perturbations. Its genuine transpose uses the same bounded FGMRES.
+    ///
+    /// Bind every law value to the retained field before calling: this method
+    /// verifies that physical residual, not convergence of a frozen outer
+    /// iterate. The complete local derivative is Estimated, not an inverse
+    /// certificate or a bound on omitted physics. Up to 64 regions and four
+    /// retained nodal factor vectors per region must fit the entry budget.
+    /// No dense nodal boundary matrix or additional primal solve is built.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_mean_robin_with_reference_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        slopes_w_m2_k2: &[f64], reference_slopes: &[f64], reference_feedback: &[f64],
+        nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
+        Self::pullback_mean_robin_inner(cx, problem, interfaces, linear, temperature,
+            regions, slopes_w_m2_k2, reference_slopes, Some(reference_feedback),
+            nodal_weights, max_feedback_entries)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pullback_mean_robin_inner(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        slopes_w_m2_k2: &[f64], reference_slopes: &[f64], reference_feedback: Option<&[f64]>,
+        nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
         poll(cx, 0)?;
         admit_linear(linear)?;
         if linear.restart == 0 { return Err(invalid("mean-HTC feedback needs a positive FGMRES restart")); }
         let n = problem.mesh.vertex_count();
-        if regions.len() > 64 || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))
+        let factors = if reference_feedback.is_some() { 4 } else { 2 };
+        if regions.len() > 64 || n.checked_mul(factors).and_then(|v| v.checked_mul(regions.len()))
             .is_none_or(|v| v > max_feedback_entries)
         { return Err(invalid("mean-HTC feedback exceeds the declared vector-entry budget or 64 regions")); }
+        if let Some(feedback) = reference_feedback { vector(cx, feedback, regions.len()*regions.len())?; }
         vector(cx, temperature, n)?;
         vector(cx, nodal_weights, n)?;
         vector(cx, slopes_w_m2_k2, regions.len())?;
@@ -145,7 +186,7 @@ impl RobinResponse {
         if primal_residual >= linear.tolerance { return Err(failed(0, primal_residual, linear)); }
         let (jacobian, tangent) = super::prepare(cx, problem, interfaces, temperature, &dofs)?;
         if !tangent.smooth { return Err(invalid("mean-HTC feedback cannot choose a derivative at a material kink")); }
-        let mut updates = Vec::with_capacity(ports.len());
+        let mut updates = Vec::with_capacity(ports.len()*factors/2);
         for ((port, &slope), &reference_slope) in ports.iter().zip(slopes_w_m2_k2).zip(reference_slopes) {
             let mut left = zeros(n)?;
             let mut right = zeros(n)?;
@@ -164,6 +205,29 @@ impl RobinResponse {
                 }
             }
             updates.push(Update { left: dofs.gather(&left), right: dofs.gather(&right) });
+        }
+        if let Some(feedback) = reference_feedback {
+            let m = ports.len();
+            for (i, port) in ports.iter().enumerate() {
+                let mut left = zeros(n)?;
+                let mut right = zeros(dofs.n())?;
+                // Actual consistent P1 load injection; retain the same face
+                // arithmetic as references rather than multiplying area means.
+                for (vertices, area) in &port.faces {
+                    poll(cx, i)?;
+                    for &v in vertices { add(&mut left[v], -port.htc_w_m2_k*(area/3.0))?; }
+                }
+                // Only the first m updates hold the original mean weights.
+                for (j, trace) in updates[..m].iter().enumerate() {
+                    let coefficient = feedback[i*m+j];
+                    if coefficient == 0.0 { continue; }
+                    for (k, (entry, weight)) in right.iter_mut().zip(&trace.right).enumerate() {
+                        if k % 512 == 0 { poll(cx, k)?; }
+                        add(entry, coefficient*weight)?;
+                    }
+                }
+                updates.push(Update { left: dofs.gather(&left), right });
+            }
         }
         let op = FeedbackOp { forward: &jacobian, reverse: &tangent.transpose,
             updates: &updates, transposed: true };
@@ -189,6 +253,11 @@ impl RobinResponse {
                 if i % 512 == 0 { poll(cx, i)?; }
                 lambda[v] = checked(state.x[i] * scale)?;
             }
+            // The returned gradient, not only its normalized candidate, must
+            // satisfy the coupled transpose after rescaling and rounding.
+            let rounded: Vec<_> = dofs.free().iter().map(|&v| lambda[v]/scale).collect();
+            let residual = feedback_residual(&op, &rounded, &rhs)?;
+            if residual >= linear.tolerance { return Err(failed(state.iters, residual, linear)); }
             (residual, state.iters)
         };
         let mut references = zeros(ports.len())?;
@@ -388,6 +457,30 @@ mod tests {
             let zero_reference = RobinResponse::pullback_mean_robin(cx, problem, None, config().linear,
                 &solution.temperature, &["wall"], &[0.8], &[0.0], &weights, 2*n).unwrap();
             assert_eq!(zero_reference, frozen, "compatibility wrapper must be bit-identical");
+        });
+    }
+
+    #[test]
+    fn cross_reference_feedback_preserves_local_law_and_admits_exact_budgets() {
+        with_gate(&CancelGate::new_clock_free(), |cx| {
+            let (mesh, material, source, boundary, solution) = physical_reference(cx, 0.0, 293.0, 0.35);
+            let n = mesh.vertex_count();
+            let mut weights = vec![0.0; n]; weights[n-1] = 1.0;
+            let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, element_materials: None, source: &source };
+            let local = RobinResponse::pullback_mean_robin(cx, problem, None, config().linear,
+                &solution.temperature, &["wall"], &[0.8], &[0.35], &weights, 2*n).unwrap();
+            let coupled = |feedback: &[f64], cap| RobinResponse::pullback_mean_robin_with_reference_feedback(
+                cx, problem, None, config().linear, &solution.temperature,
+                &["wall"], &[0.8], &[0.0], feedback, &weights, cap);
+            let gradient = coupled(&[0.35], 4*n).unwrap();
+            for (&a, &b) in gradient.nodal_load.iter().zip(&local.nodal_load) {
+                assert!((a-b).abs() < 1e-8*b.abs().max(1.0));
+            }
+            assert!(coupled(&[], 4*n).is_err());
+            assert!(coupled(&[f64::NAN], 4*n).is_err());
+            assert!(coupled(&[0.35], 4*n-1).is_err());
+            assert!(gradient.relative_residual < config().linear.tolerance);
         });
     }
 }
