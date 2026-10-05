@@ -427,7 +427,7 @@ pub fn check_outcome(
     // Independent rank profile: classify the CHECKER's own factor with the
     // same RELATIVE tolerance law, then compare headline ranks.
     let checker_r = independent::full_qr_r(a, m, n);
-    let checker_pivots = classify_independent(&checker_r, n, &policy.rank_tolerance());
+    let checker_pivots = classify_independent(&checker_r, n, policy.rank_tolerance());
     let checker_rank = checker_pivots
         .iter()
         .filter(|p| **p == PivotClass::Nonzero)
@@ -457,6 +457,25 @@ pub fn check_outcome(
     }
     records.push(CheckRecord::ResultDigestBinding);
 
+    Ok(resolve_authority(
+        outcome,
+        &checker_r,
+        checker_rank,
+        n,
+        budget,
+        records,
+    ))
+}
+
+/// Resolve the producer's authority only after every preceding obligation.
+fn resolve_authority(
+    outcome: &CanonicalQrOutcome,
+    checker_r: &[f64],
+    checker_rank: usize,
+    n: usize,
+    budget: f64,
+    mut records: Vec<CheckRecord>,
+) -> CheckerReceipt {
     // Authority resolution.
     match outcome.authority() {
         OutcomeAuthority::Certified(tier) => {
@@ -465,23 +484,23 @@ pub fn check_outcome(
             // their tier names, but our single receipt path checks the
             // strongest obligation available at full rank.
             if checker_rank == n && n > 0 {
-                let agree = independent::rel_err(&checker_r, r);
+                let agree = independent::rel_err(checker_r, outcome.r_factor());
                 let t2_budget = (budget * 10.0).min(1e-6);
                 if agree > t2_budget {
-                    return Ok(CheckerReceipt::mint(
+                    return CheckerReceipt::mint(
                         Verdict::Demoted(Refusal::FactorAgreementExceeded {
                             expected_bound: t2_budget,
                             observed: agree,
                         }),
                         records,
-                    ));
+                    );
                 }
                 records.push(CheckRecord::FullRankFactorAgreement {
                     observed_rel_err: agree,
                     budget: t2_budget,
                 });
             }
-            Ok(CheckerReceipt::mint(Verdict::Certified(tier), records))
+            CheckerReceipt::mint(Verdict::Certified(tier), records)
         }
         OutcomeAuthority::NoClaim(_) => {
             // Validate honesty: the no-claim must be SUPPORTABLE. If the
@@ -489,7 +508,7 @@ pub fn check_outcome(
             // producer UNDERCLAIMED — still recorded as validated honesty
             // (underclaiming is legal; upgrading is not the checker's job),
             // with the disagreement visible in the rank record above.
-            Ok(CheckerReceipt::mint(Verdict::NoClaimValidated, records))
+            CheckerReceipt::mint(Verdict::NoClaimValidated, records)
         }
     }
 }
@@ -598,7 +617,7 @@ pub fn promote_full_rank_t2(
 fn classify_independent(
     r: &[f64],
     n: usize,
-    tolerance: &crate::canonical_qr::RankTolerance,
+    tolerance: crate::canonical_qr::RankTolerance,
 ) -> Vec<PivotClass> {
     let mut scale = 0.0f64;
     for i in 0..n {

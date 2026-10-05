@@ -81,6 +81,7 @@ enum Verdict<'a> {
 
 impl<'a> CancelScope<'a> {
     /// A scope that never cancels (production default for short runs).
+    #[must_use]
     pub fn never() -> Self {
         Self {
             verdict: Verdict::Never,
@@ -215,8 +216,10 @@ impl TreeCheckpoint {
                     blen.checked_mul(8).ok_or(PolicyError::MalformedEncoding)?,
                 )?;
                 let block: Vec<f64> = raw
-                    .chunks_exact(8)
-                    .map(|c| f64::from_le_bytes(c.try_into().expect("chunk")))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| f64::from_le_bytes(*c))
                     .collect();
                 level.push(block);
             }
@@ -392,11 +395,11 @@ impl FixedTreeDriver {
         let n = self.n;
 
         // Resume validation: same tree, cursor inside schedule.
-        let (mut levels, mut stage) = match &resume {
+        let (mut levels, mut stage) = match resume {
             None => (Vec::new(), 0usize),
             Some((cp, seal)) => {
                 let fresh = cp.seal();
-                if &fresh != seal {
+                if fresh != seal {
                     return Err(PolicyError::StaleIdentity {
                         field: "checkpoint_digest",
                     });
@@ -409,7 +412,7 @@ impl FixedTreeDriver {
                 if cp.cursor_stage > self.total_stages() {
                     return Err(PolicyError::StaleIdentity { field: "cursor" });
                 }
-                (cp.levels.clone(), cp.cursor_stage)
+                (cp.levels, cp.cursor_stage)
             }
         };
 
@@ -444,7 +447,7 @@ impl FixedTreeDriver {
                     }
                 }
                 apply_flip_law(&mut r, n);
-                if levels.len() == 0 {
+                if levels.is_empty() {
                     levels.push(Vec::new());
                 }
                 levels[0].push(r);
@@ -496,7 +499,7 @@ impl FixedTreeDriver {
     #[must_use]
     pub fn final_r(run: &TreeRun) -> Option<&[f64]> {
         match run {
-            TreeRun::Completed(cp) => cp.levels.last()?.last().map(|v| v.as_slice()),
+            TreeRun::Completed(cp) => cp.levels.last()?.last().map(Vec::as_slice),
             TreeRun::Cancelled(..) => None,
         }
     }
@@ -574,7 +577,7 @@ pub fn classify_pivots(r: &[f64], n: usize, tolerance: &RankTolerance) -> Vec<Pi
 /// violations would indicate an internal bug, not data conditions).
 pub fn outcome_from_run(
     run: &TreeRun,
-    a: &[f64],
+    _a: &[f64],
     policy: &CanonicalQrPolicy,
     input_digest: ContentHash,
 ) -> Result<CanonicalQrOutcome, PolicyError> {

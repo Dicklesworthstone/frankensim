@@ -69,16 +69,32 @@ pub enum PolicyError {
     /// Wire payload is truncated, has trailing bytes, or misframes a field.
     MalformedEncoding,
     /// The R storage length does not equal the exactly-checked n*n product.
-    ShapeMismatch { expected: usize, got: usize },
+    ShapeMismatch {
+        /// Entry count required by the admitted shape.
+        expected: usize,
+        /// Entry count supplied by the caller.
+        got: usize,
+    },
     /// R carries a nonzero entry below the diagonal.
-    NotUpperTriangular { row: usize, col: usize },
+    NotUpperTriangular {
+        /// Row of the nonzero entry below the diagonal.
+        row: usize,
+        /// Column of the nonzero entry below the diagonal.
+        col: usize,
+    },
     /// R has a strictly-negative computed diagonal (violates the flip law:
     /// strictly-negative diagonals are flipped before admission).
-    StrictlyNegativeDiagonal { index: usize },
+    StrictlyNegativeDiagonal {
+        /// Index of the strictly-negative diagonal entry.
+        index: usize,
+    },
     /// A declared-certified tier was paired with no checker receipt.
     UncertifiedClaim,
     /// Identity versions are stale or cross-domain relative to this build.
-    StaleIdentity { field: &'static str },
+    StaleIdentity {
+        /// Identity field that failed coherence checking.
+        field: &'static str,
+    },
     /// A cancellation scope fired at a stage boundary; the operation
     /// drained and published nothing. Added by 6ys.5.1.5 for the tree-gauge
     /// investigation surface.
@@ -296,6 +312,7 @@ impl OutcomeAuthority {
 /// audit earns them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeterminismClass {
+    /// Bitwise rerun stability on the same instruction-set architecture.
     SameIsaBitStable,
 }
 
@@ -341,6 +358,7 @@ impl ArithmeticMode {
 /// Deterministic tie policy (mirrors the LU lowest-index convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TiePolicy {
+    /// Resolve equal candidates by their lowest original index.
     LowestIndexFirst,
 }
 
@@ -536,15 +554,6 @@ impl PivotClass {
             Self::Ambiguous => 2,
         }
     }
-
-    fn from_tag(tag: u8) -> Option<Self> {
-        match tag {
-            0 => Some(Self::Nonzero),
-            1 => Some(Self::Zero),
-            2 => Some(Self::Ambiguous),
-            _ => None,
-        }
-    }
 }
 
 /// Typed rank profile: the count and per-position classes. `rank` MUST equal
@@ -587,24 +596,6 @@ impl CertifiedRankProfile {
     fn encode_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self.pivots.len() as u64).to_le_bytes());
         out.extend(self.pivots.iter().map(|p| p.tag()));
-    }
-
-    fn decode_from(bytes: &[u8], cursor: &mut usize) -> Result<Self, PolicyError> {
-        let end = *cursor + 8;
-        let len_bytes = bytes
-            .get(*cursor..end)
-            .ok_or(PolicyError::MalformedEncoding)?;
-        let len = u64::from_le_bytes(len_bytes.try_into().expect("framed")) as usize;
-        // Refuse giant infallible allocations: length must fit the payload.
-        if bytes.len() < end + len {
-            return Err(PolicyError::MalformedEncoding);
-        }
-        let mut pivots = Vec::with_capacity(len);
-        for b in &bytes[end..end + len] {
-            pivots.push(PivotClass::from_tag(*b).ok_or(PolicyError::MalformedEncoding)?);
-        }
-        *cursor = end + len;
-        Self::checked(pivots)
     }
 }
 
@@ -650,12 +641,12 @@ impl ReplayIdentity {
     /// Composite domain-separated identity (what a ledger row keys on).
     #[must_use]
     pub fn composite_digest(&self) -> ContentHash {
+        const NO_CERT: [u8; 32] = [0u8; 32];
         let mut h = DomainHasher::new(CANONICAL_QR_IDENTITY_DOMAIN);
         h.update(b"replay:");
         h.update(self.input_digest.as_bytes());
         h.update(self.tree_digest.as_bytes());
         h.update(self.result_digest.as_bytes());
-        const NO_CERT: [u8; 32] = [0u8; 32];
         h.update(match self.certificate_ref.as_ref() {
             Some(c) => c.as_bytes(),
             None => &NO_CERT,

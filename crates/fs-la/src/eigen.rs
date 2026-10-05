@@ -155,7 +155,6 @@ impl std::error::Error for JacobiEighAdmissionError {}
 /// when `4 * n * n + 3 * n` cannot be represented, or
 /// [`JacobiEighAdmissionError::WorkCapExceeded`] when that aggregate exceeds
 /// [`MAX_EIGEN_WORK_ELEMENTS`].
-#[must_use]
 pub fn admit_jacobi_eigh(n: usize) -> Result<JacobiEighAdmission, JacobiEighAdmissionError> {
     let matrix_entries = n
         .checked_mul(n)
@@ -729,7 +728,7 @@ pub struct LobpcgState {
 struct LobpcgShape {
     two_b: usize,
     three_b: usize,
-    n_b: usize,
+    block_entries: usize,
     n_two_b: usize,
     n_three_b: usize,
 }
@@ -774,7 +773,7 @@ fn checked_lobpcg_shape(n: usize, b: usize) -> Option<LobpcgShape> {
     Some(LobpcgShape {
         two_b,
         three_b,
-        n_b,
+        block_entries: n_b,
         n_two_b,
         n_three_b,
     })
@@ -809,7 +808,7 @@ impl LobpcgState {
     #[must_use]
     pub fn try_new(n: usize, b: usize) -> Option<LobpcgState> {
         let shape = checked_lobpcg_shape(n, b)?;
-        let mut x0 = vec![0.0f64; shape.n_b];
+        let mut x0 = vec![0.0f64; shape.block_entries];
         for j in 0..b {
             for i in 0..n {
                 // Strict sin (see LanczosState::new — same libm hazard).
@@ -837,7 +836,7 @@ impl LobpcgState {
     #[must_use]
     pub fn with_block(n: usize, b: usize, x0: &[f64]) -> Option<LobpcgState> {
         let shape = checked_lobpcg_shape(n, b)?;
-        if x0.len() != shape.n_b || x0.iter().any(|x| !x.is_finite()) {
+        if x0.len() != shape.block_entries || x0.iter().any(|x| !x.is_finite()) {
             return None;
         }
         // Refusal semantics: a rank-deficient seed must refuse rather
@@ -964,7 +963,7 @@ where
         let ax = apply_block(op, &state.x, n, b);
         let lam = block_rayleigh(&state.x, &ax, n, b);
         // Residual block W = AX − X·diag(λ), preconditioned column-wise.
-        let mut w = vec![0.0f64; shape.n_b];
+        let mut w = vec![0.0f64; shape.block_entries];
         for j in 0..b {
             let mut col = vec![0.0f64; n];
             for i in 0..n {
@@ -1049,7 +1048,7 @@ where
         } else {
             (0..b).collect()
         };
-        let mut x_new = vec![0.0f64; shape.n_b];
+        let mut x_new = vec![0.0f64; shape.block_entries];
         for (slot, &c) in cols.iter().enumerate() {
             for i in 0..n {
                 let mut acc = 0.0f64;
@@ -1064,14 +1063,23 @@ where
         state.x = orthonormalize(&x_new, n, b);
         state.iters += 1;
     }
+    lobpcg_pairs(op, state, largest)
+}
+
+/// Final Ritz pairs in deterministic presentation order, with true residuals.
+fn lobpcg_pairs<Op>(op: &Op, state: &LobpcgState, largest: bool) -> Vec<EigenPair>
+where
+    Op: Fn(&[f64], &mut [f64]),
+{
+    let (n, b) = (state.n, state.b);
     // Final Ritz pairs with recomputed residuals.
     let ax = apply_block(op, &state.x, n, b);
     let lam = block_rayleigh(&state.x, &ax, n, b);
     let mut out = Vec::with_capacity(b);
     for j in 0..b {
         let mut v = vec![0.0f64; n];
-        for i in 0..n {
-            v[i] = state.x[i * b + j];
+        for (i, value) in v.iter_mut().enumerate() {
+            *value = state.x[i * b + j];
         }
         let residual = norm2_values((0..n).map(|i| (-lam[j]).mul_add(v[i], ax[i * b + j])));
         out.push(EigenPair {

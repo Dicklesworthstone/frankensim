@@ -502,7 +502,6 @@ fn preflight_scalar_gemm<S>(
 ///
 /// Returns [`GemmShapeError`] on extent overflow or a slice-length mismatch.
 /// All shapes are checked before any caller-visible mutation.
-#[must_use]
 #[allow(clippy::too_many_arguments)] // BLAS-shape signature: m,n,k,alpha,a,b,beta,c
 pub fn gemm_scalar_checked<S: GemmScalar>(
     m: usize,
