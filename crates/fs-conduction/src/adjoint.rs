@@ -486,6 +486,11 @@ impl<'m> ConductivityDesign<'m> {
 /// Robin-boundary and assembled-load tangents and adjoints, including k(T).
 pub mod robin;
 
+// Keep the public response types beside the goal analyzers used by native
+// radiation, natural-convection and nonlinear-solid consumers. These are the
+// same types as adjoint::robin, not alternative numerical implementations.
+pub use robin::{RobinGradient, RobinResponse};
+
 pub use robin::goal::{
     DiscreteGoalComparison, LinearGoalAnalysis, LinearGoalAnalysisConfig, LinearGoalAnalyzer,
     LinearGoalSolve, LinearGoalSolveConfig, LinearGoalStop, LinearMaximumAnalysis, LinearMaximumSolve,
