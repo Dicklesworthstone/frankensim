@@ -14,6 +14,7 @@
 
 use crate::Interval;
 use crate::taylor::{TaylorModel1, TaylorModelError};
+use core::cmp::Ordering;
 
 /// Maximum admitted multivariate dimension.
 pub const MAX_MULTIVARIATE_DIM: usize = 32;
@@ -76,7 +77,8 @@ impl VariableInfo {
     /// Whether this axis is degenerate (zero-width).
     #[must_use]
     pub fn is_fixed(&self) -> bool {
-        self.domain.lo() == self.domain.hi()
+        // Degeneracy is exact; adjacent endpoints must retain their axis.
+        self.domain.lo().partial_cmp(&self.domain.hi()) == Some(Ordering::Equal)
     }
 }
 
@@ -94,10 +96,7 @@ pub fn binomial(n: usize, k: usize) -> Option<usize> {
     for i in 1..=k {
         let num = n - k + i;
         // Check overflow
-        match res.checked_mul(num) {
-            Some(prod) => res = prod / i,
-            None => return None,
-        }
+        res = res.checked_mul(num)? / i;
     }
     Some(res)
 }
@@ -151,7 +150,6 @@ pub fn generate_multi_indices(dim: usize, order: usize) -> Vec<Vec<u16>> {
 }
 
 fn generate_fixed_degree_indices(dim: usize, target_deg: usize, out: &mut Vec<Vec<u16>>) {
-    let mut current = vec![0u16; dim];
     fn backtrack(
         dim: usize,
         idx: usize,
@@ -169,6 +167,7 @@ fn generate_fixed_degree_indices(dim: usize, target_deg: usize, out: &mut Vec<Ve
             backtrack(dim, idx + 1, remaining_deg - d, current, out);
         }
     }
+    let mut current = vec![0u16; dim];
     backtrack(dim, 0, target_deg, &mut current, out);
 }
 
@@ -302,7 +301,9 @@ impl TaylorModel {
             return Err(TaylorModelError::IncompatibleModels);
         }
         let domain = self.variables[0].domain;
-        let mut tm1 = if self.coefficients.len() > 1 && self.coefficients[1] == 1.0 {
+        let mut tm1 = if self.coefficients.len() > 1
+            && self.coefficients[1].partial_cmp(&1.0) == Some(Ordering::Equal)
+        {
             TaylorModel1::variable(domain, self.order)?
         } else {
             TaylorModel1::constant(self.coefficients[0], domain, self.order)?

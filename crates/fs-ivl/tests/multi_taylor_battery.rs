@@ -93,6 +93,28 @@ fn test_variable_info_and_fixed_axes() {
 }
 
 #[test]
+fn fixed_axes_preserve_signed_zero_and_adjacent_endpoint_subdivision() {
+    let fixed = VariableInfo::new("fixed", Interval::new(-0.0, 0.0)).unwrap();
+    assert!(fixed.is_fixed());
+    let model = TaylorModel::constant(1.0, vec![fixed], 1).unwrap();
+    assert_eq!(model.subdivide_all_axes().unwrap().len(), 1);
+
+    for domain in [
+        Interval::new(1.0, 1.0_f64.next_up()),
+        Interval::new(0.0, f64::from_bits(1)),
+        Interval::new(-f64::from_bits(1), 0.0),
+    ] {
+        let variable = VariableInfo::new("adjacent", domain).unwrap();
+        assert!(!variable.is_fixed());
+        let model = TaylorModel::constant(1.0, vec![variable], 1).unwrap();
+        let children = model.subdivide_all_axes().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].domain_box()[0].lo(), domain.lo());
+        assert_eq!(children[1].domain_box()[0].hi(), domain.hi());
+    }
+}
+
+#[test]
 fn test_multivariate_variable_construction_and_eval() {
     let x_dom = Interval::new(1.0, 3.0);
     let y_dom = Interval::new(-1.0, 1.0);
