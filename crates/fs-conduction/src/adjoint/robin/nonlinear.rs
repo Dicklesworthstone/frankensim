@@ -10,6 +10,8 @@ use super::{ConductionError, ConductionProblem, Cx, DofMap, LinearConfig,
 use crate::assemble::{assemble_jacobian_with_optional_interfaces, element_temperature,
     reduce_matrix_and_lift};
 
+mod mean_feedback;
+
 pub(super) struct TangentSystem {
     transpose: Csr,
     pub(super) smooth: bool,
