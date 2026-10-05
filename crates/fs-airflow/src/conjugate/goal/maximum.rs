@@ -16,6 +16,8 @@ use fs_exec::Cx;
 
 use super::{AirPath, BTreeSet, Result, admitted_exchange_terms, bad, finite, poll};
 
+mod inlet;
+pub use inlet::pullback_inlet_temperatures;
 mod solve;
 pub use solve::{LinearAirMaximumSolve, solve_linear_maximum};
 mod spectral;
