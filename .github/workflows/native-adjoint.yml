@@ -7,6 +7,9 @@ on:
       - 'crates/fs-cli/src/solve/nominal_adjoint*'
       - 'crates/fs-cli/src/solve/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
+      - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
+      - 'crates/fs-conduction/src/adjoint/robin/nonlinear*'
+      - 'crates/fs-conduction/src/adjoint/robin/nonlinear/**'
       - 'crates/fs-cli/src/study_uncertainty*'
       - 'crates/fs-cli/src/study_uncertainty/**'
       - 'crates/fs-project/src/uncertainty*'
@@ -100,6 +103,8 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test complete mean-coefficient FEM feedback
+        run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
       - name: Test existing and nominal calibration policies
         run: cargo test --release -p fs-project --lib uncertainty -- --test-threads=1
       - name: Test actual native adjoint contractions

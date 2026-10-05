@@ -5,7 +5,7 @@
 //! selected nodal functional, NOT a unique derivative of a relocating maximum.
 //! It is useful as a frozen mean control even when an active branch changes.
 //!
-//! Reuse production adjoints, contact operators and full affine air feedback.
+//! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
 //! new solver. Nonlinear material and radiation derivatives are NOT frozen.
 //! Fan speed, airflow inlet and prescribed-temperature controls remain explicit
@@ -19,14 +19,15 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
     conduction_error, json_string, temperature_maximum_region, trace_qoi_region_vertices};
 
 mod contractions;
+mod natural_feedback;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, linear conductivity, matching contact and hydraulic operating point; complete affine air-reference feedback is differentiated, not frozen. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Linear-solid modes retain their linear-conductivity restriction; natural-convection mode includes smooth k(T) and the card's full area-mean wall and film-temperature dependence. Complete affine air-reference feedback is differentiated when selected, not frozen. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
-        "request a report named temperature-max-adjoint for an admitted linear thermal solve; inspect unsupported parameter rows")
+        "request a report named temperature-max-adjoint for an admitted thermal solve; inspect unsupported parameter rows")
 }
 fn poll(cx: &Cx<'_>) -> Result<(), SolveRefusal> {
     cx.checkpoint().map_err(|_| conduction_error("cli-solve-cancelled",
@@ -52,6 +53,28 @@ fn zeros(n: usize) -> Result<Vec<f64>, SolveRefusal> {
     Ok(out)
 }
 
+/// An unsupported state law invalidates ALL contractions, not only its own
+/// parameter row. Never fall back to a frozen Robin power derivative.
+fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
+    let Some(setup) = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()) else { return Ok(()); };
+    let mut natural = false;
+    let mut airflow = false;
+    for row in &setup.boundaries {
+        match &row.condition {
+            fs_project::ThermalBoundaryCondition::NaturalConvection { correlation, .. } => {
+                natural = true;
+                if correlation != natural_feedback::CARD {
+                    return Err(bad("natural convection requires a differentiated Churchill-Chu card; frozen Robin derivatives are not admitted"));
+                }
+            }
+            fs_project::ThermalBoundaryCondition::AirflowConvection { .. } => airflow = true,
+            _ => {}
+        }
+    }
+    if natural && airflow { return Err(bad("a combined natural/airflow adjoint is not supplied")); }
+    Ok(())
+}
+
 pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
@@ -64,6 +87,7 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     if found && temperature_maximum_region(spec).is_none() {
         return Err(bad("the adjoint needs the existing declared temperature-max requirement and region"));
     }
+    if found { admit_state_laws(spec)?; }
     Ok(found)
 }
 
@@ -84,6 +108,7 @@ pub(super) fn extract(
     work: EvidenceWork<'_>,
 ) -> Result<String, SolveRefusal> {
     poll(cx)?;
+    admit_state_laws(spec)?;
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
@@ -136,7 +161,15 @@ pub(super) fn extract(
         residual_limits: fs_solver::goal::GoalResidualLimits { max_rows: count(256), max_nonzeros: count(64) },
         max_stability_iterations: data.linear.max_iterations,
     };
-    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if data.air_paths.is_empty() {
+    let has_natural = setup.boundaries.iter().any(|b| matches!(
+        b.condition, fs_project::ThermalBoundaryCondition::NaturalConvection { .. }));
+    let mut natural_ambient = BTreeMap::new();
+    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if has_natural {
+        let (gradient, ambient) = natural_feedback::pullback(cx, spec, solved, &weights)?;
+        natural_ambient = ambient;
+        (gradient.nodal_load, gradient.relative_residual, gradient.iterations,
+            None, None, "natural-convection-full-wall-feedback")
+    } else if data.air_paths.is_empty() {
         let analyzer = LinearGoalAnalyzer::new(cx, problem, data.interfaces.as_ref(), data.linear,
             temperature, &weights, config).map_err(lower)?;
         let analysis = analyzer.analyze(cx, temperature).map_err(lower)?;
@@ -203,8 +236,9 @@ pub(super) fn extract(
             B::HeatFlux { .. } => rows.push(row("heat-flux", &declared.target, ordinal, "W/m^2", value[2])?),
             B::FixedTemperature { .. } => missing.push(unsupported("fixed-temperature", &declared.target,
                 "prescribed values require their complete lift derivative")),
-            B::NaturalConvection { .. } => missing.push(unsupported("natural-convection-ambient", &declared.target,
-                "the coefficient's dependence on the wall temperature is not contracted")),
+            B::NaturalConvection { .. } => rows.push(row("natural-convection-ambient", &declared.target,
+                ordinal, "K", *natural_ambient.get(&declared.target)
+                    .ok_or_else(|| bad("natural boundary has no complete ambient derivative"))?)?),
             B::AirflowConvection { branch, .. } => missing.push(unsupported("air-inlet-temperature", branch,
                 "full temperature feedback is retained, but inlet and hydraulic parameter contractions are not implemented")),
         }
@@ -296,4 +330,40 @@ fn boundary_pullback(cx: &Cx<'_>, solved: &RungSolved, lambda: &[f64])
         for i in 0..3 { total[i] = finite(total[i] + bars[i])?; }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn natural_primal_and_complete_nominal_adjoint_are_admitted() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/heatsink-fan/heatsink-natural.fsim"
+        ))).expect("the native passive-heatsink fixture parses").decoded.spec;
+        assert!(!requested(&spec).expect("a primal-only natural solve remains admitted"));
+        admit_state_laws(&spec).expect("the native card has a complete differential");
+        spec.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
+            name: OUTPUT.into(), kind: "report".into(), region: None,
+        });
+        assert!(requested(&spec).expect("complete natural adjoint"));
+        for boundary in &mut spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries {
+            if let fs_project::ThermalBoundaryCondition::NaturalConvection { correlation, .. } = &mut boundary.condition {
+                *correlation = "convection.dittus-boelter".into();
+            }
+        }
+        assert!(requested(&spec).is_err(), "an unknown state derivative must never fall back to frozen h");
+    }
+
+    #[test]
+    fn linear_state_laws_still_admit_nominal_adjoints() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project/cooling-reference.fsim"
+        ))).expect("the native reference fixture parses").decoded.spec;
+        admit_state_laws(&spec).expect("linear Robin state law");
+        spec.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
+            name: OUTPUT.into(), kind: "report".into(), region: None,
+        });
+        assert!(requested(&spec).expect("linear adjoint remains admitted"));
+    }
 }
