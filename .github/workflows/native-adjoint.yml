@@ -9,6 +9,7 @@ on:
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_nonlinear_adjoint.rs'
+      - 'crates/fs-cli/tests/native_nonlinear_adjoint/**'
       - 'crates/fs-cli/tests/native_air_inlet_adjoint.rs'
       - 'crates/fs-airflow/src/composite.rs'
       - 'crates/fs-airflow/src/composite/**'
@@ -144,6 +145,9 @@ jobs:
       - name: Test complete mean-coefficient FEM feedback
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
+      - name: Compare conductivity controls with heterogeneous nonlinear FEM re-solves
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-conduction --lib material_controls -- --test-threads=1
       - name: Test card-backed radiation FEM feedback against physical re-solves
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --test ambient_radiation adjoint -- --test-threads=1

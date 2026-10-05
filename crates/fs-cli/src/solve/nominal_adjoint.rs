@@ -8,9 +8,9 @@
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
 //! new solver. Nonlinear material and radiation derivatives are NOT frozen.
-//! Single-bank fan controls compose capacity, convection and thermal feedback.
-//! Other hydraulic topologies and prescribed-temperature controls are explicit
-//! unsupported rows rather than frozen or incomplete parameter derivatives.
+//! Independent series/parallel fan-bank controls compose hydraulic, capacity,
+//! convection and thermal feedback. Regional material-law scales reuse that
+//! same complete dual. Unsupported or nonsmooth controls remain explicit rows.
 
 use std::collections::BTreeMap;
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc};
@@ -23,6 +23,7 @@ mod air_inlet;
 mod contractions;
 mod coupled_thermal;
 mod fan_speed;
+mod material_controls;
 mod natural_feedback;
 mod nonlinear_solid;
 mod radiative_feedback;
@@ -30,7 +31,7 @@ mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry and matching contact; the hydraulic operating point is fixed except for the explicitly admitted fan-speed control. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Single-bank fan-speed derivatives use native quadratic vent/leakage losses and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate the absolute speed ratio, not its logarithm. This is a nominal local model derivative, not a derivative of interval root-bracket endpoints or pressure-tolerance uncertainty. Independent multi-bank speeds, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry and matching contact; the hydraulic operating point is fixed except for the explicitly admitted fan-speed control. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Independent single/series/parallel fan-bank speed derivatives use native quadratic vent/leakage losses, each member's hydraulic response and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate each absolute speed ratio, not its logarithm or a common system speed. This is a nominal local model derivative, not a derivative of interval root-bracket endpoints or pressure-tolerance uncertainty. Conductivity-multiplier rows differentiate a shared dimensionless scale s on each region's whole effective conductivity tensor/curve K(T), evaluated at s=1; they retain the complete thermal dual and prescribed-temperature lift. They are not absolute scalar-conductivity, tensor-entry, card-selection, heat-capacity or material-uncertainty derivatives, and do not modify or validate the selected material claim. Nonsmooth fan-curve knots, nonunique parallel fan inverses, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -130,10 +131,12 @@ pub(super) fn extract(
     let fan_count = spec.cooling.as_ref().and_then(|c| c.fan_system.as_ref())
         .map_or(0, |system| system.banks.len());
     let radiation_count = setup.radiation.as_ref().map_or(0, |r| r.surfaces.len());
+    let material_count = spec.materials.as_deref().unwrap_or(&[]).len();
     let parameter_count = spec.power.as_deref().unwrap_or(&[]).len()
         .checked_add(setup.boundaries.len().saturating_mul(2))
         .and_then(|n| n.checked_add(radiation_count.saturating_mul(2)))
         .and_then(|n| n.checked_add(fan_count))
+        .and_then(|n| n.checked_add(material_count))
         .ok_or_else(|| bad("adjoint parameter count overflow"))?;
     // Logical extra vectors/records, not a total-allocator/RSS promise. The
     // numerical owners independently enforce their matrix and iteration caps.
@@ -252,6 +255,7 @@ pub(super) fn extract(
     let surface_sources = super::surface_heat(spec)?;
     let mut rows = radiation_rows;
     rows.extend(inlet_rows);
+    rows.extend(material_controls::rows(cx, spec, solved, ids, &lambda, count(64))?);
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
         poll(cx)?;

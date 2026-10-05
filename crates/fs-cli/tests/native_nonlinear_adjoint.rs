@@ -9,6 +9,9 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMateria
     NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
     Provenance, UncertaintyModel};
 
+#[path = "native_nonlinear_adjoint/material_controls.rs"]
+mod material_controls;
+
 fn scratch() -> PathBuf {
     for ordinal in 0..10000 {
         let path = std::env::temp_dir().join(format!("fs-native-nonlinear-adjoint-{}-{ordinal}", std::process::id()));
