@@ -8,6 +8,7 @@ on:
       - 'crates/fs-cli/src/solve/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
+      - 'crates/fs-cli/tests/native_nonlinear_adjoint.rs'
       - 'crates/fs-cli/src/solve/radiation.rs'
       - 'crates/fs-cli/src/solve/natural.rs'
       - 'crates/fs-conduction/src/radiation*'
@@ -138,3 +139,6 @@ jobs:
       - name: Compare native adjoints with physical re-solves
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --test native_uncertainty nominal_adjoint -- --test-threads=1
+      - name: Compare nonlinear material adjoints through the native project pipeline
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cli --test native_nonlinear_adjoint -- --test-threads=1
