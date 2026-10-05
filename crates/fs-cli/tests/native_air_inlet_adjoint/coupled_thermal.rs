@@ -68,8 +68,10 @@ fn fixture(nonlinear: bool, radiation: bool) -> Fixture {
 
 #[test]
 fn coupled_thermal_native_adjoint_matches_retained_vertex_control_resolves() {
-    for (nonlinear,radiation) in [(true,false),(false,true),(true,true)] {
-        let f = fixture(nonlinear,radiation);
+    for (nonlinear,radiation) in [(false,false),(true,false),(false,true),(true,true)] {
+        let mut f = fixture(nonlinear,radiation);
+        // A non-unit speed catches confusing dJ/ds with dJ/dln(s).
+        f.project.cooling.as_mut().unwrap().fan_system.as_mut().unwrap().banks[0].speed_ratio = 1.2;
         let (baseline,field) = f.solve(&f.project,0);
         let mut request = f.project.clone();
         request.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
@@ -80,13 +82,13 @@ fn coupled_thermal_native_adjoint_matches_retained_vertex_control_resolves() {
         for key in ["energy","conjugate","radiation"] { assert_eq!(baseline.get(key),receipt.get(key),"{key}"); }
         let adjoint = receipt.get("nominal_adjoint").unwrap();
         assert_eq!(adjoint.str_field("mode"),Some(if radiation { "radiation-full-air-feedback" }
-            else { "nonlinear-solid-full-air-feedback" }));
+            else if nonlinear { "nonlinear-solid-full-air-feedback" } else { "linear-solid-full-air-feedback" }));
         assert_eq!(adjoint.str_field("authority"),Some("Estimated"));
         assert!(adjoint.f64_field("true_relative_residual").unwrap() < 1e-10);
         let vertex = adjoint.f64_field("selected_vertex").unwrap() as usize;
         let rows = adjoint.get("parameters").unwrap().as_array().unwrap();
         assert_eq!(rows.iter().filter(|r| r.str_field("target")==Some("air-inlet-temperature")).count(),1);
-        let mut controls = vec![("power",0.25),("air-inlet-temperature",0.01)];
+        let mut controls = vec![("power",0.25),("air-inlet-temperature",0.01),("fan-speed-ratio",0.001)];
         if radiation { controls.push(("radiation-reservoir-temperature",0.01)); }
         for (i,(target,step)) in controls.into_iter().enumerate() {
             let g = rows.iter().find(|r| r.str_field("target")==Some(target)).unwrap().f64_field("derivative").unwrap();
@@ -96,6 +98,8 @@ fn coupled_thermal_native_adjoint_matches_retained_vertex_control_resolves() {
                 match target {
                     "power" => shifted.power.as_mut().unwrap()[0].watts.value += sign*step,
                     "air-inlet-temperature" => inlet(&mut shifted,297.0+sign*step),
+                    "fan-speed-ratio" => shifted.cooling.as_mut().unwrap().fan_system.as_mut().unwrap()
+                        .banks[0].speed_ratio += sign*step,
                     _ => shifted.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
                         .radiation.as_mut().unwrap().surfaces[0].reservoir_temperature.value += sign*step,
                 }
@@ -113,8 +117,12 @@ fn coupled_thermal_native_adjoint_matches_retained_vertex_control_resolves() {
             assert!((air.f64_field("air_total_w").unwrap()-rad.f64_field("convective_out_w").unwrap()).abs() < 1e-5,
                 "only convection, never radiation, may heat the air");
         }
-        assert!(adjoint.get("unsupported").unwrap().as_array().unwrap().iter()
+        let fan: Vec<_> = rows.iter().filter(|r| r.str_field("target")==Some("fan-speed-ratio")).collect();
+        assert_eq!(fan.len(),1);
+        assert_eq!(fan[0].str_field("entity"),Some("fixture-bank"));
+        assert_eq!(fan[0].str_field("parameter_unit"),Some("1"));
+        assert!(!adjoint.get("unsupported").unwrap().as_array().unwrap().iter()
             .any(|r| r.str_field("target")==Some("fan-speed-ratio")),
-            "a fixed-flow thermal derivative must not claim a hydraulic control");
+            "the admitted single-bank fan includes capacity, convection and downstream feedback");
     }
 }

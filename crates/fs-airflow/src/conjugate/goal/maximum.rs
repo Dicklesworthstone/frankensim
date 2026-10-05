@@ -16,6 +16,8 @@ use fs_exec::Cx;
 
 use super::{AirPath, BTreeSet, Result, admitted_exchange_terms, bad, finite, poll};
 
+mod transport;
+pub use transport::{AirTransportGradient, pullback_transport_controls};
 mod inlet;
 pub use inlet::pullback_inlet_temperatures;
 mod solve;

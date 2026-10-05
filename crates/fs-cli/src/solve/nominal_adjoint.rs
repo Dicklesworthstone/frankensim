@@ -8,8 +8,9 @@
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
 //! new solver. Nonlinear material and radiation derivatives are NOT frozen.
-//! Fan speed and prescribed-temperature controls remain explicit
-//! unsupported rows until their complete physical parameter maps are wired.
+//! Single-bank fan controls compose capacity, convection and thermal feedback.
+//! Other hydraulic topologies and prescribed-temperature controls are explicit
+//! unsupported rows rather than frozen or incomplete parameter derivatives.
 
 use std::collections::BTreeMap;
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc};
@@ -21,6 +22,7 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 mod air_inlet;
 mod contractions;
 mod coupled_thermal;
+mod fan_speed;
 mod natural_feedback;
 mod nonlinear_solid;
 mod radiative_feedback;
@@ -28,7 +30,7 @@ mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Natural convection combined with airflow, fan-speed derivatives and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry and matching contact; the hydraulic operating point is fixed except for the explicitly admitted fan-speed control. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Single-bank fan-speed derivatives use native quadratic vent/leakage losses and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate the absolute speed ratio, not its logarithm. This is a nominal local model derivative, not a derivative of interval root-bracket endpoints or pressure-tolerance uncertainty. Independent multi-bank speeds, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -283,10 +285,7 @@ pub(super) fn extract(
             B::AirflowConvection { .. } => {}
         }
     }
-    if let Some(system) = spec.cooling.as_ref().and_then(|c| c.fan_system.as_ref()) {
-        for bank in &system.banks { poll(cx)?; missing.push(unsupported("fan-speed-ratio", &bank.bank_id,
-            "requires flow, heat-transfer coefficient and air-capacity derivatives together")); }
-    }
+    fan_speed::append(cx, spec, solved, &lambda, &mut rows, &mut missing)?;
     let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
         .unwrap_or_else(|| "null".into());
     poll(cx)?;

@@ -159,7 +159,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// declared surface named by the output's `:region` (fsim v9).
 /// Version 38 retains original emissivity-law validity in radiation adjoints
 /// through the shared physical owner; earlier receipts cannot resume into it.
-pub const SOLVE_DRIVER_VERSION: u32 = 38;
+/// Version 39 publishes complete prescribed air-inlet derivatives and
+/// permits their use in nominal-adjoint uncertainty calibration.
+pub const SOLVE_DRIVER_VERSION: u32 = 39;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
