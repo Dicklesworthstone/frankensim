@@ -58,8 +58,10 @@ the same signed P1 modal displacement on each cell. Structural nodes, mass,
 eigenpairs, bridge projections, source dynamics and total radiating area stay
 fixed. Level zero preserves the original points and floating-point path.
 The existing 120,000-point receiver budget still refuses oversized requests
-before eigenanalysis. This option excludes crowned/cubic displacement fields
-and diagnostic volume output. It provides a spatial integration convergence
+before eigenanalysis. The flag requires geometric pressure output and excludes
+diagnostic volume and edge-cubic controls, including explicit zero. Crowned
+fields reject nonzero levels; zero preserves their original integration path.
+It provides a spatial integration convergence
 test; it does not extend structural bandwidth or establish a measured piano
 match. Compare successive levels at fixed source controls and microphone
 positions before interpreting pressure changes as improved accuracy.
