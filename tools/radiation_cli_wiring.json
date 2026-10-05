@@ -1,0 +1,22 @@
+{
+  "crates/fs-cli/src/solve.rs": {
+    "git_blob": "158897252bdcc2489ebf262d60175eb443ea120c",
+    "edits": [
+      {"old": "pub const SOLVE_DRIVER_VERSION: u32 = 37;", "new": "/// Version 38 retains original emissivity-law validity in radiation adjoints\n/// through the shared physical owner; earlier receipts cannot resume into it.\npub const SOLVE_DRIVER_VERSION: u32 = 38;"},
+      {"old": "    radiating_boundary: Option<fs_conduction::ThermalBoundary>,", "new": "    radiating_boundary: Option<fs_conduction::ThermalBoundary>,\n    /// Exact card-backed constitutive laws from the accepted radiation producer.\n    radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,"},
+      {"old": "        let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;", "new": "        let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;\n        let radiation_patches = solid.radiation_patches();"},
+      {"old": "                boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,\n                radiating_boundary,", "new": "                boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,\n                radiating_boundary, radiation_patches,"}
+    ]
+  },
+  "crates/fs-cli/src/solve/radiation.rs": {
+    "git_blob": "6a78c3c9e7e5b2d8e7bc1a46af26e48d3f4724fd",
+    "edits": [
+      {"old": "impl SolidSolution {\n", "new": "impl SolidSolution {\n    /// Retain the producer's immutable laws, never infer emissivity from a\n    /// rounded receipt or a difference of combined coefficients.\n    pub(super) fn radiation_patches(&self) -> Vec<AmbientRadiationPatch> {\n        self.radiation.as_ref().map_or_else(Vec::new, |report|\n            report.patches.iter().map(|row| row.patch.clone()).collect())\n    }\n\n"},
+      {"old": "pointwise fourth-power integral, radiative adjoint, or experimental model validation", "new": "pointwise fourth-power integral, or experimental model validation"}
+    ]
+  },
+  "crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs": {
+    "git_blob": "9a89af53082e8e8ddfe5d1ad1e625d05dfe51f96",
+    "edits": [{"old": "#[path = \"nominal_adjoint/radiative_feedback.rs\"]\nmod radiative_feedback;", "new": "#[path = \"nominal_adjoint/radiative_feedback.rs\"]\nmod radiative_feedback;\n#[path = \"nominal_adjoint/radiation_owner.rs\"]\nmod radiation_owner;"}]
+  }
+}
