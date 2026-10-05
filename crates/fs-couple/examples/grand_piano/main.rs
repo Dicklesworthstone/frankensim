@@ -600,7 +600,7 @@ fn write_modal_pressure(path: &str, modal: &[f64], pressure: &[f64],
 }
 fn write_receiver_pressure(out: &mut impl std::io::Write, pressure: &[f64],
     rate: u32, channels: usize) -> Result<(), String> {
-    if !(1..=2).contains(&channels) || rate == 0 || pressure.len()%channels != 0
+    if !(1..=2).contains(&channels) || rate == 0 || !pressure.len().is_multiple_of(channels)
         || pressure.iter().any(|p|!p.is_finite()) {
         return Err("receiver pressure needs complete finite mono/stereo frames and a positive clock".into());
     }
