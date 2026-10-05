@@ -10,7 +10,8 @@
 //! The returned conduction report retains the combined Robin operator that
 //! was actually solved. Separate ORIGINAL convection rows carry heat to air.
 //! Fixed contact, heterogeneous and nonlinear conductivity stay in every
-//! inner solve. No derivative of this radiative fixed point is provided.
+//! inner solve. The companion `pullback_ambient_radiation` reconstructs the
+//! complete fixed-point tangent on an unchanged, residual-checked field.
 
 use super::{
     STEFAN_BOLTZMANN_W_M2_K4, SurfaceEmissivity, radiation_error, require_temperature,
@@ -22,6 +23,9 @@ use crate::{
 };
 use fs_exec::Cx;
 use std::collections::BTreeSet;
+
+mod adjoint;
+pub use adjoint::{AmbientRadiationGradient, pullback_ambient_radiation};
 
 /// One immutable material-card-backed ambient patch on an existing Robin row.
 #[derive(Debug, Clone, PartialEq)]

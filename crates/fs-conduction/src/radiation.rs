@@ -39,6 +39,7 @@ mod ambient;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
     AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
+    AmbientRadiationGradient, pullback_ambient_radiation,
 };
 
 /// CODATA exact SI value after the 2019 kelvin redefinition, W/(m² K⁴).

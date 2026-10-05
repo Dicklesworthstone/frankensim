@@ -1,6 +1,8 @@
 //! G1 slab heat balance and G0 admission for the shared ambient patch producer.
 
 mod support;
+#[path = "ambient_radiation/adjoint.rs"]
+mod adjoint;
 
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::{
