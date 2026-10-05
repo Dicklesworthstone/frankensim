@@ -8,21 +8,29 @@ on:
       - 'crates/fs-cli/src/solve/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
+      - 'crates/fs-cli/src/solve/radiation.rs'
+      - 'crates/fs-cli/src/solve/natural.rs'
+      - 'crates/fs-conduction/src/radiation*'
+      - 'crates/fs-conduction/src/radiation/**'
+      - 'crates/fs-conduction/tests/ambient_radiation.rs'
+      - 'crates/fs-conduction/tests/ambient_radiation/**'
       - 'crates/fs-conduction/src/adjoint/robin/nonlinear*'
       - 'crates/fs-conduction/src/adjoint/robin/nonlinear/**'
       - 'crates/fs-cli/src/study_uncertainty*'
       - 'crates/fs-cli/src/study_uncertainty/**'
       - 'crates/fs-project/src/uncertainty*'
       - 'crates/fs-project/src/uncertainty/**'
+      - 'tools/radiation_core_wiring.json'
+      - 'tools/radiation_cli_wiring.json'
       - '.github/workflows/native-adjoint.yml'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   wire:
-    # One explicitly requested main-only integration of the reviewed large-file
-    # edit. No general mutation endpoint; exact input blobs and anchors required.
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[wire-native-mean-control]')
+    # Bounded integration of reviewed edits to oversized source files. These
+    # three literal operations require exact original blobs and unique anchors.
+    if: github.event_name == 'push' && (contains(github.event.head_commit.message, '[wire-native-mean-control]') || contains(github.event.head_commit.message, '[wire-radiation-core]') || contains(github.event.head_commit.message, '[wire-radiation-cli]'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -31,14 +39,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-      - name: Connect native adjoint calibration and commit directly to main
+      - name: Integrate the exact reviewed sources directly on main
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, pathlib
-          edits = json.loads(pathlib.Path('tools/native_mean_control_wiring.json').read_text())
+          import hashlib, json, os, pathlib, subprocess
+          choices = {
+              '[wire-native-mean-control]': ('tools/native_mean_control_wiring.json', 'feat(cli): freeze native nominal adjoints before uncertainty sampling'),
+              '[wire-radiation-core]': ('tools/radiation_core_wiring.json', 'feat(conduction): expose card-backed radiation adjoints and native FEM regressions'),
+              '[wire-radiation-cli]': ('tools/radiation_cli_wiring.json', 'feat(cli): retain original radiation laws through native thermal adjoints'),
+          }
+          selected = [value for key, value in choices.items() if key in os.environ['COMMIT_MESSAGE']]
+          if len(selected) != 1:
+              raise SystemExit('exactly one reviewed integration must be selected')
+          manifest, message = selected[0]
+          edits = json.loads(pathlib.Path(manifest).read_text())
           changed = {}
           for name, rule in edits.items():
               path = pathlib.Path(name)
+              if path.is_symlink() or not path.is_file() or not name.startswith('crates/') or '..' in path.parts:
+                  raise SystemExit(f'not an ordinary crate source: {name}')
               raw = path.read_bytes()
               oid = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
               if oid != rule['git_blob']:
@@ -51,13 +72,13 @@ jobs:
               changed[path] = text.encode()
           for path, raw in changed.items():
               path.write_bytes(raw)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'config', 'user.name', 'ChatGPT'], check=True)
+          subprocess.run(['git', 'config', 'user.email', 'noreply@openai.com'], check=True)
+          subprocess.run(['git', 'add', '--', *edits], check=True)
+          subprocess.run(['git', 'commit', '-m', message], check=True)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:main'], check=True)
           PY
-          git diff --check
-          git config user.name 'ChatGPT'
-          git config user.email 'noreply@openai.com'
-          git add -- crates/fs-project/src/uncertainty.rs crates/fs-cli/src/study_uncertainty.rs crates/fs-cli/src/study_uncertainty/model.rs
-          git commit -m 'feat(cli): freeze native nominal adjoints before uncertainty sampling'
-          git push origin HEAD:main
   native:
     needs: wire
     if: always() && (needs.wire.result == 'success' || needs.wire.result == 'skipped')
@@ -78,8 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           if ! cargo run --manifest-path tools/bootstrap/Cargo.toml; then
-            # Same exact-byte checkout repair as uncertainty-propagation.yml.
-            # Do not relax bootstrap integrity or change any dependency pin.
+            # Preserve exact dependency pins; repair only this known checkout
+            # line-ending discrepancy, not any substantive upstream source.
             python3 - <<'PY'
           import json, pathlib, subprocess
           root = pathlib.Path('../franken_numpy')
@@ -105,9 +126,15 @@ jobs:
           fi
       - name: Test complete mean-coefficient FEM feedback
         run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
+      - name: Test card-backed radiation FEM feedback against physical re-solves
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-conduction --test ambient_radiation adjoint -- --test-threads=1
       - name: Test existing and nominal calibration policies
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-project --lib uncertainty -- --test-threads=1
       - name: Test actual native adjoint contractions
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --lib nominal_adjoint -- --test-threads=1
       - name: Compare native adjoints with physical re-solves
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --test native_uncertainty nominal_adjoint -- --test-threads=1

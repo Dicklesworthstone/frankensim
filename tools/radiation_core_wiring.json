@@ -1,0 +1,17 @@
+{
+  "crates/fs-conduction/src/radiation.rs": {
+    "git_blob": "b606570c8ea4651544ab3b5cae2fb212c3fd39bb",
+    "edits": [{"old": "    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,\n};", "new": "    AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,\n    AmbientRadiationGradient, pullback_ambient_radiation,\n};"}]
+  },
+  "crates/fs-conduction/src/radiation/ambient.rs": {
+    "git_blob": "53832b49b07e204756126d08ff72e44b1a10aa77",
+    "edits": [
+      {"old": "//! inner solve. No derivative of this radiative fixed point is provided.", "new": "//! inner solve. The companion `pullback_ambient_radiation` reconstructs the\n//! complete fixed-point tangent on an unchanged, residual-checked field."},
+      {"old": "use std::collections::BTreeSet;\n", "new": "use std::collections::BTreeSet;\n\nmod adjoint;\npub use adjoint::{AmbientRadiationGradient, pullback_ambient_radiation};\n"}
+    ]
+  },
+  "crates/fs-conduction/tests/ambient_radiation.rs": {
+    "git_blob": "4c29148bc366458100f5452b6a94e300590a7310",
+    "edits": [{"old": "mod support;\n", "new": "mod support;\n#[path = \"ambient_radiation/adjoint.rs\"]\nmod adjoint;\n"}]
+  }
+}
