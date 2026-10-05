@@ -1,10 +1,27 @@
 {
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "b59686becc3d709a22167a9c6cbde606084598cb",
+    "git_blob": "a30d393325ba5fe779c460393fe90ce5d50ee37a",
     "edits": [
       {
-        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 39;",
-        "new": "/// Version 40 includes complete single-bank fan-speed controls in native\n/// adjoints; old derivative receipts cannot resume into these semantics.\npub const SOLVE_DRIVER_VERSION: u32 = 40;"
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 40;",
+        "new": "/// Version 41 differentiates independently controlled series/parallel fan banks;\n/// earlier derivative receipts cannot resume into multi-bank calibration.\npub const SOLVE_DRIVER_VERSION: u32 = 41;"
+      }
+    ]
+  },
+  "crates/fs-cli/src/solve/nominal_adjoint.rs": {
+    "git_blob": "19a00010154a7f61c509522661887156bf7da158",
+    "edits": [
+      {
+        "old": "//! Single-bank fan controls compose capacity, convection and thermal feedback.\n//! Other hydraulic topologies and prescribed-temperature controls are explicit\n//! unsupported rows rather than frozen or incomplete parameter derivatives.",
+        "new": "//! Independent series/parallel fan-bank controls compose hydraulic, capacity,\n//! convection and thermal feedback. Unsupported or nonsmooth controls remain\n//! explicit rows rather than frozen or incomplete parameter derivatives."
+      },
+      {
+        "old": "Single-bank fan-speed derivatives use native quadratic vent/leakage losses and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate the absolute speed ratio, not its logarithm.",
+        "new": "Independent single/series/parallel fan-bank speed derivatives use native quadratic vent/leakage losses, each member's hydraulic response and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate each absolute speed ratio, not its logarithm or a common system speed."
+      },
+      {
+        "old": "Independent multi-bank speeds, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied.",
+        "new": "Nonsmooth fan-curve knots, nonunique parallel fan inverses, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied."
       }
     ]
   }

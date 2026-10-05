@@ -22,6 +22,9 @@
 //! is fully bound into the composite provenance, and the composite speed
 //! domain is pinned to exactly 1 so no further scaling can sneak in.
 
+/// Independent member-speed derivatives through the nominal loss intersection.
+pub mod speed;
+
 use crate::{
     AirflowError, FanArrangement, FanBank, FanCurve, FanPoint, SourceProvenance, ToleranceBasis,
 };

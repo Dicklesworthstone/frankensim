@@ -1,17 +1,21 @@
-//! One native affinity-scaled fan bank, through the COMPLETE thermal dual.
-//! Native flow lowering uses fixed quadratic vent/leakage losses. For one
-//! bank, q(s)/s is constant, even for multiple identical fans in the bank.
-//! Every air-path capacity and Reynolds number therefore scales with s.
+//! Independently controlled native fan banks through the COMPLETE thermal dual.
+//! Fixed quadratic vent/leakage losses keep passive branch-flow fractions fixed.
+//! A single bank retains q(s)/s scaling; heterogeneous series/parallel banks use
+//! the nominal hydraulic derivative of each independently declared speed.
 
 use std::collections::BTreeMap;
 use fs_airflow::conjugate::goal::{CoupledGoalError, maximum::pullback_transport_controls};
 use fs_conduction::{ScalarField, ThermalBc};
-use fs_convection::{CorrelationId, CorrelationInputs, NusseltEvaluation, evaluate};
+use fs_convection::{CorrelationInputs, NusseltEvaluation, evaluate};
+#[cfg(test)]
+use fs_convection::CorrelationId;
 use fs_project::fansystem::FanSystemTopology;
 use super::{Cx, ProjectSpec, RungSolved, SolveRefusal, bad, conduction_error,
     contractions, finite, poll, row, unsupported, zeros};
 use super::super::conjugate::{self, AIR_DYNAMIC_VISCOSITY_PA_S, AIR_PRANDTL,
     AIR_SPECIFIC_HEAT_J_KG_K, AIR_THERMAL_CONDUCTIVITY_W_M_K};
+
+mod hydraulic;
 
 /// Append supported controls, or explicit per-bank reasons. Unsupported
 /// parameter maps do not invalidate the already complete thermal state dual.
@@ -26,13 +30,10 @@ pub(super) fn append(
     let unavailable = |missing: &mut Vec<String>, reason: &str| {
         for bank in &system.banks { missing.push(unsupported("fan-speed-ratio", &bank.bank_id, reason)); }
     };
-    if system.banks.len() != 1 || !matches!(&system.topology, FanSystemTopology::Single) {
-        unavailable(missing, "independent speeds in multi-bank systems need their own hydraulic derivative; a common-flow scaling cannot replace it");
-        return Ok(());
-    }
-    let bank = &system.banks[0];
-    if bank.speed_ratio <= bank.speed_ratio_domain.0 || bank.speed_ratio >= bank.speed_ratio_domain.1 {
-        unavailable(missing, "a two-sided fan-speed derivative requires an interior point of the declared speed domain");
+    if system.banks.len() > 64 { return Err(bad("fan-speed derivative exceeds the 64-bank budget")); }
+    if system.banks.iter().any(|bank| bank.speed_ratio <= bank.speed_ratio_domain.0
+        || bank.speed_ratio >= bank.speed_ratio_domain.1) {
+        unavailable(missing, "a two-sided fan-speed derivative requires interior points of the declared speed domains");
         return Ok(());
     }
     if data.air_paths.is_empty() {
@@ -138,48 +139,31 @@ pub(super) fn append(
     let mut total = 0.0;
     for value in &controls.log_capacity_rates { total = finite(total+value)?; }
     for (&bar, slope) in controls.log_htc.iter().zip(slopes) { total = finite(total+finite(bar*slope)?)?; }
-    // The project field is the ABSOLUTE speed ratio, not its logarithm.
-    rows.push(row("fan-speed-ratio", &bank.bank_id, 0, "1", finite(total/bank.speed_ratio)?)?);
+    let weights = if matches!(&system.topology, FanSystemTopology::Single) {
+        vec![1.0] // Preserve the existing single-bank affinity calculation.
+    } else {
+        let Some(weights) = hydraulic::flow_weights(cx, spec, &data.air_paths, &laws)? else {
+            unavailable(missing, "a member curve is at a nonsmooth knot, nonunique parallel inverse or validity endpoint; no two-sided hydraulic derivative is supplied");
+            return Ok(());
+        };
+        weights
+    };
+    if weights.len() != system.banks.len() { return Err(bad("hydraulic derivatives lost bank identity")); }
+    // Each project field is an independently controlled ABSOLUTE ratio, not
+    // ln(speed), and not a common speed change applied to all fan banks.
+    for (ordinal, (bank, weight)) in system.banks.iter().zip(weights).enumerate() {
+        poll(cx)?;
+        rows.push(row("fan-speed-ratio", &bank.bank_id, ordinal, "1",
+            finite(finite(total*weight)?/bank.speed_ratio)?)?);
+    }
     poll(cx)
 }
 
-// Derivatives of the actual admitted card formula; no perturbed h evaluation
-// determines a slope. The native adapter separately checks an interior regime.
+// Keep the native binding/domain checks above, but use the correlation owner's
+// derivative rather than maintaining another copy of its physical formulas.
 fn reynolds_elasticity(evaluation: &NusseltEvaluation) -> Result<Option<f64>, SolveRefusal> {
-    use fs_math::det;
-    if !evaluation.evidence().model.in_domain { return Ok(None); }
-    let group = |name: &str| evaluation.groups().get(name).copied()
-        .ok_or_else(|| bad(format!("fan-convection derivative lacks {name}")));
-    let nu = evaluation.evidence().value;
-    let value = match evaluation.card().id {
-        CorrelationId::CircularDuctLaminarCwt | CorrelationId::CircularDuctLaminarChf
-        | CorrelationId::RectangularDuctLaminarCwt | CorrelationId::RectangularDuctLaminarChf => 0.0,
-        CorrelationId::CircularDuctHausen => {
-            let gz = group("Gz")?;
-            let b = 0.04*det::pow(gz, 2.0/3.0);
-            (0.0668*gz/(1.0+b))/nu*(1.0+b/3.0)/(1.0+b)
-        }
-        CorrelationId::DittusBoelter => 0.8,
-        CorrelationId::Gnielinski => {
-            let re = group("Re")?; let pr = group("Pr")?;
-            let z = 0.79*det::ln(re)-1.64;
-            let c = 12.7/(det::sqrt(8.0)*z)*(det::pow(pr, 2.0/3.0)-1.0);
-            re/(re-1000.0) - 1.58/z*(1.0-0.5*c/(1.0+c))
-        }
-        CorrelationId::FlatPlateLaminarAverage => 0.5,
-        CorrelationId::FlatPlateTurbulentAverage => {
-            let term = 0.037*det::pow(group("Re")?, 0.8);
-            0.8*term/(term-871.0)
-        }
-        CorrelationId::ChurchillBernsteinCylinder => {
-            let b = det::pow(group("Re")?/282000.0, 5.0/8.0);
-            (nu-0.3)/nu*0.5*(1.0+b/(1.0+b))
-        }
-        // A C0 source table or a natural-convection law is not a smooth
-        // forced-flow coefficient derivative. Never silently assign zero.
-        _ => return Ok(None),
-    };
-    Ok(Some(finite(value)?))
+    evaluation.reynolds_elasticity().map_err(|error|
+        bad(format!("fan-convection derivative refused: {error}")))
 }
 
 #[cfg(test)]

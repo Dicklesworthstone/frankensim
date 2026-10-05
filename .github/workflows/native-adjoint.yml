@@ -10,6 +10,9 @@ on:
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_nonlinear_adjoint.rs'
       - 'crates/fs-cli/tests/native_air_inlet_adjoint.rs'
+      - 'crates/fs-airflow/src/composite.rs'
+      - 'crates/fs-airflow/src/composite/**'
+      - 'crates/fs-airflow/tests/composite_speed.rs'
       - 'crates/fs-airflow/src/conjugate/goal/maximum*'
       - 'crates/fs-airflow/src/conjugate/goal/maximum/**'
       - 'crates/fs-cli/src/solve/radiation.rs'
@@ -132,6 +135,9 @@ jobs:
           fi
       - name: Test independent branch inlet pullbacks
         run: cargo test --release -p fs-airflow --lib inlet -- --test-threads=1
+      - name: Compare independent fan-bank hydraulic derivatives with physical roots
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-airflow --test composite_speed -- --test-threads=1
       - name: Compare native inlet adjoints and resumed uncertainty studies
         if: ${{ !cancelled() }}
         run: cargo test --release -p fs-cli --test native_air_inlet_adjoint -- --test-threads=1

@@ -60,9 +60,10 @@ pub(super) fn parse(node: &Node, parameters: &[UniformParameter]) -> Result<Mean
         match method {
             MeanControlMethod::CoordinateSecant if !(p.high - p.low).is_finite() =>
                 return Err(error("mean-control support width is not finite")),
-            MeanControlMethod::NominalAdjoint if matches!(p.target,
-                super::Target::FanSpeedRatio) =>
-                return Err(error("nominal adjoint does not yet supply fan-speed derivatives; explicitly select coordinate-secant for that control")),
+            // Physical support is checked against the native nominal report.
+            // In particular, an admitted single-bank fan has a complete speed
+            // derivative; an unsupported bank/card must fail calibration, not
+            // be silently replaced with zero or a different calibration method.
             _ => {},
         }
     }
@@ -198,7 +199,7 @@ mod tests {
         assert_eq!(UncertaintyStudy::parse(s.canonical()).unwrap(),s);
     }
     #[test]
-    fn nominal_singletons_skip_calibration_and_unsupported_variables_refuse() {
+    fn nominal_singletons_skip_calibration_and_fan_variables_use_one_probe() {
         let text=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 0")
             .replace(":high 6W",":high 2W").replace(":high 310K",":high 290K");
         let s=UncertaintyStudy::parse(&text).unwrap();
@@ -213,7 +214,16 @@ mod tests {
         let fan=inlets.replace(":target power :entity \"solid\" :low 2W :high 6W",
             ":target fan-speed-ratio :entity \"bank\" :low 0.8 :high 1.2");
         assert!(fan.contains(":target fan-speed-ratio"));
-        assert!(UncertaintyStudy::parse(&fan).is_err());
+        let study=UncertaintyStudy::parse(&fan).unwrap();
+        let policy=study.mean_control().unwrap();
+        assert_eq!(policy.probe_count(study.parameters()),1);
+        assert_eq!(policy.probe(study.parameters(),0).unwrap(),[1.0,300.0]);
+        assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(),study);
+        assert!(UncertaintyStudy::parse(&fan.replace(":max-solves 1",":max-solves 0")).is_err());
         assert!(UncertaintyStudy::parse(&fan.replace(":high 1.2",":high 0.8")).is_ok());
+        let fixed=fan.replace(":high 1.2",":high 0.8").replace(":high 310K",":high 290K")
+            .replace(":max-solves 1",":max-solves 0");
+        let study=UncertaintyStudy::parse(&fixed).unwrap();
+        assert_eq!(study.mean_control().unwrap().probe_count(study.parameters()),0);
     }
 }
