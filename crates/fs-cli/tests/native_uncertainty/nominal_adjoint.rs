@@ -7,6 +7,8 @@ mod natural_feedback;
 mod radiative_feedback;
 #[path = "nominal_adjoint/radiation_owner.rs"]
 mod radiation_owner;
+#[path = "nominal_adjoint/fan_speed.rs"]
+mod fan_speed;
 
 fn request(project: &mut fs_project::ProjectSpec) {
     project.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
@@ -186,15 +188,22 @@ fn nominal_adjoint_zero_width_inputs_need_no_calibration_and_no_fake_observation
 }
 
 #[test]
-fn unsupported_nominal_fan_derivative_is_refused_before_ledger_creation() {
+fn unsupported_nominal_fan_derivative_refuses_calibration_before_sampling() {
     let fixture=Fixture::new();
     let text=study_text(false,false,true).replace(
         "(uniform :name \"power\" :target power :entity \"air\" :low 4W :high 6W)",
         "(uniform :name \"fan\" :target fan-speed-ratio :entity \"fixture-bank\" :low 0.8 :high 1.2)");
     assert!(text.contains(":target fan-speed-ratio"));
     std::fs::write(fixture.sources.join("study.fsim"),text).unwrap();
-    fixture.study(None,fs_cli::exit::REFUSED);
-    assert!(!fixture.ledger.exists());
+    // This fixture has no airflow-derived boundary. Its native fan derivative
+    // is explicitly unavailable, not a zero coefficient supplied by the parser.
+    let result=fixture.study(None,fs_cli::exit::REFUSED);
+    let (_,report)=fixture.report(&result);
+    assert!(rows(&report).is_empty(),"failed calibration must precede every probability child");
+    let control=report.get("mean_control").unwrap();
+    assert_eq!(control.str_field("status"),Some("refused"));
+    assert_eq!(control.get("gradient"),Some(&JsonValue::Null));
+    assert!(control.get("calibration").unwrap().str_field("failure").unwrap().contains("fan"));
 }
 
 #[test]
