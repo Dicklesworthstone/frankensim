@@ -52,6 +52,19 @@ fn zeros(n: usize) -> Result<Vec<f64>, SolveRefusal> {
     Ok(out)
 }
 
+/// An unsupported state law invalidates ALL contractions, not only its own
+/// parameter row. In particular, freezing h(T_wall) also corrupts dT/dpower.
+fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
+    if spec.cooling.as_ref().and_then(|c| c.conduction.as_ref()).is_some_and(|setup| {
+        setup.boundaries.iter().any(|row| matches!(
+            row.condition, fs_project::ThermalBoundaryCondition::NaturalConvection { .. }
+        ))
+    }) {
+        return Err(bad("natural convection requires its complete wall-temperature feedback Jacobian; frozen Robin power and boundary derivatives are not admitted"));
+    }
+    Ok(())
+}
+
 pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
@@ -64,6 +77,7 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     if found && temperature_maximum_region(spec).is_none() {
         return Err(bad("the adjoint needs the existing declared temperature-max requirement and region"));
     }
+    if found { admit_state_laws(spec)?; }
     Ok(found)
 }
 
@@ -84,6 +98,7 @@ pub(super) fn extract(
     work: EvidenceWork<'_>,
 ) -> Result<String, SolveRefusal> {
     poll(cx)?;
+    admit_state_laws(spec)?;
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
@@ -296,4 +311,34 @@ fn boundary_pullback(cx: &Cx<'_>, solved: &RungSolved, lambda: &[f64])
         for i in 0..3 { total[i] = finite(total[i] + bars[i])?; }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn natural_primal_is_admitted_but_frozen_nominal_adjoint_is_not() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/heatsink-fan/heatsink-natural.fsim"
+        ))).expect("the native passive-heatsink fixture parses").decoded.spec;
+        assert!(!requested(&spec).expect("a primal-only natural solve remains admitted"));
+        assert!(admit_state_laws(&spec).is_err());
+        spec.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
+            name: OUTPUT.into(), kind: "report".into(), region: None,
+        });
+        assert!(requested(&spec).is_err(), "must not publish frozen power derivatives");
+    }
+
+    #[test]
+    fn linear_state_laws_still_admit_nominal_adjoints() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project/cooling-reference.fsim"
+        ))).expect("the native reference fixture parses").decoded.spec;
+        admit_state_laws(&spec).expect("linear Robin state law");
+        spec.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {
+            name: OUTPUT.into(), kind: "report".into(), region: None,
+        });
+        assert!(requested(&spec).expect("linear adjoint remains admitted"));
+    }
 }
