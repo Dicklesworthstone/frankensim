@@ -18,7 +18,7 @@ pub(super) const CARD: &str = "convection.churchill-chu-vertical-plate";
 /// Therefore d(log h)/d(log Ra)=(1-0.825/sqrt(Nu))/3. Include BOTH film
 /// temperature derivatives: dTfilm/dTw=dTfilm/dTa=1/2. The ambient partial
 /// here holds Tw fixed; its effect through Tw is already in the Jacobian.
-fn partials(length: f64, wall: f64, ambient: f64, h: f64)
+pub(super) fn partials(length: f64, wall: f64, ambient: f64, h: f64)
     -> Result<[f64; 2], SolveRefusal>
 {
     if ![length, wall, ambient, h].iter().all(|v| v.is_finite() && *v > 0.0)

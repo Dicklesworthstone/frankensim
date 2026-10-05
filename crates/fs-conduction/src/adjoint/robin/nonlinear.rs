@@ -64,6 +64,51 @@ pub(super) fn prepare(
 }
 
 impl super::RobinResponse {
+    /// Bind mean-Robin law values evaluated at the retained field, then take
+    /// its complete adjoint. A row is `[h, reference, dh/dmean, dreference/dmean]`
+    /// in W/(m^2 K), K, W/(m^2 K^2), and K/K, respectively, in region order.
+    ///
+    /// Outer fixed-point producers often retain coefficients evaluated at the
+    /// preceding driving temperature. Checking only that frozen system would
+    /// not check convergence of the nonlinear law. This method rebinds the
+    /// selected uniform Robin values WITHOUT changing the partition, prescribed
+    /// nodes, material/contact laws or retained field. The full constitutive
+    /// primal residual must then pass `linear.tolerance`, even for a zero goal.
+    /// No new primal solve, tolerance relaxation, or frozen fallback occurs.
+    /// The caller owns the values/slopes and their physical validity. All
+    /// other guarantees and limitations are those of `pullback_mean_robin`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_mean_robin_at(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        points: &[[f64; 4]], nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<super::RobinGradient, ConductionError> {
+        poll(cx, 0)?;
+        let n = problem.mesh.vertex_count();
+        if regions.len() != points.len() || regions.len() > 64
+            || n.checked_mul(2).and_then(|v| v.checked_mul(regions.len()))
+                .is_none_or(|v| v > max_feedback_entries) {
+            return Err(invalid("mean-Robin law points must match at most 64 regions within the factor-entry budget"));
+        }
+        let mut rows = Vec::with_capacity(points.len());
+        let mut slopes = Vec::with_capacity(points.len());
+        let mut reference_slopes = Vec::with_capacity(points.len());
+        for (&name, point) in regions.iter().zip(points) {
+            poll(cx, rows.len())?;
+            super::vector(cx, point, 4)?;
+            let region = problem.boundary.region_names().iter().position(|v| v == name)
+                .ok_or_else(|| invalid("unknown mean-Robin law region"))?;
+            rows.push((region, point[0], point[1]));
+            slopes.push(point[2]);
+            reference_slopes.push(point[3]);
+        }
+        let boundary = problem.boundary.with_uniform_robin_replacements(&rows)?;
+        poll(cx, 0)?;
+        let rebound = ConductionProblem { boundary: &boundary, ..problem };
+        Self::pullback_mean_robin(cx, rebound, interfaces, linear, temperature, regions,
+            &slopes, &reference_slopes, nodal_weights, max_feedback_entries)
+    }
+
     /// Crate-private constructor for the actual backward-Euler producer. The
     /// supplied matrix is its reduced C/dt + J(T), already including contact.
     /// External callers cannot attach a fabricated public StepSolution here.

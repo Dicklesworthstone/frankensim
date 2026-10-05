@@ -20,10 +20,11 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 
 mod contractions;
 mod natural_feedback;
+mod radiative_feedback;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Linear-solid modes retain their linear-conductivity restriction; natural-convection mode includes smooth k(T) and the card's full area-mean wall and film-temperature dependence. Complete affine air-reference feedback is differentiated when selected, not frozen. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Linear-solid modes retain their linear-conductivity restriction; natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -72,6 +73,9 @@ fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
         }
     }
     if natural && airflow { return Err(bad("a combined natural/airflow adjoint is not supplied")); }
+    if airflow && setup.radiation.is_some() {
+        return Err(bad("a combined radiation/airflow adjoint is not supplied; neither state feedback may be frozen"));
+    }
     Ok(())
 }
 
@@ -112,18 +116,20 @@ pub(super) fn extract(
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
-    if data.radiating_boundary.is_some() {
-        return Err(bad("radiation needs its complete nonlinear adjoint; a frozen radiative Robin law is not admitted"));
-    }
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
+    if data.radiating_boundary.is_some() != setup.radiation.is_some() {
+        return Err(bad("radiation intent differs from the retained native operator"));
+    }
     let n = solved.mesh.vertex_count();
     let memory = spec.budgets.as_ref().map_or(0, |b| b.memory_bytes);
     let count = |divisor| usize::try_from(memory / divisor).unwrap_or(usize::MAX);
     let fan_count = spec.cooling.as_ref().and_then(|c| c.fan_system.as_ref())
         .map_or(0, |system| system.banks.len());
+    let radiation_count = setup.radiation.as_ref().map_or(0, |r| r.surfaces.len());
     let parameter_count = spec.power.as_deref().unwrap_or(&[]).len()
         .checked_add(setup.boundaries.len().saturating_mul(2))
+        .and_then(|n| n.checked_add(radiation_count.saturating_mul(2)))
         .and_then(|n| n.checked_add(fan_count))
         .ok_or_else(|| bad("adjoint parameter count overflow"))?;
     // Logical extra vectors/records, not a total-allocator/RSS promise. The
@@ -164,7 +170,14 @@ pub(super) fn extract(
     let has_natural = setup.boundaries.iter().any(|b| matches!(
         b.condition, fs_project::ThermalBoundaryCondition::NaturalConvection { .. }));
     let mut natural_ambient = BTreeMap::new();
-    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if has_natural {
+    let mut radiation_rows = Vec::new();
+    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if setup.radiation.is_some() {
+        let result = radiative_feedback::pullback(cx, spec, solved, &weights)?;
+        natural_ambient = result.natural_ambient;
+        radiation_rows = result.radiation_rows;
+        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
+            None, None, "radiation-full-wall-feedback")
+    } else if has_natural {
         let (gradient, ambient) = natural_feedback::pullback(cx, spec, solved, &weights)?;
         natural_ambient = ambient;
         (gradient.nodal_load, gradient.relative_residual, gradient.iterations,
@@ -179,7 +192,7 @@ pub(super) fn extract(
         }
         let mut lambda = zeros(n)?;
         for (i, (&vertex, &value)) in analyzer.dofs().free().iter().zip(analyzer.free_dual()).enumerate() {
-            if i % 512 == 0 { poll(cx)?; }
+            if i % 512 == 0 { poll(cx, )?; }
             lambda[vertex] = finite(value)?;
         }
         (lambda, analysis.dual_relative_residual, analysis.dual_iterations,
@@ -213,7 +226,7 @@ pub(super) fn extract(
     let source_bar = regional_source_pullback(cx, solved, &lambda)?;
     let volumes: BTreeMap<u32, f64> = audited.witness().per_region_auditor.iter()
         .map(|(region, volume)| (region.0, *volume)).collect();
-    let mut rows = Vec::new();
+    let mut rows = radiation_rows;
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
         poll(cx)?;
