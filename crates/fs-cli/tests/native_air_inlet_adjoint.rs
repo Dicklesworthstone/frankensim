@@ -1,6 +1,8 @@
 //! Native flow-network/solid-air/adjoint/UQ path with real geometry and cards.
 #[path = "../src/json_read.rs"]
 mod json_read;
+#[path = "native_air_inlet_adjoint/coupled_thermal.rs"]
+mod coupled_thermal;
 use json_read::JsonValue as J;
 use std::path::{Path, PathBuf};
 use fs_project::ThermalBoundaryCondition as B;

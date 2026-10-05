@@ -20,6 +20,7 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 
 mod air_inlet;
 mod contractions;
+mod coupled_thermal;
 mod natural_feedback;
 mod nonlinear_solid;
 mod radiative_feedback;
@@ -27,7 +28,7 @@ mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. The nonlinear-solid mode differentiates smooth heterogeneous k(T) through the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity and affine-air modes retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent prescribed air-inlet derivatives include every upstream segment at fixed flow and transport properties. Fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Natural convection combined with airflow, fan-speed derivatives and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -76,9 +77,6 @@ fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
         }
     }
     if natural && airflow { return Err(bad("a combined natural/airflow adjoint is not supplied")); }
-    if airflow && setup.radiation.is_some() {
-        return Err(bad("a combined radiation/airflow adjoint is not supplied; neither state feedback may be frozen"));
-    }
     Ok(())
 }
 
@@ -175,7 +173,17 @@ pub(super) fn extract(
     let mut natural_ambient = BTreeMap::new();
     let mut radiation_rows = Vec::new();
     let mut inlet_rows = Vec::new();
-    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if setup.radiation.is_some() {
+    let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) =
+    if !data.air_paths.is_empty()
+        && (setup.radiation.is_some() || nonlinear_solid::needed(cx, problem)?) {
+        let result = coupled_thermal::pullback(cx, spec, solved, &weights)?;
+        inlet_rows = result.air_rows;
+        radiation_rows = result.radiation_rows;
+        let mode = if setup.radiation.is_some() { "radiation-full-air-feedback" }
+            else { "nonlinear-solid-full-air-feedback" };
+        (result.gradient.nodal_load, result.gradient.relative_residual, result.gradient.iterations,
+            None, None, mode)
+    } else if setup.radiation.is_some() {
         let result = radiative_feedback::pullback(cx, spec, solved, &weights)?;
         natural_ambient = result.natural_ambient;
         radiation_rows = result.radiation_rows;
