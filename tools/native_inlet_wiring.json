@@ -1,8 +1,11 @@
 {
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "abd6f93cef792b6cf8c9d74b7c4c27d4a73d9e83",
+    "git_blob": "b59686becc3d709a22167a9c6cbde606084598cb",
     "edits": [
-      {"old": "pub const SOLVE_DRIVER_VERSION: u32 = 38;", "new": "/// Version 39 publishes complete prescribed air-inlet derivatives and\n/// permits their use in nominal-adjoint uncertainty calibration.\npub const SOLVE_DRIVER_VERSION: u32 = 39;"}
+      {
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 39;",
+        "new": "/// Version 40 includes complete single-bank fan-speed controls in native\n/// adjoints; old derivative receipts cannot resume into these semantics.\npub const SOLVE_DRIVER_VERSION: u32 = 40;"
+      }
     ]
   }
 }
