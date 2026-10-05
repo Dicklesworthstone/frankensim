@@ -1,8 +1,8 @@
-//! Area-mean-dependent Robin coefficients on a checked, retained FEM field.
+//! Area-mean-dependent Robin laws on a checked, retained FEM field.
 //!
-//! If h_j = h_j(mean_j(T), control), the missing state derivative is
-//! u_j v_j^T, where u_j = (dh_j/dmean_j) M_j (T - T_ref,j)
-//! and v_j contains the area-mean weights. These factors are NOT generally
+//! For h_j(mean_j(T)) and r_j(mean_j(T)), the state correction is u_j v_j^T,
+//! u_j = (dh_j/dmean_j) M_j (T - r_j) - h_j (dr_j/dmean_j) M_j 1.
+//! v_j contains the area-mean weights. The factors are NOT generally
 //! parallel. Apply the true transpose; do not treat this operator as SPD.
 
 use fs_solver::{FgmresState, LinearOp, norm2};
@@ -68,29 +68,52 @@ fn feedback_residual(op: &impl LinearOp, x: &[f64], rhs: &[f64])
 impl RobinResponse {
     /// Differentiate a nodal-temperature goal through area-mean-dependent h.
     ///
-    /// The supplied field is checked against the production residual with its
-    /// actual material assignment, matching contacts and Dirichlet lift. No
-    /// new primal solve is performed. Each selected uniform Robin region gets
-    /// one slope dh/d(mean wall T), in W/(m^2 K^2). The caller owns the law and
-    /// must bind both h and its slope to this SAME accepted state. Unselected
-    /// Robin coefficients stay constant. Smooth k(T) is differentiated too;
-    /// a material kink refuses. This is a discrete local derivative, not an
-    /// inverse/stability certificate or a continuum/error/uncertainty bound.
-    ///
-    /// The returned reference and log(h) entries are independent-control
-    /// partials through the complete state Jacobian. A control also changing h
-    /// must add log_htc * d(log h)/dcontrol, including the explicit reference
-    /// dependence of h. Nodal-load derivatives vanish at prescribed nodes.
-    ///
-    /// `max_feedback_entries` bounds the retained factor entries (two vectors
-    /// per selected region), not total allocator/RSS usage. At most 64 regions
-    /// are admitted. The caller's iteration budget is exact; restart is capped
-    /// at 32 with cancellation checkpoints between cycles and during traces.
+    /// References are state-independent in this convenience wrapper. For a
+    /// combined convection/radiation reference that depends on mean wall T,
+    /// use [`Self::pullback_mean_robin`] with BOTH sets of slopes instead.
+    /// The same residual, material, contact, work and cancellation gates apply.
     #[allow(clippy::too_many_arguments)]
     pub fn pullback_mean_htc(
         cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
         linear: LinearConfig, temperature: &[f64], regions: &[&str],
         slopes_w_m2_k2: &[f64], nodal_weights: &[f64], max_feedback_entries: usize,
+    ) -> Result<RobinGradient, ConductionError> {
+        poll(cx, 0)?;
+        if regions.len() > 64 { return Err(invalid("mean-HTC feedback exceeds 64 regions")); }
+        Self::pullback_mean_robin(cx, problem, interfaces, linear, temperature, regions,
+            slopes_w_m2_k2, &[0.0; 64][..regions.len()], nodal_weights, max_feedback_entries)
+    }
+
+    /// Differentiate a nodal goal through h(mean wall T) AND reference(mean wall T).
+    ///
+    /// The supplied field is checked against the production residual with its
+    /// actual material assignment, matching contacts and Dirichlet lift. No
+    /// new primal solve is performed. Each selected uniform Robin region gets
+    /// dh/dmean in W/(m^2 K^2) and dreference/dmean in K/K. The caller owns
+    /// the law and binds the coefficients and BOTH slopes to the same accepted
+    /// state. Unselected Robin laws stay constant. Smooth k(T) is differentiated
+    /// too; a material kink refuses. The consistent face mass is retained:
+    /// differentiating only an integrated patch watt law would be incorrect
+    /// on a non-isothermal trace.
+    ///
+    /// The returned reference and log(h) entries are independent-control
+    /// partials through the complete state Jacobian. A physical control p
+    /// contributes references * (partial reference/partial p at fixed mean)
+    /// plus log_htc * (partial log h/partial p at fixed mean). These are NOT
+    /// total state derivatives; feeding them back again double-counts feedback.
+    /// Nodal-load derivatives vanish at prescribed nodes.
+    ///
+    /// This is a discrete local derivative, not an inverse/stability certificate
+    /// or a continuum/error/uncertainty bound. `max_feedback_entries` bounds
+    /// retained factors (two vectors per region), not total allocator/RSS.
+    /// At most 64 regions are admitted. Inner-iteration budgets are exact;
+    /// restart is capped at 32, with checkpoints between cycles and in traces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_mean_robin(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        linear: LinearConfig, temperature: &[f64], regions: &[&str],
+        slopes_w_m2_k2: &[f64], reference_slopes: &[f64],
+        nodal_weights: &[f64], max_feedback_entries: usize,
     ) -> Result<RobinGradient, ConductionError> {
         poll(cx, 0)?;
         admit_linear(linear)?;
@@ -102,6 +125,7 @@ impl RobinResponse {
         vector(cx, temperature, n)?;
         vector(cx, nodal_weights, n)?;
         vector(cx, slopes_w_m2_k2, regions.len())?;
+        vector(cx, reference_slopes, regions.len())?;
         let dofs = DofMap::new(problem.boundary, n)?;
         if dofs.fixed().is_empty() && !problem.boundary.has_robin() {
             return Err(ConductionError::SingularPureNeumann);
@@ -122,13 +146,17 @@ impl RobinResponse {
         let (jacobian, tangent) = super::prepare(cx, problem, interfaces, temperature, &dofs)?;
         if !tangent.smooth { return Err(invalid("mean-HTC feedback cannot choose a derivative at a material kink")); }
         let mut updates = Vec::with_capacity(ports.len());
-        for (port, &slope) in ports.iter().zip(slopes_w_m2_k2) {
+        for ((port, &slope), &reference_slope) in ports.iter().zip(slopes_w_m2_k2).zip(reference_slopes) {
             let mut left = zeros(n)?;
             let mut right = zeros(n)?;
             for (vertices, area) in &port.faces {
                 poll(cx, 0)?;
                 for (a, &v) in vertices.iter().enumerate() {
                     add(&mut right[v], area / port.area_m2 / 3.0)?;
+                    // Zero preserves the original mean-HTC arithmetic path.
+                    if reference_slope != 0.0 {
+                        add(&mut left[v], -port.htc_w_m2_k * reference_slope * (area / 3.0))?;
+                    }
                     for (b, &w) in vertices.iter().enumerate() {
                         let mass = (area / 12.0) * if a == b { 2.0 } else { 1.0 };
                         add(&mut left[v], slope * mass * (temperature[w] - port.reference_k))?;
@@ -239,6 +267,12 @@ mod tests {
     fn physical(cx: &Cx<'_>, source_shift: f64, ambient: f64)
         -> (ConductionMesh, ConductivityModel, ScalarField, ThermalBoundary, ConductionSolution)
     {
+        physical_reference(cx, source_shift, ambient, 0.0)
+    }
+
+    fn physical_reference(cx: &Cx<'_>, source_shift: f64, ambient: f64, beta: f64)
+        -> (ConductionMesh, ConductivityModel, ScalarField, ThermalBoundary, ConductionSolution)
+    {
         let (complex, positions) = box_grid([3, 2, 2], [0.1, 0.04, 0.03]);
         let mesh = ConductionMesh::new(complex, positions).unwrap();
         let material = ConductivityModel::isotropic(ConductivityTable::declared_curve(
@@ -246,10 +280,11 @@ mod tests {
         let source = ScalarField::Nodal(mesh.positions().iter()
             .map(|p| 1000.0 + source_shift + 50000.0*p[1]).collect());
         let mut h = 40.0;
+        let mut reference = ambient;
         for _ in 0..100 {
             let boundary = ThermalBoundaryBuilder::new(&mesh)
                 .region("hot", |f| on_box_face(f.centroid[0], 0.0), ThermalBc::dirichlet(340.0).unwrap()).unwrap()
-                .region("wall", |f| on_box_face(f.centroid[0], 0.1), ThermalBc::robin(h, ambient).unwrap()).unwrap()
+                .region("wall", |f| on_box_face(f.centroid[0], 0.1), ThermalBc::robin(h, reference).unwrap()).unwrap()
                 .adiabatic_remainder().finish().unwrap();
             let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
                 material: &material, element_materials: None, source: &source };
@@ -261,11 +296,13 @@ mod tests {
                     .map(|&v| solution.temperature[v as usize]).sum::<f64>();
             }
             let next = 40.0 + 0.8*(integral/area - ambient - 20.0);
+            let next_reference = ambient + beta*(integral/area - ambient);
             assert!(next > 0.0);
-            if (next-h).abs() <= 1e-12*h {
+            if (next-h).abs() <= 1e-12*h && (next_reference-reference).abs() <= 1e-12*reference {
                 return (mesh, material, source, boundary, solution);
             }
             h = 0.5*(h+next);
+            if beta != 0.0 { reference = 0.5*(reference+next_reference); }
         }
         panic!("test's physical fixed point did not converge");
     }
@@ -313,6 +350,44 @@ mod tests {
             with_gate(&gate, |cancelled| assert!(matches!(RobinResponse::pullback_mean_htc(
                 cancelled, problem, None, config().linear, &solution.temperature,
                 &["wall"], &[0.8], &weights, 2*n), Err(ConductionError::Cancelled { .. }))));
+        });
+    }
+
+    #[test]
+    fn mean_reference_feedback_matches_source_and_ambient_fem_resolves() {
+        with_gate(&CancelGate::new_clock_free(), |cx| {
+            let beta = 0.35;
+            let (mesh, material, source, boundary, solution) = physical_reference(cx, 0.0, 293.0, beta);
+            let n = mesh.vertex_count();
+            let mut weights = vec![0.0; n]; weights[n-1] = 1.0;
+            let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, element_materials: None, source: &source };
+            let gradient = RobinResponse::pullback_mean_robin(cx, problem, None, config().linear,
+                &solution.temperature, &["wall"], &[0.8], &[beta], &weights, 2*n).unwrap();
+            let density_bar = |g: &RobinGradient| mesh.complex().tets.iter().enumerate()
+                .map(|(e,tet)| mesh.element_volume(e)/4.0 * tet.iter()
+                    .map(|&v| g.nodal_load[v as usize]).sum::<f64>()).sum::<f64>();
+            let power = density_bar(&gradient);
+            let low = physical_reference(cx, -1.0, 293.0, beta).4.temperature[n-1];
+            let high = physical_reference(cx, 1.0, 293.0, beta).4.temperature[n-1];
+            let expected = (high-low)/2.0;
+            assert!((power-expected).abs() < 1e-4*expected.abs().max(1e-5), "{power:e} vs {expected:e}");
+            let h = bind_ports(cx, problem, &["wall"]).unwrap()[0].htc_w_m2_k;
+            let ambient = gradient.references[0]*(1.0-beta) - gradient.log_htc[0]*0.8/h;
+            let low = physical_reference(cx, 0.0, 292.99, beta).4.temperature[n-1];
+            let high = physical_reference(cx, 0.0, 293.01, beta).4.temperature[n-1];
+            assert!((ambient-(high-low)/0.02).abs() < 2e-5);
+            let frozen = RobinResponse::pullback_mean_htc(cx, problem, None, config().linear,
+                &solution.temperature, &["wall"], &[0.8], &weights, 2*n).unwrap();
+            assert!((power-density_bar(&frozen)).abs() > 1e-3*power.abs(), "fixture must distinguish a frozen reference");
+            for &v in DofMap::new(&boundary, n).unwrap().fixed() { assert_eq!(gradient.nodal_load[v], 0.0); }
+            for slopes in [&[][..], &[f64::NAN][..]] {
+                assert!(RobinResponse::pullback_mean_robin(cx, problem, None, config().linear,
+                    &solution.temperature, &["wall"], &[0.8], slopes, &weights, 2*n).is_err());
+            }
+            let zero_reference = RobinResponse::pullback_mean_robin(cx, problem, None, config().linear,
+                &solution.temperature, &["wall"], &[0.8], &[0.0], &weights, 2*n).unwrap();
+            assert_eq!(zero_reference, frozen, "compatibility wrapper must be bit-identical");
         });
     }
 }
