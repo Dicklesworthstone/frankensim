@@ -8,7 +8,7 @@
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
 //! new solver. Nonlinear material and radiation derivatives are NOT frozen.
-//! Fan speed, airflow inlet and prescribed-temperature controls remain explicit
+//! Fan speed and prescribed-temperature controls remain explicit
 //! unsupported rows until their complete physical parameter maps are wired.
 
 use std::collections::BTreeMap;
@@ -18,6 +18,7 @@ use fs_exec::Cx;
 use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
     conduction_error, json_string, temperature_maximum_region, trace_qoi_region_vertices};
 
+mod air_inlet;
 mod contractions;
 mod natural_feedback;
 mod nonlinear_solid;
@@ -26,7 +27,7 @@ mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. The nonlinear-solid mode differentiates smooth heterogeneous k(T) through the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity and affine-air modes retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. The nonlinear-solid mode differentiates smooth heterogeneous k(T) through the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity and affine-air modes retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent prescribed air-inlet derivatives include every upstream segment at fixed flow and transport properties. Fan speed and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -173,6 +174,7 @@ pub(super) fn extract(
         b.condition, fs_project::ThermalBoundaryCondition::NaturalConvection { .. }));
     let mut natural_ambient = BTreeMap::new();
     let mut radiation_rows = Vec::new();
+    let mut inlet_rows = Vec::new();
     let (lambda, residual, dual_iterations, stability_iterations, response_iterations, mode) = if setup.radiation.is_some() {
         let result = radiative_feedback::pullback(cx, spec, solved, &weights)?;
         natural_ambient = result.natural_ambient;
@@ -227,6 +229,8 @@ pub(super) fn extract(
         let linear = fs_conduction::LinearConfig { restart: data.linear.restart.clamp(1, 32), ..data.linear };
         let gradient = analyzer.pullback_affine_controls(cx, temperature, &weights, linear)
             .map_err(lower)?;
+        let port_names: Vec<_> = analyzer.ports().iter().map(|port| port.name.as_str()).collect();
+        inlet_rows = air_inlet::rows(cx, setup, &data.air_paths, &port_names, &gradient.references)?;
         (gradient.nodal_load, gradient.relative_residual, gradient.iterations,
             None, Some(analyzer.response_iterations()), "linear-solid-full-air-feedback")
     };
@@ -237,6 +241,7 @@ pub(super) fn extract(
     // A surface has no volume ID; it is a Neumann load on retained face slots.
     let surface_sources = super::surface_heat(spec)?;
     let mut rows = radiation_rows;
+    rows.extend(inlet_rows);
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
         poll(cx)?;
@@ -266,8 +271,8 @@ pub(super) fn extract(
             B::NaturalConvection { .. } => rows.push(row("natural-convection-ambient", &declared.target,
                 ordinal, "K", *natural_ambient.get(&declared.target)
                     .ok_or_else(|| bad("natural boundary has no complete ambient derivative"))?)?),
-            B::AirflowConvection { branch, .. } => missing.push(unsupported("air-inlet-temperature", branch,
-                "full temperature feedback is retained, but inlet and hydraulic parameter contractions are not implemented")),
+            // Already emitted once per branch, not once per segment.
+            B::AirflowConvection { .. } => {}
         }
     }
     if let Some(system) = spec.cooling.as_ref().and_then(|c| c.fan_system.as_ref()) {

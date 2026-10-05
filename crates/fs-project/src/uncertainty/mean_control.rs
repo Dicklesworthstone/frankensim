@@ -61,8 +61,8 @@ pub(super) fn parse(node: &Node, parameters: &[UniformParameter]) -> Result<Mean
             MeanControlMethod::CoordinateSecant if !(p.high - p.low).is_finite() =>
                 return Err(error("mean-control support width is not finite")),
             MeanControlMethod::NominalAdjoint if matches!(p.target,
-                super::Target::AirInletTemperature | super::Target::FanSpeedRatio) =>
-                return Err(error("nominal adjoint does not yet supply air-inlet or fan-speed derivatives; explicitly select coordinate-secant for those controls")),
+                super::Target::FanSpeedRatio) =>
+                return Err(error("nominal adjoint does not yet supply fan-speed derivatives; explicitly select coordinate-secant for that control")),
             _ => {},
         }
     }
@@ -203,10 +203,17 @@ mod tests {
             .replace(":high 6W",":high 2W").replace(":high 310K",":high 290K");
         let s=UncertaintyStudy::parse(&text).unwrap();
         assert_eq!(s.mean_control().unwrap().probe_count(s.parameters()),0);
-        let unsupported=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 1")
+        let inlets=STUDY.replace("coordinate-secant :max-solves 4","nominal-adjoint :max-solves 1")
             .replace("convection-temperature","air-inlet-temperature");
-        assert!(UncertaintyStudy::parse(&unsupported).is_err());
-        let accepted=unsupported.replace(":high 310K",":high 290K");
-        assert!(UncertaintyStudy::parse(&accepted).is_ok());
+        let study=UncertaintyStudy::parse(&inlets).unwrap();
+        let policy=study.mean_control().unwrap();
+        assert_eq!(policy.probe_count(study.parameters()),1);
+        assert_eq!(policy.probe(study.parameters(),0).unwrap(),[4.0,300.0]);
+        assert_eq!(UncertaintyStudy::parse(study.canonical()).unwrap(),study);
+        let fan=inlets.replace(":target power :entity \"solid\" :low 2W :high 6W",
+            ":target fan-speed-ratio :entity \"bank\" :low 0.8 :high 1.2");
+        assert!(fan.contains(":target fan-speed-ratio"));
+        assert!(UncertaintyStudy::parse(&fan).is_err());
+        assert!(UncertaintyStudy::parse(&fan.replace(":high 1.2",":high 0.8")).is_ok());
     }
 }

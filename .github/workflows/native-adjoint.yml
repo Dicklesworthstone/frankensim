@@ -9,6 +9,9 @@ on:
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_nonlinear_adjoint.rs'
+      - 'crates/fs-cli/tests/native_air_inlet_adjoint.rs'
+      - 'crates/fs-airflow/src/conjugate/goal/maximum*'
+      - 'crates/fs-airflow/src/conjugate/goal/maximum/**'
       - 'crates/fs-cli/src/solve/radiation.rs'
       - 'crates/fs-cli/src/solve/natural.rs'
       - 'crates/fs-conduction/src/radiation*'
@@ -23,6 +26,7 @@ on:
       - 'crates/fs-project/src/uncertainty/**'
       - 'tools/radiation_core_wiring.json'
       - 'tools/radiation_cli_wiring.json'
+      - 'tools/native_inlet_wiring.json'
       - '.github/workflows/native-adjoint.yml'
   workflow_dispatch:
 permissions:
@@ -30,8 +34,8 @@ permissions:
 jobs:
   wire:
     # Bounded integration of reviewed edits to oversized source files. These
-    # three literal operations require exact original blobs and unique anchors.
-    if: github.event_name == 'push' && (contains(github.event.head_commit.message, '[wire-native-mean-control]') || contains(github.event.head_commit.message, '[wire-radiation-core]') || contains(github.event.head_commit.message, '[wire-radiation-cli]'))
+    # literal operations require exact original blobs and unique anchors.
+    if: github.event_name == 'push' && (contains(github.event.head_commit.message, '[wire-native-mean-control]') || contains(github.event.head_commit.message, '[wire-radiation-core]') || contains(github.event.head_commit.message, '[wire-radiation-cli]') || contains(github.event.head_commit.message, '[wire-native-inlet]'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -50,6 +54,7 @@ jobs:
               '[wire-native-mean-control]': ('tools/native_mean_control_wiring.json', 'feat(cli): freeze native nominal adjoints before uncertainty sampling'),
               '[wire-radiation-core]': ('tools/radiation_core_wiring.json', 'feat(conduction): expose card-backed radiation adjoints and native FEM regressions'),
               '[wire-radiation-cli]': ('tools/radiation_cli_wiring.json', 'feat(cli): retain original radiation laws through native thermal adjoints'),
+              '[wire-native-inlet]': ('tools/native_inlet_wiring.json', 'feat(cli): version native air-inlet adjoint solve receipts'),
           }
           selected = [value for key, value in choices.items() if key in os.environ['COMMIT_MESSAGE']]
           if len(selected) != 1:
@@ -125,7 +130,13 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test independent branch inlet pullbacks
+        run: cargo test --release -p fs-airflow --lib inlet -- --test-threads=1
+      - name: Compare native inlet adjoints and resumed uncertainty studies
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cli --test native_air_inlet_adjoint -- --test-threads=1
       - name: Test complete mean-coefficient FEM feedback
+        if: ${{ !cancelled() }}
         run: cargo test --release -p fs-conduction --lib mean_feedback -- --test-threads=1
       - name: Test card-backed radiation FEM feedback against physical re-solves
         if: ${{ !cancelled() }}
