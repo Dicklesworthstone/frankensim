@@ -483,6 +483,8 @@ impl Color {
                 format!("{{\"interval\":[{},{}]}}", json_f64(*lo), json_f64(*hi))
             }
             Color::Validated { regime, dataset } => {
+                use core::fmt::Write as _;
+
                 if regime.has_typed_axes() {
                     return format!(
                         "{{\"schema_version\":3,\"dataset\":{},\"regime\":{}}}",
@@ -490,7 +492,6 @@ impl Color {
                         regime.to_json()
                     );
                 }
-                use core::fmt::Write as _;
                 let mut axes = String::new();
                 for (k, (lo, hi)) in regime.bounds() {
                     if !axes.is_empty() {

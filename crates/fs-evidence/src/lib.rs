@@ -647,11 +647,10 @@ impl ValidityDomain {
                 s.push(',');
             }
             if let Some(quantity) = self.axis_quantities.get(k) {
-                let token = quantity
-                    .canonical_bytes()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
+                let mut token = String::new();
+                for byte in quantity.canonical_bytes() {
+                    let _ = write!(token, "{byte:02x}");
+                }
                 let _ = write!(
                     s,
                     "{}:{{\"bounds\":[{},{}],\"quantity\":\"{}\"}}",
