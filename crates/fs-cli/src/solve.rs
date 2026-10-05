@@ -163,7 +163,11 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// permits their use in nominal-adjoint uncertainty calibration.
 /// Version 40 includes complete single-bank fan-speed controls in native
 /// adjoints; old derivative receipts cannot resume into these semantics.
-pub const SOLVE_DRIVER_VERSION: u32 = 40;
+/// Version 41 differentiates independently controlled series/parallel fan banks;
+/// earlier derivative receipts cannot resume into multi-bank calibration.
+/// Version 42 publishes regional conductivity-multiplier controls through the
+/// complete accepted thermal adjoint; earlier reports cannot substitute for them.
+pub const SOLVE_DRIVER_VERSION: u32 = 42;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
