@@ -15,17 +15,24 @@ pub const KERNEL_VERSION: &str = concat!("fs-rand philox_normals ", env!("CARGO_
 /// Whether a [`Refusal`] maps to a registered refusal code or an execution outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
+    /// Admission refused an invalid request without drawing samples.
     RefusalCode,
+    /// Execution-outcome namespace for declared output-budget failures.
     ExecutionOutcome,
 }
 
 /// Typed refusal / budget miss. Never represented as `[]` or `NaN`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
+    /// Stable refusal or execution-outcome registry key.
     pub code: &'static str,
+    /// Explanation of the rejected request.
     pub message: String,
+    /// Suggested changes in preferred order.
     pub ranked_repairs: Vec<&'static str>,
+    /// JSON parameters explaining the violated bound.
     pub details: String,
+    /// Registry namespace containing [`Self::code`].
     pub target_kind: TargetKind,
 }
 
@@ -40,22 +47,27 @@ pub struct PhiloxNormalsSpec {
 }
 
 impl PhiloxNormalsSpec {
+    /// Seed defining the admitted random stream.
     #[must_use]
     pub const fn seed(&self) -> u64 {
         self.seed
     }
+    /// Logical kernel identity of the admitted stream.
     #[must_use]
     pub const fn stream_kernel(&self) -> u32 {
         self.stream_kernel
     }
+    /// Logical tile identity of the admitted stream.
     #[must_use]
     pub const fn tile(&self) -> u32 {
         self.tile
     }
+    /// First draw index; each normal consumes two draws.
     #[must_use]
     pub const fn start_index(&self) -> u64 {
         self.start_index
     }
+    /// Number of normal samples admitted.
     #[must_use]
     pub const fn count(&self) -> usize {
         self.count
