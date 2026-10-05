@@ -21,10 +21,11 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 mod contractions;
 mod natural_feedback;
 mod radiative_feedback;
+mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Linear-solid modes retain their linear-conductivity restriction; natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Linear-solid modes retain their linear-conductivity restriction; natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -192,7 +193,7 @@ pub(super) fn extract(
         }
         let mut lambda = zeros(n)?;
         for (i, (&vertex, &value)) in analyzer.dofs().free().iter().zip(analyzer.free_dual()).enumerate() {
-            if i % 512 == 0 { poll(cx, )?; }
+            if i % 512 == 0 { poll(cx)?; }
             lambda[vertex] = finite(value)?;
         }
         (lambda, analysis.dual_relative_residual, analysis.dual_iterations,
@@ -226,14 +227,21 @@ pub(super) fn extract(
     let source_bar = regional_source_pullback(cx, solved, &lambda)?;
     let volumes: BTreeMap<u32, f64> = audited.witness().per_region_auditor.iter()
         .map(|(region, volume)| (region.0, *volume)).collect();
+    // Use the SAME explicit Surface/Region classification as the primal.
+    // A surface has no volume ID; it is a Neumann load on retained face slots.
+    let surface_sources = super::surface_heat(spec)?;
     let mut rows = radiation_rows;
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
         poll(cx)?;
-        let id = *ids.get(&power.region).ok_or_else(|| bad("power region has no label"))?;
-        let volume = *volumes.get(&id).ok_or_else(|| bad("power region has no audited volume"))?;
-        if !(volume.is_finite() && volume > 0.0) { return Err(bad("invalid audited source volume")); }
-        let value = finite(*source_bar.get(&id).ok_or_else(|| bad("source region has no element contribution"))? * (power.duty / volume))?;
+        let value = if surface_sources.names.contains(&power.region) {
+            surface_power::pullback(cx, solved, &power.region, power.duty, &lambda)?
+        } else {
+            let id = *ids.get(&power.region).ok_or_else(|| bad("power region has no label"))?;
+            let volume = *volumes.get(&id).ok_or_else(|| bad("power region has no audited volume"))?;
+            if !(volume.is_finite() && volume > 0.0) { return Err(bad("invalid audited source volume")); }
+            finite(*source_bar.get(&id).ok_or_else(|| bad("source region has no element contribution"))? * (power.duty / volume))?
+        };
         rows.push(row("power", &power.region, ordinal, "W", value)?);
     }
     let boundary_bar = boundary_pullback(cx, solved, &lambda)?;

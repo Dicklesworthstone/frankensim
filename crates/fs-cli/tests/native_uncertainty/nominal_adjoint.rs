@@ -194,3 +194,66 @@ fn unsupported_nominal_fan_derivative_is_refused_before_ledger_creation() {
     fixture.study(None,fs_cli::exit::REFUSED);
     assert!(!fixture.ledger.exists());
 }
+
+#[test]
+fn native_surface_and_volume_power_adjoints_retain_distinct_loads_and_duties() {
+    let fixture = Fixture::new();
+    let mut base = fixture.project.clone();
+    base.solver.as_mut().unwrap().tolerance_rel = 1e-9;
+    base.assembly.as_mut().unwrap().push(fs_project::spec::EntityDecl::Surface {
+        parent: "enclosure".into(), name: "chip".into(),
+        display: "Heated chip footprint".into(), expect_id: None,
+    });
+    let assignments = base.assignments.as_mut().unwrap();
+    assignments[0].allow_overlap = true;
+    let mut patch = assignments[0].clone();
+    patch.target = "chip".into();
+    // One complete tetrahedron face, not a centroid selection or replacement
+    // tet. The primal gives this Surface precedence over the surrounding air.
+    patch.selector = fs_io::MeshSelector::HalfSpace {
+        normal: [0.0,0.0,1.0], offset: 0.0,
+        side: fs_io::HalfSpaceSide::AtMost, tolerance: 0.0,
+    };
+    assignments.push(patch);
+    let power = base.power.as_mut().unwrap();
+    power[0].duty = 0.61;
+    let mut chip = power[0].clone();
+    chip.region = "chip".into(); chip.watts.value = 7.0; chip.duty = 0.37;
+    power.push(chip);
+    let original = solve(&fixture, &base, 100);
+    let mut requested = base.clone();
+    request(&mut requested);
+    let nominal = solve(&fixture, &requested, 101);
+    let field = |receipt: &JsonValue| {
+        json_artifact(&fixture.dir.join("adjoint.db"),
+            receipt.str_field("solution_artifact").unwrap()).get("temperature").unwrap().clone()
+    };
+    assert_eq!(field(&original), field(&nominal));
+    assert_eq!(original.get("energy"), nominal.get("energy"));
+    let derivative = |receipt: &JsonValue, entity: &str| {
+        receipt.get("nominal_adjoint").unwrap().get("parameters").unwrap().as_array().unwrap()
+            .iter().find(|row| row.str_field("target") == Some("power")
+                && row.str_field("entity") == Some(entity)).unwrap().f64_field("derivative").unwrap()
+    };
+    let selected = nominal.get("nominal_adjoint").unwrap().f64_field("selected_vertex").unwrap() as usize;
+    for (case, entity) in ["air", "chip"].into_iter().enumerate() {
+        let actual = derivative(&nominal, entity);
+        let mut values = Vec::new();
+        let step = 0.02;
+        for (side, sign) in [-1.0,1.0].into_iter().enumerate() {
+            let mut perturbed = base.clone();
+            perturbed.power.as_mut().unwrap()[case].watts.value += sign*step;
+            let receipt = solve(&fixture, &perturbed, 102+2*case+side);
+            values.push(field(&receipt).as_array().unwrap()[selected].as_f64().unwrap());
+        }
+        let expected = (values[1]-values[0])/(2.0*step);
+        assert!(actual > 0.0, "positive {entity} watts must inject heat, not remove it");
+        assert!((actual-expected).abs() < 3e-6*actual.abs().max(0.01),
+            "{entity}: adjoint {actual:e}, actual load re-solves {expected:e}");
+    }
+    assert!((derivative(&nominal, "chip")/0.37-derivative(&nominal, "air")/0.61).abs() > 1e-4,
+        "the fixture must distinguish patch heat from volumetric smearing");
+    requested.power.as_mut().unwrap()[1].duty = 0.0;
+    let zero = solve(&fixture, &requested, 110);
+    assert_eq!(derivative(&zero, "chip"), 0.0, "declared pre-duty watts have zero influence at zero duty");
+}
