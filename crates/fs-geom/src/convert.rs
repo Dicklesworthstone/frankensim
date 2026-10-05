@@ -44,13 +44,13 @@ impl SagittaEnclosure {
         arc_subdivisions: u32,
     ) -> Self {
         let s_theta = if azimuthal_sectors > 0 && max_radius > 0.0 {
-            max_radius * (1.0 - (core::f64::consts::PI / azimuthal_sectors as f64).cos())
+            max_radius * (1.0 - (core::f64::consts::PI / f64::from(azimuthal_sectors)).cos())
         } else {
             0.0
         };
 
         let s_meridian = if arc_subdivisions > 0 && max_arc_radius > 0.0 && max_arc_sweep > 0.0 {
-            max_arc_radius * (1.0 - (max_arc_sweep / (2.0 * arc_subdivisions as f64)).cos())
+            max_arc_radius * (1.0 - (max_arc_sweep / (2.0 * f64::from(arc_subdivisions))).cos())
         } else {
             0.0
         };

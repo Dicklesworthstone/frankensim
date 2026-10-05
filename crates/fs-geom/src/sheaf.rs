@@ -351,7 +351,7 @@ impl AdmittedSheafComplex {
     /// Per-interface sampled mismatch bounds from immutable builder-retained
     /// chart evidence. Raw public complexes intentionally have no originless
     /// method returning this positive/negative evidence type.
-    #[must_use]
+    #[must_use = "sampled interface bounds and any algebra refusal must be inspected"]
     pub fn mismatch_bounds(&self) -> Result<Vec<InterfaceBound>, SheafAlgebraError> {
         self.inner.mismatch_bounds()
     }
@@ -766,12 +766,7 @@ fn discover_triples(
     degrees.resize(n_patches, 0usize);
     for (completed_edges, interface) in interfaces.iter().enumerate() {
         if completed_edges.is_multiple_of(256) {
-            cx.checkpoint().map_err(|_| SheafBuildError::Cancelled {
-                stage: "triple-discovery",
-                patches: None,
-                completed_work: completed_edges,
-                unit: SheafBuildProgressUnit::Edges,
-            })?;
+            checkpoint_triple_discovery(cx, completed_edges, SheafBuildProgressUnit::Edges)?;
         }
         let (a, b) = interface.patches;
         if a >= n_patches || b >= n_patches || a >= b {
@@ -826,12 +821,7 @@ fn discover_triples(
                 });
             }
             if inspected.is_multiple_of(256) {
-                cx.checkpoint().map_err(|_| SheafBuildError::Cancelled {
-                    stage: "triple-discovery",
-                    patches: None,
-                    completed_work: inspected,
-                    unit: SheafBuildProgressUnit::NeighborProbes,
-                })?;
+                checkpoint_triple_discovery(cx, inspected, SheafBuildProgressUnit::NeighborProbes)?;
             }
             inspected += 1;
             if c <= b || lookup.binary_search(&c).is_err() {
@@ -856,13 +846,21 @@ fn discover_triples(
             });
         }
     }
+    checkpoint_triple_discovery(cx, inspected, SheafBuildProgressUnit::NeighborProbes)?;
+    Ok(triples)
+}
+
+fn checkpoint_triple_discovery(
+    cx: &Cx<'_>,
+    completed_work: usize,
+    unit: SheafBuildProgressUnit,
+) -> Result<(), SheafBuildError> {
     cx.checkpoint().map_err(|_| SheafBuildError::Cancelled {
         stage: "triple-discovery",
         patches: None,
-        completed_work: inspected,
-        unit: SheafBuildProgressUnit::NeighborProbes,
-    })?;
-    Ok(triples)
+        completed_work,
+        unit,
+    })
 }
 
 impl SheafComplex {
@@ -1281,7 +1279,7 @@ impl SheafComplex {
     /// are aggregated directly from the intervals' outward endpoints; an
     /// indeterminate interval retains an infinite upper report and cannot
     /// authorize numerical evidence.
-    #[must_use]
+    #[must_use = "sampled interface bounds and any algebra refusal must be inspected"]
     fn mismatch_bounds(&self) -> Result<Vec<InterfaceBound>, SheafAlgebraError> {
         let mut bounds = Vec::new();
         bounds
@@ -1338,72 +1336,7 @@ impl SheafComplex {
                 stage: "section-offsets",
             })?;
         offsets.resize(n, 0.0f64);
-        // Edge means of the midpoint mismatch.
-        let mut degrees = Vec::new();
-        degrees
-            .try_reserve_exact(n)
-            .map_err(|_| SheafAlgebraError::ResourceExhausted {
-                stage: "section-degrees",
-            })?;
-        degrees.resize(n, 0usize);
-        for iface in &self.interfaces {
-            degrees[iface.patches.0] = degrees[iface.patches.0].saturating_add(1);
-            degrees[iface.patches.1] = degrees[iface.patches.1].saturating_add(1);
-        }
-        let mut incident = Vec::new();
-        incident
-            .try_reserve_exact(n)
-            .map_err(|_| SheafAlgebraError::ResourceExhausted {
-                stage: "section-incidence",
-            })?;
-        for degree in degrees {
-            let mut row = Vec::new();
-            row.try_reserve_exact(degree)
-                .map_err(|_| SheafAlgebraError::ResourceExhausted {
-                    stage: "section-incidence-row",
-                })?;
-            incident.push(row);
-        }
-        for (interface_index, iface) in self.interfaces.iter().enumerate() {
-            let (u, v) = iface.patches;
-            if u >= n || v >= n || u == v || iface.samples.is_empty() {
-                continue;
-            }
-            let mut sum = 0.0;
-            for (sample_index, s) in iface.samples.iter().enumerate() {
-                if s.values.iter().any(|value| {
-                    !(value.lo().is_finite() && value.hi().is_finite() && value.lo() <= value.hi())
-                }) {
-                    return Err(SheafAlgebraError::IndeterminateSampleValue {
-                        interface: interface_index,
-                        sample: sample_index,
-                    });
-                }
-                let left = s.values[0].midpoint();
-                let right = s.values[1].midpoint();
-                if !(left.is_finite() && right.is_finite()) {
-                    return Err(SheafAlgebraError::IndeterminateSampleValue {
-                        interface: interface_index,
-                        sample: sample_index,
-                    });
-                }
-                let mismatch = right - left;
-                if !mismatch.is_finite() {
-                    return Err(SheafAlgebraError::NumericalOverflow {
-                        stage: "section-edge-mismatch",
-                    });
-                }
-                sum += mismatch;
-                if !sum.is_finite() {
-                    return Err(SheafAlgebraError::NumericalOverflow {
-                        stage: "section-edge-sum",
-                    });
-                }
-            }
-            let count = s_len(iface);
-            incident[u].push((v, sum, count));
-            incident[v].push((u, -sum, count));
-        }
+        let incident = section_incidence(&self.interfaces, n)?;
         // Fix one deterministic gauge root (the smallest patch index) in every
         // connected component, including isolated patches. This removes the
         // otherwise implicit iteration/order-dependent null mode on components
@@ -1575,136 +1508,15 @@ impl SheafComplex {
                     .collect(),
             }
         };
-        let mut canon = LegacyProvenanceWriter::new();
-        let _ = write!(
-            canon,
-            "sheaf-sampled-agreement;schema=4;origin={};patches={};interfaces={};triples={};tol={:016x};structure_valid={structure_is_valid}",
-            if admitted_builder_origin {
-                "chart-sampling-builder"
-            } else {
-                "raw-public-parts"
-            },
-            self.n_patches,
-            self.interfaces.len(),
-            self.triples.len(),
-            tol.to_bits(),
+        let provenance = sampled_agreement_provenance(
+            self,
+            admitted_builder_origin,
+            tol,
+            structure_is_valid,
+            bounded_shape,
+            &bounds,
+            &verdict,
         );
-        match self.sampling_clip {
-            None => {
-                let _ = canon.write_str(";sampling_clip=none");
-            }
-            Some(clip) => {
-                let _ = write!(
-                    canon,
-                    ";sampling_clip=some:{:016x},{:016x},{:016x},{:016x},{:016x},{:016x}",
-                    clip.min.x.to_bits(),
-                    clip.min.y.to_bits(),
-                    clip.min.z.to_bits(),
-                    clip.max.x.to_bits(),
-                    clip.max.y.to_bits(),
-                    clip.max.z.to_bits()
-                );
-            }
-        }
-        if bounded_shape {
-            for interface in &self.interfaces {
-                let _ = write!(
-                    canon,
-                    ";interface={}-{};samples={}",
-                    interface.patches.0,
-                    interface.patches.1,
-                    interface.samples.len()
-                );
-                for sample in &interface.samples {
-                    let _ = write!(
-                        canon,
-                        ";sample={:016x},{:016x},{:016x}:{:016x},{:016x}:{:016x},{:016x}",
-                        sample.point.x.to_bits(),
-                        sample.point.y.to_bits(),
-                        sample.point.z.to_bits(),
-                        sample.values[0].lo().to_bits(),
-                        sample.values[0].hi().to_bits(),
-                        sample.values[1].lo().to_bits(),
-                        sample.values[1].hi().to_bits(),
-                    );
-                }
-            }
-            for triple in &self.triples {
-                let _ = write!(
-                    canon,
-                    ";triple={}-{}-{}:{}",
-                    triple.patches.0, triple.patches.1, triple.patches.2, triple.samples
-                );
-            }
-        } else {
-            let _ = canon.write_str(";raw-payload=omitted-over-work-limit");
-        }
-        for b in &bounds {
-            let _ = write!(
-                canon,
-                ";bound={}-{}:{:016x}:{:016x}:within={}:leak={}:determinate={}",
-                b.patches.0,
-                b.patches.1,
-                b.lo_report.to_bits(),
-                b.hi_report.to_bits(),
-                b.all_within(tol),
-                b.proven_leak(tol),
-                b.determinate,
-            );
-        }
-        match &verdict {
-            SheafVerdict::Pass {
-                worst_mismatch,
-                margins,
-            } => {
-                let _ = write!(canon, ";verdict=pass:{:016x}", worst_mismatch.to_bits());
-                for (patches, margin) in margins {
-                    let _ = write!(
-                        canon,
-                        ";margin={}-{}:{:016x}",
-                        patches.0,
-                        patches.1,
-                        margin.to_bits()
-                    );
-                }
-            }
-            SheafVerdict::Fail {
-                interface_violations,
-                gauge_fit_share,
-            } => {
-                let _ = canon.write_str(";verdict=fail");
-                for (patches, lower) in interface_violations {
-                    let _ = write!(
-                        canon,
-                        ";violation={}-{}:{:016x}",
-                        patches.0,
-                        patches.1,
-                        lower.to_bits()
-                    );
-                }
-                match gauge_fit_share {
-                    Some(share) => {
-                        let _ = write!(canon, ";gauge_fit_share={:016x}", share.to_bits());
-                    }
-                    None => {
-                        let _ = canon.write_str(";gauge_fit_share=none");
-                    }
-                }
-            }
-            SheafVerdict::Unknown { reported_bounds } => {
-                let _ = canon.write_str(";verdict=unknown");
-                for (patches, lower, upper) in reported_bounds {
-                    let _ = write!(
-                        canon,
-                        ";reported-bound={}-{}:{:016x}:{:016x}",
-                        patches.0,
-                        patches.1,
-                        lower.to_bits(),
-                        upper.to_bits()
-                    );
-                }
-            }
-        }
         let numerical = if admitted_builder_origin
             && all_determinate
             && !matches!(&verdict, SheafVerdict::Unknown { .. })
@@ -1721,9 +1533,239 @@ impl SheafComplex {
             statistical: StatisticalCertificate::None,
             model: ModelEvidence::none(),
             sensitivity: SensitivitySummary::default(),
-            provenance: ProvenanceHash(canon.finish()),
+            provenance,
             adjoint_ref: None,
             value: verdict,
+        }
+    }
+}
+
+type SectionIncidence = Vec<Vec<(usize, f64, usize)>>;
+
+fn section_incidence(
+    interfaces: &[Interface],
+    n_patches: usize,
+) -> Result<SectionIncidence, SheafAlgebraError> {
+    let mut degrees = Vec::new();
+    degrees
+        .try_reserve_exact(n_patches)
+        .map_err(|_| SheafAlgebraError::ResourceExhausted {
+            stage: "section-degrees",
+        })?;
+    degrees.resize(n_patches, 0usize);
+    for iface in interfaces {
+        degrees[iface.patches.0] = degrees[iface.patches.0].saturating_add(1);
+        degrees[iface.patches.1] = degrees[iface.patches.1].saturating_add(1);
+    }
+    let mut incident = Vec::new();
+    incident
+        .try_reserve_exact(n_patches)
+        .map_err(|_| SheafAlgebraError::ResourceExhausted {
+            stage: "section-incidence",
+        })?;
+    for degree in degrees {
+        let mut row = Vec::new();
+        row.try_reserve_exact(degree)
+            .map_err(|_| SheafAlgebraError::ResourceExhausted {
+                stage: "section-incidence-row",
+            })?;
+        incident.push(row);
+    }
+    for (interface_index, iface) in interfaces.iter().enumerate() {
+        let (u, v) = iface.patches;
+        if u >= n_patches || v >= n_patches || u == v || iface.samples.is_empty() {
+            continue;
+        }
+        let mut sum = 0.0;
+        for (sample_index, s) in iface.samples.iter().enumerate() {
+            if s.values.iter().any(|value| {
+                !(value.lo().is_finite() && value.hi().is_finite() && value.lo() <= value.hi())
+            }) {
+                return Err(SheafAlgebraError::IndeterminateSampleValue {
+                    interface: interface_index,
+                    sample: sample_index,
+                });
+            }
+            let left = s.values[0].midpoint();
+            let right = s.values[1].midpoint();
+            if !(left.is_finite() && right.is_finite()) {
+                return Err(SheafAlgebraError::IndeterminateSampleValue {
+                    interface: interface_index,
+                    sample: sample_index,
+                });
+            }
+            let mismatch = right - left;
+            if !mismatch.is_finite() {
+                return Err(SheafAlgebraError::NumericalOverflow {
+                    stage: "section-edge-mismatch",
+                });
+            }
+            sum += mismatch;
+            if !sum.is_finite() {
+                return Err(SheafAlgebraError::NumericalOverflow {
+                    stage: "section-edge-sum",
+                });
+            }
+        }
+        let count = s_len(iface);
+        incident[u].push((v, sum, count));
+        incident[v].push((u, -sum, count));
+    }
+    Ok(incident)
+}
+
+fn sampled_agreement_provenance(
+    sheaf: &SheafComplex,
+    admitted_builder_origin: bool,
+    tol: f64,
+    structure_is_valid: bool,
+    bounded_shape: bool,
+    bounds: &[InterfaceBound],
+    verdict: &SheafVerdict,
+) -> ProvenanceHash {
+    let mut canon = LegacyProvenanceWriter::new();
+    let _ = write!(
+        canon,
+        "sheaf-sampled-agreement;schema=4;origin={};patches={};interfaces={};triples={};tol={:016x};structure_valid={structure_is_valid}",
+        if admitted_builder_origin {
+            "chart-sampling-builder"
+        } else {
+            "raw-public-parts"
+        },
+        sheaf.n_patches,
+        sheaf.interfaces.len(),
+        sheaf.triples.len(),
+        tol.to_bits(),
+    );
+    write_sampled_agreement_payload(&mut canon, sheaf, tol, bounded_shape, bounds);
+    write_sheaf_verdict(&mut canon, verdict);
+    ProvenanceHash(canon.finish())
+}
+
+fn write_sampled_agreement_payload(
+    canon: &mut LegacyProvenanceWriter,
+    sheaf: &SheafComplex,
+    tol: f64,
+    bounded_shape: bool,
+    bounds: &[InterfaceBound],
+) {
+    match sheaf.sampling_clip {
+        None => {
+            let _ = canon.write_str(";sampling_clip=none");
+        }
+        Some(clip) => {
+            let _ = write!(
+                canon,
+                ";sampling_clip=some:{:016x},{:016x},{:016x},{:016x},{:016x},{:016x}",
+                clip.min.x.to_bits(),
+                clip.min.y.to_bits(),
+                clip.min.z.to_bits(),
+                clip.max.x.to_bits(),
+                clip.max.y.to_bits(),
+                clip.max.z.to_bits()
+            );
+        }
+    }
+    if bounded_shape {
+        for interface in &sheaf.interfaces {
+            let _ = write!(
+                canon,
+                ";interface={}-{};samples={}",
+                interface.patches.0,
+                interface.patches.1,
+                interface.samples.len()
+            );
+            for sample in &interface.samples {
+                let _ = write!(
+                    canon,
+                    ";sample={:016x},{:016x},{:016x}:{:016x},{:016x}:{:016x},{:016x}",
+                    sample.point.x.to_bits(),
+                    sample.point.y.to_bits(),
+                    sample.point.z.to_bits(),
+                    sample.values[0].lo().to_bits(),
+                    sample.values[0].hi().to_bits(),
+                    sample.values[1].lo().to_bits(),
+                    sample.values[1].hi().to_bits(),
+                );
+            }
+        }
+        for triple in &sheaf.triples {
+            let _ = write!(
+                canon,
+                ";triple={}-{}-{}:{}",
+                triple.patches.0, triple.patches.1, triple.patches.2, triple.samples
+            );
+        }
+    } else {
+        let _ = canon.write_str(";raw-payload=omitted-over-work-limit");
+    }
+    for bound in bounds {
+        let _ = write!(
+            canon,
+            ";bound={}-{}:{:016x}:{:016x}:within={}:leak={}:determinate={}",
+            bound.patches.0,
+            bound.patches.1,
+            bound.lo_report.to_bits(),
+            bound.hi_report.to_bits(),
+            bound.all_within(tol),
+            bound.proven_leak(tol),
+            bound.determinate,
+        );
+    }
+}
+
+fn write_sheaf_verdict(canon: &mut LegacyProvenanceWriter, verdict: &SheafVerdict) {
+    match verdict {
+        SheafVerdict::Pass {
+            worst_mismatch,
+            margins,
+        } => {
+            let _ = write!(canon, ";verdict=pass:{:016x}", worst_mismatch.to_bits());
+            for (patches, margin) in margins {
+                let _ = write!(
+                    canon,
+                    ";margin={}-{}:{:016x}",
+                    patches.0,
+                    patches.1,
+                    margin.to_bits()
+                );
+            }
+        }
+        SheafVerdict::Fail {
+            interface_violations,
+            gauge_fit_share,
+        } => {
+            let _ = canon.write_str(";verdict=fail");
+            for (patches, lower) in interface_violations {
+                let _ = write!(
+                    canon,
+                    ";violation={}-{}:{:016x}",
+                    patches.0,
+                    patches.1,
+                    lower.to_bits()
+                );
+            }
+            match gauge_fit_share {
+                Some(share) => {
+                    let _ = write!(canon, ";gauge_fit_share={:016x}", share.to_bits());
+                }
+                None => {
+                    let _ = canon.write_str(";gauge_fit_share=none");
+                }
+            }
+        }
+        SheafVerdict::Unknown { reported_bounds } => {
+            let _ = canon.write_str(";verdict=unknown");
+            for (patches, lower, upper) in reported_bounds {
+                let _ = write!(
+                    canon,
+                    ";reported-bound={}-{}:{:016x}:{:016x}",
+                    patches.0,
+                    patches.1,
+                    lower.to_bits(),
+                    upper.to_bits()
+                );
+            }
         }
     }
 }
@@ -1792,36 +1834,7 @@ pub fn validate_outside_ray_samples(
     steps: usize,
     cx: &Cx<'_>,
 ) -> Result<OutsideRaySampleReport, OutsideRaySampleError> {
-    if charts.is_empty() {
-        return Err(OutsideRaySampleError::EmptyCharts);
-    }
-    if rays.is_empty() {
-        return Err(OutsideRaySampleError::EmptyRays);
-    }
-    if steps == 0 {
-        return Err(OutsideRaySampleError::InvalidSteps { steps });
-    }
-    let requested = (rays.len() as u128)
-        .saturating_mul((steps as u128).saturating_add(1))
-        .saturating_mul(charts.len() as u128);
-    if requested > OUTSIDE_RAY_MAX_EVALUATIONS as u128 {
-        return Err(OutsideRaySampleError::WorkLimitExceeded {
-            requested,
-            cap: OUTSIDE_RAY_MAX_EVALUATIONS,
-        });
-    }
-
-    for (ray, (start, end)) in rays.iter().copied().enumerate() {
-        for (endpoint, point) in [(RayEndpoint::Start, start), (RayEndpoint::End, end)] {
-            if !finite_point(point) {
-                return Err(OutsideRaySampleError::NonFiniteEndpoint {
-                    ray,
-                    endpoint,
-                    point,
-                });
-            }
-        }
-    }
+    validate_outside_ray_inputs(charts.len(), rays, steps)?;
 
     let mut completed_points = 0usize;
     let mut completed_chart_evaluations = 0usize;
@@ -1864,7 +1877,7 @@ pub fn validate_outside_ray_samples(
                     let support = chart.support();
                     let excluded_by_support = support.is_well_formed() && !support.contains(p);
                     let interval = sample_interval(&sample);
-                    if !excluded_by_support && !(interval.lo().is_finite() && interval.lo() > 0.0) {
+                    if !(excluded_by_support || interval.lo().is_finite() && interval.lo() > 0.0) {
                         unproven_endpoint.get_or_insert((chart_index, sample));
                     }
                 }
@@ -1920,6 +1933,44 @@ pub fn validate_outside_ray_samples(
         chart_evaluations: completed_chart_evaluations,
         toggles: total_toggles,
     })
+}
+
+fn validate_outside_ray_inputs(
+    chart_count: usize,
+    rays: &[(Point3, Point3)],
+    steps: usize,
+) -> Result<(), OutsideRaySampleError> {
+    if chart_count == 0 {
+        return Err(OutsideRaySampleError::EmptyCharts);
+    }
+    if rays.is_empty() {
+        return Err(OutsideRaySampleError::EmptyRays);
+    }
+    if steps == 0 {
+        return Err(OutsideRaySampleError::InvalidSteps { steps });
+    }
+    let requested = (rays.len() as u128)
+        .saturating_mul((steps as u128).saturating_add(1))
+        .saturating_mul(chart_count as u128);
+    if requested > OUTSIDE_RAY_MAX_EVALUATIONS as u128 {
+        return Err(OutsideRaySampleError::WorkLimitExceeded {
+            requested,
+            cap: OUTSIDE_RAY_MAX_EVALUATIONS,
+        });
+    }
+
+    for (ray, (start, end)) in rays.iter().copied().enumerate() {
+        for (endpoint, point) in [(RayEndpoint::Start, start), (RayEndpoint::End, end)] {
+            if !finite_point(point) {
+                return Err(OutsideRaySampleError::NonFiniteEndpoint {
+                    ray,
+                    endpoint,
+                    point,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint_outside_ray_samples(
