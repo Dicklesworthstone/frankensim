@@ -16,6 +16,8 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
+mod sensitivity;
+
 use fs_evidence::{
     Ambition, Evidence, ModelCard, ModelEvidence, NumericalCertificate, ProvenanceHash,
     SensitivitySummary, StatisticalCertificate, ValidityDomain,

@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use fs_airflow::conjugate::goal::{CoupledGoalError, maximum::pullback_transport_controls};
 use fs_conduction::{ScalarField, ThermalBc};
-use fs_convection::{CorrelationId, CorrelationInputs, NusseltEvaluation, evaluate};
+use fs_convection::{CorrelationInputs, NusseltEvaluation, evaluate};
+#[cfg(test)]
+use fs_convection::CorrelationId;
 use fs_project::fansystem::FanSystemTopology;
 use super::{Cx, ProjectSpec, RungSolved, SolveRefusal, bad, conduction_error,
     contractions, finite, poll, row, unsupported, zeros};
@@ -143,43 +145,11 @@ pub(super) fn append(
     poll(cx)
 }
 
-// Derivatives of the actual admitted card formula; no perturbed h evaluation
-// determines a slope. The native adapter separately checks an interior regime.
+// Keep the native binding/domain checks above, but use the correlation owner's
+// derivative rather than maintaining another copy of its physical formulas.
 fn reynolds_elasticity(evaluation: &NusseltEvaluation) -> Result<Option<f64>, SolveRefusal> {
-    use fs_math::det;
-    if !evaluation.evidence().model.in_domain { return Ok(None); }
-    let group = |name: &str| evaluation.groups().get(name).copied()
-        .ok_or_else(|| bad(format!("fan-convection derivative lacks {name}")));
-    let nu = evaluation.evidence().value;
-    let value = match evaluation.card().id {
-        CorrelationId::CircularDuctLaminarCwt | CorrelationId::CircularDuctLaminarChf
-        | CorrelationId::RectangularDuctLaminarCwt | CorrelationId::RectangularDuctLaminarChf => 0.0,
-        CorrelationId::CircularDuctHausen => {
-            let gz = group("Gz")?;
-            let b = 0.04*det::pow(gz, 2.0/3.0);
-            (0.0668*gz/(1.0+b))/nu*(1.0+b/3.0)/(1.0+b)
-        }
-        CorrelationId::DittusBoelter => 0.8,
-        CorrelationId::Gnielinski => {
-            let re = group("Re")?; let pr = group("Pr")?;
-            let z = 0.79*det::ln(re)-1.64;
-            let c = 12.7/(det::sqrt(8.0)*z)*(det::pow(pr, 2.0/3.0)-1.0);
-            re/(re-1000.0) - 1.58/z*(1.0-0.5*c/(1.0+c))
-        }
-        CorrelationId::FlatPlateLaminarAverage => 0.5,
-        CorrelationId::FlatPlateTurbulentAverage => {
-            let term = 0.037*det::pow(group("Re")?, 0.8);
-            0.8*term/(term-871.0)
-        }
-        CorrelationId::ChurchillBernsteinCylinder => {
-            let b = det::pow(group("Re")?/282000.0, 5.0/8.0);
-            (nu-0.3)/nu*0.5*(1.0+b/(1.0+b))
-        }
-        // A C0 source table or a natural-convection law is not a smooth
-        // forced-flow coefficient derivative. Never silently assign zero.
-        _ => return Ok(None),
-    };
-    Ok(Some(finite(value)?))
+    evaluation.reynolds_elasticity().map_err(|error|
+        bad(format!("fan-convection derivative refused: {error}")))
 }
 
 #[cfg(test)]
