@@ -365,32 +365,8 @@ pub fn check_outcome(
     }
     let r = outcome.r_factor();
 
-    // Obligation: finiteness of everything under judgment.
-    for (idx, v) in r.iter().enumerate() {
-        if !v.is_finite() {
-            return Ok(CheckerReceipt::mint(
-                Verdict::Demoted(Refusal::NonFiniteEntry { index: idx }),
-                records,
-            ));
-        }
-    }
-
-    // Obligation: factor shape laws.
-    for i in 0..n {
-        if r[i * n + i] < 0.0 {
-            return Ok(CheckerReceipt::mint(
-                Verdict::Demoted(Refusal::StrictlyNegativeDiagonal { index: i }),
-                records,
-            ));
-        }
-        for j in 0..i {
-            if r[i * n + j] != 0.0 {
-                return Ok(CheckerReceipt::mint(
-                    Verdict::Demoted(Refusal::NotUpperTriangular { row: i, col: j }),
-                    records,
-                ));
-            }
-        }
+    if let Some(refusal) = factor_shape_refusal(r, n) {
+        return Ok(CheckerReceipt::mint(Verdict::Demoted(refusal), records));
     }
     records.push(CheckRecord::FactorShape);
 
@@ -465,6 +441,26 @@ pub fn check_outcome(
         budget,
         records,
     ))
+}
+
+/// Check finite entries before the original row-ordered flip/triangle laws.
+fn factor_shape_refusal(r: &[f64], n: usize) -> Option<Refusal> {
+    for (idx, v) in r.iter().enumerate() {
+        if !v.is_finite() {
+            return Some(Refusal::NonFiniteEntry { index: idx });
+        }
+    }
+    for i in 0..n {
+        if r[i * n + i] < 0.0 {
+            return Some(Refusal::StrictlyNegativeDiagonal { index: i });
+        }
+        for j in 0..i {
+            if r[i * n + j] != 0.0 {
+                return Some(Refusal::NotUpperTriangular { row: i, col: j });
+            }
+        }
+    }
+    None
 }
 
 /// Resolve the producer's authority only after every preceding obligation.
