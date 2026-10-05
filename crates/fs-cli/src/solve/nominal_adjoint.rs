@@ -20,12 +20,13 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 
 mod contractions;
 mod natural_feedback;
+mod nonlinear_solid;
 mod radiative_feedback;
 mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 const MAX_PARAMETERS: usize = 256;
-const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Linear-solid modes retain their linear-conductivity restriction; natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
+const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry, matching contact and hydraulic operating point. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. The nonlinear-solid mode differentiates smooth heterogeneous k(T) through the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity and affine-air modes retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and the complete area-mean boundary feedback. Radiation differentiates the consistent-trace secant, its weighted reference and declared reservoir, with emissivity fixed at the selected card query. The emissivity row is a local coefficient partial, not a material-card-selection or temperature-dependent-emissivity derivative. Radiation checks the constitutive primal residual at the retained field, not only the last frozen outer iterate. Complete affine air-reference feedback is differentiated when selected; combined radiation/airflow remains unsupported. Not a unique maximum derivative at a tie, a gradient-error enclosure, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Air inlet, fan speed and Dirichlet-temperature derivatives are not supplied.";
 
 fn bad(message: impl Into<String>) -> SolveRefusal {
     conduction_error("cli-solve-nominal-adjoint", message,
@@ -183,6 +184,11 @@ pub(super) fn extract(
         natural_ambient = ambient;
         (gradient.nodal_load, gradient.relative_residual, gradient.iterations,
             None, None, "natural-convection-full-wall-feedback")
+    } else if data.air_paths.is_empty() && nonlinear_solid::needed(cx, problem)? {
+        let gradient = nonlinear_solid::pullback(cx, problem, data.interfaces.as_ref(),
+            data.linear, temperature, &weights)?;
+        (gradient.nodal_load, gradient.relative_residual, gradient.iterations,
+            None, None, "nonlinear-solid-full-material-feedback")
     } else if data.air_paths.is_empty() {
         let analyzer = LinearGoalAnalyzer::new(cx, problem, data.interfaces.as_ref(), data.linear,
             temperature, &weights, config).map_err(lower)?;
