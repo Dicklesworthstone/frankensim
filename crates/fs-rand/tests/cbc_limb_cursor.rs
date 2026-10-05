@@ -124,7 +124,8 @@ fn clc_003_cancellation_at_microstep_boundaries_never_half_commits() {
         )
     };
 
-    // Cancel at EVERY poll with one-cell tiles: pauses land inside exact
+    // Admit entry, then cancel at every tile boundary with one-cell tiles:
+    // pauses land inside exact
     // operations. Public prefixes stay whole-component throughout and the
     // resumed result replays the golden byte-for-byte.
     let mut executor =
@@ -139,9 +140,9 @@ fn clc_003_cancellation_at_microstep_boundaries_never_half_commits() {
                 &mut || {
                     if first {
                         first = false;
-                        CbcControl::Cancel
-                    } else {
                         CbcControl::Continue
+                    } else {
+                        CbcControl::Cancel
                     }
                 },
                 tile(4, 2, 1),
@@ -184,16 +185,17 @@ fn clc_004_progress_receipt_exposes_positions_without_buffers() {
     // Drive into the scan phase and pause mid-operation using one-cell
     // tiles: the receipt must expose a pending cursor position.
     let mut saw_pending = false;
-    loop {
+    let mut completed = false;
+    for _ in 0..10_000 {
         let mut first = true;
         let status = executor
             .run(
                 &mut || {
                     if first {
                         first = false;
-                        CbcControl::Cancel
-                    } else {
                         CbcControl::Continue
+                    } else {
+                        CbcControl::Cancel
                     }
                 },
                 tile(4, 2, 1),
@@ -214,10 +216,14 @@ fn clc_004_progress_receipt_exposes_positions_without_buffers() {
             );
         }
         match status {
-            CbcRunStatus::Completed => break,
+            CbcRunStatus::Completed => {
+                completed = true;
+                break;
+            }
             _ => {}
         }
     }
+    assert!(completed, "bounded progress probing must complete");
     assert!(saw_pending, "at least one pause observed a pending cursor");
     assert!(
         executor.micro_progress().is_none(),

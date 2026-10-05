@@ -208,8 +208,8 @@ fn stepped_run(executor: &mut fs_rand::cbc_exec::CbcExecutor) -> CbcRunStatus {
     stepped_run_result(executor).expect("stepped execution cannot refuse while disarmed")
 }
 
-/// Run one tile batch that cancels at its first poll, so each call advances
-/// the resumable cursor by a bounded amount instead of driving to completion.
+/// Admit the entry poll, then cancel at the first completed tile boundary.
+/// Entry cancellation performs no work under the strict run protocol.
 fn stepped_run_result(
     executor: &mut fs_rand::cbc_exec::CbcExecutor,
 ) -> Result<CbcRunStatus, CbcExecError> {
@@ -218,9 +218,9 @@ fn stepped_run_result(
         &mut || {
             if first_poll {
                 first_poll = false;
-                CbcControl::Cancel
-            } else {
                 CbcControl::Continue
+            } else {
+                CbcControl::Cancel
             }
         },
         tile(4, 2),
@@ -346,7 +346,23 @@ fn cfs_003_scan_injection_refuses_typed_then_resumes_to_the_golden_lattice() {
         fs_rand::cbc_exec::CbcExecutor::new(admitted(8, 3, CbcExecutionMode::Certified))
             .expect("injected executor admits");
     executor.enable_certificates().expect("certified mode");
-    while executor.prefix().len() < 1 && !executor.is_complete() {
+    // The previous helper cancelled at entry and this loop never advanced.
+    // Preserve that negative control in the same invocation, with a bound.
+    let entry_root = executor.state_root();
+    for _ in 0..4 {
+        assert_eq!(
+            executor.run(&mut || CbcControl::Cancel, tile(4, 2), u128::MAX),
+            Ok(CbcRunStatus::Cancelled(
+                fs_rand::cbc_exec::CbcBoundary::Entry
+            ))
+        );
+        assert_eq!(executor.state_root(), entry_root);
+        assert_eq!(executor.work_spent(), 0);
+    }
+    for _ in 0..8 {
+        if !executor.prefix().is_empty() || executor.is_complete() {
+            break;
+        }
         let status = stepped_run(&mut executor);
         assert!(
             matches!(

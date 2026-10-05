@@ -74,7 +74,7 @@ impl<F: FnMut() -> CbcControl> CbcPoll for F {
 pub struct CbcTileShape {
     candidate_block: u32,
     point_block: u32,
-    limb_block: u32,
+    mutation_cells: u32,
 }
 
 impl CbcTileShape {
@@ -123,14 +123,14 @@ impl CbcTileShape {
         Ok(Self {
             candidate_block,
             point_block,
-            limb_block,
+            mutation_cells: limb_block,
         })
     }
 
     /// Mutation cells per tile (the microstep budget).
     #[must_use]
     pub const fn limb_block(self) -> u32 {
-        self.limb_block
+        self.mutation_cells
     }
 }
 
@@ -874,7 +874,7 @@ impl CbcExecutor {
         // Entry protocol: pre-cancelled runs observe cancellation even at
         // zero allowance; otherwise zero allowance exhausts at Entry
         // without executing anything.
-        if cancelled_at_entry {
+        if cancelled_at_entry || remaining == 0 {
             let receipt = CbcRunReceipt {
                 protocol_version: RUN_PROTOCOL_VERSION,
                 executor_schema_version: CBC_EXECUTOR_SCHEMA_VERSION,
@@ -888,26 +888,12 @@ impl CbcExecutor {
                 state_root_before: root_before,
                 state_root_after: self.state_root(),
             };
-            return Ok((CbcRunStatus::Cancelled(CbcBoundary::Entry), receipt));
-        }
-        if remaining == 0 {
-            let receipt = CbcRunReceipt {
-                protocol_version: RUN_PROTOCOL_VERSION,
-                executor_schema_version: CBC_EXECUTOR_SCHEMA_VERSION,
-                allowance_requested: allowance,
-                allowance_used: 0,
-                allowance_remaining: 0,
-                committed_transitions: 0,
-                last_boundary: Some(CbcBoundary::Entry),
-                polls,
-                finalized: true,
-                state_root_before: root_before,
-                state_root_after: self.state_root(),
+            let status = if cancelled_at_entry {
+                CbcRunStatus::Cancelled(CbcBoundary::Entry)
+            } else {
+                CbcRunStatus::AllowanceExhausted(CbcBoundary::Entry)
             };
-            return Ok((
-                CbcRunStatus::AllowanceExhausted(CbcBoundary::Entry),
-                receipt,
-            ));
+            return Ok((status, receipt));
         }
         // Strict-allowance shortfalls are statuses, not errors: nothing
         // executed and everything stays resumable. Translated from the
@@ -1032,55 +1018,7 @@ impl CbcExecutor {
         let transitions_handle = &mut self.run_transitions;
         loop {
             if *candidate == charges.n {
-                let (winning_score, chosen) = best
-                    .take()
-                    .expect("candidate 1 is coprime to every admitted n");
-                if charges.certifying {
-                    let prefix_len = self
-                        .z
-                        .len()
-                        .checked_add(1)
-                        .expect("admission proved the certificate prefix length fits usize");
-                    let certificate_units = self
-                        .schedule
-                        .certificate_prefix_units(prefix_len)
-                        .expect("admission proved certificate charges fit u128");
-                    // Build the full record from borrowed state first: a
-                    // storage refusal here leaves every scan field intact,
-                    // so the retry re-emits once and never double-charges
-                    // the certificate units or loses the tie class.
-                    let runner_borrowed = (*runner_up).as_ref().map(|(score, who)| (score, *who));
-                    let certificate = build_prefix_certificate(
-                        &self.z,
-                        &winning_score,
-                        chosen,
-                        runner_borrowed,
-                        tie_class,
-                        prefix_len,
-                        charges.n,
-                    )?;
-                    gate_allowance(remaining, certificate_units, CbcBoundary::CandidateBlock)?;
-                    debit(
-                        &mut self.work_spent,
-                        charges.admitted_work_units,
-                        remaining,
-                        certificate_units,
-                        CbcBoundary::CandidateBlock,
-                        &mut self.run_transitions,
-                    )?;
-                    debug_assert!(
-                        self.certificates.len() < self.certificates.capacity(),
-                        "the record array was reserved for one certificate per scanned component"
-                    );
-                    let _ = runner_up.take();
-                    tie_class.clear();
-                    self.certificates.push(certificate);
-                }
-                self.phase = Phase::Update {
-                    chosen,
-                    next_point: 0,
-                };
-                return Ok(CbcBoundary::CandidateBlock);
+                return self.finish_scan(&charges, remaining);
             }
             match advance_scan_candidate(
                 candidate,
@@ -1112,6 +1050,69 @@ impl CbcExecutor {
                 return Ok(CbcBoundary::CandidateBlock);
             }
         }
+    }
+
+    /// Commit the completed scan's optional certificate and enter its update pass.
+    fn finish_scan(
+        &mut self,
+        charges: &TileCharges,
+        remaining: &mut u128,
+    ) -> Result<CbcBoundary, CbcExecError> {
+        let Phase::Scan {
+            best,
+            runner_up,
+            tie_class,
+            ..
+        } = &mut self.phase
+        else {
+            unreachable!("only a completed scan enters its update pass");
+        };
+        let (winning_score, chosen) = best
+            .take()
+            .expect("candidate 1 is coprime to every admitted n");
+        if charges.certifying {
+            let prefix_len = self
+                .z
+                .len()
+                .checked_add(1)
+                .expect("admission proved the certificate prefix length fits usize");
+            let certificate_units = self
+                .schedule
+                .certificate_prefix_units(prefix_len)
+                .expect("admission proved certificate charges fit u128");
+            // Preserve the original reservation, allowance and debit order.
+            let runner_borrowed = (*runner_up).as_ref().map(|(score, who)| (score, *who));
+            let certificate = build_prefix_certificate(
+                &self.z,
+                &winning_score,
+                chosen,
+                runner_borrowed,
+                tie_class,
+                prefix_len,
+                charges.n,
+            )?;
+            gate_allowance(remaining, certificate_units, CbcBoundary::CandidateBlock)?;
+            debit(
+                &mut self.work_spent,
+                charges.admitted_work_units,
+                remaining,
+                certificate_units,
+                CbcBoundary::CandidateBlock,
+                &mut self.run_transitions,
+            )?;
+            debug_assert!(
+                self.certificates.len() < self.certificates.capacity(),
+                "the record array was reserved for one certificate per scanned component"
+            );
+            let _ = runner_up.take();
+            tie_class.clear();
+            self.certificates.push(certificate);
+        }
+        self.phase = Phase::Update {
+            chosen,
+            next_point: 0,
+        };
+        Ok(CbcBoundary::CandidateBlock)
     }
 
     /// Initialize first-component products for one tile of points, then
@@ -1512,7 +1513,7 @@ impl TileCharges {
                 .expect("admission proved candidate charges fit u128"),
             point_block: tile.point_block,
             candidate_block: tile.candidate_block,
-            limb_block: tile.limb_block,
+            limb_block: tile.mutation_cells,
         }
     }
 }
@@ -1607,8 +1608,29 @@ fn advance_scan_candidate(
             return Ok(AdvanceScan::Accumulating);
         }
     }
-    let n = charges.n;
     let running = accum.as_mut().expect("accumulator was just installed");
+    accumulate_scan_candidate(
+        *candidate,
+        running,
+        products,
+        charges,
+        work_spent,
+        transitions,
+        remaining,
+    )
+}
+
+/// Resume the admitted point/limb accumulation without repeating a visit debit.
+fn accumulate_scan_candidate(
+    candidate: u32,
+    running: &mut ScanAccum,
+    products: &[ExactNat],
+    charges: &TileCharges,
+    work_spent: &mut u128,
+    transitions: &mut u64,
+    remaining: &mut u128,
+) -> Result<AdvanceScan, CbcExecError> {
+    let n = charges.n;
     let end = running
         .next_point
         .saturating_add(charges.point_block)
@@ -1630,7 +1652,7 @@ fn advance_scan_candidate(
         // resume a persisted cursor without re-debiting.
         if running.micro.is_none() {
             let src = products[point_index].limbs();
-            let factor = exact_kernel_numerator(n, residue_of(point_index, *candidate, n));
+            let factor = exact_kernel_numerator(n, residue_of(point_index, candidate, n));
             let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
             let required = src
                 .len()
@@ -1666,7 +1688,7 @@ fn advance_scan_candidate(
 
         // Drive up to limb_block mutation cells of the persisted microprogram.
         let src = products[point_index].limbs();
-        let factor = exact_kernel_numerator(n, residue_of(point_index, *candidate, n));
+        let factor = exact_kernel_numerator(n, residue_of(point_index, candidate, n));
         let (factor_words, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
         let mut cursor = running.micro.expect("cursor installed above");
         let outcome = crate::cbc_limb::step_add_multiply(
