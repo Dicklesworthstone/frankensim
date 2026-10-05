@@ -140,6 +140,13 @@ pub(super) struct SolidSolution {
 }
 
 impl SolidSolution {
+    /// Retain the producer's immutable laws, never infer emissivity from a
+    /// rounded receipt or a difference of combined coefficients.
+    pub(super) fn radiation_patches(&self) -> Vec<AmbientRadiationPatch> {
+        self.radiation.as_ref().map_or_else(Vec::new, |report|
+            report.patches.iter().map(|row| row.patch.clone()).collect())
+    }
+
     pub(super) fn convective_robin_fluxes(&self) -> &[RobinFlux] {
         self.convective_fluxes
             .as_deref()
@@ -220,7 +227,7 @@ fn num(value: f64) -> Result<String, SolveRefusal> {
     })
 }
 
-const RADIATION_NO_CLAIM: &str = "card-backed emissivity is fixed at the declared query temperature; each patch radiates epsilon sigma A (area-mean temperature^4 - reservoir temperature^4) to a black isothermal reservoir with view factor one; the pointwise Robin trace uses a converged secant coefficient; no enclosure, shadowing, participating medium, temperature-dependent emissivity, pointwise fourth-power integral, radiative adjoint, or experimental model validation is claimed; the radiative magnitude share is |radiation|/(|radiation|+|convection|), not a source-power fraction";
+const RADIATION_NO_CLAIM: &str = "card-backed emissivity is fixed at the declared query temperature; each patch radiates epsilon sigma A (area-mean temperature^4 - reservoir temperature^4) to a black isothermal reservoir with view factor one; the pointwise Robin trace uses a converged secant coefficient; no enclosure, shadowing, participating medium, temperature-dependent emissivity, pointwise fourth-power integral, or experimental model validation is claimed; the radiative magnitude share is |radiation|/(|radiation|+|convection|), not a source-power fraction";
 
 /// A paired physical-model comparison, never an uncertainty bound.
 #[derive(Debug)]

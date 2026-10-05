@@ -5,6 +5,8 @@ use super::*;
 mod natural_feedback;
 #[path = "nominal_adjoint/radiative_feedback.rs"]
 mod radiative_feedback;
+#[path = "nominal_adjoint/radiation_owner.rs"]
+mod radiation_owner;
 
 fn request(project: &mut fs_project::ProjectSpec) {
     project.outputs.get_or_insert_with(Vec::new).push(fs_project::spec::OutputRequest {

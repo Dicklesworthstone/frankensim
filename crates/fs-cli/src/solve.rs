@@ -157,7 +157,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// additional row one shape: value, unit, certified `interval`, source.
 /// Version 37 admits the surface family (mean, spread, std-dev) over a
 /// declared surface named by the output's `:region` (fsim v9).
-pub const SOLVE_DRIVER_VERSION: u32 = 37;
+/// Version 38 retains original emissivity-law validity in radiation adjoints
+/// through the shared physical owner; earlier receipts cannot resume into it.
+pub const SOLVE_DRIVER_VERSION: u32 = 38;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1377,6 +1379,8 @@ struct RungAdjointData {
     air_paths: Vec<fs_airflow::conjugate::AirPath>,
     /// The combined convective + radiative partition of a radiating solve.
     radiating_boundary: Option<fs_conduction::ThermalBoundary>,
+    /// Exact card-backed constitutive laws from the accepted radiation producer.
+    radiation_patches: Vec<fs_conduction::AmbientRadiationPatch>,
 }
 
 /// A two-space observation of the actual nodal maximum. Absolute nodal dual
@@ -6816,6 +6820,7 @@ fn conduction_solve_receipt(
             (solution, Some(fragment), converged, path.air_paths())
         };
         let radiation_fragment = solid.radiation_receipt(radiation.as_ref())?;
+        let radiation_patches = solid.radiation_patches();
         let radiating_boundary = solid.combined_boundary;
         let solution = solid.conduction;
         let interface_evidence = (!interface_resolution.pairs.is_empty())
@@ -6881,7 +6886,7 @@ fn conduction_solve_receipt(
             }
             Some(RungAdjointData {
                 boundary, interfaces, source, materials: element_materials, fallback, linear, air_paths,
-                radiating_boundary,
+                radiating_boundary, radiation_patches,
             })
         } else { None };
         adaptive_deadline(deadline)?;
