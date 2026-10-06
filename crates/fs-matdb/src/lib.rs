@@ -144,8 +144,8 @@ pub enum MatDbError {
     /// A claim's value dimensions disagree with its key's registered
     /// dimensions.
     DimsMismatch {
-        /// The property key.
-        key: PropertyKey,
+        /// The complete property key, allocated only on this refusal path.
+        key: Box<PropertyKey>,
         /// The key's registered dimensions.
         expected: Dims,
         /// The offered value's dimensions.
@@ -644,6 +644,7 @@ impl PropertyKey {
         Ok(self)
     }
 
+    /// Exact strain context; absence is not a wildcard.
     #[must_use]
     pub const fn strain_component(&self) -> Option<StrainTensorComponent> {
         self.strain_component
@@ -1158,7 +1159,7 @@ impl ClaimSet {
         let found = claim.value.dims();
         if found != claim.key.dims() {
             return Err(MatDbError::DimsMismatch {
-                key: claim.key.clone(),
+                key: Box::new(claim.key.clone()),
                 expected: claim.key.dims(),
                 found,
             });
@@ -1185,7 +1186,7 @@ impl ClaimSet {
             && registered.dims() != claim.key.dims()
         {
             return Err(MatDbError::DimsMismatch {
-                key: claim.key.clone(),
+                key: Box::new(claim.key.clone()),
                 expected: registered.dims(),
                 found,
             });

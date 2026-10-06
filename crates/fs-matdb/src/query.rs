@@ -17,6 +17,7 @@
 //!   the receipt records what was considered, selected, and decided.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
@@ -630,31 +631,13 @@ impl PropertyUsageReceipt {
         let property = reader.string("property-bytes", MAX_PROPERTY_USAGE_PROPERTY_BYTES)?;
 
         reader.expect_tag(FIELD_QUERY_POINT, "query-point")?;
-        let query_count = reader.count("query-axes", MAX_PROPERTY_USAGE_QUERY_AXES)?;
-        reader.require_remaining_items(query_count, 16, "query axes")?;
-        let mut query_point = Vec::with_capacity(query_count);
-        for _ in 0..query_count {
-            let axis = reader.string("axis-bytes", MAX_PROPERTY_USAGE_AXIS_BYTES)?;
-            let value = reader.f64()?;
-            query_point.push((axis, value));
-        }
+        let query_point = reader.query_point()?;
 
         reader.expect_tag(FIELD_CONSIDERED, "considered")?;
-        let considered_count =
-            reader.count("considered-claim-ids", MAX_PROPERTY_USAGE_CLAIM_IDS)?;
-        reader.require_remaining_items(considered_count, 32, "considered claim ids")?;
-        let mut considered = Vec::with_capacity(considered_count);
-        for _ in 0..considered_count {
-            considered.push(ClaimId(reader.hash()?));
-        }
+        let considered = reader.claim_ids("considered-claim-ids", "considered claim ids")?;
 
         reader.expect_tag(FIELD_IN_DOMAIN, "in-domain")?;
-        let in_domain_count = reader.count("in-domain-claim-ids", MAX_PROPERTY_USAGE_CLAIM_IDS)?;
-        reader.require_remaining_items(in_domain_count, 32, "in-domain claim ids")?;
-        let mut in_domain = Vec::with_capacity(in_domain_count);
-        for _ in 0..in_domain_count {
-            in_domain.push(ClaimId(reader.hash()?));
-        }
+        let in_domain = reader.claim_ids("in-domain-claim-ids", "in-domain claim ids")?;
 
         reader.expect_tag(FIELD_SELECTED, "selected")?;
         let selected = ClaimId(reader.hash()?);
@@ -685,16 +668,7 @@ impl PropertyUsageReceipt {
         let mut axis_quantities = BTreeMap::new();
         if schema_version == 3 {
             reader.expect_tag(FIELD_AXIS_QUANTITIES, "axis-quantities")?;
-            let count = reader.count("axis-quantities", MAX_PROPERTY_USAGE_QUERY_AXES)?;
-            for _ in 0..count {
-                let axis = reader.string("axis-bytes", MAX_PROPERTY_USAGE_AXIS_BYTES)?;
-                let raw = reader.take(fs_qty::QUANTITY_SPEC_ENCODED_LEN)?;
-                let quantity = QuantitySpec::from_canonical_bytes(raw)
-                    .map_err(|error| invalid_field("axis-quantity", error.to_string()))?;
-                if axis_quantities.insert(axis, quantity).is_some() {
-                    return Err(invalid_field("axis-quantities", "duplicate axis"));
-                }
-            }
+            axis_quantities = reader.axis_quantities()?;
         }
         let encoded_identity = reader.hash()?;
         reader.finish()?;
@@ -818,7 +792,7 @@ impl PropertyUsageReceipt {
                 supported: 3,
             });
         }
-        if (self.schema_version == 3) != !self.axis_quantities.is_empty() {
+        if (self.schema_version == 3) == self.axis_quantities.is_empty() {
             return Err(invalid_field(
                 "axis-quantities",
                 "typed axes require v3; legacy receipts require an empty descriptor map",
@@ -1198,6 +1172,49 @@ impl<'a> ReceiptReader<'a> {
         Ok(text.to_string())
     }
 
+    fn query_point(&mut self) -> Result<Vec<(String, f64)>, PropertyUsageReceiptError> {
+        let count = self.count("query-axes", MAX_PROPERTY_USAGE_QUERY_AXES)?;
+        self.require_remaining_items(count, 16, "query axes")?;
+        let mut point = Vec::with_capacity(count);
+        for _ in 0..count {
+            let axis = self.string("axis-bytes", MAX_PROPERTY_USAGE_AXIS_BYTES)?;
+            let value = self.f64()?;
+            point.push((axis, value));
+        }
+        Ok(point)
+    }
+
+    fn claim_ids(
+        &mut self,
+        resource: &'static str,
+        field: &str,
+    ) -> Result<Vec<ClaimId>, PropertyUsageReceiptError> {
+        let count = self.count(resource, MAX_PROPERTY_USAGE_CLAIM_IDS)?;
+        self.require_remaining_items(count, 32, field)?;
+        let mut ids = Vec::with_capacity(count);
+        for _ in 0..count {
+            ids.push(ClaimId(self.hash()?));
+        }
+        Ok(ids)
+    }
+
+    fn axis_quantities(
+        &mut self,
+    ) -> Result<BTreeMap<String, QuantitySpec>, PropertyUsageReceiptError> {
+        let count = self.count("axis-quantities", MAX_PROPERTY_USAGE_QUERY_AXES)?;
+        let mut quantities = BTreeMap::new();
+        for _ in 0..count {
+            let axis = self.string("axis-bytes", MAX_PROPERTY_USAGE_AXIS_BYTES)?;
+            let raw = self.take(fs_qty::QUANTITY_SPEC_ENCODED_LEN)?;
+            let quantity = QuantitySpec::from_canonical_bytes(raw)
+                .map_err(|error| invalid_field("axis-quantity", error.to_string()))?;
+            if quantities.insert(axis, quantity).is_some() {
+                return Err(invalid_field("axis-quantities", "duplicate axis"));
+            }
+        }
+        Ok(quantities)
+    }
+
     fn hash(&mut self) -> Result<ContentHash, PropertyUsageReceiptError> {
         let mut hash = [0_u8; 32];
         hash.copy_from_slice(self.take(32)?);
@@ -1258,8 +1275,8 @@ pub enum PropertySupportError {
     Evaluation {
         /// State where evaluation refused.
         point: QueryPoint,
-        /// Unchanged underlying diagnosis.
-        error: MatDbError,
+        /// Complete underlying diagnosis, allocated only on refusal.
+        error: Box<MatDbError>,
     },
     /// Sources cannot be silently stitched into one response.
     ClaimChanges {
@@ -1388,7 +1405,7 @@ impl ClaimSet {
         self.require_dimension_only_property(property)
             .map_err(|error| PropertySupportError::Evaluation {
                 point: lower.clone(),
-                error,
+                error: Box::new(error),
             })?;
         self.query_envelope_selected(property, None, lower, upper, selection)
     }
@@ -1408,7 +1425,7 @@ impl ClaimSet {
         self.require_quantity(property)
             .map_err(|error| PropertySupportError::Evaluation {
                 point: lower.clone(),
-                error,
+                error: Box::new(error),
             })?;
         self.query_envelope_selected(property.name(), Some(property), lower, upper, selection)
     }
@@ -1437,7 +1454,7 @@ impl ClaimSet {
                 })
                 .map_err(|error| PropertySupportError::Evaluation {
                     point: point.clone(),
-                    error,
+                    error: Box::new(error),
                 })
         };
         let low = query(lower)?;
@@ -1497,7 +1514,7 @@ impl ClaimSet {
                         .with(axis, x)
                         .map_err(|error| PropertySupportError::Evaluation {
                             point: lower.clone(),
-                            error,
+                            error: Box::new(error),
                         })?;
             }
             if intersects {
@@ -1635,50 +1652,11 @@ impl ClaimSet {
         }
         let considered: Vec<ClaimId> = considered_pairs.iter().map(|(id, _)| *id).collect();
         let hardness_test = context_key.and_then(PropertyKey::hardness_test);
-        let elastic_component = context_key.and_then(PropertyKey::elastic_component);
-        let strain_component = context_key.and_then(PropertyKey::strain_component);
-        let stress_component = context_key.and_then(PropertyKey::stress_component);
-        let matches_tensor = |claim: &PropertyClaim| {
-            claim.key.elastic_component() == elastic_component
-                && claim.key.strain_component() == strain_component
-                && claim.key.stress_component() == stress_component
-        };
-        // Stress and stiffness may share pressure dimensions and a property
-        // name. An explicit complete context selects either without erasing
-        // its kind; a context-free query remains inadmissible.
-        if (elastic_component.is_none()
-            && strain_component.is_none()
-            && stress_component.is_none()
-            && considered_pairs.iter().any(|(_, claim)| {
-                claim.key.elastic_component().is_some()
-                    || claim.key.strain_component().is_some()
-                    || claim.key.stress_component().is_some()
-            }))
-            || !considered_pairs
-                .iter()
-                .any(|(_, claim)| matches_tensor(claim))
-        {
-            return Err(MatDbError::TensorContextMismatch {
-                property: property.to_owned(),
-            });
-        }
-        if considered_pairs[0].1.key.is_hardness() && hardness_test.is_none() {
-            return Err(MatDbError::MissingHardnessContext {
-                property: property.to_owned(),
-            });
-        }
-        if !considered_pairs
-            .iter()
-            .any(|(_, claim)| claim.key.hardness_test() == hardness_test)
-        {
-            return Err(MatDbError::HardnessContextMismatch {
-                property: property.to_owned(),
-            });
-        }
+        require_query_context(property, context_key, &considered_pairs)?;
         let in_domain_pairs: Vec<_> = considered_pairs
             .iter()
             .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
-            .filter(|(_, claim)| matches_tensor(claim))
+            .filter(|(_, claim)| matches_tensor_context(claim, context_key))
             .filter(|(_, claim)| {
                 claim
                     .validity
@@ -1690,7 +1668,7 @@ impl ClaimSet {
             if let Some((claim, axis)) = considered_pairs
                 .iter()
                 .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
-                .filter(|(_, claim)| matches_tensor(claim))
+                .filter(|(_, claim)| matches_tensor_context(claim, context_key))
                 .find_map(|(_, claim)| claim_axis_mismatch(claim, point).map(|axis| (*claim, axis)))
             {
                 return Err(MatDbError::AxisQuantityMismatch {
@@ -1743,40 +1721,100 @@ impl ClaimSet {
             source_hashes,
         };
 
-        let (numerical, statistical) = honest_certificates(&claim.uncertainty, value);
-        let model = ModelEvidence {
-            cards: vec![format!("fs-matdb:{property}")],
-            assumptions: vec![format!(
-                "claim provenance: {} ({})",
-                claim.provenance.source, claim.provenance.license
-            )],
-            validity: claim.validity.clone(),
-            discrepancy_rel: 0.0,
-            in_domain: true,
-        };
-        let receipt_identity = receipt
-            .try_content_hash()
-            .map_err(|error| MatDbError::PropertyUsageReceiptNotPortable { error })?;
-        let mut provenance_prefix = [0_u8; 8];
-        provenance_prefix.copy_from_slice(&receipt_identity.0[..8]);
-        let provenance = ProvenanceHash(u64::from_le_bytes(provenance_prefix));
-        let evidence = Evidence {
-            value: PropertySample {
-                value,
-                dims: claim.value.dims(),
-                quantity: claim.key.quantity(),
-                uncertainty: claim.uncertainty.clone(),
-            },
-            qoi: value,
-            numerical,
-            statistical,
-            model,
-            sensitivity: SensitivitySummary::default(),
-            provenance,
-            adjoint_ref: None,
-        };
-        Ok(MaterialAnswer { evidence, receipt })
+        material_answer(claim, value, receipt)
     }
+}
+
+fn matches_tensor_context(claim: &PropertyClaim, context_key: Option<&PropertyKey>) -> bool {
+    claim.key.elastic_component() == context_key.and_then(PropertyKey::elastic_component)
+        && claim.key.strain_component() == context_key.and_then(PropertyKey::strain_component)
+        && claim.key.stress_component() == context_key.and_then(PropertyKey::stress_component)
+}
+
+fn require_query_context(
+    property: &str,
+    context_key: Option<&PropertyKey>,
+    considered_pairs: &[(ClaimId, &PropertyClaim)],
+) -> Result<(), MatDbError> {
+    let hardness_test = context_key.and_then(PropertyKey::hardness_test);
+    // Stress and stiffness may share pressure dimensions and a property name.
+    // A complete context selects either; a context-free query cannot erase it.
+    if (context_key
+        .and_then(PropertyKey::elastic_component)
+        .is_none()
+        && context_key
+            .and_then(PropertyKey::strain_component)
+            .is_none()
+        && context_key
+            .and_then(PropertyKey::stress_component)
+            .is_none()
+        && considered_pairs.iter().any(|(_, claim)| {
+            claim.key.elastic_component().is_some()
+                || claim.key.strain_component().is_some()
+                || claim.key.stress_component().is_some()
+        }))
+        || !considered_pairs
+            .iter()
+            .any(|(_, claim)| matches_tensor_context(claim, context_key))
+    {
+        return Err(MatDbError::TensorContextMismatch {
+            property: property.to_owned(),
+        });
+    }
+    if considered_pairs[0].1.key.is_hardness() && hardness_test.is_none() {
+        return Err(MatDbError::MissingHardnessContext {
+            property: property.to_owned(),
+        });
+    }
+    if !considered_pairs
+        .iter()
+        .any(|(_, claim)| claim.key.hardness_test() == hardness_test)
+    {
+        return Err(MatDbError::HardnessContextMismatch {
+            property: property.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn material_answer(
+    claim: &PropertyClaim,
+    value: f64,
+    receipt: PropertyUsageReceipt,
+) -> Result<MaterialAnswer, MatDbError> {
+    let (numerical, statistical) = honest_certificates(&claim.uncertainty, value);
+    let model = ModelEvidence {
+        cards: vec![format!("fs-matdb:{}", receipt.property)],
+        assumptions: vec![format!(
+            "claim provenance: {} ({})",
+            claim.provenance.source, claim.provenance.license
+        )],
+        validity: claim.validity.clone(),
+        discrepancy_rel: 0.0,
+        in_domain: true,
+    };
+    let receipt_identity = receipt
+        .try_content_hash()
+        .map_err(|error| MatDbError::PropertyUsageReceiptNotPortable { error })?;
+    let mut provenance_prefix = [0_u8; 8];
+    provenance_prefix.copy_from_slice(&receipt_identity.0[..8]);
+    let provenance = ProvenanceHash(u64::from_le_bytes(provenance_prefix));
+    let evidence = Evidence {
+        value: PropertySample {
+            value,
+            dims: claim.value.dims(),
+            quantity: claim.key.quantity(),
+            uncertainty: claim.uncertainty.clone(),
+        },
+        qoi: value,
+        numerical,
+        statistical,
+        model,
+        sensitivity: SensitivitySummary::default(),
+        provenance,
+        adjoint_ref: None,
+    };
+    Ok(MaterialAnswer { evidence, receipt })
 }
 
 impl ClaimSet {
@@ -1940,7 +1978,12 @@ fn evaluate(
             // A scalar has no stored sample coordinates beyond its validity
             // bounds. A non-point bound cannot identify an exact sample;
             // treating it as support would silently invent a plateau.
-            if claim.validity.bounds().values().any(|&(lo, hi)| lo != hi) {
+            if claim
+                .validity
+                .bounds()
+                .values()
+                .any(|&(lo, hi)| lo.partial_cmp(&hi) != Some(Ordering::Equal))
+            {
                 return Err(MatDbError::UnsupportedEvaluation {
                     reason: "an exact-only scalar requires point bounds on every declared axis; use ConstantWithinValidity for a plateau claim",
                 });

@@ -683,8 +683,7 @@ impl NormalizedPack {
         let version = bytes
             .get(8..12)
             .and_then(|raw| raw.try_into().ok())
-            .map(u32::from_le_bytes)
-            .unwrap_or(0);
+            .map_or(0, u32::from_le_bytes);
         let actual = hash_domain(pack_hash_domain(version), bytes);
         if actual != expected {
             return Err(PackError::IdentityMismatch {
@@ -2121,16 +2120,16 @@ fn decode_observation(reader: &mut Reader<'_>) -> Result<ObservationDataset, Pac
     })
 }
 
-fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
-    writer.string(claim.key.name());
-    writer.dims(claim.key.dims());
+fn encode_claim_key(writer: &mut Writer, key: &PropertyKey, version: u32) {
+    writer.string(key.name());
+    writer.dims(key.dims());
     if version >= MATDB_TYPED_PACK_SCHEMA_VERSION {
         writer
             .bytes
-            .extend_from_slice(&claim.key.quantity().canonical_bytes());
+            .extend_from_slice(&key.quantity().canonical_bytes());
     }
     if version >= MATDB_HARDNESS_PACK_SCHEMA_VERSION {
-        match claim.key.hardness_test() {
+        match key.hardness_test() {
             None => writer.u8(0),
             Some(context) => {
                 writer.u8(1);
@@ -2146,7 +2145,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
         }
     }
     if version >= MATDB_TENSOR_PACK_SCHEMA_VERSION {
-        match claim.key.elastic_component() {
+        match key.elastic_component() {
             None => writer.u8(0),
             Some(component) => {
                 writer.u8(1);
@@ -2155,7 +2154,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
         }
     }
     if version >= MATDB_STRAIN_PACK_SCHEMA_VERSION {
-        match claim.key.strain_component() {
+        match key.strain_component() {
             None => writer.u8(0),
             Some(component) => {
                 writer.u8(1);
@@ -2164,7 +2163,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
         }
     }
     if version >= MATDB_STRESS_PACK_SCHEMA_VERSION {
-        match claim.key.stress_component() {
+        match key.stress_component() {
             None => writer.u8(0),
             Some(component) => {
                 writer.u8(1);
@@ -2172,6 +2171,10 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
             }
         }
     }
+}
+
+fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
+    encode_claim_key(writer, &claim.key, version);
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
             writer.u8(0);
@@ -2241,7 +2244,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
     encode_provenance(writer, &claim.provenance);
 }
 
-fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, PackError> {
+fn decode_claim_key(reader: &mut Reader<'_>, version: u32) -> Result<PropertyKey, PackError> {
     let name = reader.string()?;
     let key_dims = reader.dims()?;
     let quantity = if version >= MATDB_TYPED_PACK_SCHEMA_VERSION {
@@ -2320,7 +2323,11 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
             tag => return Err(reader.malformed(format!("unknown stress component tag {tag}"))),
         }
     }
-    let value = match reader.u8()? {
+    Ok(key)
+}
+
+fn decode_property_value(reader: &mut Reader<'_>) -> Result<PropertyValue, PackError> {
+    Ok(match reader.u8()? {
         0 => PropertyValue::Scalar {
             value: reader.f64()?,
             dims: reader.dims()?,
@@ -2345,7 +2352,12 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
             }
         }
         tag => return Err(reader.malformed(format!("unknown property-value tag {tag}"))),
-    };
+    })
+}
+
+fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, PackError> {
+    let key = decode_claim_key(reader, version)?;
+    let value = decode_property_value(reader)?;
     let validity_count = reader.count("validity_axes", MAX_VALIDITY_AXES)?;
     let mut validity = ValidityDomain::unconstrained();
     let mut previous_axis: Option<String> = None;

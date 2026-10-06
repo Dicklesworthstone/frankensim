@@ -5,8 +5,10 @@
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MatDbError, ObservationDataset, PropertyClaim, PropertyKey,
-    PropertyValue, Provenance, UncertaintyModel,
+    ClaimSelection, ClaimSet, ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
+    ElasticTensorOrder, ElasticTensorSymmetry, EvaluationDecision, InterpolationPolicy, MatDbError,
+    ObservationDataset, PropertyClaim, PropertyKey, PropertySupportError, PropertyValue,
+    Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_qty::Dims;
 
@@ -120,6 +122,118 @@ fn dims_gates_refuse_at_the_door() {
         "{{\"suite\":\"fs-matdb\",\"case\":\"dims-gate\",\"verdict\":\"pass\",\
          \"detail\":\"payload/key and key/registry dims mismatches refuse\"}}"
     );
+}
+
+#[test]
+fn dimensional_refusal_keeps_complete_tensor_context_without_partial_insertion() {
+    assert!(std::mem::size_of::<MatDbError>() <= 128);
+    let component = ElasticTensorComponent::new(
+        ElasticTensorBasis {
+            notation: ElasticTensorNotation::Mandel,
+            order: ElasticTensorOrder::XxYyZzYzZxXy,
+            frame: hash_bytes(b"source tensor frame"),
+        },
+        ElasticTensorSymmetry::MajorMinor,
+        hash_bytes(b"complete source stiffness tensor"),
+        2,
+        4,
+    )
+    .expect("explicit source coordinates");
+    let key = PropertyKey::new("stiffness-2-4", fs_qty::Pressure::DIMS)
+        .with_elastic_component(component)
+        .expect("pressure stiffness coordinate");
+    let mut set = ClaimSet::new();
+    let retained = set.insert_claim(density_claim(2700.0)).expect("baseline");
+    let wrong = PropertyClaim {
+        key: key.clone(),
+        ..density_claim(2700.0)
+    };
+    let error = set
+        .insert_claim(wrong)
+        .expect_err("wrong payload dimensions");
+    let MatDbError::DimsMismatch {
+        key: refused_key,
+        expected,
+        found,
+    } = &error
+    else {
+        panic!("expected dimensional refusal: {error}");
+    };
+    assert_eq!(refused_key.as_ref(), &key);
+    assert_eq!(*expected, fs_qty::Pressure::DIMS);
+    assert_eq!(*found, DENSITY_DIMS);
+    assert_eq!(error.clone(), error);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "property 'stiffness-2-4': value dims {DENSITY_DIMS:?} disagree with the registered dims {:?}",
+            fs_qty::Pressure::DIMS
+        )
+    );
+    assert_eq!(set.claim_count(), 1);
+    assert!(set.claim(retained).is_some());
+    assert_eq!(set.registered_dims(key.name()), None);
+    assert!(set.claims_for(key.name()).is_empty());
+}
+
+#[test]
+fn exact_only_scalar_accepts_signed_zero_point_and_refuses_adjacent_float_interval() {
+    let mut claim = density_claim(2700.0);
+    claim.interpolation = InterpolationPolicy::TabulatedOnly;
+    claim.validity = ValidityDomain::unconstrained().with("T", -0.0, 0.0);
+    let mut set = ClaimSet::new();
+    let id = set.insert_claim(claim.clone()).expect("signed zero point");
+    for coordinate in [-0.0, 0.0] {
+        let point = QueryPoint::new().with("T", coordinate).unwrap();
+        let answer = set.query_pinned("density", &point, id).unwrap();
+        assert_eq!(answer.receipt.decision, EvaluationDecision::ExactScalar);
+        set.verify_receipt(&answer.receipt).unwrap();
+    }
+    let adjacent = f64::from_bits(1.0_f64.to_bits() + 1);
+    claim.validity = ValidityDomain::unconstrained().with("T", 1.0, adjacent);
+    let id = set.insert_claim(claim).expect("adjacent float interval");
+    for coordinate in [1.0, adjacent] {
+        let point = QueryPoint::new().with("T", coordinate).unwrap();
+        assert!(matches!(
+            set.query_pinned("density", &point, id),
+            Err(MatDbError::UnsupportedEvaluation { .. })
+        ));
+    }
+}
+
+#[test]
+fn envelope_refusal_retains_exact_typed_witness_and_original_diagnosis() {
+    assert!(std::mem::size_of::<PropertySupportError>() <= 128);
+    let temperature = fs_qty::QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0]));
+    let mut claim = density_claim(2700.0);
+    claim.validity =
+        ValidityDomain::unconstrained().with_quantity("T", temperature, 273.15, 373.15);
+    let key = claim.key.clone();
+    let mut set = ClaimSet::new();
+    let id = set.insert_claim(claim.clone()).unwrap();
+    let lower = QueryPoint::new()
+        .with_quantity("T", temperature, 293.15)
+        .unwrap();
+    let upper = QueryPoint::new()
+        .with_quantity("T", temperature, 400.0)
+        .unwrap();
+    let refusal = set
+        .query_envelope_typed(&key, &lower, &upper, ClaimSelection::Pinned(id))
+        .expect_err("upper corner lies outside declared support");
+    let PropertySupportError::Evaluation { point, error } = &refusal else {
+        panic!("expected original query refusal: {refusal:?}");
+    };
+    assert_eq!(point, &upper);
+    assert_eq!(
+        error.as_ref(),
+        &MatDbError::NoClaimInDomain {
+            property: "density".into(),
+            considered: 1,
+        }
+    );
+    assert_eq!(refusal.clone(), refusal);
+    assert_eq!(set.claim_count(), 1);
+    assert_eq!(set.claim(id), Some(&claim));
 }
 
 #[test]

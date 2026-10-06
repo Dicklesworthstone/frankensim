@@ -569,6 +569,14 @@ refusals use `MatDbError`; normalized artifact refusals use `PackError` with
 stable field/resource/byte-offset or semantic-identity context. Non-finite
 ordinary-data refusals carry exact bits.
 
+`MatDbError::DimsMismatch.key` is a `Box<PropertyKey>` allocated on refusal.
+It retains the complete quantity and source tensor/test context, expected and
+offered dimensions, equality and display text. The indirection bounds the
+inline error size; it changes no claim identity, pack schema or canonical bytes.
+`PropertySupportError::Evaluation.error` likewise boxes the complete original
+`MatDbError`, retaining the exact witness point, diagnosis and refusal order.
+These cold allocations do not replace any material value or source context.
+
 ## Determinism class
 
 Fully deterministic: pure data structures, `BTreeMap`/content-id ordering,

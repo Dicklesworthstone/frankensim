@@ -204,6 +204,7 @@ impl StrainTensorComponent {
     /// Three convention/index bytes and two complete identities.
     pub const ENCODED_LEN: usize = 67;
 
+    /// Declare a bounded strain coordinate with nonzero frame and source identities.
     pub fn new(
         basis: StrainTensorBasis,
         source_tensor: ContentHash,
@@ -226,11 +227,13 @@ impl StrainTensorComponent {
         })
     }
 
+    /// Strain convention, coordinate order and source frame.
     #[must_use]
     pub const fn basis(self) -> StrainTensorBasis {
         self.basis
     }
 
+    /// Source-declared tensor grouping, distinct from a component claim ID.
     #[must_use]
     pub const fn source_tensor(self) -> ContentHash {
         self.source_tensor
@@ -262,6 +265,7 @@ impl StrainTensorComponent {
         bytes
     }
 
+    /// Decode exact-length bytes, refusing unknown conventions and identities.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, MatDbError> {
         let invalid = || MatDbError::InvalidTensorContext {
             reason: "invalid strain component descriptor length or convention tag",

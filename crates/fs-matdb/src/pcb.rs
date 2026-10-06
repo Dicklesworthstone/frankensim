@@ -784,37 +784,7 @@ impl PcbStackup {
     /// Refuses a total-thickness overflow or a stackup outside its declared
     /// feature/thickness validity domain.
     pub fn homogenize(&self) -> Result<PcbHomogenizedConductivity, PcbHomogenizationError> {
-        let total_thickness = self
-            .layers
-            .iter()
-            .try_fold(0.0f64, |sum, layer| {
-                let next = sum + layer.thickness_m;
-                next.is_finite().then_some(next)
-            })
-            .ok_or_else(|| PcbHomogenizationError::InvalidField {
-                field: "total-thickness",
-                detail: "summing layer thicknesses overflowed".to_string(),
-            })?;
-        let separation_ratio = self.scale_separation.feature_size_m / total_thickness;
-        if !separation_ratio.is_finite() {
-            return Err(PcbHomogenizationError::InvalidField {
-                field: "feature-to-thickness-ratio",
-                detail: "feature-size / total stack thickness overflowed".to_string(),
-            });
-        }
-        if separation_ratio <= 0.0 {
-            return Err(PcbHomogenizationError::InvalidField {
-                field: "feature-to-thickness-ratio",
-                detail: "feature-size / total stack thickness underflowed to zero".to_string(),
-            });
-        }
-        if separation_ratio > self.scale_separation.maximum_feature_to_thickness_ratio {
-            return Err(PcbHomogenizationError::ScaleSeparation {
-                observed_ratio: separation_ratio,
-                maximum_ratio: self.scale_separation.maximum_feature_to_thickness_ratio,
-            });
-        }
-
+        let (total_thickness, separation_ratio) = admitted_homogenization_scale(self)?;
         let (principal, structural_bounds) =
             principal_and_structural(&self.layers, total_thickness);
         let mut derived_values = principal
@@ -892,6 +862,42 @@ impl PcbStackup {
             identity,
         })
     }
+}
+
+fn admitted_homogenization_scale(
+    stackup: &PcbStackup,
+) -> Result<(f64, f64), PcbHomogenizationError> {
+    let total_thickness = stackup
+        .layers
+        .iter()
+        .try_fold(0.0f64, |sum, layer| {
+            let next = sum + layer.thickness_m;
+            next.is_finite().then_some(next)
+        })
+        .ok_or_else(|| PcbHomogenizationError::InvalidField {
+            field: "total-thickness",
+            detail: "summing layer thicknesses overflowed".to_string(),
+        })?;
+    let separation_ratio = stackup.scale_separation.feature_size_m / total_thickness;
+    if !separation_ratio.is_finite() {
+        return Err(PcbHomogenizationError::InvalidField {
+            field: "feature-to-thickness-ratio",
+            detail: "feature-size / total stack thickness overflowed".to_string(),
+        });
+    }
+    if separation_ratio <= 0.0 {
+        return Err(PcbHomogenizationError::InvalidField {
+            field: "feature-to-thickness-ratio",
+            detail: "feature-size / total stack thickness underflowed to zero".to_string(),
+        });
+    }
+    if separation_ratio > stackup.scale_separation.maximum_feature_to_thickness_ratio {
+        return Err(PcbHomogenizationError::ScaleSeparation {
+            observed_ratio: separation_ratio,
+            maximum_ratio: stackup.scale_separation.maximum_feature_to_thickness_ratio,
+        });
+    }
+    Ok((total_thickness, separation_ratio))
 }
 
 /// Principal interval bounds (series/parallel per axis) and the

@@ -526,19 +526,25 @@ impl MaterialCard {
             }
         }
         let mut claims = ClaimSet::new();
-        for (key, value) in replacements.values() {
-            claims.insert_claim(PropertyClaim {
-                key: (*key).clone(),
-                value: PropertyValue::Scalar {
-                    value: *value,
-                    dims: key.dims(),
-                },
-                validity: validity.clone(),
-                uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: Vec::new(),
-                provenance: provenance.clone(),
-            })?;
+        let replacement_claim = |key: &PropertyKey, value, validity| PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value,
+                dims: key.dims(),
+            },
+            validity,
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: provenance.clone(),
+        };
+        let mut replacement_values = replacements.values();
+        let last_replacement = replacement_values.next_back();
+        for (key, value) in replacement_values {
+            claims.insert_claim(replacement_claim(key, *value, validity.clone()))?;
+        }
+        if let Some((key, value)) = last_replacement {
+            claims.insert_claim(replacement_claim(key, *value, validity))?;
         }
         for (_, claim) in self.claims.claims_ordered() {
             if replacements

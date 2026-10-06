@@ -544,10 +544,17 @@ fn finite_admitted_inputs_refuse_when_through_plane_effective_conductivity_under
 
 #[test]
 fn finite_admitted_frame_refuses_when_rotation_overflows_the_effective_tensor() {
+    let stretch = (1.0 + 5.0e-13_f64).sqrt();
+    // Leave room for finite reciprocal-derived principal/Reuss values; MAX
+    // itself trips that earlier gate before the rotation can be exercised.
+    let conductivity = f64::MAX / stretch;
+    let first_product = conductivity * stretch;
+    assert!(first_product.is_finite());
+    assert!(first_product.mul_add(stretch, 0.0).is_infinite());
     let copper = material_card(
         "maximum-copper",
         "maximum-conductivity",
-        f64::MAX,
+        conductivity,
         UncertaintyModel::HalfWidth {
             half_width: 0.0,
             confidence: 0.95,
@@ -556,14 +563,12 @@ fn finite_admitted_frame_refuses_when_rotation_overflows_the_effective_tensor() 
     let matrix = material_card(
         "maximum-matrix",
         "maximum-conductivity",
-        f64::MAX,
+        conductivity,
         UncertaintyModel::HalfWidth {
             half_width: 0.0,
             confidence: 0.95,
         },
     );
-    let stretch = (1.0 + 5.0e-13_f64).sqrt();
-    assert!((f64::MAX * stretch).is_infinite());
     let frame = PcbPrincipalFrame::new([
         [stretch, 0.0, 0.0],
         [0.0, 1.0, 0.0],
@@ -578,6 +583,28 @@ fn finite_admitted_frame_refuses_when_rotation_overflows_the_effective_tensor() 
         coverage("coverage/tensor-overflow", 0.5, 0.5, 0.5),
     )
     .expect("finite positive layer and conductivities remain admitted inputs");
+    let unrotated = PcbStackup::new(
+        "finite-before-rotation",
+        vec![layer.clone()],
+        PcbPrincipalFrame::default(),
+        PcbScaleSeparation::new(1.0, 1.0).expect("finite scale rule"),
+    )
+    .expect("identity-frame stackup")
+    .homogenize()
+    .expect("effective quantities must be finite before rotation is tested");
+    assert!(
+        unrotated
+            .principal()
+            .nominal_w_mk
+            .into_iter()
+            .chain(unrotated.principal().lower_w_mk)
+            .chain(unrotated.principal().upper_w_mk)
+            .chain([
+                unrotated.structural_bounds().reuss_w_mk,
+                unrotated.structural_bounds().voigt_w_mk,
+            ])
+            .all(|value| value.is_finite() && value > 0.0)
+    );
     let error = PcbStackup::new(
         "tensor-overflow",
         vec![layer],
@@ -587,12 +614,52 @@ fn finite_admitted_frame_refuses_when_rotation_overflows_the_effective_tensor() 
     .expect("stackup")
     .homogenize()
     .expect_err("an infinite rotated conductivity tensor must not be published");
+    println!("rotation-overflow refusal: {error:?}");
     assert!(matches!(
         error,
         PcbHomogenizationError::InvalidField {
             field: "conductivity-tensor",
             ref detail,
         } if detail.contains("overflowed")
+    ));
+}
+
+#[test]
+fn maximum_scalar_conductivity_refuses_before_rotating_the_tensor() {
+    assert!((1.0 / f64::MAX).recip().is_infinite());
+    let maximum = material_card(
+        "maximum-conductivity-fixture",
+        "finite-input",
+        f64::MAX,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+    );
+    let layer = PcbLayer::new(
+        "maximum-finite-layer",
+        1.0,
+        datum(&maximum),
+        datum(&maximum),
+        coverage("coverage/effective-overflow", 0.5, 0.5, 0.5),
+    )
+    .expect("finite inputs");
+    let error = PcbStackup::new(
+        "effective-overflow",
+        vec![layer],
+        PcbPrincipalFrame::default(),
+        PcbScaleSeparation::new(1.0, 1.0).expect("finite scale rule"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect_err("reciprocal overflow must refuse before rotation");
+    println!("maximum-conductivity refusal: {error:?}");
+    assert!(matches!(
+        error,
+        PcbHomogenizationError::InvalidField {
+            field: "effective-conductivity",
+            ref detail,
+        } if detail.contains("overflowed or underflowed")
     ));
 }
 
