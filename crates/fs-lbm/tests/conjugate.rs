@@ -16,8 +16,9 @@
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties, LbmFlowConfig,
-    SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow, solve_energy,
+    BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
+    LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow,
+    natural_convection, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -690,4 +691,155 @@ fn developing_duct_matches_shah_london_table_52_card() {
         assert!(d.abs() < 0.10, "discrepancy {d}");
     }
     assert!(rows[1].2.abs() <= rows[0].2.abs() + 0.01, "{rows:?}");
+}
+
+/// de Vahl Davis differentially heated square cavity (Int. J. Numer. Meth.
+/// Fluids 3, 1983): hot wall x = 0, cold wall x = H, adiabatic floor and
+/// ceiling, gravity along -y, Pr = 0.71, extruded along a periodic z.
+/// Returns the mean hot-wall Nusselt number and the run report.
+fn de_vahl_davis(
+    n: usize,
+    rayleigh: f64,
+    tolerance: f64,
+) -> (f64, fs_lbm::conjugate::NaturalConvectionReport) {
+    let gate = CancelGate::new();
+    let dx = 1.0;
+    let h = n as f64 * dx;
+    let alpha = 1e-3;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: alpha,
+        kinematic_viscosity_m2_s: 0.71 * alpha,
+    };
+    let g = 9.81;
+    let beta = rayleigh * fluid.kinematic_viscosity_m2_s * alpha / (g * h * h * h);
+    let domain = VoxelDomain::new(n, n, 4, dx).unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(1.0);
+    faces[1] = ThermalFace::Temperature(0.0);
+    let config = BuoyancyConfig {
+        gravity_m_s2: [0.0, -g, 0.0],
+        expansion_per_k: beta,
+        reference_temperature_k: 0.5,
+        tau: 0.8,
+        periodic: [false, false, true],
+        steady_tolerance: tolerance,
+        ..BuoyancyConfig::default()
+    };
+    let run = natural_convection(
+        &domain,
+        &fluid,
+        &[],
+        &ThermalSetup::new(faces),
+        &config,
+        &gate,
+    )
+    .unwrap();
+    let mut heat = 0.0;
+    for z in 0..4 {
+        for y in 0..n {
+            let t = run.energy.temperature[domain.index(0, y, z)];
+            heat += 2.0 * dx * alpha * (1.0 - t);
+        }
+    }
+    let nu = heat / (alpha * 1.0 / h * h * 4.0 * dx);
+    assert!(
+        run.energy.report.balance.relative_residual < 1e-9,
+        "{:?}",
+        run.energy.report.balance
+    );
+    (nu, run.report)
+}
+
+#[test]
+fn natural_convection_cavity_matches_de_vahl_davis_at_ra_1e3() {
+    let (nu, report) = de_vahl_davis(16, 1e3, 1e-6);
+    eprintln!("de Vahl Davis Ra=1e3 n=16: Nu = {nu:.4} (reference 1.118); {report:?}");
+    assert!(report.coupling_residual_k < 1e-3, "{report:?}");
+    assert!((nu - 1.118).abs() / 1.118 < 0.03, "Nu {nu}");
+}
+
+#[test]
+fn heated_block_enclosure_closes_energy_and_responds_to_buoyancy() {
+    // A conducting block on the floor of a cold-walled enclosure: every watt
+    // leaves through the walls, and stronger buoyancy (larger beta) must
+    // cool the block (metamorphic).
+    let run = |beta: f64| {
+        let gate = CancelGate::new();
+        let dx = 1.0;
+        let domain = VoxelDomain::from_fn(16, 16, 4, dx, |p| {
+            if (6.0..10.0).contains(&p[0]) && p[1] < 4.0 {
+                Voxel::Solid(0)
+            } else {
+                Voxel::Fluid
+            }
+        })
+        .unwrap();
+        let alpha = 1e-3;
+        let fluid = FluidProperties {
+            density_kg_m3: 1.0,
+            specific_heat_j_kg_k: 1.0,
+            conductivity_w_m_k: alpha,
+            kinematic_viscosity_m2_s: 0.71 * alpha,
+        };
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::Temperature(0.0);
+        faces[1] = ThermalFace::Temperature(0.0);
+        faces[3] = ThermalFace::Temperature(0.0);
+        let mut setup = ThermalSetup::new(faces);
+        setup.add_uniform_power(&domain, 4e-3, |p| (6.0..10.0).contains(&p[0]) && p[1] < 1.0);
+        let config = BuoyancyConfig {
+            gravity_m_s2: [0.0, -9.81, 0.0],
+            expansion_per_k: beta,
+            reference_temperature_k: 0.0,
+            tau: 0.8,
+            periodic: [false, false, true],
+            steady_tolerance: 1e-6,
+            ..BuoyancyConfig::default()
+        };
+        let result = natural_convection(
+            &domain,
+            &fluid,
+            &[SolidMaterial::new("block", 100.0 * alpha)],
+            &setup,
+            &config,
+            &gate,
+        )
+        .unwrap();
+        let balance = result.energy.report.balance;
+        assert!(
+            (balance.boundary_outflow_w - 4e-3).abs() < 1e-9,
+            "{balance:?}"
+        );
+        assert!(
+            result.energy.temperature.iter().all(|&t| t >= -1e-9),
+            "maximum principle"
+        );
+        result.energy.max_where(|c| !domain.is_fluid(c)).unwrap().1
+    };
+    // beta for Rayleigh numbers of roughly 6e2 and 3e3 on the enclosure
+    // height at the block's ~0.36 K temperature rise.
+    let (weak, strong) = (run(3e-8), run(1.5e-7));
+    eprintln!("block peak rise: weak buoyancy {weak:.5} K, strong {strong:.5} K");
+    assert!(
+        strong < weak,
+        "stronger buoyancy must cool the block: {weak} -> {strong}"
+    );
+}
+
+#[test]
+#[ignore = "release-scale G2: de Vahl Davis Ra = 1e4 and 1e5 on 32 x 32 (minutes)"]
+fn natural_convection_cavity_matches_de_vahl_davis_release() {
+    for (ra, reference) in [(1e4, 2.243), (1e5, 4.519)] {
+        let (nu, report) = de_vahl_davis(32, ra, 1e-7);
+        eprintln!(
+            "de Vahl Davis Ra={ra:e} n=32: Nu = {nu:.4} (reference {reference}); steps {}",
+            report.steps
+        );
+        assert!(
+            (nu - reference).abs() / reference < 0.05,
+            "Ra {ra}: Nu {nu}"
+        );
+    }
 }

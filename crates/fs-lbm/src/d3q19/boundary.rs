@@ -384,6 +384,10 @@ pub struct BoundaryGrid3 {
     /// swapped with `f` only after a complete pass: a cancelled or refused
     /// pooled step publishes nothing.
     next: Option<[Vec<Tile>; Q3]>,
+    /// Optional per-cell Guo body force added to the uniform `force`
+    /// (flat index `tile * TILE_CELLS + lane`). `None` leaves every result
+    /// bit-identical to the uniform-force grid.
+    force_field: Option<Vec<[f64; 3]>>,
 }
 
 /// Lattice tiles per pooled kernel tile (512 cells).
@@ -522,6 +526,7 @@ impl BoundaryGrid3 {
             topology_locked: false,
             pull: Vec::new(),
             next: None,
+            force_field: None,
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -684,7 +689,48 @@ impl BoundaryGrid3 {
             "solid cells have no fluid velocity"
         );
         let (rho, momentum) = self.raw_moments(x, y, z);
-        core::array::from_fn(|axis| (momentum[axis] + 0.5 * self.force[axis]) / rho)
+        let (tile, lane) = self.addr(x, y, z);
+        let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+        core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho)
+    }
+
+    /// Install a per-cell body force (lattice units) sampled at every fluid
+    /// cell, ADDED to the uniform force; solid cells are not sampled. Used
+    /// for Boussinesq buoyancy. Replaces any previous field.
+    ///
+    /// # Panics
+    /// If the grid has an open velocity/pressure face (whose regularized
+    /// reconstruction assumes a force-free fluid), the collision model does
+    /// not admit body forcing, or a sample is non-finite.
+    pub fn set_force_field(&mut self, mut force: impl FnMut([usize; 3]) -> [f64; 3]) {
+        assert!(
+            !Face3::ALL
+                .into_iter()
+                .any(|face| self.boundaries.face(face).is_open()),
+            "per-cell forcing requires a grid without open velocity/pressure faces"
+        );
+        assert!(
+            self.collision_model.supports_body_force(),
+            "the selected collision model does not admit body forcing"
+        );
+        let mut field = vec![[0.0; 3]; self.f[0].len() * TILE_CELLS];
+        for z in 0..self.nz {
+            for y in 0..self.ny {
+                for x in 0..self.nx {
+                    if self.is_solid(x, y, z) {
+                        continue;
+                    }
+                    let value = force([x, y, z]);
+                    assert!(
+                        value.iter().all(|v| v.is_finite()),
+                        "per-cell force must be finite"
+                    );
+                    let (tile, lane) = self.addr(x, y, z);
+                    field[tile * TILE_CELLS + lane] = value;
+                }
+            }
+        }
+        self.force_field = Some(field);
     }
 
     /// Population vector of a fluid cell, copied in D3Q19 direction order.
@@ -807,6 +853,7 @@ impl BoundaryGrid3 {
                 post: chunk_groups(&mut self.post),
                 model: self.collision_model,
                 force: self.force,
+                force_field: self.force_field.as_deref(),
             };
             match run_pass(pool, gate, &kernel)? {
                 FirstCollision(None) => {}
@@ -915,7 +962,8 @@ impl BoundaryGrid3 {
                     continue;
                 }
                 let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
-                let post = collide_cell3(populations, self.collision_model, self.force)
+                let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
+                let post = collide_cell3(populations, self.collision_model, force)
                     .expect("BoundaryGrid3 constructor and prior state admit selected collision");
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
@@ -1214,6 +1262,23 @@ impl core::fmt::Debug for BoundaryGrid3 {
     }
 }
 
+/// The uniform force, plus the cell's field entry when a field is installed
+/// (without a field the uniform value is returned untouched, bit for bit).
+#[inline]
+fn cell_force(uniform: [f64; 3], field: Option<&[[f64; 3]]>, tile: usize, lane: usize) -> [f64; 3] {
+    match field {
+        None => uniform,
+        Some(field) => {
+            let local = field[tile * TILE_CELLS + lane];
+            [
+                uniform[0] + local[0],
+                uniform[1] + local[1],
+                uniform[2] + local[2],
+            ]
+        }
+    }
+}
+
 fn tile_lane_coords(dims: [usize; 3], tile: usize, lane: usize) -> [usize; 3] {
     let (ntx, nty) = (dims[0] / TILE, dims[1] / TILE);
     let tx = tile % ntx;
@@ -1363,6 +1428,7 @@ struct CollidePass<'a> {
     post: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
     model: CollisionModel3,
     force: [f64; 3],
+    force_field: Option<&'a [[f64; 3]]>,
 }
 
 impl TileKernel for CollidePass<'_> {
@@ -1387,7 +1453,8 @@ impl TileKernel for CollidePass<'_> {
                     continue;
                 }
                 let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
-                match collide_cell3(populations, self.model, self.force) {
+                let force = cell_force(self.force, self.force_field, tile, lane);
+                match collide_cell3(populations, self.model, force) {
                     Ok(post) => {
                         for (field, value) in chunk.iter_mut().zip(post) {
                             field[local].0[lane] = value;

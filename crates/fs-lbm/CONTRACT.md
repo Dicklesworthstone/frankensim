@@ -860,6 +860,34 @@ on first pooled use. `lbm_duct_flow` steps through one parked crew
 the populations, so a diverging run is a `FlowDiverged` refusal, not a
 panic.
 
+### Natural convection (`natural_convection`)
+
+Two-way Boussinesq coupling in a CLOSED enclosure (walls, or periodic
+lattice axes whose thermal faces are adiabatic — exact for solutions
+invariant along that axis). `BoundaryGrid3::set_force_field` installs a
+per-cell Guo force added to the uniform force (refused with open faces or a
+collision model without body forcing; without a field every result is
+bit-identical to before). Each coupling sets the buoyancy
+`-beta (T - T_ref) g` in lattice units, advances `coupling_interval`
+pooled steps, projects the cell mass fluxes, and takes one implicit
+energy step whose storage uses the fluid's volumetric heat capacity in
+every cell (solids get it as a PSEUDO capacity: it shapes the path, never
+the fixed point). Convergence is judged on the geometric extrapolation
+`delta r / (1 - r)` of the remaining per-coupling change (no estimate
+until the sequence contracts), for the relative mass flux and for the
+temperature over its range. The answer is a fresh STEADY energy solve on
+the final fluxes; `coupling_residual_k` retains its distance from the last
+pseudo-time iterate. A lattice speed above `max_lattice_speed` refuses as
+`LatticeResolution`.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| de Vahl Davis cavity, Ra = 1e3, Pr = 0.71, 16 x 16 (periodic z) | Nu = 1.118 | 1.1127 (0.5 %); remaining-change estimates 8e-7 / 2.8e-7; coupling residual 3.5e-7 K |
+| Conducting block heated in a cold enclosure | balance and buoyancy response | balance closes to 1e-9 W; peak rise 0.3621 K -> 0.3546 K as beta x5 |
+
+Release lane (`--ignored`): de Vahl Davis Ra = 1e4 and 1e5 on 32 x 32,
+gated at 5 % against 2.243 and 4.519.
+
 ### Invariants
 
 - Discrete conservation: the two sides of every interior face carry equal
@@ -890,8 +918,12 @@ measured discrepancy band is printed per rung and gated at 10 %.
 
 ### No-claim boundaries (conjugate)
 
-- Laminar, steady, constant-property forced convection only: no buoyancy,
-  turbulence model, radiation, or temperature-dependent properties.
+- Laminar, steady, constant-property convection only: forced convection
+  through `lbm_duct_flow`, Boussinesq natural convection in closed
+  enclosures through `natural_convection`; no open-boundary natural
+  convection, turbulence model, radiation, or temperature-dependent
+  properties. A natural-convection run that does not settle (for example
+  above the transition Rayleigh number) refuses as `FlowNotSteady`.
 - Staircase voxel geometry at the declared `dx`; one run makes no
   mesh-convergence claim. Power-law convection is first order where the
   cell Péclet number exceeds about 10. All results are Estimated numerical

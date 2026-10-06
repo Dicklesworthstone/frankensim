@@ -402,7 +402,6 @@ impl Context<'_> {
 /// [`ChtError::InvalidDomain`] for inadmissible inputs,
 /// [`ChtError::FlowThroughClosedFace`] when flow crosses a non-open face,
 /// solver refusals, or [`ChtError::Cancelled`].
-#[allow(clippy::too_many_lines)] // admission, assembly, solve, independent balance
 pub fn solve_energy(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -410,6 +409,30 @@ pub fn solve_energy(
     flow: &FlowField,
     setup: &ThermalSetup,
     config: &EnergyConfig,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    solve_energy_inner(domain, fluid, solids, flow, setup, config, None, gate)
+}
+
+/// Implicit pseudo-time storage `coefficient_c (T_c - previous_c)` (W) added
+/// to every free cell's balance, and the warm start for the Krylov solve.
+/// A steady fixed point of the stepped problem is the steady problem; the
+/// returned balance excludes the storage term, so it is exact only at that
+/// fixed point.
+pub(crate) struct PseudoStep<'a> {
+    pub coefficient_w_k: &'a [f64],
+    pub previous: &'a [f64],
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+pub(crate) fn solve_energy_inner(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
@@ -520,8 +543,13 @@ pub fn solve_energy(
             b[c] = t;
             continue;
         }
-        let mut diag = 0.0;
-        let mut rhs = source(c);
+        let (mut diag, mut rhs) = match step {
+            Some(step) => (
+                step.coefficient_w_k[c],
+                step.coefficient_w_k[c].mul_add(step.previous[c], source(c)),
+            ),
+            None => (0.0, source(c)),
+        };
         for f in 0..6 {
             let term = ctx.term(c, f);
             diag += term.diag;
@@ -566,7 +594,10 @@ pub fn solve_energy(
         })
         .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
         .unwrap_or(0.0);
-    let mut temperature = vec![guess; cells];
+    let mut temperature = match step {
+        Some(step) => step.previous.to_vec(),
+        None => vec![guess; cells],
+    };
     let outcome = bicgstab_ilu0(
         "energy",
         &a,
