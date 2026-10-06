@@ -44,11 +44,30 @@ pub(super) struct NaturalLaw {
     length_m: f64,
     pub(super) ambient_k: f64,
     card: CorrelationId,
+    /// Explicit engineering perturbation of h, not of the card's Ra or Nu.
+    htc_multiplier: f64,
 }
 
 /// The rows of `setup` that are natural-convection laws, with their cards
 /// resolved.
 pub(super) fn natural_laws(setup: &ConductionSetup) -> Result<Vec<NaturalLaw>, SolveRefusal> {
+    natural_laws_scaled(setup, 1.0)
+}
+
+/// Lower one complete discrepancy vertex. Its absolute coefficient multiplier
+/// travels with each law, so initialization AND every wall-temperature update
+/// use h_s(T) = s h_card(T). Nominal adjoints use natural_laws and retain s = 1.
+pub(super) fn natural_laws_scaled(
+    setup: &ConductionSetup,
+    htc_multiplier: f64,
+) -> Result<Vec<NaturalLaw>, SolveRefusal> {
+    if !(htc_multiplier.is_finite() && htc_multiplier > 0.0) {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-scale",
+            "a natural-convection coefficient multiplier must be finite and positive",
+            "use a card allowance that preserves a positive coefficient",
+        ));
+    }
     let mut laws = Vec::new();
     for row in &setup.boundaries {
         let ThermalBoundaryCondition::NaturalConvection {
@@ -89,6 +108,7 @@ pub(super) fn natural_laws(setup: &ConductionSetup) -> Result<Vec<NaturalLaw>, S
             length_m: characteristic_length.value,
             ambient_k: ambient_temperature.value,
             card,
+            htc_multiplier,
         });
     }
     Ok(laws)
@@ -177,11 +197,11 @@ pub(super) fn coefficient(
             )
         })?
         .value
-        .value();
+        .value() * law.htc_multiplier;
     if !(htc.is_finite() && htc > 0.0) {
         return Err(conduction_error(
             "cli-solve-conduction-natural-card",
-            format!("card `{}` produced coefficient {htc} on `{}`", law.card.name(), law.target),
+            format!("card `{}` with multiplier {} produced coefficient {htc} on `{}`", law.card.name(), law.htc_multiplier, law.target),
             "report the card defect",
         ));
     }
@@ -219,8 +239,13 @@ pub(super) fn receipt_fragment(converged: &[Converged], iterations: usize) -> Re
     };
     let mut rows = Vec::with_capacity(converged.len());
     for row in converged {
+        let multiplier = if row.law.htc_multiplier == 1.0 {
+            String::new()
+        } else {
+            format!(",\"htc_multiplier\":{}", num("htc_multiplier", row.law.htc_multiplier)?)
+        };
         rows.push(format!(
-            "{{\"target\":{},\"card\":{},\"characteristic_length_m\":{},\"ambient_k\":{},\"htc_w_m2_k\":{},\"mean_wall_k\":{},\"delta_t_k\":{},\"rayleigh\":{},\"nusselt\":{},\"heat_rate_w\":{},\"in_domain\":true}}",
+            "{{\"target\":{},\"card\":{},\"characteristic_length_m\":{},\"ambient_k\":{},\"htc_w_m2_k\":{},\"mean_wall_k\":{},\"delta_t_k\":{},\"rayleigh\":{},\"nusselt\":{},\"heat_rate_w\":{},\"in_domain\":true{multiplier}}}",
             json_string(&row.law.target),
             json_string(row.law.card.name()),
             num("length", row.law.length_m)?,
@@ -246,6 +271,30 @@ pub(super) fn receipt_fragment(converged: &[Converged], iterations: usize) -> Re
     ))
 }
 
+/// The existing enriched-goal comparison differentiates the solid/air model,
+/// not h(T_wall). Reject that fidelity before meshing instead of publishing a
+/// convergence test for a frozen coefficient. Base and ladder remain usable.
+pub(super) fn admit_fidelity(
+    spec: &fs_project::ProjectSpec,
+    setup: &ConductionSetup,
+) -> Result<(), SolveRefusal> {
+    if spec.solver.as_ref().is_some_and(|solver|
+        solver.fidelity == super::SOLVER_FIDELITY_ADAPTIVE)
+        && setup.boundaries.iter().any(|row|
+            matches!(row.condition, ThermalBoundaryCondition::NaturalConvection { .. }))
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-adaptive",
+            "adaptive goals do not yet include natural-convection coefficient feedback",
+            "use base or ladder fidelity; a frozen-coefficient enriched adjoint cannot measure this model's goal error",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod discrepancy_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +303,7 @@ mod tests {
         NaturalLaw {
             target: "wall".into(), length_m: 0.06, ambient_k,
             card: CorrelationId::ChurchillChuVerticalPlate,
+            htc_multiplier: 1.0,
         }
     }
 
