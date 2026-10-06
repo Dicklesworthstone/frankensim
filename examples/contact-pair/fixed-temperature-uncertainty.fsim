@@ -1,0 +1,26 @@
+; From the repository root, with a fresh ledger:
+; frankensim --json study examples/contact-pair/fixed-temperature-uncertainty.fsim fixed-wall-uq.db
+;
+; Independently declared wall-temperature and power distributions; no material
+; or interface tolerance is interpreted as a probability law. The cold solid
+; wall varies below the unchanged ambient-fluid envelope. Geometry, both
+; material bindings, the contact card and power duty remain the base project's.
+; One nominal boundary adjoint calibrates the fixed-count mean control before
+; the random samples. Statistics remain Estimated, not physical certification.
+(fsim-uncertainty-study
+  :version 3
+  :project "contact-pair.fsim"
+  :samples 8
+  :seed 59
+  :wall-time 120s
+  :method monte-carlo
+  :correlation independent
+  :qoi "temperature-max"
+  :geometry ((mesh :role "cold-body" :path "cold-body.stl" :unit "m" :max-hole-edges 0)
+             (mesh :role "hot-body" :path "hot-body.stl" :unit "m" :max-hole-edges 0))
+  :materials ("../../data/reference-project/aa6061.fsmcdpk")
+  :interfaces ("cold-hot.fsintpk")
+  :mean-control (nominal-adjoint :max-solves 1)
+  :parameters (
+    (uniform :name "wall" :target fixed-temperature :entity "cold" :low 280K :high 290K)
+    (uniform :name "power" :target power :entity "hot" :low 4W :high 6W)))
