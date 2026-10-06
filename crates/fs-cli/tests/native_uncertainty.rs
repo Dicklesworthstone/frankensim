@@ -11,6 +11,8 @@ mod qmc;
 mod copula;
 #[path = "native_uncertainty/nominal_adjoint.rs"]
 mod nominal_adjoint;
+#[path = "native_uncertainty/sensitivity.rs"]
+mod sensitivity;
 #[path = "../src/json_read.rs"]
 mod json_read;
 
