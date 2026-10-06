@@ -20,6 +20,15 @@ fn native_natural_adjoint_preserves_the_primal_and_matches_physical_controls() {
     assert_eq!(baseline.get("temperature"), nominal.get("temperature"));
     assert_eq!(baseline.get("energy"), nominal.get("energy"));
     assert_eq!(baseline.get("natural_convection"), nominal.get("natural_convection"));
+    for receipt in [&baseline, &nominal] {
+        let control = receipt.get("solver_control").expect("explicit algebraic scope");
+        assert_eq!(control.str_field("status"), Some("unsupported-model"));
+        assert_eq!(control.get("goal_met"), Some(&JsonValue::Bool(false)));
+        assert_eq!(control.f64_field("primal_iterations"), Some(0.0));
+        assert!(control.str_field("reason").unwrap().contains("natural-convection"));
+        assert!(control.get("final_bound_k").is_none(),
+            "a frozen Robin residual is not an enclosure of the natural fixed point");
+    }
     let ledger = fixture.dir.join("adjoint.db");
     let a = json_artifact(&ledger, baseline.str_field("solution_artifact").unwrap());
     let b = json_artifact(&ledger, nominal.str_field("solution_artifact").unwrap());

@@ -1,6 +1,6 @@
 //! Algebraic error of the published region maximum. Linear solid/air models
-//! retain the complete reference feedback; nonlinear conductivity and radiation
-//! require their existing whole-model estimate.
+//! retain the complete reference feedback; temperature-dependent conductivity,
+//! natural convection and radiation require their whole-model tolerance estimate.
 
 use super::{
     BTreeMap, EvidenceWork, PropagatedTerm, QoiRegionTraceError, RungSolved, SolveRefusal,
@@ -60,6 +60,16 @@ pub(super) fn maximum_term(
     let Some(data) = &solved.adjoint_data else {
         return gap("the published rung retained no final-state operator".to_string());
     };
+    // A converged natural-convection coefficient is not a fixed physical
+    // coefficient. The retained Robin matrix omits dh/dT and the remaining
+    // coefficient fixed-point defect. Its inverse/residual certificate cannot
+    // cover the nonlinear model, and polishing it would change the published
+    // field without re-closing that model or rebuilding its natural receipt.
+    if solved.natural_fragment.is_some() {
+        cx.checkpoint().map_err(|_| cancelled())?;
+        return Ok(unavailable("unsupported-model",
+            "linear maximum-goal analysis does not cover natural-convection coefficient feedback; retain the unchanged physical field and the whole-model tolerance estimate".to_string(), true));
+    }
     // Radiation remains a nonlinear whole-model tolerance comparison. Air
     // feedback has its own complete affine analyzer below the material gate.
     if data.radiating_boundary.is_some() {
