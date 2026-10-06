@@ -1,10 +1,52 @@
 {
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "a30d393325ba5fe779c460393fe90ce5d50ee37a",
+    "git_blob": "acd288ddfdf4047882ae7713d50ff3b9de0111b7",
     "edits": [
       {
-        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 40;",
-        "new": "/// Version 41 differentiates independently controlled series/parallel fan banks;\n/// earlier derivative receipts cannot resume into multi-bank calibration.\n/// Version 42 publishes regional conductivity-multiplier controls through the\n/// complete accepted thermal adjoint; earlier reports cannot substitute for them.\npub const SOLVE_DRIVER_VERSION: u32 = 42;"
+        "old": "/// Version 42 publishes regional conductivity-multiplier controls through the\n/// complete accepted thermal adjoint; earlier reports cannot substitute for them.\npub const SOLVE_DRIVER_VERSION: u32 = 42;\n\n",
+        "new": "/// Version 42 publishes regional conductivity-multiplier controls through the\n/// complete accepted thermal adjoint; earlier reports cannot substitute for them.\n/// Version 43 propagates natural-convection card allowances through their full\n/// fixed point and excludes frozen-coefficient error certificates/corrections.\npub const SOLVE_DRIVER_VERSION: u32 = 43;\n\n"
+      },
+      {
+        "old": "            ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => Some(inlet_temperature.value),\n            ThermalBoundaryCondition::FixedTemperature { temperature } => Some(temperature.value),\n            _ => None,\n",
+        "new": "            ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => Some(inlet_temperature.value),\n            ThermalBoundaryCondition::FixedTemperature { temperature } => Some(temperature.value),\n            ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => Some(ambient_temperature.value),\n            _ => None,\n"
+      },
+      {
+        "old": "    // This patch-mean radiation model has its own nonlinear closure. Until\n    // that complete residual has a total tangent, it cannot enter a DWR goal.\n    let radiation = radiation::lower(spec, setup, cards)?;\n",
+        "new": "    // Neither adaptive goal comparison may freeze a nonlinear boundary law.\n    // Natural base/ladder solves and their complete nominal adjoints remain\n    // admitted; the enriched-goal producer has not acquired that feedback.\n    natural::admit_fidelity(spec, setup)?;\n    // This patch-mean radiation model has its own nonlinear closure. Until\n    // that complete residual has a total tangent, it cannot enter a DWR goal.\n    let radiation = radiation::lower(spec, setup, cards)?;\n"
+      },
+      {
+        "old": "        let laws = conjugate::airflow_laws(setup)?;\n        let natural_laws = natural::natural_laws(setup)?;\n        if !natural_laws.is_empty() && !laws.is_empty() {\n",
+        "new": "        let laws = conjugate::airflow_laws(setup)?;\n        // Apply a discrepancy vertex to the constitutive law, not only its\n        // initial/final Robin row. Every Picard update must retain this scale.\n        let natural_laws = natural::natural_laws_scaled(setup, htc_scale)?;\n        if !natural_laws.is_empty() && !laws.is_empty() {\n"
+      },
+      {
+        "old": "    let unmeasured = |reason: &str| Ok(PropagatedTerm::Unmeasured { reason: reason.to_string() });\n    let Some(data) = &solved.adjoint_data else {\n",
+        "new": "    let unmeasured = |reason: &str| Ok(PropagatedTerm::Unmeasured { reason: reason.to_string() });\n    if solved.natural_fragment.is_some() {\n        return unmeasured(\"natural-convection roundoff requires the complete coefficient-feedback response; a frozen solid operator is not that bound\");\n    }\n    let Some(data) = &solved.adjoint_data else {\n"
+      },
+      {
+        "old": "    for boundary in setup.map_or(&[][..], |setup| &setup.boundaries[..]) {\n        match &boundary.condition {\n            ThermalBoundaryCondition::AirflowConvection { correlation, .. } => {\n                let card = fs_convection::correlation_catalog()\n",
+        "new": "    for boundary in setup.map_or(&[][..], |setup| &setup.boundaries[..]) {\n        match &boundary.condition {\n            ThermalBoundaryCondition::AirflowConvection { correlation, .. }\n            | ThermalBoundaryCondition::NaturalConvection { correlation, .. } => {\n                let card = fs_convection::correlation_catalog()\n"
+      }
+    ]
+  },
+  "crates/fs-cli/tests/native_uncertainty/nominal_adjoint/natural_feedback.rs": {
+    "git_blob": "a702c0fe9b963fbcc154d59752f6d9e338440be4",
+    "edits": [
+      {
+        "old": "//! Exercise the real native import, card, nonlinear solve and receipt path.\nuse super::*;\n\n#[test]\nfn native_natural_adjoint_preserves_the_primal_and_matches_physical_controls() {\n",
+        "new": "//! Exercise the real native import, card, nonlinear solve and receipt path.\nuse super::*;\n\n#[path = \"natural_budget.rs\"]\nmod natural_budget;\n\n#[test]\nfn native_natural_adjoint_preserves_the_primal_and_matches_physical_controls() {\n"
+      }
+    ]
+  },
+  "crates/fs-cli/src/solve/natural/discrepancy_tests.rs": {
+    "git_blob": "748916778d2dbaf9ee7768ba1a92c9577ab41fd3",
+    "edits": [
+      {
+        "old": "    assert!(admit_fidelity(&spec, setup).is_ok());\n",
+        "new": "    assert_eq!(super::super::coolest_declared_temperature(setup), Some(300.0));\n    assert!(admit_fidelity(&spec, setup).is_ok());\n"
+      },
+      {
+        "old": "    setup.boundaries.push(cold);\n",
+        "new": "    setup.boundaries.push(cold);\n    assert_eq!(super::super::coolest_declared_temperature(setup), Some(280.0));\n"
       }
     ]
   }
