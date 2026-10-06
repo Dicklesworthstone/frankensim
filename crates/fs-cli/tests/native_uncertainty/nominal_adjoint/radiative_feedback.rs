@@ -142,3 +142,6 @@ fn mean_feedback_rebinding_checks_constitutive_residual_even_for_zero_goal() {
         assert!(call(&[[10.0,300.0,0.2,f64::NAN]]).is_err());
     });
 }
+
+#[path = "boundary_temperatures.rs"]
+mod boundary_temperatures;
