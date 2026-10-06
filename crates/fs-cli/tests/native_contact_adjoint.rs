@@ -8,6 +8,9 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfa
     NormalizedMaterialCardPack, NormalizedPack, ObservationDataset, PropertyClaim,
     PropertyKey, PropertyValue, Provenance, SurfaceSpec, SystemContext, UncertaintyModel};
 
+#[path = "native_contact_adjoint/prescribed.rs"]
+mod prescribed;
+
 const OUTPUT: &str = "temperature-max-contact-adjoint";
 const TARGET: &str = "contact-resistance-multiplier";
 
