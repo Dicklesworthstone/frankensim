@@ -7,6 +7,8 @@
 //! No perfect contact, face ownership, material data or gap closure is inferred.
 mod matching;
 pub mod nonmatching;
+mod sensitivity;
+pub use sensitivity::ContactResistanceGradient;
 
 pub use matching::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,

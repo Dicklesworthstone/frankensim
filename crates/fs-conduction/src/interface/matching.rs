@@ -26,6 +26,8 @@ use crate::ConductionError;
 use crate::bc::ThermalBoundary;
 use crate::mesh::ConductionMesh;
 
+mod sensitivity;
+
 /// Canonical `fs-matdb` property consumed by the contact operator.
 pub const AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY: &str =
     "area-specific-thermal-contact-resistance";
