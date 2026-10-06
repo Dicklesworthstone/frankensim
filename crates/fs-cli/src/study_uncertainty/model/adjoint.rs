@@ -64,6 +64,8 @@ fn target_name(target: Target) -> &'static str {
         Target::HeatFlux => "heat-flux",
         Target::AirInletTemperature => "air-inlet-temperature",
         Target::FanSpeedRatio => "fan-speed-ratio",
+        Target::NaturalConvectionAmbient => "natural-convection-ambient",
+        Target::RadiationReservoirTemperature => "radiation-reservoir-temperature",
     }
 }
 
@@ -114,5 +116,19 @@ mod tests {
         assert_eq!(coefficients(&report(""), &p, 301.0, "solid").unwrap(),[0.0]);
         p[0].high=3.0;
         assert!(coefficients(&report(""), &p, 301.0, "solid").is_err());
+    }
+    #[test]
+    fn nominal_boundary_temperature_coefficients_do_not_alias_same_unit_controls() {
+        for (target, name) in [(Target::NaturalConvectionAmbient, "natural-convection-ambient"),
+            (Target::RadiationReservoirTemperature, "radiation-reservoir-temperature")] {
+            let parameters = [UniformParameter { name:"reservoir".into(), entity:"wall".into(),
+                target, low:290.0, high:310.0 }];
+            let row = format!(r#"{{"target":"{name}","entity":"wall","parameter_unit":"K","derivative":0.7}}"#);
+            assert_eq!(coefficients(&report(&row), &parameters, 301.0, "solid").unwrap(), [0.7]);
+            for bad in [row.replace(name,"convection-temperature"), row.replace("wall","other"),
+                row.replace("\"K\"","\"W\""), format!("{row},{row}"), String::new()] {
+                assert!(coefficients(&report(&bad), &parameters, 301.0, "solid").is_err());
+            }
+        }
     }
 }
