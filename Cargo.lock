@@ -1861,6 +1861,7 @@ name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-convection",
  "fs-evidence",
  "fs-exec",
  "fs-fft",
@@ -1869,6 +1870,7 @@ dependencies = [
  "fs-obs",
  "fs-qty",
  "fs-roofline",
+ "fs-sparse",
 ]
 
 [[package]]

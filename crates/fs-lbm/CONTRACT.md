@@ -9,8 +9,10 @@ thermal double-population fixtures, and a free-surface mass-ledger prototype.
 
 Layer L3 (FLUX). Depends on `fs-evidence` (the `Color` for the Evidence-typed
 scaling plan), deterministic `fs-math` primitives, `fs-matdb` for immutable
-interface-system queries and usage receipts, and `fs-qty` for runtime
-dimension checks. Pure, deterministic (fixed tile/cell/link order).
+interface-system queries and usage receipts, `fs-qty` for runtime
+dimension checks, `fs-exec` for cancel gates and pooled sweeps, and
+`fs-sparse` (COO/CSR assembly and ILU(0)) for the conjugate energy and
+projection solves. Pure, deterministic (fixed tile/cell/link order).
 
 ## Public types and semantics
 
@@ -783,6 +785,107 @@ replay-stable seeded determinism CANDIDATE.
   (committed tree, M4 + x86, debug + release), per the 40p2 precedent.
 - Wall layers hold equilibrium state and are excluded from physics
   claims; only the fluid interior is certified.
+
+## Steady conjugate heat transfer (`conjugate`, bead rc-root-q61wp.34)
+
+`conjugate` couples the existing `BoundaryGrid3` airflow to ONE conservative
+finite-volume energy equation over fluid AND solid voxels, for forced-air
+electronics cooling (the wedge's second physics after steady conduction).
+
+- `VoxelDomain` (cubic cells of edge `dx` metres, index `(z ny + y) nx + x`,
+  `Voxel::Fluid | Voxel::Solid(material)`), `FluidProperties` (constant
+  `rho`, `c_p`, `k`, `nu`; `dry_air_300k()` cites Incropera Table A.4) and
+  `SolidMaterial` (labelled isotropic `k`).
+- `FlowField`: staggered volumetric face fluxes (m^3/s). Producers:
+  `quiescent`, `from_face_velocity` (analytic/measured face-normal velocity,
+  no projection), and `from_cell_velocities`, which interpolates cell
+  velocities and PROJECTS them onto discretely divergence-free fluxes with
+  one SPD correction-potential solve on the fluid cells (`FlowFace::Fixed`
+  fluxes held, potential zero on `FlowFace::Free` faces, components without
+  a free face pinned). `ProjectionReport` retains divergence before/after
+  and the largest correction. Faces touching a solid carry exactly zero.
+- `lbm_duct_flow` -> `LbmFlow { field, velocity_m_s, pressure_pa, report }`:
+  velocity inlet on `x-min`, pressure outlet on `x-max`,
+  no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the
+  declared physical state and refuses (`LatticeResolution`, with the voxel
+  size that would admit it) below `min_tau`; `Auto` collision is BGK for
+  `tau >= 0.55`, else central-moment relaxation (higher moments rate 1).
+  The steady criterion is the relative L2 change of the cell MASS flux
+  `rho u` between checks. Mass flux, not velocity, feeds the projection:
+  the weakly compressible lattice conserves `rho u` per layer (measured
+  uniform to 1e-6 over interior layers) while `u` rises along the
+  pressure drop. Both on-site faces are `Free`, because boundary-cell
+  momentum is a reconstruction; `LbmFlowReport` retains the NOMINAL and
+  REALIZED inflow (inlet rim cells share wall links, so a coarse grid
+  admits less than the plug). `pressure_pa` is the gauge pressure
+  `c_s^2 (rho_lat - 1) rho S^2`; `report.pressure_drop_pa` spans the first
+  to the last interior layer and `mean_pressure_x` averages one layer.
+- `solve_energy`: every face flux is `J = d T_P - a T_N - r`; interior
+  faces use the harmonic face conductivity (exact series resistance of two
+  half cells, so temperature and normal flux are continuous across any
+  fluid/solid or solid/solid contrast) and Patankar power-law (or upwind)
+  convection in conservative form. `ThermalFace` rules: `Adiabatic`,
+  `Temperature`, `HeatFlux` (into the domain), `Convective { h, ambient }`,
+  `Inflow { temperature }`, `Outflow { backflow_temperature }`; solid cells
+  on open faces are adiabatic. Sources via `ThermalSetup::power_w` (W per
+  cell, `add_uniform_power`) and fixed-temperature cells. The M-matrix is
+  solved by ILU(0)-right-preconditioned BiCGStab on the Jacobi-scaled
+  system; acceptance is the RECOMPUTED true residual.
+- `EnergyBalance` is computed from boundary and fixed-cell fluxes alone:
+  `source + fixed_injection - boundary_outflow` closes to roundoff because
+  the face fluxes telescope; `EnergySolution` adds `bulk_temperature_x`,
+  `solid_to_fluid_heat_w`, `max_where`.
+
+`BoundaryGrid3` streaming reads a pull-source table compiled with the link
+masks (one `u32` per cell and direction) instead of re-classifying every
+link on every step. The table selects exactly the source the classifier
+would, so results are bit-identical: `BOUNDARY_GOLDEN_HASH`
+(`d3q19_boundaries`) and `GOLDEN_HASH` (`d3q19_battery`) are unchanged and
+`D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION` stays 1. Memory cost: 76 bytes per
+cell beside the 304 bytes of populations.
+
+### Invariants
+
+- Discrete conservation: the two sides of every interior face carry equal
+  and opposite `J` for any temperatures; the balance residual is the sum of
+  solver residuals.
+- Maximum principle: off-diagonals are non-positive and the operator is
+  weakly diagonally dominant for divergence-free fluxes, so with no sources
+  no temperature leaves the hull of the boundary data (tested).
+- Flow never crosses a non-open thermal face (`FlowThroughClosedFace`).
+- A problem with no temperature anchor refuses instead of stalling.
+
+### Conformance (`tests/conjugate.rs`)
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Two-material slab, `k` 1 and 10 | exact series profile | every cell within 1e-9 K |
+| Parallel plates, isothermal, Pe_Dh 100 | Nu_T = 7.541 | n=8: 7.5015, n=16: 7.5313; error ratio 4.07 (second order) |
+| Plates with conducting walls (k_s/k_f = 10), uniform outer flux | Nu_H = 8.235 | 8.2448 (0.12 %) |
+| Rectangular duct, aspect 0.5, isothermal, x* = 0.125 | Nu_T = 3.391 (Shah & London) | 3.4326 on 12 x 24 (1.2 %) |
+| LBM duct (8 x 16, Re 10, Pr 0.7) vs the analytic-profile solve | same thermal problem | local Nu 3.446 vs 3.503 (1.6 %); profile within 4.3 % of the developed shape; interior layer mass flux uniform to 2e-3 |
+| Same LBM duct, developed pressure gradient | Darcy f Re = 62.19 (Shah & London, aspect 0.5) | 2.574e8 vs 2.496e8 Pa/m (3.1 %) |
+| Metamorphic: wall `k` x10 under a hot spot | peak must fall | 309.70 K -> 304.40 K |
+| Refusals | closed-face flow, no anchor, unknown material, lattice resolution, non-tile dims, cancellation | structured errors |
+
+Release lane (`--ignored`): simultaneously developing duct at Pr = 0.72 on
+two LBM rungs against the `fs-convection` Shah–London Table 52 card; the
+measured discrepancy band is printed per rung and gated at 10 %.
+
+### No-claim boundaries (conjugate)
+
+- Laminar, steady, constant-property forced convection only: no buoyancy,
+  turbulence model, radiation, or temperature-dependent properties.
+- Staircase voxel geometry at the declared `dx`; one run makes no
+  mesh-convergence claim. Power-law convection is first order where the
+  cell Péclet number exceeds about 10. All results are Estimated numerical
+  evidence; no enclosure or Verified colour is produced.
+- `lbm_duct_flow` runs the single-threaded reference `BoundaryGrid3`; its
+  cost (steps to steady scale with the slowest viscous mode) bounds the
+  practical domain to around 10^5 cells per minute-scale run. No throughput
+  claim.
+- No product (`.fsim`) stage consumes this module yet; Journey A budgets are
+  unchanged by it.
 
 ## D3Q19 sparse-sweep performance evidence model (bead 712t)
 

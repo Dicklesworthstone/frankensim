@@ -17,8 +17,10 @@ fs-exec = { path = "../fs-exec" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
+fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-convection = { path = "../fs-convection" }
 fs-fft = { path = "../fs-fft" }
 fs-obs = { path = "../fs-obs" }
 fs-roofline = { path = "../fs-roofline" }

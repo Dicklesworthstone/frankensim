@@ -1099,6 +1099,7 @@
     "crates/fs-ladder/tests/fidelity_graph.rs",
     "crates/fs-ladder/tests/ladder.rs",
     "crates/fs-lattice/tests/battery.rs",
+    "crates/fs-lbm/tests/conjugate.rs",
     "crates/fs-lbm/tests/cylinder_re100.rs",
     "crates/fs-lbm/tests/d3q19_battery.rs",
     "crates/fs-lbm/tests/d3q19_boundaries.rs",

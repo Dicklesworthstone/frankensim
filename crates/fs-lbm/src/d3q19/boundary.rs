@@ -366,7 +366,17 @@ pub struct BoundaryGrid3 {
     /// Solid topology is immutable after it is defined or state evolution
     /// begins; this prevents silent mass/topology transitions.
     topology_locked: bool,
+    /// Precompiled fluid pull sources: entry `(tile * TILE_CELLS + lane) *
+    /// Q3 + q` is the flat source cell `tile * TILE_CELLS + lane` of
+    /// direction `q`, or [`NO_FLUID_SOURCE`] for wall/open links and solid
+    /// cells. A pure function of topology, compiled with the link masks, so
+    /// streaming never re-derives neighbours (bit-identical by construction:
+    /// it selects the same source the classifier would).
+    pull: Vec<u32>,
 }
+
+/// Pull-table sentinel for links whose source is not a fluid cell.
+const NO_FLUID_SOURCE: u32 = u32::MAX;
 
 impl BoundaryGrid3 {
     /// Unit-density fluid at rest under the supplied face rules.
@@ -465,11 +475,13 @@ impl BoundaryGrid3 {
             open_link_masks: vec![LinkMaskTile3::empty(); tiles],
             stationary_link_masks: vec![LinkMaskTile3::empty(); tiles],
             topology_locked: false,
+            pull: Vec::new(),
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
         grid.open_link_masks = open_masks;
         grid.stationary_link_masks = stationary_masks;
+        grid.pull = grid.compile_pull_table(&grid.solid);
         grid
     }
 
@@ -595,10 +607,12 @@ impl BoundaryGrid3 {
         );
         self.validate_open_neighbors(&proposed_solid);
         let (wall_masks, open_masks, stationary_masks) = self.compile_link_masks(&proposed_solid);
+        let pull = self.compile_pull_table(&proposed_solid);
         self.solid = proposed_solid;
         self.link_masks = wall_masks;
         self.open_link_masks = open_masks;
         self.stationary_link_masks = stationary_masks;
+        self.pull = pull;
         self.topology_locked = true;
     }
 
@@ -812,54 +826,88 @@ impl BoundaryGrid3 {
     }
 
     fn stream(&mut self) {
+        // Canonical tile/lane traversal. Every destination population is a
+        // pure read of the immutable post-collision state, so the visiting
+        // order cannot move result bits.
+        for tile in 0..self.f[0].len() {
+            let solid = self.solid[tile];
+            for lane in 0..TILE_CELLS {
+                if solid & (1u64 << lane) != 0 {
+                    continue;
+                }
+                let base = (tile * TILE_CELLS + lane) * Q3;
+                let wall_mask = self.link_masks[tile].0[lane];
+                let open_mask = self.open_link_masks[tile].0[lane];
+                if wall_mask | open_mask == 0 {
+                    for q in 0..Q3 {
+                        let source = self.pull[base + q] as usize;
+                        self.f[q][tile].0[lane] =
+                            self.post[q][source / TILE_CELLS].0[source % TILE_CELLS];
+                    }
+                    continue;
+                }
+                let rho_post = (0..Q3).map(|q| self.post[q][tile].0[lane]).sum::<f64>();
+                let stationary_mask = self.stationary_link_masks[tile].0[lane];
+                for q in 0..Q3 {
+                    let bit = 1u32 << q;
+                    let value = if wall_mask & bit != 0 {
+                        let velocity = if stationary_mask & bit != 0 {
+                            [0.0; 3]
+                        } else {
+                            let [x, y, z] = self.coords(tile, lane);
+                            self.effective_wall_velocity(x, y, z)
+                        };
+                        let e = E3[q];
+                        let eu_wall = f64::from(e.0).mul_add(
+                            velocity[0],
+                            f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
+                        );
+                        self.post[OPP3[q]][tile].0[lane] + 2.0 * W3[q] * rho_post * eu_wall / CS2
+                    } else if open_mask & bit != 0 {
+                        // Every population on an open face-interior cell
+                        // is replaced by the regularized pass below.
+                        self.post[OPP3[q]][tile].0[lane]
+                    } else {
+                        let source = self.pull[base + q];
+                        debug_assert_ne!(
+                            source, NO_FLUID_SOURCE,
+                            "compiled boundary masks must classify every non-fluid link"
+                        );
+                        let source = source as usize;
+                        self.post[q][source / TILE_CELLS].0[source % TILE_CELLS]
+                    };
+                    self.f[q][tile].0[lane] = value;
+                }
+            }
+        }
+    }
+
+    fn compile_pull_table(&self, solid: &[u64]) -> Vec<u32> {
+        let cells = self.f[0].len() * TILE_CELLS;
+        assert!(
+            u32::try_from(cells).is_ok_and(|n| n < NO_FLUID_SOURCE),
+            "BoundaryGrid3 pull table supports fewer than 2^32 - 1 cells"
+        );
+        let mut pull = vec![NO_FLUID_SOURCE; cells * Q3];
         for z in 0..self.nz {
             for y in 0..self.ny {
                 for x in 0..self.nx {
-                    if self.is_solid(x, y, z) {
+                    if self.is_solid_in(solid, x, y, z) {
                         continue;
                     }
-                    let (destination_tile, destination_lane) = self.addr(x, y, z);
-                    let rho_post = (0..Q3)
-                        .map(|q| self.post[q][destination_tile].0[destination_lane])
-                        .sum::<f64>();
-                    let wall_mask = self.link_masks[destination_tile].0[destination_lane];
-                    let open_mask = self.open_link_masks[destination_tile].0[destination_lane];
-                    let stationary_mask =
-                        self.stationary_link_masks[destination_tile].0[destination_lane];
+                    let (tile, lane) = self.addr(x, y, z);
+                    let base = (tile * TILE_CELLS + lane) * Q3;
                     for q in 0..Q3 {
-                        let bit = 1u32 << q;
-                        let value = if wall_mask & bit != 0 {
-                            let velocity = if stationary_mask & bit != 0 {
-                                [0.0; 3]
-                            } else {
-                                self.effective_wall_velocity(x, y, z)
-                            };
-                            let e = E3[q];
-                            let eu_wall = f64::from(e.0).mul_add(
-                                velocity[0],
-                                f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
-                            );
-                            self.post[OPP3[q]][destination_tile].0[destination_lane]
-                                + 2.0 * W3[q] * rho_post * eu_wall / CS2
-                        } else if open_mask & bit != 0 {
-                            // Every population on an open face-interior cell
-                            // is replaced by the regularized pass below.
-                            self.post[OPP3[q]][destination_tile].0[destination_lane]
-                        } else {
-                            let PullSource::Fluid { tile, lane } =
-                                self.classify_pull(&self.solid, x, y, z, q)
-                            else {
-                                unreachable!(
-                                    "compiled boundary masks must classify every non-fluid link"
-                                )
-                            };
-                            self.post[q][tile].0[lane]
-                        };
-                        self.f[q][destination_tile].0[destination_lane] = value;
+                        if let PullSource::Fluid { tile, lane } =
+                            self.classify_pull(solid, x, y, z, q)
+                        {
+                            pull[base + q] = (tile * TILE_CELLS + lane) as u32;
+                        }
                     }
                 }
             }
         }
+        pull
     }
 
     fn apply_open_boundaries(&mut self) {

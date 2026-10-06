@@ -15,6 +15,7 @@
 
 pub use fs_evidence::Color;
 
+pub mod conjugate;
 pub mod core2;
 pub mod d3q19;
 pub mod freesurface;
