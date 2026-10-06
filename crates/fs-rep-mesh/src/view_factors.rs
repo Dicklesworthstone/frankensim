@@ -42,21 +42,60 @@ pub enum ViewFactorError {
     /// An input or representable arithmetic requirement failed.
     Invalid(&'static str),
     /// The complete bounded trace exceeds the declared work allowance.
-    Budget { required: u64, limit: u64 },
+    Budget {
+        /// Complete ray/triangle visit count required by the request.
+        required: u64,
+        /// Caller-declared maximum ray/triangle visit count.
+        limit: u64,
+    },
     /// Cancellation/deadline was observed at a bounded checkpoint.
     Interrupted,
     /// A ray left the represented enclosure; no implicit ambient row is added.
-    Escape { surface: usize, ray: u32 },
+    Escape {
+        /// Zero-based emitting patch index.
+        surface: usize,
+        /// Zero-based ray index within the emitting patch.
+        ray: u32,
+    },
     /// An opaque first hit has no radiative patch owner.
-    UnassignedHit { surface: usize, ray: u32, face: usize },
+    UnassignedHit {
+        /// Zero-based emitting patch index.
+        surface: usize,
+        /// Zero-based ray index within the emitting patch.
+        ray: u32,
+        /// Index of the nearest opaque triangle without a patch owner.
+        face: usize,
+    },
     /// The receiving face points away from the void seen by the emitter.
-    BackfaceHit { surface: usize, ray: u32, face: usize },
+    BackfaceHit {
+        /// Zero-based emitting patch index.
+        surface: usize,
+        /// Zero-based ray index within the emitting patch.
+        ray: u32,
+        /// Index of the receiving triangle facing away from the radiating void.
+        face: usize,
+    },
     /// The two nested sample counts disagree beyond the explicit allowance.
-    SamplingChange { observed: f64, allowed: f64 },
+    SamplingChange {
+        /// Maximum absolute difference between N and N/2 raw factors.
+        observed: f64,
+        /// Caller-declared maximum absolute sampling change.
+        allowed: f64,
+    },
     /// Symmetric area scaling did not close within the numerical work budget.
-    Balance { iterations: usize, residual: f64 },
+    Balance {
+        /// Number of completed symmetric-scaling updates.
+        iterations: usize,
+        /// Maximum absolute normalized row-margin error after those updates.
+        residual: f64,
+    },
     /// Conservation projection would change the raw estimate too much.
-    Adjustment { observed: f64, allowed: f64 },
+    Adjustment {
+        /// Maximum absolute projected-minus-raw factor change.
+        observed: f64,
+        /// Caller-declared maximum absolute projection adjustment.
+        allowed: f64,
+    },
 }
 impl core::fmt::Display for ViewFactorError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -88,24 +127,34 @@ pub struct ViewFactorEstimate {
 }
 impl ViewFactorEstimate {
     /// Exact input geometry, winding, owner order and patch-count identity.
+    #[must_use]
     pub const fn geometry_identity(&self) -> ContentHash { self.geometry_identity }
     /// Integrated areas in the caller's patch order.
+    #[must_use]
     pub fn areas(&self) -> &[f64] { &self.areas }
     /// Nearest-hit counts, before ANY reciprocity correction.
+    #[must_use]
     pub fn counts(&self) -> &[Vec<u32>] { &self.counts }
     /// Count/N factors before ANY reciprocity correction.
+    #[must_use]
     pub fn raw_factors(&self) -> &[Vec<f64>] { &self.raw }
     /// Symmetric-area-scaled factors; numerical conservation, not geometric proof.
+    #[must_use]
     pub fn factors(&self) -> &[Vec<f64>] { &self.factors }
     /// Exact policy consumed by generation.
+    #[must_use]
     pub const fn config(&self) -> ViewFactorConfig { self.config }
     /// Observed maximum difference between N and N/2 ray-prefix factors.
+    #[must_use]
     pub const fn sampling_change(&self) -> f64 { self.sampling_change }
     /// Observed maximum absolute projected-minus-raw factor change.
+    #[must_use]
     pub const fn adjustment(&self) -> f64 { self.adjustment }
     /// Number of completed symmetric-scaling updates.
+    #[must_use]
     pub const fn balance_iterations(&self) -> usize { self.balance_iterations }
     /// Intersection visits actually performed.
+    #[must_use]
     pub const fn triangle_tests(&self) -> u64 { self.triangle_tests }
 }
 
@@ -168,9 +217,9 @@ pub fn estimate_view_factors(cx: &Cx<'_>, positions: &[[f64;3]], triangles: &[[u
     poll(cx)?;
     let identity=geometry_identity(positions,triangles,owners,surfaces)?;
     let rays=config.rays_per_surface;
-    if !(256..=1_048_576).contains(&rays) || !rays.is_power_of_two()
-        || !(1..=4096).contains(&config.max_balance_iterations)
-        || !(config.max_sampling_change.is_finite() && config.max_sampling_change>0.0 && config.max_sampling_change<1.0)
+    if !((256..=1_048_576).contains(&rays) && rays.is_power_of_two()
+        && (1..=4096).contains(&config.max_balance_iterations)
+        && config.max_sampling_change.is_finite() && config.max_sampling_change>0.0 && config.max_sampling_change<1.0)
         || !(config.max_factor_adjustment.is_finite() && config.max_factor_adjustment>0.0 && config.max_factor_adjustment<1.0)
         || config.max_triangle_tests==0 || config.max_triangle_tests>MAX_TESTS {
         return Err(ViewFactorError::Invalid("invalid ray, projection or work policy"));
@@ -226,7 +275,7 @@ pub fn estimate_view_factors(cx: &Cx<'_>, positions: &[[f64;3]], triangles: &[[u
             let mut nearest=None; let mut distance=f64::INFINITY;
             for (slot,other) in faces.iter().enumerate() {
                 if slot==source {continue;}
-                if visits%256==0 {poll(cx)?;} visits+=1;
+                if visits.is_multiple_of(256) {poll(cx)?;} visits+=1;
                 if let Some(t)=ray_triangle_watertight(origin,dir,other.points[0],other.points[1],other.points[2])
                     && t>0.0 && t.is_finite() && t<distance {
                     distance=t; nearest=Some(slot);

@@ -481,94 +481,7 @@ impl TriComplex2 {
         faces: Vec<[u32; 3]>,
         metric: Metric2,
     ) -> Result<Self, TriComplex2Error> {
-        match metric {
-            Metric2::Planar { thickness } => {
-                validate_positive_metric("thickness", thickness)
-                    .map_err(TriComplex2Error::Metric)?;
-            }
-            Metric2::Axisymmetric { angular_span } => {
-                validate_positive_metric("angular span", angular_span)
-                    .map_err(TriComplex2Error::Metric)?;
-                if angular_span > core::f64::consts::TAU {
-                    return Err(TriComplex2Error::Metric(
-                        Metric2Error::AngularSpanExceedsTurn {
-                            bits: angular_span.to_bits(),
-                        },
-                    ));
-                }
-            }
-        }
-        if vertex_keys.len() != vertices.len() {
-            return Err(TriComplex2Error::VertexKeyCount {
-                vertices: vertices.len(),
-                keys: vertex_keys.len(),
-            });
-        }
-        if faces.is_empty() {
-            return Err(TriComplex2Error::NoFaces);
-        }
-
-        let mut seen_keys = BTreeMap::new();
-        for (vertex, &key) in vertex_keys.iter().enumerate() {
-            if let Some(first) = seen_keys.insert(key, vertex) {
-                return Err(TriComplex2Error::DuplicateVertexKey {
-                    key,
-                    first,
-                    second: vertex,
-                });
-            }
-        }
-        for (vertex, coordinates) in vertices.iter().enumerate() {
-            for (axis, value) in coordinates.iter().copied().enumerate() {
-                if !value.is_finite() {
-                    return Err(TriComplex2Error::NonFiniteCoordinate {
-                        vertex,
-                        axis,
-                        bits: value.to_bits(),
-                    });
-                }
-            }
-            if metric.is_axisymmetric() && coordinates[0] < 0.0 {
-                return Err(TriComplex2Error::NegativeRadius {
-                    vertex,
-                    bits: coordinates[0].to_bits(),
-                });
-            }
-        }
-
-        let mut edge_set = BTreeSet::new();
-        let mut face_set = BTreeMap::new();
-        for (face_index, face) in faces.iter().copied().enumerate() {
-            for (local, vertex) in face.iter().copied().enumerate() {
-                if vertex as usize >= vertices.len() {
-                    return Err(TriComplex2Error::VertexIndexOutOfRange {
-                        face: face_index,
-                        local,
-                        vertex,
-                        vertex_count: vertices.len(),
-                    });
-                }
-            }
-            if face[0] == face[1] || face[1] == face[2] || face[2] == face[0] {
-                return Err(TriComplex2Error::RepeatedFaceVertex {
-                    face: face_index,
-                    vertices: face,
-                });
-            }
-            let mut canonical_face = face;
-            canonical_face.sort_unstable();
-            if let Some(first) = face_set.insert(canonical_face, face_index) {
-                return Err(TriComplex2Error::DuplicateFace {
-                    first,
-                    second: face_index,
-                    vertices: canonical_face,
-                });
-            }
-            for (from, to) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
-                edge_set.insert(canonical_edge(from, to));
-            }
-        }
-
+        let edge_set = validate_tri_complex2_input(&vertices, &vertex_keys, &faces, metric)?;
         let edges: Vec<[u32; 2]> = edge_set.into_iter().collect();
         let edge_index: BTreeMap<[u32; 2], usize> = edges
             .iter()
@@ -872,6 +785,101 @@ impl TriComplex2 {
     pub fn edge_index(&self, a: u32, b: u32) -> Option<usize> {
         self.edge_index.get(&canonical_edge(a, b)).copied()
     }
+}
+
+fn validate_tri_complex2_input(
+    vertices: &[[f64; 2]],
+    vertex_keys: &[u64],
+    faces: &[[u32; 3]],
+    metric: Metric2,
+) -> Result<BTreeSet<[u32; 2]>, TriComplex2Error> {
+    match metric {
+        Metric2::Planar { thickness } => {
+            validate_positive_metric("thickness", thickness).map_err(TriComplex2Error::Metric)?;
+        }
+        Metric2::Axisymmetric { angular_span } => {
+            validate_positive_metric("angular span", angular_span)
+                .map_err(TriComplex2Error::Metric)?;
+            if angular_span > core::f64::consts::TAU {
+                return Err(TriComplex2Error::Metric(
+                    Metric2Error::AngularSpanExceedsTurn {
+                        bits: angular_span.to_bits(),
+                    },
+                ));
+            }
+        }
+    }
+    if vertex_keys.len() != vertices.len() {
+        return Err(TriComplex2Error::VertexKeyCount {
+            vertices: vertices.len(),
+            keys: vertex_keys.len(),
+        });
+    }
+    if faces.is_empty() {
+        return Err(TriComplex2Error::NoFaces);
+    }
+
+    let mut seen_keys = BTreeMap::new();
+    for (vertex, &key) in vertex_keys.iter().enumerate() {
+        if let Some(first) = seen_keys.insert(key, vertex) {
+            return Err(TriComplex2Error::DuplicateVertexKey {
+                key,
+                first,
+                second: vertex,
+            });
+        }
+    }
+    for (vertex, coordinates) in vertices.iter().enumerate() {
+        for (axis, value) in coordinates.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return Err(TriComplex2Error::NonFiniteCoordinate {
+                    vertex,
+                    axis,
+                    bits: value.to_bits(),
+                });
+            }
+        }
+        if metric.is_axisymmetric() && coordinates[0] < 0.0 {
+            return Err(TriComplex2Error::NegativeRadius {
+                vertex,
+                bits: coordinates[0].to_bits(),
+            });
+        }
+    }
+
+    let mut edge_set = BTreeSet::new();
+    let mut face_set = BTreeMap::new();
+    for (face_index, face) in faces.iter().copied().enumerate() {
+        for (local, vertex) in face.iter().copied().enumerate() {
+            if vertex as usize >= vertices.len() {
+                return Err(TriComplex2Error::VertexIndexOutOfRange {
+                    face: face_index,
+                    local,
+                    vertex,
+                    vertex_count: vertices.len(),
+                });
+            }
+        }
+        if face[0] == face[1] || face[1] == face[2] || face[2] == face[0] {
+            return Err(TriComplex2Error::RepeatedFaceVertex {
+                face: face_index,
+                vertices: face,
+            });
+        }
+        let mut canonical_face = face;
+        canonical_face.sort_unstable();
+        if let Some(first) = face_set.insert(canonical_face, face_index) {
+            return Err(TriComplex2Error::DuplicateFace {
+                first,
+                second: face_index,
+                vertices: canonical_face,
+            });
+        }
+        for (from, to) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            edge_set.insert(canonical_edge(from, to));
+        }
+    }
+    Ok(edge_set)
 }
 
 fn canonical_edge(a: u32, b: u32) -> [u32; 2] {

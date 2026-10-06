@@ -5,6 +5,7 @@
 //! certificate. Near-degenerate/ambiguous input may refuse. Callers admitting
 //! untrusted meshes must still run their usual topology and repair boundary.
 
+use core::cmp::Ordering;
 use fs_geom::Point3;
 use std::fmt;
 
@@ -78,6 +79,51 @@ fn may_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     turn(a, b, c) * turn(a, b, d) <= 0 && turn(c, d, a) * turn(c, d, b) <= 0
 }
 
+fn normalized_polygon_points(
+    positions: &[Point3],
+    indices: &[u32],
+) -> Result<Vec<[f64; 3]>, PolygonError> {
+    let mut points = reserved(indices.len())?;
+    for &index in indices {
+        let p = positions
+            .get(index as usize)
+            .ok_or(PolygonError::Input("polygon vertex index out of range"))?;
+        if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
+            return Err(PolygonError::Input(
+                "polygon contains a non-finite coordinate",
+            ));
+        }
+        points.push([p.x, p.y, p.z]);
+    }
+    // Subtract first to retain small features far from the origin. Only halve
+    // globally when a subtraction would overflow; halving is an exact binary
+    // rescale for ordinary coordinates and avoids an infinite extent.
+    let origin = points[0];
+    let halve = points
+        .iter()
+        .any(|p| (0..3).any(|axis| !(p[axis] - origin[axis]).is_finite()));
+    let mut extent = 0.0_f64;
+    for p in &mut points {
+        for axis in 0..3 {
+            p[axis] = if halve {
+                0.5 * p[axis] - 0.5 * origin[axis]
+            } else {
+                p[axis] - origin[axis]
+            };
+            extent = extent.max(p[axis].abs());
+        }
+    }
+    if !(extent.is_finite() && extent > 0.0) {
+        return Err(PolygonError::Degenerate);
+    }
+    for p in &mut points {
+        for value in p {
+            *value /= extent;
+        }
+    }
+    Ok(points)
+}
+
 /// Triangulate a simple planar polygon, retaining all boundary vertices.
 ///
 /// Output uses the original IDs, follows the input winding, and contains
@@ -104,30 +150,7 @@ pub fn triangulate_polygon(
     if n > MAX_POLYGON_VERTICES {
         return Err(PolygonError::Resource("polygon vertex count exceeds the face cap"));
     }
-    let mut points = reserved(n)?;
-    for &index in indices {
-        let p = positions.get(index as usize)
-            .ok_or(PolygonError::Input("polygon vertex index out of range"))?;
-        if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
-            return Err(PolygonError::Input("polygon contains a non-finite coordinate"));
-        }
-        points.push([p.x, p.y, p.z]);
-    }
-    // Subtract first to retain small features far from the origin. Only halve
-    // globally when a subtraction would overflow; halving is an exact binary
-    // rescale for ordinary coordinates and avoids an infinite extent.
-    let origin = points[0];
-    let halve = points.iter().any(|p| (0..3).any(|a| !(p[a] - origin[a]).is_finite()));
-    let mut extent = 0.0_f64;
-    for p in &mut points {
-        for axis in 0..3 {
-            p[axis] = if halve { 0.5 * p[axis] - 0.5 * origin[axis] }
-                else { p[axis] - origin[axis] };
-            extent = extent.max(p[axis].abs());
-        }
-    }
-    if !(extent.is_finite() && extent > 0.0) { return Err(PolygonError::Degenerate); }
-    for p in &mut points { for value in p { *value /= extent; } }
+    let points = normalized_polygon_points(positions, indices)?;
 
     // Newell's area normal chooses a stable cyclic projection. Its magnitude
     // also refuses zero-area bow ties and faces below the roundoff scale.
@@ -165,7 +188,9 @@ pub fn triangulate_polygon(
     for i in 0..n {
         let a = projected[i];
         let b = projected[(i + 1) % n];
-        if a == b { return Err(PolygonError::NonSimple); }
+        if a.partial_cmp(&b) == Some(Ordering::Equal) {
+            return Err(PolygonError::NonSimple);
+        }
         // Adjacent collinear edges may continue straight, but must not double
         // back. The latter overlap is excluded from the nonadjacent-pair scan.
         let c = projected[(i + 2) % n];
@@ -282,6 +307,15 @@ mod tests {
         let mut p = points(&[[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
         p[2].z = 0.1;
         assert_eq!(triangulate_polygon(&p, &[0, 1, 2, 3]), Err(PolygonError::NonPlanar));
+    }
+
+    #[test]
+    fn adjacent_vertices_differing_only_by_signed_zero_are_not_distinct() {
+        let p = points(&[[0., 0.], [1., 0.], [1., 1.], [-0.0, 1.], [0.0, 1.]]);
+        assert_eq!(
+            triangulate_polygon(&p, &[0, 1, 2, 3, 4]),
+            Err(PolygonError::NonSimple)
+        );
     }
 
     #[test]
