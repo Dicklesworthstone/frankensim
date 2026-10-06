@@ -6,6 +6,12 @@ on:
       - 'crates/fs-cli/src/solve.rs'
       - 'crates/fs-cli/src/solve/nominal_adjoint*'
       - 'crates/fs-cli/src/solve/nominal_adjoint/**'
+      - 'crates/fs-cli/tests/native_contact_adjoint.rs'
+      - 'crates/fs-conduction/src/interface.rs'
+      - 'crates/fs-conduction/src/interface/sensitivity.rs'
+      - 'crates/fs-conduction/src/interface/matching*'
+      - 'crates/fs-conduction/src/interface/matching/**'
+      - 'crates/fs-conduction/tests/contact_controls.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint.rs'
       - 'crates/fs-cli/tests/native_uncertainty/nominal_adjoint/**'
       - 'crates/fs-cli/tests/native_nonlinear_adjoint.rs'
@@ -134,6 +140,12 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Compare bound contact controls with physical FEM re-solves
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-conduction --test contact_controls -- --test-threads=1
+      - name: Compare native contact adjoints with real card and physics re-solves
+        if: ${{ !cancelled() }}
+        run: cargo test --release -p fs-cli --test native_contact_adjoint -- --test-threads=1
       - name: Test independent branch inlet pullbacks
         run: cargo test --release -p fs-airflow --lib inlet -- --test-threads=1
       - name: Compare independent fan-bank hydraulic derivatives with physical roots
