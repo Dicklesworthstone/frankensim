@@ -4,6 +4,8 @@
 //! hottest vertex of the declared temperature-max region. At a tie this is a
 //! selected nodal functional, NOT a unique derivative of a relocating maximum.
 //! It is useful as a frozen mean control even when an active branch changes.
+//! `temperature-max-contact-adjoint` selects the same complete derivative and
+//! adds named contact-resistance controls; choose one report, not both.
 //!
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
@@ -21,6 +23,7 @@ use super::{EvidenceWork, ProjectSpec, RungSolved, SolveRefusal, canonical_f64,
 
 mod air_inlet;
 mod contractions;
+mod contact_controls;
 mod coupled_thermal;
 mod fan_speed;
 mod material_controls;
@@ -86,9 +89,9 @@ fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
 pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
-    for row in rows.iter().filter(|row| row.name == OUTPUT) {
+    for row in rows.iter().filter(|row| row.name == OUTPUT || row.name == contact_controls::OUTPUT) {
         if found || row.kind != "report" {
-            return Err(bad("temperature-max-adjoint requires exactly one report output"));
+            return Err(bad("choose exactly one report: temperature-max-adjoint or temperature-max-contact-adjoint"));
         }
         found = true;
     }
@@ -117,6 +120,8 @@ pub(super) fn extract(
 ) -> Result<String, SolveRefusal> {
     poll(cx)?;
     admit_state_laws(spec)?;
+    let contact_requested = contact_controls::requested(spec);
+    let output = if contact_requested { contact_controls::OUTPUT } else { OUTPUT };
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
@@ -132,11 +137,13 @@ pub(super) fn extract(
         .map_or(0, |system| system.banks.len());
     let radiation_count = setup.radiation.as_ref().map_or(0, |r| r.surfaces.len());
     let material_count = spec.materials.as_deref().unwrap_or(&[]).len();
+    let contact_count = if contact_requested { spec.interface_cards.as_deref().unwrap_or(&[]).len() } else { 0 };
     let parameter_count = spec.power.as_deref().unwrap_or(&[]).len()
         .checked_add(setup.boundaries.len().saturating_mul(2))
         .and_then(|n| n.checked_add(radiation_count.saturating_mul(2)))
         .and_then(|n| n.checked_add(fan_count))
         .and_then(|n| n.checked_add(material_count))
+        .and_then(|n| n.checked_add(contact_count))
         .ok_or_else(|| bad("adjoint parameter count overflow"))?;
     // Logical extra vectors/records, not a total-allocator/RSS promise. The
     // numerical owners independently enforce their matrix and iteration caps.
@@ -256,6 +263,9 @@ pub(super) fn extract(
     let mut rows = radiation_rows;
     rows.extend(inlet_rows);
     rows.extend(material_controls::rows(cx, spec, solved, ids, &lambda, count(64))?);
+    if contact_requested {
+        rows.extend(contact_controls::rows(cx, spec, solved, &lambda, count(64))?);
+    }
     let mut missing = Vec::new();
     for (ordinal, power) in spec.power.as_deref().unwrap_or(&[]).iter().enumerate() {
         poll(cx)?;
@@ -292,17 +302,19 @@ pub(super) fn extract(
     fan_speed::append(cx, spec, solved, &lambda, &mut rows, &mut missing)?;
     let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
         .unwrap_or_else(|| "null".into());
+    let scope = if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
+        else { SCOPE.to_string() };
     poll(cx)?;
-    Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":\"temperature-max-adjoint\",",
+    Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":{},",
         "\"functional\":\"selected-nodal-temperature\",\"region\":{},\"selected_vertex\":{},",
         "\"value_k\":{},\"tied_maximum_vertices\":{},\"runner_up_gap_k\":{},\"mode\":{},",
         "\"true_relative_residual\":{},\"dual_iterations\":{},\"stability_iterations\":{},\"response_iterations\":{},",
         "\"parameters\":[{}],\"unsupported\":[{}],\"authority\":\"Estimated\",\"scope\":{}}}"),
-        json_string(region), selected, number(temperature[selected])?, tied, gap, json_string(mode),
+        json_string(output), json_string(region), selected, number(temperature[selected])?, tied, gap, json_string(mode),
         number(residual)?, dual_iterations,
         stability_iterations.map_or_else(|| "null".into(), |n| n.to_string()),
         response_iterations.map_or_else(|| "null".into(), |n| n.to_string()),
-        rows.join(","), missing.join(","), json_string(SCOPE)))
+        rows.join(","), missing.join(","), json_string(&scope)))
 }
 
 /// Transpose BOTH the consistent source mass and native regional nodal mixing.
@@ -408,5 +420,30 @@ mod admission_tests {
             name: OUTPUT.into(), kind: "report".into(), region: None,
         });
         assert!(requested(&spec).expect("linear adjoint remains admitted"));
+    }
+
+    #[test]
+    fn contact_extended_request_is_explicit_and_cannot_duplicate_the_same_goal() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/contact-pair/contact-pair.fsim"
+        ))).unwrap().decoded.spec;
+        assert!(!requested(&spec).unwrap());
+        assert!(!contact_controls::requested(&spec));
+        let request = fs_project::spec::OutputRequest {
+            name: contact_controls::OUTPUT.into(), kind: "report".into(), region: None,
+        };
+        spec.outputs.get_or_insert_with(Vec::new).push(request.clone());
+        assert!(requested(&spec).unwrap());
+        assert!(contact_controls::requested(&spec));
+        let mut both = spec.clone();
+        both.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+            name: OUTPUT.into(), ..request.clone()
+        });
+        assert!(requested(&both).is_err());
+        let mut duplicated = spec.clone();
+        duplicated.outputs.as_mut().unwrap().push(request);
+        assert!(requested(&duplicated).is_err());
+        spec.outputs.as_mut().unwrap().last_mut().unwrap().kind = "scalar".into();
+        assert!(requested(&spec).is_err());
     }
 }

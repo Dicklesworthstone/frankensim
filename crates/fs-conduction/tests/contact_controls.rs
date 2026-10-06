@@ -3,7 +3,7 @@ use fs_conduction::{ConductionMesh, ConductionProblem, ConductivityModel,
     ConductivityTable, InterfaceFacePair, InterfaceResistance, InterfaceSurface,
     ScalarField, SolveConfig, InitialGuess, ThermalBc, ThermalBoundaryBuilder,
     ThermalInterfaces, ConductionError};
-use fs_conduction::adjoint::RobinLinearization;
+use fs_conduction::adjoint::robin::RobinLinearization;
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::interface::{NonmatchingOptions, NonmatchingSurface};
 use fs_matdb::{ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId,
