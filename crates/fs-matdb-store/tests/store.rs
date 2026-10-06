@@ -251,16 +251,14 @@ fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_suppor
     for p in &lead.properties[..2] {
         assert!(matches!(
             &p.support,
-            Err(DiscoveryGap::Evaluation {
-                error: MatDbError::NoClaimInDomain { .. },
-                ..
-            })
+            Err(DiscoveryGap::Evaluation { error, .. })
+                if matches!(**error, MatDbError::NoClaimInDomain { .. })
         ));
     }
     for p in &lead.properties[2..] {
-        assert!(matches!(&p.support, Err(DiscoveryGap::Evaluation {
-            error: MatDbError::UnknownProperty { property }, ..
-        }) if property == p.property.name()));
+        assert!(matches!(&p.support, Err(DiscoveryGap::Evaluation { error, .. })
+            if matches!(&**error, MatDbError::UnknownProperty { property }
+                if property == p.property.name())));
     }
     request.properties.truncate(2);
     request.domain =
@@ -372,17 +370,16 @@ fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
             .candidates[1]
             .properties[0]
             .support,
-        Err(DiscoveryGap::Evaluation {
-            error: MatDbError::OutsideKnotSpan { .. },
-            ..
-        })
+        Err(DiscoveryGap::Evaluation { error, .. })
+            if matches!(**error, MatDbError::OutsideKnotSpan { .. })
     ));
     request.properties = vec![PropertyKey::new("density", Dims::NONE)];
     request.domain = discovery_request(&["unused"], 300.0, 400.0).domain;
     let conflict = store.discover(&request, &LawRegistry::new()).unwrap();
     assert!(matches!(&conflict.candidates[0].properties[0].support,
-        Err(DiscoveryGap::Evaluation { point, error: MatDbError::AmbiguousSelection { .. } })
-        if point.axes()["temperature"] == 325.0));
+        Err(DiscoveryGap::Evaluation { point, error })
+        if matches!(**error, MatDbError::AmbiguousSelection { .. })
+            && point.axes()["temperature"] == 325.0));
     // Existing observation precedence still decides; a weaker competing claim
     // does not demote this supported bundle under the declared policy (G3).
     request.selection = SelectionPolicy::PreferObservationBacked;
@@ -473,10 +470,8 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
     assert_eq!(wrong_axes.candidates[0].pack.pack_id, "ab");
     assert!(matches!(
         &wrong_axes.candidates[0].properties[0].support,
-        Err(DiscoveryGap::Evaluation {
-            error: MatDbError::AxisQuantityMismatch { .. },
-            ..
-        })
+        Err(DiscoveryGap::Evaluation { error, .. })
+            if matches!(**error, MatDbError::AxisQuantityMismatch { .. })
     ));
     request.domain = DiscoveryDomain::Envelope {
         lower: QueryPoint::new()
@@ -502,10 +497,8 @@ fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_err
             .candidates[0]
             .properties[0]
             .support,
-        Err(DiscoveryGap::Evaluation {
-            error: MatDbError::QuantityMismatch { .. },
-            ..
-        })
+        Err(DiscoveryGap::Evaluation { error, .. })
+            if matches!(**error, MatDbError::QuantityMismatch { .. })
     ));
     request.domain = discovery_request(&["unused"], 400.0, 300.0).domain;
     assert!(matches!(

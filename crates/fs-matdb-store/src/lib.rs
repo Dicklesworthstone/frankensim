@@ -767,7 +767,7 @@ fn discover_property(
             })
             .map_err(|error| DiscoveryGap::Evaluation {
                 point: point.clone(),
-                error,
+                error: Box::new(error),
             }),
         DiscoveryDomain::Envelope { lower, upper } => claims
             .query_envelope_typed(key, lower, upper, ClaimSelection::Policy(policy))

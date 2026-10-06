@@ -343,7 +343,7 @@ impl ThermalBoundary {
     /// admitted uniform Robin rows. The ambient-radiation producer uses this
     /// for one combined convection/radiation secant solve; it never changes
     /// ownership, overlays an interface, or converts another boundary law.
-    pub(crate) fn with_uniform_robin_replacements(
+    pub fn with_uniform_robin_replacements(
         &self,
         rows: &[(usize, f64, f64)],
     ) -> Result<ThermalBoundary, ConductionError> {
