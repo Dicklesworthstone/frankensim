@@ -28,8 +28,8 @@ mod simd;
 pub mod sparse;
 
 pub use boundary::{
-    BoundaryGrid3, BoundaryLink3, BoundarySpec3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3,
-    FaceBoundary3, LinkMaskTile3,
+    BoundaryGrid3, BoundaryLink3, BoundarySpec3, BoundaryStepError3,
+    D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3, FaceBoundary3, LinkMaskTile3,
 };
 pub use coupled::{
     PlatesGrid3, ThermalLbm3, gbeta_for_rayleigh3, plate_channel_flow3, shear_rate3, update_tau3,

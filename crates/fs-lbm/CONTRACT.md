@@ -844,6 +844,22 @@ would, so results are bit-identical: `BOUNDARY_GOLDEN_HASH`
 `D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION` stays 1. Memory cost: 76 bytes per
 cell beside the 304 bytes of populations.
 
+`BoundaryGrid3::step_pooled(pool, gate)` runs collide and pull-stream as
+`fs_exec::TileKernel`s over groups of 8 lattice tiles (512 cells); the
+open-face reconstruction (face cells only) stays serial. Serial and pooled
+streams call the same `StreamView::pull_cell`, and collision the same
+`collide_cell3`, so the published state is bit-identical to `step()` for
+any worker count (`lbm3bc-pool`: workers 1/2/3 on an obstructed
+velocity/pressure duct and on a moving-lid cavity). The stream writes a
+scratch buffer that is swapped in only after both passes complete:
+cancellation (`BoundaryStepError3::Cancelled`), a collision refusal (first
+cell in canonical order), or a pool fault leaves the pre-step state
+published (`lbm3bc-pool-cancel`). The scratch buffer adds 304 bytes per cell
+on first pooled use. `lbm_duct_flow` steps through one parked crew
+(`LbmFlowConfig::workers`, `0` = every host core) and takes moments from
+the populations, so a diverging run is a `FlowDiverged` refusal, not a
+panic.
+
 ### Invariants
 
 - Discrete conservation: the two sides of every interior face carry equal
@@ -880,10 +896,8 @@ measured discrepancy band is printed per rung and gated at 10 %.
   mesh-convergence claim. Power-law convection is first order where the
   cell Péclet number exceeds about 10. All results are Estimated numerical
   evidence; no enclosure or Verified colour is produced.
-- `lbm_duct_flow` runs the single-threaded reference `BoundaryGrid3`; its
-  cost (steps to steady scale with the slowest viscous mode) bounds the
-  practical domain to around 10^5 cells per minute-scale run. No throughput
-  claim.
+- `lbm_duct_flow` runs `BoundaryGrid3` pooled but scalar (no SIMD path);
+  steps to steady scale with the slowest viscous mode. No throughput claim.
 - No product (`.fsim`) stage consumes this module yet; Journey A budgets are
   unchanged by it.
 

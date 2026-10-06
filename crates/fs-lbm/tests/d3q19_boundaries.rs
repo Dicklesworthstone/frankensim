@@ -805,3 +805,93 @@ fn face_normals_and_tile_size_are_pinned() {
     assert_eq!(Face3::YMax.normal(), [0, 1, 0]);
     assert_eq!(Face3::ZMax.normal(), [0, 0, 1]);
 }
+
+fn pooled_fixture(spec: BoundarySpec3, obstacle: bool) -> BoundaryGrid3 {
+    let mut grid = BoundaryGrid3::new(16, 8, 8, 0.7, [0.0; 3], spec);
+    if obstacle {
+        grid.voxelize_sdf(|p| {
+            let d = [p[0] - 8.0, p[1] - 4.0, p[2] - 4.0];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - 2.5
+        });
+    }
+    grid
+}
+
+fn fluid_bits(grid: &BoundaryGrid3) -> Vec<u64> {
+    let [nx, ny, nz] = grid.dimensions();
+    let mut bits = Vec::new();
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if !grid.is_solid(x, y, z) {
+                    bits.extend(grid.populations(x, y, z).map(f64::to_bits));
+                }
+            }
+        }
+    }
+    bits
+}
+
+/// lbm3bc-pool: the pooled collide/stream passes publish exactly the serial
+/// state for every worker count, on an obstructed velocity/pressure duct and
+/// on a moving-lid cavity (non-stationary wall links).
+#[test]
+fn pooled_steps_are_bit_identical_to_serial_for_any_worker_count() {
+    use fs_exec::{CancelGate, TilePool};
+    let wall = FaceBoundary3::stationary_wall();
+    let duct = BoundarySpec3::new([
+        FaceBoundary3::Velocity {
+            velocity: [0.04, 0.0, 0.0],
+        },
+        FaceBoundary3::Pressure { density: 1.0 },
+        wall,
+        wall,
+        wall,
+        wall,
+    ]);
+    let lid = BoundarySpec3::lid_cavity([0.05, 0.0, 0.0]);
+    for (spec, obstacle) in [(duct, true), (lid, false)] {
+        let mut serial = pooled_fixture(spec, obstacle);
+        serial.run(12);
+        let expected = fluid_bits(&serial);
+        for workers in [1usize, 2, 3] {
+            let pool = TilePool::for_host(workers, 7);
+            let gate = CancelGate::new();
+            let mut pooled = pooled_fixture(spec, obstacle);
+            pool.with_parked_crew_local(|parked| {
+                for _ in 0..12 {
+                    pooled
+                        .step_pooled(parked, &gate)
+                        .expect("admitted pooled step");
+                }
+            });
+            verdict(
+                "lbm3bc-pool",
+                fluid_bits(&pooled) == expected,
+                &format!("workers={workers} obstacle={obstacle}"),
+            );
+        }
+    }
+}
+
+/// lbm3bc-pool-cancel: a tripped gate refuses the pooled step and leaves
+/// the published state exactly as it was.
+#[test]
+fn cancelled_pooled_step_publishes_nothing() {
+    use fs_exec::{CancelGate, TilePool};
+    let lid = BoundarySpec3::lid_cavity([0.05, 0.0, 0.0]);
+    let mut grid = pooled_fixture(lid, false);
+    grid.run(3);
+    let before = fluid_bits(&grid);
+    let gate = CancelGate::new();
+    gate.request();
+    let pool = TilePool::for_host(2, 7);
+    let error = grid
+        .step_pooled(&pool, &gate)
+        .expect_err("tripped gate must refuse");
+    verdict(
+        "lbm3bc-pool-cancel",
+        error == fs_lbm::BoundaryStepError3::Cancelled && fluid_bits(&grid) == before,
+        &format!("{error}"),
+    );
+}

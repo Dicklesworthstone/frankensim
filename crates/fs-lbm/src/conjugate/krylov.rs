@@ -39,6 +39,7 @@ fn residual(a: &Csr, b: &[f64], x: &[f64], r: &mut [f64]) {
 }
 
 /// Solve `A x = b` from the supplied initial `x`.
+#[allow(clippy::too_many_lines)] // one textbook iteration with explicit restarts
 pub(crate) fn bicgstab_ilu0(
     system: &'static str,
     a: &Csr,

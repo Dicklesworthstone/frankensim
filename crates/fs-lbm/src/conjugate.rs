@@ -169,6 +169,11 @@ pub enum ChtError {
         /// Failing row.
         row: usize,
     },
+    /// The tile pool refused a pass (worker fault or admission).
+    Executor {
+        /// Rendered pool diagnostic.
+        detail: String,
+    },
     /// The cancel gate tripped; nothing was published.
     Cancelled,
 }
@@ -222,6 +227,7 @@ impl core::fmt::Display for ChtError {
             Self::PreconditionerBreakdown { system, row } => {
                 write!(f, "{system} ILU(0) zero pivot at row {row}")
             }
+            Self::Executor { detail } => write!(f, "tile pool refused an LBM pass: {detail}"),
             Self::Cancelled => write!(f, "conjugate heat-transfer run cancelled"),
         }
     }

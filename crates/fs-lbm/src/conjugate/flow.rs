@@ -5,14 +5,17 @@
 // table; iterating them as integers is the clearest form.
 #![allow(clippy::needless_range_loop)]
 
-use fs_exec::CancelGate;
+use fs_exec::{CancelGate, TilePool};
 use fs_sparse::Coo;
 
 use super::domain::{FluidProperties, VoxelDomain};
 use super::krylov::bicgstab_ilu0;
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::equilibrium3;
-use crate::d3q19::{BoundaryGrid3, BoundarySpec3, CollisionModel3, Face3, FaceBoundary3, TILE};
+use crate::d3q19::{
+    BoundaryGrid3, BoundarySpec3, BoundaryStepError3, CollisionModel3, E3, Face3, FaceBoundary3,
+    TILE,
+};
 
 /// Mass-flow role of one domain face for flux construction and projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +286,7 @@ impl FlowField {
     /// Remove the discrete divergence with one correction potential `phi` on
     /// the fluid cells: corrected flux `F - (A/dx)(phi_N - phi_P)` on interior
     /// faces and `F + (2A/dx) phi_P` on outflow faces (`phi = 0` there).
+    #[allow(clippy::too_many_lines)] // components, assembly, solve, correction
     fn project(
         &mut self,
         domain: &VoxelDomain,
@@ -466,6 +470,9 @@ pub struct LbmFlowConfig {
     pub steady_tolerance: f64,
     /// Relative residual for the divergence-free projection.
     pub projection_tolerance: f64,
+    /// Pool workers for the collide/stream passes; `0` means every core the
+    /// host reports. Results are bit-identical for any value.
+    pub workers: usize,
 }
 
 impl Default for LbmFlowConfig {
@@ -479,6 +486,7 @@ impl Default for LbmFlowConfig {
             check_interval: 100,
             steady_tolerance: 1e-7,
             projection_tolerance: 1e-12,
+            workers: 0,
         }
     }
 }
@@ -692,43 +700,71 @@ pub fn lbm_duct_flow(
     }
     // The weakly compressible lattice conserves MASS: density falls along
     // the pressure drop and the velocity rises with it. The incompressible
-    // volumetric flux is therefore the momentum `rho u` over the reference
-    // density 1, which is (to steady tolerance) constant along a duct.
-    let sample = |grid: &BoundaryGrid3| -> Vec<[f64; 3]> {
+    // volumetric flux is therefore the momentum `sum e_q f_q` (force-free
+    // grid) over the reference density 1, which is (to steady tolerance)
+    // constant along a duct. Moments are taken from the populations
+    // directly, so a diverging state is a refusal, never a panic.
+    let sample = |grid: &BoundaryGrid3, step: usize| -> Result<Vec<[f64; 4]>, ChtError> {
         fluid_cells
             .iter()
             .map(|&c| {
                 let [x, y, z] = domain.coords(c);
-                let rho = grid.density(x, y, z);
-                grid.velocity(x, y, z).map(|u| rho * u)
+                let mut moments = [0.0f64; 4];
+                for (q, fq) in grid.populations(x, y, z).into_iter().enumerate() {
+                    let e = E3[q];
+                    moments[0] += f64::from(e.0) * fq;
+                    moments[1] += f64::from(e.1) * fq;
+                    moments[2] += f64::from(e.2) * fq;
+                    moments[3] += fq;
+                }
+                if moments.iter().all(|m| m.is_finite()) && moments[3] > 0.0 {
+                    Ok(moments)
+                } else {
+                    Err(ChtError::FlowDiverged { step })
+                }
             })
             .collect()
     };
-    let mut previous = sample(&grid);
-    let mut steps = 0usize;
-    let mut last_change = f64::INFINITY;
-    while steps < config.max_steps {
-        poll(gate)?;
-        let batch = config.check_interval.min(config.max_steps - steps);
-        grid.run(batch);
-        steps += batch;
-        let current = sample(&grid);
-        let (mut diff, mut norm) = (0.0f64, 0.0f64);
-        for (a, b) in current.iter().zip(&previous) {
-            for k in 0..3 {
-                if !a[k].is_finite() {
-                    return Err(ChtError::FlowDiverged { step: steps });
+    let workers = if config.workers == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    } else {
+        config.workers
+    };
+    let pool = TilePool::for_host(workers, 0);
+    let (steps, last_change, previous) = pool.with_parked_crew_local(|parked| {
+        let mut previous = sample(&grid, 0)?;
+        let mut steps = 0usize;
+        let mut last_change = f64::INFINITY;
+        while steps < config.max_steps {
+            poll(gate)?;
+            let batch = config.check_interval.min(config.max_steps - steps);
+            for _ in 0..batch {
+                grid.step_pooled(parked, gate)
+                    .map_err(|error| match error {
+                        BoundaryStepError3::Cancelled => ChtError::Cancelled,
+                        BoundaryStepError3::Collision { .. } => {
+                            ChtError::FlowDiverged { step: steps }
+                        }
+                        BoundaryStepError3::Pool(detail) => ChtError::Executor { detail },
+                    })?;
+                steps += 1;
+            }
+            let current = sample(&grid, steps)?;
+            let (mut diff, mut norm) = (0.0f64, 0.0f64);
+            for (a, b) in current.iter().zip(&previous) {
+                for k in 0..3 {
+                    diff = (a[k] - b[k]).mul_add(a[k] - b[k], diff);
+                    norm = a[k].mul_add(a[k], norm);
                 }
-                diff = (a[k] - b[k]).mul_add(a[k] - b[k], diff);
-                norm = a[k].mul_add(a[k], norm);
+            }
+            last_change = fs_math::det::sqrt(diff / norm.max(f64::MIN_POSITIVE));
+            previous = current;
+            if last_change <= config.steady_tolerance {
+                break;
             }
         }
-        last_change = fs_math::det::sqrt(diff / norm.max(f64::MIN_POSITIVE));
-        previous = current;
-        if last_change <= config.steady_tolerance {
-            break;
-        }
-    }
+        Ok::<_, ChtError>((steps, last_change, previous))
+    })?;
     if last_change > config.steady_tolerance {
         return Err(ChtError::FlowNotSteady {
             steps,
@@ -740,12 +776,11 @@ pub fn lbm_duct_flow(
     let mut velocities = vec![[0.0f64; 3]; domain.cell_count()];
     let mut pressure_pa = vec![0.0f64; domain.cell_count()];
     let pressure_scale = crate::CS2 * fluid.density_kg_m3 * velocity_scale_m_s * velocity_scale_m_s;
-    for (&c, u) in fluid_cells.iter().zip(&previous) {
-        let speed = fs_math::det::sqrt(u[0].mul_add(u[0], u[1].mul_add(u[1], u[2] * u[2])));
+    for (&c, m) in fluid_cells.iter().zip(&previous) {
+        let speed = fs_math::det::sqrt(m[0].mul_add(m[0], m[1].mul_add(m[1], m[2] * m[2])));
         max_lattice_speed = max_lattice_speed.max(speed);
-        velocities[c] = u.map(|v| v * velocity_scale_m_s);
-        let [x, y, z] = domain.coords(c);
-        pressure_pa[c] = (grid.density(x, y, z) - 1.0) * pressure_scale;
+        velocities[c] = [m[0], m[1], m[2]].map(|v| v * velocity_scale_m_s);
+        pressure_pa[c] = (m[3] - 1.0) * pressure_scale;
     }
     // Both on-site faces are Free: the interior lattice layers conserve mass
     // exactly, while the boundary cells' momentum is a reconstruction, so the

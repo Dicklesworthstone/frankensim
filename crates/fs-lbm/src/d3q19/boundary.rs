@@ -9,8 +9,14 @@
 //! density/velocity moments without maintaining six hand-specialized D3Q19
 //! formula tables.
 
+use core::ops::ControlFlow;
+use std::sync::Mutex;
+
+use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
+
 use super::{
-    CollisionModel3, E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, collide_cell3, equilibrium3,
+    CollisionError3, CollisionModel3, E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, collide_cell3,
+    equilibrium3,
 };
 use crate::CS2;
 
@@ -373,7 +379,46 @@ pub struct BoundaryGrid3 {
     /// streaming never re-derives neighbours (bit-identical by construction:
     /// it selects the same source the classifier would).
     pull: Vec<u32>,
+    /// Stream destination for [`BoundaryGrid3::step_pooled`], allocated on
+    /// first use as a copy of `f` (so never-written solid entries agree) and
+    /// swapped with `f` only after a complete pass: a cancelled or refused
+    /// pooled step publishes nothing.
+    next: Option<[Vec<Tile>; Q3]>,
 }
+
+/// Lattice tiles per pooled kernel tile (512 cells).
+const POOLED_GROUP_TILES: usize = 8;
+
+/// Refusal from one pooled [`BoundaryGrid3`] step. The published state is the
+/// pre-step state in every case.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundaryStepError3 {
+    /// The cancel gate tripped during the collide or stream pass.
+    Cancelled,
+    /// The first (lowest canonical index) cell whose collision refused.
+    Collision {
+        /// Cell coordinates.
+        cell: [usize; 3],
+        /// The collision diagnostic.
+        source: CollisionError3,
+    },
+    /// Pool-level refusal (worker fault or admission), rendered.
+    Pool(String),
+}
+
+impl core::fmt::Display for BoundaryStepError3 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "pooled D3Q19 step cancelled"),
+            Self::Collision { cell, source } => {
+                write!(f, "D3Q19 collision refused at cell {cell:?}: {source:?}")
+            }
+            Self::Pool(detail) => write!(f, "pooled D3Q19 step refused by the pool: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for BoundaryStepError3 {}
 
 /// Pull-table sentinel for links whose source is not a fluid cell.
 const NO_FLUID_SOURCE: u32 = u32::MAX;
@@ -476,6 +521,7 @@ impl BoundaryGrid3 {
             stationary_link_masks: vec![LinkMaskTile3::empty(); tiles],
             topology_locked: false,
             pull: Vec::new(),
+            next: None,
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -738,6 +784,67 @@ impl BoundaryGrid3 {
         }
     }
 
+    /// One step with the collide and pull-stream passes executed as tile
+    /// kernels on `pool`; the open-face reconstruction (face cells only)
+    /// stays serial. Every kernel tile writes a disjoint group of
+    /// [`POOLED_GROUP_TILES`] lattice tiles from read-only inputs through the
+    /// SAME per-cell functions as [`BoundaryGrid3::step`], so the published
+    /// state is bit-identical to a serial step for any worker count.
+    ///
+    /// # Errors
+    /// [`BoundaryStepError3`]; the pre-step state is intact in every case,
+    /// and re-issuing the step is deterministic.
+    pub fn step_pooled<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryStepError3> {
+        self.topology_locked = true;
+        {
+            let kernel = CollidePass {
+                f: &self.f,
+                solid: &self.solid,
+                post: chunk_groups(&mut self.post),
+                model: self.collision_model,
+                force: self.force,
+            };
+            match run_pass(pool, gate, &kernel)? {
+                FirstCollision(None) => {}
+                FirstCollision(Some((index, source))) => {
+                    return Err(BoundaryStepError3::Collision {
+                        cell: self.coords(index / TILE_CELLS, index % TILE_CELLS),
+                        source,
+                    });
+                }
+            }
+        }
+        let mut next = self.next.take().unwrap_or_else(|| self.f.clone());
+        let outcome = {
+            let kernel = StreamPass {
+                view: StreamView {
+                    post: &self.post,
+                    pull: &self.pull,
+                    link_masks: &self.link_masks,
+                    open_link_masks: &self.open_link_masks,
+                    stationary_link_masks: &self.stationary_link_masks,
+                    boundaries: self.boundaries,
+                    dims: [self.nx, self.ny, self.nz],
+                },
+                solid: &self.solid,
+                next: chunk_groups(&mut next),
+            };
+            run_pass(pool, gate, &kernel)
+        };
+        if let Err(error) = outcome {
+            self.next = Some(next);
+            return Err(error);
+        }
+        core::mem::swap(&mut self.f, &mut next);
+        self.next = Some(next);
+        self.apply_open_boundaries();
+        Ok(())
+    }
+
     /// Velocity component over one z section, row-major in `(y, x)`.
     #[must_use]
     pub fn velocity_section_z(&self, z: usize, component: usize) -> Vec<f64> {
@@ -772,15 +879,7 @@ impl BoundaryGrid3 {
     }
 
     fn coords(&self, tile: usize, lane: usize) -> [usize; 3] {
-        let (ntx, nty) = (self.nx / TILE, self.ny / TILE);
-        let tx = tile % ntx;
-        let rem = tile / ntx;
-        let ty = rem % nty;
-        let tz = rem / nty;
-        let lx = lane % TILE;
-        let ly = (lane / TILE) % TILE;
-        let lz = lane / (TILE * TILE);
-        [tx * TILE + lx, ty * TILE + ly, tz * TILE + lz]
+        tile_lane_coords([self.nx, self.ny, self.nz], tile, lane)
     }
 
     fn raw_moments(&self, x: usize, y: usize, z: usize) -> (f64, [f64; 3]) {
@@ -829,54 +928,24 @@ impl BoundaryGrid3 {
         // Canonical tile/lane traversal. Every destination population is a
         // pure read of the immutable post-collision state, so the visiting
         // order cannot move result bits.
+        let view = StreamView {
+            post: &self.post,
+            pull: &self.pull,
+            link_masks: &self.link_masks,
+            open_link_masks: &self.open_link_masks,
+            stationary_link_masks: &self.stationary_link_masks,
+            boundaries: self.boundaries,
+            dims: [self.nx, self.ny, self.nz],
+        };
         for tile in 0..self.f[0].len() {
             let solid = self.solid[tile];
             for lane in 0..TILE_CELLS {
                 if solid & (1u64 << lane) != 0 {
                     continue;
                 }
-                let base = (tile * TILE_CELLS + lane) * Q3;
-                let wall_mask = self.link_masks[tile].0[lane];
-                let open_mask = self.open_link_masks[tile].0[lane];
-                if wall_mask | open_mask == 0 {
-                    for q in 0..Q3 {
-                        let source = self.pull[base + q] as usize;
-                        self.f[q][tile].0[lane] =
-                            self.post[q][source / TILE_CELLS].0[source % TILE_CELLS];
-                    }
-                    continue;
-                }
-                let rho_post = (0..Q3).map(|q| self.post[q][tile].0[lane]).sum::<f64>();
-                let stationary_mask = self.stationary_link_masks[tile].0[lane];
-                for q in 0..Q3 {
-                    let bit = 1u32 << q;
-                    let value = if wall_mask & bit != 0 {
-                        let velocity = if stationary_mask & bit != 0 {
-                            [0.0; 3]
-                        } else {
-                            let [x, y, z] = self.coords(tile, lane);
-                            self.effective_wall_velocity(x, y, z)
-                        };
-                        let e = E3[q];
-                        let eu_wall = f64::from(e.0).mul_add(
-                            velocity[0],
-                            f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
-                        );
-                        self.post[OPP3[q]][tile].0[lane] + 2.0 * W3[q] * rho_post * eu_wall / CS2
-                    } else if open_mask & bit != 0 {
-                        // Every population on an open face-interior cell
-                        // is replaced by the regularized pass below.
-                        self.post[OPP3[q]][tile].0[lane]
-                    } else {
-                        let source = self.pull[base + q];
-                        debug_assert_ne!(
-                            source, NO_FLUID_SOURCE,
-                            "compiled boundary masks must classify every non-fluid link"
-                        );
-                        let source = source as usize;
-                        self.post[q][source / TILE_CELLS].0[source % TILE_CELLS]
-                    };
-                    self.f[q][tile].0[lane] = value;
+                let values = view.pull_cell(tile, lane);
+                for (field, value) in self.f.iter_mut().zip(values) {
+                    field[tile].0[lane] = value;
                 }
             }
         }
@@ -1116,32 +1185,6 @@ impl BoundaryGrid3 {
         }
     }
 
-    /// One velocity owns every exterior wall link of a boundary cell. At a
-    /// seam where incident wall faces disagree (for example, moving lid meets
-    /// stationary side wall), the entire cell is stationary. This keeps the
-    /// moving-wall corrections pairwise balanced instead of injecting mass
-    /// through an arbitrarily owned diagonal link.
-    fn effective_wall_velocity(&self, x: usize, y: usize, z: usize) -> [f64; 3] {
-        let mut velocity: Option<[f64; 3]> = None;
-        for face in Face3::ALL {
-            if !self.on_face(x, y, z, face) {
-                continue;
-            }
-            let FaceBoundary3::Wall {
-                velocity: face_velocity,
-            } = self.boundaries.face(face)
-            else {
-                continue;
-            };
-            velocity = Some(match velocity {
-                Some(existing) if !same_velocity(existing, face_velocity) => [0.0; 3],
-                Some(existing) => existing,
-                None => face_velocity,
-            });
-        }
-        velocity.unwrap_or([0.0; 3])
-    }
-
     fn interior_neighbor(x: usize, y: usize, z: usize, face: Face3) -> [usize; 3] {
         match face {
             Face3::XMin => [x + 1, y, z],
@@ -1169,6 +1212,250 @@ impl core::fmt::Debug for BoundaryGrid3 {
             )
             .finish_non_exhaustive()
     }
+}
+
+fn tile_lane_coords(dims: [usize; 3], tile: usize, lane: usize) -> [usize; 3] {
+    let (ntx, nty) = (dims[0] / TILE, dims[1] / TILE);
+    let tx = tile % ntx;
+    let rem = tile / ntx;
+    let ty = rem % nty;
+    let tz = rem / nty;
+    let lx = lane % TILE;
+    let ly = (lane / TILE) % TILE;
+    let lz = lane / (TILE * TILE);
+    [tx * TILE + lx, ty * TILE + ly, tz * TILE + lz]
+}
+
+/// One velocity owns every exterior wall link of a boundary cell. At a
+/// seam where incident wall faces disagree (for example, moving lid meets
+/// stationary side wall), the entire cell is stationary. This keeps the
+/// moving-wall corrections pairwise balanced instead of injecting mass
+/// through an arbitrarily owned diagonal link.
+fn effective_wall_velocity(
+    boundaries: BoundarySpec3,
+    dims: [usize; 3],
+    cell: [usize; 3],
+) -> [f64; 3] {
+    let mut velocity: Option<[f64; 3]> = None;
+    for face in Face3::ALL {
+        let axis = face.axis();
+        let on_face = if face.is_min() {
+            cell[axis] == 0
+        } else {
+            cell[axis] + 1 == dims[axis]
+        };
+        if !on_face {
+            continue;
+        }
+        let FaceBoundary3::Wall {
+            velocity: face_velocity,
+        } = boundaries.face(face)
+        else {
+            continue;
+        };
+        velocity = Some(match velocity {
+            Some(existing) if !same_velocity(existing, face_velocity) => [0.0; 3],
+            Some(existing) => existing,
+            None => face_velocity,
+        });
+    }
+    velocity.unwrap_or([0.0; 3])
+}
+
+/// Read-only inputs of the pull-stream, shared by the serial and pooled
+/// passes so both evaluate the identical per-cell expression.
+struct StreamView<'a> {
+    post: &'a [Vec<Tile>; Q3],
+    pull: &'a [u32],
+    link_masks: &'a [LinkMaskTile3],
+    open_link_masks: &'a [LinkMaskTile3],
+    stationary_link_masks: &'a [LinkMaskTile3],
+    boundaries: BoundarySpec3,
+    dims: [usize; 3],
+}
+
+impl StreamView<'_> {
+    /// Post-stream populations of one fluid cell before open-face
+    /// reconstruction.
+    fn pull_cell(&self, tile: usize, lane: usize) -> [f64; Q3] {
+        let post = self.post;
+        let base = (tile * TILE_CELLS + lane) * Q3;
+        let wall_mask = self.link_masks[tile].0[lane];
+        let open_mask = self.open_link_masks[tile].0[lane];
+        if wall_mask | open_mask == 0 {
+            return core::array::from_fn(|q| {
+                let source = self.pull[base + q] as usize;
+                post[q][source / TILE_CELLS].0[source % TILE_CELLS]
+            });
+        }
+        let rho_post = (0..Q3).map(|q| post[q][tile].0[lane]).sum::<f64>();
+        let stationary_mask = self.stationary_link_masks[tile].0[lane];
+        core::array::from_fn(|q| {
+            let bit = 1u32 << q;
+            if wall_mask & bit != 0 {
+                let velocity = if stationary_mask & bit != 0 {
+                    [0.0; 3]
+                } else {
+                    effective_wall_velocity(
+                        self.boundaries,
+                        self.dims,
+                        tile_lane_coords(self.dims, tile, lane),
+                    )
+                };
+                let e = E3[q];
+                let eu_wall = f64::from(e.0).mul_add(
+                    velocity[0],
+                    f64::from(e.1).mul_add(velocity[1], f64::from(e.2) * velocity[2]),
+                );
+                post[OPP3[q]][tile].0[lane] + 2.0 * W3[q] * rho_post * eu_wall / CS2
+            } else if open_mask & bit != 0 {
+                // Every population on an open face-interior cell is replaced
+                // by the regularized pass that follows streaming.
+                post[OPP3[q]][tile].0[lane]
+            } else {
+                let source = self.pull[base + q];
+                debug_assert_ne!(
+                    source, NO_FLUID_SOURCE,
+                    "compiled boundary masks must classify every non-fluid link"
+                );
+                let source = source as usize;
+                post[q][source / TILE_CELLS].0[source % TILE_CELLS]
+            }
+        })
+    }
+}
+
+/// Split the 19 SoA fields into aligned groups of [`POOLED_GROUP_TILES`]
+/// tiles, one exclusive (uncontended) lock per kernel tile.
+fn chunk_groups(fields: &mut [Vec<Tile>; Q3]) -> Vec<Mutex<[&mut [Tile]; Q3]>> {
+    let groups = fields[0].len().div_ceil(POOLED_GROUP_TILES);
+    let mut iters: Vec<_> = fields
+        .iter_mut()
+        .map(|field| field.chunks_mut(POOLED_GROUP_TILES))
+        .collect();
+    (0..groups)
+        .map(|_| {
+            Mutex::new(core::array::from_fn(|q| {
+                iters[q]
+                    .next()
+                    .expect("every SoA field has the same tile count")
+            }))
+        })
+        .collect()
+}
+
+/// First collision refusal in canonical (tile, lane) order.
+struct FirstCollision(Option<(usize, CollisionError3)>);
+
+impl Reduce for FirstCollision {
+    fn identity() -> Self {
+        FirstCollision(None)
+    }
+
+    fn merge(self, other: Self) -> Self {
+        if self.0.is_some() { self } else { other }
+    }
+}
+
+struct CollidePass<'a> {
+    f: &'a [Vec<Tile>; Q3],
+    solid: &'a [u64],
+    post: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
+    model: CollisionModel3,
+    force: [f64; 3],
+}
+
+impl TileKernel for CollidePass<'_> {
+    type Out = FirstCollision;
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new("fs-lbm.boundary3.collide", self.post.len() as u64)
+    }
+
+    fn run(&self, group: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, FirstCollision> {
+        if let Err(cancelled) = cx.checkpoint() {
+            return ControlFlow::Break(cancelled);
+        }
+        let group = group as usize;
+        let mut chunk = self.post[group]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for local in 0..chunk[0].len() {
+            let tile = group * POOLED_GROUP_TILES + local;
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    continue;
+                }
+                let populations = core::array::from_fn(|q| self.f[q][tile].0[lane]);
+                match collide_cell3(populations, self.model, self.force) {
+                    Ok(post) => {
+                        for (field, value) in chunk.iter_mut().zip(post) {
+                            field[local].0[lane] = value;
+                        }
+                    }
+                    Err(source) => {
+                        return ControlFlow::Continue(FirstCollision(Some((
+                            tile * TILE_CELLS + lane,
+                            source,
+                        ))));
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(FirstCollision(None))
+    }
+}
+
+struct StreamPass<'a> {
+    view: StreamView<'a>,
+    solid: &'a [u64],
+    next: Vec<Mutex<[&'a mut [Tile]; Q3]>>,
+}
+
+impl TileKernel for StreamPass<'_> {
+    type Out = ();
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new("fs-lbm.boundary3.stream", self.next.len() as u64)
+    }
+
+    fn run(&self, group: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, ()> {
+        if let Err(cancelled) = cx.checkpoint() {
+            return ControlFlow::Break(cancelled);
+        }
+        let group = group as usize;
+        let mut chunk = self.next[group]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for local in 0..chunk[0].len() {
+            let tile = group * POOLED_GROUP_TILES + local;
+            for lane in 0..TILE_CELLS {
+                if self.solid[tile] & (1u64 << lane) != 0 {
+                    continue;
+                }
+                let values = self.view.pull_cell(tile, lane);
+                for (field, value) in chunk.iter_mut().zip(values) {
+                    field[local].0[lane] = value;
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn run_pass<P: KernelRunner, K: TileKernel>(
+    pool: &P,
+    gate: &CancelGate,
+    kernel: &K,
+) -> Result<K::Out, BoundaryStepError3> {
+    let (outcome, _report) = pool.run_with_gate(kernel, gate);
+    outcome.map_err(|error| {
+        if gate.is_requested() {
+            BoundaryStepError3::Cancelled
+        } else {
+            BoundaryStepError3::Pool(format!("{error:?}"))
+        }
+    })
 }
 
 fn same_velocity(left: [f64; 3], right: [f64; 3]) -> bool {

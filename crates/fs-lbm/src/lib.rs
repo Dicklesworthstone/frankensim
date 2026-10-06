@@ -28,8 +28,8 @@ pub mod thermal;
 
 pub use core2::{Cell, Grid};
 pub use d3q19::{
-    BoundaryGrid3, BoundaryLink3, BoundarySpec3, Duct, Face3, FaceBoundary3, LinkMaskTile3, Q3,
-    duct_analytic, equilibrium3,
+    BoundaryGrid3, BoundaryLink3, BoundarySpec3, BoundaryStepError3, Duct, Face3, FaceBoundary3,
+    LinkMaskTile3, Q3, duct_analytic, equilibrium3,
 };
 pub use freesurface::{ContactModel, FreeSurface};
 pub use refine::RefinedChannel;
