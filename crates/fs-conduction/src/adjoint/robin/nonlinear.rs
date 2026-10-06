@@ -12,6 +12,7 @@ use crate::assemble::{assemble_jacobian_with_optional_interfaces, element_temper
 
 mod mean_feedback;
 mod material_controls;
+mod prescribed;
 
 pub(super) struct TangentSystem {
     transpose: Csr,
