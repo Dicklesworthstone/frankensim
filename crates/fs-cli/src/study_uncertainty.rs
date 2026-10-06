@@ -25,6 +25,8 @@ mod compliance;
 mod execution;
 #[path = "study_uncertainty/qmc.rs"]
 mod qmc;
+#[path = "study_uncertainty/sensitivity.rs"]
+mod sensitivity;
 #[path = "study_uncertainty/legacy.rs"]
 mod legacy;
 #[path = "study_uncertainty/model.rs"]
@@ -351,8 +353,11 @@ fn persist(
     let id = model.identity();
     let report = execution.monte_carlo().map(UqExecution::report);
     let qmc_report = execution.qmc_report();
+    let sensitivity_report = execution.sensitivity_report();
     let compliance = execution.compliance(model)?;
-    let scope = if compliance.is_some() {
+    let scope = if sensitivity_report.is_some() {
+        sensitivity::SCOPE.to_string()
+    } else if compliance.is_some() {
         compliance::scope(model)
     } else if qmc_report.is_some() {
         qmc::scope(model)
@@ -365,7 +370,11 @@ fn persist(
     let qmc_field = qmc_report.as_ref().map_or_else(String::new, |report| {
         format!(",\"qmc\":{}", qmc::json(report))
     });
-    let method = if qmc_report.is_some() { "quasi-monte-carlo" } else { "monte-carlo" };
+    let sensitivity_field = sensitivity_report.as_ref().map(|report|
+        sensitivity::json(report, model.bound.study().parameters())
+            .map(|json| format!(",\"sensitivity\":{json}"))).transpose()?.unwrap_or_default();
+    let method = if sensitivity_report.is_some() { "sobol-sensitivity" }
+        else if qmc_report.is_some() { "quasi-monte-carlo" } else { "monte-carlo" };
     let correlation = if model.bound.study().latent_correlation().is_some() {
         "gaussian-copula"
     } else { "independent" };
@@ -394,7 +403,7 @@ fn persist(
         .as_deref()
         .map_or_else(|| "null".into(), quoted);
     let summary = format!(
-        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{dependence_field}{control_field},\"no_claim\":{}}}",
+        "{{\"schema\":{REPORT_SCHEMA:?},\"driver\":{DRIVER:?},\"study_id\":{},\"status\":{},\"termination\":{},\"qoi\":\"temperature-max\",\"unit\":\"K\",\"authority\":\"Estimated\",\"method\":{method:?},\"correlation\":{correlation:?},\"seed\":{},\"samples_evaluated\":{n},\"samples_planned\":{},\"evaluations_attempted\":{},\"temperature_limit_k\":{},\"observations\":{samples},\"statistics\":{statistics},\"failure\":{failure}{compliance_field}{qmc_field}{sensitivity_field}{dependence_field}{control_field},\"no_claim\":{}}}",
         quoted(&id.to_hex()),
         quoted(status),
         quoted(termination),
@@ -417,7 +426,9 @@ fn persist(
     let compliance_html = compliance
         .as_ref()
         .map_or_else(String::new, |assessment| assessment.html());
-    let statistics_html = if let Some(report) = &qmc_report {
+    let statistics_html = if let Some(report) = &sensitivity_report {
+        sensitivity::html(report)
+    } else if let Some(report) = &qmc_report {
         qmc::html(report)
     } else {
         let complete = report.as_ref().filter(|_| status == "completed");
@@ -754,6 +765,8 @@ fn drive(
         } else if execution_status == UqStatus::Complete {
             if compliance.is_some() {
                 ("budget-exhausted", "lifetime-sample-budget")
+            } else if model.bound.study().sobol_sensitivity() {
+                ("completed", "fixed-sensitivity-design")
             } else {
                 ("completed", "fixed-sample-count")
             }

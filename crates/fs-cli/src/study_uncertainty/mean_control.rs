@@ -123,6 +123,7 @@ impl Calibration {
         };
         let fresh = Execution::new(model)?;
         self.control = Some(match &fresh {
+            Execution::SobolSensitivity(_) => return Err(invalid("pick-freeze sensitivity does not admit mean calibration")),
             Execution::MonteCarlo(run) => Frozen::MonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::CopulaMonteCarlo(run) => Frozen::Copula(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),
             Execution::QuasiMonteCarlo(run) => Frozen::QuasiMonteCarlo(run.freeze_linear_control_variate(&gradient).map_err(|e| invalid(e.to_string()))?),

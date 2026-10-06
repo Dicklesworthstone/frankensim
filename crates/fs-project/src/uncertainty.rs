@@ -4,7 +4,10 @@
 //!
 //! Uniform inputs require explicit independence or a declared Gaussian copula.
 //! Version 1 admits fixed-count propagation with Monte Carlo
-//! or explicitly replicated randomized Sobol quadrature. Version 2 requires
+//! or explicitly replicated randomized Sobol quadrature. The opt-in
+//! `sobol-sensitivity` method instead uses a fixed pick-freeze design to
+//! estimate global main and total effects under independent inputs. Its sample
+//! cap counts EVERY base and hybrid solve, not just complete rows. Version 2 requires
 //! an explicit Bernoulli-mixture policy for sequential Monte Carlo decisions.
 //! Version 3 adds fixed-count mean controls from support secants or one nominal adjoint.
 //! An engineering
@@ -155,6 +158,7 @@ pub struct UncertaintyStudy {
     latent_correlation: Option<Vec<Vec<f64>>>,
     compliance: Option<CompliancePolicy>,
     qmc: Option<QmcLayout>,
+    sobol_sensitivity: bool,
     mean_control: Option<MeanControlPolicy>,
 }
 
@@ -299,11 +303,15 @@ impl UncertaintyStudy {
         if (version == 3) != f.contains_key("mean-control") {
             return Err(error("only version 3 requires and admits a mean-control policy"));
         }
-        let randomized_qmc = match &f["method"].kind {
-            NodeKind::Symbol(method) if method == "monte-carlo" => false,
-            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => true,
-            _ => return Err(error("method must be monte-carlo or quasi-monte-carlo")),
+        let (randomized_qmc, sobol_sensitivity) = match &f["method"].kind {
+            NodeKind::Symbol(method) if method == "monte-carlo" => (false, false),
+            NodeKind::Symbol(method) if method == "quasi-monte-carlo" => (true, false),
+            NodeKind::Symbol(method) if method == "sobol-sensitivity" => (false, true),
+            _ => return Err(error("method must be monte-carlo, quasi-monte-carlo or sobol-sensitivity")),
         };
+        if sobol_sensitivity && version != 1 {
+            return Err(error("Sobol sensitivity requires a version 1 fixed design; mean controls and sequential compliance do not apply to pick-freeze rows"));
+        }
         if randomized_qmc != f.contains_key("qmc") {
             return Err(error("quasi-monte-carlo requires an explicit :qmc layout; monte-carlo forbids it"));
         }
@@ -374,19 +382,29 @@ impl UncertaintyStudy {
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
         }
+        if sobol_sensitivity {
+            if latent_correlation.is_some() || parameters.iter().any(|p| p.low == p.high) {
+                return Err(error("Sobol sensitivity requires explicitly independent varying inputs; keep constants in the base project"));
+            }
+            let width = parameters.len() + 2;
+            if samples % width != 0 || samples / width < 2 {
+                return Err(error("Sobol :samples must count N*(parameters+2) native solves with at least two complete rows"));
+            }
+        }
         let mean_control = f.get("mean-control").map(|node| mean_control::parse(node, &parameters)).transpose()?;
         let qoi = text(f["qoi"])?;
         if qoi != "temperature-max" { return Err(error("this native lane requires temperature-max")); }
         Ok(Self { canonical: fs_ir::sexpr::print(&root).map_err(|e| error(e.to_string()))?,
             project: text(f["project"])?, samples, seed: integer(f["seed"])?, wall_seconds, qoi,
             geometry, materials: paths(f["materials"])?, interfaces: paths(f["interfaces"])?, parameters,
-            latent_correlation, compliance, qmc, mean_control })
+            latent_correlation, compliance, qmc, sobol_sensitivity, mean_control })
     }
     /// Canonical source, including all explicit path and parameter declarations.
     #[must_use] pub fn canonical(&self) -> &str { &self.canonical }
     /// Referenced native project path.
     #[must_use] pub fn project_path(&self) -> &str { &self.project }
-    /// Original lifetime sample budget, including sequential decision studies.
+    /// Original lifetime evaluation budget, including every sensitivity hybrid
+    /// and sequential decision sample, but excluding capped calibration probes.
     #[must_use] pub const fn samples(&self) -> usize { self.samples }
     /// Statistical sampler seed, separate from the base project's physics seed.
     #[must_use] pub const fn seed(&self) -> u64 { self.seed }
@@ -407,6 +425,9 @@ impl UncertaintyStudy {
     #[must_use] pub fn compliance(&self) -> Option<&CompliancePolicy> { self.compliance.as_ref() }
     /// Explicit randomized Sobol layout; absent for the Monte Carlo method.
     #[must_use] pub const fn qmc(&self) -> Option<QmcLayout> { self.qmc }
+    /// Whether the study requests global independent-input Sobol effects, not
+    /// Sobol quadrature, a nominal derivative, or a compliance probability.
+    #[must_use] pub const fn sobol_sensitivity(&self) -> bool { self.sobol_sensitivity }
     /// Explicit whole-model mean calibration; absent in versions 1 and 2.
     #[must_use] pub const fn mean_control(&self) -> Option<MeanControlPolicy> { self.mean_control }
     /// Geometry sources, matched by role, not by path order.
@@ -574,3 +595,5 @@ mod boundary_temperature_tests;
 
 #[cfg(test)]
 mod fixed_temperature_tests;
+#[cfg(test)]
+mod sensitivity_tests;
