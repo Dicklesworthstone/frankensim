@@ -6,6 +6,8 @@
 //! It is useful as a frozen mean control even when an active branch changes.
 //! `temperature-max-contact-adjoint` selects the same complete derivative and
 //! adds named contact-resistance controls; choose one report, not both.
+//! `temperature-max-boundary-adjoint` instead adds prescribed-temperature
+//! controls through the complete lift, without changing legacy report bytes.
 //!
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
@@ -29,6 +31,7 @@ mod fan_speed;
 mod material_controls;
 mod natural_feedback;
 mod nonlinear_solid;
+mod prescribed_controls;
 mod radiative_feedback;
 mod surface_power;
 
@@ -89,9 +92,10 @@ fn admit_state_laws(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
 pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
-    for row in rows.iter().filter(|row| row.name == OUTPUT || row.name == contact_controls::OUTPUT) {
+    for row in rows.iter().filter(|row| row.name == OUTPUT || row.name == contact_controls::OUTPUT
+        || row.name == prescribed_controls::OUTPUT) {
         if found || row.kind != "report" {
-            return Err(bad("choose exactly one report: temperature-max-adjoint or temperature-max-contact-adjoint"));
+            return Err(bad("choose exactly one report: temperature-max-adjoint, temperature-max-contact-adjoint or temperature-max-boundary-adjoint"));
         }
         found = true;
     }
@@ -121,7 +125,9 @@ pub(super) fn extract(
     poll(cx)?;
     admit_state_laws(spec)?;
     let contact_requested = contact_controls::requested(spec);
-    let output = if contact_requested { contact_controls::OUTPUT } else { OUTPUT };
+    let boundary_requested = prescribed_controls::requested(spec);
+    let output = if contact_requested { contact_controls::OUTPUT }
+        else if boundary_requested { prescribed_controls::OUTPUT } else { OUTPUT };
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
@@ -290,8 +296,10 @@ pub(super) fn extract(
                 rows.push(row("convection-temperature", &declared.target, ordinal, "K", value[1])?);
             }
             B::HeatFlux { .. } => rows.push(row("heat-flux", &declared.target, ordinal, "W/m^2", value[2])?),
-            B::FixedTemperature { .. } => missing.push(unsupported("fixed-temperature", &declared.target,
-                "prescribed values require their complete lift derivative")),
+            B::FixedTemperature { .. } => {
+                if !boundary_requested { missing.push(unsupported("fixed-temperature", &declared.target,
+                    "prescribed values require their complete lift derivative")); }
+            }
             B::NaturalConvection { .. } => rows.push(row("natural-convection-ambient", &declared.target,
                 ordinal, "K", *natural_ambient.get(&declared.target)
                     .ok_or_else(|| bad("natural boundary has no complete ambient derivative"))?)?),
@@ -300,9 +308,14 @@ pub(super) fn extract(
         }
     }
     fan_speed::append(cx, spec, solved, &lambda, &mut rows, &mut missing)?;
+    if boundary_requested {
+        prescribed_controls::append(cx, spec, solved, &weights, &lambda, &mut rows, &mut missing, count(32))?;
+    }
     let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
         .unwrap_or_else(|| "null".into());
     let scope = if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
+        else if boundary_requested { format!("{} {}",
+            SCOPE.replace(" and Dirichlet-temperature derivatives", ""), prescribed_controls::SCOPE) }
         else { SCOPE.to_string() };
     poll(cx)?;
     Ok(format!(concat!("{{\"schema\":\"frankensim.cli.nominal-adjoint.v1\",\"output\":{},",
@@ -445,5 +458,25 @@ mod admission_tests {
         assert!(requested(&duplicated).is_err());
         spec.outputs.as_mut().unwrap().last_mut().unwrap().kind = "scalar".into();
         assert!(requested(&spec).is_err());
+    }
+
+    #[test]
+    fn prescribed_extended_request_cannot_alias_another_adjoint_report() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/contact-pair/contact-pair.fsim"
+        ))).unwrap().decoded.spec;
+        let request = fs_project::spec::OutputRequest {
+            name: prescribed_controls::OUTPUT.into(), kind: "report".into(), region: None,
+        };
+        spec.outputs.get_or_insert_with(Vec::new).push(request.clone());
+        assert!(requested(&spec).unwrap());
+        assert!(prescribed_controls::requested(&spec));
+        for other in [OUTPUT, contact_controls::OUTPUT, prescribed_controls::OUTPUT] {
+            let mut duplicate = spec.clone();
+            duplicate.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+                name: other.into(), ..request.clone()
+            });
+            assert!(requested(&duplicate).is_err());
+        }
     }
 }
