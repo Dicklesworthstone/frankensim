@@ -68,3 +68,6 @@ fn native_prescribed_controls_include_contact_material_and_cooling_feedback() {
             "nonlinear={nonlinear} cooling={cooling}: {actual:e} != {expected:e}");
     } }
 }
+
+#[path = "uncertainty.rs"]
+mod uncertainty;

@@ -4,6 +4,8 @@
 use super::*;
 use fs_project::uncertainty::{Target, UniformParameter};
 
+mod output;
+
 const OUTPUT: &str = "temperature-max-adjoint";
 
 impl Model {
@@ -12,14 +14,7 @@ impl Model {
     /// no second file load, source substitution or independent physical solver.
     fn nominal_view(&self) -> Result<Self> {
         let mut spec = self.base.spec.clone();
-        let outputs = spec.outputs.get_or_insert_with(Vec::new);
-        let requests: Vec<_> = outputs.iter().filter(|row| row.name == OUTPUT).collect();
-        if requests.len() > 1 || requests.first().is_some_and(|row| row.kind != "report") {
-            return Err(invalid("nominal calibration requires one unambiguous adjoint report output"));
-        }
-        if requests.is_empty() {
-            outputs.push(fs_project::spec::OutputRequest { name: OUTPUT.into(), kind: "report".into(), region: None });
-        }
+        output::configure(&mut spec, self.bound.study().parameters())?;
         let text = fs_project::print_sexpr(&spec).map_err(project_error)?;
         let base = fs_project::parse_sexpr(&text).map_err(project_error)?;
         let bound = self.bound.study().clone().bind(&base.spec).map_err(project_error)?;
@@ -64,6 +59,7 @@ fn target_name(target: Target) -> &'static str {
         Target::HeatFlux => "heat-flux",
         Target::AirInletTemperature => "air-inlet-temperature",
         Target::FanSpeedRatio => "fan-speed-ratio",
+        Target::FixedTemperature => "fixed-temperature",
         Target::NaturalConvectionAmbient => "natural-convection-ambient",
         Target::RadiationReservoirTemperature => "radiation-reservoir-temperature",
     }
@@ -120,7 +116,8 @@ mod tests {
     #[test]
     fn nominal_boundary_temperature_coefficients_do_not_alias_same_unit_controls() {
         for (target, name) in [(Target::NaturalConvectionAmbient, "natural-convection-ambient"),
-            (Target::RadiationReservoirTemperature, "radiation-reservoir-temperature")] {
+            (Target::RadiationReservoirTemperature, "radiation-reservoir-temperature"),
+            (Target::FixedTemperature, "fixed-temperature")] {
             let parameters = [UniformParameter { name:"reservoir".into(), entity:"wall".into(),
                 target, low:290.0, high:310.0 }];
             let row = format!(r#"{{"target":"{name}","entity":"wall","parameter_unit":"K","derivative":0.7}}"#);

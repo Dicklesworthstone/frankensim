@@ -52,6 +52,9 @@ pub enum Target {
     NaturalConvectionAmbient,
     /// Reservoir temperature of one named radiating surface, not its wall.
     RadiationReservoirTemperature,
+    /// Absolute prescribed temperature of one uniform Dirichlet boundary.
+    /// This is a solid-boundary value, not an ambient-fluid temperature.
+    FixedTemperature,
 }
 
 impl Target {
@@ -62,7 +65,8 @@ impl Target {
             Self::Power => "W",
             Self::ConvectionCoefficient => "W/m^2/K",
             Self::ConvectionTemperature | Self::AirInletTemperature
-            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature => "K",
+            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
+            | Self::FixedTemperature => "K",
             Self::HeatFlux => "W/m^2",
             Self::FanSpeedRatio => "1",
         }
@@ -73,7 +77,8 @@ impl Target {
             Self::Power => dims::POWER,
             Self::ConvectionCoefficient => dims::HEAT_TRANSFER_COEFFICIENT,
             Self::ConvectionTemperature | Self::AirInletTemperature
-            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature => dims::TEMPERATURE,
+            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature
+            | Self::FixedTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
             Self::FanSpeedRatio => Dims::NONE,
         }
@@ -348,6 +353,7 @@ impl UncertaintyStudy {
                     "fan-speed-ratio" => Target::FanSpeedRatio,
                     "natural-convection-ambient" => Target::NaturalConvectionAmbient,
                     "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
+                    "fixed-temperature" => Target::FixedTemperature,
                     _ => return Err(error("unsupported random project field")),
                 },
                 _ => return Err(error("parameter target must be a symbol")),
@@ -362,7 +368,8 @@ impl UncertaintyStudy {
             if low > high || (target == Target::Power && low < 0.0)
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
                     | Target::AirInletTemperature | Target::FanSpeedRatio
-                    | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature) && low <= 0.0) {
+                    | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
+                    | Target::FixedTemperature) && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
@@ -543,6 +550,10 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
                     (ThermalBoundaryCondition::Convection { coefficient, .. }, Target::ConvectionCoefficient) => coefficient.value = value,
                     (ThermalBoundaryCondition::Convection { reference_temperature, .. }, Target::ConvectionTemperature) => reference_temperature.value = value,
                     (ThermalBoundaryCondition::HeatFlux { outward_flux }, Target::HeatFlux) => outward_flux.value = value,
+                    // Preserve the original Dirichlet law and every unrelated
+                    // value. The solid/material solver admits each actual field;
+                    // the fluid ambient envelope does not bound a fixed wall.
+                    (ThermalBoundaryCondition::FixedTemperature { temperature }, Target::FixedTemperature) => temperature.value = value,
                     (ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. }, Target::NaturalConvectionAmbient) => ambient_temperature.value = value,
                     _ => return Err(error("random field does not match the declared boundary law; derived coefficients cannot be overwritten")),
                 }
@@ -560,3 +571,6 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
 mod tests;
 #[cfg(test)]
 mod boundary_temperature_tests;
+
+#[cfg(test)]
+mod fixed_temperature_tests;
