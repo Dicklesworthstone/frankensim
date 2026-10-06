@@ -48,6 +48,10 @@ pub enum Target {
     /// Absolute speed ratio of one explicitly named native fan-system bank.
     /// The source curve and its admitted speed domain remain unchanged.
     FanSpeedRatio,
+    /// Ambient temperature of one declared natural-convection boundary.
+    NaturalConvectionAmbient,
+    /// Reservoir temperature of one named radiating surface, not its wall.
+    RadiationReservoirTemperature,
 }
 
 impl Target {
@@ -57,7 +61,8 @@ impl Target {
         match self {
             Self::Power => "W",
             Self::ConvectionCoefficient => "W/m^2/K",
-            Self::ConvectionTemperature | Self::AirInletTemperature => "K",
+            Self::ConvectionTemperature | Self::AirInletTemperature
+            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature => "K",
             Self::HeatFlux => "W/m^2",
             Self::FanSpeedRatio => "1",
         }
@@ -67,7 +72,8 @@ impl Target {
         match self {
             Self::Power => dims::POWER,
             Self::ConvectionCoefficient => dims::HEAT_TRANSFER_COEFFICIENT,
-            Self::ConvectionTemperature | Self::AirInletTemperature => dims::TEMPERATURE,
+            Self::ConvectionTemperature | Self::AirInletTemperature
+            | Self::NaturalConvectionAmbient | Self::RadiationReservoirTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
             Self::FanSpeedRatio => Dims::NONE,
         }
@@ -81,7 +87,8 @@ pub struct UniformParameter {
     pub name: String,
     /// The native field to vary.
     pub target: Target,
-    /// Region, boundary target, air branch, or fan-bank identity according to `target`.
+    /// Region, boundary target, air branch, fan bank, or radiating-surface name
+    /// according to `target`; a radiating surface is not its geometric target.
     pub entity: String,
     /// Closed distribution support in coherent SI units; equality is deterministic.
     pub low: f64,
@@ -339,6 +346,8 @@ impl UncertaintyStudy {
                     "air-inlet-temperature" => Target::AirInletTemperature,
                     "heat-flux" => Target::HeatFlux,
                     "fan-speed-ratio" => Target::FanSpeedRatio,
+                    "natural-convection-ambient" => Target::NaturalConvectionAmbient,
+                    "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
                     _ => return Err(error("unsupported random project field")),
                 },
                 _ => return Err(error("parameter target must be a symbol")),
@@ -352,7 +361,8 @@ impl UncertaintyStudy {
             let high = quantity(p["high"], target.dims())?;
             if low > high || (target == Target::Power && low < 0.0)
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
-                    | Target::AirInletTemperature | Target::FanSpeedRatio) && low <= 0.0) {
+                    | Target::AirInletTemperature | Target::FanSpeedRatio
+                    | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature) && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
@@ -419,7 +429,8 @@ impl UncertaintyStudy {
         }
         let envelope = base.envelope.as_ref().ok_or_else(|| error("missing operating envelope"))?;
         for parameter in &self.parameters {
-            if matches!(parameter.target, Target::ConvectionTemperature | Target::AirInletTemperature)
+            if matches!(parameter.target, Target::ConvectionTemperature | Target::AirInletTemperature
+                | Target::NaturalConvectionAmbient)
                 && (parameter.low < envelope.ambient_lo.value || parameter.high > envelope.ambient_hi.value) {
                 return Err(error("temperature support exceeds the unchanged operating envelope"));
             }
@@ -507,6 +518,18 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
                 matches += 1;
             }
         }
+    } else if parameter.target == Target::RadiationReservoirTemperature {
+        // A radiative reservoir is independent of the ambient-fluid envelope.
+        // Change only its explicit temperature, never emissivity, card query,
+        // convection ambient, surface ownership, or a derived effective Robin row.
+        let radiation = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
+            .and_then(|c| c.radiation.as_mut()).ok_or_else(|| error("declared radiation is required"))?;
+        for surface in &mut radiation.surfaces {
+            if surface.name == parameter.entity {
+                surface.reservoir_temperature.value = value;
+                matches += 1;
+            }
+        }
     } else {
         let setup = project.cooling.as_mut().and_then(|c| c.conduction.as_mut())
             .ok_or_else(|| error("native conduction setup is required"))?;
@@ -520,6 +543,7 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
                     (ThermalBoundaryCondition::Convection { coefficient, .. }, Target::ConvectionCoefficient) => coefficient.value = value,
                     (ThermalBoundaryCondition::Convection { reference_temperature, .. }, Target::ConvectionTemperature) => reference_temperature.value = value,
                     (ThermalBoundaryCondition::HeatFlux { outward_flux }, Target::HeatFlux) => outward_flux.value = value,
+                    (ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. }, Target::NaturalConvectionAmbient) => ambient_temperature.value = value,
                     _ => return Err(error("random field does not match the declared boundary law; derived coefficients cannot be overwritten")),
                 }
                 matches += 1;
@@ -534,3 +558,5 @@ fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) ->
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod boundary_temperature_tests;
