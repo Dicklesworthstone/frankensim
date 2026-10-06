@@ -71,3 +71,61 @@ fn native_prescribed_controls_include_contact_material_and_cooling_feedback() {
 
 #[path = "uncertainty.rs"]
 mod uncertainty;
+
+#[test]
+fn native_cooled_walls_keep_inward_heat_and_complete_boundary_sensitivities() {
+    for nonlinear in [false, true] {
+        let mut f = Fixture::new(nonlinear, false);
+        f.project.power.as_mut().unwrap()[0].watts.value = 0.1;
+        let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.boundaries[0].condition = B::NaturalConvection {
+            characteristic_length: QtyAny::new(0.06, dims::LENGTH),
+            ambient_temperature: QtyAny::new(310.0, dims::TEMPERATURE),
+            correlation: "convection.churchill-chu-vertical-plate".into(),
+        };
+        setup.boundaries[1].condition = B::FixedTemperature {
+            temperature: QtyAny::new(285.0, dims::TEMPERATURE),
+        };
+        f.project.requirements.as_mut().unwrap()[0].region = "cold".into();
+        let (plain, original, _) = f.solve(0.13, None, 20);
+        let (nominal, field, _) = f.solve(0.13, Some(BOUNDARY_OUTPUT), 21);
+        assert_eq!(original.get("temperature"), field.get("temperature"));
+        for key in ["energy", "interfaces", "natural_convection"] {
+            assert_eq!(plain.get(key), nominal.get(key), "{key}");
+        }
+        let law = &nominal.get("natural_convection").unwrap()
+            .get("laws").unwrap().as_array().unwrap()[0];
+        assert!(law.f64_field("mean_wall_k").unwrap() < 310.0);
+        assert!(law.f64_field("delta_t_k").unwrap() < 0.0);
+        assert!(law.f64_field("heat_rate_w").unwrap() < 0.0,
+            "a colder wall absorbs heat from ambient; do not take |flux|");
+        assert!(law.f64_field("htc_w_m2_k").unwrap() > 0.0);
+        assert_eq!(nominal.get("solver_control").unwrap().str_field("status"),
+            Some("unsupported-model"));
+        let report = nominal.get("nominal_adjoint").unwrap();
+        let selected = report.f64_field("selected_vertex").unwrap() as usize;
+        let parameters = report.get("parameters").unwrap().as_array().unwrap();
+        let step = 0.002;
+        for (case, (target, entity)) in [("fixed-temperature", "hot"),
+            ("natural-convection-ambient", "cold")].into_iter().enumerate()
+        {
+            let actual = parameters.iter().find(|r| r.str_field("target") == Some(target)
+                && r.str_field("entity") == Some(entity)).unwrap()
+                .f64_field("derivative").unwrap();
+            let mut values = Vec::new();
+            for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+                fixed_value(&mut f, "hot", 285.0 + if case == 0 { sign * step } else { 0.0 });
+                let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+                let B::NaturalConvection { ambient_temperature, .. } = &mut setup.boundaries[0].condition
+                    else { panic!("cooled-wall law"); };
+                ambient_temperature.value = 310.0 + if case == 1 { sign * step } else { 0.0 };
+                let (_, field, _) = f.solve(0.13, None, 22 + case * 2 + side);
+                values.push(field.get("temperature").unwrap().as_array().unwrap()[selected].as_f64().unwrap());
+            }
+            let expected = (values[1] - values[0]) / (2.0 * step);
+            assert!(actual > 0.0 && expected > 0.0);
+            assert!((actual - expected).abs() < 3e-4 * expected.abs().max(0.01),
+                "nonlinear={nonlinear} {target}: {actual:e} != {expected:e}");
+        }
+    }
+}

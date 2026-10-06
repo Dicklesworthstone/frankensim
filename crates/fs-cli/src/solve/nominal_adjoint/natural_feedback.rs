@@ -14,15 +14,18 @@ use std::collections::BTreeMap;
 pub(super) const CARD: &str = "convection.churchill-chu-vertical-plate";
 
 /// At fixed pressure, geometry and frozen transport properties:
-/// Ra is proportional to (Tw-Ta)/Tfilm^3 and Nu=(0.825+x)^2, x~Ra^(1/6).
+/// Ra is proportional to |Tw-Ta|/Tfilm^3 and Nu=(0.825+x)^2, x~Ra^(1/6).
 /// Therefore d(log h)/d(log Ra)=(1-0.825/sqrt(Nu))/3. Include BOTH film
 /// temperature derivatives: dTfilm/dTw=dTfilm/dTa=1/2. The ambient partial
 /// here holds Tw fixed; its effect through Tw is already in the Jacobian.
+/// Away from equilibrium, d(log|Tw-Ta|)/dTw = 1/(Tw-Ta) on BOTH branches.
+/// Taking an absolute value in that denominator would reverse cooled-wall
+/// feedback. The correlation's non-smooth equilibrium is not extrapolated.
 pub(super) fn partials(length: f64, wall: f64, ambient: f64, h: f64)
     -> Result<[f64; 2], SolveRefusal>
 {
     if ![length, wall, ambient, h].iter().all(|v| v.is_finite() && *v > 0.0)
-        || wall <= ambient { return Err(bad("natural adjoint needs a finite heated wall and positive retained law values")); }
+        || wall == ambient { return Err(bad("natural adjoint needs a finite non-equilibrium wall and positive retained law values")); }
     let delta = finite(wall-ambient)?;
     let film = finite(ambient+0.5*delta)?;
     let nu = finite(h*length/AIR_THERMAL_CONDUCTIVITY_W_M_K)?;
@@ -105,7 +108,7 @@ mod tests {
             ThermalBoundaryCondition::NaturalConvection { characteristic_length, .. } => Some(characteristic_length.value),
             _ => None,
         }).unwrap();
-        for ambient in [290.0, 320.0] { for delta in [1.0, 25.0, 80.0] { for pressure in [80000.0, 101325.0] {
+        for ambient in [290.0, 320.0] { for delta in [-80.0, -25.0, -1.0, 1.0, 25.0, 80.0] { for pressure in [80000.0, 101325.0] {
             let wall = ambient + delta;
             let evaluate = |tw: f64, ta: f64| {
                 let mut input = law.clone(); input.ambient_k = ta;
@@ -124,8 +127,8 @@ mod tests {
     }
 
     #[test]
-    fn a_natural_derivative_never_extrapolates_an_unheated_or_nonfinite_state() {
-        for values in [[0.06, 290.0, 300.0, 5.0], [0.06, 300.0, 300.0, 5.0],
+    fn a_natural_derivative_never_extrapolates_equilibrium_or_nonphysical_state() {
+        for values in [[0.06, 0.0, 300.0, 5.0], [0.06, 300.0, 300.0, 5.0],
             [0.06, 320.0, 300.0, f64::NAN], [0.0, 320.0, 300.0, 5.0],
             [0.06, 320.0, 300.0, 0.01]] {
             assert!(partials(values[0],values[1],values[2],values[3]).is_err());

@@ -6,7 +6,10 @@
 //! difference, so the stage iterates: solve with `h_k`, read the target's
 //! area-mean wall temperature from the Robin decomposition, re-evaluate the
 //! card, and stop when `h` moves by at most `TOLERANCE_REL`. The card is never
-//! extrapolated: a point outside its Rayleigh domain refuses.
+//! extrapolated: a point outside its Rayleigh domain refuses. The vertical
+//! Churchill-Chu law admits heated and cooled walls: Ra uses |Tw-Ta|, while
+//! the film temperature, Robin flux and retained temperature difference keep
+//! their physical sign. Exact thermal equilibrium remains explicitly refused.
 
 use std::collections::BTreeMap;
 
@@ -106,22 +109,42 @@ pub(super) fn coefficient(
     delta_t_k: f64,
     pressure_pa: f64,
 ) -> Result<Coefficient, SolveRefusal> {
-    if !(delta_t_k.is_finite() && delta_t_k > 0.0) {
+    if !(delta_t_k.is_finite() && delta_t_k != 0.0) {
         return Err(conduction_error(
             "cli-solve-conduction-natural-unheated",
             format!(
-                "natural convection on `{}` needs a wall warmer than the {} K ambient; the solved mean wall-to-ambient difference is {delta_t_k} K",
-                law.target, law.ambient_k
+                "natural convection on `{}` needs a finite nonzero wall-to-ambient difference; found {delta_t_k} K",
+                law.target
             ),
-            "natural convection is driven by a heated wall: declare power or a warmer boundary, or use a fixed-coefficient convection law",
+            "declare a heated or cooled vertical wall; equilibrium requires a separately admitted limiting law",
+        ));
+    }
+    // Churchill-Chu is a vertical-plate law for heating OR cooling. Only Ra
+    // uses the magnitude: the film temperature and the Robin heat flux must
+    // retain the signed wall-minus-ambient difference. Other orientations
+    // cannot be promoted to the cooled branch without their own admission.
+    if delta_t_k < 0.0 && law.card != CorrelationId::ChurchillChuVerticalPlate {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-cooled-card",
+            "the cooled-wall branch is admitted only for the Churchill-Chu vertical-plate card",
+            "declare a supported vertical-plate law",
         ));
     }
     let film_k = law.ambient_k + 0.5 * delta_t_k;
+    if ![law.length_m, law.ambient_k, law.ambient_k + delta_t_k, film_k, pressure_pa]
+        .iter().all(|v| v.is_finite() && *v > 0.0)
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-natural-input",
+            "natural convection requires positive finite absolute temperatures, pressure and length",
+            "inspect the declared law and the actual wall temperature",
+        ));
+    }
     let density = pressure_pa / (AIR_GAS_CONSTANT_J_KG_K * film_k);
     let kinematic = AIR_DYNAMIC_VISCOSITY_PA_S / density;
     let diffusivity = kinematic / AIR_PRANDTL;
     let length3 = law.length_m * law.length_m * law.length_m;
-    let rayleigh = GRAVITY_M_S2 * (1.0 / film_k) * delta_t_k * length3 / (kinematic * diffusivity);
+    let rayleigh = GRAVITY_M_S2 * (1.0 / film_k) * delta_t_k.abs() * length3 / (kinematic * diffusivity);
     let nusselt = evaluate(law.card, CorrelationInputs::natural(rayleigh, AIR_PRANDTL)).map_err(|error| {
         conduction_error(
             "cli-solve-conduction-natural-card",
@@ -221,4 +244,48 @@ pub(super) fn receipt_fragment(converged: &[Converged], iterations: usize) -> Re
         json_string(AUTHORITY),
         json_string(NO_CLAIM),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn law(ambient_k: f64) -> NaturalLaw {
+        NaturalLaw {
+            target: "wall".into(), length_m: 0.06, ambient_k,
+            card: CorrelationId::ChurchillChuVerticalPlate,
+        }
+    }
+
+    #[test]
+    fn reversing_wall_and_ambient_preserves_the_card_but_reverses_heat_flow() {
+        // Both states have exactly the same film temperature and |delta|.
+        let hot = coefficient(&law(295.0), 10.0, 101325.0).unwrap();
+        let cold = coefficient(&law(305.0), -10.0, 101325.0).unwrap();
+        assert_eq!(hot.htc_w_m2_k.to_bits(), cold.htc_w_m2_k.to_bits());
+        assert_eq!(hot.rayleigh.to_bits(), cold.rayleigh.to_bits());
+        assert_eq!(hot.nusselt.to_bits(), cold.nusselt.to_bits());
+        assert!(cold.htc_w_m2_k > 0.0);
+        assert_eq!(hot.htc_w_m2_k * 10.0, -(cold.htc_w_m2_k * -10.0));
+        // At a fixed ambient, density changes with the SIGNED film state.
+        let same_ambient_hot = coefficient(&law(305.0), 10.0, 101325.0).unwrap();
+        assert!(cold.htc_w_m2_k > same_ambient_hot.htc_w_m2_k);
+    }
+
+    #[test]
+    fn cooling_does_not_admit_equilibrium_nonphysical_inputs_or_other_cards() {
+        for delta in [0.0, -0.0, f64::NAN, f64::INFINITY, -305.0, -306.0] {
+            assert!(coefficient(&law(305.0), delta, 101325.0).is_err());
+        }
+        for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(coefficient(&law(305.0), -10.0, pressure).is_err());
+        }
+        let mut other = law(305.0);
+        other.card = CorrelationId::Gnielinski;
+        assert!(coefficient(&other, -10.0, 101325.0).is_err());
+        other = law(305.0);
+        other.length_m = 1.0e9;
+        assert!(coefficient(&other, -10.0, 101325.0).is_err(),
+            "a cold wall cannot bypass the actual Rayleigh domain");
+    }
 }
