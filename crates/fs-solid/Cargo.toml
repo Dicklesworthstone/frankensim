@@ -26,6 +26,7 @@ fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-modal = { path = "../fs-modal" }
 fs-material = { path = "../fs-material" }
+fs-math = { path = "../fs-math" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }

@@ -433,6 +433,48 @@ of uncertain temperature/stiffness/orientation, or experimental validation.
   this pressure port. The cane integration assembles uniform-pressure loads
   from its planar underside triangles and exercises the resulting bore response.
 
+### Three-dimensional finite-strain hyperelasticity (`hyper3`)
+
+`HyperTetProblem { nodes_m, tetrahedra, material, prescribed_m,
+nodal_forces_n, body_force_n_m3, budget, settings }.solve(cx)` is the 3-D
+Total-Lagrangian counterpart of `hyper2d`: P1 tetrahedra (constant `F` per
+element, so one card evaluation is exact quadrature), the `fs-material`
+energy cards (Neo-Hookean, Mooney–Rivlin; exact AD Piola stress and
+nested-dual 9x9 tangent), DEAD loads (nodal forces, body force per reference
+volume lumped to vertices), and linear ramping over `load_steps`. Each
+Newton step solves `K_ff d = -r_f - K_fp dp` so pending prescribed motion
+enters through the consistent linearization; trial states that invert an
+element are halved; once the boundary data are applied an Armijo condition
+on the potential `sum V W - f_ext . u` is enforced (residual decrease on a
+non-descent direction). The gate is `||r_f|| <= relative_tolerance *
+max(||f_int||, ||f_ext||, max|K_dd| max|u|)`; the stiffness term keeps it
+meaningful at stress-free states (a rigid rotation, where every force
+vanishes). Linear solves: ILU(0)-PCG, falling back to |diag|-Jacobi PMINRES
+for an indefinite tangent; acceptance on the recomputed residual.
+`HyperTetSolution` carries displacements, reactions in `prescribed_m`
+order, stored energy, the smallest `det F`, and per-step residual histories,
+backtracks, linear iterations and fallbacks. `internal_force` and
+`tangent_matrix` are exposed for verification. Element quality and sizes are
+admitted against `TetAssemblyBudget`; refusals are `HyperTetError`
+(`InvalidInput`, `DegenerateElement`, `MaterialRefused`, `NewtonStalled`,
+`LinearSolveFailed`, `Cancelled`).
+
+Conformance (`tests/hyper3.rs`, all executed): the affine finite-strain
+patch test is reproduced to 1.2e-14 m with the exact stored energy; the
+compressible Neo-Hookean uniaxial stretch to 1.6 (rollers) matches the
+closed-form lateral stretch and nominal stress to 1e-9 in 4-5 Newton
+iterations per step; the tangent matches a central difference of the
+internal force to 4e-11 (Neo-Hookean and Mooney–Rivlin); at the reference
+state it equals the independently written `linear3` stiffness to 4e-16; a
+rigid rotation of the boundary stores 1e-17 J with reactions below 1e-15 N;
+inverted elements, repeated prescribed DOFs and cancellation refuse.
+
+No-claims (`hyper3`): static, isothermal, rate-independent; constant-strain
+tetrahedra (volumetric locking of nearly incompressible cards is not
+mitigated; no mixed or F-bar formulation); dead loads only (no follower
+pressure); no contact; no limit-point continuation (drive by displacement
+or refuse); no mesh-convergence claim from one run.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to

@@ -34,6 +34,8 @@ pub mod continuation;
 pub mod cutfront;
 pub mod fiber;
 pub mod hyper2d;
+/// Three-dimensional finite-strain hyperelasticity on linear tetrahedra.
+pub mod hyper3;
 #[cfg(feature = "koiter-asymptotics")]
 pub mod koiter;
 pub mod linear;
@@ -52,6 +54,9 @@ pub use cutfront::{
 };
 pub use fiber::{Fiber, FiberLaw, Section, SectionState, update_sections_batched};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
+pub use hyper3::{
+    HyperLoadStep, HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution,
+};
 pub use linear::{Formulation, LinearProblem, PlaneKind};
 pub use linear3::{
     MandelStiffness6, TetAssemblyBudget, TetDeformedMesh, TetElasticAssembly, TetElasticError,
