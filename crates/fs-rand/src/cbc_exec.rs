@@ -1067,9 +1067,13 @@ impl CbcExecutor {
         else {
             unreachable!("only a completed scan enters its update pass");
         };
+        // Keep the complete incumbent in the replayable scan until every
+        // fallible certificate reservation and debit has succeeded. Taking it
+        // here loses the winner on a storage refusal or NeedAllowance retry.
         let (winning_score, chosen) = best
-            .take()
+            .as_ref()
             .expect("candidate 1 is coprime to every admitted n");
+        let chosen = *chosen;
         if charges.certifying {
             let prefix_len = self
                 .z
@@ -1084,7 +1088,7 @@ impl CbcExecutor {
             let runner_borrowed = (*runner_up).as_ref().map(|(score, who)| (score, *who));
             let certificate = build_prefix_certificate(
                 &self.z,
-                &winning_score,
+                winning_score,
                 chosen,
                 runner_borrowed,
                 tie_class,
@@ -1187,16 +1191,10 @@ impl CbcExecutor {
                 schedule.prefix_control_units(),
                 CbcBoundary::Prefix,
             )?;
-            debit(
-                work_spent,
-                *admitted_work_units,
-                remaining,
-                schedule.prefix_control_units(),
-                CbcBoundary::Prefix,
-                run_transitions,
-            )?;
-            z.push(1);
-            *phase = if dimension == 1 {
+            // Stage the next phase before publishing this component. A
+            // failed tie reservation must leave the completed product pass
+            // resumable, with no prefix append or repeated control debit.
+            let next_phase = if dimension == 1 {
                 Phase::Done
             } else {
                 Phase::Scan {
@@ -1212,6 +1210,16 @@ impl CbcExecutor {
                     )?,
                 }
             };
+            debit(
+                work_spent,
+                *admitted_work_units,
+                remaining,
+                schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+                run_transitions,
+            )?;
+            z.push(1);
+            *phase = next_phase;
             Ok(CbcBoundary::Prefix)
         } else {
             *phase = Phase::Init { next_point: end };
@@ -1294,16 +1302,10 @@ impl CbcExecutor {
                 schedule.prefix_control_units(),
                 CbcBoundary::Prefix,
             )?;
-            debit(
-                work_spent,
-                *admitted_work_units,
-                remaining,
-                schedule.prefix_control_units(),
-                CbcBoundary::Prefix,
-                run_transitions,
-            )?;
-            z.push(chosen);
-            *phase = if z.len() == dimension {
+            // Stage the next phase before publishing this component. A
+            // failed tie reservation must leave the completed product pass
+            // resumable, with no prefix append or repeated control debit.
+            let next_phase = if z.len() + 1 == dimension {
                 Phase::Done
             } else {
                 Phase::Scan {
@@ -1319,6 +1321,16 @@ impl CbcExecutor {
                     )?,
                 }
             };
+            debit(
+                work_spent,
+                *admitted_work_units,
+                remaining,
+                schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+                run_transitions,
+            )?;
+            z.push(chosen);
+            *phase = next_phase;
             Ok(CbcBoundary::Prefix)
         } else {
             *phase = Phase::Update {
@@ -1565,7 +1577,6 @@ fn advance_scan_candidate(
             *candidates_in_tile = 0;
             return Ok(AdvanceScan::Boundary(CbcBoundary::CandidateBlock));
         }
-        *candidates_in_tile += 1;
         gate_allowance(
             remaining,
             charges.candidate_control_units,
@@ -1587,14 +1598,6 @@ fn advance_scan_candidate(
                     observed: 0,
                 })
             })?;
-        if coprime {
-            *accum = Some(ScanAccum {
-                score,
-                next_point: 0,
-                micro: None,
-                micro_point: 0,
-            });
-        }
         debit(
             work_spent,
             charges.admitted_work_units,
@@ -1603,6 +1606,17 @@ fn advance_scan_candidate(
             CbcBoundary::CandidateBlock,
             transitions,
         )?;
+        // A rejected candidate admission consumes neither a tile slot nor
+        // an accumulator. Publish them only after reservation and debit.
+        *candidates_in_tile += 1;
+        if coprime {
+            *accum = Some(ScanAccum {
+                score,
+                next_point: 0,
+                micro: None,
+                micro_point: 0,
+            });
+        }
         if !coprime {
             *candidate += 1;
             return Ok(AdvanceScan::Accumulating);
@@ -2017,3 +2031,6 @@ mod debit_schedule_tests {
         assert_eq!(second_certificate.certificates.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod transaction_tests;
