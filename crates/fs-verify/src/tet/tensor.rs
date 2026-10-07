@@ -132,6 +132,14 @@ impl Conductivity<'_> {
             Self::Tensor(k) => k[e].defect_integral(nodal, volume),
         }
     }
+    /// Mixed coefficient contraction for the exact degree-four source lifting.
+    pub(super) fn inverse_bilinear(self, e: usize, a: [Iv; 3], b: [Iv; 3]) -> Iv {
+        match self {
+            Self::Scalar(k) => dot(a, b).div_pos(Iv::point(k[e])),
+            Self::Tensor(k) => (0..3).fold(Iv::zero(), |sum, i|
+                sum.add(a[i].mul(dot(k[e].inverse[i], b)))),
+        }
+    }
     pub(super) fn bilinear_integral(self, e: usize, a: [Iv; 3], b: [Iv; 3], volume: Iv) -> Iv {
         match self {
             Self::Scalar(k) => volume.mul(Iv::point(k[e])).mul(dot(a,b)),
@@ -150,18 +158,11 @@ impl TensorTetProblem<'_> {
         self.prepare(budget, &mut keep_going).map(|_| ())
     }
     fn prepare(&self, budget: FluxBudget, keep_going: &mut impl FnMut() -> bool) -> Result<Vec<Tensor>, TetError> {
-        poll(keep_going)?;
-        if self.tets.len() > budget.max_cells || self.vertices.len() > budget.max_cells.saturating_mul(4)
-            || budget.max_iterations > 1_000_000 { return Err(TetError::Budget); }
-        if self.conductivity.len() != self.tets.len() { return Err(TetError::Invalid("tensor conductivity length")); }
-        let mut tensors = Vec::new();
-        tensors.try_reserve_exact(self.tets.len()).map_err(|_| TetError::Budget)?;
-        for &k in self.conductivity { poll(keep_going)?; tensors.push(Tensor::new(k)?); }
-        Ok(tensors)
+        prepare_tensors(self.vertices.len(), self.tets.len(), self.conductivity, budget, keep_going)
     }
     fn problem<'a>(&'a self, tensors: &'a [Tensor]) -> Problem<'a> {
         Problem { vertices: self.vertices, tets: self.tets, conductivity: Conductivity::Tensor(tensors),
-            source: self.source, boundary: self.boundary }
+            source: Source::Constant(self.source), boundary: self.boundary }
     }
 }
 
@@ -192,6 +193,79 @@ pub fn tensor_mean_bound(
     problem: &TensorTetProblem<'_>, candidate: &[f64], dual_candidate: &[f64],
     budget: FluxBudget, mut keep_going: impl FnMut() -> bool,
 ) -> Result<MeanBound, TetError> {
+    let tensors = problem.prepare(budget, &mut keep_going)?;
+    goal::mean_bound_impl(&problem.problem(&tensors), candidate, dual_candidate, budget, &mut keep_going)
+}
+
+fn prepare_tensors(vertices: usize, cells: usize, conductivity: &[ConductivityTensor],
+    budget: FluxBudget, keep_going: &mut impl FnMut() -> bool) -> Result<Vec<Tensor>, TetError>
+{
+    poll(keep_going)?;
+    if cells > budget.max_cells || vertices > budget.max_cells.saturating_mul(4)
+        || budget.max_iterations > 1_000_000 { return Err(TetError::Budget); }
+    if conductivity.len() != cells { return Err(TetError::Invalid("tensor conductivity length")); }
+    let mut tensors = Vec::new();
+    tensors.try_reserve_exact(cells).map_err(|_| TetError::Budget)?;
+    for &k in conductivity { poll(keep_going)?; tensors.push(Tensor::new(k)?); }
+    Ok(tensors)
+}
+
+/// Linear tensor diffusion with a complete affine source in every tetrahedron.
+/// `source[e][i]` is the exact source value at local vertex `tets[e][i]`.
+/// Sources may jump across cells. No averaging or data projection changes the
+/// PDE; a zero-normal polynomial lifting equilibrates the within-cell variation.
+#[derive(Debug, Clone, Copy)]
+pub struct AffineSourceTetProblem<'a> {
+    pub vertices: &'a [[f64; 3]],
+    pub tets: &'a [[usize; 4]],
+    pub conductivity: &'a [ConductivityTensor],
+    pub source: &'a [[f64; 4]],
+    pub boundary: &'a [BoundaryFace],
+}
+impl AffineSourceTetProblem<'_> {
+    /// The same bounded outward tensor admission as the constant-source API.
+    /// Does not independently validate geometry, sources or boundary traces.
+    pub fn validate_conductivity(&self, budget: FluxBudget, mut keep_going: impl FnMut() -> bool)
+        -> Result<(), TetError>
+    {
+        self.prepare(budget, &mut keep_going).map(|_| ())
+    }
+    fn prepare(&self, budget: FluxBudget, keep_going: &mut impl FnMut() -> bool) -> Result<Vec<Tensor>, TetError> {
+        prepare_tensors(self.vertices.len(), self.tets.len(), self.conductivity, budget, keep_going)
+    }
+    fn problem<'a>(&'a self, tensors: &'a [Tensor]) -> Problem<'a> {
+        Problem { vertices: self.vertices, tets: self.tets, conductivity: Conductivity::Tensor(tensors),
+            source: Source::Affine(self.source), boundary: self.boundary }
+    }
+}
+
+/// Energy-norm majorant for the actual affine-source equation, including Robin
+/// trace and algebraic error of any admitted P1 candidate. All local polynomial
+/// products use outward exact simplex moments through degree four. This does
+/// not validate CAD, material uncertainty, nonlinear physics or a point maximum.
+pub fn affine_source_energy_bound(problem: &AffineSourceTetProblem<'_>, candidate: &[f64],
+    budget: FluxBudget, mut keep_going: impl FnMut() -> bool) -> Result<EnergyBound, TetError>
+{
+    let tensors = problem.prepare(budget, &mut keep_going)?;
+    energy_bound_impl(&problem.problem(&tensors), candidate, budget, &mut keep_going)
+}
+
+/// Exact cell-weighted integral, with the actual affine primal source retained
+/// in the outward residual correction and a same-operator constant-weight dual.
+pub fn affine_source_goal_bound(problem: &AffineSourceTetProblem<'_>, candidate: &[f64],
+    dual_candidate: &[f64], weights: &[f64], budget: FluxBudget,
+    mut keep_going: impl FnMut() -> bool) -> Result<GoalBound, TetError>
+{
+    let tensors = problem.prepare(budget, &mut keep_going)?;
+    goal::goal_bound_impl(&problem.problem(&tensors), candidate, dual_candidate, weights, budget, &mut keep_going)
+}
+
+/// Whole-volume mean for an affine source; the dual still has UNIT source.
+/// Constant source rows follow the original arithmetic without a fake lifting.
+pub fn affine_source_mean_bound(problem: &AffineSourceTetProblem<'_>, candidate: &[f64],
+    dual_candidate: &[f64], budget: FluxBudget, mut keep_going: impl FnMut() -> bool)
+    -> Result<MeanBound, TetError>
+{
     let tensors = problem.prepare(budget, &mut keep_going)?;
     goal::mean_bound_impl(&problem.problem(&tensors), candidate, dual_candidate, budget, &mut keep_going)
 }

@@ -85,7 +85,7 @@ pub(super) fn build(
             return Err(TetError::Invalid("non-finite coordinates"));
         }
     }
-    if candidate.iter().chain(problem.source).any(|v| !v.is_finite()) {
+    if candidate.iter().any(|v| !v.is_finite()) || !problem.source.is_finite() {
         return Err(TetError::Invalid("finite data required"));
     }
     problem.conductivity.validate(keep_going)?;

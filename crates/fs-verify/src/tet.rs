@@ -1,4 +1,4 @@
-//! Outward-evaluated equilibrated RT0 majorants on a conforming tetrahedral domain.
+//! Outward-evaluated equilibrated flux majorants on a conforming tetrahedral domain.
 //!
 //! The admitted PDE is -div(K grad u)=f, with element-constant scalar k>0
 //! or symmetric positive-definite tensor K, and element-constant f, P1
@@ -13,8 +13,10 @@
 //! For q in H(div), div q=f and q.n=g_N, integration by parts gives
 //!   ||u-v||_a <= (||q+K grad v||^2_(K^-1)
 //!                  + ||q.n-h(v-u_ref)||^2_(1/h,Robin))^(1/2).
-//! All integrands are quadratic polynomials and simplex moments are evaluated
-//! outward, including geometry. This includes algebraic error in ANY admitted
+//! Constant-source integrands are quadratic polynomials and simplex moments are evaluated
+//! outward, including geometry. The affine-source API adds an exact zero-normal
+//! polynomial lifting and degree-four moments; constant-source APIs retain RT0.
+//! This includes algebraic error in ANY admitted
 //! P1 candidate, not just a converged Galerkin solution.
 //!
 //! Domain-conditional: the caller must supply a conforming, non-overlapping
@@ -30,9 +32,12 @@ use crate::interval::Iv;
 
 mod geometry;
 mod goal;
+mod source;
+use source::Source;
 mod tensor;
 pub use goal::{GoalBound, MeanBound, goal_bound, mean_bound};
 pub use tensor::{ConductivityTensor, TensorTetProblem, tensor_energy_bound, tensor_goal_bound, tensor_mean_bound};
+pub use tensor::{AffineSourceTetProblem, affine_source_energy_bound, affine_source_goal_bound, affine_source_mean_bound};
 use tensor::Conductivity;
 use geometry::{Cell, Face, build, dot, integral_square, scale, sub};
 
@@ -70,13 +75,13 @@ struct Problem<'a> {
     vertices: &'a [[f64; 3]],
     tets: &'a [[usize; 4]],
     conductivity: Conductivity<'a>,
-    source: &'a [f64],
+    source: Source<'a>,
     boundary: &'a [BoundaryFace],
 }
 impl<'a> From<&TetProblem<'a>> for Problem<'a> {
     fn from(p: &TetProblem<'a>) -> Self {
         Self { vertices: p.vertices, tets: p.tets, conductivity: Conductivity::Scalar(p.conductivity),
-            source: p.source, boundary: p.boundary }
+            source: Source::Constant(p.source), boundary: p.boundary }
     }
 }
 
@@ -121,6 +126,8 @@ pub struct EnergyBound {
     /// Correlated conservative face-flux enclosures, outward from each cell.
     /// Entry i is opposite the tet's vertex i. Independent choices from these
     /// boxes need not be conservative; the forest construction establishes existence.
+    /// For affine sources these are the traces of RT0 plus a zero-normal local
+    /// lifting; the full interior flux has divergence equal to the actual P1 source.
     pub outward_flux_integrals: Vec<[Iv; 4]>,
     pub proposal_iterations: usize,
 }
@@ -171,7 +178,7 @@ fn energy_bound_impl(
                 for d in 0..3 { value[d] = value[d].add(basis[d]); }
             }
         }
-        let mut eta = problem.conductivity.defect_integral(e, &defect, cell.volume);
+        let mut eta = problem.source.defect_integral(e, cell, &defect, problem.conductivity)?;
         for (i, &f) in cell.faces.iter().enumerate() {
             if let Some(BoundaryCondition::Robin { h, reference }) = faces[f].condition {
                 let qn = local[i].div_pos(faces[f].area);
@@ -209,8 +216,8 @@ fn propose(
     let n = cells.len();
     let mut flux = Vec::with_capacity(faces.len());
     let mut weights = Vec::with_capacity(faces.len());
-    let mut rhs = problem.source.iter().zip(cells)
-        .map(|(&f, c)| midpoint(c.volume.mul(Iv::point(f)))).collect::<Result<Vec<_>, _>>()?;
+    let mut rhs = cells.iter().enumerate()
+        .map(|(e, c)| midpoint(c.volume.mul(problem.source.mean(e)))).collect::<Result<Vec<_>, _>>()?;
     let mut diag = vec![0.0; n];
     for face in faces {
         poll(keep_going)?;
@@ -325,7 +332,7 @@ fn equilibrate(
     for &e in order.iter().rev() {
         poll(keep_going)?;
         let pf = parent[e].ok_or(TetError::Invalid("missing forest parent"))?;
-        let mut balance = cells[e].volume.mul(Iv::point(problem.source[e]));
+        let mut balance = cells[e].volume.mul(problem.source.mean(e));
         for &f in &cells[e].faces {
             if f != pf { balance = balance.sub(signed(flux[f], faces[f].sign(e))); }
         }

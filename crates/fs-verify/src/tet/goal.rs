@@ -29,11 +29,11 @@ pub struct MeanBound {
     pub integral: GoalBound,
 }
 
-fn linear_integral(values: &[Iv], measure: Iv) -> Iv {
+pub(super) fn linear_integral(values: &[Iv], measure: Iv) -> Iv {
     measure.mul(values.iter().copied().fold(Iv::zero(), Iv::add))
         .div_pos(Iv::point(values.len() as f64))
 }
-fn product_integral(a: &[Iv], b: &[Iv], measure: Iv) -> Iv {
+pub(super) fn product_integral(a: &[Iv], b: &[Iv], measure: Iv) -> Iv {
     let sa = a.iter().copied().fold(Iv::zero(), Iv::add);
     let sb = b.iter().copied().fold(Iv::zero(), Iv::add);
     let diagonal = a.iter().zip(b).fold(Iv::zero(), |s, (a,b)| s.add(a.mul(*b)));
@@ -71,7 +71,7 @@ pub(super) fn goal_bound_impl(
             BoundaryCondition::Robin { h, .. } => BoundaryCondition::Robin { h, reference: [0.0; 3] },
         }});
     }
-    let dual_problem = Problem { source: weights, boundary: &dual_boundary, ..*problem };
+    let dual_problem = Problem { source: Source::Constant(weights), boundary: &dual_boundary, ..*problem };
     let dual = energy_bound_impl(&dual_problem, dual_candidate, budget, keep_going)?;
     let (cells, faces) = build(problem, candidate, budget, keep_going)?;
     let (dual_cells, _) = build(&dual_problem, dual_candidate, budget, keep_going)?;
@@ -84,7 +84,7 @@ pub(super) fn goal_bound_impl(
         let z = problem.tets[e].map(|i| Iv::point(dual_candidate[i]));
         volume = volume.add(cell.volume);
         value = value.add(linear_integral(&u, cell.volume).mul(Iv::point(weights[e])));
-        residual = residual.add(linear_integral(&z, cell.volume).mul(Iv::point(problem.source[e])))
+        residual = residual.add(problem.source.load(e, &z, cell.volume))
             .sub(problem.conductivity.bilinear_integral(e, cell.gradient, dual_cells[e].gradient, cell.volume));
     }
     for face in &faces {
