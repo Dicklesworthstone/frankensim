@@ -176,6 +176,7 @@ fn two_resistor_component_matches_its_network() {
                 steps: 1,
                 energy: EnergyConfig::default(),
             },
+            None,
             &gate,
         ),
         Err(ChtError::InvalidInput {
@@ -1222,6 +1223,7 @@ fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
                     ..EnergyConfig::default()
                 },
             },
+            None,
             &gate,
         )
         .unwrap()
@@ -1301,6 +1303,7 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
             steps: 400,
             energy: EnergyConfig::default(),
         },
+        None,
         &gate,
     )
     .unwrap();
@@ -1348,6 +1351,7 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
             steps: 1,
             energy: EnergyConfig::default(),
         },
+        None,
         &gate,
     )
     .unwrap_err();
@@ -2176,6 +2180,7 @@ fn march_conjugate_on_a_plug_flow_reproduces_march_energy() {
         |_| 1.0,
         |_| 1.0,
         &EnergyConfig::default(),
+        None,
         &gate,
     )
     .unwrap();
@@ -2195,6 +2200,7 @@ fn march_conjugate_on_a_plug_flow_reproduces_march_energy() {
             steps: 10,
             energy: EnergyConfig::default(),
         },
+        None,
         &gate,
     )
     .unwrap();
@@ -2463,6 +2469,122 @@ fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
     assert!((report.radiated_w - power).abs() < 1e-6 * power);
     assert!(solution.report.balance.relative_residual < 1e-9);
     assert!((solution.report.balance.sink_outflow_w - power).abs() < 1e-6 * power);
+}
+
+#[test]
+fn radiating_plate_march_follows_its_linearized_recursion() {
+    // The exposed plate of the Stefan-Boltzmann test, now with heat
+    // capacity, marched from the surroundings' temperature. Uniform power,
+    // uniform emission and adiabatic edges keep the plate exactly
+    // isothermal, so the march is the scalar ODE
+    // C dT/dt = P - eps sigma A (T^4 - T_amb^4), and each step is backward
+    // Euler with the sink Newton-linearized about the previous step:
+    // T+ = T + dt (P - q(T)) / (C + dt q'(T)). The discrete answer matches
+    // that recursion to solver precision, converges to the ODE at first
+    // order, and settles at the closed-form steady temperature.
+    let gate = CancelGate::new();
+    let (n, dx) = (6usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        if p[2] < dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let rho_c = 2.4e6;
+    let solids = [SolidMaterial::new("plate", 200.0).with_heat_capacity(rho_c)];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[5] = ThermalFace::Temperature(300.0);
+    let mut setup = ThermalSetup::new(faces);
+    let power = 5.0;
+    setup.add_uniform_power(&domain, power, |p| p[2] < dx);
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    let radiation = RadiationConfig::new(vec![0.9], surroundings);
+    let area = (n * n) as f64 * dx * dx;
+    let capacity = rho_c * area * dx;
+    let k4 = 0.9 * STEFAN_BOLTZMANN * area;
+    let q = |t: f64| k4 * (t.powi(4) - 300f64.powi(4));
+    let plate = domain.index(2, 3, 0);
+    let run = |dt: f64, steps: usize| {
+        march_energy(
+            &domain,
+            &fluid,
+            &solids,
+            &FlowField::quiescent(&domain),
+            &setup,
+            &vec![300.0; domain.cell_count()],
+            |_| 1.0,
+            &TransientConfig {
+                time_step_s: dt,
+                steps,
+                energy: EnergyConfig::default(),
+            },
+            Some(&radiation),
+            &gate,
+        )
+        .unwrap()
+    };
+    // One linearized time constant at the steady state is ~1800 s.
+    let t_end = 1800.0;
+    let rk4 = {
+        let (mut t, h) = (300.0f64, 0.5);
+        let f = |t: f64| (power - q(t)) / capacity;
+        for _ in 0..(t_end / h) as usize {
+            let k1 = f(t);
+            let k2 = f(t + 0.5 * h * k1);
+            let k3 = f(t + 0.5 * h * k2);
+            let k4 = f(h.mul_add(k3, t));
+            t += h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+        }
+        t
+    };
+    let mut errors = Vec::new();
+    for steps in [15usize, 30] {
+        let dt = t_end / steps as f64;
+        let march = run(dt, steps);
+        let mut recursion = 300.0f64;
+        for record in &march.records {
+            recursion +=
+                dt * (power - q(recursion)) / (4.0 * k4 * recursion.powi(3)).mul_add(dt, capacity);
+            assert!(
+                record.closure_j.abs() < 1e-8 * record.source_j,
+                "closure {} J of {} J",
+                record.closure_j,
+                record.source_j
+            );
+        }
+        let marched = march.temperature[plate];
+        let last = march.records.last().unwrap();
+        eprintln!(
+            "dt {dt}: plate {marched:.9} K, recursion {recursion:.9} K, ODE {rk4:.9} K, radiated {:.6} W",
+            last.radiated_w
+        );
+        assert!(
+            (marched - recursion).abs() < 1e-7,
+            "{marched} vs {recursion}"
+        );
+        assert!((last.radiated_w - q(marched)).abs() < 1e-9 * power);
+        errors.push((marched - rk4).abs());
+    }
+    let ratio = errors[0] / errors[1];
+    eprintln!("time errors {errors:?}, ratio {ratio:.4}");
+    assert!((ratio - 2.0).abs() < 0.15, "first-order ratio {ratio}");
+    // Long steps are stable and settle at the closed-form steady state.
+    let settled = run(600.0, 200);
+    let exact = (power / k4 + 300f64.powi(4)).powf(0.25);
+    let last = settled.records.last().unwrap();
+    eprintln!(
+        "settled {:.9} K, exact {exact:.9} K, radiated {} W",
+        settled.temperature[plate], last.radiated_w
+    );
+    assert!((settled.temperature[plate] - exact).abs() < 1e-5);
+    assert!((last.radiated_w - power).abs() < 1e-6 * power);
 }
 
 #[test]

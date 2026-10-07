@@ -18,17 +18,21 @@
 //! `dt (source - boundary outflow)` from boundary fluxes alone; their
 //! difference is the solver residual, never a modelling term.
 //!
+//! Radiation, when declared, enters each step as sinks Newton-linearized
+//! about the previous step's temperature (implicit in each face's own
+//! emission, irradiation lagged one step).
+//!
 //! No-claims: the flow is frozen (forced convection whose velocity does not
-//! depend on temperature; for buoyant flows use the steady
-//! `natural_convection`); first-order in time (the step size is the
-//! caller's accuracy decision; halving it is the convergence evidence); no
-//! temperature-dependent properties.
+//! depend on temperature; buoyant transients march through
+//! `march_conjugate`); first-order in time (the step size is the caller's
+//! accuracy decision; halving it is the convergence evidence).
 
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 use super::energy::{EnergyConfig, PseudoStep, ThermalSetup, solve_energy_inner};
 use super::flow::FlowField;
+use super::radiation::{RadiationConfig, Radiators};
 use super::{ChtError, finite, finite_positive, poll};
 
 /// Time-march configuration.
@@ -59,6 +63,9 @@ pub struct TransientRecord {
     pub boundary_outflow_j: f64,
     /// `stored - (source - outflow)`, J: the step's solver residual.
     pub closure_j: f64,
+    /// Net heat radiated to the surroundings at the step's end temperature,
+    /// W (zero without radiation; radiation's share of the outflow).
+    pub radiated_w: f64,
     /// Krylov iterations of the step.
     pub iterations: usize,
 }
@@ -87,6 +94,7 @@ pub fn march_energy(
     initial_temperature: &[f64],
     power_schedule: impl Fn(f64) -> f64,
     config: &TransientConfig,
+    radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
 ) -> Result<TransientSolution, ChtError> {
     fluid.validate()?;
@@ -118,6 +126,10 @@ pub fn march_energy(
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
     let mut temperature = initial_temperature.to_vec();
     let mut records = Vec::with_capacity(config.steps);
+    let radiators = match radiation {
+        Some(r) => Some(Radiators::build(domain, solids, r, gate)?),
+        None => None,
+    };
     let mut stepped = setup.clone();
     for step in 1..=config.steps {
         poll(gate)?;
@@ -129,7 +141,14 @@ pub fn march_energy(
                 *out = base * scale;
             }
         }
-        let (next, record) = energy_step(
+        // Radiation: sinks Newton-linearized about the previous step.
+        if let Some(radiators) = &radiators {
+            stepped.cell_sinks.clone_from(&setup.cell_sinks);
+            stepped
+                .cell_sinks
+                .extend(radiators.sinks(domain, &temperature));
+        }
+        let (next, mut record) = energy_step(
             domain,
             fluid,
             solids,
@@ -141,6 +160,9 @@ pub fn march_energy(
             (time_s, config.time_step_s, solids_present),
             gate,
         )?;
+        if let Some(radiators) = &radiators {
+            record.radiated_w = radiators.radiated(domain, &next);
+        }
         records.push(record);
         temperature = next;
     }
@@ -235,6 +257,7 @@ pub(crate) fn energy_step(
         source_j,
         boundary_outflow_j,
         closure_j: stored - (source_j - boundary_outflow_j),
+        radiated_w: 0.0,
         iterations: next.report.iterations,
     };
     Ok((next.temperature, record))

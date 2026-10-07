@@ -30,7 +30,9 @@ Scene (`frankensim.cooling-cht.v1`):
   `patch_size`, default 4 faces, and `surface_exchange`, default true;
   false keeps only the escape to the surroundings). The result reports
   `radiation.radiated_w` (to the surroundings) and the energy balance's
-  `sink_outflow_w`. Transients refuse radiation.
+  `sink_outflow_w`. Transient marches (frozen or unsteady flow) carry the
+  radiation too, Newton-linearized about each previous step, and report
+  `radiated_w` per record.
 - `contacts` (optional): `between` (two material names) and
   `resistance_m2_k_w`, a per-area interface resistance (thermal interface
   material, bonded or pressed joint) on every face the two materials share.
@@ -111,6 +113,20 @@ Scene (`frankensim.cooling-cht.v1`):
   Variants are solved on `parallelism` threads (default: the available
   cores); the report is identical for any thread count. A grid search: no
   optimality claim between grid points.
+- Optional `grid_convergence`: `{"splits": [a, b, c]}` (three increasing
+  whole numbers up to 16) solves the scene three times with every cell of
+  its grid (uniform or graded) split into `a`, `b`, `c` equal parts per
+  axis, in parallel (`parallelism`), and reports for every quantity above
+  the three values, the convergence behaviour (`monotone`, `oscillatory`,
+  `divergent`, `converged`, `indeterminate`), Celik's observed order (an
+  iteration when the two ratios differ), the Richardson extrapolation and
+  the fine-grid convergence index `GCI = 1.25 |phi_fine - phi_medium| /
+  (r^p - 1)` in the quantity's units, with the order capped at 2 (result
+  schema `frankensim.cooling-cht.convergence.v1`, the finest level's full
+  result under `fine_result`; field files come from the finest level).
+  The band is asymptotic, not a bound, and only monotone quantities get
+  one; geometry off the declared grid (STL solids) re-staircases between
+  levels. `[1, 2, 3]` costs 1 + 8 + 27 times the base grid.
 - Instead of `size_m` + `voxel_m`, a graded grid: `"grid": {"x": [{"to_m",
   "voxel_m"}, ...], "y": [...], "z": [...]}`, each zone a whole number of
   uniform cells from the previous zone's end (0 first), so fine voxels go

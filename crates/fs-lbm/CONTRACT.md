@@ -903,13 +903,22 @@ sources `power_w * power_schedule(t)`, and per-step records of the peak
 (solid) temperature and an energy closure computed two independent ways
 (stored-energy change vs `dt (source - boundary outflow)`). Unconditionally
 stable for the M-matrix, so electronics-scale conductivity and capacity
-contrasts impose no step limit; first order in time.
+contrasts impose no step limit; first order in time. Declared radiation
+(`Some(&RadiationConfig)`, escape or surface exchange) enters each step as
+sinks Newton-linearized about the previous step's temperature, implicit in
+each face's own emission with the irradiation lagged one step; the
+records carry the power radiated to the surroundings
+(`TransientRecord::radiated_w`) and the closure counts it in the outflow.
+`march_conjugate` takes the same argument.
 
 | Fixture | Reference | Measured |
 |---|---|---|
 | Near-isothermal cube (Biot 4e-7) cooled by convective faces, 100 steps of tau/50 | backward-Euler recursion of the lumped ODE | 0.1380329637 vs 0.1380329672 |
 | Same, dt halved | continuous exponential | error 2.698e-3 -> 1.351e-3 (ratio 2.00) |
 | Heated plate under channel flow, 400 steps from cold | steady solve; energy budget | stored 2.616326564 J = net input; worst step closure 4e-12 J; within 2.5e-9 K of steady |
+| Radiating floor plate (the Stefan–Boltzmann fixture with `rho c` 2.4e6), 30 steps to t = 1800 s | linearized backward-Euler recursion `T+ = T + dt (P - q(T)) / (C + dt q'(T))` | 379.460985216 vs 379.460985226 K; every step closes to 1e-8 of its input |
+| Same, 15 vs 30 steps | RK4 solution of `C dT/dt = P - eps sigma A (T^4 - T_amb^4)` | error 1.095 -> 0.565 K (ratio 1.94) |
+| Same, 200 steps of 600 s | closed-form steady state | 433.501643767 vs 433.501645484 K; 4.9999999 of 5 W radiated |
 
 ### Steady finite-volume flow (`simple_flow`)
 
