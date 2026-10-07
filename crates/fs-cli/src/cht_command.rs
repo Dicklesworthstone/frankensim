@@ -24,11 +24,12 @@ use fs_geom::Point3;
 use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, CompactComponent, ContactResistance, EnergyConfig, EnergySolution, FacePatch,
-    FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow,
-    InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
-    TransientConfig, Turbulence, Voxel, VoxelDomain, fv_natural_convection, march_energy,
-    simple_flow, solve_energy, solve_energy_radiating,
+    Boussinesq, ChtError, CompactComponent, ContactResistance, EnergyConfig, EnergySolution,
+    FacePatch, FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig,
+    FvFlow, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
+    TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
+    fv_natural_convection, march_conjugate, march_energy, simple_flow, solve_energy,
+    solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -39,7 +40,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -92,6 +93,16 @@ fn quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// A finite number, or `null` (a quantity the scene does not have, such as
+/// a solid temperature without solids).
+fn num_or_null(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".into()
+    }
 }
 
 fn num(value: f64) -> Result<String> {
@@ -440,6 +451,62 @@ struct Transient {
     initial_temperature_k: Option<f64>,
     /// `(time s, power scale)`, increasing time; constant beyond the ends.
     schedule: Vec<(f64, f64)>,
+    /// `flow: "unsteady"`: march the flow with the energy (else the energy
+    /// marches over the steady flow).
+    unsteady: Option<UnsteadyOptions>,
+}
+
+/// Controls of the unsteady flow march.
+struct UnsteadyOptions {
+    scheme: TimeScheme,
+    inner_iterations: usize,
+    inner_tolerance: f64,
+    /// `(time s, inlet velocity scale)`, like the power schedule.
+    inlet_schedule: Vec<(f64, f64)>,
+}
+
+/// A piecewise-linear `[[time_s, scale], ...]` schedule (increasing times).
+fn parse_schedule(value: Option<&J>, key: &str) -> Result<Vec<(f64, f64)>> {
+    let mut schedule = Vec::new();
+    if let Some(points) = value {
+        for point in points
+            .as_array()
+            .ok_or_else(|| bad(format!("transient.{key} must be [[time_s, scale], ...]")))?
+        {
+            let pair = point
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                .filter(|(t, k)| t.is_finite() && k.is_finite())
+                .ok_or_else(|| bad(format!("transient.{key} entries must be [time_s, scale]")))?;
+            if schedule
+                .last()
+                .is_some_and(|&(t, _): &(f64, f64)| pair.0 <= t)
+            {
+                return Err(bad(format!("transient.{key} times must increase")));
+            }
+            schedule.push(pair);
+        }
+    }
+    Ok(schedule)
+}
+
+/// Linear interpolation in `schedule`, constant beyond the ends (1 when
+/// empty).
+fn interpolate(schedule: &[(f64, f64)], time: f64) -> f64 {
+    let Some(&(t0, k0)) = schedule.first() else {
+        return 1.0;
+    };
+    if time <= t0 {
+        return k0;
+    }
+    for pair in schedule.windows(2) {
+        let ((ta, ka), (tb, kb)) = (pair[0], pair[1]);
+        if time <= tb {
+            return ka + (kb - ka) * (time - ta) / (tb - ta);
+        }
+    }
+    schedule.last().map_or(1.0, |&(_, k)| k)
 }
 
 impl Transient {
@@ -459,51 +526,51 @@ impl Transient {
                 Self::MAX_STEPS
             )));
         }
-        let mut schedule = Vec::new();
-        if let Some(points) = value.get("power_schedule") {
-            for point in points
-                .as_array()
-                .ok_or_else(|| bad("transient.power_schedule must be [[time_s, scale], ...]"))?
-            {
-                let pair = point
-                    .as_array()
-                    .filter(|pair| pair.len() == 2)
-                    .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
-                    .filter(|(t, k)| t.is_finite() && k.is_finite())
-                    .ok_or_else(|| {
-                        bad("transient.power_schedule entries must be [time_s, scale]")
-                    })?;
-                if schedule
-                    .last()
-                    .is_some_and(|&(t, _): &(f64, f64)| pair.0 <= t)
+        let schedule = parse_schedule(value.get("power_schedule"), "power_schedule")?;
+        let unsteady = match value.str_field("flow") {
+            None | Some("frozen") => None,
+            Some("unsteady") => {
+                let scheme = match value.str_field("scheme") {
+                    None | Some("bdf2") => TimeScheme::Bdf2,
+                    Some("backward-euler") => TimeScheme::BackwardEuler,
+                    Some(other) => {
+                        return Err(bad(format!(
+                            "transient.scheme must be \"bdf2\" or \"backward-euler\", not {other}"
+                        )));
+                    }
+                };
+                let inner = optional_number(value, "inner_iterations", at)?.unwrap_or(100.0);
+                let tolerance = optional_number(value, "inner_tolerance", at)?.unwrap_or(1e-6);
+                if !(1.0..=100_000.0).contains(&inner) || inner.fract() != 0.0 || !(tolerance > 0.0)
                 {
-                    return Err(bad("transient.power_schedule times must increase"));
+                    return Err(bad(
+                        "transient.inner_iterations must be a whole number >= 1 and inner_tolerance positive",
+                    ));
                 }
-                schedule.push(pair);
+                Some(UnsteadyOptions {
+                    scheme,
+                    inner_iterations: inner as usize,
+                    inner_tolerance: tolerance,
+                    inlet_schedule: parse_schedule(value.get("inlet_schedule"), "inlet_schedule")?,
+                })
             }
-        }
+            Some(other) => {
+                return Err(bad(format!(
+                    "transient.flow must be \"frozen\" or \"unsteady\", not {other}"
+                )));
+            }
+        };
         Ok(Self {
             time_step_s,
             steps: steps as usize,
             initial_temperature_k: optional_number(value, "initial_temperature_k", at)?,
             schedule,
+            unsteady,
         })
     }
 
     fn scale(&self, time: f64) -> f64 {
-        let Some(&(t0, k0)) = self.schedule.first() else {
-            return 1.0;
-        };
-        if time <= t0 {
-            return k0;
-        }
-        for pair in self.schedule.windows(2) {
-            let ((ta, ka), (tb, kb)) = (pair[0], pair[1]);
-            if time <= tb {
-                return ka + (kb - ka) * (time - ta) / (tb - ta);
-            }
-        }
-        self.schedule.last().map_or(1.0, |&(_, k)| k)
+        interpolate(&self.schedule, time)
     }
 }
 
@@ -945,6 +1012,210 @@ impl Scene {
     }
 }
 
+/// The unsteady march (`transient.flow: "unsteady"`): flow and energy
+/// advance together, so there is no steady solution to report; the result
+/// carries the march's closure, peak and final temperatures instead.
+#[allow(clippy::too_many_lines)] // solve and one linear report
+fn execute_unsteady(
+    scene: &Scene,
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    flow_config: &SimpleConfig,
+    (transient, options): (&Transient, &UnsteadyOptions),
+    gate: &CancelGate,
+    json_mode: bool,
+) -> Result<String> {
+    let ambient = scene.faces.iter().find_map(|rule| match rule {
+        FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+            Some(*temperature)
+        }
+        FaceRule::Opening { ambient } => Some(*ambient),
+        _ => None,
+    });
+    let initial = transient
+        .initial_temperature_k
+        .or(ambient)
+        .ok_or_else(|| bad("transient.initial_temperature_k is required here"))?;
+    let buoyancy = match scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0)) {
+        Some(gravity) => {
+            let reference = scene.reference.or(ambient).ok_or_else(|| {
+                bad("a buoyant scene needs reference_temperature_k, an inlet, or an opening")
+            })?;
+            Some(Boussinesq {
+                gravity_m_s2: gravity,
+                expansion_per_k: scene.expansion.unwrap_or(1.0 / reference),
+                reference_temperature_k: reference,
+            })
+        }
+        None => None,
+    };
+    let mut unsteady = UnsteadyConfig::new(transient.time_step_s, transient.steps);
+    unsteady.scheme = options.scheme;
+    unsteady.inner_iterations = options.inner_iterations;
+    unsteady.inner_tolerance = options.inner_tolerance;
+    let started = Instant::now();
+    let run = march_conjugate(
+        domain,
+        &scene.fluid,
+        &scene.materials,
+        setup,
+        flow_config,
+        &unsteady,
+        buoyancy.as_ref(),
+        &vec![initial; domain.cell_count()],
+        |t| interpolate(&options.inlet_schedule, t),
+        |t| transient.scale(t),
+        &EnergyConfig::default(),
+        gate,
+    )
+    .map_err(|e| solver_failure(&e))?;
+    let wall_s = started.elapsed().as_secs_f64();
+    let records = &run.energy_records;
+    let steps = &run.flow.records;
+    let worst_closure = records.iter().fold(0.0f64, |m, r| m.max(r.closure_j.abs()));
+    let peak = records
+        .iter()
+        .map(|r| r.max_solid_temperature_k)
+        .filter(|t| t.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let sweeps: usize = steps.iter().map(|r| r.inner_iterations).sum();
+    let max_step_sweeps = steps.iter().map(|r| r.inner_iterations).max().unwrap_or(0);
+    let last = steps.last().copied();
+    let report = &run.flow.flow.report;
+    let tie = 1e-6 * scene.dx;
+    let solids_max = |field: &[f64]| {
+        (0..domain.cell_count())
+            .filter(|&c| !domain.is_fluid(c))
+            .map(|c| field[c])
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let source_rows: Vec<(String, f64, f64, f64)> = scene
+        .sources
+        .iter()
+        .map(|source| {
+            let cells: Vec<usize> = (0..domain.cell_count())
+                .filter(|&c| {
+                    let [x, y, z] = domain.coords(c);
+                    !domain.is_fluid(c)
+                        && source.region.contains(probe(domain.center(x, y, z), tie))
+                })
+                .collect();
+            let max = |field: &[f64]| {
+                cells
+                    .iter()
+                    .map(|&c| field[c])
+                    .fold(f64::NEG_INFINITY, f64::max)
+            };
+            (
+                source.name.clone(),
+                source.power_w,
+                max(&run.temperature),
+                max(&run.mean_temperature),
+            )
+        })
+        .collect();
+    let solver_name = if buoyancy.is_some() {
+        "fv-simplec-unsteady-boussinesq"
+    } else {
+        "fv-simplec-unsteady"
+    };
+    let scheme = match options.scheme {
+        TimeScheme::Bdf2 => "bdf2",
+        TimeScheme::BackwardEuler => "backward-euler",
+    };
+    if json_mode {
+        let mut out = format!(
+            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{}",
+            quote(RESULT_SCHEMA),
+            quote(solver_name),
+            domain.cell_count(),
+            domain.fluid_count(),
+            num(scene.dx)?
+        );
+        let _ = write!(
+            out,
+            ",\"flow\":{{\"steps\":{},\"sweeps\":{sweeps},\"max_step_sweeps\":{max_step_sweeps},\"final_mass_residual\":{},\"final_momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"final_kinetic_energy_j\":{}}}",
+            steps.len(),
+            num(last.map_or(0.0, |r| r.mass_residual))?,
+            num(last.map_or(0.0, |r| r.momentum_residual))?,
+            num(report.inflow_m3_s)?,
+            num(report.outflow_m3_s)?,
+            num(last.map_or(0.0, |r| r.kinetic_energy_j))?
+        );
+        let every = records.len().div_ceil(200).max(1);
+        let _ = write!(
+            out,
+            ",\"transient\":{{\"time_step_s\":{},\"steps\":{},\"scheme\":{},\"averaged_steps\":{},\"worst_step_closure_j\":{},\"peak_solid_temperature_k\":{},\"final_max_solid_temperature_k\":{},\"records\":[",
+            num(transient.time_step_s)?,
+            records.len(),
+            quote(scheme),
+            run.flow.averaged_steps,
+            num(worst_closure)?,
+            num_or_null(peak),
+            num_or_null(solids_max(&run.temperature))
+        );
+        let mut first = true;
+        for (i, (record, step)) in records.iter().zip(steps).enumerate() {
+            if (i + 1) % every != 0 && i + 1 != records.len() {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let _ = write!(
+                out,
+                "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"kinetic_energy_j\":{},\"sweeps\":{}}}",
+                num(record.time_s)?,
+                num_or_null(record.max_solid_temperature_k),
+                num(step.kinetic_energy_j)?,
+                step.inner_iterations
+            );
+        }
+        out.push_str("]},\"sources\":[");
+        for (i, (name, power, last_max, mean_max)) in source_rows.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "{{\"name\":{},\"power_w\":{},\"final_max_temperature_k\":{},\"mean_max_temperature_k\":{}}}",
+                quote(name),
+                num(*power)?,
+                num(*last_max)?,
+                num(*mean_max)?
+            );
+        }
+        let _ = writeln!(
+            out,
+            "],\"max_solid_temperature_k\":{},\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
+            num_or_null(solids_max(&run.temperature)),
+            num(wall_s)?,
+            quote(NO_CLAIM)
+        );
+        Ok(out)
+    } else {
+        let mut out = format!(
+            "status=completed\nsolver={solver_name}\ncells={}\nfluid_cells={}\nsteps={}\nsweeps={sweeps}\nscheme={scheme}\nworst_step_closure_j={worst_closure:e}\npeak_solid_temperature_k={peak}\nfinal_max_solid_temperature_k={}\n",
+            domain.cell_count(),
+            domain.fluid_count(),
+            records.len(),
+            solids_max(&run.temperature)
+        );
+        for (name, power, last_max, mean_max) in &source_rows {
+            let _ = writeln!(
+                out,
+                "source={name} power_w={power} final_max_temperature_k={last_max:.4} mean_max_temperature_k={mean_max:.4}"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "wall_s={wall_s:.3}\nevidence=Estimated\nno_claim={NO_CLAIM}"
+        );
+        Ok(out)
+    }
+}
+
 #[allow(clippy::too_many_lines)] // build, solve, and one linear report
 fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> {
     let [nx, ny, nz] = scene.dims;
@@ -1047,6 +1318,19 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         return Err(bad(
             "transient marches do not carry radiation; drop the transient block or the emissivities",
         ));
+    }
+    if let Some(transient) = &scene.transient
+        && let Some(options) = &transient.unsteady
+    {
+        return execute_unsteady(
+            scene,
+            &domain,
+            &setup,
+            &flow_config,
+            (transient, options),
+            gate,
+            json_mode,
+        );
     }
     let mut radiated: Option<(f64, usize, usize)> = None;
     let started = Instant::now();

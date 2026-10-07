@@ -1057,6 +1057,35 @@ transport, history, separation physics or transition prediction; it
 applies its eddy viscosity wherever `Re_L` is large, laminar regions
 included); the bands above are the evidence, not a general accuracy.
 
+### Unsteady flow and transient conjugate marches (`simple_unsteady`, `march_conjugate`)
+
+The momentum equations gain `rho V du/dt` over each staggered volume,
+implicit by backward Euler or BDF2 (`TimeScheme`; BDF2 starts with one
+backward-Euler step), inside `a_P` so SIMPLEC's `d` stays consistent. Each
+step iterates sweeps to `inner_tolerance` on the step's own mass and
+momentum residuals (a step that misses it in `inner_iterations` refuses as
+`SolverNotConverged { system: "unsteady flow step" }`), then one tight
+pressure correction leaves its fluxes divergence-free. Inlets follow an
+`inlet_schedule(t)` (ramps, fan start-up); a face fan's operating-point
+iteration is steady and refuses (internal fans march). Records carry the
+sweeps, residuals, a probe velocity and the kinetic energy per step, plus a
+time-averaged velocity over a declared window. `march_conjugate` advances
+flow and energy together: each step's flow (with the Boussinesq force of
+the previous step's temperature when declared, and LVEL's eddy
+conductivity), then the backward-Euler energy step of `march_energy` on
+those fluxes with its two-way closure.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Smoothly started channel (32 x 8, inlet `1 - exp(-t/0.05)`), probe at t = 0.05 viscous times | 256-step BDF2 reference | errors 1.894e-5 -> 4.100e-6 (32 -> 64 steps): order 2.21 (BDF2); 1.330e-4 -> 6.799e-5: order 0.97 (backward Euler) |
+| Same channel, 40 steps of one viscous time | steady SIMPLEC solution | largest velocity difference 2.5e-10 |
+| Plug flow heated mid-channel, 10 steps | `march_energy` on the steady plug flow | 8.2e-11 K; every step closes |
+| Refusals | face fan, empty march, compact components | structured errors |
+
+An impulsively started flow (inlet on at t = 0 over fluid at rest) is
+non-smooth initial data: BDF2 measured order 1.35 at t = 0.04 there;
+smooth starts (`inlet_schedule`) recover second order.
+
 ### Orthotropic solids and contact resistance
 
 `SolidMaterial::with_orthotropic([k_x, k_y, k_z])` declares grid-aligned
@@ -1276,7 +1305,8 @@ the central-moment operator the same duct diverged; it now refuses as
 
 ### No-claim boundaries (conjugate)
 
-- Steady, constant-property convection only: forced convection
+- Constant-property convection: steady or unsteady (`march_conjugate`)
+  forced convection
   through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in
   closed enclosures through `natural_convection` and in closed or open
   domains through `fv_natural_convection`; turbulence only through the

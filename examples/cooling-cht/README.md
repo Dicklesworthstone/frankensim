@@ -57,8 +57,16 @@ Scene (`frankensim.cooling-cht.v1`):
   Backward Euler marches the energy equation over the converged steady
   forced flow; materials then need `volumetric_heat_capacity_j_m3_k`. The
   result adds per-step peak solid temperatures (up to ~200 records) and the
-  worst per-step energy closure. Buoyant scenes refuse a transient: their
-  flow depends on temperature.
+  worst per-step energy closure. With `"flow": "unsteady"` the flow marches
+  with the energy from rest instead (implicit SIMPLEC, `"scheme"`: `"bdf2"`,
+  the default, or `"backward-euler"`; `inner_iterations`,
+  `inner_tolerance`; `inlet_schedule` `[[time_s, scale], ...]` scales the
+  inlet velocities, e.g. a fan start-up ramp), buoyant when gravity is
+  declared, so flows that never settle (shedding wakes, plumes) are marched
+  instead of refused. The unsteady result reports the march: steps and
+  sweeps, final kinetic energy and flows, per-step records, the peak and
+  final solid temperatures, and per source the final and time-averaged
+  (second half) maxima. Frozen-flow transients still refuse buoyant scenes.
 - Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
   `reference_temperature_k` (default: the first inlet or opening
   temperature), `solver.tolerance`, `solver.max_iterations`,

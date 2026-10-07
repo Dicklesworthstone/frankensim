@@ -406,6 +406,72 @@ fn sealed_box_radiates_from_the_block_to_its_walls() {
 }
 
 #[test]
+fn unsteady_march_ramps_the_duct_flow_and_closes_every_step() {
+    // The duct started from rest with its inlet ramped over 0.2 s: flow and
+    // energy march together; each step's energy closes, the chip warms, and
+    // the final inflow is the declared one.
+    let scene = DUCT
+        .replace(
+            r#""conductivity_w_m_k": 167.0}"#,
+            r#""conductivity_w_m_k": 167.0, "volumetric_heat_capacity_j_m3_k": 2.4e6}"#,
+        )
+        .replace(
+            r#""solver": {"tolerance": 1e-8}"#,
+            r#""solver": {"tolerance": 1e-8},
+ "transient": {"time_step_s": 0.05, "steps": 12, "flow": "unsteady",
+   "inner_tolerance": 1e-8, "inlet_schedule": [[0.0, 0.0], [0.2, 1.0]]}"#,
+        );
+    assert_ne!(scene, DUCT);
+    let (code, result, stderr) = run(&scratch("unsteady-duct.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.str_field("solver"), Some("fv-simplec-unsteady"));
+    assert_eq!(
+        result.path(&["transient", "scheme"]).and_then(J::as_str),
+        Some("bdf2")
+    );
+    assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-9);
+    let inflow = f(&result, &["flow", "inflow_m3_s"]);
+    assert!((inflow - 0.1 * 16e-6).abs() < 1e-12, "{inflow}");
+    assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+    let peak = f(&result, &["transient", "peak_solid_temperature_k"]);
+    assert!(peak > 300.0, "{peak}");
+    let records = result
+        .path(&["transient", "records"])
+        .and_then(J::as_array)
+        .unwrap();
+    assert_eq!(records.len(), 12);
+    // The kinetic energy grows with the ramp and then holds.
+    let ke = |i: usize| records[i].path(&["kinetic_energy_j"]).and_then(J::as_f64).unwrap();
+    assert!(ke(0) < ke(3) && (ke(11) - ke(10)).abs() < 1e-6 * ke(11));
+}
+
+#[test]
+fn unsteady_buoyant_column_starts_its_own_draft() {
+    // The heated-wall chimney from rest: buoyancy starts the draft without
+    // any inlet, and the march reports it.
+    let scene = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.004, 0.004, 0.016], "voxel_m": 0.001,
+ "faces": {
+  "x-": {"type": "wall", "temperature_k": 320.0},
+  "z-": {"type": "opening", "ambient_k": 300.0},
+  "z+": {"type": "opening", "ambient_k": 300.0}
+ },
+ "gravity_m_s2": [0.0, 0.0, -9.81],
+ "transient": {"time_step_s": 0.02, "steps": 10, "flow": "unsteady", "inner_tolerance": 1e-8}
+}"#;
+    let (code, result, stderr) = run(&scratch("unsteady-chimney.json", scene));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        result.str_field("solver"),
+        Some("fv-simplec-unsteady-boussinesq")
+    );
+    assert!(f(&result, &["flow", "outflow_m3_s"]) > 0.0);
+    assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+    assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-9);
+}
+
+#[test]
 fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     // A die (k 150) on a laminate (k 30 in-plane, 0.3 through) with a
     // 2e-4 m^2K/W interface, cooled from below: the joint and the weak

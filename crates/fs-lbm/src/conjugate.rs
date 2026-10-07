@@ -92,6 +92,7 @@ mod radiation;
 mod simple;
 mod transient;
 pub mod turbulence;
+mod unsteady;
 
 pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
@@ -112,9 +113,13 @@ pub use radiation::{
 };
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
-    InternalFan, PressureSolver, SimpleConfig, SimpleReport, Turbulence, simple_flow,
+    InternalFan, PressureSolver, SimpleConfig, SimpleReport, TimeScheme, Turbulence, simple_flow,
 };
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
+pub use unsteady::{
+    Boussinesq, ConjugateMarch, FlowStepRecord, UnsteadyConfig, UnsteadyFlow, march_conjugate,
+    simple_unsteady,
+};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
 /// flux layout, projection, energy discretization, solver policy, and the

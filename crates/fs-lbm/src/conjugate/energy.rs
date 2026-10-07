@@ -111,10 +111,6 @@ pub struct CompactComponent {
 }
 
 impl CompactComponent {
-    fn contains(&self, at: [usize; 3]) -> bool {
-        (0..3).all(|a| at[a] >= self.lo[a] && at[a] < self.hi[a])
-    }
-
     /// Area of the case-top (= board) face, m^2.
     fn face_area(&self, dx: f64) -> f64 {
         let axis = self.board_face as usize / 2;

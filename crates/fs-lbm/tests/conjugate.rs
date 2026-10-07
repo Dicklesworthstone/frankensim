@@ -20,9 +20,10 @@ use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, CompactComponent, ContactResistance, ConvectionScheme, EnergyConfig,
     FacePatch, FanCurve, FanInlet, FlowFace, FlowField, FlowResistance, FluidProperties,
     FvBoundary, FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig, RadiationConfig,
-    STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
-    Turbulence, Voxel, VoxelDomain, escape_factors, fv_natural_convection, lbm_duct_flow,
-    march_energy, natural_convection, simple_flow, solve_energy, solve_energy_radiating,
+    STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TimeScheme,
+    TransientConfig, Turbulence, UnsteadyConfig, UnsteadyFlow, Voxel, VoxelDomain, escape_factors,
+    fv_natural_convection, lbm_duct_flow, march_conjugate, march_energy, natural_convection,
+    simple_flow, simple_unsteady, solve_energy, solve_energy_radiating,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1810,6 +1811,187 @@ fn porous_block_follows_darcy_forchheimer() {
     assert!(matches!(
         simple_flow(&domain, &unit_fluid(), &wrong, &gate),
         Err(ChtError::InvalidInput { .. })
+    ));
+}
+
+/// Smoothly started channel (walls at y, symmetry at z), 32 x 8 cells of
+/// 1/8, unit fluid, inlet `U(t) = 1 - exp(-t / 0.05)`, marched for `steps`
+/// steps of `t_end / steps`.
+fn started_channel(scheme: TimeScheme, steps: usize, t_end: f64) -> UnsteadyFlow {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::new(32, 8, 1, 1.0 / 8.0).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.scheme = ConvectionScheme::PowerLaw;
+    let mut unsteady = UnsteadyConfig::new(t_end / steps as f64, steps);
+    unsteady.scheme = scheme;
+    unsteady.inner_tolerance = 1e-10;
+    unsteady.inner_iterations = 400;
+    unsteady.probe = Some(domain.index(16, 4, 0));
+    simple_unsteady(
+        &domain,
+        &unit_fluid(),
+        &config,
+        &unsteady,
+        |t| 1.0 - (-t / 0.05).exp(),
+        &gate,
+    )
+    .unwrap()
+}
+
+#[test]
+fn unsteady_bdf2_is_second_order_and_settles_to_the_steady_flow() {
+    // G1 temporal order on a smoothly started channel: the probe velocity at
+    // t = 0.05 viscous times against a 256-step BDF2 reference. Measured
+    // errors halve (backward Euler) and quarter (BDF2) per halved step.
+    let probe = |scheme, steps| {
+        started_channel(scheme, steps, 0.05)
+            .records
+            .last()
+            .unwrap()
+            .probe_velocity_m_s[0]
+    };
+    let reference = probe(TimeScheme::Bdf2, 256);
+    for (scheme, coarse, expected) in [
+        (TimeScheme::Bdf2, 32, 2.0),
+        (TimeScheme::BackwardEuler, 32, 1.0),
+    ] {
+        let (a, b) = (
+            (probe(scheme, coarse) - reference).abs(),
+            (probe(scheme, 2 * coarse) - reference).abs(),
+        );
+        let order = (a / b).log2();
+        eprintln!("{scheme:?}: errors {a:.3e} {b:.3e}, observed order {order:.3}");
+        assert!((order - expected).abs() < 0.25, "{scheme:?} order {order}");
+    }
+    // Steady limit: 40 steps of one viscous time.
+    let long = started_channel(TimeScheme::Bdf2, 40, 40.0);
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::new(32, 8, 1, 1.0 / 8.0).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.tolerance = 1e-10;
+    let steady = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let worst = long
+        .flow
+        .velocity_m_s
+        .iter()
+        .zip(&steady.velocity_m_s)
+        .fold(0.0f64, |m, (a, b)| {
+            m.max((a[0] - b[0]).abs().max((a[1] - b[1]).abs()))
+        });
+    eprintln!("steady limit: largest velocity difference {worst:.3e}");
+    assert!(worst < 1e-7, "{worst}");
+    // The second half of the march averages to (nearly) the steady flow.
+    assert_eq!(long.averaged_steps, 20);
+}
+
+#[test]
+fn march_conjugate_on_a_plug_flow_reproduces_march_energy() {
+    // Symmetry sides make the started flow an exact plug from the first
+    // step, so the coupled march must match the frozen-flow march on that
+    // plug flow step by step (air heated volumetrically mid-channel).
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::new(16, 4, 1, dx).unwrap();
+    let solids: [SolidMaterial; 0] = [];
+    let fluid = FluidProperties::dry_air_300k();
+    let config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [0.2, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    let mut setup = ThermalSetup::new(faces);
+    setup.add_uniform_power(&domain, 0.05, |p| p[0] > 6e-3 && p[0] < 8e-3 && p[1] < 1e-3);
+    let mut unsteady = UnsteadyConfig::new(0.05, 10);
+    unsteady.inner_tolerance = 1e-10;
+    let initial = vec![300.0; domain.cell_count()];
+    let coupled = march_conjugate(
+        &domain,
+        &fluid,
+        &solids,
+        &setup,
+        &config,
+        &unsteady,
+        None,
+        &initial,
+        |_| 1.0,
+        |_| 1.0,
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    let mut steady_config = config.clone();
+    steady_config.tolerance = 1e-10;
+    let steady = simple_flow(&domain, &fluid, &steady_config, &gate).unwrap();
+    let frozen = march_energy(
+        &domain,
+        &fluid,
+        &solids,
+        &steady.field,
+        &setup,
+        &initial,
+        |_| 1.0,
+        &TransientConfig {
+            time_step_s: 0.05,
+            steps: 10,
+            energy: EnergyConfig::default(),
+        },
+        &gate,
+    )
+    .unwrap();
+    let worst = coupled
+        .temperature
+        .iter()
+        .zip(&frozen.temperature)
+        .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("coupled vs frozen march: {worst:.3e} K");
+    assert!(worst < 1e-6, "{worst}");
+    for (a, b) in coupled.energy_records.iter().zip(&frozen.records) {
+        assert!((a.max_temperature_k - b.max_temperature_k).abs() < 1e-6);
+        assert!(
+            a.closure_j.abs() < 1e-9 * a.source_j.abs().max(1e-12),
+            "{a:?}"
+        );
+    }
+    // A face fan refuses the unsteady march.
+    let mut fanned = config.clone();
+    fanned.fan = Some(FanInlet {
+        face: Face3::XMin,
+        curve: FanCurve::new(&[(0.0, 1.0), (1e-5, 0.0)]).unwrap(),
+    });
+    assert!(matches!(
+        simple_unsteady(&domain, &fluid, &fanned, &unsteady, |_| 1.0, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.fan",
+            ..
+        })
     ));
 }
 

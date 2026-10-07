@@ -113,25 +113,7 @@ pub fn march_energy(
         finite("transient.initial_temperature", t)?;
     }
     domain.check_materials(solids.len())?;
-    let volume = domain.dx() * domain.dx() * domain.dx();
-    let mut capacity = vec![0.0f64; cells];
-    for (c, slot) in capacity.iter_mut().enumerate() {
-        let rho_c = match domain.voxel_at(c) {
-            Voxel::Fluid => fluid.volumetric_heat_capacity(),
-            Voxel::Solid(m) => {
-                let solid = &solids[usize::from(m)];
-                let value = solid.volumetric_heat_capacity_j_m3_k.ok_or_else(|| {
-                    ChtError::InvalidInput {
-                        field: "solid.volumetric_heat_capacity_j_m3_k",
-                        reason: format!("solid `{}` declares no heat capacity", solid.label),
-                    }
-                })?;
-                finite_positive("solid.volumetric_heat_capacity_j_m3_k", value)?;
-                value
-            }
-        };
-        *slot = rho_c * volume;
-    }
+    let capacity = heat_capacity(domain, fluid, solids)?;
     let storage: Vec<f64> = capacity.iter().map(|c| c / config.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
     let mut temperature = initial_temperature.to_vec();
@@ -147,54 +129,114 @@ pub fn march_energy(
                 *out = base * scale;
             }
         }
-        let next = solve_energy_inner(
+        let (next, record) = energy_step(
             domain,
             fluid,
             solids,
             flow,
             &stepped,
             &config.energy,
-            Some(&PseudoStep {
-                coefficient_w_k: &storage,
-                previous: &temperature,
-            }),
+            (&capacity, &storage),
+            &temperature,
+            (time_s, config.time_step_s, solids_present),
             gate,
         )?;
-        let stored: f64 = capacity
-            .iter()
-            .zip(next.temperature.iter().zip(&temperature))
-            .map(|(c, (a, b))| c * (a - b))
-            .sum();
-        let balance = next.report.balance;
-        let source_j = balance.source_w * config.time_step_s;
-        let boundary_outflow_j = (balance.boundary_outflow_w + balance.sink_outflow_w
-            - balance.fixed_cell_injection_w)
-            * config.time_step_s;
-        let max_temperature_k = next
-            .temperature
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let max_solid_temperature_k = if solids_present {
-            next.max_where(|c| !domain.is_fluid(c))
-                .map_or(f64::NAN, |(_, t)| t)
-        } else {
-            f64::NAN
-        };
-        records.push(TransientRecord {
-            time_s,
-            max_temperature_k,
-            max_solid_temperature_k,
-            stored_energy_change_j: stored,
-            source_j,
-            boundary_outflow_j,
-            closure_j: stored - (source_j - boundary_outflow_j),
-            iterations: next.report.iterations,
-        });
-        temperature = next.temperature;
+        records.push(record);
+        temperature = next;
     }
     Ok(TransientSolution {
         temperature,
         records,
     })
+}
+
+/// Heat capacity `(rho c)_c V_c` of every cell, J/K (a solid without a
+/// declared heat capacity refuses).
+pub(crate) fn heat_capacity(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+) -> Result<Vec<f64>, ChtError> {
+    let volume = domain.dx() * domain.dx() * domain.dx();
+    (0..domain.cell_count())
+        .map(|c| {
+            let rho_c = match domain.voxel_at(c) {
+                Voxel::Fluid => fluid.volumetric_heat_capacity(),
+                Voxel::Solid(m) => {
+                    let solid = &solids[usize::from(m)];
+                    let value = solid.volumetric_heat_capacity_j_m3_k.ok_or_else(|| {
+                        ChtError::InvalidInput {
+                            field: "solid.volumetric_heat_capacity_j_m3_k",
+                            reason: format!("solid `{}` declares no heat capacity", solid.label),
+                        }
+                    })?;
+                    finite_positive("solid.volumetric_heat_capacity_j_m3_k", value)?;
+                    value
+                }
+            };
+            Ok(rho_c * volume)
+        })
+        .collect()
+}
+
+/// One backward-Euler energy step on `flow` from `previous`, with its
+/// closure record. `(capacity, storage)` are `C` and `C / dt` per cell;
+/// `(time_s, dt, solids_present)` label the record.
+#[allow(clippy::too_many_arguments)] // physics inputs + step state
+pub(crate) fn energy_step(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    energy: &EnergyConfig,
+    (capacity, storage): (&[f64], &[f64]),
+    previous: &[f64],
+    (time_s, dt, solids_present): (f64, f64, bool),
+    gate: &CancelGate,
+) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+    let next = solve_energy_inner(
+        domain,
+        fluid,
+        solids,
+        flow,
+        setup,
+        energy,
+        Some(&PseudoStep {
+            coefficient_w_k: storage,
+            previous,
+        }),
+        gate,
+    )?;
+    let stored: f64 = capacity
+        .iter()
+        .zip(next.temperature.iter().zip(previous))
+        .map(|(c, (a, b))| c * (a - b))
+        .sum();
+    let balance = next.report.balance;
+    let source_j = balance.source_w * dt;
+    let boundary_outflow_j =
+        (balance.boundary_outflow_w + balance.sink_outflow_w - balance.fixed_cell_injection_w) * dt;
+    let max_temperature_k = next
+        .temperature
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_solid_temperature_k = if solids_present {
+        next.max_where(|c| !domain.is_fluid(c))
+            .map_or(f64::NAN, |(_, t)| t)
+    } else {
+        f64::NAN
+    };
+    let record = TransientRecord {
+        time_s,
+        max_temperature_k,
+        max_solid_temperature_k,
+        stored_energy_change_j: stored,
+        source_j,
+        boundary_outflow_j,
+        closure_j: stored - (source_j - boundary_outflow_j),
+        iterations: next.report.iterations,
+    };
+    Ok((next.temperature, record))
 }

@@ -58,11 +58,13 @@
 //!
 //! # No-claim boundaries
 //!
-//! Steady, laminar, constant-property, incompressible flow; no turbulence
-//! model (a laminar solution above transition is a laminar idealization, not
-//! a prediction), no buoyancy, staircase voxel walls, power-law convection
-//! (first order at high cell Péclet numbers: numerical diffusion is not
-//! bounded here). One run makes no mesh-convergence claim.
+//! Constant-property incompressible flow, steady here and unsteady through
+//! [`super::simple_unsteady`]; turbulence only through the algebraic LVEL
+//! closure (a laminar solution above transition is a laminar idealization,
+//! not a prediction); buoyancy only as the body force the natural-convection
+//! drivers set; staircase voxel walls; power-law convection (first order at
+//! high cell Péclet numbers: numerical diffusion is not bounded here). One
+//! run makes no mesh-convergence claim.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
@@ -327,6 +329,17 @@ pub enum Turbulence {
     Lvel,
 }
 
+/// Implicit time discretization of the unsteady momentum equations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeScheme {
+    /// First-order backward Euler.
+    BackwardEuler,
+    /// Second-order backward differentiation (the first step is backward
+    /// Euler).
+    #[default]
+    Bdf2,
+}
+
 /// Sweeps between AMG hierarchy rebuilds for [`PressureSolver::AmgCg`].
 pub const AMG_REBUILD_SWEEPS: usize = 10;
 
@@ -535,6 +548,17 @@ pub(super) struct Solver<'a> {
     internal_fans: Vec<InternalFanState>,
     /// Last RMS momentum right-hand side per component (residual scale).
     momentum_rms: [f64; 3],
+    /// Unsteady mode: step, scheme, and the face velocities at the previous
+    /// (and, for BDF2, the one before) time level.
+    time: Option<TimeLevels>,
+}
+
+#[derive(Debug, Clone)]
+struct TimeLevels {
+    dt: f64,
+    scheme: TimeScheme,
+    previous: [Vec<f64>; 3],
+    older: Option<[Vec<f64>; 3]>,
 }
 
 /// Internal fan state: the flow through the patch and the curve's rise and
@@ -777,6 +801,7 @@ impl<'a> Solver<'a> {
             fan_face,
             internal_fans,
             momentum_rms: [0.0; 3],
+            time: None,
             fan: config.fan.map(|fan| {
                 let side = fan.face as usize;
                 let axis = side / 2;
@@ -941,6 +966,21 @@ impl<'a> Solver<'a> {
         }
     }
 
+    /// Scale every declared inlet's velocity by `scale` (an inflow schedule
+    /// of the unsteady march).
+    pub(super) fn scale_inlets(&mut self, scale: f64) {
+        for side in 0..6 {
+            if let FvBoundary::Inlet { velocity } = self.config.faces[side] {
+                let axis = side / 2;
+                let inward = if side % 2 == 0 { 1.0 } else { -1.0 };
+                self.set_inlet_speed(side, inward * velocity[axis] * scale);
+                self.faces[side] = FvBoundary::Inlet {
+                    velocity: velocity.map(|v| v * scale),
+                };
+            }
+        }
+    }
+
     /// Secant step of the fan operating point, taken only on a settled
     /// flow: the mean inlet-layer pressure just after an inflow change is
     /// dominated by the pressure-correction transient, so the flow at the
@@ -1022,6 +1062,44 @@ impl<'a> Solver<'a> {
         self.update_fan(mass, steady);
         let fan = self.fan.as_ref().map_or(0.0, |fan| fan.residual);
         Ok((mass, steady.max(fan)))
+    }
+
+    /// Enter unsteady mode at the current velocities (time level 0).
+    pub(super) fn start_time(&mut self, dt: f64, scheme: TimeScheme) {
+        self.time = Some(TimeLevels {
+            dt,
+            scheme,
+            previous: self.vel.clone(),
+            older: None,
+        });
+    }
+
+    /// Close the current time step: its velocities become the previous
+    /// level.
+    pub(super) fn advance_time(&mut self) {
+        if let Some(time) = &mut self.time {
+            let previous = std::mem::replace(&mut time.previous, self.vel.clone());
+            time.older = Some(previous);
+        }
+    }
+
+    /// Remove the residual divergence of the current iterate by one tight
+    /// pressure correction (1e-8 of its imbalance).
+    pub(super) fn project(&mut self, gate: &CancelGate) -> Result<(), ChtError> {
+        self.correct(1e-8, gate)?;
+        self.guard_finite()
+    }
+
+    /// Cell-centred velocity of `cell` (zero in solids).
+    pub(super) fn cell_velocity(&self, cell: usize) -> [f64; 3] {
+        if !self.domain.is_fluid(cell) {
+            return [0.0; 3];
+        }
+        let at = self.domain.coords(cell);
+        [0, 1, 2].map(|a| {
+            0.5 * (self.vel[a][self.cell_face(a, at, false)]
+                + self.vel[a][self.cell_face(a, at, true)])
+        })
     }
 
     /// A diverging iteration refuses here, before non-finite coefficients
@@ -1223,6 +1301,23 @@ impl<'a> Solver<'a> {
                 );
                 let per_volume = (0.5 * (m.1 + p.1)).mul_add(u_old.abs(), 0.5 * (m.0 + p.0));
                 a_p += per_volume * self.area * dx;
+            }
+            if let Some(time) = &self.time {
+                // rho V du/dt over the cell-sized staggered volume.
+                let c = self.rho * self.area * dx / time.dt;
+                match (time.scheme, &time.older) {
+                    (TimeScheme::Bdf2, Some(older)) => {
+                        a_p += 1.5 * c;
+                        rhs = c.mul_add(
+                            (-0.5f64).mul_add(older[a][index], 2.0 * time.previous[a][index]),
+                            rhs,
+                        );
+                    }
+                    _ => {
+                        a_p += c;
+                        rhs = c.mul_add(time.previous[a][index], rhs);
+                    }
+                }
             }
             if let Some(&i) = self.fan_face[a].get(index)
                 && i != usize::MAX
