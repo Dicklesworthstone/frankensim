@@ -4,11 +4,11 @@
     "edits": [
       {
         "old": "use crate::import::{explicits, json_string};\n",
-        "new": "use crate::import::{explicits, json_string};\n\nmod input_propagation;\n"
+        "new": "use crate::import::{explicits, json_string};\n\nmod input_propagation;\nmod joint_parameters;\n"
       },
       {
         "old": "pub const SOLVE_DRIVER_VERSION: u32 = 44;\n",
-        "new": "/// Version 45 preserves independent radiative reservoirs in ambient sweeps\n/// and retains refused joint input corners as unmeasured rather than zero.\npub const SOLVE_DRIVER_VERSION: u32 = 45;\n"
+        "new": "/// Version 45 preserves independent radiative reservoirs in ambient sweeps\n/// and retains refused joint input corners as unmeasured rather than zero.\n/// Version 46 propagates declared manufactured-joint resistance bands jointly\n/// with conductivity tolerances; unexecuted corner designs remain unmeasured.\npub const SOLVE_DRIVER_VERSION: u32 = 46;\n"
       },
       {
         "old": "/// Set every inlet, fluid-reference and radiative-reservoir temperature to\n/// `temperature_k`: all of them are the declared ambient.\nfn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {\n    let mut perturbed = spec.clone();\n    if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {\n        if let Some(radiation) = setup.radiation.as_mut() {\n            for surface in &mut radiation.surfaces {\n                surface.reservoir_temperature.value = temperature_k;\n            }\n        }\n        for boundary in &mut setup.boundaries {\n            match &mut boundary.condition {\n                ThermalBoundaryCondition::Convection { reference_temperature, .. } => {\n                    reference_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {\n                    inlet_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => {\n                    ambient_temperature.value = temperature_k;\n                }\n                _ => {}\n            }\n        }\n    }\n    perturbed\n}\n",
@@ -29,6 +29,14 @@
       {
         "old": "inlet, fluid-reference and radiative-reservoir temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)",
         "new": "fluid inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared); independently declared radiative reservoirs remain fixed"
+      },
+      {
+        "old": "    // Geometry: every declared surface-offset band moved outward and then\n",
+        "new": "    // Extend declared-parameter propagation without changing the original\n    // conductivity-only path or inventing distributions from joint tolerances.\n    let parameters = joint_parameters::propagate(&base, cards, nominal, parameters, work,\n        |label, project, side| vertex_with(label, project, 1.0, side))?;\n\n    // Geometry: every declared surface-offset band moved outward and then\n"
+      },
+      {
+        "old": "declared material conductivity tolerances move together to each bound for the Parameters term",
+        "new": "declared material conductivity tolerances move together to each bound for the Parameters term; when manufactured-joint bands are declared, all independent contact resistance extrema (including interior source knots) are crossed with those common conductivity extremes; unprovided material uncertainties and parameter/ambient interactions are not bounded"
       }
     ]
   },
@@ -38,6 +46,15 @@
       {
         "old": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n",
         "new": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n\n#[path = \"ambient_envelope.rs\"]\nmod ambient_envelope;\n"
+      }
+    ]
+  },
+  "crates/fs-cli/src/study_uncertainty/model/adjoint/contact/tests.rs": {
+    "git_blob": "f461afc1198ff18aefeaddbc4fb88d5f54cddb35",
+    "edits": [
+      {
+        "old": "#[path = \"mixed.rs\"]\nmod mixed;",
+        "new": "#[path = \"mixed.rs\"]\nmod mixed;\n\n#[path = \"bands.rs\"]\nmod bands;"
       }
     ]
   }
