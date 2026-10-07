@@ -11,7 +11,10 @@
 //! 1. **Flow.** [`lbm_duct_flow`] drives the existing [`crate::BoundaryGrid3`]
 //!    (velocity inlet on `x-min`, pressure outlet on `x-max`, halfway
 //!    bounce-back walls and voxel obstacles) to a steady state measured by
-//!    the relative velocity change between checks. Any other producer of
+//!    the relative velocity change between checks. [`simple_flow`] solves
+//!    the same steady flow by finite volumes on the staggered faces (SIMPLEC)
+//!    with no lattice constraint, returning divergence-free face fluxes
+//!    directly. Any other producer of
 //!    cell or face velocities (an analytic profile, another solver) enters
 //!    through [`FlowField::from_cell_velocities`] or
 //!    [`FlowField::from_face_velocity`].
@@ -81,6 +84,7 @@ mod energy;
 mod flow;
 mod krylov;
 mod natural;
+mod simple;
 mod transient;
 
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
@@ -93,6 +97,7 @@ pub use flow::{
     ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
+pub use simple::{FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face

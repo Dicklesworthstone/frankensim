@@ -17,8 +17,9 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    LbmCollisionChoice, LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
-    Voxel, VoxelDomain, lbm_duct_flow, march_energy, natural_convection, solve_energy,
+    FvBoundary, LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial, ThermalFace,
+    ThermalSetup, TransientConfig, Voxel, VoxelDomain, lbm_duct_flow, march_energy,
+    natural_convection, simple_flow, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1021,5 +1022,309 @@ fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
             }
         ),
         "{err}"
+    );
+}
+
+/// Ghia, Ghia & Shin (1982), Table I, Re = 100: u on the vertical centreline.
+const GHIA_RE100: [(f64, f64); 9] = [
+    (0.0547, -0.03717),
+    (0.1719, -0.10150),
+    (0.2813, -0.15662),
+    (0.4531, -0.21090),
+    (0.5, -0.20581),
+    (0.6172, -0.13641),
+    (0.7344, 0.00332),
+    (0.8516, 0.23151),
+    (0.9531, 0.68717),
+];
+
+/// Lid-driven cavity at Re = 100 on n x n cells (one cell deep, symmetry in
+/// z); returns the worst deviation from Ghia's centreline u.
+fn lid_cavity(n: usize) -> (f64, fs_lbm::conjugate::SimpleReport) {
+    let gate = CancelGate::new();
+    let dx = 1.0 / n as f64;
+    let domain = VoxelDomain::new(n, n, 1, dx).unwrap();
+    let fluid = FluidProperties {
+        kinematic_viscosity_m2_s: 0.01,
+        ..unit_fluid()
+    };
+    let mut config = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Wall {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.tolerance = 1e-6;
+    let flow = simple_flow(&domain, &fluid, &config, &gate).unwrap();
+    // u on x = 1/2 (between columns n/2 - 1 and n/2), extended to the
+    // walls (u = 0 at y = 0, u = 1 at the lid) for linear interpolation.
+    let mut ys = vec![0.0];
+    let mut us = vec![0.0];
+    for y in 0..n {
+        ys.push((y as f64 + 0.5) * dx);
+        us.push(
+            0.5 * (flow.velocity_m_s[domain.index(n / 2 - 1, y, 0)][0]
+                + flow.velocity_m_s[domain.index(n / 2, y, 0)][0]),
+        );
+    }
+    ys.push(1.0);
+    us.push(1.0);
+    let worst = GHIA_RE100
+        .iter()
+        .map(|&(y, u)| {
+            let i = ys.iter().position(|&v| v >= y).unwrap().max(1);
+            let t = (y - ys[i - 1]) / (ys[i] - ys[i - 1]);
+            (us[i - 1] + t * (us[i] - us[i - 1]) - u).abs()
+        })
+        .fold(0.0, f64::max);
+    (worst, flow.report)
+}
+
+#[test]
+fn simplec_lid_driven_cavity_matches_ghia_at_re_100() {
+    // G2: measured worst centreline deviations 0.0268 (16^2) and 0.0059
+    // (32^2) against Ghia's 129^2 multigrid solution.
+    let (coarse, _) = lid_cavity(16);
+    let (fine, report) = lid_cavity(32);
+    eprintln!("cavity worst |u - ghia|: 16^2 {coarse:.4} 32^2 {fine:.4} {report:?}");
+    assert!(fine < 0.01, "32^2 deviates from Ghia by {fine}");
+    assert!(
+        fine < 0.5 * coarse,
+        "no refinement gain: {coarse} -> {fine}"
+    );
+    // Closed cavity: the pinned pressure correction still conserves mass.
+    assert!(report.max_divergence_m3_s < 1e-12 * report.max_cell_reynolds.max(1.0));
+    assert_eq!(report.inflow_m3_s, 0.0);
+}
+
+/// Developed plane Poiseuille flow between walls `n` cells apart (Re_H = 1):
+/// the developed pressure gradient.
+fn poiseuille(n: usize) -> (f64, fs_lbm::conjugate::SimpleReport) {
+    let gate = CancelGate::new();
+    let dx = 1.0 / n as f64;
+    let domain = VoxelDomain::new(6 * n, n, 1, dx).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.tolerance = 1e-9;
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let (a, b) = (3 * n, 5 * n);
+    let gradient = (flow.mean_pressure(&domain, 0, a).unwrap()
+        - flow.mean_pressure(&domain, 0, b).unwrap())
+        / ((b - a) as f64 * dx);
+    (gradient, flow.report)
+}
+
+#[test]
+fn simplec_plane_poiseuille_matches_the_exact_discrete_solution() {
+    // G1. The staggered stencil with half-cell wall diffusion is solved
+    // exactly by u_j = (G / 2 mu) (y_j (H - y_j) + dx^2 / 4); its cell mean
+    // (midpoint rule: H^2 / 6 + dx^2 / 12) gives the discrete law
+    // G = 12 mu U / H^2 * n^2 / (n^2 + 2): second-order convergence to the
+    // continuum 12 mu U / H^2 with a known constant.
+    for n in [4usize, 8, 16] {
+        let (gradient, report) = poiseuille(n);
+        let n2 = (n * n) as f64;
+        let discrete = 12.0 * n2 / (n2 + 2.0);
+        eprintln!("poiseuille n={n}: dp/dx {gradient:.9} discrete {discrete:.9} {report:?}");
+        assert!(
+            (gradient - discrete).abs() < 1e-6 * discrete,
+            "n={n}: {gradient} vs {discrete}"
+        );
+        assert!((report.outflow_m3_s - report.inflow_m3_s).abs() < 1e-12);
+    }
+}
+
+/// Quarter of a square duct (symmetry on y- and z-min) of half-side `m`
+/// cells at Re_Dh = 2: the Darcy friction constant f Re.
+fn quarter_square_duct(m: usize) -> f64 {
+    let gate = CancelGate::new();
+    let dx = 1.0 / m as f64;
+    let domain = VoxelDomain::new(8 * m, m, m, dx).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::wall(),
+    ]);
+    config.tolerance = 1e-8;
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let (a, b) = (4 * m, 6 * m);
+    let gradient = (flow.mean_pressure(&domain, 0, a).unwrap()
+        - flow.mean_pressure(&domain, 0, b).unwrap())
+        / ((b - a) as f64 * dx);
+    // Full side 2 = D_h: f Re = 2 (dp/dx) D_h^2 / (mu U).
+    8.0 * gradient
+}
+
+#[test]
+fn simplec_square_duct_friction_converges_to_shah_london() {
+    // G1/G2: Shah & London (1978) Darcy f Re = 56.91 for the square duct.
+    // Measured 53.749 (m = 4) and 56.069 (m = 8): error ratio 3.8, and the
+    // Richardson value 56.842 is within 0.12 %.
+    let coarse = quarter_square_duct(4);
+    let fine = quarter_square_duct(8);
+    let richardson = fine + (fine - coarse) / 3.0;
+    eprintln!("square duct fRe: {coarse:.4} {fine:.4} richardson {richardson:.4}");
+    let reference = 56.91;
+    let ratio = (reference - coarse) / (reference - fine);
+    assert!((3.0..5.0).contains(&ratio), "order ratio {ratio}");
+    assert!((fine - reference).abs() < 0.02 * reference, "{fine}");
+    assert!(
+        (richardson - reference).abs() < 0.005 * reference,
+        "{richardson}"
+    );
+}
+
+#[test]
+fn simplec_flow_drives_the_conjugate_duct_like_the_analytic_profile() {
+    // The same aspect-0.5 duct and thermal problem as the LBM rung above:
+    // the FV flux field is exactly divergence-free, carries the inlet flow,
+    // develops the Shah-London profile and gives the same downstream Nusselt
+    // number as the analytic developed profile.
+    let gate = CancelGate::new();
+    let (nx, ny, nz) = (24, 8, 16);
+    let dx = 1e-3;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1.0 / 0.7,
+        kinematic_viscosity_m2_s: 1.0,
+    };
+    let dh = 4.0 * (ny * nz) as f64 * dx * dx / (2.0 * (ny + nz) as f64 * dx);
+    let mean = 10.0 * fluid.kinematic_viscosity_m2_s / dh;
+    let domain = VoxelDomain::new(nx, ny, nz, dx).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [mean, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+    ]);
+    config.tolerance = 1e-8;
+    let flow = simple_flow(&domain, &fluid, &config, &gate).unwrap();
+    let report = &flow.report;
+    eprintln!("{report:?}");
+    let nominal = mean * (ny * nz) as f64 * dx * dx;
+    assert!((report.inflow_m3_s - nominal).abs() < 1e-12 * nominal);
+    assert!((report.outflow_m3_s - nominal).abs() < 1e-7 * nominal);
+    assert!(report.max_divergence_m3_s < 1e-7 * nominal);
+    let (p_a, p_b) = (
+        flow.mean_pressure(&domain, 0, 10).unwrap(),
+        flow.mean_pressure(&domain, 0, 20).unwrap(),
+    );
+    let gradient = (p_a - p_b) / (10.0 * dx);
+    let darcy =
+        62.19 * fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s * mean / (2.0 * dh * dh);
+    eprintln!("developed dp/dx: fv {gradient:.6e} Pa/m, Darcy fRe=62.19 {darcy:.6e} Pa/m");
+    // Measured -2.98 %: the second-order discretization error with 8 cells
+    // across the short side (cf. the square-duct rungs above).
+    assert!(
+        (gradient - darcy).abs() / darcy < 0.04,
+        "{gradient} vs {darcy}"
+    );
+    let profile = duct_profile(ny, nz, dx);
+    let station = 18;
+    let mut worst = 0.0f64;
+    for z in 0..nz {
+        for y in 0..ny {
+            let u = flow.velocity_m_s[domain.index(station, y, z)][0];
+            worst = worst.max((u / mean - profile[z * ny + y]).abs());
+        }
+    }
+    eprintln!("max |u_fv/U - w| at x={station}: {worst:.4}");
+    assert!(worst < 0.03, "developed FV profile deviates by {worst}");
+    let analytic = FlowField::from_face_velocity(&domain, OPEN_X, |axis, p| {
+        if axis == 0 {
+            let (y, z) = ((p[1] / dx) as usize, (p[2] / dx) as usize);
+            mean * profile[z * ny + y]
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let (nu_fv, fv_report) = rect_duct_nusselt(&domain, &fluid, &flow.field, station, 1.0);
+    let (nu_analytic, _) = rect_duct_nusselt(&domain, &fluid, &analytic, station, 1.0);
+    eprintln!("local Nu_T at x={station}: fv {nu_fv:.4} analytic {nu_analytic:.4}");
+    assert!(fv_report.balance < 1e-9, "{fv_report:?}");
+    assert!(
+        (nu_fv - nu_analytic).abs() / nu_analytic < 0.03,
+        "{nu_fv} vs {nu_analytic}"
+    );
+}
+
+#[test]
+fn simplec_refusals_are_structured() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::new(6, 3, 3, 1.0).unwrap();
+    let open = [
+        FvBoundary::Inlet {
+            velocity: [1.0, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+    ];
+    let field_of = |config: &SimpleConfig| match simple_flow(&domain, &unit_fluid(), config, &gate)
+    {
+        Err(ChtError::InvalidInput { field, .. }) => field,
+        other => panic!("expected an input refusal, got {other:?}"),
+    };
+    let mut outward = open;
+    outward[0] = FvBoundary::Inlet {
+        velocity: [-1.0, 0.0, 0.0],
+    };
+    assert_eq!(
+        field_of(&SimpleConfig::new(outward)),
+        "simple.inlet_velocity"
+    );
+    let mut piercing = open;
+    piercing[2] = FvBoundary::Wall {
+        velocity: [0.0, 0.5, 0.0],
+    };
+    assert_eq!(
+        field_of(&SimpleConfig::new(piercing)),
+        "simple.wall_velocity"
+    );
+    let mut relaxed = SimpleConfig::new(open);
+    relaxed.velocity_relaxation = 1.0;
+    assert_eq!(field_of(&relaxed), "simple.velocity_relaxation");
+    // An exhausted budget is a refusal, not a silently unconverged field.
+    let mut short = SimpleConfig::new(open);
+    short.max_iterations = 1;
+    assert!(matches!(
+        simple_flow(&domain, &unit_fluid(), &short, &gate),
+        Err(ChtError::FlowNotSteady { steps: 1, .. })
+    ));
+    let solid = VoxelDomain::from_fn(4, 4, 4, 1.0, |_| Voxel::Solid(0)).unwrap();
+    assert!(matches!(
+        simple_flow(&solid, &unit_fluid(), &SimpleConfig::new(open), &gate),
+        Err(ChtError::InvalidDomain { .. })
+    ));
+    let tripped = CancelGate::new();
+    tripped.request();
+    assert_eq!(
+        simple_flow(&domain, &unit_fluid(), &SimpleConfig::new(open), &tripped),
+        Err(ChtError::Cancelled)
     );
 }

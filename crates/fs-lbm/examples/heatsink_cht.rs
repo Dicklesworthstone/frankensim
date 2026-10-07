@@ -1,11 +1,13 @@
 //! Ducted plate-fin heatsink, end to end through the conjugate pipeline:
-//! voxelize aluminium fins on a base with a chip footprint, run the steady
-//! D3Q19 airflow on every core, solve the conjugate energy equation, and
-//! report the junction temperature, thermal resistance, effective film
-//! coefficient, pressure drop and energy closure.
+//! voxelize aluminium fins on a base with a chip footprint, solve the steady
+//! airflow (finite-volume SIMPLEC by default, or D3Q19 LBM on every core),
+//! solve the conjugate energy equation, and report the junction
+//! temperature, thermal resistance, effective film coefficient, pressure
+//! drop and energy closure.
 //!
 //! ```text
-//! cargo run --release -p fs-lbm --example heatsink_cht \
+//! cargo run --release -p fs-lbm --example heatsink_cht -- fv [inlet_velocity_m_s]
+//! cargo run --release -p fs-lbm --example heatsink_cht -- lbm \
 //!     [inlet_velocity_m_s] [lattice_inlet_velocity] [auto|bgk|central] [max_steps]
 //! ```
 //!
@@ -23,8 +25,9 @@
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    EnergyConfig, FluidProperties, LbmCollisionChoice, LbmFlowConfig, SolidMaterial, ThermalFace,
-    ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow, solve_energy,
+    EnergyConfig, FlowField, FluidProperties, FvBoundary, LbmCollisionChoice, LbmFlowConfig,
+    SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow,
+    simple_flow, solve_energy,
 };
 
 const DX: f64 = 0.5e-3;
@@ -48,17 +51,15 @@ fn heatsink(p: [f64; 3]) -> Voxel {
     }
 }
 
-#[allow(clippy::too_many_lines)] // one linear report: flow, energy, result
-fn main() {
+/// Flow stage outputs shared by both solvers.
+struct Flow {
+    field: FlowField,
+    inflow_m3_s: f64,
+    pressure_drop_pa: f64,
+}
+
+fn lbm_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow {
     let gate = CancelGate::new();
-    let (nx, ny, nz) = (120, 40, 28);
-    let domain = VoxelDomain::from_fn(nx, ny, nz, DX, heatsink).expect("admitted domain");
-    let air = FluidProperties::dry_air_300k();
-    let aluminium = [SolidMaterial::new(
-        "AA6061-T6 (fixture card, 167 W/m/K)",
-        167.0,
-    )];
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let number = |index: usize, default: f64| {
         args.get(index)
             .map_or(default, |a| a.parse().expect("numeric argument"))
@@ -80,11 +81,11 @@ fn main() {
         ..LbmFlowConfig::default()
     };
     let started = std::time::Instant::now();
-    let flow = lbm_duct_flow(&domain, &air, &config, &gate).expect("steady duct flow");
+    let flow = lbm_duct_flow(domain, air, &config, &gate).expect("steady duct flow");
     let flow_s = started.elapsed().as_secs_f64();
     let r = &flow.report;
     println!(
-        "{{\"stage\":\"flow\",\"cells\":{},\"fluid_cells\":{},\"steps\":{},\"tau\":{:.5},\"collision\":\"{:?}\",\"inlet_mach\":{:.4},\"max_lattice_speed\":{:.4},\"realized_inflow_m3_s\":{:.6e},\"nominal_inflow_m3_s\":{:.6e},\"pressure_drop_pa\":{:.5},\"projection_max_correction_m3_s\":{:.3e},\"wall_s\":{flow_s:.1}}}",
+        "{{\"stage\":\"flow\",\"solver\":\"lbm\",\"cells\":{},\"fluid_cells\":{},\"steps\":{},\"tau\":{:.5},\"collision\":\"{:?}\",\"inlet_mach\":{:.4},\"max_lattice_speed\":{:.4},\"realized_inflow_m3_s\":{:.6e},\"nominal_inflow_m3_s\":{:.6e},\"pressure_drop_pa\":{:.5},\"projection_max_correction_m3_s\":{:.3e},\"wall_s\":{flow_s:.1}}}",
         domain.cell_count(),
         domain.fluid_count(),
         r.steps,
@@ -97,6 +98,73 @@ fn main() {
         r.pressure_drop_pa,
         r.projection.max_correction_m3_s,
     );
+    Flow {
+        inflow_m3_s: r.realized_inflow_m3_s,
+        pressure_drop_pa: r.pressure_drop_pa,
+        field: flow.field,
+    }
+}
+
+fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow {
+    let gate = CancelGate::new();
+    let inlet = args
+        .first()
+        .map_or(0.25, |a| a.parse().expect("numeric inlet velocity"));
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [inlet, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+    ]);
+    config.tolerance = 1e-6;
+    let started = std::time::Instant::now();
+    let flow = simple_flow(domain, air, &config, &gate).expect("steady duct flow");
+    let flow_s = started.elapsed().as_secs_f64();
+    let r = &flow.report;
+    let [nx, _, _] = domain.dims();
+    let pressure_drop_pa = flow.mean_pressure(domain, 0, 0).expect("fluid inlet layer")
+        - flow
+            .mean_pressure(domain, 0, nx - 1)
+            .expect("fluid outlet layer");
+    println!(
+        "{{\"stage\":\"flow\",\"solver\":\"fv-simplec\",\"cells\":{},\"fluid_cells\":{},\"iterations\":{},\"mass_residual\":{:.2e},\"momentum_residual\":{:.2e},\"max_cell_reynolds\":{:.2},\"inflow_m3_s\":{:.6e},\"outflow_m3_s\":{:.6e},\"max_divergence_m3_s\":{:.2e},\"pressure_drop_pa\":{pressure_drop_pa:.5},\"wall_s\":{flow_s:.1}}}",
+        domain.cell_count(),
+        domain.fluid_count(),
+        r.iterations,
+        r.mass_residual,
+        r.momentum_residual,
+        r.max_cell_reynolds,
+        r.inflow_m3_s,
+        r.outflow_m3_s,
+        r.max_divergence_m3_s,
+    );
+    Flow {
+        inflow_m3_s: r.inflow_m3_s,
+        pressure_drop_pa,
+        field: flow.field,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // one linear report: flow, energy, result
+fn main() {
+    let gate = CancelGate::new();
+    let (nx, ny, nz) = (120, 40, 28);
+    let domain = VoxelDomain::from_fn(nx, ny, nz, DX, heatsink).expect("admitted domain");
+    let air = FluidProperties::dry_air_300k();
+    let aluminium = [SolidMaterial::new(
+        "AA6061-T6 (fixture card, 167 W/m/K)",
+        167.0,
+    )];
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flow = match args.first().map(String::as_str) {
+        None | Some("fv") => fv_flow(&domain, &air, args.get(1..).unwrap_or(&[])),
+        Some("lbm") => lbm_flow(&domain, &air, &args[1..]),
+        Some(other) => panic!("unknown flow solver {other}; use fv or lbm"),
+    };
 
     let inlet_k = 300.0;
     let mut faces = [ThermalFace::Adiabatic; 6];
@@ -139,7 +207,7 @@ fn main() {
     // rho c_p Q (T_out,bulk - T_in).
     let outlet_k = inlet_k
         + energy.report.balance.advective_outflow_w
-            / (air.volumetric_heat_capacity() * r.realized_inflow_m3_s);
+            / (air.volumetric_heat_capacity() * flow.inflow_m3_s);
     // Wetted area: fluid/solid faces.
     let mut wetted = 0usize;
     for &c in &solid_cells {
@@ -173,6 +241,6 @@ fn main() {
     println!(
         "{{\"stage\":\"result\",\"junction_k\":{junction_k:.4},\"mean_solid_k\":{mean_solid_k:.4},\"outlet_bulk_k\":{outlet_k:.4},\"thermal_resistance_k_per_w\":{:.4},\"wetted_area_m2\":{wetted_m2:.4e},\"effective_h_w_m2_k\":{h_eff:.3},\"pressure_drop_pa\":{:.5},\"evidence\":\"Estimated\"}}",
         (junction_k - inlet_k) / chip_w,
-        r.pressure_drop_pa,
+        flow.pressure_drop_pa,
     );
 }

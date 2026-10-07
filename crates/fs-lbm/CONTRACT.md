@@ -911,6 +911,40 @@ contrasts impose no step limit; first order in time.
 | Same, dt halved | continuous exponential | error 2.698e-3 -> 1.351e-3 (ratio 2.00) |
 | Heated plate under channel flow, 400 steps from cold | steady solve; energy budget | stored 2.616326564 J = net input; worst step closure 4e-12 J; within 2.5e-9 K of steady |
 
+### Steady finite-volume flow (`simple_flow`)
+
+Steady laminar incompressible Navier–Stokes by finite volumes on the
+staggered (MAC) faces of the same `VoxelDomain`, coupled by SIMPLEC (Van
+Doormaal & Raithby 1984). This is the forced-convection path with no
+lattice constraint: no `tau`, Mach or cell-Reynolds admission, so operating
+points the LBM would need millions of cells for run on the declared voxels.
+The returned `FlowField` holds the face fluxes the energy solver consumes,
+so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
+
+- Faces touching a solid voxel are blocked; a blocked transverse neighbour
+  is a no-slip wall half a cell away (staircase). Domain faces are
+  `FvBoundary::{Wall { velocity }, Symmetry, Inlet { velocity }, Outlet}`;
+  the outlet holds pressure zero with zero-gradient velocity and its normal
+  velocity is pressure-corrected like an interior face, so the field leaves
+  every iteration exactly divergence-free to the pressure solve.
+- Momentum uses power-law (or upwind) coefficients with `a_P / alpha`
+  under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
+  components of the pressure correction are pinned.
+- Convergence is two steady residuals of the same iterate: the largest cell
+  mass imbalance before correction over the largest face mass flux, and
+  per component `||b - A u|| / ||b||` of the Jacobi-scaled momentum system
+  at the velocities entering the iteration. Inner solves only reduce that
+  entry residual by `momentum_tolerance`, so a converged report never rests
+  on a skipped inner solve. Budget exhaustion refuses as `FlowNotSteady`.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Plane Poiseuille, n = 4, 8, 16 cells across | exact discrete law `12 mu U / H^2 * n^2 / (n^2 + 2)` (half-cell wall stencil; second order to the continuum) | 10.666666608, 11.636363639, 11.906976745: within 1e-8 relative |
+| Lid-driven cavity, Re 100, 16^2 and 32^2 | Ghia, Ghia & Shin (1982) centreline u | worst deviation 0.0268 -> 0.0059 |
+| Square duct (quarter, symmetry), half-side 4 and 8 cells | Darcy f Re = 56.91 (Shah & London) | 53.749, 56.069 (error ratio 3.8); Richardson 56.843 (0.12 %) |
+| Aspect-0.5 duct, 8 x 16, Re 10, same thermal problem as the LBM rung | analytic developed profile and its Nu | profile within 0.4 %; local Nu 3.5078 vs 3.5005 (0.2 %); dp/dx -2.98 % vs f Re = 62.19 |
+| Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
+
 ### Worked example (`examples/heatsink_cht.rs`)
 
 `cargo run --release -p fs-lbm --example heatsink_cht [U] [u_lat]
@@ -978,7 +1012,7 @@ the central-moment operator the same duct diverged; it now refuses as
 ### No-claim boundaries (conjugate)
 
 - Laminar, steady, constant-property convection only: forced convection
-  through `lbm_duct_flow`, Boussinesq natural convection in closed
+  through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in closed
   enclosures through `natural_convection`; no open-boundary natural
   convection, turbulence model, radiation, or temperature-dependent
   properties. A natural-convection run that does not settle (for example
@@ -989,6 +1023,11 @@ the central-moment operator the same duct diverged; it now refuses as
   evidence; no enclosure or Verified colour is produced.
 - `lbm_duct_flow` runs `BoundaryGrid3` pooled but scalar (no SIMD path);
   steps to steady scale with the slowest viscous mode. No throughput claim.
+- `simple_flow` is sequential (assembly, ILU(0) and BiCGStab), has no
+  buoyancy term, no turbulence model (a laminar solution above transition
+  is a laminar idealization, not a prediction), and power-law momentum
+  convection is first order at high cell Péclet numbers; its numerical
+  diffusion is not bounded here. No throughput claim.
 - No product (`.fsim`) stage consumes this module yet; Journey A budgets are
   unchanged by it.
 

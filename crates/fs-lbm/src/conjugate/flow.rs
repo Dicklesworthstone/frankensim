@@ -82,6 +82,26 @@ impl FlowField {
         }
     }
 
+    /// Adopt face fluxes (m^3/s) already laid out as this type stores them.
+    pub(crate) fn from_face_arrays(
+        domain: &VoxelDomain,
+        fx: Vec<f64>,
+        fy: Vec<f64>,
+        fz: Vec<f64>,
+    ) -> Self {
+        let [nx, ny, nz] = domain.dims();
+        debug_assert_eq!(fx.len(), (nx + 1) * ny * nz);
+        debug_assert_eq!(fy.len(), nx * (ny + 1) * nz);
+        debug_assert_eq!(fz.len(), nx * ny * (nz + 1));
+        Self {
+            dims: [nx, ny, nz],
+            dx: domain.dx(),
+            fx,
+            fy,
+            fz,
+        }
+    }
+
     /// Sample a face-normal velocity (m/s) at every face centre that carries
     /// flow: interior faces between two fluid cells, and boundary faces of
     /// fluid cells on [`FlowFace::Fixed`] / [`FlowFace::Free`] domain
