@@ -169,7 +169,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// complete accepted thermal adjoint; earlier reports cannot substitute for them.
 /// Version 43 propagates natural-convection card allowances through their full
 /// fixed point and excludes frozen-coefficient error certificates/corrections.
-pub const SOLVE_DRIVER_VERSION: u32 = 43;
+/// Version 44 queries contact resistance at the declared manufactured joint
+/// state and requires full temperature/state-band support on the same card.
+pub const SOLVE_DRIVER_VERSION: u32 = 44;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -6184,11 +6186,15 @@ fn lower_thermal_interfaces(
         // Binding already proves continuous support by this same claim.
         // Equal endpoints alone do not prove a piecewise-linear law constant.
         let interior_varies = match &claim.value {
-            fs_matdb::PropertyValue::Curve { knots, .. } => knots.iter().any(|(t, value)| {
-                (binding.range_lo..=binding.range_hi).contains(t)
-                    && value.to_bits() != property.value_lo.to_bits()
-            }),
-            fs_matdb::PropertyValue::Scalar { .. } => false,
+            fs_matdb::PropertyValue::Curve { abscissa, knots, .. }
+                if abscissa == &requirements.temperature_axis => knots.iter().any(|(t, value)| {
+                    (binding.range_lo..=binding.range_hi).contains(t)
+                        && value.to_bits() != property.value_lo.to_bits()
+                }),
+            // A manufactured-state curve is evaluated at one fixed state.
+            // Pressure/thickness knots are not temperatures, even if their
+            // numerical coordinates happen to lie in the temperature range.
+            _ => false,
         };
         if property.value_lo.to_bits() != property.value_hi.to_bits() || interior_varies {
             return Err(conduction_error(
@@ -6200,15 +6206,21 @@ fn lower_thermal_interfaces(
                 "use a constant-within-validity contact claim until temperature-dependent contact is coupled into the nonlinear solve",
             ));
         }
-        let point = QueryPoint::new()
-            .with(requirements.temperature_axis.clone(), binding.range_lo)
-            .map_err(|error| {
-                conduction_error(
-                    "cli-solve-conduction-interface-card",
-                    format!("interface `{name}` query point refused: {error}"),
-                    "repair the admitted temperature range",
-                )
-            })?;
+        let declared = spec.interface_cards.as_deref().unwrap_or(&[]).iter()
+            .find(|row| row.interface == name)
+            .ok_or_else(|| conduction_error(
+                "cli-solve-conduction-interface-card",
+                format!("resolved interface `{name}` has no original manufactured state"),
+                "preserve the original interface binding through thermal lowering",
+            ))?;
+        let point = fs_project::interface_state::query_point(
+            &declared.state, &requirements.temperature_axis, binding.range_lo,
+            fs_project::interface_state::StatePoint::Nominal,
+        ).map_err(|error| conduction_error(
+            "cli-solve-conduction-interface-card",
+            format!("interface `{name}` query point refused: {}", error.detail),
+            "repair the admitted temperature range or manufactured joint state",
+        ))?;
         let resistance = match binding.pinned_claim.as_deref() {
             Some(pin) => fs_conduction::InterfaceResistance::from_card_pinned(
                 name,
