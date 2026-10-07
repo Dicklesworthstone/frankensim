@@ -447,7 +447,9 @@ impl Binder<'_> {
         }
         let project = self.project_operand(verb, &positional, refusals)?;
         match verb {
-            "cooling.study" => native_study::bind(self, &project, &named, refusals).map(Step::Study),
+            "cooling.study" => {
+                native_study::bind(self, &project, &named, refusals).map(Step::Study)
+            }
             "cooling.import" => {
                 let mut sources = None;
                 let mut unit = None;
