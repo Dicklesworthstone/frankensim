@@ -72,3 +72,6 @@ fn ambient_budget_vertices_equal_isolated_physical_resolves_not_reservoir_substi
         }
     }
 }
+
+#[path = "joint_envelope.rs"]
+mod joint_envelope;
