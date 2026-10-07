@@ -86,6 +86,9 @@ fn manufacturing_interval_cannot_extrapolate_or_hide_interior_claim_conflicts() 
     assert!(query_envelope(&broad, crate::CONTACT_RESISTANCE_PROPERTY, &dry(), "T", 250.0, 400.0, SINGLE).is_err());
     let pinned = query_envelope(&broad, crate::CONTACT_RESISTANCE_PROPERTY, &dry(), "T", 250.0, 400.0, ClaimSelection::Pinned(pin)).unwrap();
     assert_eq!(pinned.lower.receipt.selected, pin);
+    let wrong_dims = claims("normal_pressure", dims::TEMPERATURE, vec![(0.5e6, 0.2), (1.5e6, 0.1)]);
+    assert!(query_envelope(&wrong_dims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(), "T", 250.0, 400.0, SINGLE).is_err(),
+        "an axis name cannot erase incompatible source dimensions");
     let alias = claims("pressure", dims::PRESSURE, vec![(0.5e6, 0.2), (1.5e6, 0.1)]);
     assert!(query_envelope(&alias, crate::CONTACT_RESISTANCE_PROPERTY, &dry(), "T", 250.0, 400.0, SINGLE).is_err(), "no inferred axis aliases");
 }

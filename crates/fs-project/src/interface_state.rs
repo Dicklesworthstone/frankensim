@@ -77,6 +77,28 @@ pub fn query_envelope(
         .map_err(|e| PropertySupportError::InvalidEnvelope { reason: e.detail });
     let support = claims.query_envelope(property,
         &point(low_k, StatePoint::Lower)?, &point(high_k, StatePoint::Upper)?, selection)?;
+    // Legacy axis names carry no QueryPoint descriptor. Check the selected
+    // source curve's abscissa dimensions explicitly before interpreting its
+    // numeric coordinate as pressure, thickness, torque or temperature.
+    let claim = claims.claim(support.lower.receipt.selected).ok_or_else(||
+        PropertySupportError::InvalidEnvelope { reason: "selected interface claim is absent".into() })?;
+    if let fs_matdb::PropertyValue::Curve { abscissa, abscissa_dims, .. } = &claim.value {
+        let expected = match abscissa.as_str() {
+            axis if axis == temperature_axis => crate::spec::dims::TEMPERATURE,
+            "normal_pressure" => crate::spec::dims::PRESSURE,
+            "thickness" | "gap" => crate::spec::dims::LENGTH,
+            "torque" => Dims([2, 1, -2, 0, 0, 0]),
+            "bolt_count" => Dims::NONE,
+            _ => return Err(PropertySupportError::InvalidEnvelope {
+                reason: "interface curve uses an unprovided manufactured-state coordinate".into(),
+            }),
+        };
+        if *abscissa_dims != expected {
+            return Err(PropertySupportError::InvalidEnvelope {
+                reason: format!("interface curve axis `{abscissa}` has dimensions {:?}, expected {:?}", abscissa_dims, expected),
+            });
+        }
+    }
     let nominal = claims.query_envelope(property,
         &point(low_k, StatePoint::Nominal)?, &point(high_k, StatePoint::Nominal)?, selection)?;
     if support.lower.receipt.selected != nominal.lower.receipt.selected {
