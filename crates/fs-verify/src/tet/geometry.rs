@@ -90,6 +90,7 @@ pub(super) fn build(
     }
     problem.conductivity.validate(keep_going)?;
     let mut declarations = BTreeMap::new();
+    let mut has_contact = false;
     for boundary in problem.boundary {
         poll(keep_going)?;
         let mut order = [0, 1, 2];
@@ -116,6 +117,16 @@ pub(super) fn build(
                     return Err(TetError::Invalid("positive Robin h and finite reference required"));
                 }
                 BoundaryCondition::Robin { h, reference: order.map(|i| reference[i]) }
+            }
+            BoundaryCondition::Contact { mut partner, resistance } => {
+                partner.sort_unstable();
+                if !resistance.is_finite() || resistance <= 0.0
+                    || partner[2] >= candidate.len() || partner.windows(2).any(|v| v[0] == v[1])
+                    || partner.iter().any(|v| key.contains(v)) {
+                    return Err(TetError::Invalid("contact needs positive resistance and separate complete traces"));
+                }
+                has_contact = true;
+                BoundaryCondition::Contact { partner, resistance }
             }
         };
         if declarations.insert(key, condition).is_some() {
@@ -175,5 +186,11 @@ pub(super) fn build(
     if !declarations.is_empty() || faces.iter().any(|f| f.sides.len() == 1 && f.condition.is_none()) {
         return Err(TetError::Invalid("boundary declarations must partition the extracted exterior"));
     }
+    // A contact is an edge in the same conservation graph, not a free
+    // exterior flux or an anchor. This also admits a heated component whose
+    // only connection to a Dirichlet/Robin anchor is through finite contact.
+    let faces = if has_contact {
+        contact::link(problem.vertices, &mut cells, faces, keep_going)?
+    } else { faces };
     Ok((cells, faces))
 }

@@ -23,13 +23,16 @@
 //! tetrahedralization of its declared polyhedral domain. Local incidence,
 //! face orientation and nondegeneracy are checked; global intersection freedom
 //! and agreement with an original CAD surface are NOT certified here. No
-//! nonlinear, contact, uncertain-coefficient, or point-maximum bound is claimed.
+//! nonlinear, nonmatching-contact, uncertain-coefficient, or point-maximum bound
+//! is claimed. Explicit matching finite-resistance contacts retain independent
+//! temperature traces; their jump-energy defect is added once per paired face.
 //! The construction does not claim local efficiency or contrast robustness.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::interval::Iv;
 
+mod contact;
 mod geometry;
 mod goal;
 mod source;
@@ -50,6 +53,12 @@ pub enum BoundaryCondition {
     Neumann(f64),
     /// q.n = h*(u-reference), with constant h>0 and affine reference.
     Robin { h: f64, reference: [f64; 3] },
+    /// Finite contact: outward q.n = (u - u_partner)/resistance. Both
+    /// geometrically identical, oppositely oriented exterior faces must name
+    /// each other with the SAME positive area-specific resistance. Vertex
+    /// identities stay disjoint; their temperatures are never welded together.
+    /// Partner order is immaterial: exact coordinates establish correspondence.
+    Contact { partner: [usize; 3], resistance: f64 },
 }
 
 /// Exactly one declaration is required for every exterior face.
@@ -114,14 +123,16 @@ impl std::fmt::Display for TetError {
 }
 impl std::error::Error for TetError {}
 
-/// Bound on sqrt(integral grad(u-v).K.grad(u-v) + integral_R h(u-v)^2).
+/// Bound on sqrt(integral grad(u-v).K.grad(u-v) + integral_R h(u-v)^2
+/// + integral_contact jump(u-v)^2/resistance).
 /// Does not include geometry/model/input uncertainty and is not a maximum bound.
 #[derive(Debug, Clone)]
 pub struct EnergyBound {
     pub energy_error_upper: f64,
     /// Enclosure of the computable majorant squared, NOT of the true error squared.
     pub majorant_squared: Iv,
-    /// Outward upper contributions, including a cell's exterior Robin faces.
+    /// Outward upper contributions, including Robin faces and contact defects.
+    /// A contact defect is assigned once to its canonical side's owning cell.
     pub cell_majorant_squared_upper: Vec<f64>,
     /// Correlated conservative face-flux enclosures, outward from each cell.
     /// Entry i is opposite the tet's vertex i. Independent choices from these
@@ -188,6 +199,17 @@ fn energy_bound_impl(
                 });
                 eta = eta.add(integral_square(&residual, faces[f].area, 12.0)
                     .div_pos(Iv::point(h)));
+            }
+            if let Some(BoundaryCondition::Contact { partner, resistance }) = faces[f].condition {
+                // One shared flux with opposite outward signs. Count the
+                // interface energy only once, not once for each solid.
+                if faces[f].sides[0].0 == e {
+                    let jump = contact::jump(&faces[f], partner, candidate);
+                    let rq = local[i].div_pos(faces[f].area).mul(Iv::point(resistance));
+                    let defect = jump.map(|v| rq.sub(v));
+                    eta = eta.add(integral_square(&defect, faces[f].area, 12.0)
+                        .div_pos(Iv::point(resistance)));
+                }
             }
         }
         if eta.is_unbounded() || eta.hi < 0.0 { return Err(TetError::Unbounded); }

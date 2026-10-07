@@ -69,6 +69,7 @@ pub(super) fn goal_bound_impl(
             BoundaryCondition::Dirichlet(_) => BoundaryCondition::Dirichlet([0.0; 3]),
             BoundaryCondition::Neumann(_) => BoundaryCondition::Neumann(0.0),
             BoundaryCondition::Robin { h, .. } => BoundaryCondition::Robin { h, reference: [0.0; 3] },
+            BoundaryCondition::Contact { partner, resistance } => BoundaryCondition::Contact { partner, resistance },
         }});
     }
     let dual_problem = Problem { source: Source::Constant(weights), boundary: &dual_boundary, ..*problem };
@@ -99,6 +100,12 @@ pub(super) fn goal_bound_impl(
                     Iv::point(candidate[face.vertices[i]]).sub(Iv::point(reference[i]))
                 });
                 residual = residual.sub(product_integral(&departure, &z, face.area).mul(Iv::point(h)));
+            }
+            Some(BoundaryCondition::Contact { partner, resistance }) => {
+                let primal_jump = contact::jump(face, partner, candidate);
+                let dual_jump = contact::jump(face, partner, dual_candidate);
+                residual = residual.sub(product_integral(&primal_jump, &dual_jump, face.area)
+                    .div_pos(Iv::point(resistance)));
             }
             _ => {}
         }
