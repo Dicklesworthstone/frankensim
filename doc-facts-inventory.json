@@ -1366,6 +1366,7 @@
     "crates/fs-solid/tests/contact.rs",
     "crates/fs-solid/tests/hyper3.rs",
     "crates/fs-solid/tests/koiter.rs",
+    "crates/fs-solid/tests/plastic3.rs",
     "crates/fs-solid/tests/shell_operator.rs",
     "crates/fs-solid/tests/shell_time.rs",
     "crates/fs-solid/tests/stability.rs",

@@ -41,6 +41,8 @@ pub mod koiter;
 pub mod linear;
 pub mod linear3;
 pub mod mesh2;
+/// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
+pub mod plastic3;
 pub mod reduce;
 pub mod rod;
 pub mod shell;
@@ -64,6 +66,10 @@ pub use linear3::{
     TetThermalDisplacementSolution, TetThermalLoad, TetThermalStrainField, TetThermalStrainState,
 };
 pub use mesh2::{Mesh2, Patch};
+pub use plastic3::{
+    IncrementRecord, IncrementSettings, SmallStrainTetError, SmallStrainTetProblem,
+    SmallStrainTetSolution,
+};
 pub use rod::{Rod, RodSection, TipLoad};
 pub use shell::{
     AssemblyBudget, Damping, DampingModel, Mass, OperatorDiagnostics, ShellAssembly, ShellError,

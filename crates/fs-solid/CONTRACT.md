@@ -475,6 +475,39 @@ mitigated; no mixed or F-bar formulation); dead loads only (no follower
 pressure); no contact; no limit-point continuation (drive by displacement
 or refuse); no mesh-convergence claim from one run.
 
+### Incremental small-strain inelasticity (`plastic3`)
+
+`SmallStrainTetProblem { nodes_m, tetrahedra, law, prescribed_m,
+nodal_forces_n, load_path, budget, settings }.solve(cx)` follows a load path
+on P1 tetrahedra for ANY `fs-material::SmallStrainLaw` (J2 radial return
+with the Simo–Hughes algorithmic tangent, isotropic/orthotropic
+elasticity). Tensor-component Voigt strain `eps = B u`, internal force
+`sum V B^T W sigma`, tangent `sum V B^T W C_alg B` with `W = diag(1,1,1,2,2,2)`.
+Each load factor (which may decrease or reverse) is one Newton solve from
+the last converged state, prescribed increments through the consistent
+linearization, residual-increase halving, the same scale-aware gate and
+linear-solve policy as `hyper3`; element states are updated by the law and
+committed only after convergence. The solution carries displacements,
+element strain/stress/states, and per-increment reactions, residual
+histories, and counts of evolving elements. `internal_force` and
+`tangent_matrix` take explicit committed states for verification.
+
+Conformance (`tests/plastic3.rs`, executed): homogeneous uniaxial tension
+with linear hardening (E = 1000, nu = 0.3, sigma_y = 1, H = 100) follows the
+closed form through yield to eps = 0.006 (force 1.4545454547 vs
+1.4545454545) and elastic unloading to the plastic strain leaves zero force
+(2.6e-11), alpha = eps_p and the isochoric lateral contraction eps_p / 2 to
+1e-8 relative, in 2-5 Newton iterations per increment; the algorithmic
+tangent matches central differences of the internal force to 4.6e-10 at a
+plastic state; the elastic-law tangent equals `linear3` to 4e-13 relative; a
+cantilever driven by tip displacement yields progressively (1, 20, 33 newly
+yielding elements) with a falling secant stiffness.
+
+No-claims (`plastic3`): small strain and rotation; rate independence;
+constant-strain tetrahedra lock under confined plastic incompressibility
+(confined limit loads are over-predicted; no B-bar/mixed formulation); dead
+loads; no limit-load continuation; no mesh-convergence claim.
+
 ## Invariants
 
 1. Patch tests exact: linear displacement fields are reproduced to
