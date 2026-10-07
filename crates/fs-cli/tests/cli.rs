@@ -2122,3 +2122,278 @@ fn ja_005_level_a_energy_balance_brackets_the_retained_maximum() {
         "{{\"falsifier\":\"level-a-energy-balance-anchor\",\"q_w\":{q_w},\"h_w_m2k\":{h},\"t_ref_k\":{t_ref},\"k_w_mk\":{k},\"area_m2\":{area},\"length_m\":{length},\"biot\":{biot},\"lumped_excess_k\":{lumped_excess_k},\"t_min_k\":{t_min},\"t_max_k\":{t_max},\"spread_k\":{spread},\"closure_w\":{closure_w}}}"
     );
 }
+
+/// One field of a single-line JSON record, as its raw string value.
+fn json_field<'a>(record: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let start = record.rfind(&needle)? + needle.len();
+    let end = record[start..].find('"')? + start;
+    Some(&record[start..end])
+}
+
+#[test]
+fn g1_frankenscript_program_reproduces_the_heatsink_run_of_the_fsim_verbs() {
+    // FrankenScript executor v0 (bead rc-root-q61wp.38): the tracked study
+    // program admits, binds its cooling.* verbs to the CLI's own stage
+    // drivers, and reproduces the `.fsim` command sequence exactly — same
+    // run id, report content hash and package Merkle root.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let program = root.join("examples/heatsink-fan/heatsink-fan.fs");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("frankenscript-parity");
+    let program_ledger = dir.join("program.db");
+    let verbs_ledger = dir.join("verbs.db");
+
+    let executed = run(args(&[
+        "--json",
+        "run",
+        program.to_string_lossy().as_ref(),
+        program_ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        executed.exit_code,
+        exit::SUCCESS,
+        "stdout: {} / stderr: {}",
+        executed.stdout,
+        executed.stderr
+    );
+    assert!(executed.stdout.contains("\"status\":\"completed\""));
+    assert!(
+        executed
+            .stdout
+            .contains("\"study\":\"heatsink-fan-journey-a\"")
+    );
+    assert!(
+        executed
+            .stdout
+            .contains("\"verb\":\"cooling.import\",\"exit\":0")
+    );
+    assert!(
+        executed
+            .stdout
+            .contains("\"verb\":\"cooling.run\",\"exit\":0")
+    );
+    assert!(executed.stdout.contains("\"stages_completed\":7"));
+
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        verbs_ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(imported.exit_code, exit::SUCCESS, "{}", imported.stderr);
+    let verbs = run(args(&[
+        "--json",
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        verbs_ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(verbs.exit_code, exit::SUCCESS, "{}", verbs.stderr);
+    for key in ["run", "report_content_hash", "package_root", "verdict"] {
+        let left = json_field(&executed.stdout, key);
+        assert!(left.is_some(), "program output lacks {key}");
+        assert_eq!(left, json_field(&verbs.stdout, key), "{key} differs");
+    }
+}
+
+#[test]
+fn frankenscript_refuses_before_any_stage_runs() {
+    // Falsifiers: a unit error is refused at admission, an unbound verb gets
+    // the structured "not executable" diagnostic, and explicits that
+    // disagree with the project (seed, pinned hash) refuse. None of them
+    // opens the ledger.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let tracked = std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan.fs"))
+        .expect("tracked program is readable");
+    let examples = root.join("examples/heatsink-fan");
+    let absolute = tracked
+        .replace(
+            "\"heatsink-fan.fsim\"",
+            &format!("\"{}\"", examples.join("heatsink-fan.fsim").display()),
+        )
+        .replace(
+            "\"heatsink.stl\"",
+            &format!("\"{}\"", examples.join("heatsink.stl").display()),
+        );
+    let dir = scratch("frankenscript-refusals");
+    let cases = [
+        ("(wall 60s)", "(wall 60m)", "admission-budget"),
+        (
+            "(cooling.run project",
+            "(cooling.optimize project",
+            "frankenscript-not-executable",
+        ),
+        ("(seed 0x7)", "(seed 0x8)", "frankenscript-explicit-seed"),
+        (":hash \"eb3c", ":hash \"ab3c", "frankenscript-project-hash"),
+        (
+            ":ops (cooling.*)",
+            ":ops (thermal.*)",
+            "admission-capability",
+        ),
+    ];
+    for (index, (from, to, code)) in cases.iter().enumerate() {
+        assert!(absolute.contains(from), "fixture lacks {from}");
+        let program = dir.join(format!("case-{index}.fs"));
+        std::fs::write(&program, absolute.replacen(from, to, 1)).expect("program writes");
+        let ledger = dir.join(format!("case-{index}.db"));
+        let output = run(args(&[
+            "--json",
+            "run",
+            program.to_string_lossy().as_ref(),
+            ledger.to_string_lossy().as_ref(),
+        ]));
+        assert_eq!(output.exit_code, exit::REFUSED, "{code}: {}", output.stderr);
+        assert!(
+            output.stderr.contains(&format!("\"code\":\"{code}\"")),
+            "{code}: {}",
+            output.stderr
+        );
+        assert!(
+            !ledger.exists(),
+            "{code}: a refused program opened the ledger"
+        );
+    }
+    // Card packs belong to the program, not the command line.
+    let output = run(args(&[
+        "run",
+        root.join("examples/heatsink-fan/heatsink-fan.fs")
+            .to_string_lossy()
+            .as_ref(),
+        dir.join("cards.db").to_string_lossy().as_ref(),
+        "--materials",
+        "pack.fsmcdpk",
+    ]));
+    assert_eq!(output.exit_code, exit::USAGE);
+}
+
+#[test]
+fn frankenscript_json_twin_is_the_same_program() {
+    // The canonical JSON spelling of the program admits to the same lowered
+    // identity (program hash) as the s-expression and binds the same steps.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan.fs"))
+        .expect("tracked program is readable");
+    let node = fs_ir::sexpr::parse(&source).expect("program parses");
+    let json = fs_ir::json::print(&node).expect("program prints as JSON");
+    let dir = scratch("frankenscript-json");
+    // Seed mismatch keeps both runs at the binding stage (no ledger work)
+    // while still exercising parse, admission and identity.
+    let probe = |name: &str, text: String| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).expect("program writes");
+        run(args(&[
+            "--json",
+            "run",
+            path.to_string_lossy().as_ref(),
+            dir.join("unused.db").to_string_lossy().as_ref(),
+        ]))
+    };
+    let sexpr_out = probe("p.fs", source.clone());
+    let json_out = probe("p.fs.json", json);
+    // Relative project paths resolve against the scratch directory, so both
+    // refuse identically at project binding after admitting.
+    assert_eq!(sexpr_out.exit_code, exit::REFUSED);
+    assert_eq!(json_out.exit_code, sexpr_out.exit_code);
+    assert_eq!(
+        json_out.stderr.replace("p.fs.json", "p.fs"),
+        sexpr_out.stderr
+    );
+    assert!(
+        sexpr_out.stderr.contains("cli-input-read"),
+        "{}",
+        sexpr_out.stderr
+    );
+}
+
+/// Remove the values of `keys` (string or number) from a JSON line so two
+/// receipts can be compared modulo their volatile fields.
+fn without_volatile(record: &str, keys: &[&str]) -> String {
+    let mut out = record.trim().to_string();
+    for key in keys {
+        let needle = format!("\"{key}\":");
+        while let Some(start) = out.find(&needle) {
+            let value = start + needle.len();
+            let end = if out[value..].starts_with('"') {
+                value + 1 + out[value + 1..].find('"').expect("closed string") + 1
+            } else {
+                value
+                    + out[value..]
+                        .find([',', '}'])
+                        .expect("number is followed by a delimiter")
+            };
+            out.replace_range(start..end, &format!("\"{key}#\":0"));
+        }
+    }
+    out
+}
+
+#[test]
+fn g1_frankenscript_study_program_matches_the_study_verb() {
+    // Journey B through a program: `study.run` binds the canonical study
+    // driver. On the reduced marquee fixture (as in study_checkpoint_cli) the
+    // program's step result equals `frankensim study` on the same file in
+    // every receipt field except wall seconds, the ledger predecessor and the
+    // run id that chains through them.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fsim"))
+        .expect("tracked marquee study is readable");
+    let dir = scratch("frankenscript-study");
+    let study = dir.join("study.fsim");
+    std::fs::write(
+        &study,
+        fixture
+            .replace(":mesh-level 5", ":mesh-level 2")
+            .replace(":max-iterations 32", ":max-iterations 3")
+            .replace(":steps 32", ":steps 3")
+            .replace(":move-cells 0.35", ":move-cells 0.05")
+            .replace(":nucleation-period 4", ":nucleation-period 0"),
+    )
+    .expect("study writes");
+    let tracked = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fs"))
+        .expect("tracked program is readable");
+    let pin_start = tracked
+        .find(":hash \"")
+        .expect("tracked program pins its study")
+        + 7;
+    let pin = &tracked[pin_start..pin_start + 64];
+    let program = dir.join("study.fs");
+    std::fs::write(
+        &program,
+        tracked
+            .replace("\"bracket-2d.fsim\"", "\"study.fsim\"")
+            .replace(&format!(" :hash \"{pin}\""), ""),
+    )
+    .expect("program writes");
+    let executed = run(args(&[
+        "--json",
+        "run",
+        program.to_string_lossy().as_ref(),
+        dir.join("program.db").to_string_lossy().as_ref(),
+    ]));
+    let direct = run(args(&[
+        "--json",
+        "study",
+        study.to_string_lossy().as_ref(),
+        dir.join("direct.db").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(executed.exit_code, direct.exit_code, "{}", executed.stderr);
+    assert!(executed.stdout.contains("\"verb\":\"study.run\""));
+    let volatile = ["consumed_wall_s", "predecessor", "run", "run_id"];
+    let step = without_volatile(&direct.stdout, &volatile);
+    assert!(step.contains("\"study_id\":"), "{step}");
+    assert!(
+        without_volatile(&executed.stdout, &volatile).contains(&step),
+        "program step differs from the study verb:\n{}\n{}",
+        executed.stdout,
+        direct.stdout
+    );
+}

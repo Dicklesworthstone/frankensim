@@ -27,9 +27,11 @@ fs-cutfem = { path = "../fs-cutfem", optional = true }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
 fs-io = { path = "../fs-io" }
 fs-ir = { path = "../fs-ir" }
 fs-ivl = { path = "../fs-ivl", optional = true }
+fs-lbm = { path = "../fs-lbm" }
 fs-ledger = { path = "../fs-ledger" }
 fs-marquee = { path = "../fs-marquee" }
 fs-matdb = { path = "../fs-matdb" }
@@ -55,7 +57,6 @@ fs-viz = { path = "../fs-viz" }
 sdf3-study = ["dep:fs-cutfem", "dep:fs-ivl", "dep:fs-topopt"]
 
 [dev-dependencies]
-fs-geom = { path = "../fs-geom" }
 fs-mbd = { path = "../fs-mbd" }
 
 [lints]

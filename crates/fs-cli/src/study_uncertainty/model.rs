@@ -17,6 +17,9 @@ use super::{Result, artifact, fail, quoted};
 // resolve beside model.rs, not under model/.
 #[path = "model/adjoint.rs"]
 mod adjoint;
+#[path = "model/prepared.rs"]
+mod prepared;
+pub(crate) use prepared::{PreparedStudy, StudyPins};
 use crate::json_read::JsonValue as J;
 use crate::{
     CardPackKind, CardPackSet, GeometryImportLimits, RawCardPack, RawGeometryLibrary,
@@ -126,7 +129,17 @@ fn charge(total: &mut u64, length: usize, cap: u64) -> Result<()> {
 
 impl Model {
     pub(super) fn load(path: &Path) -> Result<Self> {
-        let source = read(path, fs_project::uncertainty::MAX_SOURCE_BYTES as u64)?;
+        Self::load_checked(path, u64::MAX, |_, _| Ok(()))
+    }
+
+    /// Bind once, check the caller's pins, then read the assets under both
+    /// the native and the caller's remaining input-storage envelopes.
+    fn load_checked(
+        path: &Path,
+        input_cap: u64,
+        check: impl FnOnce(&BoundStudy, &DecodedProject) -> Result<()>,
+    ) -> Result<Self> {
+        let source = read(path, (fs_project::uncertainty::MAX_SOURCE_BYTES as u64).min(input_cap))?;
         let study = UncertaintyStudy::parse(utf8(&source)?).map_err(project_error)?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         let project_path = relative(directory, study.project_path())?;
@@ -135,7 +148,8 @@ impl Model {
         // Bind before reading assets: bad targets and probability support do
         // not spend geometry/card resources or create a ledger.
         let bound = study.bind(&base.spec).map_err(project_error)?;
-        let cap = input_limit(&base)?;
+        check(&bound, &base)?;
+        let cap = input_limit(&base)?.min(input_cap);
         let mut used = 0;
         charge(&mut used, bound.study().canonical().len(), cap)?;
         charge(&mut used, base.canonical.len(), cap)?;
@@ -168,7 +182,22 @@ impl Model {
             }
         }
         let cards = CardPackSet::admit(packs).map_err(|error| invalid(error.to_string()))?;
-        Self::from_parts(bound, base, geometry, cards)
+        let model = Self::from_parts(bound, base, geometry, cards)?;
+        // Normalization may change pack lengths. Charge the bytes actually
+        // retained by the snapshot as well as bounding the original reads.
+        if model.input_bytes()? > cap {
+            return Err(invalid("normalized native-study inputs exceed the declared memory envelope"));
+        }
+        Ok(model)
+    }
+
+    fn input_bytes(&self) -> Result<u64> {
+        let mut used = 0;
+        charge(&mut used, self.bound.study().canonical().len(), u64::MAX)?;
+        charge(&mut used, self.base.canonical.len(), u64::MAX)?;
+        for bytes in &self.geometry { charge(&mut used, bytes.len(), u64::MAX)?; }
+        for pack in self.cards.iter() { charge(&mut used, pack.bytes().len(), u64::MAX)?; }
+        Ok(used)
     }
 
     fn from_parts(

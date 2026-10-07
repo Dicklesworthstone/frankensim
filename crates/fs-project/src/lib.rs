@@ -16,6 +16,7 @@ pub mod assignment;
 pub mod bind;
 pub mod decision;
 pub mod fansystem;
+pub mod interface_state;
 pub mod migration;
 pub mod spec;
 pub mod study;

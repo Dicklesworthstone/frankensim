@@ -1300,6 +1300,36 @@ pub enum PropertySupportError {
     },
 }
 
+impl fmt::Display for PropertySupportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEnvelope { reason } => write!(f, "invalid property envelope: {reason}"),
+            Self::Evaluation { point, error } => {
+                write!(f, "property evaluation refused at {point:?}: {error}")
+            }
+            Self::ClaimChanges {
+                point,
+                selected,
+                other,
+            } => write!(
+                f,
+                "the selected claim changes inside the envelope at {point:?}: {selected:?} at the lower corner, {other:?} there"
+            ),
+            Self::DiscreteSupport {
+                axis,
+                lower,
+                upper,
+                claim,
+            } => write!(
+                f,
+                "claim {claim:?} has only discrete samples on {axis}, not the interval [{lower}, {upper}]"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PropertySupportError {}
+
 /// Narrow the in-domain candidates under the caller's selection. Policy
 /// arms may keep several candidates (the caller refuses ambiguity); the
 /// pinned arm refuses here with the pin-specific diagnosis.

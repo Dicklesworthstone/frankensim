@@ -167,7 +167,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// earlier derivative receipts cannot resume into multi-bank calibration.
 /// Version 42 publishes regional conductivity-multiplier controls through the
 /// complete accepted thermal adjoint; earlier reports cannot substitute for them.
-pub const SOLVE_DRIVER_VERSION: u32 = 42;
+/// Version 43 propagates natural-convection card allowances through their full
+/// fixed point and excludes frozen-coefficient error certificates/corrections.
+pub const SOLVE_DRIVER_VERSION: u32 = 43;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -1920,6 +1922,7 @@ fn coolest_declared_temperature(setup: &ConductionSetup) -> Option<f64> {
             ThermalBoundaryCondition::Convection { reference_temperature, .. } => Some(reference_temperature.value),
             ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => Some(inlet_temperature.value),
             ThermalBoundaryCondition::FixedTemperature { temperature } => Some(temperature.value),
+            ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => Some(ambient_temperature.value),
             _ => None,
         })
         .filter(|value| value.is_finite())
@@ -6338,6 +6341,10 @@ fn conduction_solve_receipt(
                 "declare region seeds and thermal boundary laws under cooling.conduction",
             )
         })?;
+    // Neither adaptive goal comparison may freeze a nonlinear boundary law.
+    // Natural base/ladder solves and their complete nominal adjoints remain
+    // admitted; the enriched-goal producer has not acquired that feedback.
+    natural::admit_fidelity(spec, setup)?;
     // This patch-mean radiation model has its own nonlinear closure. Until
     // that complete residual has a total tangent, it cannot enter a DWR goal.
     let radiation = radiation::lower(spec, setup, cards)?;
@@ -6653,7 +6660,9 @@ fn conduction_solve_receipt(
             })
         };
         let laws = conjugate::airflow_laws(setup)?;
-        let natural_laws = natural::natural_laws(setup)?;
+        // Apply a discrepancy vertex to the constitutive law, not only its
+        // initial/final Robin row. Every Picard update must retain this scale.
+        let natural_laws = natural::natural_laws_scaled(setup, htc_scale)?;
         if !natural_laws.is_empty() && !laws.is_empty() {
             return Err(conduction_error(
                 "cli-solve-conduction-natural-with-airflow",
@@ -7336,6 +7345,9 @@ fn roundoff_term(
     work: EvidenceWork<'_>,
 ) -> Result<PropagatedTerm, SolveRefusal> {
     let unmeasured = |reason: &str| Ok(PropagatedTerm::Unmeasured { reason: reason.to_string() });
+    if solved.natural_fragment.is_some() {
+        return unmeasured("natural-convection roundoff requires the complete coefficient-feedback response; a frozen solid operator is not that bound");
+    }
     let Some(data) = &solved.adjoint_data else {
         return unmeasured("the published rung retained no final-state operator");
     };
@@ -7750,7 +7762,8 @@ fn propagate_declared_inputs(
     let mut model_gap = None;
     for boundary in setup.map_or(&[][..], |setup| &setup.boundaries[..]) {
         match &boundary.condition {
-            ThermalBoundaryCondition::AirflowConvection { correlation, .. } => {
+            ThermalBoundaryCondition::AirflowConvection { correlation, .. }
+            | ThermalBoundaryCondition::NaturalConvection { correlation, .. } => {
                 let card = fs_convection::correlation_catalog()
                     .into_iter()
                     .find(|card| card.id.name() == correlation.as_str());

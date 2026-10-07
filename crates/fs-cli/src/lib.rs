@@ -11,6 +11,7 @@ mod cards;
 mod cinematic;
 mod compare;
 mod discover;
+mod frankenscript;
 mod import;
 mod json_read;
 mod package;
@@ -72,7 +73,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source>... <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | run <program.fs|program.fs.json> <ledger.db> | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -227,6 +228,23 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
         Command::Report { run_id, ledger } => report::report_path(&run_id, ledger.as_deref(), mode),
         Command::Package { run_id, ledger } => {
             package::package_path(&run_id, ledger.as_deref(), mode)
+        }
+        Command::Run {
+            project,
+            ledger,
+            cards,
+        } if frankenscript::is_program(&project) => {
+            if cards.is_empty() {
+                frankenscript::run_program_path(&project, &ledger, mode)
+            } else {
+                let diagnostic = Diagnostic::new(
+                    "run",
+                    "cli-run-program-cards",
+                    "a FrankenScript program declares its card packs itself",
+                    "move the packs into the program's :materials / :interfaces arguments",
+                );
+                refusal(mode, exit::USAGE, &diagnostic, None)
+            }
         }
         Command::Run {
             project,

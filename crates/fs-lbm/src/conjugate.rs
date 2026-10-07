@@ -14,7 +14,8 @@
 //!    the relative velocity change between checks. [`simple_flow`] solves
 //!    the same steady flow by finite volumes on the staggered faces (SIMPLEC)
 //!    with no lattice constraint, returning divergence-free face fluxes
-//!    directly. Any other producer of
+//!    directly; [`fv_natural_convection`] couples it to the energy equation
+//!    through the Boussinesq force, including pressure openings. Any other producer of
 //!    cell or face velocities (an analytic profile, another solver) enters
 //!    through [`FlowField::from_cell_velocities`] or
 //!    [`FlowField::from_face_velocity`].
@@ -79,25 +80,34 @@ use fs_exec::CancelGate;
 
 use crate::d3q19::Face3;
 
+mod buoyant;
 mod domain;
 mod energy;
 mod flow;
 mod krylov;
 mod natural;
+mod radiation;
 mod simple;
 mod transient;
 
+pub use buoyant::{
+    FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
+};
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
-    ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution, ThermalFace,
-    ThermalSetup, solve_energy,
+    CellSink, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport,
+    EnergySolution, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
     ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
-pub use simple::{FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
+pub use radiation::{
+    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, escape_factors,
+    radiated_power, radiative_sinks, solve_energy_radiating,
+};
+pub use simple::{FanCurve, FanInlet, FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
@@ -222,7 +232,7 @@ impl core::fmt::Display for ChtError {
                 tolerance,
             } => write!(
                 f,
-                "LBM flow not steady after {steps} steps (relative change {last_change:e} > {tolerance:e})"
+                "flow not steady after {steps} steps/iterations (residual or change {last_change:e} > {tolerance:e})"
             ),
             Self::SolverNotConverged {
                 system,

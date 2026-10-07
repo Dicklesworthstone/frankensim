@@ -159,8 +159,9 @@ pub fn march_energy(
             .sum();
         let balance = next.report.balance;
         let source_j = balance.source_w * config.time_step_s;
-        let boundary_outflow_j =
-            (balance.boundary_outflow_w - balance.fixed_cell_injection_w) * config.time_step_s;
+        let boundary_outflow_j = (balance.boundary_outflow_w + balance.sink_outflow_w
+            - balance.fixed_cell_injection_w)
+            * config.time_step_s;
         let max_temperature_k = next
             .temperature
             .iter()

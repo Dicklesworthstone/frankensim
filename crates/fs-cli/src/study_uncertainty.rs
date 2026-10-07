@@ -32,6 +32,7 @@ mod legacy;
 #[path = "study_uncertainty/model.rs"]
 mod model;
 use model::{Model, Sample};
+pub(crate) use model::{PreparedStudy, StudyPins};
 use execution::Execution;
 #[path = "study_uncertainty/mean_control.rs"]
 mod mean_control;

@@ -924,18 +924,37 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 - Faces touching a solid voxel are blocked; a blocked transverse neighbour
   is a no-slip wall half a cell away (staircase). Domain faces are
   `FvBoundary::{Wall { velocity }, Symmetry, Inlet { velocity }, Outlet}`;
-  the outlet holds pressure zero with zero-gradient velocity and its normal
-  velocity is pressure-corrected like an interior face, so the field leaves
-  every iteration exactly divergence-free to the pressure solve.
+  an outlet face is a momentum unknown whose outside twin mirrors the inside
+  cell (zero normal gradient) and carries the ghost pressure `-p_inside`, so
+  the face holds pressure zero and the pressure correction uses the matching
+  linearization `u' = 2 d p'_inside`. The steady state is one fixed point of
+  the discrete equations, independent of the relaxation, also for
+  undeveloped (even partly reversed) outflow. (The first version
+  re-extrapolated outlet velocities each iteration and stalled at a 3e-4
+  mass residual on the heatsink, whose outflow is not developed.)
 - Momentum uses power-law (or upwind) coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
 - Convergence is two steady residuals of the same iterate: the largest cell
   mass imbalance before correction over the largest face mass flux, and
   per component `||b - A u|| / ||b||` of the Jacobi-scaled momentum system
-  at the velocities entering the iteration. Inner solves only reduce that
-  entry residual by `momentum_tolerance`, so a converged report never rests
-  on a skipped inner solve. Budget exhaustion refuses as `FlowNotSteady`.
+  at the velocities entering the iteration. Inner solves only reduce their
+  entry residuals (by `momentum_tolerance`, default 0.1, and
+  `pressure_tolerance`, default 0.01), so a converged report never rests on a
+  skipped inner solve; one tight final correction (1e-8 of the converged
+  imbalance) then hands the energy equation a projected flux field. Budget
+  exhaustion refuses as `FlowNotSteady`; non-finite velocities or pressures
+  after any momentum solve or correction refuse as `FlowDiverged` before they
+  reach an incomplete factorization.
+- `SimpleConfig::fan` puts a piecewise-linear `FanCurve` (static pressure rise
+  against flow) on one `Inlet` face: the face's uniform normal inflow is the
+  operating point where the curve meets the mean pressure of the fluid layer
+  behind the face (fan pulling from ambient at pressure zero). The delivery
+  moves by secant steps on settled flows only (the inlet-layer pressure just
+  after an inflow change is a pressure-correction transient; a per-sweep
+  update was measured to oscillate with growing amplitude), and the fan
+  mismatch joins the momentum residual. The report carries the operating
+  point and mismatch.
 
 | Fixture | Reference | Measured |
 |---|---|---|
@@ -943,11 +962,86 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Lid-driven cavity, Re 100, 16^2 and 32^2 | Ghia, Ghia & Shin (1982) centreline u | worst deviation 0.0268 -> 0.0059 |
 | Square duct (quarter, symmetry), half-side 4 and 8 cells | Darcy f Re = 56.91 (Shah & London) | 53.749, 56.069 (error ratio 3.8); Richardson 56.843 (0.12 %) |
 | Aspect-0.5 duct, 8 x 16, Re 10, same thermal problem as the LBM rung | analytic developed profile and its Nu | profile within 0.4 %; local Nu 3.5078 vs 3.5005 (0.2 %); dp/dx -2.98 % vs f Re = 62.19 |
+| Block two cells upstream of the outlet (backflow -0.099 m/s through the outlet plane) | convergence; relaxation independence | converged to 1e-10; alpha 0.5 vs 0.8 velocities within 2.6e-10 |
+| Channel driven by a linear fan curve (3 Pa shut-off, 2.5e-3 m^3/s free delivery), operating mid-curve | the operating point is on the curve AND on the system curve (a fixed-velocity solve at the solved flow) | Q = 1.6917e-3 m^3/s at 0.96997 Pa; curve mismatch 6e-10; fixed-velocity inlet pressure equal to 1e-6 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
+
+### Orthotropic solids and contact resistance
+
+`SolidMaterial::with_orthotropic([k_x, k_y, k_z])` declares grid-aligned
+principal conductivities (a PCB laminate: about 30 W/(m K) in-plane, 0.3
+through the board); each face uses the conductivity along its normal
+axis. `ThermalSetup::contacts` lists `ContactResistance { materials,
+resistance_m2_k_w }` between two distinct solid materials (a thermal
+interface material, a bonded or pressed joint), added in series on every
+face the two materials share: the face conductance is
+`A / (dx/2 / k_P + R'' + dx/2 / k_N)`, exact for piecewise-constant
+properties. `EnergySolution::conductivity` reports the per-axis values.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
+| k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
+
+### Surface radiation to the surroundings (`radiation`)
+
+`solve_energy_radiating` (and `FvBuoyancyConfig::radiation` inside the
+natural-convection coupling) adds gray diffuse emission from every solid
+voxel face that borders fluid, `q = eps sigma F A (T^4 - T_amb^4)`, to the
+surroundings seen through declared domain faces (`RadiationConfig::
+surroundings_k`; openings and inlets, typically). The escape factor `F` is
+a Monte Carlo estimate: `rays_per_face` cosine-weighted rays per face,
+marched voxel by voxel (Amanatides–Woo), with counter-based streams keyed by
+`(seed, cell, face, ray)`, so estimates are bit-reproducible and carry the
+standard error `sqrt(F (1 - F) / rays)`. The energy equation takes `q` as a
+cell sink Newton-linearized about the previous iterate
+(`ThermalSetup::cell_sinks`, reported in `EnergyBalance::sink_outflow_w`),
+starting from the linearization about the surroundings temperature.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Slab filling a box floor, five faces surroundings at 300 K, non-conducting air, 5 W | `F = 1` exactly; `T = (P / (eps sigma A) + T_amb^4)^(1/4)` | every escape factor 1.0; 433.501645484 K vs 433.501645484 K; 5.000000000 W radiated; 6 Newton iterations |
+| Two opposed 8 x 8 plates four cells apart, sides open | `1 - F_12`, `F_12` the closed-form aligned-rectangle view factor (X = Y = 2: 0.41525) | mean escape 0.58231 vs 0.58475 with 64 x 4096 rays; reruns bit-identical |
+
+No-claims: surface-to-surface exchange (fin to fin, solid to a warm wall)
+and wall re-radiation are not modelled: a ray hitting a solid or an opaque
+face is simply not escaping, exact when the obstructing surfaces are at the
+emitter's temperature. Transparent air, gray diffuse opaque surfaces,
+Monte Carlo escape factors.
+
+### Finite-volume natural convection (`fv_natural_convection`)
+
+Steady Boussinesq natural (or mixed) convection on the SIMPLEC flow and the
+conjugate energy equation, including OPEN boundaries: `FvBoundary::Outlet`
+faces are pressure openings that pass flow both ways (paired with
+`ThermalFace::Outflow { backflow_temperature }` for the ambient), with
+pressure measured from the reference hydrostatic state. The momentum source
+is `-rho beta (T - T_ref) g` on fluid cells (cell-sized staggered volumes
+average the two adjacent cells). The coupling starts from conduction
+through still fluid with the openings held at ambient (a uniform reference
+field carries no buoyancy, and openings without flow anchor no temperature).
+Each coupling runs `sweeps_per_coupling`
+SIMPLEC iterations under the current force, then re-solves energy on the
+current fluxes; convergence needs the SIMPLEC residuals below
+`flow.tolerance` AND the energy re-solve's largest temperature change below
+`temperature_tolerance` times the span, at the same coupling. The returned
+energy solution is computed on exactly the returned (tightly projected)
+fluxes. This closes the LBM path's "closed enclosures only" boundary.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| De Vahl Davis cavity, 32^2, Ra 1e3 | Nu = 1.118 | 1.1201 (0.2 %), 78 couplings |
+| Same, Ra 1e4 | Nu = 2.243 | 2.2671 (1.1 %), 36 couplings |
+| Open vertical channel (chimney), isothermal plates 8 cells apart, Ra_b = 20, openings top and bottom | fully developed Elenbaas limit g beta dT b^3 / (12 nu) of the discrete stencil ((n^2 + 2) / n^2 x the continuum) | 0.9795 (L/b = 10), 0.9931 (L/b = 30): approaches from below; energy closure 1e-9; induced in/outflow equal to 1e-12 |
+
+No-claims: steady laminar Boussinesq only (an unsteady configuration refuses
+as `FlowNotSteady` rather than returning a time average), no radiation; the
+SIMPLEC no-claims apply.
 
 ### Worked example (`examples/heatsink_cht.rs`)
 
-`cargo run --release -p fs-lbm --example heatsink_cht [U] [u_lat]
+`cargo run --release -p fs-lbm --example heatsink_cht -- fv [U] [voxel_mm]`
+(finite-volume SIMPLEC flow, the default) or `-- lbm [U] [u_lat]
 [auto|bgk|central] [max_steps]`: a ducted aluminium plate-fin heatsink
 (30 mm long, five 1 mm fins 10 mm tall at 4 mm pitch on a 2 mm base, 2 W
 chip under the fins) in a 60 x 20 x 14 mm duct at 0.5 mm voxels, air at 300 K
@@ -962,6 +1056,23 @@ and 0.25 m/s. Executed 2026-10-07 on a 4-core host (release, lto off):
 | Junction temperature | 335.31 K (thermal resistance 17.66 K/W) |
 | Outlet bulk temperature | 323.41 K (= inlet + 2 W / (rho c_p Q)) |
 | Effective film coefficient | 23.2 W/m^2K over 3.78e-3 m^2 wetted area |
+
+The same case with the SIMPLEC flow, executed 2026-10-07 through
+`frankensim cooling-cht examples/cooling-cht/heatsink-duct.json` (debug
+build):
+
+| Quantity | FV, 1 mm voxels (16 800 cells) |
+|---|---|
+| Flow | 76 SIMPLEC iterations, mass residual 2.6e-7, momentum residual 9.4e-7, max cell Re 39, 89 s |
+| Inflow / outflow | 7.000e-5 / 7.000e-5 m^3/s (divergence 3e-22) |
+| Energy | 61 BiCGStab iterations; 2 W in, 2 W advected out; balance 8e-13 |
+| Junction temperature | 334.98 K (17.49 K/W) |
+
+The FV junction at 1 mm sits 0.33 K below the 0.5 mm LBM run. At 1 mm
+the fin faces fall exactly on voxel centres; the example and the
+`cooling-cht` scene parser now resolve such ties deterministically (the
+voxel at a box's min edge is in, the one at its max edge is out), and an
+earlier 1 mm run that let rounding decide carried one fin two voxels thick.
 
 Estimated numerical evidence at one resolution. The peak lattice speed in
 the fin gaps reached 0.163 (Mach ~0.28): compressibility error is O(Ma^2)
@@ -1012,10 +1123,12 @@ the central-moment operator the same duct diverged; it now refuses as
 ### No-claim boundaries (conjugate)
 
 - Laminar, steady, constant-property convection only: forced convection
-  through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in closed
-  enclosures through `natural_convection`; no open-boundary natural
-  convection, turbulence model, radiation, or temperature-dependent
-  properties. A natural-convection run that does not settle (for example
+  through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in
+  closed enclosures through `natural_convection` and in closed or open
+  domains through `fv_natural_convection`; no open-boundary LBM natural
+  convection, turbulence model, or temperature-dependent properties;
+  radiation only as surface emission to the surroundings (no
+  surface-to-surface exchange). A natural-convection run that does not settle (for example
   above the transition Rayleigh number) refuses as `FlowNotSteady`.
 - Staircase voxel geometry at the declared `dx`; one run makes no
   mesh-convergence claim. Power-law convection is first order where the

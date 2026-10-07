@@ -1,0 +1,146 @@
+{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [
+  0.06,
+  0.02,
+  0.014
+ ],
+ "voxel_m": 0.001,
+ "fluid": "dry-air-300k",
+ "materials": [
+  {
+   "name": "aluminium",
+   "conductivity_w_m_k": 167.0
+  }
+ ],
+ "solids": [
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0,
+    0.0
+   ],
+   "max_m": [
+    0.04,
+    0.02,
+    0.002
+   ]
+  },
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0015,
+    0.002
+   ],
+   "max_m": [
+    0.04,
+    0.0025,
+    0.012
+   ]
+  },
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0055,
+    0.002
+   ],
+   "max_m": [
+    0.04,
+    0.006500000000000001,
+    0.012
+   ]
+  },
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0095,
+    0.002
+   ],
+   "max_m": [
+    0.04,
+    0.0105,
+    0.012
+   ]
+  },
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0135,
+    0.002
+   ],
+   "max_m": [
+    0.04,
+    0.0145,
+    0.012
+   ]
+  },
+  {
+   "material": "aluminium",
+   "min_m": [
+    0.01,
+    0.0175,
+    0.002
+   ],
+   "max_m": [
+    0.04,
+    0.0185,
+    0.012
+   ]
+  }
+ ],
+ "sources": [
+  {
+   "name": "chip",
+   "power_w": 2.0,
+   "min_m": [
+    0.02,
+    0.005,
+    0.0
+   ],
+   "max_m": [
+    0.03,
+    0.015,
+    0.001
+   ]
+  }
+ ],
+ "faces": {
+  "x-": {
+   "type": "inlet",
+   "velocity_m_s": [
+    0.25,
+    0.0,
+    0.0
+   ],
+   "temperature_k": 300.0
+  },
+  "x+": {
+   "type": "opening",
+   "ambient_k": 300.0
+  },
+  "y-": {
+   "type": "wall"
+  },
+  "y+": {
+   "type": "wall"
+  },
+  "z-": {
+   "type": "wall"
+  },
+  "z+": {
+   "type": "wall"
+  }
+ },
+ "solver": {
+  "tolerance": 1e-06,
+  "max_iterations": 3000
+ },
+ "limits": {
+  "wall_seconds": 600
+ }
+}

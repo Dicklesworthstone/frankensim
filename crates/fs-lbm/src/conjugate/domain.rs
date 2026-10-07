@@ -264,13 +264,18 @@ impl FluidProperties {
     }
 }
 
-/// One isotropic conducting solid.
+/// One conducting solid: isotropic, or orthotropic along the grid axes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolidMaterial {
     /// Caller label retained in reports (for example a matdb card id).
     pub label: String,
-    /// Thermal conductivity, W/(m K).
+    /// Thermal conductivity, W/(m K) (the isotropic value; superseded per
+    /// axis by `orthotropic_w_m_k` when declared).
     pub conductivity_w_m_k: f64,
+    /// Principal conductivities along x, y, z, W/(m K), for orthotropic
+    /// solids aligned with the grid (for example a PCB laminate: high
+    /// in-plane, low through the board).
+    pub orthotropic_w_m_k: Option<[f64; 3]>,
     /// Volumetric heat capacity `rho c`, J/(m^3 K). Required only by
     /// transient marches; steady solves never read it.
     pub volumetric_heat_capacity_j_m3_k: Option<f64>,
@@ -283,8 +288,24 @@ impl SolidMaterial {
         Self {
             label: label.into(),
             conductivity_w_m_k,
+            orthotropic_w_m_k: None,
             volumetric_heat_capacity_j_m3_k: None,
         }
+    }
+
+    /// Declare grid-aligned principal conductivities `[k_x, k_y, k_z]`,
+    /// W/(m K).
+    #[must_use]
+    pub fn with_orthotropic(mut self, conductivity_w_m_k: [f64; 3]) -> Self {
+        self.orthotropic_w_m_k = Some(conductivity_w_m_k);
+        self
+    }
+
+    /// Conductivity along each grid axis, W/(m K).
+    #[must_use]
+    pub fn axis_conductivity(&self) -> [f64; 3] {
+        self.orthotropic_w_m_k
+            .unwrap_or([self.conductivity_w_m_k; 3])
     }
 
     /// Declare the volumetric heat capacity `rho c`, J/(m^3 K).

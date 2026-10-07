@@ -16,10 +16,12 @@
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    FvBoundary, LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial, ThermalFace,
-    ThermalSetup, TransientConfig, Voxel, VoxelDomain, lbm_duct_flow, march_energy,
-    natural_convection, simple_flow, solve_energy,
+    BuoyancyConfig, ChtError, ContactResistance, ConvectionScheme, EnergyConfig, FanCurve,
+    FanInlet, FlowFace, FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig,
+    LbmCollisionChoice, LbmFlowConfig, RadiationConfig, STEFAN_BOLTZMANN, SimpleConfig,
+    SolidMaterial, ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, escape_factors,
+    fv_natural_convection, lbm_duct_flow, march_energy, natural_convection, simple_flow,
+    solve_energy, solve_energy_radiating,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1327,4 +1329,505 @@ fn simplec_refusals_are_structured() {
         simple_flow(&domain, &unit_fluid(), &SimpleConfig::new(open), &tripped),
         Err(ChtError::Cancelled)
     );
+}
+
+#[test]
+fn simplec_outlet_admits_undeveloped_outflow_at_one_fixed_point() {
+    // G3 metamorphic: a block two cells upstream of the outlet sends a
+    // recirculating, undeveloped stream through the outlet plane. The
+    // ghost-pressure outlet keeps the discrete problem square, so SIMPLEC
+    // converges (an extrapolated outlet stalls here) and the converged field
+    // does not depend on the under-relaxation factor.
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(24, 10, 1, dx, |p| {
+        let (x, y) = (p[0] / dx, p[1] / dx);
+        if (18.0..20.0).contains(&x) && y < 6.0 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        kinematic_viscosity_m2_s: 1e-4,
+        ..unit_fluid()
+    };
+    let solve = |alpha: f64| {
+        let mut config = SimpleConfig::new([
+            FvBoundary::Inlet {
+                velocity: [0.5, 0.0, 0.0],
+            },
+            FvBoundary::Outlet,
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::Symmetry,
+            FvBoundary::Symmetry,
+        ]);
+        config.velocity_relaxation = alpha;
+        config.tolerance = 1e-10;
+        simple_flow(&domain, &fluid, &config, &gate).unwrap()
+    };
+    let slow = solve(0.5);
+    let fast = solve(0.8);
+    eprintln!("{:?}\n{:?}", slow.report, fast.report);
+    for flow in [&slow, &fast] {
+        let r = &flow.report;
+        assert!((r.outflow_m3_s - r.inflow_m3_s).abs() < 1e-12 * r.inflow_m3_s);
+        assert!(r.max_divergence_m3_s < 1e-14 * r.inflow_m3_s);
+    }
+    // Reversed flow crosses the outlet plane: the outflow is undeveloped.
+    let backflow = (0..10)
+        .map(|y| slow.velocity_m_s[domain.index(23, y, 0)][0])
+        .fold(f64::INFINITY, f64::min);
+    eprintln!("min outlet-layer u {backflow:.4e}");
+    let worst = (0..domain.cell_count())
+        .map(|c| (slow.velocity_m_s[c][0] - fast.velocity_m_s[c][0]).abs())
+        .fold(0.0, f64::max);
+    eprintln!("relaxation 0.5 vs 0.8: max |du| {worst:.3e}");
+    assert!(worst < 1e-7, "fixed point depends on relaxation: {worst}");
+}
+
+/// De Vahl Davis square cavity (hot x = 0, cold x = H, adiabatic y walls)
+/// on n x n cells, one cell deep with symmetry in z, by FV-SIMPLEC
+/// natural convection: the hot-wall mean Nusselt number.
+fn fv_de_vahl_davis(
+    n: usize,
+    rayleigh: f64,
+) -> (f64, fs_lbm::conjugate::FvNaturalConvectionReport) {
+    let gate = CancelGate::new();
+    let dx = 1.0 / n as f64;
+    let alpha = 1e-2;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: alpha,
+        kinematic_viscosity_m2_s: 0.71 * alpha,
+    };
+    let g = 9.81;
+    let beta = rayleigh * fluid.kinematic_viscosity_m2_s * alpha / g;
+    let domain = VoxelDomain::new(n, n, 1, dx).unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(1.0);
+    faces[1] = ThermalFace::Temperature(0.0);
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-7;
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.5, flow);
+    let run = fv_natural_convection(
+        &domain,
+        &fluid,
+        &[],
+        &ThermalSetup::new(faces),
+        &config,
+        &gate,
+    )
+    .unwrap();
+    assert!(run.energy.report.balance.relative_residual < 1e-9);
+    // Hot-wall heat over the conduction heat k dT / H through the same wall.
+    let heat: f64 = (0..n)
+        .map(|y| 2.0 * dx * alpha * (1.0 - run.energy.temperature[domain.index(0, y, 0)]))
+        .sum();
+    (heat / (alpha * dx), run.report)
+}
+
+#[test]
+fn fv_natural_convection_cavity_matches_de_vahl_davis() {
+    // G2: de Vahl Davis (1983) benchmark Nu = 1.118 (Ra 1e3), 2.243 (Ra 1e4).
+    for (rayleigh, reference) in [(1e3, 1.118), (1e4, 2.243)] {
+        let (nu, report) = fv_de_vahl_davis(32, rayleigh);
+        eprintln!("FV de Vahl Davis Ra {rayleigh:e}: Nu {nu:.4} (ref {reference}) {report:?}");
+        assert!(
+            (nu - reference).abs() < 0.03 * reference,
+            "Ra {rayleigh}: {nu} vs {reference}"
+        );
+    }
+}
+
+/// Open vertical channel (chimney) between isothermal plates `n` cells
+/// apart and `n * aspect` tall, open at the bottom and top: the induced
+/// volume flow per unit depth over the Elenbaas fully developed limit
+/// g beta dT b^3 / (12 nu) of the discrete stencil.
+fn fv_chimney(n: usize, aspect: usize) -> (f64, f64, fs_lbm::conjugate::FvNaturalConvectionReport) {
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let b = n as f64 * dx;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-5,
+        kinematic_viscosity_m2_s: 0.71e-5,
+    };
+    let alpha = fluid.conductivity_w_m_k;
+    // Channel Rayleigh number on the gap: g beta dT b^3 / (nu alpha) = 20.
+    let g = 9.81;
+    let beta = 20.0 * fluid.kinematic_viscosity_m2_s * alpha / (g * b * b * b);
+    let domain = VoxelDomain::new(n, n * aspect, 1, dx).unwrap();
+    let mut thermal = [ThermalFace::Adiabatic; 6];
+    thermal[0] = ThermalFace::Temperature(1.0);
+    thermal[1] = ThermalFace::Temperature(1.0);
+    thermal[2] = ThermalFace::Outflow {
+        backflow_temperature: 0.0,
+    };
+    thermal[3] = ThermalFace::Outflow {
+        backflow_temperature: 0.0,
+    };
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Outlet,
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-8;
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.0, flow);
+    let run = fv_natural_convection(
+        &domain,
+        &fluid,
+        &[],
+        &ThermalSetup::new(thermal),
+        &config,
+        &gate,
+    )
+    .unwrap();
+    let flow_report = &run.flow.report;
+    // The exact discrete Poiseuille law of this stencil (see the plane
+    // Poiseuille test) carries (n^2 + 2) / n^2 more flow at a given forcing.
+    let n2 = (n * n) as f64;
+    let limit =
+        g * beta * 1.0 * b * b * b / (12.0 * fluid.kinematic_viscosity_m2_s) * dx * (n2 + 2.0) / n2;
+    let q = flow_report.outflow_m3_s;
+    // Energy: wall heat leaves as advection through the top opening.
+    let balance = &run.energy.report.balance;
+    assert!(balance.relative_residual < 1e-9, "{balance:?}");
+    assert!((flow_report.outflow_m3_s - flow_report.inflow_m3_s).abs() < 1e-12 * q.max(1e-30));
+    (q / limit, flow_report.max_divergence_m3_s / q, run.report)
+}
+
+#[test]
+fn fv_open_chimney_approaches_the_elenbaas_developed_limit() {
+    // G1/G2 for open-boundary buoyancy: at Ra_b = 20 the fluid reaches the
+    // wall temperature within a few gaps, so the induced flow tends to the
+    // fully developed limit g beta dT b^3 / (12 nu) from below as the
+    // channel lengthens (the cool entrance region carries less buoyancy).
+    // Measured 0.9795 (L/b = 10) and 0.9931 (L/b = 30) of the discrete
+    // limit, which itself is 1.031 x the continuum limit at 8 cells.
+    let (short, _, short_report) = fv_chimney(8, 10);
+    let (long, divergence, long_report) = fv_chimney(8, 30);
+    eprintln!(
+        "chimney Q/Q_limit: L/b=10 {short:.4} L/b=30 {long:.4}\n{short_report:?}\n{long_report:?}"
+    );
+    assert!(divergence < 1e-10);
+    assert!(short < long && long < 1.0, "{short} {long}");
+    assert!(
+        long > 0.98,
+        "long channel far from the developed limit: {long}"
+    );
+}
+
+#[test]
+fn simplec_fan_inlet_settles_at_the_fan_and_system_curve_intersection() {
+    // A channel driven by a linear fan curve (3 Pa shut-off, free delivery
+    // at 2.5e-3 m^3/s) from ambient, operating mid-curve: the solved operating
+    // point lies on the fan curve, and a fixed-velocity solve at the solved
+    // flow reproduces the same inlet-layer pressure, so it is the
+    // intersection with the channel's own system curve.
+    let gate = CancelGate::new();
+    let n = 8;
+    let dx = 1.0 / n as f64;
+    let domain = VoxelDomain::new(6 * n, n, 1, dx).unwrap();
+    let faces = [
+        FvBoundary::Inlet {
+            velocity: [0.1, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ];
+    let curve = FanCurve::new(&[(0.0, 3.0), (2.5e-3, 0.0)]).unwrap();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-9;
+    config.fan = Some(FanInlet {
+        face: Face3::XMin,
+        curve,
+    });
+    let fan_run = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let (flow, pressure, residual) = fan_run.report.fan.unwrap();
+    let inlet_layer = fan_run.mean_pressure(&domain, 0, 0).unwrap();
+    eprintln!(
+        "fan: Q {flow:.6e} dp {pressure:.6} inlet layer {inlet_layer:.6} residual {residual:.2e} iterations {}",
+        fan_run.report.iterations
+    );
+    assert!(residual < 1e-9);
+    assert!((pressure - curve.pressure(flow)).abs() < 1e-12);
+    assert!((inlet_layer - pressure).abs() < 1e-8 * pressure);
+    assert!((fan_run.report.inflow_m3_s - flow).abs() < 1e-12 * flow);
+    // The same channel at the solved flow, prescribed: same inlet pressure.
+    let speed = flow / (n as f64 * dx * dx);
+    let mut fixed = SimpleConfig::new(faces);
+    fixed.faces[0] = FvBoundary::Inlet {
+        velocity: [speed, 0.0, 0.0],
+    };
+    fixed.tolerance = 1e-9;
+    let fixed_run = simple_flow(&domain, &unit_fluid(), &fixed, &gate).unwrap();
+    let system = fixed_run.mean_pressure(&domain, 0, 0).unwrap();
+    eprintln!("system curve at the solved flow: {system:.6} Pa");
+    assert!(
+        (system - pressure).abs() < 1e-6 * pressure,
+        "{system} vs {pressure}"
+    );
+    // A non-inlet fan face refuses.
+    let mut wrong = config;
+    wrong.fan = Some(FanInlet {
+        face: Face3::XMax,
+        curve,
+    });
+    assert!(matches!(
+        simple_flow(&domain, &unit_fluid(), &wrong, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.fan",
+            ..
+        })
+    ));
+    assert!(FanCurve::new(&[(0.0, 10.0), (1.0, 20.0)]).is_err());
+}
+
+/// Steady conduction along `axis` through a 12-cell bar between faces held
+/// at 1 K and 0 K (other faces adiabatic): the heat rate.
+fn bar_heat(
+    solids: &[SolidMaterial],
+    material_of: impl Fn(usize) -> u16,
+    axis: usize,
+    contacts: Vec<ContactResistance>,
+) -> (f64, Vec<f64>) {
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let mut dims = [2, 2, 2];
+    dims[axis] = 12;
+    let domain = VoxelDomain::from_fn(dims[0], dims[1], dims[2], dx, |p| {
+        Voxel::Solid(material_of((p[axis] / dx) as usize))
+    })
+    .unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[2 * axis] = ThermalFace::Temperature(1.0);
+    faces[2 * axis + 1] = ThermalFace::Temperature(0.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.contacts = contacts;
+    let solution = solve_energy(
+        &domain,
+        &unit_fluid(),
+        solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    let heat = solution.report.balance.boundary_outflow_w;
+    let profile = (0..12)
+        .map(|i| {
+            let mut at = [0usize; 3];
+            at[axis] = i;
+            solution.temperature[domain.index(at[0], at[1], at[2])]
+        })
+        .collect();
+    (heat, profile)
+}
+
+#[test]
+fn orthotropic_conductivity_and_contact_resistance_are_exact_in_series() {
+    // G1: piecewise-constant conductivity and interface resistances are
+    // exact series resistances in this finite-volume operator, so a bar's
+    // heat rate is the closed form to round-off.
+    let dx = 1e-3;
+    // A laminate with k = (30, 30, 0.3) in series with an isotropic k = 3
+    // solid, six cells each: the interface temperature depends on the
+    // laminate's conductivity ALONG the bar, in-plane (x) or through the
+    // board (z).
+    let half = 6.0 * dx;
+    let stack = [
+        SolidMaterial::new("pcb", 1.0).with_orthotropic([30.0, 30.0, 0.3]),
+        SolidMaterial::new("iso", 3.0),
+    ];
+    for (axis, k_axis) in [(0usize, 30.0), (2, 0.3)] {
+        let (heat, profile) = bar_heat(&stack, |i| u16::from(i >= 6), axis, Vec::new());
+        assert!(heat.abs() < 1e-12, "net heat must vanish: {heat}");
+        let q = 1.0 / (half / k_axis + half / 3.0);
+        for (i, t) in profile.iter().enumerate() {
+            let x = (i as f64 + 0.5) * dx;
+            let r = if i < 6 {
+                x / k_axis
+            } else {
+                half / k_axis + (x - half) / 3.0
+            };
+            assert!(
+                (t - (1.0 - q * r)).abs() < 1e-9,
+                "axis {axis} cell {i}: {t}"
+            );
+        }
+    }
+    // Two materials (k 10 | k 2, six cells each) with a 1e-4 m^2K/W joint.
+    let pair = [SolidMaterial::new("a", 10.0), SolidMaterial::new("b", 2.0)];
+    let split = |i: usize| u16::from(i >= 6);
+    let resistance = 1e-4;
+    let (_, profile) = bar_heat(
+        &pair,
+        split,
+        0,
+        vec![ContactResistance {
+            materials: (0, 1),
+            resistance_m2_k_w: resistance,
+        }],
+    );
+    let total = half / 10.0 + resistance + half / 2.0;
+    let q = 1.0 / total; // W/m^2
+    // Cell centres: T(x) on each side of the joint is linear in the series
+    // resistance from the hot face.
+    for (i, t) in profile.iter().enumerate() {
+        let x = (i as f64 + 0.5) * dx;
+        let r = if i < 6 {
+            x / 10.0
+        } else {
+            half / 10.0 + resistance + (x - half) / 2.0
+        };
+        let exact = 1.0 - q * r;
+        assert!((t - exact).abs() < 1e-9, "cell {i}: {t} vs {exact}");
+    }
+    // The joint's temperature step is q R'' (cells 5 | 6 straddle it).
+    let jump = (profile[5] - profile[6]) - q * (0.5 * dx / 10.0 + 0.5 * dx / 2.0);
+    assert!(
+        (jump - q * resistance).abs() < 1e-9,
+        "{jump} vs {}",
+        q * resistance
+    );
+}
+
+#[test]
+fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
+    // A slab filling the floor of a box whose other five faces are
+    // surroundings at 300 K sees them with escape factor exactly one, so
+    // with air made non-conducting its steady temperature is
+    // (P / (eps sigma A) + T_amb^4)^(1/4) in closed form.
+    let gate = CancelGate::new();
+    let (n, dx) = (6usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        if p[2] < dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let solids = [SolidMaterial::new("plate", 200.0)];
+    // Only the top face anchors the (non-conducting) air; the plate's edges
+    // touch the side faces, which must not conduct its heat away.
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[5] = ThermalFace::Temperature(300.0);
+    let mut setup = ThermalSetup::new(faces);
+    let power = 5.0;
+    setup.add_uniform_power(&domain, power, |p| p[2] < dx);
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    let radiation = RadiationConfig::new(vec![0.9], surroundings);
+    let exposed = escape_factors(&domain, &solids, &radiation, &gate).unwrap();
+    assert_eq!(exposed.len(), n * n);
+    assert!(
+        exposed
+            .iter()
+            .all(|f| f.escape == 1.0 && f.surroundings_k == 300.0)
+    );
+    let (solution, report) = solve_energy_radiating(
+        &domain,
+        &fluid,
+        &solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let area = (n * n) as f64 * dx * dx;
+    let exact = (power / (0.9 * STEFAN_BOLTZMANN * area) + 300f64.powi(4)).powf(0.25);
+    let plate = solution.temperature[domain.index(2, 3, 0)];
+    eprintln!("plate {plate:.9} K exact {exact:.9} K, {report:?}");
+    assert!((plate - exact).abs() < 1e-6, "{plate} vs {exact}");
+    assert!((report.radiated_w - power).abs() < 1e-6 * power);
+    assert!(solution.report.balance.relative_residual < 1e-9);
+    assert!((solution.report.balance.sink_outflow_w - power).abs() < 1e-6 * power);
+}
+
+#[test]
+fn parallel_plate_escape_matches_the_analytic_view_factor() {
+    // Two directly opposed 8 x 8 plates four cells apart, open on all four
+    // sides: the lower plate's mean escape factor is 1 - F_12, with F_12 the
+    // closed-form view factor between aligned parallel rectangles
+    // (Incropera, Table 13.2; X = Y = a / c = 2 gives 0.4152).
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(8, 8, 6, dx, |p| {
+        if p[2] < dx || p[2] > 5.0 * dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    surroundings[5] = None;
+    let mut radiation = RadiationConfig::new(vec![1.0], surroundings);
+    radiation.rays_per_face = 4096;
+    let exposed = escape_factors(
+        &domain,
+        &[SolidMaterial::new("plate", 1.0)],
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let lower: Vec<f64> = exposed
+        .iter()
+        .filter(|f| domain.coords(f.cell)[2] == 0)
+        .map(|f| f.escape)
+        .collect();
+    assert_eq!(lower.len(), 64);
+    let mean = lower.iter().sum::<f64>() / 64.0;
+    let x: f64 = 2.0;
+    let (x2, y) = (x * x, x);
+    let f12 = 2.0 / (std::f64::consts::PI * x * y)
+        * ((((1.0 + x2) * (1.0 + y * y)) / (1.0 + x2 + y * y))
+            .sqrt()
+            .ln()
+            + x * (1.0 + y * y).sqrt() * (x / (1.0 + y * y).sqrt()).atan()
+            + y * (1.0 + x2).sqrt() * (y / (1.0 + x2).sqrt()).atan()
+            - x * x.atan()
+            - y * y.atan());
+    eprintln!(
+        "mean escape {mean:.5}, analytic 1 - F12 = {:.5} (F12 {f12:.5})",
+        1.0 - f12
+    );
+    // 64 x 4096 rays: standard error ~1e-3.
+    assert!((mean - (1.0 - f12)).abs() < 5e-3, "{mean} vs {}", 1.0 - f12);
+    // Deterministic streams: a rerun is bit-identical.
+    let again = escape_factors(
+        &domain,
+        &[SolidMaterial::new("plate", 1.0)],
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(exposed, again);
 }
