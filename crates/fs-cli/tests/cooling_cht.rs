@@ -143,6 +143,53 @@ fn graded_grid_refines_the_block_and_closes_energy() {
 }
 
 #[test]
+fn probes_and_vtk_export_report_the_fields() {
+    // A probe in the heated block and one in the inlet air, and the fields
+    // written as a VTK rectilinear grid next to the scene.
+    let scene = DUCT.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8},
+ "probes": [{"name": "chip", "at_m": [0.006, 0.0005, 0.002]},
+            {"name": "inlet-air", "at_m": [0.0005, 0.003, 0.002]}],
+ "output": {"vtk": "duct-fields.vtr"}"#,
+    );
+    assert_ne!(scene, DUCT);
+    let path = scratch("duct-probes.json", &scene);
+    let (code, result, stderr) = run(&path);
+    assert_eq!(code, 0, "{stderr}");
+    let probes = result.get("probes").and_then(J::as_array).unwrap();
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0].get("solid"), Some(&J::Bool(true)));
+    assert_eq!(probes[1].get("solid"), Some(&J::Bool(false)));
+    let chip = probes[0].path(&["temperature_k"]).and_then(J::as_f64).unwrap();
+    let air = probes[1].path(&["temperature_k"]).and_then(J::as_f64).unwrap();
+    assert!(chip > air && air >= 300.0 - 1e-9, "{chip} {air}");
+    let inflow_speed = probes[1]
+        .path(&["velocity_m_s"])
+        .and_then(J::as_array)
+        .unwrap()[0]
+        .as_f64()
+        .unwrap();
+    assert!(inflow_speed > 0.0);
+    let vtk = std::fs::read_to_string(path.with_file_name("duct-fields.vtr")).unwrap();
+    assert!(vtk.contains("<RectilinearGrid WholeExtent=\"0 12 0 4 0 4\">"));
+    for name in ["temperature_k", "velocity_m_s", "pressure_pa", "material"] {
+        assert!(vtk.contains(&format!("Name=\"{name}\"")), "{name}");
+    }
+    // 192 cells of temperature after its header line.
+    let block: Vec<&str> = vtk
+        .split("Name=\"temperature_k\" format=\"ascii\">\n")
+        .nth(1)
+        .unwrap()
+        .split("</DataArray>")
+        .next()
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(block.len(), 192);
+}
+
+#[test]
 fn malformed_scenes_refuse_with_structured_codes() {
     let cases = [
         (DUCT.replace("cooling-cht.v1", "cooling-cht.v9"), "schema"),

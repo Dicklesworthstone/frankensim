@@ -239,7 +239,8 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
     // The base scene without its study block.
     let mut template = root.clone();
     if let J::Object(entries) = &mut template {
-        entries.retain(|(key, _)| key != "study");
+        // Variants write no field files (parallel variants would share one).
+        entries.retain(|(key, _)| key != "study" && key != "output");
     }
     // Every variant is built (and its paths checked) before any is solved.
     let mut variants = Vec::with_capacity(evaluations);

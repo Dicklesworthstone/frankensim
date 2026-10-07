@@ -117,6 +117,14 @@ Scene (`frankensim.cooling-cht.v1`):
   only where features and boundary layers need them. Box, plane and
   source positions use the actual cell centres and faces; the result
   reports `graded` and `voxel_m` as the smallest width.
+- Optional `probes`: `[{"name", "at_m": [x, y, z]}, ...]` report the
+  temperature, velocity and fluid/solid state of the cell containing each
+  point (`probes` in the result).
+- Optional `output`: `{"vtk": "fields.vtr"}` writes the cell temperature,
+  velocity, pressure and material as a VTK XML rectilinear grid next to
+  the scene (on the actual face coordinates, so graded grids open as
+  graded in ParaView and other VTK readers); the result names the file.
+  Studies write no field files.
 - Optional `components`: JEDEC two-resistor compact models (`name`,
   `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
   `junction_to_board_k_w`). The box blocks flow; the junction reaches the

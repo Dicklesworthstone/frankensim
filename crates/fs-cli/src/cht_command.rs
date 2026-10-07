@@ -643,6 +643,11 @@ struct Scene {
     /// Rays per exposed face and stream seed of the radiation estimate.
     rays_per_face: usize,
     ray_seed: u64,
+    /// `output.vtk`: a VTK rectilinear-grid file of the fields, resolved
+    /// against the scene's directory.
+    vtk: Option<std::path::PathBuf>,
+    /// Named probe points, metres.
+    probes: Vec<(String, [f64; 3])>,
 }
 
 /// A backward-Euler march of the energy equation over the converged steady
@@ -1184,6 +1189,7 @@ impl Scene {
         if !(wall_seconds > 0.0) {
             return Err(bad("limits.wall_seconds must be positive"));
         }
+        let lengths = [0, 1, 2].map(|a| grid.length(a));
         Ok(Self {
             dx,
             grid,
@@ -1245,8 +1251,130 @@ impl Scene {
                 }
                 None => 0x5EED_0FA1,
             },
+            vtk: match root.get("output").map(|o| o.get("vtk")) {
+                None | Some(None) => None,
+                Some(Some(J::Str(name))) if name.ends_with(".vtr") => Some(base.join(name)),
+                Some(Some(_)) => return Err(bad("output.vtk must be a file name ending in .vtr")),
+            },
+            probes: {
+                let mut probes = Vec::new();
+                for (i, item) in array_of(&root, "probes")?.iter().enumerate() {
+                    let at = format!("probes[{i}]");
+                    let point = vec3(item, "at_m", &at)?;
+                    if (0..3).any(|a| point[a] < 0.0 || point[a] > lengths[a]) {
+                        return Err(bad(format!("{at}.at_m lies outside the domain")));
+                    }
+                    probes.push((item.str_field("name").unwrap_or("probe").to_string(), point));
+                }
+                probes
+            },
         })
     }
+}
+
+/// Write the fields as a VTK XML rectilinear grid (ASCII; cell data on the
+/// actual face coordinates, so graded grids keep their geometry): cell
+/// temperature, velocity, pressure, and the solid material (0 for fluid,
+/// material index + 1 otherwise).
+fn write_vtk(
+    path: &std::path::Path,
+    domain: &VoxelDomain,
+    grid: &Grid,
+    temperature: &[f64],
+    velocity: &[[f64; 3]],
+    pressure: &[f64],
+) -> Result<()> {
+    let [nx, ny, nz] = grid.dims();
+    let mut out = String::with_capacity(64 * domain.cell_count());
+    let _ = writeln!(
+        out,
+        "<?xml version=\"1.0\"?>\n<VTKFile type=\"RectilinearGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n<RectilinearGrid WholeExtent=\"0 {nx} 0 {ny} 0 {nz}\">\n<Piece Extent=\"0 {nx} 0 {ny} 0 {nz}\">\n<CellData Scalars=\"temperature_k\" Vectors=\"velocity_m_s\">"
+    );
+    out.push_str("<DataArray type=\"Float64\" Name=\"temperature_k\" format=\"ascii\">\n");
+    for t in temperature {
+        let _ = writeln!(out, "{t}");
+    }
+    out.push_str("</DataArray>\n<DataArray type=\"Float64\" Name=\"velocity_m_s\" NumberOfComponents=\"3\" format=\"ascii\">\n");
+    for v in velocity {
+        let _ = writeln!(out, "{} {} {}", v[0], v[1], v[2]);
+    }
+    out.push_str(
+        "</DataArray>\n<DataArray type=\"Float64\" Name=\"pressure_pa\" format=\"ascii\">\n",
+    );
+    for p in pressure {
+        let _ = writeln!(out, "{p}");
+    }
+    out.push_str("</DataArray>\n<DataArray type=\"Int32\" Name=\"material\" format=\"ascii\">\n");
+    for c in 0..domain.cell_count() {
+        let id = match domain.voxel_at(c) {
+            Voxel::Fluid => 0,
+            Voxel::Solid(m) => i32::from(m) + 1,
+        };
+        let _ = writeln!(out, "{id}");
+    }
+    out.push_str("</DataArray>\n</CellData>\n<Coordinates>\n");
+    for (axis, name) in ["x", "y", "z"].iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "<DataArray type=\"Float64\" Name=\"{name}\" format=\"ascii\">"
+        );
+        for f in &grid.faces[axis] {
+            let _ = writeln!(out, "{f}");
+        }
+        out.push_str("</DataArray>\n");
+    }
+    out.push_str("</Coordinates>\n</Piece>\n</RectilinearGrid>\n</VTKFile>\n");
+    std::fs::write(path, out).map_err(|e| Failure {
+        code: "cooling-cht-output",
+        message: format!("cannot write {}: {e}", path.display()),
+    })
+}
+
+/// Probe readings: `(name, temperature K, velocity m/s, solid)`.
+fn read_probes(
+    scene: &Scene,
+    domain: &VoxelDomain,
+    temperature: &[f64],
+    velocity: &[[f64; 3]],
+) -> Vec<(String, f64, [f64; 3], bool)> {
+    scene
+        .probes
+        .iter()
+        .map(|(name, point)| {
+            let at = [0, 1, 2].map(|a| scene.grid.locate(a, point[a]));
+            let c = domain.index(at[0], at[1], at[2]);
+            (
+                name.clone(),
+                temperature[c],
+                velocity[c],
+                !domain.is_fluid(c),
+            )
+        })
+        .collect()
+}
+
+/// The probe readings as a JSON array member (`""` without probes).
+fn probes_json(readings: &[(String, f64, [f64; 3], bool)]) -> Result<String> {
+    if readings.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::from(",\"probes\":[");
+    for (i, (name, t, v, solid)) in readings.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"name\":{},\"temperature_k\":{},\"velocity_m_s\":[{},{},{}],\"solid\":{solid}}}",
+            quote(name),
+            num(*t)?,
+            num(v[0])?,
+            num(v[1])?,
+            num(v[2])?
+        );
+    }
+    out.push(']');
+    Ok(out)
 }
 
 /// The unsteady march (`transient.flow: "unsteady"`): flow and energy
@@ -1722,6 +1850,17 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     };
     let wall_s = started.elapsed().as_secs_f64();
     let temperature = &energy.temperature;
+    let probes = read_probes(scene, &domain, temperature, &flow.velocity_m_s);
+    if let Some(path) = &scene.vtk {
+        write_vtk(
+            path,
+            &domain,
+            &scene.grid,
+            temperature,
+            &flow.velocity_m_s,
+            &flow.pressure_pa,
+        )?;
+    }
     // Per-material and per-source temperatures.
     let mut material_rows = Vec::new();
     for (index, material) in scene.materials.iter().enumerate() {
@@ -1960,6 +2099,10 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 num(at[2])?
             );
         }
+        out.push_str(&probes_json(&probes)?);
+        if let Some(path) = &scene.vtk {
+            let _ = write!(out, ",\"vtk\":{}", quote(&path.display().to_string()));
+        }
         let _ = writeln!(
             out,
             ",\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
@@ -2027,6 +2170,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 out,
                 "max_solid_temperature_k={t:.4} at_m=({:.6},{:.6},{:.6})",
                 at[0], at[1], at[2]
+            );
+        }
+        for (name, t, v, _) in &probes {
+            let _ = writeln!(
+                out,
+                "probe={name} temperature_k={t:.4} velocity_m_s=({:e},{:e},{:e})",
+                v[0], v[1], v[2]
             );
         }
         let _ = writeln!(
