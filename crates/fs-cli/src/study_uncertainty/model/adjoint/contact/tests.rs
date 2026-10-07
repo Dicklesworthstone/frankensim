@@ -152,3 +152,6 @@ fn joint_calibration_resume_is_source_free_and_nonsmooth_sources_refuse_before_s
     assert_eq!(resumed.get("mean_control").unwrap().get("gradient"),report.get("mean_control").unwrap().get("gradient"));
     assert_eq!(resumed.get("observations").unwrap().as_array().unwrap().len(),4);
 }
+
+#[path = "mixed.rs"]
+mod mixed;

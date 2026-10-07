@@ -7,7 +7,8 @@ use fs_matdb::{ClaimId, ClaimSelection, SelectionPolicy};
 pub(super) fn convert(model: &Model, sample: &Sample, report: &J, coefficients: &mut [f64]) -> Result<()> {
     let parameters = model.bound.study().parameters();
     if !parameters.iter().any(|p| p.target.contact_axis().is_some() && p.low != p.high) { return Ok(()); }
-    if coefficients.len() != parameters.len() || report.str_field("output") != Some("temperature-max-contact-adjoint") {
+    if coefficients.len() != parameters.len()
+        || !matches!(report.str_field("output"), Some(output::CONTACT | output::COMBINED)) {
         return Err(invalid("joint-state calibration requires the complete contact adjoint report"));
     }
     // The marginal means generally differ from the base project. Reconstruct
