@@ -137,9 +137,10 @@ pub struct SimpleReport {
     pub momentum_residual: f64,
     /// Largest per-cell |net outflow| of the returned fluxes, m^3/s.
     pub max_divergence_m3_s: f64,
-    /// Total inflow through inlet faces, m^3/s.
+    /// Total inflow through inlet faces and backflow through outlets
+    /// (openings), m^3/s.
     pub inflow_m3_s: f64,
-    /// Total outflow through outlet faces, m^3/s.
+    /// Total outflow through outlet faces (openings), m^3/s.
     pub outflow_m3_s: f64,
     /// Largest cell Reynolds number `|u| dx / nu`.
     pub max_cell_reynolds: f64,
@@ -220,7 +221,7 @@ impl Component {
     }
 }
 
-struct Solver<'a> {
+pub(super) struct Solver<'a> {
     domain: &'a VoxelDomain,
     config: &'a SimpleConfig,
     n: [usize; 3],
@@ -236,6 +237,8 @@ struct Solver<'a> {
     /// Krylov iterations spent on momentum and pressure correction.
     momentum_krylov: usize,
     pressure_krylov: usize,
+    /// Body force per cell, N/m^3 (empty: none).
+    force: Vec<[f64; 3]>,
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -247,7 +250,11 @@ fn cell_of(n: [usize; 3], c: [usize; 3]) -> usize {
 }
 
 impl<'a> Solver<'a> {
-    fn new(domain: &'a VoxelDomain, fluid: &FluidProperties, config: &'a SimpleConfig) -> Self {
+    pub(super) fn new(
+        domain: &'a VoxelDomain,
+        fluid: &FluidProperties,
+        config: &'a SimpleConfig,
+    ) -> Self {
         let n = domain.dims();
         let comps = [0, 1, 2].map(|axis| {
             let mut dims = n;
@@ -320,7 +327,45 @@ impl<'a> Solver<'a> {
             d,
             momentum_krylov: 0,
             pressure_krylov: 0,
+            force: Vec::new(),
         }
+    }
+
+    /// Replace the per-cell body force (N/m^3; zero in solids).
+    pub(super) fn set_force(&mut self, force: Vec<[f64; 3]>) {
+        debug_assert_eq!(force.len(), self.domain.cell_count());
+        self.force = force;
+    }
+
+    /// One SIMPLEC iteration: three momentum solves and a pressure
+    /// correction. Returns `(mass_residual, momentum_residual)` of the
+    /// velocities entering it (see the module docs).
+    pub(super) fn sweep(&mut self, gate: &CancelGate) -> Result<(f64, f64), ChtError> {
+        let mut steady = 0.0f64;
+        for a in 0..3 {
+            steady = steady.max(self.momentum(a, gate)?);
+        }
+        let imbalance = self.correct(self.config.pressure_tolerance, gate)?;
+        let largest_velocity = self
+            .vel
+            .iter()
+            .flat_map(|v| v.iter())
+            .fold(0.0f64, |m, v| m.max(v.abs()))
+            .max(f64::MIN_POSITIVE);
+        Ok((
+            imbalance / (self.rho * self.area * largest_velocity),
+            steady,
+        ))
+    }
+
+    /// The current face fluxes.
+    pub(super) fn field(&self) -> FlowField {
+        let area = self.area;
+        let [fx, fy, fz] = self
+            .vel
+            .clone()
+            .map(|v| v.into_iter().map(|u| u * area).collect::<Vec<f64>>());
+        FlowField::from_face_arrays(self.domain, fx, fy, fz)
     }
 
     fn weight(&self, peclet: f64) -> f64 {
@@ -493,6 +538,14 @@ impl<'a> Solver<'a> {
                 }
             };
             rhs = self.area.mul_add(drop, rhs);
+            if !self.force.is_empty() {
+                // Cell-sized staggered volume: half in each adjacent cell
+                // (an outlet face's mirrored twin repeats the inside cell).
+                let mean = 0.5
+                    * (self.force[cell_of(self.n, minus_cell)][a]
+                        + self.force[cell_of(self.n, plus_cell)][a]);
+                rhs = (self.area * dx).mul_add(mean, rhs);
+            }
             let relaxed = a_p / alpha;
             rhs = ((1.0 - alpha) * relaxed).mul_add(self.vel[a][index], rhs);
             coo.push(row, row, relaxed);
@@ -681,19 +734,12 @@ impl<'a> Solver<'a> {
     }
 }
 
-/// Solve steady incompressible flow on `domain` by SIMPLEC.
-///
-/// # Errors
-/// Input refusals (non-finite rules, an inlet pointing outward, a wall with
-/// normal velocity), [`ChtError::FlowNotSteady`] when the iteration budget
-/// ends first, solver refusals, or [`ChtError::Cancelled`].
-#[allow(clippy::too_many_lines)] // admission, iteration, flux handover, report
-pub fn simple_flow(
+/// Admission shared by every SIMPLEC driver.
+pub(super) fn admit(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
     config: &SimpleConfig,
-    gate: &CancelGate,
-) -> Result<FvFlow, ChtError> {
+) -> Result<(), ChtError> {
     fluid.validate()?;
     // SIMPLEC's d = A / (a_P / alpha - sum a_nb) degenerates at alpha = 1.
     if !(config.velocity_relaxation > 0.0 && config.velocity_relaxation < 1.0) {
@@ -739,93 +785,116 @@ pub fn simple_flow(
             reason: "no fluid cell".into(),
         });
     }
+    Ok(())
+}
+
+impl Solver<'_> {
+    /// Project tightly and assemble the public result.
+    pub(super) fn finish(
+        mut self,
+        fluid: &FluidProperties,
+        iterations: usize,
+        (mass_residual, momentum_residual): (f64, f64),
+        gate: &CancelGate,
+    ) -> Result<FvFlow, ChtError> {
+        // Hand over an exactly projected field: one tight correction removes
+        // the residual divergence the loose inner solves leave (its size is
+        // bounded by the converged imbalance, so the flow is unchanged to
+        // tolerance).
+        self.correct(1e-12, gate)?;
+        let domain = self.domain;
+        let field = self.field();
+        let mut velocity_m_s = vec![[0.0f64; 3]; domain.cell_count()];
+        let mut max_cell_reynolds = 0.0f64;
+        for (c, slot) in velocity_m_s.iter_mut().enumerate() {
+            if !domain.is_fluid(c) {
+                self.pressure[c] = 0.0;
+                continue;
+            }
+            let at = domain.coords(c);
+            for a in 0..3 {
+                slot[a] = 0.5
+                    * (self.vel[a][self.cell_face(a, at, false)]
+                        + self.vel[a][self.cell_face(a, at, true)]);
+            }
+            let speed = fs_math::det::sqrt(slot.iter().map(|v| v * v).sum::<f64>());
+            max_cell_reynolds =
+                max_cell_reynolds.max(speed * domain.dx() / fluid.kinematic_viscosity_m2_s);
+        }
+        let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
+        for face in Face3::ALL {
+            let net = field.boundary_outflow(domain, face);
+            match self.config.faces[face as usize] {
+                FvBoundary::Inlet { .. } => inflow -= net,
+                // Openings pass flow both ways: count each direction.
+                FvBoundary::Outlet => {
+                    for c in 0..domain.cell_count() {
+                        if domain.neighbor(c, face as usize).is_none() && domain.is_fluid(c) {
+                            let out = field.outward(domain, c, face as usize);
+                            if out > 0.0 {
+                                outflow += out;
+                            } else {
+                                inflow -= out;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let report = SimpleReport {
+            iterations,
+            mass_residual,
+            momentum_residual,
+            max_divergence_m3_s: field.max_divergence(domain),
+            inflow_m3_s: inflow,
+            outflow_m3_s: outflow,
+            max_cell_reynolds,
+            momentum_krylov_iterations: self.momentum_krylov,
+            pressure_krylov_iterations: self.pressure_krylov,
+        };
+        Ok(FvFlow {
+            field,
+            velocity_m_s,
+            pressure_pa: self.pressure,
+            report,
+        })
+    }
+}
+
+/// Solve steady incompressible flow on `domain` by SIMPLEC.
+///
+/// # Errors
+/// Input refusals (non-finite rules, an inlet pointing outward, a wall with
+/// normal velocity), [`ChtError::FlowNotSteady`] when the iteration budget
+/// ends first, solver refusals, or [`ChtError::Cancelled`].
+pub fn simple_flow(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
+    admit(domain, fluid, config)?;
     let mut solver = Solver::new(domain, fluid, config);
     let mut iterations = 0usize;
-    let mut mass_residual = f64::INFINITY;
-    let mut momentum_residual = f64::INFINITY;
+    let mut residuals = (f64::INFINITY, f64::INFINITY);
     while iterations < config.max_iterations {
         poll(gate)?;
         iterations += 1;
-        let mut steady = 0.0f64;
-        for a in 0..3 {
-            steady = steady.max(solver.momentum(a, gate)?);
-        }
-        let imbalance = solver.correct(config.pressure_tolerance, gate)?;
-        let largest_velocity = solver
-            .vel
-            .iter()
-            .flat_map(|v| v.iter())
-            .fold(0.0f64, |m, v| m.max(v.abs()))
-            .max(f64::MIN_POSITIVE);
-        let largest_flux = solver.rho * solver.area * largest_velocity;
-        mass_residual = imbalance / largest_flux;
-        momentum_residual = steady;
-        if !(mass_residual.is_finite() && momentum_residual.is_finite()) {
+        residuals = solver.sweep(gate)?;
+        if !(residuals.0.is_finite() && residuals.1.is_finite()) {
             return Err(ChtError::FlowDiverged { step: iterations });
         }
-        if mass_residual <= config.tolerance && momentum_residual <= config.tolerance {
+        if residuals.0 <= config.tolerance && residuals.1 <= config.tolerance {
             break;
         }
     }
-    if mass_residual > config.tolerance || momentum_residual > config.tolerance {
+    if residuals.0 > config.tolerance || residuals.1 > config.tolerance {
         return Err(ChtError::FlowNotSteady {
             steps: iterations,
-            last_change: mass_residual.max(momentum_residual),
+            last_change: residuals.0.max(residuals.1),
             tolerance: config.tolerance,
         });
     }
-    // Hand over an exactly projected field: one tight correction removes the
-    // residual divergence the loose inner solves leave (its size is bounded
-    // by the converged imbalance, so the flow is unchanged to tolerance).
-    solver.correct(1e-12, gate)?;
-    let area = solver.area;
-    let fluxes = solver
-        .vel
-        .clone()
-        .map(|v| v.into_iter().map(|u| u * area).collect::<Vec<f64>>());
-    let [fx, fy, fz] = fluxes;
-    let field = FlowField::from_face_arrays(domain, fx, fy, fz);
-    let mut velocity_m_s = vec![[0.0f64; 3]; domain.cell_count()];
-    let mut max_cell_reynolds = 0.0f64;
-    for (c, slot) in velocity_m_s.iter_mut().enumerate() {
-        if !domain.is_fluid(c) {
-            solver.pressure[c] = 0.0;
-            continue;
-        }
-        let at = domain.coords(c);
-        for a in 0..3 {
-            slot[a] = 0.5
-                * (solver.vel[a][solver.cell_face(a, at, false)]
-                    + solver.vel[a][solver.cell_face(a, at, true)]);
-        }
-        let speed = fs_math::det::sqrt(slot.iter().map(|v| v * v).sum::<f64>());
-        max_cell_reynolds =
-            max_cell_reynolds.max(speed * domain.dx() / fluid.kinematic_viscosity_m2_s);
-    }
-    let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
-    for face in Face3::ALL {
-        let net = field.boundary_outflow(domain, face);
-        match config.faces[face as usize] {
-            FvBoundary::Inlet { .. } => inflow -= net,
-            FvBoundary::Outlet => outflow += net,
-            _ => {}
-        }
-    }
-    let report = SimpleReport {
-        iterations,
-        mass_residual,
-        momentum_residual,
-        max_divergence_m3_s: field.max_divergence(domain),
-        inflow_m3_s: inflow,
-        outflow_m3_s: outflow,
-        max_cell_reynolds,
-        momentum_krylov_iterations: solver.momentum_krylov,
-        pressure_krylov_iterations: solver.pressure_krylov,
-    };
-    Ok(FvFlow {
-        field,
-        velocity_m_s,
-        pressure_pa: solver.pressure,
-        report,
-    })
+    solver.finish(fluid, iterations, residuals, gate)
 }

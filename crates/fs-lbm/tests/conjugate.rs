@@ -17,9 +17,9 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    FvBoundary, LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial, ThermalFace,
-    ThermalSetup, TransientConfig, Voxel, VoxelDomain, lbm_duct_flow, march_energy,
-    natural_convection, simple_flow, solve_energy,
+    FvBoundary, FvBuoyancyConfig, LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial,
+    ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, fv_natural_convection,
+    lbm_duct_flow, march_energy, natural_convection, simple_flow, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1384,4 +1384,148 @@ fn simplec_outlet_admits_undeveloped_outflow_at_one_fixed_point() {
         .fold(0.0, f64::max);
     eprintln!("relaxation 0.5 vs 0.8: max |du| {worst:.3e}");
     assert!(worst < 1e-7, "fixed point depends on relaxation: {worst}");
+}
+
+/// De Vahl Davis square cavity (hot x = 0, cold x = H, adiabatic y walls)
+/// on n x n cells, one cell deep with symmetry in z, by FV-SIMPLEC
+/// natural convection: the hot-wall mean Nusselt number.
+fn fv_de_vahl_davis(
+    n: usize,
+    rayleigh: f64,
+) -> (f64, fs_lbm::conjugate::FvNaturalConvectionReport) {
+    let gate = CancelGate::new();
+    let dx = 1.0 / n as f64;
+    let alpha = 1e-2;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: alpha,
+        kinematic_viscosity_m2_s: 0.71 * alpha,
+    };
+    let g = 9.81;
+    let beta = rayleigh * fluid.kinematic_viscosity_m2_s * alpha / g;
+    let domain = VoxelDomain::new(n, n, 1, dx).unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(1.0);
+    faces[1] = ThermalFace::Temperature(0.0);
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-7;
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.5, flow);
+    let run = fv_natural_convection(
+        &domain,
+        &fluid,
+        &[],
+        &ThermalSetup::new(faces),
+        &config,
+        &gate,
+    )
+    .unwrap();
+    assert!(run.energy.report.balance.relative_residual < 1e-9);
+    // Hot-wall heat over the conduction heat k dT / H through the same wall.
+    let heat: f64 = (0..n)
+        .map(|y| 2.0 * dx * alpha * (1.0 - run.energy.temperature[domain.index(0, y, 0)]))
+        .sum();
+    (heat / (alpha * dx), run.report)
+}
+
+#[test]
+fn fv_natural_convection_cavity_matches_de_vahl_davis() {
+    // G2: de Vahl Davis (1983) benchmark Nu = 1.118 (Ra 1e3), 2.243 (Ra 1e4).
+    for (rayleigh, reference) in [(1e3, 1.118), (1e4, 2.243)] {
+        let (nu, report) = fv_de_vahl_davis(32, rayleigh);
+        eprintln!("FV de Vahl Davis Ra {rayleigh:e}: Nu {nu:.4} (ref {reference}) {report:?}");
+        assert!(
+            (nu - reference).abs() < 0.03 * reference,
+            "Ra {rayleigh}: {nu} vs {reference}"
+        );
+    }
+}
+
+/// Open vertical channel (chimney) between isothermal plates `n` cells
+/// apart and `n * aspect` tall, open at the bottom and top: the induced
+/// volume flow per unit depth over the Elenbaas fully developed limit
+/// g beta dT b^3 / (12 nu) of the discrete stencil.
+fn fv_chimney(n: usize, aspect: usize) -> (f64, f64, fs_lbm::conjugate::FvNaturalConvectionReport) {
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let b = n as f64 * dx;
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-5,
+        kinematic_viscosity_m2_s: 0.71e-5,
+    };
+    let alpha = fluid.conductivity_w_m_k;
+    // Channel Rayleigh number on the gap: g beta dT b^3 / (nu alpha) = 20.
+    let g = 9.81;
+    let beta = 20.0 * fluid.kinematic_viscosity_m2_s * alpha / (g * b * b * b);
+    let domain = VoxelDomain::new(n, n * aspect, 1, dx).unwrap();
+    let mut thermal = [ThermalFace::Adiabatic; 6];
+    thermal[0] = ThermalFace::Temperature(1.0);
+    thermal[1] = ThermalFace::Temperature(1.0);
+    thermal[2] = ThermalFace::Outflow {
+        backflow_temperature: 0.0,
+    };
+    thermal[3] = ThermalFace::Outflow {
+        backflow_temperature: 0.0,
+    };
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Outlet,
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-8;
+    let config = FvBuoyancyConfig::new([0.0, -g, 0.0], beta, 0.0, flow);
+    let run = fv_natural_convection(
+        &domain,
+        &fluid,
+        &[],
+        &ThermalSetup::new(thermal),
+        &config,
+        &gate,
+    )
+    .unwrap();
+    let flow_report = &run.flow.report;
+    // The exact discrete Poiseuille law of this stencil (see the plane
+    // Poiseuille test) carries (n^2 + 2) / n^2 more flow at a given forcing.
+    let n2 = (n * n) as f64;
+    let limit =
+        g * beta * 1.0 * b * b * b / (12.0 * fluid.kinematic_viscosity_m2_s) * dx * (n2 + 2.0) / n2;
+    let q = flow_report.outflow_m3_s;
+    // Energy: wall heat leaves as advection through the top opening.
+    let balance = &run.energy.report.balance;
+    assert!(balance.relative_residual < 1e-9, "{balance:?}");
+    assert!((flow_report.outflow_m3_s - flow_report.inflow_m3_s).abs() < 1e-12 * q.max(1e-30));
+    (q / limit, flow_report.max_divergence_m3_s / q, run.report)
+}
+
+#[test]
+fn fv_open_chimney_approaches_the_elenbaas_developed_limit() {
+    // G1/G2 for open-boundary buoyancy: at Ra_b = 20 the fluid reaches the
+    // wall temperature within a few gaps, so the induced flow tends to the
+    // fully developed limit g beta dT b^3 / (12 nu) from below as the
+    // channel lengthens (the cool entrance region carries less buoyancy).
+    // Measured 0.9795 (L/b = 10) and 0.9931 (L/b = 30) of the discrete
+    // limit, which itself is 1.031 x the continuum limit at 8 cells.
+    let (short, _, short_report) = fv_chimney(8, 10);
+    let (long, divergence, long_report) = fv_chimney(8, 30);
+    eprintln!(
+        "chimney Q/Q_limit: L/b=10 {short:.4} L/b=30 {long:.4}\n{short_report:?}\n{long_report:?}"
+    );
+    assert!(divergence < 1e-10);
+    assert!(short < long && long < 1.0, "{short} {long}");
+    assert!(
+        long > 0.98,
+        "long channel far from the developed limit: {long}"
+    );
 }

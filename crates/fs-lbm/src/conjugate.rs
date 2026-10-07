@@ -14,7 +14,8 @@
 //!    the relative velocity change between checks. [`simple_flow`] solves
 //!    the same steady flow by finite volumes on the staggered faces (SIMPLEC)
 //!    with no lattice constraint, returning divergence-free face fluxes
-//!    directly. Any other producer of
+//!    directly; [`fv_natural_convection`] couples it to the energy equation
+//!    through the Boussinesq force, including pressure openings. Any other producer of
 //!    cell or face velocities (an analytic profile, another solver) enters
 //!    through [`FlowField::from_cell_velocities`] or
 //!    [`FlowField::from_face_velocity`].
@@ -79,6 +80,7 @@ use fs_exec::CancelGate;
 
 use crate::d3q19::Face3;
 
+mod buoyant;
 mod domain;
 mod energy;
 mod flow;
@@ -87,6 +89,9 @@ mod natural;
 mod simple;
 mod transient;
 
+pub use buoyant::{
+    FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
+};
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
     ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution, ThermalFace,

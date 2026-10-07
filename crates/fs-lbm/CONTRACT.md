@@ -954,6 +954,32 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Block two cells upstream of the outlet (backflow -0.099 m/s through the outlet plane) | convergence; relaxation independence | converged to 1e-10; alpha 0.5 vs 0.8 velocities within 2.6e-10 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
 
+### Finite-volume natural convection (`fv_natural_convection`)
+
+Steady Boussinesq natural (or mixed) convection on the SIMPLEC flow and the
+conjugate energy equation, including OPEN boundaries: `FvBoundary::Outlet`
+faces are pressure openings that pass flow both ways (paired with
+`ThermalFace::Outflow { backflow_temperature }` for the ambient), with
+pressure measured from the reference hydrostatic state. The momentum source
+is `-rho beta (T - T_ref) g` on fluid cells (cell-sized staggered volumes
+average the two adjacent cells). Each coupling runs `sweeps_per_coupling`
+SIMPLEC iterations under the current force, then re-solves energy on the
+current fluxes; convergence needs the SIMPLEC residuals below
+`flow.tolerance` AND the energy re-solve's largest temperature change below
+`temperature_tolerance` times the span, at the same coupling. The returned
+energy solution is computed on exactly the returned (tightly projected)
+fluxes. This closes the LBM path's "closed enclosures only" boundary.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| De Vahl Davis cavity, 32^2, Ra 1e3 | Nu = 1.118 | 1.1201 (0.2 %), 78 couplings |
+| Same, Ra 1e4 | Nu = 2.243 | 2.2671 (1.1 %), 36 couplings |
+| Open vertical channel (chimney), isothermal plates 8 cells apart, Ra_b = 20, openings top and bottom | fully developed Elenbaas limit g beta dT b^3 / (12 nu) of the discrete stencil ((n^2 + 2) / n^2 x the continuum) | 0.9795 (L/b = 10), 0.9931 (L/b = 30): approaches from below; energy closure 1e-9; induced in/outflow equal to 1e-12 |
+
+No-claims: steady laminar Boussinesq only (an unsteady configuration refuses
+as `FlowNotSteady` rather than returning a time average), no radiation; the
+SIMPLEC no-claims apply.
+
 ### Worked example (`examples/heatsink_cht.rs`)
 
 `cargo run --release -p fs-lbm --example heatsink_cht -- fv [U] [voxel_mm]`
@@ -1037,8 +1063,9 @@ the central-moment operator the same duct diverged; it now refuses as
 ### No-claim boundaries (conjugate)
 
 - Laminar, steady, constant-property convection only: forced convection
-  through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in closed
-  enclosures through `natural_convection`; no open-boundary natural
+  through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in
+  closed enclosures through `natural_convection` and in closed or open
+  domains through `fv_natural_convection`; no open-boundary LBM natural
   convection, turbulence model, radiation, or temperature-dependent
   properties. A natural-convection run that does not settle (for example
   above the transition Rayleigh number) refuses as `FlowNotSteady`.
