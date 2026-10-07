@@ -26,7 +26,8 @@ use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     ChtError, ContactResistance, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties,
     FvBoundary, FvBuoyancyConfig, FvFlow, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
-    Voxel, VoxelDomain, fv_natural_convection, simple_flow, solve_energy,
+    TransientConfig, Voxel, VoxelDomain, fv_natural_convection, march_energy, simple_flow,
+    solve_energy,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -37,7 +38,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model, radiation, or temperature-dependent properties; power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Optional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -306,6 +307,82 @@ struct Scene {
     tolerance: f64,
     max_iterations: usize,
     wall_seconds: f64,
+    transient: Option<Transient>,
+}
+
+/// A backward-Euler march of the energy equation over the converged steady
+/// flow, with every source scaled by a piecewise-linear schedule.
+struct Transient {
+    time_step_s: f64,
+    steps: usize,
+    initial_temperature_k: Option<f64>,
+    /// `(time s, power scale)`, increasing time; constant beyond the ends.
+    schedule: Vec<(f64, f64)>,
+}
+
+impl Transient {
+    const MAX_STEPS: usize = 100_000;
+
+    fn parse(value: &J) -> Result<Self> {
+        let at = "transient";
+        let time_step_s = number(value, "time_step_s", at)?;
+        let steps = number(value, "steps", at)?;
+        if time_step_s <= 0.0
+            || steps < 1.0
+            || steps > Self::MAX_STEPS as f64
+            || steps.fract() != 0.0
+        {
+            return Err(bad(format!(
+                "transient needs time_step_s > 0 and a whole number of steps in 1..={}",
+                Self::MAX_STEPS
+            )));
+        }
+        let mut schedule = Vec::new();
+        if let Some(points) = value.get("power_schedule") {
+            for point in points
+                .as_array()
+                .ok_or_else(|| bad("transient.power_schedule must be [[time_s, scale], ...]"))?
+            {
+                let pair = point
+                    .as_array()
+                    .filter(|pair| pair.len() == 2)
+                    .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                    .filter(|(t, k)| t.is_finite() && k.is_finite())
+                    .ok_or_else(|| {
+                        bad("transient.power_schedule entries must be [time_s, scale]")
+                    })?;
+                if schedule
+                    .last()
+                    .is_some_and(|&(t, _): &(f64, f64)| pair.0 <= t)
+                {
+                    return Err(bad("transient.power_schedule times must increase"));
+                }
+                schedule.push(pair);
+            }
+        }
+        Ok(Self {
+            time_step_s,
+            steps: steps as usize,
+            initial_temperature_k: optional_number(value, "initial_temperature_k", at)?,
+            schedule,
+        })
+    }
+
+    fn scale(&self, time: f64) -> f64 {
+        let Some(&(t0, k0)) = self.schedule.first() else {
+            return 1.0;
+        };
+        if time <= t0 {
+            return k0;
+        }
+        for pair in self.schedule.windows(2) {
+            let ((ta, ka), (tb, kb)) = (pair[0], pair[1]);
+            if time <= tb {
+                return ka + (kb - ka) * (time - ta) / (tb - ta);
+            }
+        }
+        self.schedule.last().map_or(1.0, |&(_, k)| k)
+    }
 }
 
 const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
@@ -385,6 +462,10 @@ impl Scene {
                     SolidMaterial::new(name, (k[0] * k[1] * k[2]).cbrt()).with_orthotropic(k)
                 }
                 None => SolidMaterial::new(name, number(item, "conductivity_w_m_k", &at)?),
+            };
+            let material = match optional_number(item, "volumetric_heat_capacity_j_m3_k", &at)? {
+                Some(rho_c) => material.with_heat_capacity(rho_c),
+                None => material,
             };
             materials.push(material);
         }
@@ -590,6 +671,7 @@ impl Scene {
             tolerance,
             max_iterations: max_iterations as usize,
             wall_seconds,
+            transient: root.get("transient").map(Transient::parse).transpose()?,
         })
     }
 }
@@ -717,6 +799,47 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             .map_err(|e| solver_failure(&e))?;
             (flow, energy, None)
         };
+    // Optional transient march over the converged (forced) flow.
+    let march = match (&scene.transient, couplings) {
+        (None, _) => None,
+        (Some(_), Some(_)) => {
+            return Err(bad(
+                "transient runs freeze the flow; a buoyant scene's flow depends on temperature",
+            ));
+        }
+        (Some(transient), None) => {
+            let initial = transient
+                .initial_temperature_k
+                .or_else(|| {
+                    scene.faces.iter().find_map(|rule| match rule {
+                        FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+                            Some(*temperature)
+                        }
+                        FaceRule::Opening { ambient } => Some(*ambient),
+                        _ => None,
+                    })
+                })
+                .ok_or_else(|| bad("transient.initial_temperature_k is required here"))?;
+            let config = TransientConfig {
+                time_step_s: transient.time_step_s,
+                steps: transient.steps,
+                energy: EnergyConfig::default(),
+            };
+            let solution = march_energy(
+                &domain,
+                &scene.fluid,
+                &scene.materials,
+                &flow.field,
+                &setup,
+                &vec![initial; domain.cell_count()],
+                |t| transient.scale(t),
+                &config,
+                gate,
+            )
+            .map_err(|e| solver_failure(&e))?;
+            Some(solution)
+        }
+    };
     let wall_s = started.elapsed().as_secs_f64();
     let temperature = &energy.temperature;
     // Per-material and per-source temperatures.
@@ -836,6 +959,43 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             );
         }
         out.push(']');
+        if let Some(march) = &march {
+            // At most ~200 records: every k-th step and the last.
+            let every = march.records.len().div_ceil(200).max(1);
+            let worst_closure = march
+                .records
+                .iter()
+                .fold(0.0f64, |m, r| m.max(r.closure_j.abs()));
+            let _ = write!(
+                out,
+                ",\"transient\":{{\"steps\":{},\"worst_step_closure_j\":{},\"final_max_solid_temperature_k\":{},\"records\":[",
+                march.records.len(),
+                num(worst_closure)?,
+                num(march
+                    .records
+                    .last()
+                    .map_or(f64::NAN, |r| r.max_solid_temperature_k))?
+            );
+            let mut first = true;
+            for (i, record) in march.records.iter().enumerate() {
+                if (i + 1) % every != 0 && i + 1 != march.records.len() {
+                    continue;
+                }
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                let _ = write!(
+                    out,
+                    "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"source_j\":{},\"stored_j\":{}}}",
+                    num(record.time_s)?,
+                    num(record.max_solid_temperature_k)?,
+                    num(record.source_j)?,
+                    num(record.stored_energy_change_j)?
+                );
+            }
+            out.push_str("]}");
+        }
         if let Some((t, at)) = hottest {
             let _ = write!(
                 out,
@@ -867,6 +1027,15 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         );
         if let Some((q, dp, _)) = r.fan {
             let _ = writeln!(out, "fan_flow_m3_s={q:e}\nfan_pressure_pa={dp}");
+        }
+        if let Some(record) = march.as_ref().and_then(|m| m.records.last()) {
+            let _ = writeln!(
+                out,
+                "transient_steps={}\ntransient_final_time_s={}\ntransient_final_max_solid_temperature_k={:.4}",
+                march.as_ref().map_or(0, |m| m.records.len()),
+                record.time_s,
+                record.max_solid_temperature_k
+            );
         }
         for (name, cells, max, mean) in &material_rows {
             let _ = writeln!(

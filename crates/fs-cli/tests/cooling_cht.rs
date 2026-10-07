@@ -264,3 +264,62 @@ fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     let rise = joined - bonded;
     assert!(rise > 1.5 && rise < 2.5, "{bonded} -> {joined}");
 }
+
+#[test]
+fn transient_march_warms_toward_the_steady_junction_and_closes_energy() {
+    // The duct scene with heat capacities and a transient block: a long
+    // march from the inlet temperature settles on the steady solution's
+    // hottest solid voxel; with the schedule at zero nothing heats.
+    let with_capacity = DUCT.replace(
+        r#""conductivity_w_m_k": 167.0}"#,
+        r#""conductivity_w_m_k": 167.0, "volumetric_heat_capacity_j_m3_k": 2.4e6}"#,
+    );
+    assert_ne!(with_capacity, DUCT);
+    let scene = with_capacity.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 2.0, "steps": 400}"#,
+    );
+    let (code, result, stderr) = run(&scratch("warm.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    let steady = f(&result, &["max_solid_temperature_k"]);
+    let last = f(&result, &["transient", "final_max_solid_temperature_k"]);
+    assert!(
+        (last - steady).abs() < 1e-3 * (steady - 300.0),
+        "{last} vs steady {steady}"
+    );
+    // Energy closure per step relative to the 0.2 J the die releases per
+    // step (measured 4e-9 J: 2e-8 relative, the solver tolerance level).
+    let closure = f(&result, &["transient", "worst_step_closure_j"]);
+    assert!(closure < 1e-6 * 0.2, "{closure}");
+    let records = result
+        .path(&["transient", "records"])
+        .and_then(J::as_array)
+        .unwrap();
+    let first = records[0]
+        .path(&["max_solid_temperature_k"])
+        .and_then(J::as_f64)
+        .unwrap();
+    assert!(first > 300.0 && first < last, "{first} {last}");
+    // Power held off by the schedule: the body stays at the inlet temperature.
+    let off = with_capacity.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 1.0, "steps": 5, "power_schedule": [[0.0, 0.0], [10.0, 0.0]]}"#,
+    );
+    let (code, result, stderr) = run(&scratch("off.json", &off));
+    assert_eq!(code, 0, "{stderr}");
+    let cold = f(&result, &["transient", "final_max_solid_temperature_k"]);
+    assert!((cold - 300.0).abs() < 1e-9, "{cold}");
+    // No heat capacity: refused, not guessed.
+    let missing = DUCT.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 1.0, "steps": 5}"#,
+    );
+    let (code, diagnostic, _) = run(&scratch("nocap.json", &missing));
+    assert_eq!(code, 4);
+    assert!(
+        diagnostic
+            .str_field("message")
+            .unwrap()
+            .contains("heat capacity")
+    );
+}

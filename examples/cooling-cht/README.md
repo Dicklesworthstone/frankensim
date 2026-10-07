@@ -34,6 +34,18 @@ Scene (`frankensim.cooling-cht.v1`):
   pressure zero, flow in either direction), `symmetry`, or `wall`
   (adiabatic, or one of `temperature_k`, `heat_flux_w_m2` into the domain,
   `htc_w_m2_k` with `ambient_k`).
+- `fan` faces: `curve` `[[flow_m3_s, pressure_pa], ...]` (2 to 8 points,
+  pressure non-increasing) and `temperature_k`; the delivered flow is the
+  operating point where the curve meets the system resistance, reported as
+  `fan_flow_m3_s` / `fan_pressure_pa`.
+- Optional `transient`: `time_step_s`, `steps`, `power_schedule`
+  `[[time_s, scale], ...]` (piecewise linear, constant beyond the ends;
+  default 1), `initial_temperature_k` (default: the inlet temperature).
+  Backward Euler marches the energy equation over the converged steady
+  forced flow; materials then need `volumetric_heat_capacity_j_m3_k`. The
+  result adds per-step peak solid temperatures (up to ~200 records) and the
+  worst per-step energy closure. Buoyant scenes refuse a transient: their
+  flow depends on temperature.
 - Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
   `reference_temperature_k` (default: the first inlet or opening
   temperature), `solver.tolerance`, `solver.max_iterations`,
@@ -44,8 +56,13 @@ Examples:
 - `heatsink-duct.json`: the ducted plate-fin heatsink of
   `crates/fs-lbm/examples/heatsink_cht.rs` at 1 mm voxels (2 W chip,
   0.25 m/s air at 300 K).
-- `vented-heatsink-natural.json`: a vertical plate-fin heatsink in a column
-  open at the bottom and top, cooled by natural convection only.
+- `vented-heatsink-natural.json`: a vertical plate-fin heatsink (three 2 mm
+  fins) in a 30 x 20 x 60 mm column open at the bottom and top, cooled by
+  natural convection only, at 2 mm voxels. Measured (debug build, 315 s):
+  181 energy couplings, 905 SIMPLEC sweeps, induced draft 2.23e-5 m^3/s
+  (peak 0.15 m/s), 0.5 W chip at 332.21 K (64 K/W), all heat leaving by
+  advection through the top opening (balance 2e-12). No radiation is
+  modelled, which matters for natural convection.
 - `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
   (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
   at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins, at
