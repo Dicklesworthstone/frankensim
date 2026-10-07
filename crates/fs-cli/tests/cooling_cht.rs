@@ -131,6 +131,13 @@ fn malformed_scenes_refuse_with_structured_codes() {
             DUCT.replace("\"type\": \"opening\"", "\"type\": \"vent\""),
             "type must be",
         ),
+        (
+            DUCT.replace(
+                "\"solver\": {\"tolerance\": 1e-8}",
+                "\"solver\": {\"tolerance\": 1e-8, \"turbulence\": \"k-epsilon\"}",
+            ),
+            "solver.turbulence",
+        ),
     ];
     for (index, (scene, needle)) in cases.iter().enumerate() {
         assert_ne!(
@@ -222,6 +229,90 @@ fn fan_face_finds_its_operating_point_on_the_curve() {
     assert!(f(&result, &["flow", "fan_residual"]) < 1e-6);
     assert!((f(&result, &["flow", "inflow_m3_s"]) - q).abs() < 1e-12 * q);
     assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+}
+
+#[test]
+fn lvel_turbulence_adds_eddy_viscosity_and_cools_the_chip() {
+    // The duct at 4 m/s (local wall Reynolds numbers ~ 100; LVEL applies its
+    // eddy viscosity wherever those are large, so this exercises the model's
+    // plumbing, not a transition claim): the eddy viscosity is reported, the
+    // energy still closes, and the added mixing cools the chip.
+    let fast = DUCT.replace("[0.1, 0.0, 0.0]", "[4.0, 0.0, 0.0]");
+    let lvel = fast.replace(
+        "\"solver\": {\"tolerance\": 1e-8}",
+        "\"solver\": {\"tolerance\": 1e-8, \"turbulence\": \"lvel\"}",
+    );
+    assert_ne!(fast, DUCT);
+    assert_ne!(lvel, fast);
+    let (code, laminar, stderr) = run(&scratch("duct-laminar.json", &fast));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(laminar.path(&["flow", "turbulence"]).and_then(J::as_str), Some("laminar"));
+    let (code, turbulent, stderr) = run(&scratch("duct-lvel.json", &lvel));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(turbulent.path(&["flow", "turbulence"]).and_then(J::as_str), Some("lvel"));
+    let ratio = f(&turbulent, &["flow", "max_eddy_viscosity_ratio"]);
+    assert!(ratio > 0.0, "{ratio}");
+    assert!(f(&turbulent, &["energy", "balance_relative_residual"]) < 1e-9);
+    let (cold, hot) = (
+        f(&turbulent, &["max_solid_temperature_k"]),
+        f(&laminar, &["max_solid_temperature_k"]),
+    );
+    assert!(cold < hot && cold > 300.0, "lvel {cold} vs laminar {hot}");
+}
+
+const FAN_CHANNEL: &str = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.024, 0.004, 0.004], "voxel_m": 0.001,
+ "faces": {
+  "x-": {"type": "opening", "ambient_k": 300.0},
+  "x+": {"type": "opening", "ambient_k": 300.0},
+  "y-": {"type": "symmetry"}, "y+": {"type": "symmetry"},
+  "z-": {"type": "symmetry"}, "z+": {"type": "symmetry"}
+ },
+ "internal_fans": [{"name": "axial", "axis": "x", "at_m": 0.008, "direction": "+",
+   "min_m": [0.0, 0.0, 0.0], "max_m": [0.0, 0.004, 0.004],
+   "curve": [[0.0, 2.0], [1.6e-5, 0.0]]}],
+ "resistances": [{"type": "grille", "axis": "x", "at_m": 0.016,
+   "min_m": [0.0, 0.0, 0.0], "max_m": [0.0, 0.004, 0.004], "free_area_ratio": 0.5}],
+ "solver": {"tolerance": 1e-9}
+}"#;
+
+#[test]
+fn internal_fan_and_grille_set_the_channel_operating_point() {
+    // Plug flow between two openings: the fan's rise equals the grille's
+    // 1/2 rho K U^2 (K from Idelchik's 50 % perforated plate), so the
+    // operating point solves a quadratic.
+    let (code, result, stderr) = run(&scratch("fan-channel.json", FAN_CHANNEL));
+    assert_eq!(code, 0, "{stderr}");
+    let fans = result
+        .path(&["flow", "internal_fans"])
+        .and_then(J::as_array)
+        .unwrap();
+    assert_eq!(fans[0].str_field("name"), Some("axial"));
+    let q = fans[0].path(&["flow_m3_s"]).and_then(J::as_f64).unwrap();
+    let rise = fans[0]
+        .path(&["pressure_rise_pa"])
+        .and_then(J::as_f64)
+        .unwrap();
+    let (rho, area, p0, q_max) = (1.1614, 16e-6, 2.0, 1.6e-5);
+    let k = (1.0 + 0.707 * 0.5f64.sqrt() - 0.5).powi(2) / 0.25;
+    let (qa, qb) = (0.5 * rho * k / (area * area), p0 / q_max);
+    let exact = (-qb + (qb * qb + 4.0 * qa * p0).sqrt()) / (2.0 * qa);
+    assert!((q - exact).abs() < 1e-6 * exact, "{q} vs {exact}");
+    assert!((rise - p0 * (1.0 - q / q_max)).abs() < 1e-9, "{rise}");
+    assert!((f(&result, &["flow", "inflow_m3_s"]) - q).abs() < 1e-9 * q);
+    // A fan plane between voxel faces refuses.
+    let off = FAN_CHANNEL.replace("\"at_m\": 0.008", "\"at_m\": 0.0085");
+    assert_ne!(off, FAN_CHANNEL);
+    let (code, diagnostic, _) = run(&scratch("fan-off-grid.json", &off));
+    assert_eq!(code, 4);
+    assert!(
+        diagnostic
+            .str_field("message")
+            .unwrap()
+            .contains("voxel face"),
+        "{diagnostic:?}"
+    );
 }
 
 #[test]

@@ -58,7 +58,10 @@ Scene (`frankensim.cooling-cht.v1`):
 - Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
   `reference_temperature_k` (default: the first inlet or opening
   temperature), `solver.tolerance`, `solver.max_iterations`,
-  `limits.wall_seconds`.
+  `solver.turbulence` (`"laminar"`, the default, or `"lvel"`: the LVEL
+  algebraic eddy viscosity and its turbulent conductivity, for
+  transitional or turbulent fan-driven flow; the result then reports
+  `flow.max_eddy_viscosity_ratio`), `limits.wall_seconds`.
 
 Examples:
 
@@ -85,7 +88,9 @@ Examples:
   top lies on a voxel centre and falls outside under the tie rule): refine
   `voxel_m` before reading temperatures to better than that geometry.
 
-Results are Estimated numerical evidence at one resolution: no turbulence
-model, radiation, or temperature-dependent properties; staircase geometry;
-not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
+Results are Estimated numerical evidence at one resolution: turbulence only
+through the algebraic LVEL closure (its friction runs 13-16 % above
+turbulent channel correlations; see `crates/fs-lbm/CONTRACT.md`), radiation
+only to the surroundings, no temperature-dependent properties; staircase
+geometry; not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
 sensitivity.

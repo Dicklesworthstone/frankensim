@@ -22,8 +22,10 @@
 //!
 //! Steady laminar Boussinesq flow (`beta |T - T_ref|` small); a configuration
 //! above the transition to unsteady convection refuses as `FlowNotSteady`
-//! rather than returning a time average. No radiation. The SIMPLEC
-//! no-claims apply (staircase walls, power-law momentum convection).
+//! rather than returning a time average. Radiation only as the optional
+//! emission to the surroundings; turbulence only through the optional LVEL
+//! closure. The SIMPLEC no-claims apply (staircase walls, power-law
+//! momentum convection).
 
 use fs_exec::CancelGate;
 
@@ -31,7 +33,8 @@ use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, escape_factors, radiated_power, radiative_sinks};
-use super::simple::{FvFlow, SimpleConfig, Solver, admit};
+use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
+use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
 /// Boussinesq coupling controls.
@@ -177,11 +180,19 @@ pub fn fv_natural_convection(
         Some(radiation) => Some(escape_factors(domain, solids, radiation, gate)?),
         None => None,
     };
-    let with_radiation = |temperature: &[f64]| {
+    // Each energy solve carries the current radiative sinks and, with a
+    // turbulence closure, the current eddy conductivity.
+    let energy_setup = |temperature: &[f64], eddy_viscosity: &[f64]| {
         let mut step = setup.clone();
         if let Some(faces) = &exposed {
             step.cell_sinks
                 .extend(radiative_sinks(domain, faces, temperature));
+        }
+        if config.flow.turbulence != Turbulence::Laminar {
+            step.eddy_conductivity_w_m_k = eddy_viscosity
+                .iter()
+                .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+                .collect();
         }
         step
     };
@@ -229,7 +240,7 @@ pub fn fv_natural_convection(
             fluid,
             solids,
             &solver.field(),
-            &with_radiation(&temperature),
+            &energy_setup(&temperature, &solver.heat_eddy_viscosity()),
             &config.energy,
             gate,
         )?;
@@ -269,7 +280,7 @@ pub fn fv_natural_convection(
         fluid,
         solids,
         &flow.field,
-        &with_radiation(&temperature),
+        &energy_setup(&temperature, &flow.heat_eddy_viscosity_m2_s),
         &config.energy,
         gate,
     )?;

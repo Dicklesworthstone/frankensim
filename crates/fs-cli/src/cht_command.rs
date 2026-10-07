@@ -24,10 +24,11 @@ use fs_geom::Point3;
 use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, ContactResistance, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties,
-    FvBoundary, FvBuoyancyConfig, FvFlow, RadiationConfig, SimpleConfig, SolidMaterial,
-    ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, fv_natural_convection,
-    march_energy, simple_flow, solve_energy, solve_energy_radiating,
+    ChtError, ContactResistance, EnergyConfig, EnergySolution, FacePatch, FanCurve, FanInlet,
+    FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow, InternalFan,
+    RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
+    Turbulence, Voxel, VoxelDomain, fv_natural_convection, march_energy, simple_flow, solve_energy,
+    solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -37,8 +38,8 @@ const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model or temperature-dependent properties; radiation only as gray diffuse emission from exposed solid faces to the surroundings seen through openings, inlets and fans (Monte Carlo escape factors; no surface-to-surface exchange or wall re-radiation); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only as gray diffuse emission from exposed solid faces to the surroundings seen through openings, inlets and fans (Monte Carlo escape factors; no surface-to-surface exchange or wall re-radiation); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -141,6 +142,111 @@ fn vec3(object: &J, key: &str, at: &str) -> Result<[f64; 3]> {
             .ok_or_else(|| bad(format!("{at}.{key} entries must be finite numbers")))?;
     }
     Ok(out)
+}
+
+/// The array under `key` (absent: empty).
+fn array_of<'a>(object: &'a J, key: &str) -> Result<&'a [J]> {
+    match object.get(key) {
+        None => Ok(&[]),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| bad(format!("{key} must be an array"))),
+    }
+}
+
+/// A fan characteristic `curve: [[flow_m3_s, pressure_pa], ...]`.
+fn fan_curve(rule: &J, at: &str) -> Result<FanCurve> {
+    let points = field(rule, "curve", at)?
+        .as_array()
+        .ok_or_else(|| {
+            bad(format!(
+                "{at}.curve must be [[flow_m3_s, pressure_pa], ...]"
+            ))
+        })?
+        .iter()
+        .map(|point| {
+            point
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                .ok_or_else(|| {
+                    bad(format!(
+                        "{at}.curve entries must be [flow_m3_s, pressure_pa]"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    FanCurve::new(&points).map_err(|e| bad(format!("{at}.curve: {e}")))
+}
+
+/// A number or a 3-vector under `key` (absent: `default` on every axis).
+fn per_axis(object: &J, key: &str, at: &str, default: f64) -> Result<[f64; 3]> {
+    match object.get(key) {
+        None => Ok([default; 3]),
+        Some(value) if value.as_f64().is_some() => Ok([number(object, key, at)?; 3]),
+        Some(_) => vec3(object, key, at),
+    }
+}
+
+/// Cells of each axis whose (tie-shifted) centres lie in `[min, max)`.
+fn cell_span(min: f64, max: f64, dx: f64, cells: usize) -> (usize, usize) {
+    let tie = 1e-6 * dx;
+    let first = |edge: f64| {
+        (0..cells)
+            .find(|&i| (i as f64 + 0.5).mul_add(dx, tie) >= edge)
+            .unwrap_or(cells)
+    };
+    (first(min), first(max))
+}
+
+/// Cell ranges `lo..hi` of a box (each non-empty) in a `dims` grid.
+fn cell_box(
+    region: &Aabb,
+    dx: f64,
+    dims: [usize; 3],
+    at: &str,
+) -> Result<([usize; 3], [usize; 3])> {
+    let (mut lo, mut hi) = ([0; 3], [0; 3]);
+    for a in 0..3 {
+        (lo[a], hi[a]) = cell_span(region.min[a], region.max[a], dx, dims[a]);
+        if lo[a] >= hi[a] {
+            return Err(bad(format!(
+                "{at}: the box covers no voxel centre on axis {a}"
+            )));
+        }
+    }
+    Ok((lo, hi))
+}
+
+/// An interior face patch: `axis` ("x", "y", "z"), the plane `at_m` (on a
+/// voxel face strictly inside the domain), and the transverse extent of the
+/// box `min_m`/`max_m` (its entries along `axis` are ignored).
+fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch> {
+    let axis = match item.str_field("axis") {
+        Some("x") => 0,
+        Some("y") => 1,
+        Some("z") => 2,
+        _ => return Err(bad(format!("{at}.axis must be \"x\", \"y\" or \"z\""))),
+    };
+    let plane = number(item, "at_m", at)? / dx;
+    let index = plane.round();
+    if (plane - index).abs() > 1e-6 || index < 1.0 || index >= dims[axis] as f64 {
+        return Err(bad(format!(
+            "{at}.at_m must lie on a voxel face strictly inside the domain"
+        )));
+    }
+    let mut min = vec3(item, "min_m", at)?;
+    let mut max = vec3(item, "max_m", at)?;
+    // The normal extent is irrelevant: give the box one full cell there.
+    min[axis] = 0.0;
+    max[axis] = dx;
+    let (lo, hi) = cell_box(&Aabb { min, max }, dx, dims, at)?;
+    Ok(FacePatch {
+        axis,
+        index: index as usize,
+        lo,
+        hi,
+    })
 }
 
 /// An axis-aligned box `[min, max)` in metres.
@@ -305,6 +411,11 @@ struct Scene {
     expansion: Option<f64>,
     reference: Option<f64>,
     tolerance: f64,
+    turbulence: Turbulence,
+    /// Named fans inside the domain.
+    internal_fans: Vec<(String, InternalFan)>,
+    /// Grilles and porous blocks.
+    resistances: Vec<FlowResistance>,
     max_iterations: usize,
     wall_seconds: f64,
     transient: Option<Transient>,
@@ -585,33 +696,10 @@ impl Scene {
                     velocity: vec3(rule, "velocity_m_s", &at)?,
                     temperature: number(rule, "temperature_k", &at)?,
                 },
-                Some("fan") => {
-                    let points = field(rule, "curve", &at)?
-                        .as_array()
-                        .ok_or_else(|| {
-                            bad(format!(
-                                "{at}.curve must be [[flow_m3_s, pressure_pa], ...]"
-                            ))
-                        })?
-                        .iter()
-                        .map(|point| {
-                            point
-                                .as_array()
-                                .filter(|pair| pair.len() == 2)
-                                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
-                                .ok_or_else(|| {
-                                    bad(format!(
-                                        "{at}.curve entries must be [flow_m3_s, pressure_pa]"
-                                    ))
-                                })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    FaceRule::Fan {
-                        curve: FanCurve::new(&points)
-                            .map_err(|e| bad(format!("{at}.curve: {e}")))?,
-                        temperature: number(rule, "temperature_k", &at)?,
-                    }
-                }
+                Some("fan") => FaceRule::Fan {
+                    curve: fan_curve(rule, &at)?,
+                    temperature: number(rule, "temperature_k", &at)?,
+                },
                 Some("opening") => FaceRule::Opening {
                     ambient: number(rule, "ambient_k", &at)?,
                 },
@@ -660,6 +748,78 @@ impl Scene {
                 "solver.tolerance must be positive and max_iterations at least 1",
             ));
         }
+        let turbulence = match solver.and_then(|s| s.str_field("turbulence")) {
+            None | Some("laminar") => Turbulence::Laminar,
+            Some("lvel") => Turbulence::Lvel,
+            Some(other) => {
+                return Err(bad(format!(
+                    "solver.turbulence must be \"laminar\" or \"lvel\", not {other}"
+                )));
+            }
+        };
+        let mut internal_fans = Vec::new();
+        for (i, item) in array_of(&root, "internal_fans")?.iter().enumerate() {
+            let at = format!("internal_fans[{i}]");
+            let patch = face_patch(item, dx, dims, &at)?;
+            let blows_positive = match item.str_field("direction") {
+                Some("+") => true,
+                Some("-") => false,
+                _ => return Err(bad(format!("{at}.direction must be \"+\" or \"-\""))),
+            };
+            internal_fans.push((
+                item.str_field("name").unwrap_or("fan").to_string(),
+                InternalFan {
+                    patch,
+                    blows_positive,
+                    curve: fan_curve(item, &at)?,
+                },
+            ));
+        }
+        let mut resistances = Vec::new();
+        for (i, item) in array_of(&root, "resistances")?.iter().enumerate() {
+            let at = format!("resistances[{i}]");
+            resistances.push(match item.str_field("type") {
+                Some("grille") => {
+                    let loss = match (
+                        optional_number(item, "loss_coefficient", &at)?,
+                        optional_number(item, "free_area_ratio", &at)?,
+                    ) {
+                        (Some(k), None) if k >= 0.0 => k,
+                        (None, Some(f)) => FlowResistance::perforated_plate_loss(f).ok_or_else(
+                            || bad(format!("{at}.free_area_ratio must lie in (0, 1]")),
+                        )?,
+                        _ => {
+                            return Err(bad(format!(
+                                "{at}: declare one of loss_coefficient (non-negative) or free_area_ratio"
+                            )));
+                        }
+                    };
+                    FlowResistance::Planar {
+                        patch: face_patch(item, dx, dims, &at)?,
+                        loss_coefficient: loss,
+                    }
+                }
+                Some("porous") => {
+                    let (lo, hi) = cell_box(&Aabb::parse(item, &at)?, dx, dims, &at)?;
+                    let permeability_m2 = per_axis(item, "permeability_m2", &at, f64::INFINITY)?;
+                    let inertial_per_m = per_axis(item, "inertial_per_m", &at, 0.0)?;
+                    if permeability_m2.iter().any(|k| !(*k > 0.0))
+                        || inertial_per_m.iter().any(|c| !(*c >= 0.0))
+                    {
+                        return Err(bad(format!(
+                            "{at}: permeability_m2 must be positive and inertial_per_m non-negative"
+                        )));
+                    }
+                    FlowResistance::Volume {
+                        lo,
+                        hi,
+                        permeability_m2,
+                        inertial_per_m,
+                    }
+                }
+                _ => return Err(bad(format!("{at}.type must be grille or porous"))),
+            });
+        }
         let wall_seconds = match root.get("limits") {
             Some(l) => optional_number(l, "wall_seconds", "limits")?.unwrap_or(3600.0),
             None => 3600.0,
@@ -680,6 +840,9 @@ impl Scene {
             expansion: optional_number(&root, "expansion_per_k", "scene")?,
             reference: optional_number(&root, "reference_temperature_k", "scene")?,
             tolerance,
+            turbulence,
+            internal_fans,
+            resistances,
             max_iterations: max_iterations as usize,
             wall_seconds,
             transient: root.get("transient").map(Transient::parse).transpose()?,
@@ -775,7 +938,10 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     }
     let mut flow_config = SimpleConfig::new(flow_faces);
     flow_config.tolerance = scene.tolerance;
+    flow_config.turbulence = scene.turbulence;
     flow_config.max_iterations = scene.max_iterations;
+    flow_config.internal_fans = scene.internal_fans.iter().map(|(_, fan)| *fan).collect();
+    flow_config.resistances.clone_from(&scene.resistances);
     flow_config.fan = fans.first().map(|&side| FanInlet {
         face: Face3::ALL[side],
         curve: match scene.faces[side] {
@@ -842,6 +1008,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         } else {
             let flow = simple_flow(&domain, &scene.fluid, &flow_config, gate)
                 .map_err(|e| solver_failure(&e))?;
+            if scene.turbulence != Turbulence::Laminar {
+                setup.eddy_conductivity_w_m_k = flow.eddy_conductivity(&scene.fluid);
+            }
             let energy = match &radiation {
                 Some(config) => {
                     let (energy, report) = solve_energy_radiating(
@@ -955,6 +1124,15 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         .fold(0.0f64, f64::max);
     let r = &flow.report;
     let b = &energy.report.balance;
+    let nu = scene.fluid.kinematic_viscosity_m2_s;
+    let max_eddy_ratio = flow
+        .eddy_viscosity_m2_s
+        .iter()
+        .fold(0.0f64, |m, nu_t| m.max(nu_t / nu));
+    let turbulence_name = match scene.turbulence {
+        Turbulence::Laminar => "laminar",
+        Turbulence::Lvel => "lvel",
+    };
     let solver_name = if couplings.is_some() {
         "fv-simplec-boussinesq"
     } else {
@@ -981,6 +1159,14 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             num(max_speed)?,
             num(r.max_cell_reynolds)?
         );
+        let _ = write!(out, ",\"turbulence\":{}", quote(turbulence_name));
+        if scene.turbulence != Turbulence::Laminar {
+            let _ = write!(
+                out,
+                ",\"max_eddy_viscosity_ratio\":{}",
+                num(max_eddy_ratio)?
+            );
+        }
         if let Some(couplings) = couplings {
             let _ = write!(out, ",\"energy_couplings\":{couplings}");
         }
@@ -992,6 +1178,24 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 num(dp)?,
                 num(mismatch)?
             );
+        }
+        if !r.internal_fans.is_empty() {
+            out.push_str(",\"internal_fans\":[");
+            for (i, ((name, _), &(q, dp))) in
+                scene.internal_fans.iter().zip(&r.internal_fans).enumerate()
+            {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "{{\"name\":{},\"flow_m3_s\":{},\"pressure_rise_pa\":{}}}",
+                    quote(name),
+                    num(q)?,
+                    num(dp)?
+                );
+            }
+            out.push(']');
         }
         let _ = write!(
             out,
@@ -1106,8 +1310,20 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             r.outflow_m3_s,
             b.relative_residual
         );
+        if scene.turbulence != Turbulence::Laminar {
+            let _ = writeln!(
+                out,
+                "turbulence={turbulence_name}\nmax_eddy_viscosity_ratio={max_eddy_ratio}"
+            );
+        }
         if let Some((q, dp, _)) = r.fan {
             let _ = writeln!(out, "fan_flow_m3_s={q:e}\nfan_pressure_pa={dp}");
+        }
+        for ((name, _), (q, dp)) in scene.internal_fans.iter().zip(&r.internal_fans) {
+            let _ = writeln!(
+                out,
+                "internal_fan.{name}.flow_m3_s={q:e}\ninternal_fan.{name}.pressure_rise_pa={dp}"
+            );
         }
         if let Some(record) = march.as_ref().and_then(|m| m.records.last()) {
             let _ = writeln!(

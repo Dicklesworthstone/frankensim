@@ -25,18 +25,33 @@
 //! state is therefore one fixed point of the discrete equations, independent
 //! of the relaxation, also where the outflow is not fully developed.
 //!
+//! # Fans and resistances
+//!
+//! [`InternalFan`]s raise the static pressure across a planar patch of
+//! interior faces by their curve's value at the flow through the patch; the
+//! source is linearized about each sweep's flow (`S(u) = s A dp(Q0) + A
+//! dp'(Q0) A_fan (u - u0)`, exact at the fixed point) so the fan-system
+//! loop is damped by the curve's own slope. [`FlowResistance::Planar`]
+//! drops it by `1/2 rho K |u| u` across a patch (grilles, perforated
+//! plates); [`FlowResistance::Volume`] is a Darcy–Forchheimer porous block.
+//! Both are implicit in `a_P` (Picard in `|u|`), so they also enter
+//! SIMPLEC's `d`. They act on momentum only (no heat).
+//!
 //! # SIMPLEC iteration
 //!
 //! Momentum is under-relaxed (`a_P / alpha`) and solved per component with
 //! ILU(0)-BiCGStab; the pressure correction uses `d = A / (a_P / alpha -
-//! sum a_nb)` and is solved with ILU(0)-BiCGStab on the Jacobi-scaled system
-//! (components without an outlet are pinned); velocities and pressure are
+//! sum a_nb)` and is solved with AMG-preconditioned CG (or ILU(0)-BiCGStab)
+//! on the Jacobi-scaled system (components without an outlet are pinned);
+//! velocities and pressure are
 //! corrected with no pressure under-relaxation. Convergence requires two steady residuals of the same
 //! iterate below the tolerance: the largest cell mass imbalance (before
 //! correction) over the largest face mass flux, and, per velocity component,
-//! the relative residual `||b - A u|| / ||b||` of the Jacobi-scaled momentum
-//! system at the velocities entering the iteration (under-relaxation cancels
-//! there, so it is the residual of the unrelaxed equations). Inner solves
+//! the residual `||b - A u||` of the Jacobi-scaled momentum system at the
+//! velocities entering the iteration (under-relaxation cancels there, so it
+//! is the residual of the unrelaxed equations), relative to the flow's
+//! momentum scale `sqrt(rows) max_c rms(b_c)` (a component that vanishes by
+//! symmetry has a round-off `b`; its own norm is no scale). Inner solves
 //! only reduce their entry residuals (by `momentum_tolerance` and
 //! `pressure_tolerance`), so the outer residuals carry the convergence claim
 //! and a converged report never rests on a skipped inner solve.
@@ -51,11 +66,13 @@
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
+use fs_sparse::precond::{SaAmg, pcg};
 
 use super::domain::{FluidProperties, VoxelDomain};
 use super::energy::ConvectionScheme;
 use super::flow::{FlowField, scale_rows};
 use super::krylov::bicgstab_ilu0;
+use super::turbulence::{TURBULENT_PRANDTL, law_of_the_wall_ratios, wall_distance};
 use super::{ChtError, finite, finite_positive, poll};
 use crate::d3q19::Face3;
 
@@ -166,8 +183,155 @@ pub struct FanInlet {
     pub curve: FanCurve,
 }
 
-/// SIMPLEC controls.
+/// A planar patch of interior faces: the faces normal to `axis` on the face
+/// plane `index` (between cells `index - 1` and `index` along `axis`, so
+/// `1..n[axis]`), over the cells `lo[t]..hi[t]` of the two transverse axes
+/// `t` (the `axis` entries of `lo`/`hi` are ignored). Faces touching a solid
+/// voxel are skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FacePatch {
+    /// Normal axis (0, 1, 2).
+    pub axis: usize,
+    /// Face-plane index along `axis`.
+    pub index: usize,
+    /// First transverse cells (inclusive).
+    pub lo: [usize; 3],
+    /// Last transverse cells (exclusive).
+    pub hi: [usize; 3],
+}
+
+impl FacePatch {
+    /// Face coordinates of the patch whose two adjacent cells are fluid.
+    fn open_faces(&self, domain: &VoxelDomain) -> Vec<[usize; 3]> {
+        let n = domain.dims();
+        let (u, w) = ((self.axis + 1) % 3, (self.axis + 2) % 3);
+        let mut faces = Vec::new();
+        for j in self.lo[w]..self.hi[w].min(n[w]) {
+            for i in self.lo[u]..self.hi[u].min(n[u]) {
+                let mut f = [0usize; 3];
+                f[self.axis] = self.index;
+                f[u] = i;
+                f[w] = j;
+                let mut minus = f;
+                minus[self.axis] -= 1;
+                if domain.is_fluid(cell_of(n, minus)) && domain.is_fluid(cell_of(n, f)) {
+                    faces.push(f);
+                }
+            }
+        }
+        faces
+    }
+
+    fn admit(&self, domain: &VoxelDomain, field: &'static str) -> Result<(), ChtError> {
+        let n = domain.dims();
+        let refuse = |reason: String| Err(ChtError::InvalidInput { field, reason });
+        if self.axis > 2 {
+            return refuse(format!("axis {} is not 0, 1 or 2", self.axis));
+        }
+        if self.index == 0 || self.index >= n[self.axis] {
+            return refuse(format!(
+                "face plane {} must be interior (1..{} along axis {})",
+                self.index, n[self.axis], self.axis
+            ));
+        }
+        for t in [(self.axis + 1) % 3, (self.axis + 2) % 3] {
+            if self.lo[t] >= self.hi[t] || self.hi[t] > n[t] {
+                return refuse(format!(
+                    "transverse cells {}..{} on axis {t} must be non-empty within 0..{}",
+                    self.lo[t], self.hi[t], n[t]
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A flow resistance inside the fluid (a sink of momentum; no heat).
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlowResistance {
+    /// Thin planar resistance (grille, perforated plate, filter sheet): the
+    /// static pressure drops by `1/2 rho K |u| u` across each face of the
+    /// patch, `u` the face (approach) velocity.
+    Planar {
+        /// The faces.
+        patch: FacePatch,
+        /// Loss coefficient `K` (non-negative).
+        loss_coefficient: f64,
+    },
+    /// Porous block over the cells `lo..hi` (a heat-exchanger core, filter,
+    /// dense component array): per axis `a`,
+    /// `-dp/dx_a = mu / kappa_a u_a + 1/2 rho C_a |u_a| u_a`
+    /// (Darcy–Forchheimer on the superficial velocity, orthotropic).
+    Volume {
+        /// First cells (inclusive).
+        lo: [usize; 3],
+        /// Last cells (exclusive).
+        hi: [usize; 3],
+        /// Permeability per axis, m^2 (`f64::INFINITY`: no viscous term).
+        permeability_m2: [f64; 3],
+        /// Inertial (Forchheimer) coefficient per axis, 1/m.
+        inertial_per_m: [f64; 3],
+    },
+}
+
+impl FlowResistance {
+    /// Idelchik's loss coefficient of a thin sharp-edged perforated plate
+    /// with free-area ratio `f` (Handbook of Hydraulic Resistance, diagram
+    /// 8-1, turbulent): `K = (1 + 0.707 sqrt(1 - f) - f)^2 / f^2` on the
+    /// approach velocity; `None` outside `(0, 1]`.
+    #[must_use]
+    pub fn perforated_plate_loss(free_area_ratio: f64) -> Option<f64> {
+        let f = free_area_ratio;
+        if !(f > 0.0 && f <= 1.0) {
+            return None;
+        }
+        let k = 0.707f64.mul_add(fs_math::det::sqrt(1.0 - f), 1.0 - f) / f;
+        Some(k * k)
+    }
+}
+
+/// A fan inside the domain (an axial fan in an enclosure): across each face
+/// of the patch the static pressure rises by the curve's value at the flow
+/// through the whole patch, in the blowing direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InternalFan {
+    /// The faces (at least one must be open).
+    pub patch: FacePatch,
+    /// Blowing toward `+axis` (true) or `-axis` (false).
+    pub blows_positive: bool,
+    /// The characteristic (flow in the blowing direction).
+    pub curve: FanCurve,
+}
+
+/// Linear solver of the (symmetric positive definite) pressure correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PressureSolver {
+    /// Conjugate gradients preconditioned by fs-sparse's smoothed-aggregation
+    /// AMG V-cycle; the hierarchy is rebuilt every
+    /// [`AMG_REBUILD_SWEEPS`] sweeps (the matrix changes slowly), and a
+    /// failed solve falls back to ILU(0)-BiCGStab.
+    #[default]
+    AmgCg,
+    /// ILU(0)-preconditioned BiCGStab on the Jacobi-scaled system.
+    IluBicgstab,
+}
+
+/// Turbulence closure of the momentum equations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Turbulence {
+    /// Laminar (molecular viscosity only).
+    #[default]
+    Laminar,
+    /// LVEL algebraic eddy viscosity from the wall distance and local speed
+    /// (see [`super::turbulence`]).
+    Lvel,
+}
+
+/// Sweeps between AMG hierarchy rebuilds for [`PressureSolver::AmgCg`].
+pub const AMG_REBUILD_SWEEPS: usize = 10;
+
+/// SIMPLEC controls.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimpleConfig {
     /// One rule per domain face in [`Face3::ALL`] order.
     pub faces: [FvBoundary; 6],
@@ -187,6 +351,14 @@ pub struct SimpleConfig {
     pub pressure_tolerance: f64,
     /// Optional fan on one inlet face (operating point solved).
     pub fan: Option<FanInlet>,
+    /// Pressure-correction linear solver.
+    pub pressure_solver: PressureSolver,
+    /// Turbulence closure.
+    pub turbulence: Turbulence,
+    /// Flow resistances (grilles, porous blocks).
+    pub resistances: Vec<FlowResistance>,
+    /// Fans inside the domain.
+    pub internal_fans: Vec<InternalFan>,
 }
 
 impl SimpleConfig {
@@ -202,6 +374,10 @@ impl SimpleConfig {
             momentum_tolerance: 1e-1,
             pressure_tolerance: 1e-2,
             fan: None,
+            pressure_solver: PressureSolver::AmgCg,
+            turbulence: Turbulence::Laminar,
+            resistances: Vec::new(),
+            internal_fans: Vec::new(),
         }
     }
 }
@@ -234,6 +410,9 @@ pub struct SimpleReport {
     /// mismatch between the curve and the mean inlet-layer pressure)`, when a
     /// fan is declared.
     pub fan: Option<(f64, f64, f64)>,
+    /// Operating point `(flow m^3/s in the blowing direction, static
+    /// pressure rise Pa)` of each internal fan, in declaration order.
+    pub internal_fans: Vec<(f64, f64)>,
 }
 
 /// Steady finite-volume flow.
@@ -246,11 +425,27 @@ pub struct FvFlow {
     pub velocity_m_s: Vec<[f64; 3]>,
     /// Cell pressure, Pa (outlet reference zero); zero in solids.
     pub pressure_pa: Vec<f64>,
+    /// Eddy viscosity per cell, m^2/s (zeros when laminar).
+    pub eddy_viscosity_m2_s: Vec<f64>,
+    /// The eddy viscosity the energy equation should use per cell, m^2/s:
+    /// the law-of-the-wall secant value in wall-adjacent cells, the LVEL
+    /// value elsewhere (zeros when laminar).
+    pub heat_eddy_viscosity_m2_s: Vec<f64>,
     /// Run evidence.
     pub report: SimpleReport,
 }
 
 impl FvFlow {
+    /// Turbulent conductivity `rho c_p nu_t / Pr_t` per cell, W/(m K), for
+    /// `ThermalSetup::eddy_conductivity_w_m_k` (zeros when laminar).
+    #[must_use]
+    pub fn eddy_conductivity(&self, fluid: &FluidProperties) -> Vec<f64> {
+        self.heat_eddy_viscosity_m2_s
+            .iter()
+            .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
+            .collect()
+    }
+
     /// Mean pressure over the fluid cells of layer `index` along `axis`, Pa.
     #[must_use]
     pub fn mean_pressure(&self, domain: &VoxelDomain, axis: usize, index: usize) -> Option<f64> {
@@ -321,6 +516,41 @@ pub(super) struct Solver<'a> {
     fan: Option<FanState>,
     /// SIMPLEC iterations taken.
     sweeps: usize,
+    /// AMG hierarchy of the pressure correction and the sweep it was built at.
+    amg: Option<(SaAmg, usize)>,
+    /// LVEL: wall distance per cell (m), eddy viscosity per cell (m^2/s),
+    /// the law-of-the-wall secant viscosity ratio `y+ / u+` per cell, and
+    /// whether a cell borders a wall; all empty when laminar.
+    wall_distance: Vec<f64>,
+    eddy_viscosity: Vec<f64>,
+    wall_ratio: Vec<f64>,
+    wall_adjacent: Vec<bool>,
+    /// Planar loss coefficient per face and component (empty: none).
+    planar_loss: [Vec<f64>; 3],
+    /// Porous `(mu / kappa, rho C / 2)` per cell and axis (empty: none).
+    porous: Vec<[(f64, f64); 3]>,
+    /// Internal fan index per face and component (`usize::MAX`: none;
+    /// empty: no internal fans).
+    fan_face: [Vec<usize>; 3],
+    internal_fans: Vec<InternalFanState>,
+    /// Last RMS momentum right-hand side per component (residual scale).
+    momentum_rms: [f64; 3],
+}
+
+/// Internal fan state: the flow through the patch and the curve's rise and
+/// slope there, refreshed at the start of each sweep.
+#[derive(Debug, Clone)]
+struct InternalFanState {
+    axis: usize,
+    /// +1 blowing toward +axis, -1 toward -axis.
+    sign: f64,
+    faces: Vec<usize>,
+    /// Open area of the patch, m^2.
+    area: f64,
+    curve: FanCurve,
+    flow: f64,
+    rise: f64,
+    slope: f64,
 }
 
 /// Fan operating-point state.
@@ -347,6 +577,7 @@ fn cell_of(n: [usize; 3], c: [usize; 3]) -> usize {
 }
 
 impl<'a> Solver<'a> {
+    #[allow(clippy::too_many_lines)] // one constructor of the solver state
     pub(super) fn new(
         domain: &'a VoxelDomain,
         fluid: &FluidProperties,
@@ -411,6 +642,90 @@ impl<'a> Solver<'a> {
                 .collect::<Vec<f64>>()
         });
         let d = [0, 1, 2].map(|a| vec![0.0; comps[a].kind.len()]);
+        let planar_loss = {
+            let mut loss = [0, 1, 2].map(|_| Vec::new());
+            for resistance in &config.resistances {
+                if let FlowResistance::Planar {
+                    patch,
+                    loss_coefficient,
+                } = *resistance
+                {
+                    let comp = &comps[patch.axis];
+                    let slot = &mut loss[patch.axis];
+                    if slot.is_empty() {
+                        *slot = vec![0.0; comp.kind.len()];
+                    }
+                    for f in patch.open_faces(domain) {
+                        slot[comp.index(f)] += loss_coefficient;
+                    }
+                }
+            }
+            loss
+        };
+        let porous = {
+            let mut porous = Vec::new();
+            let mu = fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s;
+            for resistance in &config.resistances {
+                if let FlowResistance::Volume {
+                    lo,
+                    hi,
+                    permeability_m2,
+                    inertial_per_m,
+                } = *resistance
+                {
+                    if porous.is_empty() {
+                        porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
+                    }
+                    for z in lo[2]..hi[2] {
+                        for y in lo[1]..hi[1] {
+                            for x in lo[0]..hi[0] {
+                                let cell: &mut [(f64, f64); 3] = &mut porous[domain.index(x, y, z)];
+                                for a in 0..3 {
+                                    cell[a].0 += mu / permeability_m2[a];
+                                    cell[a].1 += 0.5 * fluid.density_kg_m3 * inertial_per_m[a];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            porous
+        };
+        let fan_face = if config.internal_fans.is_empty() {
+            [Vec::new(), Vec::new(), Vec::new()]
+        } else {
+            let mut map = [0, 1, 2].map(|a| vec![usize::MAX; comps[a].kind.len()]);
+            for (i, fan) in config.internal_fans.iter().enumerate() {
+                let comp = &comps[fan.patch.axis];
+                for f in fan.patch.open_faces(domain) {
+                    map[fan.patch.axis][comp.index(f)] = i;
+                }
+            }
+            map
+        };
+        let internal_fans: Vec<InternalFanState> = config
+            .internal_fans
+            .iter()
+            .map(|fan| {
+                let comp = &comps[fan.patch.axis];
+                let faces: Vec<usize> = fan
+                    .patch
+                    .open_faces(domain)
+                    .into_iter()
+                    .map(|f| comp.index(f))
+                    .collect();
+                InternalFanState {
+                    axis: fan.patch.axis,
+                    sign: if fan.blows_positive { 1.0 } else { -1.0 },
+                    area: domain.dx() * domain.dx() * faces.len() as f64,
+                    faces,
+                    curve: fan.curve,
+                    flow: 0.0,
+                    rise: fan.curve.pressure(0.0),
+                    slope: fan.curve.slope(0.0),
+                }
+            })
+            .collect();
         Self {
             domain,
             config,
@@ -427,6 +742,41 @@ impl<'a> Solver<'a> {
             force: Vec::new(),
             faces: config.faces,
             sweeps: 0,
+            amg: None,
+            wall_distance: match config.turbulence {
+                Turbulence::Laminar => Vec::new(),
+                Turbulence::Lvel => wall_distance(
+                    domain,
+                    config
+                        .faces
+                        .map(|rule| matches!(rule, FvBoundary::Wall { .. })),
+                ),
+            },
+            eddy_viscosity: match config.turbulence {
+                Turbulence::Laminar => Vec::new(),
+                Turbulence::Lvel => vec![0.0; domain.cell_count()],
+            },
+            wall_ratio: match config.turbulence {
+                Turbulence::Laminar => Vec::new(),
+                Turbulence::Lvel => vec![1.0; domain.cell_count()],
+            },
+            wall_adjacent: match config.turbulence {
+                Turbulence::Laminar => Vec::new(),
+                Turbulence::Lvel => (0..domain.cell_count())
+                    .map(|c| {
+                        domain.is_fluid(c)
+                            && (0..6).any(|f| match domain.neighbor(c, f) {
+                                Some(n) => !domain.is_fluid(n),
+                                None => matches!(config.faces[f], FvBoundary::Wall { .. }),
+                            })
+                    })
+                    .collect(),
+            },
+            planar_loss,
+            porous,
+            fan_face,
+            internal_fans,
+            momentum_rms: [0.0; 3],
             fan: config.fan.map(|fan| {
                 let side = fan.face as usize;
                 let axis = side / 2;
@@ -451,6 +801,120 @@ impl<'a> Solver<'a> {
                 }
             }),
         }
+    }
+
+    /// Effective dynamic viscosity of `cell` (molecular plus eddy).
+    fn mu_eff(&self, cell: [usize; 3]) -> f64 {
+        if self.eddy_viscosity.is_empty() {
+            self.mu
+        } else {
+            self.rho
+                .mul_add(self.eddy_viscosity[cell_of(self.n, cell)], self.mu)
+        }
+    }
+
+    /// Wall viscosity of the half cell between `minus`/`plus` and a wall:
+    /// the law-of-the-wall secant (molecular when laminar).
+    fn wall_mu(&self, minus: [usize; 3], plus: [usize; 3]) -> f64 {
+        if self.wall_ratio.is_empty() {
+            return self.mu;
+        }
+        let ratio = 0.5
+            * (self.wall_ratio[cell_of(self.n, minus)] + self.wall_ratio[cell_of(self.n, plus)]);
+        self.mu * ratio
+    }
+
+    /// Mean effective viscosity at the CV edge shared by `minus` and
+    /// `plus` across direction `d` (`up`: toward +d): the fluid cells among
+    /// the two and their neighbours across the edge.
+    fn edge_mu(&self, minus: [usize; 3], plus: [usize; 3], d: usize, up: bool) -> f64 {
+        if self.eddy_viscosity.is_empty() {
+            return self.mu;
+        }
+        let (mut sum, mut count) = (self.mu_eff(minus) + self.mu_eff(plus), 2.0);
+        for c in [minus, plus] {
+            let across = if up {
+                (c[d] + 1 < self.n[d]).then(|| {
+                    let mut g = c;
+                    g[d] += 1;
+                    g
+                })
+            } else {
+                (c[d] > 0).then(|| {
+                    let mut g = c;
+                    g[d] -= 1;
+                    g
+                })
+            };
+            if let Some(g) = across
+                && self.domain.is_fluid(cell_of(self.n, g))
+            {
+                sum += self.mu_eff(g);
+                count += 1.0;
+            }
+        }
+        sum / count
+    }
+
+    /// LVEL: refresh the eddy viscosity from the current cell-centred
+    /// speeds (under-relaxed by one half after the first sweep).
+    fn update_turbulence(&mut self) {
+        if self.eddy_viscosity.is_empty() {
+            return;
+        }
+        let nu = self.mu / self.rho;
+        let first = self.sweeps <= 1;
+        for c in 0..self.domain.cell_count() {
+            if !self.domain.is_fluid(c) {
+                continue;
+            }
+            let at = self.domain.coords(c);
+            let mut speed2 = 0.0;
+            for a in 0..3 {
+                let v = 0.5
+                    * (self.vel[a][self.cell_face(a, at, false)]
+                        + self.vel[a][self.cell_face(a, at, true)]);
+                speed2 += v * v;
+            }
+            let reynolds = fs_math::det::sqrt(speed2) * self.wall_distance[c].min(1e6) / nu;
+            let (tangent, secant) = law_of_the_wall_ratios(reynolds);
+            let target = tangent * nu;
+            if first {
+                self.eddy_viscosity[c] = target;
+                self.wall_ratio[c] = secant;
+            } else {
+                self.eddy_viscosity[c] = 0.5 * (self.eddy_viscosity[c] + target);
+                self.wall_ratio[c] = 0.5 * (self.wall_ratio[c] + secant);
+            }
+        }
+    }
+
+    /// Eddy viscosity per cell, m^2/s (zeros when laminar).
+    pub(super) fn eddy_viscosity(&self) -> Vec<f64> {
+        if self.eddy_viscosity.is_empty() {
+            vec![0.0; self.domain.cell_count()]
+        } else {
+            self.eddy_viscosity.clone()
+        }
+    }
+
+    /// The eddy viscosity the energy equation uses per cell, m^2/s: the
+    /// law-of-the-wall secant `nu (y+/u+ - 1)` in wall-adjacent cells (their
+    /// conduction to the wall spans the half cell), LVEL's value elsewhere.
+    pub(super) fn heat_eddy_viscosity(&self) -> Vec<f64> {
+        if self.eddy_viscosity.is_empty() {
+            return vec![0.0; self.domain.cell_count()];
+        }
+        let nu = self.mu / self.rho;
+        (0..self.domain.cell_count())
+            .map(|c| {
+                if self.wall_adjacent[c] {
+                    nu * (self.wall_ratio[c] - 1.0)
+                } else {
+                    self.eddy_viscosity[c]
+                }
+            })
+            .collect()
     }
 
     /// Set the uniform normal inflow speed of inlet face `side`.
@@ -532,6 +996,13 @@ impl<'a> Solver<'a> {
     /// velocities entering it (see the module docs).
     pub(super) fn sweep(&mut self, gate: &CancelGate) -> Result<(f64, f64), ChtError> {
         self.sweeps += 1;
+        self.update_turbulence();
+        for fan in &mut self.internal_fans {
+            let sum: f64 = fan.faces.iter().map(|&f| self.vel[fan.axis][f]).sum();
+            fan.flow = fan.sign * self.area * sum;
+            fan.rise = fan.curve.pressure(fan.flow);
+            fan.slope = fan.curve.slope(fan.flow);
+        }
         let mut steady = 0.0f64;
         for a in 0..3 {
             steady = steady.max(self.momentum(a, gate)?);
@@ -595,9 +1066,9 @@ impl<'a> Solver<'a> {
 
     /// Momentum system of component `a`: assemble, under-relax, solve, and
     /// record SIMPLEC `d`. Returns the steady momentum residual of the
-    /// velocities on entry: `||b - A u|| / ||b||` of the row-scaled system
-    /// (under-relaxation cancels at `u = u_old`, so this is the residual of
-    /// the unrelaxed steady equations).
+    /// velocities on entry: `||b - A u||` of the row-scaled system over the
+    /// flow's momentum scale (under-relaxation cancels at `u = u_old`, so
+    /// this is the residual of the unrelaxed steady equations).
     #[allow(clippy::too_many_lines)] // one staggered control-volume assembly
     fn momentum(&mut self, a: usize, gate: &CancelGate) -> Result<f64, ChtError> {
         let comp = &self.comps[a];
@@ -607,7 +1078,7 @@ impl<'a> Solver<'a> {
         }
         let alpha = self.config.velocity_relaxation;
         let dx = self.domain.dx();
-        let diff = self.mu * self.area / dx;
+        let conductance = self.area / dx;
         let mut coo = Coo::new(rows, rows);
         let mut b = vec![0.0f64; rows];
         let mut a_p_relaxed = vec![0.0f64; rows];
@@ -659,6 +1130,8 @@ impl<'a> Solver<'a> {
                         let flux =
                             s * self.rho * self.area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
                         net_out += flux;
+                        let diff =
+                            conductance * self.mu_eff(if plus { plus_cell } else { minus_cell });
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
@@ -681,11 +1154,13 @@ impl<'a> Solver<'a> {
                     } else {
                         f[d] == 0
                     };
+                    let diff = conductance * self.edge_mu(minus_cell, plus_cell, d, plus);
                     if outside {
                         match self.faces[2 * d + usize::from(plus)] {
                             FvBoundary::Wall { velocity } => {
-                                a_p += 2.0 * diff;
-                                rhs = (2.0 * diff).mul_add(velocity[a], rhs);
+                                let wall = conductance * self.wall_mu(minus_cell, plus_cell);
+                                a_p += 2.0 * wall;
+                                rhs = (2.0 * wall).mul_add(velocity[a], rhs);
                             }
                             FvBoundary::Symmetry => {}
                             FvBoundary::Inlet { velocity } => {
@@ -727,13 +1202,40 @@ impl<'a> Solver<'a> {
                         // inflow through the edge brings zero momentum.
                         _ => {
                             net_out += edge_flux;
-                            a_p += 2.0f64.mul_add(diff, (-edge_flux).max(0.0));
+                            let wall = conductance * self.wall_mu(minus_cell, plus_cell);
+                            a_p += 2.0f64.mul_add(wall, (-edge_flux).max(0.0));
                         }
                     }
                 }
             }
             // Continuity is satisfied only at convergence: keep a_P >= sum.
             a_p += net_out.max(0.0);
+            let u_old = self.vel[a][index];
+            if let Some(&loss) = self.planar_loss[a].get(index) {
+                // 1/2 rho K |u| u across the face (Picard in |u|).
+                a_p += 0.5 * self.rho * loss * u_old.abs() * self.area;
+            }
+            if !self.porous.is_empty() {
+                // Half of the staggered volume lies in each adjacent cell.
+                let (m, p) = (
+                    self.porous[cell_of(self.n, minus_cell)][a],
+                    self.porous[cell_of(self.n, plus_cell)][a],
+                );
+                let per_volume = (0.5 * (m.1 + p.1)).mul_add(u_old.abs(), 0.5 * (m.0 + p.0));
+                a_p += per_volume * self.area * dx;
+            }
+            if let Some(&i) = self.fan_face[a].get(index)
+                && i != usize::MAX
+            {
+                // Rise dp(Q) on the face, linearized about the sweep's flow
+                // as if the whole patch moved with this face:
+                // S(u) = s A dp(Q0) + A slope A_fan (u - u0); exact at the
+                // fixed point, and the stiffness damps the fan-system loop.
+                let fan = &self.internal_fans[i];
+                let stiffness = -fan.slope * fan.area * self.area;
+                a_p += stiffness;
+                rhs += (fan.sign * self.area).mul_add(fan.rise, stiffness * u_old);
+            }
             // Interior faces separate two fluid cells; an outlet face sees
             // the ghost pressure -p_inside (boundary pressure zero).
             let drop = match comp.kind[index] {
@@ -764,16 +1266,22 @@ impl<'a> Solver<'a> {
         let mut x: Vec<f64> = comp.unknowns.iter().map(|&i| self.vel[a][i]).collect();
         let mut r = vec![0.0f64; rows];
         matrix.spmv(&x, &mut r);
-        let b_norm = norm(&b);
-        let steady = if b_norm > 0.0 {
-            fs_math::det::sqrt(
-                r.iter()
-                    .zip(&b)
-                    .map(|(ax, bi)| (bi - ax) * (bi - ax))
-                    .sum::<f64>(),
-            ) / b_norm
+        // Relative to the flow's momentum scale: the largest RMS right-hand
+        // side over the components (a component that vanishes by symmetry
+        // has a round-off `b`, and its own ratio would be noise over noise).
+        let rows_root = fs_math::det::sqrt(rows as f64);
+        self.momentum_rms[a] = norm(&b) / rows_root;
+        let scale = rows_root * self.momentum_rms.iter().fold(0.0f64, |m, v| m.max(*v));
+        let residual = fs_math::det::sqrt(
+            r.iter()
+                .zip(&b)
+                .map(|(ax, bi)| (bi - ax) * (bi - ax))
+                .sum::<f64>(),
+        );
+        let steady = if scale > 0.0 {
+            residual / scale
         } else {
-            norm(&r)
+            residual
         };
         // Inner solves reduce the entry residual by `momentum_tolerance`.
         let inner = (self.config.momentum_tolerance * steady).max(1e-15);
@@ -890,19 +1398,40 @@ impl<'a> Solver<'a> {
         for &row in &pins {
             coo.push(row, row, self.rho * self.area * self.domain.dx() / self.mu);
         }
-        let matrix = scale_rows(&coo, &mut b);
         let mut correction = vec![0.0f64; rows];
         if b.iter().any(|v| *v != 0.0) {
-            let outcome = bicgstab_ilu0(
-                "pressure",
-                &matrix,
-                &b,
-                &mut correction,
-                tolerance,
-                20_000,
-                gate,
-            )?;
-            self.pressure_krylov += outcome.iterations;
+            let mut solved = false;
+            if self.config.pressure_solver == PressureSolver::AmgCg {
+                poll(gate)?;
+                let matrix = coo.assemble();
+                let stale = self
+                    .amg
+                    .as_ref()
+                    .is_none_or(|(_, built)| self.sweeps >= built + AMG_REBUILD_SWEEPS);
+                if stale {
+                    self.amg = Some((SaAmg::new(&matrix, 0.08, 3), self.sweeps));
+                }
+                let (amg, _) = self.amg.as_ref().expect("built above");
+                let report = pcg(&matrix, &b, &mut correction, amg, tolerance, 500);
+                self.pressure_krylov += report.iters;
+                solved = report.converged && correction.iter().all(|v| v.is_finite());
+                if !solved {
+                    correction.fill(0.0);
+                }
+            }
+            if !solved {
+                let matrix = scale_rows(&coo, &mut b);
+                let outcome = bicgstab_ilu0(
+                    "pressure",
+                    &matrix,
+                    &b,
+                    &mut correction,
+                    tolerance,
+                    20_000,
+                    gate,
+                )?;
+                self.pressure_krylov += outcome.iterations;
+            }
         }
         let p_of = |cell: [usize; 3]| -> f64 {
             let c = cell_of(self.n, cell);
@@ -942,6 +1471,7 @@ impl<'a> Solver<'a> {
 }
 
 /// Admission shared by every SIMPLEC driver.
+#[allow(clippy::too_many_lines)] // one check per declared input
 pub(super) fn admit(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -994,6 +1524,64 @@ pub(super) fn admit(
             field: "simple.fan",
             reason: format!("the fan face {:?} must be declared an Inlet", fan.face),
         });
+    }
+    for resistance in &config.resistances {
+        match *resistance {
+            FlowResistance::Planar {
+                patch,
+                loss_coefficient,
+            } => {
+                patch.admit(domain, "simple.resistance.patch")?;
+                finite("simple.resistance.loss_coefficient", loss_coefficient)?;
+                if loss_coefficient < 0.0 {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.resistance.loss_coefficient",
+                        reason: format!("must be non-negative, got {loss_coefficient}"),
+                    });
+                }
+            }
+            FlowResistance::Volume {
+                lo,
+                hi,
+                permeability_m2,
+                inertial_per_m,
+            } => {
+                let n = domain.dims();
+                if (0..3).any(|a| lo[a] >= hi[a] || hi[a] > n[a]) {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.resistance.cells",
+                        reason: format!("cells {lo:?}..{hi:?} must be non-empty within {n:?}"),
+                    });
+                }
+                for a in 0..3 {
+                    if !(permeability_m2[a] > 0.0) {
+                        return Err(ChtError::InvalidInput {
+                            field: "simple.resistance.permeability_m2",
+                            reason: format!(
+                                "must be positive (infinite: no viscous term), got {}",
+                                permeability_m2[a]
+                            ),
+                        });
+                    }
+                    finite("simple.resistance.inertial_per_m", inertial_per_m[a])?;
+                    if inertial_per_m[a] < 0.0 {
+                        return Err(ChtError::InvalidInput {
+                            field: "simple.resistance.inertial_per_m",
+                            reason: format!("must be non-negative, got {}", inertial_per_m[a]),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for fan in &config.internal_fans {
+        fan.patch.admit(domain, "simple.internal_fan.patch")?;
+        if fan.patch.open_faces(domain).is_empty() {
+            return Err(ChtError::InvalidInput {
+                field: "simple.internal_fan.patch",
+                reason: "the fan covers no face between two fluid cells".into(),
+            });
+        }
     }
     if domain.fluid_count() == 0 {
         return Err(ChtError::InvalidDomain {
@@ -1071,11 +1659,24 @@ impl Solver<'_> {
                 .fan
                 .as_ref()
                 .map(|fan| (fan.flow, fan.curve.pressure(fan.flow), fan.residual)),
+            internal_fans: self
+                .internal_fans
+                .iter()
+                .map(|fan| {
+                    let sum: f64 = fan.faces.iter().map(|&f| self.vel[fan.axis][f]).sum();
+                    let flow = fan.sign * self.area * sum;
+                    (flow, fan.curve.pressure(flow))
+                })
+                .collect(),
         };
+        let eddy_viscosity_m2_s = self.eddy_viscosity();
+        let heat_eddy_viscosity_m2_s = self.heat_eddy_viscosity();
         Ok(FvFlow {
             field,
             velocity_m_s,
             pressure_pa: self.pressure,
+            eddy_viscosity_m2_s,
+            heat_eddy_viscosity_m2_s,
             report,
         })
     }

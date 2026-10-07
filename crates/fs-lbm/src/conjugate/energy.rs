@@ -77,6 +77,9 @@ pub struct ThermalSetup {
     /// Linear exchanges `G (T_cell - T_sink)` leaving individual cells (a
     /// linearized radiation exchange, a compact thermal model's link).
     pub cell_sinks: Vec<CellSink>,
+    /// Turbulent conductivity added to each FLUID cell, W/(m K) (empty: none;
+    /// otherwise one entry per cell, for example `FvFlow::eddy_conductivity`).
+    pub eddy_conductivity_w_m_k: Vec<f64>,
 }
 
 /// A linear heat path from one cell to a fixed temperature: the heat
@@ -112,6 +115,7 @@ impl ThermalSetup {
             fixed_temperature: Vec::new(),
             contacts: Vec::new(),
             cell_sinks: Vec::new(),
+            eddy_conductivity_w_m_k: Vec::new(),
         }
     }
 
@@ -565,9 +569,30 @@ pub(crate) fn solve_energy_inner(
             }
         }
     }
+    if !setup.eddy_conductivity_w_m_k.is_empty() {
+        if setup.eddy_conductivity_w_m_k.len() != cells {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.eddy_conductivity_w_m_k",
+                reason: format!(
+                    "expected {cells} entries, got {}",
+                    setup.eddy_conductivity_w_m_k.len()
+                ),
+            });
+        }
+        for &k in &setup.eddy_conductivity_w_m_k {
+            finite("thermal.eddy_conductivity_w_m_k", k)?;
+            if k < 0.0 {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.eddy_conductivity_w_m_k",
+                    reason: "must be non-negative".into(),
+                });
+            }
+        }
+    }
+    let eddy = |c: usize| setup.eddy_conductivity_w_m_k.get(c).copied().unwrap_or(0.0);
     let k: Vec<[f64; 3]> = (0..cells)
         .map(|c| match domain.voxel_at(c) {
-            Voxel::Fluid => [fluid.conductivity_w_m_k; 3],
+            Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
             Voxel::Solid(m) => solids[usize::from(m)].axis_conductivity(),
         })
         .collect();
