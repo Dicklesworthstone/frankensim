@@ -1,29 +1,62 @@
-//! Bind native cooling probability/sensitivity studies without another sampler.
-//!
-//! The program's root seed belongs to the physical project; the study source
-//! explicitly owns a DIFFERENT sampling seed. Neither is replaced here. The
-//! native driver owns assets, calibration, evaluation accounting and recovery.
+//! Bind native studies to the exact bounded model snapshots that execute.
+//! Physical and sampling seeds stay distinct; the ordinary native producer
+//! owns calibration, numerical evaluation, retained results and recovery.
 
-use std::io::Read as _;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use fs_project::uncertainty::UncertaintyStudy;
-
+use fs_blake3::ContentHash;
+use crate::study::{PreparedStudy, StudyPins};
 use super::{Binder, Node, ProjectBinding, Refusals, count_of, string_of};
-use crate::{CommandOutput, OutputMode, read_project_for_solve};
+use crate::{CommandOutput, OutputMode};
 
 #[derive(Debug)]
 pub(super) struct StudyStep {
-    source: PathBuf,
+    model: Rc<PreparedStudy>,
     budget: Option<String>,
 }
 
 impl StudyStep {
     pub(super) fn run(&self, ledger: &Path, mode: OutputMode) -> CommandOutput {
-        // Keep the ordinary native study's complete receipt as the step result,
-        // including its resumable run ID on budget exhaustion. Program execution
-        // stops on any non-success; later clauses cannot consume a partial study.
-        crate::study::study_path(&self.source, ledger, self.budget.as_deref(), mode)
+        self.model.run(ledger, self.budget.as_deref(), mode)
+    }
+}
+
+/// Program-local input snapshots. The same declared source path always means
+/// the first admitted snapshot, even if the filesystem changes between clauses.
+/// Distinct paths share one aggregate input-byte allowance (not an RSS claim).
+pub(super) struct SnapshotCache {
+    limit: u64,
+    used: u64,
+    models: BTreeMap<PathBuf, Rc<PreparedStudy>>,
+}
+
+impl SnapshotCache {
+    pub(super) fn new(memory: Option<u64>) -> Self {
+        // Match the native model's input-storage allocation; leave room for
+        // decoded state and numerical work. No implicit unlimited grant.
+        Self { limit: memory.map_or(0, |bytes| (bytes / 4).min(256 * 1024 * 1024)),
+            used: 0, models: BTreeMap::new() }
+    }
+
+    fn prepare(&mut self, source: PathBuf, pins: StudyPins) -> Result<Rc<PreparedStudy>, String> {
+        if let Some(model) = self.models.get(&source) {
+            model.check(pins)?;
+            return Ok(Rc::clone(model));
+        }
+        let remaining = self.limit.checked_sub(self.used)
+            .filter(|remaining| *remaining > 0)
+            .ok_or("native study snapshots exceed the program's declared input-storage allowance; declare a sufficient (budget (mem ...))")?;
+        let model = PreparedStudy::load(&source, pins, remaining)?;
+        let used = self.used.checked_add(model.input_bytes())
+            .filter(|used| *used <= self.limit)
+            .ok_or("native study snapshot input-byte accounting exceeded the program allowance")?;
+        let model = Rc::new(model);
+        // A refused load/pin never publishes a cache entry or spends storage.
+        self.models.insert(source, Rc::clone(&model));
+        self.used = used;
+        Ok(model)
     }
 }
 
@@ -46,7 +79,7 @@ fn options<'a>(named: &[(&str, &'a Node)]) -> Result<Options<'a>, String> {
             "hash" if hash.is_none() => {
                 let pin = string_of(value)
                     .ok_or("cooling.study :hash needs a 64-hex canonical-study hash string")?;
-                if fs_blake3::ContentHash::from_hex(pin).is_none() {
+                if ContentHash::from_hex(pin).is_none() {
                     return Err("cooling.study :hash is not a 64-hex content hash".into());
                 }
                 hash = Some(pin);
@@ -66,70 +99,29 @@ fn options<'a>(named: &[(&str, &'a Node)]) -> Result<Options<'a>, String> {
     })
 }
 
-fn read_source(path: &Path) -> Result<UncertaintyStudy, String> {
-    let cap = fs_project::uncertainty::MAX_SOURCE_BYTES as u64;
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > cap {
-        return Err(format!("native study must be a regular UTF-8 file within {cap} bytes"));
-    }
-    let mut text = String::new();
-    file.take(cap + 1).read_to_string(&mut text).map_err(|e| e.to_string())?;
-    if text.len() as u64 > cap {
-        return Err("native study exceeded its source limit while being read".into());
-    }
-    UncertaintyStudy::parse(&text).map_err(|e| format!("{}: {}", e.code, e.detail))
-}
-
-fn plan(
-    binder: &Binder<'_>,
-    project: &ProjectBinding,
-    options: Options<'_>,
-    mode: OutputMode,
-) -> Result<StudyStep, String> {
+fn plan(binder: &mut Binder<'_>, project: &ProjectBinding, options: Options<'_>) -> Result<StudyStep, String> {
     let source = binder.resolve(options.source);
-    let study = read_source(&source)?;
-    let hash = fs_blake3::hash_bytes(study.canonical().as_bytes()).to_hex();
-    if options.hash.is_some_and(|pin| pin != hash) {
-        return Err(format!("native study hashes to {hash}, not its pinned :hash"));
-    }
-    if binder.wall_seconds.is_some_and(|wall| wall < study.wall_seconds()) {
-        return Err(format!(
-            "native study declares {} s, above the program's wall allowance; :budget limits evaluations, not the declared wall allowance",
-            study.wall_seconds(),
-        ));
-    }
-    // Paths inside the native source belong to THAT source's directory, not
-    // the program's directory. Equal canonical project content is the binding,
-    // not path spelling: relocated copies retain the same physical identity.
-    let relative = Path::new(study.project_path());
-    if relative.is_absolute() {
-        return Err("native study project paths must be relative to the study file".into());
-    }
-    let base_path = source.parent().unwrap_or_else(|| Path::new(".")).join(relative);
-    let base = read_project_for_solve(&base_path, mode).map_err(|out| out.stderr)?;
-    if base.hash().to_hex() != project.hash {
-        return Err("native study's physical project differs from the cooling.project binding".into());
-    }
-    // Reuse the owner's complete target, support, dependence and policy gates.
-    // In particular, a malformed late study clause cannot allow an earlier
-    // cooling.import/solve clause to create a ledger first.
-    study.bind(&base.spec).map_err(|e| format!("{}: {}", e.code, e.detail))?;
-    Ok(StudyStep { source, budget: options.budget.map(|v| v.to_string()) })
+    let pins = StudyPins {
+        project: ContentHash::from_hex(&project.hash).ok_or("invalid bound project identity")?,
+        source: options.hash.map(|hash| ContentHash::from_hex(hash)
+            .ok_or("invalid canonical-study pin")).transpose()?,
+        wall_seconds: binder.wall_seconds,
+    };
+    let model = binder.native_studies.prepare(source, pins)?;
+    Ok(StudyStep { model, budget: options.budget.map(|value| value.to_string()) })
 }
 
 pub(super) fn bind(
-    binder: &Binder<'_>,
+    binder: &mut Binder<'_>,
     project: &ProjectBinding,
     named: &[(&str, &Node)],
     refusals: &mut Refusals,
 ) -> Option<StudyStep> {
-    let result = options(named).and_then(|options| plan(binder, project, options, refusals.mode));
-    match result {
+    match options(named).and_then(|options| plan(binder, project, options)) {
         Ok(step) => Some(step),
         Err(error) => {
             refusals.push("frankenscript-native-study", error,
-                "use (cooling.study project :source \"study.fsim\" [:hash \"canonical-study-hash\"] [:budget N]); bind the same physical project and cover the native wall allowance");
+                "use (cooling.study project :source \"study.fsim\" [:hash \"canonical-study-hash\"] [:budget N]); bind the same physical project and provide readable assets within the program's wall and memory allowances");
             None
         }
     }
@@ -177,3 +169,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "native_study/snapshot_tests.rs"]
+mod snapshot_tests;
