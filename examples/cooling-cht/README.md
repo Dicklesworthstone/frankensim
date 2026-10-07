@@ -156,6 +156,15 @@ Examples:
   voxelized body holds 4.80e-5 m^3 of the STL's 5.28e-5 m^3 (its 5 mm base
   top lies on a voxel centre and falls outside under the tie rule): refine
   `voxel_m` before reading temperatures to better than that geometry.
+- `stl-heatsink-unsteady.json`: the same body at 0.5 m/s, the case the
+  steady solver refuses (its wake never settles), marched instead: 100
+  BDF2 steps of 20 ms from rest (`"flow": "unsteady"`) with the steady
+  energy on the flow averaged over the last 50 steps (`"energy":
+  "steady-on-mean-flow"`), at 4 mm voxels. Measured (debug build, 469 s):
+  1324 sweeps in all, inflow 1.638e-3 m^3/s, die at 311.40 K for 3 W from
+  293.15 K air, energy balance 5e-13. Coarse geometry and the neglected
+  `<u' T'>` correlation bound what this shows: a usable mean answer where
+  the steady path has none, not a validated temperature.
 
 Results are Estimated numerical evidence at one resolution: turbulence only
 through the algebraic LVEL closure (its friction runs 13-16 % above
