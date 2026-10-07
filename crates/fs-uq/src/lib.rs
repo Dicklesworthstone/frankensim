@@ -14,6 +14,8 @@
 pub mod adaptive;
 pub mod anytime;
 pub mod chance;
+/// Bounded selection of complete experiments from local observation Jacobians.
+pub mod experimental_design;
 pub mod kl;
 pub mod mlmc;
 pub mod pce;
