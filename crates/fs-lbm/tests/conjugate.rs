@@ -15,13 +15,14 @@
 
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
+use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, ContactResistance, ConvectionScheme, EnergyConfig, FanCurve,
-    FanInlet, FlowFace, FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig,
-    LbmCollisionChoice, LbmFlowConfig, RadiationConfig, STEFAN_BOLTZMANN, SimpleConfig,
-    SolidMaterial, ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, escape_factors,
-    fv_natural_convection, lbm_duct_flow, march_energy, natural_convection, simple_flow,
-    solve_energy, solve_energy_radiating,
+    BuoyancyConfig, ChtError, CompactComponent, ContactResistance, ConvectionScheme, EnergyConfig,
+    FacePatch, FanCurve, FanInlet, FlowFace, FlowField, FlowResistance, FluidProperties,
+    FvBoundary, FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig, RadiationConfig,
+    STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
+    Turbulence, Voxel, VoxelDomain, escape_factors, fv_natural_convection, lbm_duct_flow,
+    march_energy, natural_convection, simple_flow, solve_energy, solve_energy_radiating,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -79,6 +80,108 @@ fn composite_slab_conduction_is_exact() {
     let balance = solution.report.balance;
     assert!(balance.boundary_outflow_w.abs() < 1e-12, "{balance:?}");
     assert!(balance.relative_residual < 1e-12, "{balance:?}");
+}
+
+#[test]
+fn two_resistor_component_matches_its_network() {
+    // A 4 x 4 x 2-cell compact component between two k = 5 slabs (2 cells
+    // each) held at 300 K below and 310 K above: the junction sees two paths,
+    // R_b = R_jb + 2 dx / (k A) and R_t = R_jc + 2 dx / (k A), exactly.
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(4, 4, 6, dx, |p| {
+        Voxel::Solid(u16::from(p[2] > 2.0 * dx && p[2] < 4.0 * dx))
+    })
+    .unwrap();
+    let solids = [
+        SolidMaterial::new("slab", 5.0),
+        SolidMaterial::new("package", 1.0),
+    ];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[4] = ThermalFace::Temperature(300.0);
+    faces[5] = ThermalFace::Temperature(310.0);
+    let mut setup = ThermalSetup::new(faces);
+    let (power, r_jc, r_jb) = (1.0, 50.0, 20.0);
+    setup.compact_components.push(CompactComponent {
+        lo: [0, 0, 2],
+        hi: [4, 4, 4],
+        board_face: Face3::ZMin,
+        power_w: power,
+        junction_to_case_k_w: r_jc,
+        junction_to_board_k_w: r_jb,
+    });
+    let solve = |setup: &ThermalSetup| {
+        solve_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            setup,
+            &EnergyConfig::default(),
+            &gate,
+        )
+    };
+    let solution = solve(&setup).unwrap();
+    let area = 16.0 * dx * dx;
+    let slabs = 2.0 * dx / (5.0 * area);
+    let (r_b, r_t) = (r_jb + slabs, r_jc + slabs);
+    let exact = (power + 300.0 / r_b + 310.0 / r_t) / (1.0 / r_b + 1.0 / r_t);
+    let junction = &solution.junctions[0];
+    assert!(
+        (junction.temperature_k - exact).abs() < 1e-9,
+        "{} vs {exact}",
+        junction.temperature_k
+    );
+    assert!((junction.board_w - (exact - 300.0) / r_b).abs() < 1e-9);
+    assert!((junction.case_w - (exact - 310.0) / r_t).abs() < 1e-9);
+    assert!((junction.case_w + junction.board_w - power).abs() < 1e-12);
+    // The collapsed cells report the junction; the balance closes.
+    assert!((solution.temperature[domain.index(2, 2, 3)] - exact).abs() < 1e-9);
+    assert!((solution.report.balance.source_w - power).abs() < 1e-15);
+    // Solver-limited: the Dirichlet terms dwarf the 1 W source.
+    assert!(
+        solution.report.balance.relative_residual < 1e-10,
+        "{:?}",
+        solution.report.balance
+    );
+    assert_eq!(solution.report.unknowns, domain.cell_count() + 1);
+    // Refusals: the board face on the domain boundary, power inside the box,
+    // a transient march.
+    let mut on_boundary = setup.clone();
+    on_boundary.compact_components[0].lo = [0, 0, 0];
+    on_boundary.compact_components[0].hi = [4, 4, 2];
+    let mut powered = setup.clone();
+    powered.add_uniform_power(&domain, 0.5, |p| p[2] > 2.0 * dx && p[2] < 4.0 * dx);
+    for bad in [on_boundary, powered] {
+        assert!(matches!(
+            solve(&bad),
+            Err(ChtError::InvalidInput {
+                field: "thermal.compact_components",
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        march_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            &setup,
+            &vec![300.0; domain.cell_count()],
+            |_| 1.0,
+            &TransientConfig {
+                time_step_s: 1.0,
+                steps: 1,
+                energy: EnergyConfig::default(),
+            },
+            &gate,
+        ),
+        Err(ChtError::InvalidInput {
+            field: "thermal.compact_components",
+            ..
+        })
+    ));
 }
 
 /// Parallel plates of gap `h` resolved by `n` cells, analytic Poiseuille
@@ -1532,6 +1635,184 @@ fn fv_open_chimney_approaches_the_elenbaas_developed_limit() {
     );
 }
 
+/// Plug-flow channel along x (symmetry on y and z), `nx` cells long and 4
+/// across, unit cells; the given x rules.
+fn plug_channel(nx: usize, x_minus: FvBoundary) -> (VoxelDomain, SimpleConfig) {
+    let domain = VoxelDomain::new(nx, 4, 1, 1.0).unwrap();
+    let mut config = SimpleConfig::new([
+        x_minus,
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.tolerance = 1e-10;
+    (domain, config)
+}
+
+fn full_plane(index: usize) -> FacePatch {
+    FacePatch {
+        axis: 0,
+        index,
+        lo: [0, 0, 0],
+        hi: [0, 4, 1],
+    }
+}
+
+#[test]
+fn planar_resistance_jumps_the_pressure_by_half_rho_k_u_squared() {
+    // Uniform flow through a grille of K = 4 (Idelchik's 50 % perforated
+    // plate): the pressure is flat on both sides and drops by 1/2 rho K U^2
+    // across the plane.
+    let gate = CancelGate::new();
+    let speed = 0.5;
+    let (domain, mut config) = plug_channel(
+        24,
+        FvBoundary::Inlet {
+            velocity: [speed, 0.0, 0.0],
+        },
+    );
+    let k = FlowResistance::perforated_plate_loss(0.5).unwrap();
+    assert!((k - 3.999396).abs() < 1e-6, "{k}");
+    config.resistances.push(FlowResistance::Planar {
+        patch: full_plane(12),
+        loss_coefficient: k,
+    });
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let expected = 0.5 * k * speed * speed;
+    let (up, down) = (
+        flow.mean_pressure(&domain, 0, 11).unwrap(),
+        flow.mean_pressure(&domain, 0, 12).unwrap(),
+    );
+    assert!(
+        (up - down - expected).abs() < 1e-8 * expected,
+        "{up} {down}"
+    );
+    assert!((flow.mean_pressure(&domain, 0, 0).unwrap() - up).abs() < 1e-8 * expected);
+    assert!(down.abs() < 1e-8 * expected, "{down}");
+    // Refusals: a boundary plane, a negative coefficient.
+    for bad in [
+        FlowResistance::Planar {
+            patch: full_plane(0),
+            loss_coefficient: 1.0,
+        },
+        FlowResistance::Planar {
+            patch: full_plane(5),
+            loss_coefficient: -1.0,
+        },
+    ] {
+        let mut wrong = config.clone();
+        wrong.resistances = vec![bad];
+        assert!(matches!(
+            simple_flow(&domain, &unit_fluid(), &wrong, &gate),
+            Err(ChtError::InvalidInput { .. })
+        ));
+    }
+}
+
+#[test]
+fn internal_fan_settles_where_its_curve_meets_the_grille() {
+    // A channel open at both ends, an internal fan (linear curve: 10 Pa
+    // shut-off, 8 m^3/s free delivery) blowing +x against a K = 6 grille:
+    // the operating point solves p0 (1 - Q / Qmax) = 1/2 rho K (Q / A)^2.
+    let gate = CancelGate::new();
+    let (domain, mut config) = plug_channel(24, FvBoundary::Outlet);
+    let (p0, q_max, k, area) = (10.0, 8.0, 6.0, 4.0);
+    let curve = FanCurve::new(&[(0.0, p0), (q_max, 0.0)]).unwrap();
+    config.internal_fans.push(InternalFan {
+        patch: full_plane(8),
+        blows_positive: true,
+        curve,
+    });
+    config.resistances.push(FlowResistance::Planar {
+        patch: full_plane(16),
+        loss_coefficient: k,
+    });
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    // (rho K / 2 A^2) Q^2 + (p0 / Qmax) Q - p0 = 0.
+    let (qa, qb) = (0.5 * k / (area * area), p0 / q_max);
+    let exact = (-qb + qb.mul_add(qb, 4.0 * qa * p0).sqrt()) / (2.0 * qa);
+    let (q, rise) = flow.report.internal_fans[0];
+    eprintln!(
+        "internal fan: Q {q:.9} exact {exact:.9} rise {rise:.6} iterations {}",
+        flow.report.iterations
+    );
+    assert!((q - exact).abs() < 1e-8 * exact, "{q} vs {exact}");
+    assert!((rise - curve.pressure(q)).abs() < 1e-12);
+    // Ambient at both openings; the fan raises, the grille drops.
+    let p = |i| flow.mean_pressure(&domain, 0, i).unwrap();
+    assert!(
+        p(4).abs() < 1e-7 && p(20).abs() < 1e-7,
+        "{} {}",
+        p(4),
+        p(20)
+    );
+    assert!((p(12) - rise).abs() < 1e-7 * rise);
+    assert!((flow.report.inflow_m3_s - q).abs() < 1e-9 * q);
+    // Reversing the fan reverses the flow with the same magnitude.
+    let mut reversed = config.clone();
+    reversed.internal_fans[0].blows_positive = false;
+    let back = simple_flow(&domain, &unit_fluid(), &reversed, &gate).unwrap();
+    let (q_back, _) = back.report.internal_fans[0];
+    assert!((q_back - exact).abs() < 1e-8 * exact, "{q_back}");
+    assert!(back.field.boundary_outflow(&domain, Face3::XMin) > 0.0);
+    // A fan on solid-only faces refuses.
+    let mut blocked = domain.clone();
+    for y in 0..4 {
+        blocked.set(8, y, 0, Voxel::Solid(0));
+    }
+    assert!(matches!(
+        simple_flow(&blocked, &unit_fluid(), &config, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.internal_fan.patch",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn porous_block_follows_darcy_forchheimer() {
+    // A 10-cell block across the channel: the pressure falls by
+    // (mu U / kappa + rho C U^2 / 2) L between the cells bracketing it, and
+    // is flat elsewhere.
+    let gate = CancelGate::new();
+    let speed = 0.4;
+    let (domain, mut config) = plug_channel(
+        30,
+        FvBoundary::Inlet {
+            velocity: [speed, 0.0, 0.0],
+        },
+    );
+    let (kappa, c) = (2.0, 3.0);
+    config.resistances.push(FlowResistance::Volume {
+        lo: [10, 0, 0],
+        hi: [20, 4, 1],
+        permeability_m2: [kappa, f64::INFINITY, f64::INFINITY],
+        inertial_per_m: [c, 0.0, 0.0],
+    });
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let expected = (speed / kappa + 0.5 * c * speed * speed) * 10.0;
+    let drop =
+        flow.mean_pressure(&domain, 0, 9).unwrap() - flow.mean_pressure(&domain, 0, 20).unwrap();
+    assert!(
+        (drop - expected).abs() < 1e-8 * expected,
+        "{drop} vs {expected}"
+    );
+    assert!(flow.mean_pressure(&domain, 0, 25).unwrap().abs() < 1e-8 * expected);
+    let mut wrong = config.clone();
+    wrong.resistances = vec![FlowResistance::Volume {
+        lo: [10, 0, 0],
+        hi: [20, 4, 1],
+        permeability_m2: [0.0, 1.0, 1.0],
+        inertial_per_m: [0.0; 3],
+    }];
+    assert!(matches!(
+        simple_flow(&domain, &unit_fluid(), &wrong, &gate),
+        Err(ChtError::InvalidInput { .. })
+    ));
+}
+
 #[test]
 fn simplec_fan_inlet_settles_at_the_fan_and_system_curve_intersection() {
     // A channel driven by a linear fan curve (3 Pa shut-off, free delivery
@@ -1771,6 +2052,92 @@ fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
 }
 
 #[test]
+fn sealed_enclosure_exchanges_by_the_two_surface_formula() {
+    // A convex 2 x 2 x 2-cell cube (eps 0.8, 1 W) inside a sealed shell
+    // (eps 0.5) held near 300 K, air made non-conducting: every ray from the
+    // cube is absorbed or reflected by the shell, so the gray two-surface
+    // enclosure law holds,
+    // P = sigma A1 (T1^4 - T2^4) / (1/eps1 + (A1/A2) (1/eps2 - 1)),
+    // exactly for a black shell and up to the shell's radiosity
+    // non-uniformity otherwise. Measured: black shell 1.5e-11, eps2 0.5
+    // 2.3e-6 (relative, in T1). The escape-only model sees no surroundings
+    // and radiates nothing.
+    let gate = CancelGate::new();
+    let (n, dx) = (8usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        let cell = p.map(|v| (v / dx).floor() as usize);
+        if cell.iter().any(|&c| c == 0 || c == n - 1) {
+            Voxel::Solid(0)
+        } else if cell.iter().all(|&c| (3..5).contains(&c)) {
+            Voxel::Solid(1)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let solids = [
+        SolidMaterial::new("shell", 1e3),
+        SolidMaterial::new("cube", 1e4),
+    ];
+    let mut setup = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
+    let power = 1.0;
+    setup.add_uniform_power(&domain, power, |p| {
+        p.iter().all(|&v| v > 3.0 * dx && v < 5.0 * dx)
+    });
+    let (eps1, eps2) = (0.8, 0.5);
+    let mut radiation = RadiationConfig::new(vec![eps2, eps1], [None; 6]);
+    radiation.rays_per_face = 1024;
+    let (solution, report) = solve_energy_radiating(
+        &domain,
+        &fluid,
+        &solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let cube = solution.temperature[domain.index(3, 3, 3)];
+    let shell = solution.temperature[domain.index(1, 0, 1)];
+    let (a1, a2) = (24.0 * dx * dx, 216.0 * dx * dx);
+    let resistance = 1.0 / eps1 + (a1 / a2) * (1.0 / eps2 - 1.0);
+    let exact = (power * resistance / (STEFAN_BOLTZMANN * a1) + shell.powi(4)).powf(0.25);
+    eprintln!(
+        "sealed enclosure: cube {cube:.6} K exact {exact:.6} K ({:+.2e}), shell {shell:.6}, patches {}, iterations {}",
+        cube / exact - 1.0,
+        report.patches,
+        report.iterations
+    );
+    assert!((cube / exact - 1.0).abs() < 1e-5, "{cube} vs {exact}");
+    assert!(
+        report.radiated_w.abs() < 1e-12,
+        "sealed: {}",
+        report.radiated_w
+    );
+    // The heat crosses the gap by radiation and leaves through the shell.
+    let balance = solution.report.balance;
+    assert!(
+        (balance.boundary_outflow_w - power).abs() < 1e-6 * power,
+        "{balance:?}"
+    );
+    assert!(balance.sink_outflow_w.abs() < 1e-6 * power, "{balance:?}");
+    // Without exchange there is no radiative path: the cube can only heat up
+    // until the (refused) Picard budget, or radiate nothing.
+    let mut escape_only = radiation.clone();
+    escape_only.surface_exchange = false;
+    assert!(
+        escape_factors(&domain, &solids, &escape_only, &gate)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn parallel_plate_escape_matches_the_analytic_view_factor() {
     // Two directly opposed 8 x 8 plates four cells apart, open on all four
     // sides: the lower plate's mean escape factor is 1 - F_12, with F_12 the
@@ -1830,4 +2197,212 @@ fn parallel_plate_escape_matches_the_analytic_view_factor() {
     )
     .unwrap();
     assert_eq!(exposed, again);
+}
+/// Fully developed half-channel of the continuum LVEL model: the shear
+/// `tau = rho u_tau^2 (1 - y/h)` carried by `rho nu (1 + nu_t/nu) du/dy`, with
+/// `nu_t` from the local `Re = u y / nu`; returns the Darcy factor at bulk
+/// speed `mean` (bisection on `u_tau`, midpoint rule over 4000 steps). This is
+/// the model's own answer, the reference that verifies the discretization.
+fn lvel_continuum_darcy(h: f64, nu: f64, mean: f64) -> f64 {
+    let bulk = |u_tau: f64| {
+        let steps = 4000;
+        let dy = h / steps as f64;
+        let (mut u, mut integral) = (0.0f64, 0.0);
+        for i in 0..steps {
+            let y = (i as f64 + 0.5) * dy;
+            let tau = u_tau * u_tau * (1.0 - y / h);
+            let slope = |u: f64| tau / (nu * (1.0 + eddy_viscosity_ratio(u * y / nu)));
+            let half = 0.5f64.mul_add(dy * slope(u), u);
+            let next = dy.mul_add(slope(half), u);
+            integral += 0.5 * (u + next) * dy;
+            u = next;
+        }
+        integral / h
+    };
+    let (mut lo, mut hi) = (0.01 * mean, 0.2 * mean);
+    for _ in 0..50 {
+        let mid = 0.5 * (lo + hi);
+        if bulk(mid) > mean {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let u_tau = 0.5 * (lo + hi);
+    8.0 * u_tau * u_tau / (mean * mean)
+}
+
+/// Half-channel (wall at y-, symmetry at y+, height `h` = 10 mm, `n` cells
+/// across, 120 h long) at `Re_Dh` with LVEL: the developed Darcy factor over
+/// 80..110 h, the local Nu at 100 h for a 301 K wall and 300 K inflow, and
+/// the bulk speed.
+fn lvel_channel(n: usize, re_dh: f64) -> (f64, f64, f64, fs_lbm::conjugate::SimpleReport) {
+    let gate = CancelGate::new();
+    let h = 0.01;
+    let dx = h / n as f64;
+    let nx = 120 * n;
+    let domain = VoxelDomain::new(nx, n, 1, dx).unwrap();
+    let fluid = FluidProperties::dry_air_300k();
+    let dh = 4.0 * h;
+    let mean = re_dh * fluid.kinematic_viscosity_m2_s / dh;
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [mean, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.turbulence = Turbulence::Lvel;
+    config.tolerance = 1e-6;
+    config.max_iterations = 6000;
+    let flow = simple_flow(&domain, &fluid, &config, &gate).unwrap();
+    let (a, b) = (80 * n, 110 * n);
+    let gradient = (flow.mean_pressure(&domain, 0, a).unwrap()
+        - flow.mean_pressure(&domain, 0, b).unwrap())
+        / ((b - a) as f64 * dx);
+    let darcy = gradient * dh / (0.5 * fluid.density_kg_m3 * mean * mean);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    faces[2] = ThermalFace::Temperature(301.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.eddy_conductivity_w_m_k = flow.eddy_conductivity(&fluid);
+    let energy = solve_energy(
+        &domain,
+        &fluid,
+        &[],
+        &flow.field,
+        &setup,
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    // Local Nu at x = 100 h from the wall flux through the first cell.
+    let station = 100 * n;
+    let wall_cell = domain.index(station, 0, 0);
+    let k_wall = fluid.conductivity_w_m_k + setup.eddy_conductivity_w_m_k[wall_cell];
+    let q = 2.0 * k_wall * (301.0 - energy.temperature[wall_cell]) / dx;
+    let tb = energy
+        .bulk_temperature_x(&domain, &flow.field, station)
+        .unwrap();
+    let nu = q * dh / (fluid.conductivity_w_m_k * (301.0 - tb));
+    (darcy, nu, mean, flow.report)
+}
+
+/// Dean's developed channel friction (Darcy on `D_h = 4h`, `Re_m` on the
+/// full height `2h`) and Gnielinski's Nu with Petukhov's f (a pipe
+/// correlation applied on `D_h`), at `Re_Dh`, Pr 0.71.
+fn turbulent_channel_references(re_dh: f64) -> (f64, f64) {
+    let dean = 4.0 * 0.073 * (re_dh / 2.0).powf(-0.25);
+    let fp = 0.790f64.mul_add(re_dh.ln(), -1.64).powi(-2);
+    let pr: f64 = 0.71;
+    let gnielinski = (fp / 8.0) * (re_dh - 1000.0) * pr
+        / (12.7 * (fp / 8.0).sqrt()).mul_add(pr.powf(2.0 / 3.0) - 1.0, 1.0);
+    (dean, gnielinski)
+}
+
+#[test]
+fn lvel_ratios_invert_spaldings_profile() {
+    // At chosen u+, Re_L = u+ y+(u+) must return the profile's slope - 1 and
+    // y+/u+; both vanish to laminar as Re_L -> 0.
+    let (kappa, e) = (0.41f64, 8.6f64);
+    for u in [0.5f64, 3.0, 11.0, 20.0, 30.0] {
+        let ku = kappa * u;
+        let y = u + (ku.exp() - 1.0 - ku - 0.5 * ku * ku - ku * ku * ku / 6.0) / e;
+        let slope = 1.0 + kappa * (ku.exp() - 1.0 - ku - 0.5 * ku * ku) / e;
+        let (tangent, secant) = law_of_the_wall_ratios(u * y);
+        assert!(
+            (tangent - (slope - 1.0)).abs() < 1e-9 * slope,
+            "u+ {u}: {tangent}"
+        );
+        assert!((secant - y / u).abs() < 1e-9 * (y / u), "u+ {u}: {secant}");
+    }
+    assert_eq!(law_of_the_wall_ratios(0.0), (0.0, 1.0));
+    let (tangent, secant) = law_of_the_wall_ratios(1e-3);
+    assert!(tangent < 1e-6 && (secant - 1.0).abs() < 1e-6);
+    // Log region: the tangent (interior) exceeds the secant (wall) ratio.
+    let (tangent, secant) = law_of_the_wall_ratios(2000.0);
+    assert!(tangent > 2.0 * secant, "{tangent} {secant}");
+}
+
+#[test]
+fn wall_distance_measures_to_walls_and_solids_only() {
+    // 6 x 4 x 1 with a solid voxel at (5, 3): wall at y- only.
+    let dx = 0.002;
+    let mut domain = VoxelDomain::new(6, 4, 1, dx).unwrap();
+    domain.set(5, 3, 0, Voxel::Solid(0));
+    let wall = [false, false, true, false, false, false];
+    let distance = wall_distance(&domain, wall);
+    // Bottom row half a cell from the wall; the symmetry/opening faces do
+    // not seed.
+    assert!((distance[domain.index(0, 0, 0)] - 0.5 * dx).abs() < 1e-15);
+    assert!((distance[domain.index(0, 3, 0)] - 3.5 * dx).abs() < 1e-15);
+    // Next to the solid voxel: half a cell from its face.
+    assert!((distance[domain.index(4, 3, 0)] - 0.5 * dx).abs() < 1e-15);
+    assert_eq!(distance[domain.index(5, 3, 0)], 0.0);
+    // Diagonal neighbour of the solid: centre distance sqrt(2) less half.
+    let diagonal = (2f64.sqrt() - 0.5) * dx;
+    assert!((distance[domain.index(4, 2, 0)] - diagonal).abs() < 1e-15);
+}
+
+#[test]
+fn lvel_channel_reproduces_its_continuum_model() {
+    // G1-style verification of the discretization against the model's own
+    // developed answer, plus validation bands against turbulent channel
+    // correlations, at 6 cells across a 10 mm half-channel, Re_Dh = 2e4
+    // (first cell at y+ ~ 25).
+    let re = 2e4;
+    let (f, nu, mean, report) = lvel_channel(6, re);
+    let fluid = FluidProperties::dry_air_300k();
+    let model = lvel_continuum_darcy(0.01, fluid.kinematic_viscosity_m2_s, mean);
+    let (dean, gnielinski) = turbulent_channel_references(re);
+    eprintln!(
+        "LVEL n 6 Re_Dh {re:e}: f {f:.5} model {model:.5} ({:+.1}%) Dean {dean:.5} ({:+.1}%), Nu {nu:.2} Gnielinski {gnielinski:.2} ({:+.1}%), iters {}",
+        100.0 * (f / model - 1.0),
+        100.0 * (f / dean - 1.0),
+        100.0 * (nu / gnielinski - 1.0),
+        report.iterations
+    );
+    assert!(report.mass_residual <= 1e-6 && report.momentum_residual <= 1e-6);
+    // Measured: -1.6 % on the model, +14.4 % on Dean; Nu -10.8 % (first
+    // cell at y+ ~ 25 with the momentum secant as thermal wall law).
+    assert!((f / model - 1.0).abs() < 0.03, "f {f} vs model {model}");
+    // LVEL's own error: the continuum model is +16 % on Dean here.
+    assert!(
+        (model / dean - 1.0 - 0.163).abs() < 0.01,
+        "model {model} vs Dean {dean}"
+    );
+    assert!(
+        (nu / gnielinski - 1.0).abs() < 0.13,
+        "Nu {nu} vs {gnielinski}"
+    );
+}
+
+#[test]
+#[ignore = "release lane: a 17 280-cell LVEL channel (about 35 min in debug)"]
+fn lvel_channel_twelve_cells_across() {
+    // First cell at y+ ~ 13 (buffer layer). Measured: f +2.9 % on the
+    // continuum model, +19.6 % on Dean; Nu +1.4 % on Gnielinski.
+    let re = 2e4;
+    let (f, nu, mean, report) = lvel_channel(12, re);
+    let fluid = FluidProperties::dry_air_300k();
+    let model = lvel_continuum_darcy(0.01, fluid.kinematic_viscosity_m2_s, mean);
+    let (dean, gnielinski) = turbulent_channel_references(re);
+    eprintln!(
+        "LVEL n 12 Re_Dh {re:e}: f {f:.5} model {model:.5} ({:+.1}%) Dean {dean:.5} ({:+.1}%), Nu {nu:.2} Gnielinski {gnielinski:.2} ({:+.1}%), iters {}",
+        100.0 * (f / model - 1.0),
+        100.0 * (f / dean - 1.0),
+        100.0 * (nu / gnielinski - 1.0),
+        report.iterations
+    );
+    assert!((f / model - 1.0).abs() < 0.04, "f {f} vs model {model}");
+    assert!(
+        (nu / gnielinski - 1.0).abs() < 0.05,
+        "Nu {nu} vs {gnielinski}"
+    );
 }

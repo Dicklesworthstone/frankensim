@@ -937,8 +937,11 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   components of the pressure correction are pinned.
 - Convergence is two steady residuals of the same iterate: the largest cell
   mass imbalance before correction over the largest face mass flux, and
-  per component `||b - A u|| / ||b||` of the Jacobi-scaled momentum system
-  at the velocities entering the iteration. Inner solves only reduce their
+  per component `||b - A u||` of the Jacobi-scaled momentum system at the
+  velocities entering the iteration, over the flow's momentum scale
+  `sqrt(rows) max_c rms(b_c)` (a component that vanishes by symmetry has a
+  round-off right-hand side; normalizing it by its own norm left plug flows
+  through a porous block stalled at a "residual" of 0.3). Inner solves only reduce their
   entry residuals (by `momentum_tolerance`, default 0.1, and
   `pressure_tolerance`, default 0.01), so a converged report never rests on a
   skipped inner solve; one tight final correction (1e-8 of the converged
@@ -955,6 +958,19 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   update was measured to oscillate with growing amplitude), and the fan
   mismatch joins the momentum residual. The report carries the operating
   point and mismatch.
+- The pressure correction is symmetric positive definite (equal face
+  coefficients both ways; outlets add only to the diagonal), so
+  `PressureSolver::AmgCg` (the default) solves it by conjugate gradients
+  preconditioned with fs-sparse's smoothed-aggregation AMG V-cycle (strength
+  0.08, three smoothing sweeps), the hierarchy rebuilt every
+  `AMG_REBUILD_SWEEPS` = 10 sweeps because the coefficients drift slowly; a
+  failed CG solve falls back to ILU(0)-BiCGStab, which
+  `PressureSolver::IluBicgstab` selects outright. The report counts momentum
+  and pressure Krylov iterations. On the 1 mm heatsink AMG-CG took a third
+  of the ILU pressure iterations at no wall-time gain (16 800 cells); at
+  0.5 mm the AMG flow solve took 3 285 s (debug) where an ILU run spent
+  4 871 s (below; not a like-for-like timing, the projection tolerance
+  differed).
 
 | Fixture | Reference | Measured |
 |---|---|---|
@@ -965,6 +981,81 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Block two cells upstream of the outlet (backflow -0.099 m/s through the outlet plane) | convergence; relaxation independence | converged to 1e-10; alpha 0.5 vs 0.8 velocities within 2.6e-10 |
 | Channel driven by a linear fan curve (3 Pa shut-off, 2.5e-3 m^3/s free delivery), operating mid-curve | the operating point is on the curve AND on the system curve (a fixed-velocity solve at the solved flow) | Q = 1.6917e-3 m^3/s at 0.96997 Pa; curve mismatch 6e-10; fixed-velocity inlet pressure equal to 1e-6 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
+
+### Internal fans and flow resistances (`InternalFan`, `FlowResistance`)
+
+The enclosure ingredients of electronics cooling, all inside the SIMPLEC
+momentum equations (momentum only; no heat):
+
+- `InternalFan { patch, blows_positive, curve }`: across each open face of
+  a `FacePatch` (an interior face plane and a transverse cell range) the
+  static pressure rises by the `FanCurve` value at the flow through the
+  whole patch. The source is linearized about each sweep's flow,
+  `S(u) = s A dp(Q0) + A dp'(Q0) A_fan (u - u0)`: exact at the fixed point,
+  and the curve's own (non-positive) slope damps the fan-system loop. The
+  report lists each fan's operating point.
+- `FlowResistance::Planar { patch, loss_coefficient }`: a grille or
+  perforated plate dropping `1/2 rho K |u| u` across each face;
+  `FlowResistance::perforated_plate_loss(f)` gives Idelchik's thin
+  sharp-edged plate `K = (1 + 0.707 sqrt(1 - f) - f)^2 / f^2`.
+- `FlowResistance::Volume { lo, hi, permeability_m2, inertial_per_m }`: an
+  orthotropic Darcy–Forchheimer block, `-dp/dx_a = mu u_a / kappa_a +
+  1/2 rho C_a |u_a| u_a` on the superficial velocity.
+
+Resistances enter `a_P` (Picard in `|u|`), hence SIMPLEC's `d`.
+
+| Fixture (plug flow, symmetry sides) | Reference | Measured |
+|---|---|---|
+| Grille K = 3.9994 (50 % plate) at U = 0.5 | jump `1/2 rho K U^2`, flat elsewhere | within 1e-8 relative |
+| Internal fan (10 Pa, 8 m^3/s free delivery) against a K = 6 grille, both ends open | root of `p0 (1 - Q/Qmax) = 1/2 rho K (Q/A)^2` | Q 4.694396385 vs 4.694396386 in 91 sweeps; reversed fan same magnitude |
+| 10-cell porous block, kappa 2, C 3 | `(mu U / kappa + rho C U^2 / 2) L` | within 1e-8 relative |
+| Refusals | boundary plane, negative K, non-positive permeability, fan on solid faces | structured errors |
+
+No-claims: a fan is a pressure jump on a plane (no swirl, hub blockage or
+blade aerodynamics); planar and volume losses are the declared coefficients
+(the perforated-plate formula is Idelchik's turbulent thin-plate
+correlation, not a measurement of a particular grille).
+
+### LVEL turbulence (`turbulence`, `SimpleConfig::turbulence`)
+
+`Turbulence::Lvel` adds the algebraic LVEL closure (Agonafer, Gan-Li &
+Spalding 1996), the electronics-cooling model for fan-driven flows on
+coarse voxel meshes: per fluid cell, the wall distance `L` (exact Euclidean
+transform to the nearest solid voxel or wall-type domain face; openings,
+inlets and symmetry planes do not count) and the local speed give
+`Re_L = V L / nu`, which Spalding's unified law of the wall (`k` 0.41, `E`
+8.6) inverts for `u+`. Interior diffusion uses the profile's tangent
+`nu_eff = nu dy+/du+`; the half-cell flux to a wall uses its secant
+`nu_w = nu y+/u+`, so the discrete wall shear `mu_w u_P / L` equals
+`rho u_tau^2` of the law of the wall at any first-cell `y+` (using the
+tangent at the wall over-predicted the friction by 61 % and the Nusselt
+number by 43 % at Re_Dh 2e4). Both are under-relaxed by one half per sweep.
+`FvFlow::eddy_conductivity` gives the energy equation `rho c_p nu_t / 0.9`
+(the secant value in wall-adjacent cells); `fv_natural_convection` applies
+the same closure. The cooling-cht scene selects it with
+`solver.turbulence: "lvel"`.
+
+Verification is against the continuum LVEL model itself (the developed
+half-channel ODE `rho nu (1 + nu_t/nu) du/dy = tau_w (1 - y/h)`, solved in
+the test), validation against Dean's channel friction and Gnielinski's Nu
+(a pipe correlation on `D_h = 4h`, Pr 0.71). Half-channel, wall at y-,
+symmetry at y+, `h` = 10 mm, 120 h long, developed values over 80..110 h:
+
+| Cells across, Re_Dh | Darcy f | continuum LVEL | Dean | Nu (x = 100 h) | Gnielinski |
+|---|---|---|---|---|---|
+| 6, 2e4 (first cell y+ ~ 25; 208 sweeps) | 0.03342 | 0.03395 (-1.6 %) | 0.02920 (+14.4 %) | 46.19 | 51.77 (-10.8 %) |
+| 12, 2e4 (`--ignored`; first cell y+ ~ 13; 523 sweeps)* | 0.03493 | 0.03395 (+2.9 %) | 0.02920 (+19.6 %) | 52.49 | 51.77 (+1.4 %) |
+
+\* Measured before the momentum residual took the flow-wide scale (same
+1e-6 tolerance; the 6-cell case moved by 0.03 % in f across that change).
+
+The friction excess over Dean is the model's own (+16.3 % at Re_Dh 2e4,
++12.8 % at 1e5 for the continuum LVEL): extending the log-law mixing to the
+centreline flattens the profile (centreline/bulk 1.098 against Dean's
+1.150). No-claims: equilibrium algebraic model only (no turbulence
+transport, history, separation physics or transition prediction; it
+applies its eddy viscosity wherever `Re_L` is large, laminar regions
+included); the bands above are the evidence, not a general accuracy.
 
 ### Orthotropic solids and contact resistance
 
@@ -982,6 +1073,33 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 |---|---|---|
 | Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
 | k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
+
+### Two-resistor compact components (`CompactComponent`)
+
+`ThermalSetup::compact_components` holds JEDEC two-resistor models
+(JESD15-3), the standard board-level representation of a package from its
+datasheet `R_jc` and `R_jb`: the component's box of solid cells blocks flow
+like any solid, but its interior is collapsed. One extra unknown per
+component, the junction, receives the power and reaches every cell beyond
+the case-top face through `R_jc` and every cell beyond the board face
+through `R_jb`. Each resistor is split over its face in proportion to area
+and placed in series with the outside cell's half width:
+`G = 1 / (R A_face / A_cell + dx / (2 k A_cell))`. The sides are
+adiabatic; the box cells report the junction temperature through identity
+rows. `EnergySolution::junctions` gives the junction temperature and the
+case and board heats; `solid_to_fluid_heat_w` counts the case links into
+fluid instead of the collapsed cells. Refusals: a box that holds fluid,
+overlaps or sits on another component, or puts its case or board face on
+the domain boundary; power, sinks or fixed temperatures inside a box; any
+transient march (the model has no heat capacity).
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| 4 x 4 x 2-cell component (R_jc 50, R_jb 20 K/W, 1 W) between k = 5 slabs held at 300 K / 310 K | two-path network `R_b = R_jb + 2 dx/(kA)`, `R_t = R_jc + 2 dx/(kA)` | junction temperature and both resistor heats within 1e-9; balance 8e-12 |
+
+No-claims: the two-resistor model's own limits (boundary-condition
+dependence of a 2R reduction, no spreading inside the package, adiabatic
+sides); steady only.
 
 ### Surface radiation to the surroundings (`radiation`)
 
@@ -1003,11 +1121,31 @@ starting from the linearization about the surroundings temperature.
 | Slab filling a box floor, five faces surroundings at 300 K, non-conducting air, 5 W | `F = 1` exactly; `T = (P / (eps sigma A) + T_amb^4)^(1/4)` | every escape factor 1.0; 433.501645484 K vs 433.501645484 K; 5.000000000 W radiated; 6 Newton iterations |
 | Two opposed 8 x 8 plates four cells apart, sides open | `1 - F_12`, `F_12` the closed-form aligned-rectangle view factor (X = Y = 2: 0.41525) | mean escape 0.58231 vs 0.58475 with 64 x 4096 rays; reruns bit-identical |
 
-No-claims: surface-to-surface exchange (fin to fin, solid to a warm wall)
-and wall re-radiation are not modelled: a ray hitting a solid or an opaque
-face is simply not escaping, exact when the obstructing surfaces are at the
-emitter's temperature. Transparent air, gray diffuse opaque surfaces,
-Monte Carlo escape factors.
+Surface-to-surface exchange (`RadiationConfig::surface_exchange`, the
+default; `SurfaceExchange`): the emitting faces are grouped into planar
+tiles of up to `patch_size x patch_size` faces of one material and
+orientation, and every ray ends where it is absorbed, on a patch or in the
+surroundings; non-emitting solids and opaque domain faces reflect it
+diffusely (re-radiating surfaces, at most `max_bounces` times). The Monte
+Carlo exchange `A_i F_ij` is averaged with `A_j F_ji` and then balanced
+symmetrically (`G = D S D`, symmetric Sinkhorn) so the factors are
+reciprocal AND every row sums to the emitter's own absorbed share:
+pairwise averaging alone broke the row sums, and clipping the negative
+self-views it produced biased the black-shell fixture below by 1 % in
+`T^4`. Patch irradiation solves the gray radiosity system by Gauss–Seidel;
+each face loses `eps A (sigma T^4 - H)`, Newton-linearized in its own
+temperature with `H` lagged. The net heat the surfaces lose equals what the
+surroundings receive (zero in a sealed box). The escape-only model remains
+available (`surface_exchange: false`); `fv_natural_convection` uses either.
+
+| Fixture (S2S) | Reference | Measured |
+|---|---|---|
+| Convex 2 x 2 x 2-cell cube (eps 0.8, 1 W) in a sealed 8^3 shell at 300 K, non-conducting air, 1024 rays per face, 48 patches | two-surface enclosure `P = sigma A1 (T1^4 - T2^4) / (1/eps1 + (A1/A2)(1/eps2 - 1))` | black shell: 1.5e-11 relative in T1; eps2 = 0.5: 2.3e-6 (the formula's uniform-radiosity assumption); radiated to surroundings 0 |
+
+No-claims: one irradiation per patch tile; opaque domain faces and
+non-emitting solids reflect perfectly (declare radiating enclosure walls as
+emissive solid cells); transparent air; gray diffuse opaque surfaces;
+Monte Carlo factors.
 
 ### Finite-volume natural convection (`fv_natural_convection`)
 
@@ -1034,9 +1172,9 @@ fluxes. This closes the LBM path's "closed enclosures only" boundary.
 | Same, Ra 1e4 | Nu = 2.243 | 2.2671 (1.1 %), 36 couplings |
 | Open vertical channel (chimney), isothermal plates 8 cells apart, Ra_b = 20, openings top and bottom | fully developed Elenbaas limit g beta dT b^3 / (12 nu) of the discrete stencil ((n^2 + 2) / n^2 x the continuum) | 0.9795 (L/b = 10), 0.9931 (L/b = 30): approaches from below; energy closure 1e-9; induced in/outflow equal to 1e-12 |
 
-No-claims: steady laminar Boussinesq only (an unsteady configuration refuses
-as `FlowNotSteady` rather than returning a time average), no radiation; the
-SIMPLEC no-claims apply.
+No-claims: steady Boussinesq only (an unsteady configuration refuses
+as `FlowNotSteady` rather than returning a time average); radiation only
+through `FvBuoyancyConfig::radiation`; the SIMPLEC no-claims apply.
 
 ### Worked example (`examples/heatsink_cht.rs`)
 
@@ -1068,7 +1206,23 @@ build):
 | Energy | 61 BiCGStab iterations; 2 W in, 2 W advected out; balance 8e-13 |
 | Junction temperature | 334.98 K (17.49 K/W) |
 
-The FV junction at 1 mm sits 0.33 K below the 0.5 mm LBM run. At 1 mm
+The same scene at 0.5 mm voxels (134 400 cells), `heatsink_cht fv 0.25 0.5
+amg`, debug build, executed 2026-10-07: 167 SIMPLEC iterations (mass
+residual 3.5e-8, momentum 9.5e-7), 1 765 AMG-CG pressure and 499 momentum
+Krylov iterations, flow 3 285 s; energy 145 BiCGStab iterations, balance
+2e-11; junction 334.36 K (17.18 K/W), pressure drop 0.468 Pa. (An earlier
+ILU-BiCGStab run at this resolution took 4 871 s and then failed the
+since-relaxed 1e-12 final projection.)
+
+| Junction temperature | K |
+|---|---|
+| FV 1 mm | 334.98 |
+| FV 0.5 mm | 334.36 |
+| LBM 0.5 mm (realized inflow +4.4 %, Ma ~0.28 in the gaps) | 335.31 |
+
+The FV junction moves 0.62 K on halving the voxel and lands 0.95 K (0.3 %
+of absolute, 3 % of the rise) below the LBM run at the same resolution: a
+cross-method band, not a mesh-converged value. At 1 mm
 the fin faces fall exactly on voxel centres; the example and the
 `cooling-cht` scene parser now resolve such ties deterministically (the
 voxel at a box's min edge is in, the one at its max edge is out), and an
@@ -1122,13 +1276,14 @@ the central-moment operator the same duct diverged; it now refuses as
 
 ### No-claim boundaries (conjugate)
 
-- Laminar, steady, constant-property convection only: forced convection
+- Steady, constant-property convection only: forced convection
   through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in
   closed enclosures through `natural_convection` and in closed or open
-  domains through `fv_natural_convection`; no open-boundary LBM natural
-  convection, turbulence model, or temperature-dependent properties;
-  radiation only as surface emission to the surroundings (no
-  surface-to-surface exchange). A natural-convection run that does not settle (for example
+  domains through `fv_natural_convection`; turbulence only through the
+  algebraic LVEL closure of the FV path; no open-boundary LBM natural
+  convection or temperature-dependent properties;
+  radiation only between gray diffuse surface patches and to the
+  surroundings (no participating media). A natural-convection run that does not settle (for example
   above the transition Rayleigh number) refuses as `FlowNotSteady`.
 - Staircase voxel geometry at the declared `dx`; one run makes no
   mesh-convergence claim. Power-law convection is first order where the
@@ -1136,11 +1291,12 @@ the central-moment operator the same duct diverged; it now refuses as
   evidence; no enclosure or Verified colour is produced.
 - `lbm_duct_flow` runs `BoundaryGrid3` pooled but scalar (no SIMD path);
   steps to steady scale with the slowest viscous mode. No throughput claim.
-- `simple_flow` is sequential (assembly, ILU(0) and BiCGStab), has no
-  buoyancy term, no turbulence model (a laminar solution above transition
-  is a laminar idealization, not a prediction), and power-law momentum
-  convection is first order at high cell Péclet numbers; its numerical
-  diffusion is not bounded here. No throughput claim.
+- `simple_flow` is sequential (assembly, AMG-CG or ILU(0)-BiCGStab), its
+  only turbulence closure is the optional algebraic LVEL model (a laminar
+  solution above transition is a laminar idealization, not a prediction),
+  and power-law momentum convection is first order at high cell Péclet
+  numbers; its numerical diffusion is not bounded here. No throughput
+  claim.
 - No product (`.fsim`) stage consumes this module yet; Journey A budgets are
   unchanged by it.
 

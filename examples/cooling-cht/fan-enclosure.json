@@ -1,0 +1,38 @@
+{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.1, 0.06, 0.03], "voxel_m": 0.0025,
+ "materials": [
+  {"name": "abs", "conductivity_w_m_k": 0.2},
+  {"name": "fr4", "conductivity_w_m_k": [20.0, 20.0, 0.3]},
+  {"name": "package", "conductivity_w_m_k": 15.0}
+ ],
+ "solids": [
+  {"material": "abs", "min_m": [0.02, 0.0, 0.0], "max_m": [0.0225, 0.01, 0.03]},
+  {"material": "abs", "min_m": [0.02, 0.05, 0.0], "max_m": [0.0225, 0.06, 0.03]},
+  {"material": "abs", "min_m": [0.02, 0.01, 0.0], "max_m": [0.0225, 0.05, 0.0025]},
+  {"material": "abs", "min_m": [0.02, 0.01, 0.0275], "max_m": [0.0225, 0.05, 0.03]},
+  {"material": "fr4", "min_m": [0.03, 0.005, 0.0], "max_m": [0.095, 0.055, 0.0025]},
+  {"material": "package", "min_m": [0.04, 0.01, 0.0025], "max_m": [0.055, 0.025, 0.005]},
+  {"material": "package", "min_m": [0.065, 0.035, 0.0025], "max_m": [0.08, 0.05, 0.005]}
+ ],
+ "sources": [
+  {"name": "cpu", "power_w": 3.0, "min_m": [0.04, 0.01, 0.0025], "max_m": [0.055, 0.025, 0.005]},
+  {"name": "regulator", "power_w": 2.0, "min_m": [0.065, 0.035, 0.0025], "max_m": [0.08, 0.05, 0.005]}
+ ],
+ "faces": {
+  "x-": {"type": "opening", "ambient_k": 300.0},
+  "x+": {"type": "opening", "ambient_k": 300.0}
+ },
+ "internal_fans": [
+  {"name": "intake", "axis": "x", "at_m": 0.0225, "direction": "+",
+   "min_m": [0.0, 0.01, 0.0025], "max_m": [0.0, 0.05, 0.0275],
+   "curve": [[0.0, 40.0], [0.003, 25.0], [0.006, 0.0]]}
+ ],
+ "resistances": [
+  {"type": "grille", "axis": "x", "at_m": 0.0025,
+   "min_m": [0.0, 0.0, 0.0], "max_m": [0.0, 0.06, 0.03], "free_area_ratio": 0.5},
+  {"type": "porous", "min_m": [0.06, 0.005, 0.005], "max_m": [0.09, 0.03, 0.025],
+   "inertial_per_m": [60.0, 2000.0, 2000.0]}
+ ],
+ "solver": {"tolerance": 1e-6, "turbulence": "lvel"}
+}

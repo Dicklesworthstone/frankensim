@@ -20,12 +20,16 @@ Scene (`frankensim.cooling-cht.v1`):
   for grid-aligned orthotropic solids such as PCB laminates), optional
   `emissivity` (0 to 1; any non-zero value enables radiation) and
   `volumetric_heat_capacity_j_m3_k` (transients).
-- Radiation: exposed solid faces emit `eps sigma F A (T^4 - T_amb^4)` to the
-  surroundings seen through openings, inlets and fans (at their
-  temperatures); walls are opaque. Escape factors `F` come from
-  deterministic Monte Carlo rays (optional `radiation`: `rays_per_face`,
-  default 256, and `seed`). Surface-to-surface exchange is not modelled.
-  The result reports `radiation.radiated_w` and the energy balance's
+- Radiation: exposed faces of emissive solids exchange gray diffuse
+  radiation with each other and with the surroundings seen through
+  openings, inlets and fans (at their temperatures); domain walls and
+  non-emitting solids reflect perfectly, so a sealed box radiates from its
+  hot parts to its emissive walls (model enclosure walls as emissive solid
+  boxes). Exchange factors come from deterministic Monte Carlo rays on face
+  patches (optional `radiation`: `rays_per_face`, default 256, `seed`,
+  `patch_size`, default 4 faces, and `surface_exchange`, default true;
+  false keeps only the escape to the surroundings). The result reports
+  `radiation.radiated_w` (to the surroundings) and the energy balance's
   `sink_outflow_w`. Transients refuse radiation.
 - `contacts` (optional): `between` (two material names) and
   `resistance_m2_k_w`, a per-area interface resistance (thermal interface
@@ -58,7 +62,29 @@ Scene (`frankensim.cooling-cht.v1`):
 - Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
   `reference_temperature_k` (default: the first inlet or opening
   temperature), `solver.tolerance`, `solver.max_iterations`,
-  `limits.wall_seconds`.
+  `solver.turbulence` (`"laminar"`, the default, or `"lvel"`: the LVEL
+  algebraic eddy viscosity and its turbulent conductivity, for
+  transitional or turbulent fan-driven flow; the result then reports
+  `flow.max_eddy_viscosity_ratio`), `limits.wall_seconds`.
+
+- Optional `internal_fans`: `name`, `axis` (`"x"`, `"y"`, `"z"`), `at_m` (a
+  voxel face plane strictly inside the domain), `direction` (`"+"` or
+  `"-"`), `min_m`/`max_m` (the transverse extent; the entries along `axis`
+  are ignored), and `curve`. The pressure rises across the plane by the
+  curve's value at the flow through it; the result lists each fan's
+  operating point under `flow.internal_fans`.
+- Optional `resistances`: `{"type": "grille", axis, at_m, min_m, max_m,
+  loss_coefficient | free_area_ratio}` (pressure drop `1/2 rho K |u| u`;
+  a free-area ratio uses Idelchik's thin perforated plate) or
+  `{"type": "porous", min_m, max_m, permeability_m2, inertial_per_m}`
+  (Darcy-Forchheimer, scalar or per axis; a missing permeability means no
+  viscous term). Grilles on a vent sit one voxel inside the open face.
+- Optional `components`: JEDEC two-resistor compact models (`name`,
+  `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
+  `junction_to_board_k_w`). The box blocks flow; the junction reaches the
+  case top and the board only through the two resistors (sides adiabatic),
+  and the result reports `components[].junction_temperature_k`, `case_w`
+  and `board_w`. Steady scenes only.
 
 Examples:
 
@@ -72,6 +98,14 @@ Examples:
   (peak 0.15 m/s), 0.5 W chip at 332.21 K (64 K/W), all heat leaving by
   advection through the top opening (balance 2e-12). This scene declares
   no emissivity; adding one enables radiation through the openings.
+- `fan-enclosure.json`: a 100 x 60 x 30 mm electronics enclosure at 2.5 mm
+  voxels: a 50 % perforated vent grille behind the open x- face, an axial
+  fan (40 Pa shut-off, 6 l/s free delivery) in an ABS baffle, an orthotropic
+  FR4 board with a 3 W and a 2 W package, a porous card array, an open
+  exhaust, and LVEL turbulence. Measured (debug build, 529 s): 420 SIMPLEC
+  iterations, fan operating point 3.65e-3 m^3/s at 19.6 Pa (on its curve),
+  peak eddy viscosity 86 x molecular, packages at 394.3 K and 372.5 K,
+  energy balance 9e-14.
 - `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
   (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
   at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins, at
@@ -85,7 +119,9 @@ Examples:
   top lies on a voxel centre and falls outside under the tie rule): refine
   `voxel_m` before reading temperatures to better than that geometry.
 
-Results are Estimated numerical evidence at one resolution: no turbulence
-model, radiation, or temperature-dependent properties; staircase geometry;
-not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
+Results are Estimated numerical evidence at one resolution: turbulence only
+through the algebraic LVEL closure (its friction runs 13-16 % above
+turbulent channel correlations; see `crates/fs-lbm/CONTRACT.md`), radiation
+only to the surroundings, no temperature-dependent properties; staircase
+geometry; not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
 sensitivity.

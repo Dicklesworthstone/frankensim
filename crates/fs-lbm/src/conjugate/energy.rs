@@ -77,6 +77,68 @@ pub struct ThermalSetup {
     /// Linear exchanges `G (T_cell - T_sink)` leaving individual cells (a
     /// linearized radiation exchange, a compact thermal model's link).
     pub cell_sinks: Vec<CellSink>,
+    /// Turbulent conductivity added to each FLUID cell, W/(m K) (empty: none;
+    /// otherwise one entry per cell, for example `FvFlow::eddy_conductivity`).
+    pub eddy_conductivity_w_m_k: Vec<f64>,
+    /// Two-resistor compact thermal models of components.
+    pub compact_components: Vec<CompactComponent>,
+}
+
+/// A JEDEC two-resistor compact thermal model (JESD15-3) of a packaged
+/// component occupying the solid cells `lo..hi`: the dissipated power enters
+/// one junction node, which reaches the case top through
+/// `junction_to_case_k_w` and the board through `junction_to_board_k_w`,
+/// each resistor spread over its face of the box in proportion to area; the
+/// sides are adiabatic and the box interior is collapsed (its cells report
+/// the junction temperature and carry no conduction of their own). The box
+/// blocks flow like any solid. Both faces must border cells inside the
+/// domain that belong to no other component.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactComponent {
+    /// First cells of the box (inclusive).
+    pub lo: [usize; 3],
+    /// Last cells of the box (exclusive).
+    pub hi: [usize; 3],
+    /// The face of the box that sits on the board; its opposite is the case
+    /// top.
+    pub board_face: Face3,
+    /// Dissipated power, W.
+    pub power_w: f64,
+    /// Junction-to-case (top) resistance, K/W.
+    pub junction_to_case_k_w: f64,
+    /// Junction-to-board resistance, K/W.
+    pub junction_to_board_k_w: f64,
+}
+
+impl CompactComponent {
+    fn contains(&self, at: [usize; 3]) -> bool {
+        (0..3).all(|a| at[a] >= self.lo[a] && at[a] < self.hi[a])
+    }
+
+    /// Area of the case-top (= board) face, m^2.
+    fn face_area(&self, dx: f64) -> f64 {
+        let axis = self.board_face as usize / 2;
+        (0..3)
+            .filter(|&a| a != axis)
+            .map(|a| (self.hi[a] - self.lo[a]) as f64 * dx)
+            .product()
+    }
+}
+
+/// Steady state of one compact component.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JunctionSolution {
+    /// Junction temperature, K.
+    pub temperature_k: f64,
+    /// Heat leaving through the junction-to-case resistor, W.
+    pub case_w: f64,
+    /// Heat leaving through the junction-to-board resistor, W.
+    pub board_w: f64,
+    /// The component's cell box (`lo..hi`).
+    pub cells: ([usize; 3], [usize; 3]),
+    /// Outside cells the junction couples to, with their conductances, W/K
+    /// (the resistor's area share in series with the cell's half width).
+    pub links: Vec<(usize, f64)>,
 }
 
 /// A linear heat path from one cell to a fixed temperature: the heat
@@ -112,6 +174,8 @@ impl ThermalSetup {
             fixed_temperature: Vec::new(),
             contacts: Vec::new(),
             cell_sinks: Vec::new(),
+            eddy_conductivity_w_m_k: Vec::new(),
+            compact_components: Vec::new(),
         }
     }
 
@@ -232,6 +296,8 @@ pub struct EnergySolution {
     pub temperature: Vec<f64>,
     /// Conductivity per cell along x, y, z used by the solve, W/(m K).
     pub conductivity: Vec<[f64; 3]>,
+    /// One entry per `ThermalSetup::compact_components`, in order.
+    pub junctions: Vec<JunctionSolution>,
     /// Solve evidence.
     pub report: EnergyReport,
 }
@@ -281,8 +347,23 @@ impl EnergySolution {
     pub fn solid_to_fluid_heat_w(&self, domain: &VoxelDomain) -> f64 {
         let dx = domain.dx();
         let mut total = 0.0;
+        // A collapsed component cell holds its junction's temperature and
+        // reaches its neighbours only through the junction's links.
+        let collapsed = |c: usize| {
+            let at = domain.coords(c);
+            self.junctions
+                .iter()
+                .any(|j| (0..3).all(|a| at[a] >= j.cells.0[a] && at[a] < j.cells.1[a]))
+        };
+        for junction in &self.junctions {
+            for &(n, g) in &junction.links {
+                if domain.is_fluid(n) {
+                    total += g * (junction.temperature_k - self.temperature[n]);
+                }
+            }
+        }
         for c in 0..domain.cell_count() {
-            if domain.is_fluid(c) {
+            if domain.is_fluid(c) || collapsed(c) {
                 continue;
             }
             for f in 0..6 {
@@ -565,9 +646,30 @@ pub(crate) fn solve_energy_inner(
             }
         }
     }
+    if !setup.eddy_conductivity_w_m_k.is_empty() {
+        if setup.eddy_conductivity_w_m_k.len() != cells {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.eddy_conductivity_w_m_k",
+                reason: format!(
+                    "expected {cells} entries, got {}",
+                    setup.eddy_conductivity_w_m_k.len()
+                ),
+            });
+        }
+        for &k in &setup.eddy_conductivity_w_m_k {
+            finite("thermal.eddy_conductivity_w_m_k", k)?;
+            if k < 0.0 {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.eddy_conductivity_w_m_k",
+                    reason: "must be non-negative".into(),
+                });
+            }
+        }
+    }
+    let eddy = |c: usize| setup.eddy_conductivity_w_m_k.get(c).copied().unwrap_or(0.0);
     let k: Vec<[f64; 3]> = (0..cells)
         .map(|c| match domain.voxel_at(c) {
-            Voxel::Fluid => [fluid.conductivity_w_m_k; 3],
+            Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
             Voxel::Solid(m) => solids[usize::from(m)].axis_conductivity(),
         })
         .collect();
@@ -610,9 +712,12 @@ pub(crate) fn solve_energy_inner(
             setup.power_w[c]
         }
     };
+    let compact = Compact::new(domain, &ctx.k, setup)?;
+    let parts = setup.compact_components.len();
+    let unknowns = cells + parts;
 
-    let mut coo = Coo::new(cells, cells);
-    let mut b = vec![0.0f64; cells];
+    let mut coo = Coo::new(unknowns, unknowns);
+    let mut b = vec![0.0f64; unknowns];
     let mut max_cell_peclet = 0.0f64;
     // The box grid is face-connected, so one anchor anywhere makes the
     // operator nonsingular; without one the problem is pure Neumann.
@@ -643,6 +748,12 @@ pub(crate) fn solve_energy_inner(
         if c.is_multiple_of(4096) {
             super::poll(gate)?;
         }
+        if let Some(j) = compact.owner(c) {
+            // Collapsed component cell: it reports its junction temperature.
+            coo.push(c, c, 1.0);
+            coo.push(c, cells + j, -1.0);
+            continue;
+        }
         if let Some(t) = fixed[c] {
             coo.push(c, c, 1.0);
             b[c] = t;
@@ -658,7 +769,15 @@ pub(crate) fn solve_energy_inner(
         // Cell sinks: G (T - T_sink) leaves the cell.
         diag += sinks[c].0;
         rhs += sinks[c].1;
+        // Junction resistors reaching this cell.
+        for &(j, g) in compact.links_of(c) {
+            diag += g;
+            coo.push(c, cells + j, -g);
+        }
         for f in 0..6 {
+            if compact.toward_component(c, f) {
+                continue;
+            }
             let term = ctx.term(c, f);
             diag += term.diag;
             rhs += term.rhs;
@@ -683,6 +802,16 @@ pub(crate) fn solve_energy_inner(
         coo.push(c, c, diag);
         b[c] = rhs;
     }
+    for (j, part) in setup.compact_components.iter().enumerate() {
+        let row = cells + j;
+        let mut diag = 0.0;
+        for &(n, g, _) in &compact.links[j] {
+            diag += g;
+            coo.push(row, n, -g);
+        }
+        coo.push(row, row, diag);
+        b[row] = part.power_w;
+    }
     if !anchored {
         return Err(ChtError::InvalidInput {
             field: "thermal.faces",
@@ -703,8 +832,17 @@ pub(crate) fn solve_energy_inner(
         .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
         .unwrap_or(0.0);
     let mut temperature = match step {
-        Some(step) => step.previous.to_vec(),
-        None => vec![guess; cells],
+        Some(step) => {
+            let mut warm = step.previous.to_vec();
+            warm.extend(
+                setup
+                    .compact_components
+                    .iter()
+                    .map(|part| step.previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]),
+            );
+            warm
+        }
+        None => vec![guess; unknowns],
     };
     let outcome = bicgstab_ilu0(
         "energy",
@@ -728,11 +866,17 @@ pub(crate) fn solve_energy_inner(
         sink_w += sink;
         scale += sink.abs();
         if fixed[c].is_some() {
-            // A fixed cell also feeds its own sinks.
+            // A fixed cell also feeds its own sinks and junction links.
             fixed_w += sink;
             for f in 0..6 {
+                if compact.toward_component(c, f) {
+                    continue;
+                }
                 let term = ctx.term(c, f);
                 fixed_w += flux_of(&term, c);
+            }
+            for &(j, g) in compact.links_of(c) {
+                fixed_w += g * (temperature[c] - temperature[cells + j]);
             }
         } else {
             source_w += source(c);
@@ -759,6 +903,10 @@ pub(crate) fn solve_energy_inner(
             };
         }
     }
+    for part in &setup.compact_components {
+        source_w += part.power_w;
+        scale += part.power_w.abs();
+    }
     scale += fixed_w.abs();
     let residual_w = source_w + fixed_w - out_w - sink_w;
     let balance = EnergyBalance {
@@ -774,8 +922,33 @@ pub(crate) fn solve_energy_inner(
             0.0
         },
     };
+    let junctions = setup
+        .compact_components
+        .iter()
+        .enumerate()
+        .map(|(j, part)| {
+            let t = temperature[cells + j];
+            let (mut case_w, mut board_w) = (0.0, 0.0);
+            for &(n, g, board) in &compact.links[j] {
+                let q = g * (t - temperature[n]);
+                if board {
+                    board_w += q;
+                } else {
+                    case_w += q;
+                }
+            }
+            JunctionSolution {
+                temperature_k: t,
+                case_w,
+                board_w,
+                cells: (part.lo, part.hi),
+                links: compact.links[j].iter().map(|&(n, g, _)| (n, g)).collect(),
+            }
+        })
+        .collect();
+    temperature.truncate(cells);
     let report = EnergyReport {
-        unknowns: cells,
+        unknowns,
         nonzeros,
         iterations: outcome.iterations,
         relative_residual: outcome.relative_residual,
@@ -786,6 +959,179 @@ pub(crate) fn solve_energy_inner(
     Ok(EnergySolution {
         temperature,
         conductivity: ctx.k,
+        junctions,
         report,
     })
+}
+
+/// Compact components prepared for assembly: the owning component of each
+/// cell, each junction's links `(outside cell, conductance, board side)`,
+/// and the same links indexed by outside cell.
+struct Compact {
+    owner: Vec<usize>,
+    links: Vec<Vec<(usize, f64, bool)>>,
+    by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>>,
+    dims: [usize; 3],
+}
+
+impl Compact {
+    fn new(domain: &VoxelDomain, k: &[[f64; 3]], setup: &ThermalSetup) -> Result<Self, ChtError> {
+        let parts = &setup.compact_components;
+        let cells = domain.cell_count();
+        let n = domain.dims();
+        let refuse = |reason: String| ChtError::InvalidInput {
+            field: "thermal.compact_components",
+            reason,
+        };
+        let mut owner = if parts.is_empty() {
+            Vec::new()
+        } else {
+            vec![usize::MAX; cells]
+        };
+        for (i, part) in parts.iter().enumerate() {
+            if (0..3).any(|a| part.lo[a] >= part.hi[a] || part.hi[a] > n[a]) {
+                return Err(refuse(format!(
+                    "component {i}: cells {:?}..{:?} must be non-empty within {n:?}",
+                    part.lo, part.hi
+                )));
+            }
+            finite("thermal.compact_components.power_w", part.power_w)?;
+            finite_positive(
+                "thermal.compact_components.junction_to_case_k_w",
+                part.junction_to_case_k_w,
+            )?;
+            finite_positive(
+                "thermal.compact_components.junction_to_board_k_w",
+                part.junction_to_board_k_w,
+            )?;
+            for z in part.lo[2]..part.hi[2] {
+                for y in part.lo[1]..part.hi[1] {
+                    for x in part.lo[0]..part.hi[0] {
+                        let c = domain.index(x, y, z);
+                        if domain.is_fluid(c) {
+                            return Err(refuse(format!(
+                                "component {i}: cell ({x}, {y}, {z}) is fluid; the box must be solid"
+                            )));
+                        }
+                        if owner[c] != usize::MAX {
+                            return Err(refuse(format!("components {} and {i} overlap", owner[c])));
+                        }
+                        owner[c] = i;
+                    }
+                }
+            }
+        }
+        let dx = domain.dx();
+        let face_area = dx * dx;
+        let mut links = Vec::with_capacity(parts.len());
+        let mut by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
+            std::collections::BTreeMap::new();
+        for (i, part) in parts.iter().enumerate() {
+            let board = part.board_face as usize;
+            let axis = board / 2;
+            let area = part.face_area(dx);
+            let mut list = Vec::new();
+            for z in part.lo[2]..part.hi[2] {
+                for y in part.lo[1]..part.hi[1] {
+                    for x in part.lo[0]..part.hi[0] {
+                        let c = domain.index(x, y, z);
+                        for f in [2 * axis, 2 * axis + 1] {
+                            let resistance = if f == board {
+                                part.junction_to_board_k_w
+                            } else {
+                                part.junction_to_case_k_w
+                            };
+                            match domain.neighbor(c, f) {
+                                Some(m) if owner[m] == i => {}
+                                Some(m) if owner[m] != usize::MAX => {
+                                    return Err(refuse(format!(
+                                        "component {i} sits directly on component {}",
+                                        owner[m]
+                                    )));
+                                }
+                                None => {
+                                    return Err(refuse(format!(
+                                        "component {i}: its case or board face lies on the domain boundary"
+                                    )));
+                                }
+                                Some(m) => {
+                                    // The resistor's area share in series
+                                    // with the outside cell's half width.
+                                    let g = 1.0
+                                        / (resistance * area / face_area
+                                            + 0.5 * dx / (k[m][axis] * face_area));
+                                    list.push((m, g, f == board));
+                                    by_cell.entry(m).or_default().push((i, g));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            links.push(list);
+        }
+        if !owner.is_empty() {
+            for &(c, _) in &setup.fixed_temperature {
+                if owner.get(c).is_some_and(|&o| o != usize::MAX) {
+                    return Err(refuse(format!("cell {c} is fixed inside a component")));
+                }
+            }
+            for sink in &setup.cell_sinks {
+                if owner.get(sink.cell).is_some_and(|&o| o != usize::MAX) {
+                    return Err(refuse(format!(
+                        "cell {} carries a sink inside a component",
+                        sink.cell
+                    )));
+                }
+            }
+            for (c, &p) in setup.power_w.iter().enumerate() {
+                if p != 0.0 && owner[c] != usize::MAX {
+                    return Err(refuse(format!(
+                        "cell {c} carries power inside a component; declare it as the component's power_w"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            owner,
+            links,
+            by_cell,
+            dims: n,
+        })
+    }
+
+    fn owner(&self, c: usize) -> Option<usize> {
+        self.owner.get(c).copied().filter(|&o| o != usize::MAX)
+    }
+
+    /// Whether face `f` of cell `c` leads into a component cell (those faces
+    /// carry no ordinary conduction; the junction links replace them).
+    fn toward_component(&self, c: usize, f: usize) -> bool {
+        if self.owner.is_empty() {
+            return false;
+        }
+        let mut at = [
+            c % self.dims[0],
+            (c / self.dims[0]) % self.dims[1],
+            c / (self.dims[0] * self.dims[1]),
+        ];
+        let axis = f / 2;
+        if f % 2 == 1 {
+            if at[axis] + 1 >= self.dims[axis] {
+                return false;
+            }
+            at[axis] += 1;
+        } else {
+            if at[axis] == 0 {
+                return false;
+            }
+            at[axis] -= 1;
+        }
+        let n = (at[2] * self.dims[1] + at[1]) * self.dims[0] + at[0];
+        self.owner[n] != usize::MAX
+    }
+
+    fn links_of(&self, c: usize) -> &[(usize, f64)] {
+        self.by_cell.get(&c).map_or(&[], Vec::as_slice)
+    }
 }

@@ -64,9 +64,11 @@
 //!
 //! # No-claim boundaries
 //!
-//! - Laminar, steady, constant-property, forced convection only: no
-//!   buoyancy, no turbulence model, no temperature-dependent properties, no
-//!   radiation. Fluid properties are frozen at the declared state.
+//! - Steady, constant-property convection: forced, or Boussinesq natural
+//!   and mixed; turbulence only through the algebraic LVEL closure
+//!   ([`turbulence`]); radiation only as surface emission to the
+//!   surroundings; no temperature-dependent properties. Fluid properties are
+//!   frozen at the declared state.
 //! - Voxel (staircase) geometry at the declared resolution; curved walls are
 //!   represented to `O(dx)`. No mesh-convergence claim is made by a single
 //!   run; refinement ladders are the caller's evidence.
@@ -89,14 +91,15 @@ mod natural;
 mod radiation;
 mod simple;
 mod transient;
+pub mod turbulence;
 
 pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
-    CellSink, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport,
-    EnergySolution, ThermalFace, ThermalSetup, solve_energy,
+    CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
+    EnergyReport, EnergySolution, JunctionSolution, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
@@ -104,10 +107,13 @@ pub use flow::{
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
-    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, escape_factors,
-    radiated_power, radiative_sinks, solve_energy_radiating,
+    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, SurfaceExchange,
+    escape_factors, radiated_power, radiative_sinks, solve_energy_radiating,
 };
-pub use simple::{FanCurve, FanInlet, FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
+pub use simple::{
+    AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,
+    InternalFan, PressureSolver, SimpleConfig, SimpleReport, Turbulence, simple_flow,
+};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face

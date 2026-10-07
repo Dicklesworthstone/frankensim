@@ -6,7 +6,7 @@
 //! drop and energy closure.
 //!
 //! ```text
-//! cargo run --release -p fs-lbm --example heatsink_cht -- fv [inlet_velocity_m_s] [voxel_mm]
+//! cargo run --release -p fs-lbm --example heatsink_cht -- fv [inlet_velocity_m_s] [voxel_mm] [amg|ilu]
 //! cargo run --release -p fs-lbm --example heatsink_cht -- lbm \
 //!     [inlet_velocity_m_s] [lattice_inlet_velocity] [auto|bgk|central] [max_steps]
 //! ```
@@ -27,8 +27,8 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     EnergyConfig, FlowField, FluidProperties, FvBoundary, LbmCollisionChoice, LbmFlowConfig,
-    SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow,
-    simple_flow, solve_energy,
+    PressureSolver, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
+    lbm_duct_flow, simple_flow, solve_energy,
 };
 
 const MM: f64 = 1e-3;
@@ -119,6 +119,7 @@ fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow
     let inlet = args
         .first()
         .map_or(0.25, |a| a.parse().expect("numeric inlet velocity"));
+    // args[1] is the voxel size (read by main); args[2] optionally "ilu".
     let mut config = SimpleConfig::new([
         FvBoundary::Inlet {
             velocity: [inlet, 0.0, 0.0],
@@ -130,6 +131,9 @@ fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow
         FvBoundary::wall(),
     ]);
     config.tolerance = 1e-6;
+    if args.get(2).is_some_and(|a| a == "ilu") {
+        config.pressure_solver = PressureSolver::IluBicgstab;
+    }
     let started = std::time::Instant::now();
     let flow = simple_flow(domain, air, &config, &gate).expect("steady duct flow");
     let flow_s = started.elapsed().as_secs_f64();
@@ -140,7 +144,7 @@ fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow
             .mean_pressure(domain, 0, nx - 1)
             .expect("fluid outlet layer");
     println!(
-        "{{\"stage\":\"flow\",\"solver\":\"fv-simplec\",\"cells\":{},\"fluid_cells\":{},\"iterations\":{},\"mass_residual\":{:.2e},\"momentum_residual\":{:.2e},\"max_cell_reynolds\":{:.2},\"inflow_m3_s\":{:.6e},\"outflow_m3_s\":{:.6e},\"max_divergence_m3_s\":{:.2e},\"pressure_drop_pa\":{pressure_drop_pa:.5},\"wall_s\":{flow_s:.1}}}",
+        "{{\"stage\":\"flow\",\"solver\":\"fv-simplec\",\"cells\":{},\"fluid_cells\":{},\"iterations\":{},\"mass_residual\":{:.2e},\"momentum_residual\":{:.2e},\"max_cell_reynolds\":{:.2},\"inflow_m3_s\":{:.6e},\"outflow_m3_s\":{:.6e},\"max_divergence_m3_s\":{:.2e},\"pressure_drop_pa\":{pressure_drop_pa:.5},\"momentum_krylov\":{},\"pressure_krylov\":{},\"wall_s\":{flow_s:.1}}}",
         domain.cell_count(),
         domain.fluid_count(),
         r.iterations,
@@ -150,6 +154,8 @@ fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow
         r.inflow_m3_s,
         r.outflow_m3_s,
         r.max_divergence_m3_s,
+        r.momentum_krylov_iterations,
+        r.pressure_krylov_iterations,
     );
     Flow {
         inflow_m3_s: r.inflow_m3_s,
