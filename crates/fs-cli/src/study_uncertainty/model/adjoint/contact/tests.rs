@@ -155,3 +155,6 @@ fn joint_calibration_resume_is_source_free_and_nonsmooth_sources_refuse_before_s
 
 #[path = "mixed.rs"]
 mod mixed;
+
+#[path = "bands.rs"]
+mod bands;

@@ -145,3 +145,6 @@ fn mean_feedback_rebinding_checks_constitutive_residual_even_for_zero_goal() {
 
 #[path = "boundary_temperatures.rs"]
 mod boundary_temperatures;
+
+#[path = "ambient_envelope.rs"]
+mod ambient_envelope;

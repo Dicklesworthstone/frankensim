@@ -82,6 +82,9 @@ use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, S
 use crate::cards::{CardPackKind, CardPackSet, CardPackSetBuilder, RawCardPack};
 use crate::import::{explicits, json_string};
 
+mod input_propagation;
+mod joint_parameters;
+
 /// Domain separating solve-run identity derivation from every other hash.
 pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1";
 /// Driver semantics version bound into run identity and driver state.
@@ -171,7 +174,13 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// fixed point and excludes frozen-coefficient error certificates/corrections.
 /// Version 44 queries contact resistance at the declared manufactured joint
 /// state and requires full temperature/state-band support on the same card.
-pub const SOLVE_DRIVER_VERSION: u32 = 44;
+/// Version 45 preserves independent radiative reservoirs in ambient sweeps
+/// and retains refused joint input corners as unmeasured rather than zero.
+/// Version 46 propagates declared manufactured-joint resistance bands jointly
+/// with conductivity tolerances; unexecuted corner designs remain unmeasured.
+/// Version 47 evaluates every declared boundary/model-form corner, including
+/// stronger coefficients and cold-side deviations; unknown interaction is null.
+pub const SOLVE_DRIVER_VERSION: u32 = 47;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -7507,7 +7516,7 @@ impl InputPropagation {
     }
 }
 
-const PROPAGATION_NO_CLAIM: &str = "input terms use interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed, one joint corner is checked; the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; solver-algebraic uses its separately named published-field linear enclosure or base-field tolerance comparison; declared surface-offset bands move the exterior surface together to each bound on the same topology for the Geometry term (roundoff is bounded separately on the published solve); Estimated, not a certificate";
+const PROPAGATION_NO_CLAIM: &str = "input terms use interval vertex enumeration through base-fidelity re-solves of the declared operating envelope, fan-curve tolerance and convection-card discrepancy allowance; monotone response per input is assumed; every distinct ambient/fan-pressure endpoint is crossed with both common coefficient extremes when the individual terms are measurable; all joint results are retained and any refused corner leaves the boundary contribution unmeasured; unavailable interaction is null, not zero; the boundary vertices move only fluid inlet/reference temperatures; independently declared radiative reservoirs stay fixed and require explicitly declared study inputs to vary; the model-form term covers only the card allowance on the derived coefficient; a separately retained radiation-on/off sensitivity does not bound omitted physics or radiation-model error; declared material conductivity tolerances move together to each bound for the Parameters term; when manufactured-joint bands are declared, all independent contact resistance extrema (including interior source knots) are crossed with those common conductivity extremes; unprovided material uncertainties and parameter/ambient interactions are not bounded; solver-algebraic uses its separately named published-field linear enclosure or base-field tolerance comparison; declared surface-offset bands move the exterior surface together to each bound on the same topology for the Geometry term (roundoff is bounded separately on the published solve); Estimated, not a certificate";
 
 /// Budget receipts the QoI stage may cite: the propagation's measured terms
 /// (each citing the conduction receipt that retains its vertices) and the
@@ -7630,32 +7639,11 @@ fn base_fidelity(spec: &ProjectSpec) -> ProjectSpec {
     base
 }
 
-/// Set every inlet, fluid-reference and radiative-reservoir temperature to
-/// `temperature_k`: all of them are the declared ambient.
+/// Vary only fluid temperatures under the declared ambient envelope.
+/// A radiative reservoir is independently declared, even when numerically equal
+/// to the nominal fluid ambient; no thermal or probabilistic coupling is inferred.
 fn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {
-    let mut perturbed = spec.clone();
-    if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {
-        if let Some(radiation) = setup.radiation.as_mut() {
-            for surface in &mut radiation.surfaces {
-                surface.reservoir_temperature.value = temperature_k;
-            }
-        }
-        for boundary in &mut setup.boundaries {
-            match &mut boundary.condition {
-                ThermalBoundaryCondition::Convection { reference_temperature, .. } => {
-                    reference_temperature.value = temperature_k;
-                }
-                ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {
-                    inlet_temperature.value = temperature_k;
-                }
-                ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => {
-                    ambient_temperature.value = temperature_k;
-                }
-                _ => {}
-            }
-        }
-    }
-    perturbed
+    input_propagation::with_fluid_temperature(spec, temperature_k)
 }
 
 /// Scale every declared fan-curve pressure by `factor`.
@@ -7761,7 +7749,7 @@ fn propagate_declared_inputs(
             half_width_k: deviation(&boundary_values),
             method: "interval-vertex-resolve",
             detail: format!(
-                "inlet, fluid-reference and radiative-reservoir temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)"
+                "fluid inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared); independently declared radiative reservoirs remain fixed"
             ),
             vertices: boundary_values.clone(),
         },
@@ -7821,31 +7809,23 @@ fn propagate_declared_inputs(
         }
     };
 
-    // Joint worst corner: the hottest boundary vertex with the weaker
-    // coefficient. Excess over the summed half-widths is an interaction the
-    // per-source vertices missed; it is charged to the boundary term.
-    let mut interaction_excess_k = 0.0;
-    if let (Some(bc), Some(mf), Some(rel), Some(&(temperature, factor, _))) = (
-        boundary.half_width(),
-        model_form.half_width(),
-        allowance,
-        boundary_points.iter().max_by(|a, b| a.2.total_cmp(&b.2)),
+    // Complete boundary/model-form corner design, with at most eight distinct
+    // re-solves. Stronger convection can amplify either heating or cooling.
+    // Charge excess over the separate widths once; do not publish a subset.
+    let (boundary, interaction_excess_k) = if let (Some(_), Some(mf), Some(rel)) = (
+        boundary.half_width(), model_form.half_width(), allowance,
     ) {
-        let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);
-        if let Ok((_, joint)) = vertex("joint worst corner".to_string(), &project, 1.0 - rel)? {
-            interaction_excess_k = ((joint - nominal).abs() - (bc + mf)).max(0.0);
-        }
-    }
-    let boundary = match boundary {
-        PropagatedTerm::Measured { half_width_k, method, detail, vertices } if interaction_excess_k > 0.0 => {
-            PropagatedTerm::Measured {
-                half_width_k: half_width_k + interaction_excess_k,
-                method,
-                detail: format!("{detail}; includes {interaction_excess_k} K joint-corner interaction excess"),
-                vertices,
-            }
-        }
-        other => other,
+        input_propagation::account_joint_design(
+            boundary, mf, nominal, &boundary_points, rel, input_propagation::MAX_CORNERS,
+            |label, temperature, factor, scale| {
+                let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);
+                vertex(label, &project, scale)
+            },
+        )?
+    } else {
+        // Missing individual evidence does not establish zero interaction.
+        // The existing JSON projection represents this unknown as null.
+        (boundary, f64::NAN)
     };
 
     // A linear enclosure belongs to the published mesh and actual field,
@@ -7918,6 +7898,11 @@ fn propagate_declared_inputs(
             },
         }
     };
+
+    // Extend declared-parameter propagation without changing the original
+    // conductivity-only path or inventing distributions from joint tolerances.
+    let parameters = joint_parameters::propagate(&base, cards, nominal, parameters, work,
+        |label, project, side| vertex_with(label, project, 1.0, side))?;
 
     // Geometry: every declared surface-offset band moved outward and then
     // inward together, re-solved on the same topology. Undeclared stays
