@@ -17,7 +17,12 @@ Scene (`frankensim.cooling-cht.v1`):
 - `fluid`: `"dry-air-300k"` (default) or explicit `density_kg_m3`,
   `specific_heat_j_kg_k`, `conductivity_w_m_k`, `kinematic_viscosity_m2_s`.
 - `materials`: `name`, `conductivity_w_m_k`.
-- `solids`: `material`, `min_m`, `max_m` boxes; later boxes override earlier.
+- `solids`: `material` plus either a box (`min_m`, `max_m`) or a closed STL
+  mesh (`stl`, a path relative to the scene file; optional `scale` and
+  `offset_m`, placing `world = scale * stl + offset`). Mesh occupancy is the
+  robust generalized winding number above one half (exact solid-angle sum,
+  or the dipole octree above 4096 triangles). Later solids override
+  earlier ones.
 - `sources`: `name`, `power_w`, `min_m`, `max_m`; the power is spread
   uniformly over the solid voxels whose centres the box covers.
 - `faces` (`x-`, `x+`, `y-`, `y+`, `z-`, `z+`; missing faces are adiabatic
@@ -37,6 +42,9 @@ Examples:
   0.25 m/s air at 300 K).
 - `vented-heatsink-natural.json`: a vertical plate-fin heatsink in a column
   open at the bottom and top, cooled by natural convection only.
+- `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
+  (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
+  at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins.
 
 Results are Estimated numerical evidence at one resolution: no turbulence
 model, radiation, or temperature-dependent properties; staircase geometry;

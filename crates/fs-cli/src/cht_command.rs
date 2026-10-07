@@ -20,19 +20,23 @@ use std::time::{Duration, Instant};
 
 use fs_cli::{CommandOutput, exit};
 use fs_exec::CancelGate;
+use fs_geom::Point3;
+use fs_io::stl::read_stl;
 use fs_lbm::conjugate::{
     ChtError, EnergyConfig, EnergySolution, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow,
     SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
     fv_natural_convection, simple_flow, solve_energy,
 };
+use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CELLS: usize = 4_000_000;
+const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model, radiation, or temperature-dependent properties; power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials, solid boxes (later boxes override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nopening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials, solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nopening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -156,12 +160,109 @@ impl Aabb {
         Ok(Self { min, max })
     }
 
-    /// Voxel-centre membership. Both edges shift down by `tie` (a tiny
-    /// fraction of the voxel), so an edge lying exactly on a voxel centre
-    /// deterministically takes the voxel at its min edge and leaves the one at
-    /// its max edge, whatever the rounding of the decimal coordinates.
-    fn contains(&self, p: [f64; 3], tie: f64) -> bool {
-        (0..3).all(|a| p[a] >= self.min[a] - tie && p[a] < self.max[a] - tie)
+    /// Membership of a query point (see [`probe`]).
+    fn contains(&self, q: [f64; 3]) -> bool {
+        (0..3).all(|a| q[a] >= self.min[a] && q[a] < self.max[a])
+    }
+}
+
+/// The point at which a voxel centre's membership is evaluated: the centre
+/// moved up by `tie` (a tiny fraction of the voxel) on every axis, so a box
+/// edge or mesh face lying exactly on a centre deterministically takes the
+/// voxel at a box's min edge and leaves the one at its max edge, whatever
+/// the rounding of decimal coordinates.
+fn probe(centre: [f64; 3], tie: f64) -> [f64; 3] {
+    centre.map(|v| v + tie)
+}
+
+/// A closed triangle mesh placed by `world = scale * stl + offset`; inside
+/// is the robust generalized winding number above one half.
+struct MeshSolid {
+    soup: Soup,
+    tree: Option<WindingOctree>,
+    scale: f64,
+    offset: [f64; 3],
+    bounds: Aabb,
+}
+
+/// Triangle count above which classification uses the dipole octree
+/// instead of the exact solid-angle sum.
+const EXACT_WINDING_TRIANGLES: usize = 4096;
+
+impl MeshSolid {
+    fn load(item: &J, at: &str, base: &std::path::Path) -> Result<Self> {
+        let path = base.join(
+            item.str_field("stl")
+                .ok_or_else(|| bad(format!("{at}.stl must be a path string")))?,
+        );
+        let scale = optional_number(item, "scale", at)?.unwrap_or(1.0);
+        if scale <= 0.0 {
+            return Err(bad(format!("{at}.scale must be positive")));
+        }
+        let offset = match item.get("offset_m") {
+            None => [0.0; 3],
+            Some(_) => vec3(item, "offset_m", at)?,
+        };
+        let mut bytes = Vec::new();
+        File::open(&path)
+            .and_then(|file| file.take(MAX_STL_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|e| bad(format!("{at}: cannot read {}: {e}", path.display())))?;
+        if bytes.len() as u64 > MAX_STL_BYTES {
+            return Err(bad(format!("{at}: STL exceeds {MAX_STL_BYTES} bytes")));
+        }
+        let soup = read_stl(&bytes).map_err(|e| bad(format!("{at}: {}: {e:?}", path.display())))?;
+        if soup.triangles.is_empty() {
+            return Err(bad(format!("{at}: STL has no triangles")));
+        }
+        let mut bounds = Aabb {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        };
+        for p in &soup.positions {
+            for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                bounds.min[a] = bounds.min[a].min(v);
+                bounds.max[a] = bounds.max[a].max(v);
+            }
+        }
+        let tree = (soup.triangles.len() > EXACT_WINDING_TRIANGLES)
+            .then(|| WindingOctree::build(&soup, 2.0));
+        Ok(Self {
+            soup,
+            tree,
+            scale,
+            offset,
+            bounds,
+        })
+    }
+
+    fn contains(&self, q: [f64; 3]) -> bool {
+        let local = [0, 1, 2].map(|a| (q[a] - self.offset[a]) / self.scale);
+        if (0..3).any(|a| local[a] < self.bounds.min[a] || local[a] > self.bounds.max[a]) {
+            return false;
+        }
+        let point = Point3 {
+            x: local[0],
+            y: local[1],
+            z: local[2],
+        };
+        match &self.tree {
+            Some(tree) => tree.inside(&self.soup, point),
+            None => winding_exact(&self.soup, point) > 0.5,
+        }
+    }
+}
+
+enum Shape {
+    Box(Aabb),
+    Mesh(Box<MeshSolid>),
+}
+
+impl Shape {
+    fn contains(&self, q: [f64; 3]) -> bool {
+        match self {
+            Self::Box(region) => region.contains(q),
+            Self::Mesh(mesh) => mesh.contains(q),
+        }
     }
 }
 
@@ -190,7 +291,7 @@ struct Scene {
     dx: f64,
     fluid: FluidProperties,
     materials: Vec<SolidMaterial>,
-    solids: Vec<(u16, Aabb)>,
+    solids: Vec<(u16, Shape)>,
     sources: Vec<Source>,
     faces: [FaceRule; 6],
     gravity: Option<[f64; 3]>,
@@ -205,7 +306,7 @@ const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
 
 impl Scene {
     #[allow(clippy::too_many_lines)] // one schema, field by field
-    fn parse(text: &str) -> Result<Self> {
+    fn parse(text: &str, base: &std::path::Path) -> Result<Self> {
         let root = J::parse(text).map_err(|e| bad(format!("invalid JSON: {e:?}")))?;
         if root.str_field("schema") != Some(SCHEMA) {
             return Err(bad(format!("schema must be {SCHEMA}")));
@@ -294,10 +395,12 @@ impl Scene {
                 .iter()
                 .position(|n| *n == material)
                 .ok_or_else(|| bad(format!("{at}: unknown material {material}")))?;
-            solids.push((
-                u16::try_from(index).expect("bounded above"),
-                Aabb::parse(item, &at)?,
-            ));
+            let shape = if item.get("stl").is_some() {
+                Shape::Mesh(Box::new(MeshSolid::load(item, &at, base)?))
+            } else {
+                Shape::Box(Aabb::parse(item, &at)?)
+            };
+            solids.push((u16::try_from(index).expect("bounded above"), shape));
         }
         let mut sources = Vec::new();
         for (i, item) in root
@@ -421,7 +524,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             .solids
             .iter()
             .rev()
-            .find(|(_, region)| region.contains(p, tie))
+            .find(|(_, shape)| shape.contains(probe(p, tie)))
             .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
     })
     .map_err(|e| solver_failure(&e))?;
@@ -443,7 +546,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     let mut source_cells = Vec::with_capacity(scene.sources.len());
     for source in &scene.sources {
         let count = setup.add_uniform_power(&domain, source.power_w, |p| {
-            source.region.contains(p, tie)
+            source.region.contains(probe(p, tie))
                 && !domain.is_fluid({
                     let cell = |v: f64| (v / scene.dx).floor() as usize;
                     domain.index(cell(p[0]), cell(p[1]), cell(p[2]))
@@ -527,7 +630,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         let max = (0..domain.cell_count())
             .filter(|&c| {
                 let [x, y, z] = domain.coords(c);
-                !domain.is_fluid(c) && source.region.contains(domain.center(x, y, z), tie)
+                !domain.is_fluid(c) && source.region.contains(probe(domain.center(x, y, z), tie))
             })
             .map(|c| temperature[c])
             .fold(f64::NEG_INFINITY, f64::max);
@@ -715,7 +818,10 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if text.len() as u64 > MAX_INPUT_BYTES {
         return diagnostic(exit::INPUT, &bad("scene exceeds 16 MiB"), json_mode);
     }
-    let scene = match Scene::parse(&text) {
+    let base = std::path::Path::new(&args[0])
+        .parent()
+        .map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
+    let scene = match Scene::parse(&text, &base) {
         Ok(scene) => scene,
         Err(failure) => {
             let class = if failure.code == "cooling-cht-budget" {

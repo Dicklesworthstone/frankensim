@@ -139,3 +139,56 @@ fn malformed_scenes_refuse_with_structured_codes() {
         assert!(message.contains(needle), "case {index}: {message}");
     }
 }
+
+/// ASCII STL of the unit cube [0, 1]^3, outward-wound.
+fn unit_cube_stl() -> String {
+    let v = |i: usize| [(i & 1) as f64, ((i >> 1) & 1) as f64, ((i >> 2) & 1) as f64];
+    // Two triangles per face, counter-clockwise seen from outside.
+    let faces: [[usize; 4]; 6] = [
+        [0, 2, 3, 1], // z = 0
+        [4, 5, 7, 6], // z = 1
+        [0, 1, 5, 4], // y = 0
+        [2, 6, 7, 3], // y = 1
+        [0, 4, 6, 2], // x = 0
+        [1, 3, 7, 5], // x = 1
+    ];
+    let mut out = String::from("solid cube\n");
+    for [a, b, c, d] in faces {
+        for tri in [[a, b, c], [a, c, d]] {
+            out.push_str(" facet normal 0 0 0\n  outer loop\n");
+            for i in tri {
+                let p = v(i);
+                out.push_str(&format!("   vertex {} {} {}\n", p[0], p[1], p[2]));
+            }
+            out.push_str("  endloop\n endfacet\n");
+        }
+    }
+    out.push_str("endsolid cube\n");
+    out
+}
+
+#[test]
+fn stl_solids_voxelize_by_winding_number_with_scale_and_offset() {
+    // A 4 mm cube from a unit-cube STL (scale 0.004, offset 2 mm) in an
+    // 8 mm box at 1 mm voxels occupies exactly 4^3 voxels; a heated cube in
+    // still air with one cold wall conducts its power out through that wall.
+    scratch("cube.stl", &unit_cube_stl());
+    let scene = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.008, 0.008, 0.008], "voxel_m": 0.001,
+ "materials": [{"name": "copper", "conductivity_w_m_k": 400.0}],
+ "solids": [{"material": "copper", "stl": "cube.stl", "scale": 0.004, "offset_m": [0.002, 0.002, 0.002]}],
+ "sources": [{"name": "die", "power_w": 0.01, "min_m": [0.0, 0.0, 0.0], "max_m": [0.008, 0.008, 0.008]}],
+ "faces": {"z-": {"type": "wall", "temperature_k": 300.0}}
+}"#;
+    let (code, result, stderr) = run(&scratch("cube.json", scene));
+    assert_eq!(code, 0, "{stderr}");
+    let materials = result.get("materials").and_then(J::as_array).unwrap();
+    assert_eq!(materials[0].path(&["cells"]).and_then(J::as_f64), Some(64.0));
+    let sources = result.get("sources").and_then(J::as_array).unwrap();
+    assert_eq!(sources[0].path(&["cells"]).and_then(J::as_f64), Some(64.0));
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+    // No flow anywhere: the power leaves through the cold wall.
+    assert!((f(&result, &["energy", "boundary_outflow_w"]) - 0.01).abs() < 1e-11);
+    assert!(f(&result, &["max_solid_temperature_k"]) > 300.0);
+}
