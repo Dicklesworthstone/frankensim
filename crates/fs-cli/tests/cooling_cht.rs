@@ -471,6 +471,69 @@ fn unsteady_buoyant_column_starts_its_own_draft() {
     assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-9);
 }
 
+const FIN_STUDY: &str = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.016, 0.008, 0.006], "voxel_m": 0.001,
+ "materials": [{"name": "aluminium", "conductivity_w_m_k": 167.0}],
+ "solids": [{"material": "aluminium", "heatsink": {
+   "base_min_m": [0.003, 0.0, 0.0], "base_size_m": [0.01, 0.008, 0.001],
+   "fin_count": 2, "fin_thickness_m": 0.001, "fin_height_m": 0.003, "fins_along": "x"}}],
+ "sources": [{"name": "chip", "power_w": 0.2, "min_m": [0.006, 0.0, 0.0], "max_m": [0.01, 0.008, 0.001]}],
+ "faces": {
+  "x-": {"type": "inlet", "velocity_m_s": [0.5, 0.0, 0.0], "temperature_k": 300.0},
+  "x+": {"type": "opening", "ambient_k": 300.0}
+ },
+ "solver": {"tolerance": 1e-7},
+ "study": {
+  "parameters": [{"name": "fins", "path": ["solids", 0, "heatsink", "fin_count"], "values": [2, 3, 5]}],
+  "objective": {"minimize": "source:chip"}
+ }
+}"#;
+
+#[test]
+fn fin_count_study_ranks_variants_and_records_refusals() {
+    // Three fin counts on a 1 mm grid: 2 and 3 fins solve (more area runs
+    // cooler at a fixed inflow); 5 fins merge on this grid and refuse.
+    let (code, result, stderr) = run(&scratch("fin-study.json", FIN_STUDY));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        result.str_field("schema"),
+        Some("frankensim.cooling-cht.study.v1")
+    );
+    let evaluations = result.get("evaluations").and_then(J::as_array).unwrap();
+    assert_eq!(evaluations.len(), 3);
+    let objective = |i: usize| evaluations[i].path(&["objective"]).and_then(J::as_f64);
+    let (two, three) = (objective(0).unwrap(), objective(1).unwrap());
+    assert!(three < two && two > 300.0, "{two} {three}");
+    assert_eq!(evaluations[2].str_field("status"), Some("refused"));
+    assert!(
+        evaluations[2]
+            .str_field("message")
+            .unwrap()
+            .contains("fins merge"),
+        "{:?}",
+        evaluations[2]
+    );
+    assert_eq!(
+        result.path(&["best", "index"]).and_then(J::as_f64),
+        Some(1.0)
+    );
+    // An unreachable constraint leaves no feasible variant.
+    let constrained = FIN_STUDY.replace(
+        r#""objective": {"minimize": "source:chip"}"#,
+        r#""objective": {"minimize": "source:chip"},
+  "constraints": [{"quantity": "inflow_m3_s", "min": 1.0}]"#,
+    );
+    assert_ne!(constrained, FIN_STUDY);
+    let (code, result, stderr) = run(&scratch("fin-study-constrained.json", &constrained));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.get("best"), Some(&J::Null));
+    // A path that does not exist refuses the study.
+    let wrong = FIN_STUDY.replace(r#""heatsink", "fin_count""#, r#""heatsink", "fins""#);
+    let (code, diagnostic, _) = run(&scratch("fin-study-wrong.json", &wrong));
+    assert_eq!(code, 4, "{diagnostic:?}");
+}
+
 #[test]
 fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     // A die (k 150) on a laminate (k 30 in-plane, 0.3 through) with a

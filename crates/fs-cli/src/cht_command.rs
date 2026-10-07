@@ -11,6 +11,7 @@
 #[path = "json_read.rs"]
 #[allow(dead_code)]
 mod json;
+mod study;
 
 use std::ffi::OsString;
 use std::fmt::{self, Write as _};
@@ -40,7 +41,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -258,6 +259,82 @@ fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch
         lo,
         hi,
     })
+}
+
+/// A plate-fin heatsink: a base box `base_min_m` + `base_size_m` and
+/// `fin_count` plates of `fin_thickness_m` standing `fin_height_m` on its
+/// top (+z), running along `fins_along` (`"x"` or `"y"`) and spread evenly
+/// across the other horizontal axis (the outer fins flush with the base
+/// edges). Every fin must cover voxel centres and every gap must keep a
+/// fluid voxel, so a design the grid cannot represent refuses.
+fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<Vec<Aabb>> {
+    let origin = vec3(item, "base_min_m", at)?;
+    let size = vec3(item, "base_size_m", at)?;
+    let count = number(item, "fin_count", at)?;
+    let thickness = number(item, "fin_thickness_m", at)?;
+    let height = number(item, "fin_height_m", at)?;
+    if size.iter().any(|v| *v <= 0.0)
+        || !(1.0..=1000.0).contains(&count)
+        || count.fract() != 0.0
+        || thickness <= 0.0
+        || height <= 0.0
+    {
+        return Err(bad(format!(
+            "{at}: base_size_m, fin_thickness_m and fin_height_m must be positive and fin_count a whole number in 1..=1000"
+        )));
+    }
+    // The axis the fins are spread across (they run along the other).
+    let across = match item.str_field("fins_along") {
+        None | Some("x") => 1,
+        Some("y") => 0,
+        Some(_) => return Err(bad(format!("{at}.fins_along must be \"x\" or \"y\""))),
+    };
+    let count = count as usize;
+    if thickness * count as f64 > size[across] + 1e-12 {
+        return Err(bad(format!(
+            "{at}: {count} fins of {thickness} m do not fit the base"
+        )));
+    }
+    let mut parts = vec![Aabb {
+        min: origin,
+        max: [0, 1, 2].map(|a| origin[a] + size[a]),
+    }];
+    let pitch = if count > 1 {
+        (size[across] - thickness) / (count - 1) as f64
+    } else {
+        0.0
+    };
+    let mut previous_end: Option<f64> = None;
+    for i in 0..count {
+        let start = if count > 1 {
+            origin[across] + i as f64 * pitch
+        } else {
+            origin[across] + 0.5 * (size[across] - thickness)
+        };
+        let mut min = origin;
+        let mut max = [0, 1, 2].map(|a| origin[a] + size[a]);
+        min[across] = start;
+        max[across] = start + thickness;
+        min[2] = origin[2] + size[2];
+        max[2] = min[2] + height;
+        let (lo, hi) = cell_span(min[across], max[across], dx, dims[across]);
+        if lo >= hi {
+            return Err(bad(format!(
+                "{at}: fin {i} ({thickness} m) covers no voxel centre at voxel_m {dx}"
+            )));
+        }
+        if let Some(end) = previous_end {
+            let (gap_lo, gap_hi) = cell_span(end, start, dx, dims[across]);
+            if gap_lo >= gap_hi {
+                return Err(bad(format!(
+                    "{at}: the gap before fin {i} holds no fluid voxel at voxel_m {dx} (fins merge)"
+                )));
+            }
+        }
+        previous_end = Some(start + thickness);
+        parts.push(Aabb { min, max });
+    }
+    Ok(parts)
 }
 
 /// An axis-aligned box `[min, max)` in metres.
@@ -581,8 +658,8 @@ const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
     #[allow(clippy::too_many_lines)] // one schema, field by field
-    fn parse(text: &str, base: &std::path::Path) -> Result<Self> {
-        let root = J::parse(text).map_err(|e| bad(format!("invalid JSON: {e:?}")))?;
+    fn from_root(root: &J, base: &std::path::Path) -> Result<Self> {
+        let root = root.clone();
         if root.str_field("schema") != Some(SCHEMA) {
             return Err(bad(format!("schema must be {SCHEMA}")));
         }
@@ -728,12 +805,19 @@ impl Scene {
                 .iter()
                 .position(|n| *n == material)
                 .ok_or_else(|| bad(format!("{at}: unknown material {material}")))?;
+            let material = u16::try_from(index).expect("bounded above");
+            if let Some(heatsink) = item.get("heatsink") {
+                for part in plate_fin_heatsink(heatsink, dx, dims, &format!("{at}.heatsink"))? {
+                    solids.push((material, Shape::Box(part)));
+                }
+                continue;
+            }
             let shape = if item.get("stl").is_some() {
                 Shape::Mesh(Box::new(MeshSolid::load(item, &at, base)?))
             } else {
                 Shape::Box(Aabb::parse(item, &at)?)
             };
-            solids.push((u16::try_from(index).expect("bounded above"), shape));
+            solids.push((material, shape));
         }
         // Two-resistor components: voxelized after (over) the declared
         // solids with the hidden compact material.
@@ -1772,6 +1856,29 @@ fn diagnostic(code: u8, failure: &Failure, json_mode: bool) -> CommandOutput {
     }
 }
 
+/// Execute `scene` under its wall-time limit: the limit trips the same
+/// cancellation gate the solvers poll, so an exhausted budget publishes
+/// nothing.
+fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
+    let gate = CancelGate::new();
+    let duration = Duration::from_secs_f64(scene.wall_seconds);
+    std::thread::scope(|scope| {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let gate_ref = &gate;
+        scope.spawn(move || {
+            if matches!(
+                stopped.recv_timeout(duration),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                gate_ref.request();
+            }
+        });
+        let result = execute(scene, &gate, json_mode);
+        let _ = stop.send(());
+        result
+    })
+}
+
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         return CommandOutput {
@@ -1803,36 +1910,31 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     let base = std::path::Path::new(&args[0])
         .parent()
         .map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
-    let scene = match Scene::parse(&text, &base) {
-        Ok(scene) => scene,
-        Err(failure) => {
-            let class = if failure.code == "cooling-cht-budget" {
-                exit::BUDGET
-            } else {
-                exit::REFUSED
-            };
-            return diagnostic(class, &failure, json_mode);
+    let root = match J::parse(&text) {
+        Ok(root) => root,
+        Err(e) => {
+            return diagnostic(
+                exit::REFUSED,
+                &bad(format!("invalid JSON: {e:?}")),
+                json_mode,
+            );
         }
     };
-    // The wall-time limit trips the same cancellation gate the solvers poll,
-    // so an exhausted budget publishes nothing.
-    let gate = CancelGate::new();
-    let duration = Duration::from_secs_f64(scene.wall_seconds);
-    let result = std::thread::scope(|scope| {
-        let (stop, stopped) = std::sync::mpsc::channel::<()>();
-        let gate_ref = &gate;
-        scope.spawn(move || {
-            if matches!(
-                stopped.recv_timeout(duration),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ) {
-                gate_ref.request();
+    let result = if root.get("study").is_some() {
+        study::run(&root, &base, json_mode)
+    } else {
+        match Scene::from_root(&root, &base) {
+            Ok(scene) => execute_within_budget(&scene, json_mode),
+            Err(failure) => {
+                let class = if failure.code == "cooling-cht-budget" {
+                    exit::BUDGET
+                } else {
+                    exit::REFUSED
+                };
+                return diagnostic(class, &failure, json_mode);
             }
-        });
-        let result = execute(&scene, &gate, json_mode);
-        let _ = stop.send(());
-        result
-    });
+        }
+    };
     match result {
         Ok(stdout) => CommandOutput {
             exit_code: exit::SUCCESS,

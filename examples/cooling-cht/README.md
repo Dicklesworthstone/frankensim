@@ -87,6 +87,22 @@ Scene (`frankensim.cooling-cht.v1`):
   `{"type": "porous", min_m, max_m, permeability_m2, inertial_per_m}`
   (Darcy-Forchheimer, scalar or per axis; a missing permeability means no
   viscous term). Grilles on a vent sit one voxel inside the open face.
+- A solid may be a parametric plate-fin heatsink instead of a box or STL:
+  `{"material": ..., "heatsink": {"base_min_m", "base_size_m", "fin_count",
+  "fin_thickness_m", "fin_height_m", "fins_along": "x" | "y"}}` (fins stand
+  on the base top, the outer ones flush with its edges). A fin that covers
+  no voxel centre, or a gap that keeps no fluid voxel, refuses: the grid
+  cannot represent that design.
+- Optional `study`: `{"parameters": [{"name", "path": [keys and indices
+  into this scene], "values": [...]}, ...], "objective": {"minimize":
+  quantity}, "constraints": [{"quantity", "min", "max"}]}` evaluates every
+  combination of the values (at most 64) as an ordinary scene under its
+  own wall budget and ranks the completed, feasible variants. Quantities:
+  `max_solid_temperature_k`, `source:<name>`, `component:<name>`,
+  `internal_fan:<name>`, `fan_flow_m3_s`, `inflow_m3_s`. Refused variants
+  are listed with their refusal and never ranked; the result
+  (`frankensim.cooling-cht.study.v1`) lists every evaluation and the best.
+  A grid search: no optimality claim between grid points.
 - Optional `components`: JEDEC two-resistor compact models (`name`,
   `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
   `junction_to_board_k_w`). The box blocks flow; the junction reaches the

@@ -654,7 +654,9 @@ impl SurfaceExchange {
         let face_area = dx * dx;
         let area: Vec<f64> = members.iter().map(|&m| m as f64 * face_area).collect();
         let raw = |i: usize, j: usize| {
-            hits[i].get(&j).map_or(0.0, |&n| n as f64 / traced[i] as f64)
+            hits[i]
+                .get(&j)
+                .map_or(0.0, |&n| n as f64 / traced[i] as f64)
         };
         let escape: Vec<(f64, f64)> = (0..patches)
             .map(|i| {
@@ -691,7 +693,9 @@ impl SurfaceExchange {
         for row in &mut symmetric {
             row.sort_by_key(|&(j, _)| j);
         }
-        let target: Vec<f64> = (0..patches).map(|i| area[i] * (1.0 - escape[i].0)).collect();
+        let target: Vec<f64> = (0..patches)
+            .map(|i| area[i] * (1.0 - escape[i].0))
+            .collect();
         let mut d = vec![1.0f64; patches];
         for sweep in 0..10_000 {
             if sweep % 64 == 0 {
