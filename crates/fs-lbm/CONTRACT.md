@@ -1142,6 +1142,20 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 | Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
 | k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
 
+### Temperature-dependent conductivity (`SolidMaterial::conductivity_table`)
+
+A solid may declare `k(T)` as a piecewise-linear table; every axis
+conductivity scales by `k(T) / conductivity_w_m_k` at the cell's
+temperature. The energy solve (steady, and each transient step) iterates
+Picard passes, each evaluating `k` at the previous pass and warm-starting
+the Krylov solve, until the largest temperature change is below 1e-10 of
+the span (200 passes, else `SolverNotConverged { system: "energy
+conductivity" }`). Face conductances stay harmonic in the cell values.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Slab, `k = 1 + (T - 300)/100`, faces 400 K / 300 K, 10 and 20 cells | Kirchhoff transform: `int k dT` linear in x | max error 0.229 K -> 0.063 K of a 100 K span: order 1.86 |
+
 ### Two-resistor compact components (`CompactComponent`)
 
 `ThermalSetup::compact_components` holds JEDEC two-resistor models

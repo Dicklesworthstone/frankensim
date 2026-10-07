@@ -117,6 +117,11 @@ Scene (`frankensim.cooling-cht.v1`):
   only where features and boundary layers need them. Box, plane and
   source positions use the actual cell centres and faces; the result
   reports `graded` and `voxel_m` as the smallest width.
+- A material may declare `conductivity_table`: `[[temperature_k, k], ...]`
+  (piecewise linear, constant beyond the ends). Every axis conductivity of
+  that material scales by `k(T) / conductivity_w_m_k` at each cell's
+  temperature, and the energy solve iterates to a consistent field
+  (silicon's conductivity falls by about a third between 300 and 400 K).
 - Optional `probes`: `[{"name", "at_m": [x, y, z]}, ...]` report the
   temperature, velocity and fluid/solid state of the cell containing each
   point (`probes` in the result).

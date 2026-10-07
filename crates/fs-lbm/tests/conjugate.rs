@@ -196,6 +196,51 @@ fn clustered(n: usize, h: f64) -> Vec<f64> {
 }
 
 #[test]
+fn temperature_dependent_conductivity_follows_the_kirchhoff_transform() {
+    // k(T) = 1 + (T - 300) / 100 between 400 K and 300 K faces: the
+    // Kirchhoff potential theta = int k dT = (T - 300) + (T - 300)^2 / 200
+    // is linear in x, so T(x) is known exactly; the finite-volume solution
+    // (harmonic face conductivities at the cell temperatures) converges to
+    // it at second order. Without the table the profile would be linear.
+    let gate = CancelGate::new();
+    let solve = |n: usize| {
+        let dx = 0.1 / n as f64;
+        let domain = VoxelDomain::from_fn(n, 1, 1, dx, |_| Voxel::Solid(0)).unwrap();
+        let solids =
+            [SolidMaterial::new("ramp", 1.0)
+                .with_conductivity_table(&[(300.0, 1.0), (400.0, 2.0)])];
+        let mut faces = [ThermalFace::Adiabatic; 6];
+        faces[0] = ThermalFace::Temperature(400.0);
+        faces[1] = ThermalFace::Temperature(300.0);
+        let solution = solve_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            &ThermalSetup::new(faces),
+            &EnergyConfig::default(),
+            &gate,
+        )
+        .unwrap();
+        let theta_left = 100.0 + 100.0 * 100.0 / 200.0;
+        (0..n)
+            .map(|x| {
+                let xc = (x as f64 + 0.5) * dx;
+                let theta = theta_left * (1.0 - xc / 0.1);
+                // (T - 300)^2 / 200 + (T - 300) - theta = 0.
+                let exact = 300.0 + 100.0 * ((1.0 + theta / 50.0).sqrt() - 1.0);
+                (solution.temperature[x] - exact).abs()
+            })
+            .fold(0.0f64, f64::max)
+    };
+    let (coarse, fine) = (solve(10), solve(20));
+    let order = (coarse / fine).log2();
+    eprintln!("k(T) slab: max errors {coarse:.3e} {fine:.3e}, order {order:.3}");
+    // Measured: 0.229 K and 0.063 K of a 100 K span (order 1.86).
+    assert!(fine < 0.07 && (order - 2.0).abs() < 0.3, "{coarse} {fine}");
+}
+
+#[test]
 fn graded_composite_slab_is_exact() {
     // Piecewise-constant k on arbitrary widths: the series profile is exact.
     let gate = CancelGate::new();

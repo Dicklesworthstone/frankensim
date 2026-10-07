@@ -190,6 +190,27 @@ fn probes_and_vtk_export_report_the_fields() {
 }
 
 #[test]
+fn falling_conductivity_table_runs_the_chip_hotter() {
+    // An aluminium whose conductivity falls steeply with temperature runs
+    // hotter than the constant-k part, and the energy still closes.
+    let table = DUCT.replace(
+        r#""conductivity_w_m_k": 167.0}"#,
+        r#""conductivity_w_m_k": 167.0, "conductivity_table": [[300.0, 167.0], [400.0, 0.5]]}"#,
+    );
+    assert_ne!(table, DUCT);
+    let (code, constant, stderr) = run(&scratch("duct-k-constant.json", DUCT));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, varying, stderr) = run(&scratch("duct-k-table.json", &table));
+    assert_eq!(code, 0, "{stderr}");
+    let (a, b) = (
+        f(&constant, &["max_solid_temperature_k"]),
+        f(&varying, &["max_solid_temperature_k"]),
+    );
+    assert!(b > a, "constant {a} vs k(T) {b}");
+    assert!(f(&varying, &["energy", "balance_relative_residual"]) < 1e-9);
+}
+
+#[test]
 fn malformed_scenes_refuse_with_structured_codes() {
     let cases = [
         (DUCT.replace("cooling-cht.v1", "cooling-cht.v9"), "schema"),

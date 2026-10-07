@@ -420,6 +420,11 @@ pub struct SolidMaterial {
     /// Volumetric heat capacity `rho c`, J/(m^3 K). Required only by
     /// transient marches; steady solves never read it.
     pub volumetric_heat_capacity_j_m3_k: Option<f64>,
+    /// Temperature dependence `[(T K, k W/(m K)), ...]` (empty: constant):
+    /// piecewise linear in T, constant beyond the ends, scaling every axis
+    /// conductivity by `k(T) / conductivity_w_m_k` at each cell's
+    /// temperature (the energy solve iterates to consistency).
+    pub conductivity_table: Vec<(f64, f64)>,
 }
 
 impl SolidMaterial {
@@ -431,7 +436,38 @@ impl SolidMaterial {
             conductivity_w_m_k,
             orthotropic_w_m_k: None,
             volumetric_heat_capacity_j_m3_k: None,
+            conductivity_table: Vec::new(),
         }
+    }
+
+    /// Declare a temperature-dependent conductivity `[(T K, k W/(m K)), ...]`
+    /// (see [`Self::conductivity_table`]).
+    #[must_use]
+    pub fn with_conductivity_table(mut self, points: &[(f64, f64)]) -> Self {
+        self.conductivity_table = points.to_vec();
+        self
+    }
+
+    /// `k(T) / conductivity_w_m_k`: the factor scaling every axis
+    /// conductivity at temperature `t` (1 without a table).
+    #[must_use]
+    pub fn conductivity_factor(&self, t: f64) -> f64 {
+        let table = &self.conductivity_table;
+        let Some(&(t0, k0)) = table.first() else {
+            return 1.0;
+        };
+        let k = if t <= t0 {
+            k0
+        } else {
+            table
+                .windows(2)
+                .find(|w| t <= w[1].0)
+                .map_or_else(
+                    || table[table.len() - 1].1,
+                    |w| w[0].1 + (w[1].1 - w[0].1) * (t - w[0].0) / (w[1].0 - w[0].0),
+                )
+        };
+        k / self.conductivity_w_m_k
     }
 
     /// Declare grid-aligned principal conductivities `[k_x, k_y, k_z]`,

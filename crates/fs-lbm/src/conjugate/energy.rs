@@ -565,7 +565,11 @@ pub(crate) struct PseudoStep<'a> {
     pub previous: &'a [f64],
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+/// The energy solve, iterated to a consistent temperature field when a solid
+/// declares a temperature-dependent conductivity (Picard: each pass
+/// evaluates every solid cell's `k(T)` at the previous pass's temperature,
+/// until the largest change is below 1e-10 of the temperature span).
+#[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -574,6 +578,97 @@ pub(crate) fn solve_energy_inner(
     setup: &ThermalSetup,
     config: &EnergyConfig,
     step: Option<&PseudoStep<'_>>,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    if solids.iter().all(|s| s.conductivity_table.is_empty()) {
+        return solve_energy_once(domain, fluid, solids, flow, setup, config, step, None, gate);
+    }
+    for solid in solids {
+        for (i, &(t, k)) in solid.conductivity_table.iter().enumerate() {
+            finite("solid.conductivity_table.temperature", t)?;
+            finite_positive("solid.conductivity_table.conductivity", k)?;
+            if i > 0 && t <= solid.conductivity_table[i - 1].0 {
+                return Err(ChtError::InvalidInput {
+                    field: "solid.conductivity_table",
+                    reason: format!("temperatures must increase ({})", solid.label),
+                });
+            }
+        }
+    }
+    domain.check_materials(solids.len())?;
+    let scales = |temperature: &[f64]| -> Vec<f64> {
+        (0..domain.cell_count())
+            .map(|c| match domain.voxel_at(c) {
+                Voxel::Fluid => 1.0,
+                Voxel::Solid(m) => solids[usize::from(m)].conductivity_factor(temperature[c]),
+            })
+            .collect()
+    };
+    // First pass: every solid at its table's value for the first declared
+    // face, fixed or step temperature (or its reference conductivity).
+    let start = match step {
+        Some(step) => scales(step.previous),
+        None => {
+            let reference = setup.faces.iter().find_map(|rule| match *rule {
+                ThermalFace::Temperature(t) | ThermalFace::Inflow { temperature: t } => Some(t),
+                ThermalFace::Convective { ambient, .. } => Some(ambient),
+                _ => None,
+            });
+            match reference {
+                Some(t) => scales(&vec![t; domain.cell_count()]),
+                None => vec![1.0; domain.cell_count()],
+            }
+        }
+    };
+    let mut solution =
+        solve_energy_once(domain, fluid, solids, flow, setup, config, step, Some((&start, None)), gate)?;
+    for _ in 0..200 {
+        super::poll(gate)?;
+        let next = solve_energy_once(
+            domain,
+            fluid,
+            solids,
+            flow,
+            setup,
+            config,
+            step,
+            Some((&scales(&solution.temperature), Some(&solution.temperature))),
+            gate,
+        )?;
+        let (lo, hi) = next
+            .temperature
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+        let change = next
+            .temperature
+            .iter()
+            .zip(&solution.temperature)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        solution = next;
+        if change <= 1e-10 * (hi - lo).max(1e-12) {
+            return Ok(solution);
+        }
+    }
+    Err(ChtError::SolverNotConverged {
+        system: "energy conductivity",
+        iterations: 200,
+        relative_residual: f64::NAN,
+        tolerance: 1e-10,
+    })
+}
+
+/// One linear energy solve; `nonlinear` carries per-cell solid conductivity
+/// factors and an optional warm start (the previous Picard pass).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+fn solve_energy_once(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    nonlinear: Option<(&[f64], Option<&[f64]>)>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
@@ -674,7 +769,10 @@ pub(crate) fn solve_energy_inner(
     let k: Vec<[f64; 3]> = (0..cells)
         .map(|c| match domain.voxel_at(c) {
             Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
-            Voxel::Solid(m) => solids[usize::from(m)].axis_conductivity(),
+            Voxel::Solid(m) => {
+                let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
+                solids[usize::from(m)].axis_conductivity().map(|k| k * scale)
+            }
         })
         .collect();
     let mut contacts = Vec::with_capacity(setup.contacts.len());
@@ -838,8 +936,19 @@ pub(crate) fn solve_energy_inner(
         })
         .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
         .unwrap_or(0.0);
-    let mut temperature = match step {
-        Some(step) => {
+    let warm = nonlinear.and_then(|(_, warm)| warm);
+    let mut temperature = match (warm, step) {
+        (Some(previous), _) => {
+            let mut start = previous.to_vec();
+            start.extend(
+                setup
+                    .compact_components
+                    .iter()
+                    .map(|part| previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]),
+            );
+            start
+        }
+        (None, Some(step)) => {
             let mut warm = step.previous.to_vec();
             warm.extend(
                 setup
@@ -849,7 +958,7 @@ pub(crate) fn solve_energy_inner(
             );
             warm
         }
-        None => vec![guess; unknowns],
+        (None, None) => vec![guess; unknowns],
     };
     let outcome = bicgstab_ilu0(
         "energy",
