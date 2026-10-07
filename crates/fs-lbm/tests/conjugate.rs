@@ -1328,3 +1328,60 @@ fn simplec_refusals_are_structured() {
         Err(ChtError::Cancelled)
     );
 }
+
+#[test]
+fn simplec_outlet_admits_undeveloped_outflow_at_one_fixed_point() {
+    // G3 metamorphic: a block two cells upstream of the outlet sends a
+    // recirculating, undeveloped stream through the outlet plane. The
+    // ghost-pressure outlet keeps the discrete problem square, so SIMPLEC
+    // converges (an extrapolated outlet stalls here) and the converged field
+    // does not depend on the under-relaxation factor.
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(24, 10, 1, dx, |p| {
+        let (x, y) = (p[0] / dx, p[1] / dx);
+        if (18.0..20.0).contains(&x) && y < 6.0 {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        kinematic_viscosity_m2_s: 1e-4,
+        ..unit_fluid()
+    };
+    let solve = |alpha: f64| {
+        let mut config = SimpleConfig::new([
+            FvBoundary::Inlet {
+                velocity: [0.5, 0.0, 0.0],
+            },
+            FvBoundary::Outlet,
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::Symmetry,
+            FvBoundary::Symmetry,
+        ]);
+        config.velocity_relaxation = alpha;
+        config.tolerance = 1e-10;
+        simple_flow(&domain, &fluid, &config, &gate).unwrap()
+    };
+    let slow = solve(0.5);
+    let fast = solve(0.8);
+    eprintln!("{:?}\n{:?}", slow.report, fast.report);
+    for flow in [&slow, &fast] {
+        let r = &flow.report;
+        assert!((r.outflow_m3_s - r.inflow_m3_s).abs() < 1e-12 * r.inflow_m3_s);
+        assert!(r.max_divergence_m3_s < 1e-14 * r.inflow_m3_s);
+    }
+    // Reversed flow crosses the outlet plane: the outflow is undeveloped.
+    let backflow = (0..10)
+        .map(|y| slow.velocity_m_s[domain.index(23, y, 0)][0])
+        .fold(f64::INFINITY, f64::min);
+    eprintln!("min outlet-layer u {backflow:.4e}");
+    let worst = (0..domain.cell_count())
+        .map(|c| (slow.velocity_m_s[c][0] - fast.velocity_m_s[c][0]).abs())
+        .fold(0.0, f64::max);
+    eprintln!("relaxation 0.5 vs 0.8: max |du| {worst:.3e}");
+    assert!(worst < 1e-7, "fixed point depends on relaxation: {worst}");
+}

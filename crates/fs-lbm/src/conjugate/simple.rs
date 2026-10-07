@@ -17,24 +17,29 @@
 //!
 //! Domain faces are [`FvBoundary`]: `Wall` (no-slip, optionally moving
 //! tangentially), `Symmetry` (free slip), `Inlet` (prescribed velocity) and
-//! `Outlet` (prescribed pressure zero, zero-gradient velocity; its normal
-//! velocity is corrected by the pressure correction like an interior face,
-//! so the outlet absorbs the mass imbalance).
+//! `Outlet` (pressure zero, zero normal gradient of velocity). An outlet
+//! face is a momentum unknown like an interior face: the cell beyond the
+//! boundary mirrors the inside cell's velocities and carries the ghost
+//! pressure `-p_inside`, so the face holds pressure zero, and the pressure
+//! correction uses the same linearization (`u' = 2 d p'_inside`). The steady
+//! state is therefore one fixed point of the discrete equations, independent
+//! of the relaxation, also where the outflow is not fully developed.
 //!
 //! # SIMPLEC iteration
 //!
 //! Momentum is under-relaxed (`a_P / alpha`) and solved per component with
 //! ILU(0)-BiCGStab; the pressure correction uses `d = A / (a_P / alpha -
-//! sum a_nb)` and is solved with ILU(0)-PCG (components without an outlet are
-//! pinned); velocities and pressure are corrected with no pressure
-//! under-relaxation. Convergence requires two steady residuals of the same
+//! sum a_nb)` and is solved with ILU(0)-BiCGStab on the Jacobi-scaled system
+//! (components without an outlet are pinned); velocities and pressure are
+//! corrected with no pressure under-relaxation. Convergence requires two steady residuals of the same
 //! iterate below the tolerance: the largest cell mass imbalance (before
 //! correction) over the largest face mass flux, and, per velocity component,
 //! the relative residual `||b - A u|| / ||b||` of the Jacobi-scaled momentum
 //! system at the velocities entering the iteration (under-relaxation cancels
 //! there, so it is the residual of the unrelaxed equations). Inner solves
-//! only reduce that residual by `momentum_tolerance`, so a converged report
-//! never rests on a skipped inner solve.
+//! only reduce their entry residuals (by `momentum_tolerance` and
+//! `pressure_tolerance`), so the outer residuals carry the convergence claim
+//! and a converged report never rests on a skipped inner solve.
 //!
 //! # No-claim boundaries
 //!
@@ -97,7 +102,9 @@ pub struct SimpleConfig {
     pub tolerance: f64,
     /// Factor by which each inner momentum solve reduces its entry residual.
     pub momentum_tolerance: f64,
-    /// Relative residual of each pressure-correction solve.
+    /// Factor by which each pressure-correction solve reduces its entry
+    /// residual (the correction starts from zero, so this is its residual
+    /// relative to the mass imbalance it corrects).
     pub pressure_tolerance: f64,
 }
 
@@ -111,8 +118,8 @@ impl SimpleConfig {
             velocity_relaxation: 0.7,
             max_iterations: 3000,
             tolerance: 1e-6,
-            momentum_tolerance: 1e-2,
-            pressure_tolerance: 1e-8,
+            momentum_tolerance: 1e-1,
+            pressure_tolerance: 1e-2,
         }
     }
 }
@@ -136,6 +143,10 @@ pub struct SimpleReport {
     pub outflow_m3_s: f64,
     /// Largest cell Reynolds number `|u| dx / nu`.
     pub max_cell_reynolds: f64,
+    /// Total Krylov iterations of the momentum solves.
+    pub momentum_krylov_iterations: usize,
+    /// Total Krylov iterations of the pressure-correction solves.
+    pub pressure_krylov_iterations: usize,
 }
 
 /// Steady finite-volume flow.
@@ -173,8 +184,20 @@ enum Kind {
     Unknown(usize),
     /// Prescribed value (blocked faces carry zero).
     Fixed(f64),
-    /// Outlet face: extrapolated, then pressure-corrected.
-    Outlet,
+    /// Outlet face (row index): solved by its own momentum equation with
+    /// zero normal gradient and a ghost pressure `-p_inside`, so the face
+    /// carries the boundary pressure zero.
+    Outlet(usize),
+}
+
+impl Kind {
+    /// Momentum row of a solved face.
+    const fn row(self) -> Option<usize> {
+        match self {
+            Self::Unknown(row) | Self::Outlet(row) => Some(row),
+            Self::Fixed(_) => None,
+        }
+    }
 }
 
 /// Face lattice of one velocity component.
@@ -210,6 +233,9 @@ struct Solver<'a> {
     pressure: Vec<f64>,
     /// SIMPLEC `d` per face (0 for non-unknown faces until set).
     d: [Vec<f64>; 3],
+    /// Krylov iterations spent on momentum and pressure correction.
+    momentum_krylov: usize,
+    pressure_krylov: usize,
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -253,7 +279,10 @@ impl<'a> Solver<'a> {
                     *slot = match rule {
                         FvBoundary::Wall { .. } | FvBoundary::Symmetry => Kind::Fixed(0.0),
                         FvBoundary::Inlet { velocity } => Kind::Fixed(velocity[axis]),
-                        FvBoundary::Outlet => Kind::Outlet,
+                        FvBoundary::Outlet => {
+                            unknowns.push(index);
+                            Kind::Outlet(unknowns.len() - 1)
+                        }
                     };
                 } else {
                     minus[axis] -= 1;
@@ -289,6 +318,8 @@ impl<'a> Solver<'a> {
             vel,
             pressure: vec![0.0; domain.cell_count()],
             d,
+            momentum_krylov: 0,
+            pressure_krylov: 0,
         }
     }
 
@@ -334,9 +365,20 @@ impl<'a> Solver<'a> {
                 poll(gate)?;
             }
             let f = comp.coords(index);
-            let mut minus_cell = f;
-            minus_cell[a] -= 1;
-            let plus_cell = f;
+            // The two cells the face separates; an outlet face has one
+            // inside, and its outside twin mirrors it (zero normal gradient).
+            let minus_cell = (f[a] > 0).then(|| {
+                let mut c = f;
+                c[a] -= 1;
+                c
+            });
+            let plus_cell = (f[a] < self.n[a]).then_some(f);
+            let (minus_cell, plus_cell) = match (minus_cell, plus_cell) {
+                (Some(m), Some(p)) => (m, p),
+                (Some(m), None) => (m, m),
+                (None, Some(p)) => (p, p),
+                (None, None) => unreachable!("every face touches a cell"),
+            };
             let mut sum_nb = 0.0f64;
             let mut a_p = 0.0f64;
             let mut rhs = 0.0f64;
@@ -346,6 +388,13 @@ impl<'a> Solver<'a> {
                     let s = if plus { 1.0 } else { -1.0 };
                     if d == a {
                         // CV side at the centre of the minus/plus cell.
+                        let beyond = if plus { f[a] == self.n[a] } else { f[a] == 0 };
+                        if beyond {
+                            // Outlet: the mirrored outside centre moves with
+                            // the face itself, so only the flux remains.
+                            net_out += s * self.rho * self.area * self.vel[a][index];
+                            continue;
+                        }
                         let nf = {
                             let mut g = f;
                             if plus {
@@ -360,12 +409,11 @@ impl<'a> Solver<'a> {
                         net_out += flux;
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
                         match comp.kind[nf] {
-                            Kind::Unknown(col) => {
+                            Kind::Unknown(col) | Kind::Outlet(col) => {
                                 coo.push(row, col, -coef);
                                 sum_nb += coef;
                             }
                             Kind::Fixed(v) => rhs = coef.mul_add(v, rhs),
-                            Kind::Outlet => rhs = coef.mul_add(self.vel[a][nf], rhs),
                         }
                         a_p += coef;
                         continue;
@@ -414,7 +462,7 @@ impl<'a> Solver<'a> {
                     }
                     let nf = comp.index(g);
                     match comp.kind[nf] {
-                        Kind::Unknown(col) => {
+                        Kind::Unknown(col) | Kind::Outlet(col) => {
                             net_out += edge_flux;
                             let coef =
                                 diff.mul_add(self.weight(edge_flux / diff), (-edge_flux).max(0.0));
@@ -434,9 +482,16 @@ impl<'a> Solver<'a> {
             }
             // Continuity is satisfied only at convergence: keep a_P >= sum.
             a_p += net_out.max(0.0);
-            // Unknown faces separate two fluid cells.
-            let drop = self.pressure[cell_of(self.n, minus_cell)]
-                - self.pressure[cell_of(self.n, plus_cell)];
+            // Interior faces separate two fluid cells; an outlet face sees
+            // the ghost pressure -p_inside (boundary pressure zero).
+            let drop = match comp.kind[index] {
+                Kind::Outlet(_) if f[a] == 0 => -2.0 * self.pressure[cell_of(self.n, plus_cell)],
+                Kind::Outlet(_) => 2.0 * self.pressure[cell_of(self.n, minus_cell)],
+                _ => {
+                    self.pressure[cell_of(self.n, minus_cell)]
+                        - self.pressure[cell_of(self.n, plus_cell)]
+                }
+            };
             rhs = self.area.mul_add(drop, rhs);
             let relaxed = a_p / alpha;
             rhs = ((1.0 - alpha) * relaxed).mul_add(self.vel[a][index], rhs);
@@ -463,35 +518,13 @@ impl<'a> Solver<'a> {
         // Inner solves reduce the entry residual by `momentum_tolerance`.
         let inner = (self.config.momentum_tolerance * steady).max(1e-15);
         if steady > 1e-15 {
-            bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)?;
+            let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)?;
+            self.momentum_krylov += outcome.iterations;
         }
         for (row, &index) in self.comps[a].unknowns.iter().enumerate() {
             self.vel[a][index] = x[row];
             self.d[a][index] =
                 self.area / (a_p_relaxed[row] - neighbour_sum[row]).max(f64::MIN_POSITIVE);
-        }
-        // Outlet faces: zero-gradient extrapolation from the interior face
-        // upstream; their d follows the same face.
-        for index in 0..self.comps[a].kind.len() {
-            if self.comps[a].kind[index] != Kind::Outlet {
-                continue;
-            }
-            let f = self.comps[a].coords(index);
-            let mut g = f;
-            if f[a] == 0 {
-                g[a] += 1;
-            } else {
-                g[a] -= 1;
-            }
-            let upstream = self.comps[a].index(g);
-            let (value, d) = match self.comps[a].kind[upstream] {
-                Kind::Unknown(_) => (self.vel[a][upstream], self.d[a][upstream]),
-                _ => (self.vel[a][index], 0.5 * dx / self.mu),
-            };
-            // An outlet admits no inflow from outside in the extrapolation.
-            let outward = if f[a] == 0 { -value } else { value };
-            self.vel[a][index] = if outward < 0.0 { 0.0 } else { value };
-            self.d[a][index] = d;
         }
         Ok(steady)
     }
@@ -504,9 +537,10 @@ impl<'a> Solver<'a> {
         (if plus { v } else { -v }) * self.rho * self.area
     }
 
-    /// Pressure correction; returns the largest cell mass imbalance before
+    /// Pressure correction solved to `tolerance` (relative to the imbalance
+    /// it corrects); returns the largest cell mass imbalance before
     /// correction.
-    fn correct(&mut self, gate: &CancelGate) -> Result<f64, ChtError> {
+    fn correct(&mut self, tolerance: f64, gate: &CancelGate) -> Result<f64, ChtError> {
         let cells: Vec<usize> = (0..self.domain.cell_count())
             .filter(|&c| self.domain.is_fluid(c))
             .collect();
@@ -543,8 +577,9 @@ impl<'a> Solver<'a> {
                         }
                         coo.push(row, row_of[cell_of(self.n, nc)], -coef);
                     }
-                    Kind::Outlet => {
-                        diag += self.rho * self.area * self.d[axis][face];
+                    Kind::Outlet(_) => {
+                        // u' = 2 d p'_inside against the ghost pressure.
+                        diag += 2.0 * self.rho * self.area * self.d[axis][face];
                         drains[row] = true;
                     }
                     Kind::Fixed(_) => {}
@@ -598,15 +633,16 @@ impl<'a> Solver<'a> {
         let matrix = scale_rows(&coo, &mut b);
         let mut correction = vec![0.0f64; rows];
         if b.iter().any(|v| *v != 0.0) {
-            bicgstab_ilu0(
+            let outcome = bicgstab_ilu0(
                 "pressure",
                 &matrix,
                 &b,
                 &mut correction,
-                self.config.pressure_tolerance,
+                tolerance,
                 20_000,
                 gate,
             )?;
+            self.pressure_krylov += outcome.iterations;
         }
         let p_of = |cell: [usize; 3]| -> f64 {
             let c = cell_of(self.n, cell);
@@ -625,13 +661,13 @@ impl<'a> Solver<'a> {
                         minus[a] -= 1;
                         self.vel[a][index] += self.d[a][index] * (p_of(minus) - p_of(f));
                     }
-                    Kind::Outlet => {
+                    Kind::Outlet(_) => {
                         if f[a] == 0 {
-                            self.vel[a][index] -= self.d[a][index] * p_of(f);
+                            self.vel[a][index] -= 2.0 * self.d[a][index] * p_of(f);
                         } else {
                             let mut minus = f;
                             minus[a] -= 1;
-                            self.vel[a][index] += self.d[a][index] * p_of(minus);
+                            self.vel[a][index] += 2.0 * self.d[a][index] * p_of(minus);
                         }
                     }
                     Kind::Fixed(_) => {}
@@ -714,7 +750,7 @@ pub fn simple_flow(
         for a in 0..3 {
             steady = steady.max(solver.momentum(a, gate)?);
         }
-        let imbalance = solver.correct(gate)?;
+        let imbalance = solver.correct(config.pressure_tolerance, gate)?;
         let largest_velocity = solver
             .vel
             .iter()
@@ -738,6 +774,10 @@ pub fn simple_flow(
             tolerance: config.tolerance,
         });
     }
+    // Hand over an exactly projected field: one tight correction removes the
+    // residual divergence the loose inner solves leave (its size is bounded
+    // by the converged imbalance, so the flow is unchanged to tolerance).
+    solver.correct(1e-12, gate)?;
     let area = solver.area;
     let fluxes = solver
         .vel
@@ -779,6 +819,8 @@ pub fn simple_flow(
         inflow_m3_s: inflow,
         outflow_m3_s: outflow,
         max_cell_reynolds,
+        momentum_krylov_iterations: solver.momentum_krylov,
+        pressure_krylov_iterations: solver.pressure_krylov,
     };
     Ok(FvFlow {
         field,

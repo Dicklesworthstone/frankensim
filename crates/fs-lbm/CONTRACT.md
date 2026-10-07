@@ -924,18 +924,26 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 - Faces touching a solid voxel are blocked; a blocked transverse neighbour
   is a no-slip wall half a cell away (staircase). Domain faces are
   `FvBoundary::{Wall { velocity }, Symmetry, Inlet { velocity }, Outlet}`;
-  the outlet holds pressure zero with zero-gradient velocity and its normal
-  velocity is pressure-corrected like an interior face, so the field leaves
-  every iteration exactly divergence-free to the pressure solve.
+  an outlet face is a momentum unknown whose outside twin mirrors the inside
+  cell (zero normal gradient) and carries the ghost pressure `-p_inside`, so
+  the face holds pressure zero and the pressure correction uses the matching
+  linearization `u' = 2 d p'_inside`. The steady state is one fixed point of
+  the discrete equations, independent of the relaxation, also for
+  undeveloped (even partly reversed) outflow. (The first version
+  re-extrapolated outlet velocities each iteration and stalled at a 3e-4
+  mass residual on the heatsink, whose outflow is not developed.)
 - Momentum uses power-law (or upwind) coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
 - Convergence is two steady residuals of the same iterate: the largest cell
   mass imbalance before correction over the largest face mass flux, and
   per component `||b - A u|| / ||b||` of the Jacobi-scaled momentum system
-  at the velocities entering the iteration. Inner solves only reduce that
-  entry residual by `momentum_tolerance`, so a converged report never rests
-  on a skipped inner solve. Budget exhaustion refuses as `FlowNotSteady`.
+  at the velocities entering the iteration. Inner solves only reduce their
+  entry residuals (by `momentum_tolerance`, default 0.1, and
+  `pressure_tolerance`, default 0.01), so a converged report never rests on a
+  skipped inner solve; one tight final correction (1e-12) then hands the
+  energy equation a projected flux field. Budget exhaustion refuses as
+  `FlowNotSteady`.
 
 | Fixture | Reference | Measured |
 |---|---|---|
@@ -943,11 +951,13 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Lid-driven cavity, Re 100, 16^2 and 32^2 | Ghia, Ghia & Shin (1982) centreline u | worst deviation 0.0268 -> 0.0059 |
 | Square duct (quarter, symmetry), half-side 4 and 8 cells | Darcy f Re = 56.91 (Shah & London) | 53.749, 56.069 (error ratio 3.8); Richardson 56.843 (0.12 %) |
 | Aspect-0.5 duct, 8 x 16, Re 10, same thermal problem as the LBM rung | analytic developed profile and its Nu | profile within 0.4 %; local Nu 3.5078 vs 3.5005 (0.2 %); dp/dx -2.98 % vs f Re = 62.19 |
+| Block two cells upstream of the outlet (backflow -0.099 m/s through the outlet plane) | convergence; relaxation independence | converged to 1e-10; alpha 0.5 vs 0.8 velocities within 2.6e-10 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
 
 ### Worked example (`examples/heatsink_cht.rs`)
 
-`cargo run --release -p fs-lbm --example heatsink_cht [U] [u_lat]
+`cargo run --release -p fs-lbm --example heatsink_cht -- fv [U] [voxel_mm]`
+(finite-volume SIMPLEC flow, the default) or `-- lbm [U] [u_lat]
 [auto|bgk|central] [max_steps]`: a ducted aluminium plate-fin heatsink
 (30 mm long, five 1 mm fins 10 mm tall at 4 mm pitch on a 2 mm base, 2 W
 chip under the fins) in a 60 x 20 x 14 mm duct at 0.5 mm voxels, air at 300 K
@@ -962,6 +972,21 @@ and 0.25 m/s. Executed 2026-10-07 on a 4-core host (release, lto off):
 | Junction temperature | 335.31 K (thermal resistance 17.66 K/W) |
 | Outlet bulk temperature | 323.41 K (= inlet + 2 W / (rho c_p Q)) |
 | Effective film coefficient | 23.2 W/m^2K over 3.78e-3 m^2 wetted area |
+
+The same case with the SIMPLEC flow (`fv`), executed 2026-10-07:
+
+| Quantity | FV, 1 mm voxels (16 800 cells, debug build) |
+|---|---|
+| Flow | 74 SIMPLEC iterations, mass residual 3.7e-7, momentum residual 9.0e-7, max cell Re 41, 88.7 s |
+| Inflow / outflow | 7.000e-5 / 7.000e-5 m^3/s (divergence 3e-22) |
+| Pressure drop | 0.415 Pa |
+| Junction temperature | 335.29 K (17.65 K/W) |
+| Outlet bulk temperature | 324.43 K |
+| Effective film coefficient | 23.6 W/m^2K |
+
+The FV junction temperature at 1 mm agrees with the LBM run at 0.5 mm to
+0.02 K; the pressure drops differ (0.415 vs 0.621 Pa), consistent with the
+LBM run's compressibility caveat below and the coarser FV voxels.
 
 Estimated numerical evidence at one resolution. The peak lattice speed in
 the fin gaps reached 0.163 (Mach ~0.28): compressibility error is O(Ma^2)

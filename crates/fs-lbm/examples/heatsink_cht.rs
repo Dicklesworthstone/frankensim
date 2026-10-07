@@ -6,7 +6,7 @@
 //! drop and energy closure.
 //!
 //! ```text
-//! cargo run --release -p fs-lbm --example heatsink_cht -- fv [inlet_velocity_m_s]
+//! cargo run --release -p fs-lbm --example heatsink_cht -- fv [inlet_velocity_m_s] [voxel_mm]
 //! cargo run --release -p fs-lbm --example heatsink_cht -- lbm \
 //!     [inlet_velocity_m_s] [lattice_inlet_velocity] [auto|bgk|central] [max_steps]
 //! ```
@@ -16,7 +16,8 @@
 //! fins 10 mm tall at a 4 mm pitch (2 mm bypass above the fin tips), and a
 //! 20 mm outlet run. A 10 x 10 mm, 2 W chip is a uniform source in the
 //! lowest base layer under the fin centre. Air at 300 K enters at 0.25 m/s;
-//! the duct walls are adiabatic. Voxel edge 0.5 mm.
+//! the duct walls are adiabatic. Voxel edge 0.5 mm (the `fv` mode accepts
+//! any edge that divides the 0.5 mm features, e.g. 1.0 or 0.25 mm).
 //!
 //! The output is one JSON object per line. Every value is Estimated
 //! numerical evidence at this single resolution: no mesh-convergence,
@@ -30,7 +31,6 @@ use fs_lbm::conjugate::{
     simple_flow, solve_energy,
 };
 
-const DX: f64 = 0.5e-3;
 const MM: f64 = 1e-3;
 
 fn heatsink(p: [f64; 3]) -> Voxel {
@@ -151,15 +151,31 @@ fn fv_flow(domain: &VoxelDomain, air: &FluidProperties, args: &[String]) -> Flow
 
 #[allow(clippy::too_many_lines)] // one linear report: flow, energy, result
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let gate = CancelGate::new();
-    let (nx, ny, nz) = (120, 40, 28);
-    let domain = VoxelDomain::from_fn(nx, ny, nz, DX, heatsink).expect("admitted domain");
+    let dx = match args.first().map(String::as_str) {
+        Some("lbm") => 0.5 * MM,
+        _ => {
+            args.get(2)
+                .map_or(0.5, |a| a.parse::<f64>().expect("numeric voxel_mm"))
+                * MM
+        }
+    };
+    let cells = |length_mm: f64| {
+        let n = (length_mm * MM / dx).round();
+        assert!(
+            (n * dx - length_mm * MM).abs() < 1e-9,
+            "voxel edge must divide {length_mm} mm"
+        );
+        n as usize
+    };
+    let (nx, ny, nz) = (cells(60.0), cells(20.0), cells(14.0));
+    let domain = VoxelDomain::from_fn(nx, ny, nz, dx, heatsink).expect("admitted domain");
     let air = FluidProperties::dry_air_300k();
     let aluminium = [SolidMaterial::new(
         "AA6061-T6 (fixture card, 167 W/m/K)",
         167.0,
     )];
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let flow = match args.first().map(String::as_str) {
         None | Some("fv") => fv_flow(&domain, &air, args.get(1..).unwrap_or(&[])),
         Some("lbm") => lbm_flow(&domain, &air, &args[1..]),
@@ -177,7 +193,7 @@ fn main() {
     let mut setup = ThermalSetup::new(faces);
     let chip_w = 2.0;
     let chip = setup.add_uniform_power(&domain, chip_w, |p| {
-        p[2] < DX && (20.0 * MM..30.0 * MM).contains(&p[0]) && (5.0 * MM..15.0 * MM).contains(&p[1])
+        p[2] < dx && (20.0 * MM..30.0 * MM).contains(&p[0]) && (5.0 * MM..15.0 * MM).contains(&p[1])
     });
     let started = std::time::Instant::now();
     let energy = solve_energy(
@@ -224,7 +240,7 @@ fn main() {
             wetted += usize::from(neighbour.is_some_and(|n| domain.is_fluid(n)));
         }
     }
-    let wetted_m2 = wetted as f64 * DX * DX;
+    let wetted_m2 = wetted as f64 * dx * dx;
     let interface_w = energy.solid_to_fluid_heat_w(&domain);
     let mean_air_k = 0.5 * (inlet_k + outlet_k);
     let h_eff = interface_w / (wetted_m2 * (mean_solid_k - mean_air_k));
