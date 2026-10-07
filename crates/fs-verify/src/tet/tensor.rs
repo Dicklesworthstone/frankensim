@@ -270,5 +270,8 @@ pub fn affine_source_mean_bound(problem: &AffineSourceTetProblem<'_>, candidate:
     goal::mean_bound_impl(&problem.problem(&tensors), candidate, dual_candidate, budget, &mut keep_going)
 }
 
+mod region;
+pub use region::{RegionMeanBound, RegionMeanSelection};
+
 #[cfg(test)]
 mod tests;

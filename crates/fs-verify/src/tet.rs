@@ -41,6 +41,7 @@ mod tensor;
 pub use goal::{GoalBound, MeanBound, goal_bound, mean_bound};
 pub use tensor::{ConductivityTensor, TensorTetProblem, tensor_energy_bound, tensor_goal_bound, tensor_mean_bound};
 pub use tensor::{AffineSourceTetProblem, affine_source_energy_bound, affine_source_goal_bound, affine_source_mean_bound};
+pub use tensor::{RegionMeanBound, RegionMeanSelection};
 use tensor::Conductivity;
 use geometry::{Cell, Face, build, dot, integral_square, scale, sub};
 
