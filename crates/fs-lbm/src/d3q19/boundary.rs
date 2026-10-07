@@ -388,9 +388,11 @@ pub struct BoundaryGrid3 {
     /// (flat index `tile * TILE_CELLS + lane`). `None` leaves every result
     /// bit-identical to the uniform-force grid.
     force_field: Option<Vec<[f64; 3]>>,
-    /// Flat indices of the interior cells the open-face reconstruction reads
-    /// (cached on first pooled step; topology is immutable by then).
-    open_sources: Option<Vec<usize>>,
+    /// Open-face cells in canonical reconstruction order (face, then z, y,
+    /// x) with the interior cell each reads. Cached on the first step; the
+    /// topology is immutable from then on, so the per-step pass visits only
+    /// these cells instead of scanning the whole grid.
+    open_cells: Option<Vec<([usize; 3], [usize; 3], Face3)>>,
 }
 
 /// Lattice tiles per pooled kernel tile (512 cells).
@@ -542,7 +544,7 @@ impl BoundaryGrid3 {
             pull: Vec::new(),
             next: None,
             force_field: None,
-            open_sources: None,
+            open_cells: None,
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -905,17 +907,16 @@ impl BoundaryGrid3 {
         // The open-face reconstruction asserts a positive density at its
         // source cells; check them on the unpublished state so a lattice
         // that left its physical regime refuses instead of panicking.
-        if self.open_sources.is_none() {
-            self.open_sources = Some(self.compile_open_sources());
+        if self.open_cells.is_none() {
+            self.open_cells = Some(self.compile_open_cells());
         }
-        if let Some(sources) = &self.open_sources {
-            for &flat in sources {
-                let (tile, lane) = (flat / TILE_CELLS, flat % TILE_CELLS);
+        if let Some(cells) = &self.open_cells {
+            for &(_, interior, _) in cells {
+                let (tile, lane) = self.addr(interior[0], interior[1], interior[2]);
                 let rho = (0..Q3).map(|q| next[q][tile].0[lane]).sum::<f64>();
                 if !(rho.is_finite() && rho > 0.0) {
-                    let cell = self.coords(tile, lane);
                     self.next = Some(next);
-                    return Err(BoundaryStepError3::Unphysical { cell });
+                    return Err(BoundaryStepError3::Unphysical { cell: interior });
                 }
             }
         }
@@ -1060,31 +1061,8 @@ impl BoundaryGrid3 {
         pull
     }
 
-    fn compile_open_sources(&self) -> Vec<usize> {
-        let mut sources = Vec::new();
-        for face in Face3::ALL {
-            if !self.boundaries.face(face).is_open() {
-                continue;
-            }
-            for z in 0..self.nz {
-                for y in 0..self.ny {
-                    for x in 0..self.nx {
-                        if self.on_face(x, y, z, face)
-                            && !self.is_solid(x, y, z)
-                            && self.open_link_mask(x, y, z) != 0
-                        {
-                            let [ix, iy, iz] = Self::interior_neighbor(x, y, z, face);
-                            let (tile, lane) = self.addr(ix, iy, iz);
-                            sources.push(tile * TILE_CELLS + lane);
-                        }
-                    }
-                }
-            }
-        }
-        sources
-    }
-
-    fn apply_open_boundaries(&mut self) {
+    fn compile_open_cells(&self) -> Vec<([usize; 3], [usize; 3], Face3)> {
+        let mut cells = Vec::new();
         for face in Face3::ALL {
             if !self.boundaries.face(face).is_open() {
                 continue;
@@ -1103,36 +1081,48 @@ impl BoundaryGrid3 {
                             !self.is_solid(interior[0], interior[1], interior[2]),
                             "open boundary {face:?} requires a fluid first-interior neighbor"
                         );
-                        let (neighbor_rho, neighbor_velocity, stress) =
-                            self.regularized_source(interior[0], interior[1], interior[2]);
-                        let (rho, velocity) = match self.boundaries.face(face) {
-                            FaceBoundary3::Velocity { velocity } => (neighbor_rho, velocity),
-                            FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
-                            FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
-                        };
-                        let reconstructed = regularized_populations(rho, velocity, stress);
-                        let (tile, lane) = self.addr(x, y, z);
-                        let wall_mask = self.link_masks[tile].0[lane];
-                        let open_mask = self.open_link_masks[tile].0[lane];
-                        if wall_mask == 0 {
-                            for (field, value) in self.f.iter_mut().zip(reconstructed) {
-                                field[tile].0[lane] = value;
-                            }
-                        } else {
-                            // Mixed wall/open cells retain their bounced wall
-                            // populations and streamed tangential populations.
-                            // Only directions whose source crosses the open
-                            // face alone receive the regularized closure.
-                            for (q, value) in reconstructed.into_iter().enumerate().skip(1) {
-                                if open_mask & (1u32 << q) != 0 {
-                                    self.f[q][tile].0[lane] = value;
-                                }
-                            }
-                        }
+                        cells.push(([x, y, z], interior, face));
                     }
                 }
             }
         }
+        cells
+    }
+
+    fn apply_open_boundaries(&mut self) {
+        if self.open_cells.is_none() {
+            self.open_cells = Some(self.compile_open_cells());
+        }
+        let cells = self.open_cells.take().unwrap_or_default();
+        for &([x, y, z], interior, face) in &cells {
+            let (neighbor_rho, neighbor_velocity, stress) =
+                self.regularized_source(interior[0], interior[1], interior[2]);
+            let (rho, velocity) = match self.boundaries.face(face) {
+                FaceBoundary3::Velocity { velocity } => (neighbor_rho, velocity),
+                FaceBoundary3::Pressure { density } => (density, neighbor_velocity),
+                FaceBoundary3::Periodic | FaceBoundary3::Wall { .. } => unreachable!(),
+            };
+            let reconstructed = regularized_populations(rho, velocity, stress);
+            let (tile, lane) = self.addr(x, y, z);
+            let wall_mask = self.link_masks[tile].0[lane];
+            let open_mask = self.open_link_masks[tile].0[lane];
+            if wall_mask == 0 {
+                for (field, value) in self.f.iter_mut().zip(reconstructed) {
+                    field[tile].0[lane] = value;
+                }
+            } else {
+                // Mixed wall/open cells retain their bounced wall
+                // populations and streamed tangential populations.
+                // Only directions whose source crosses the open
+                // face alone receive the regularized closure.
+                for (q, value) in reconstructed.into_iter().enumerate().skip(1) {
+                    if open_mask & (1u32 << q) != 0 {
+                        self.f[q][tile].0[lane] = value;
+                    }
+                }
+            }
+        }
+        self.open_cells = Some(cells);
     }
 
     fn regularized_source(&self, x: usize, y: usize, z: usize) -> (f64, [f64; 3], [[f64; 3]; 3]) {
