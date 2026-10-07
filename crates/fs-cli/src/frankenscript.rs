@@ -43,15 +43,21 @@
 //!
 //! # No-claim boundaries
 //!
-//! v0 binds the cooling project pipeline (`cooling.project`,
-//! `cooling.import`, `cooling.solve`, `cooling.run`) and the canonical study
-//! driver (`study.run` on a `.fsim` study, e.g. the 2-D marquee); the
-//! catalog's physics operators (`flux.*`, `ascent.*`, …) are admitted by fs-ir
-//! but have no stage binding here and refuse as not executable. Project and
-//! study files are re-read by each stage driver exactly as the CLI verbs read
-//! them; `:hash` pins are checked once before execution. `study.run` checks
-//! the seed against the study file but not its budgets (the study driver
-//! enforces its own).
+//! v0 binds the cooling project pipeline (`cooling.project`, `cooling.import`,
+//! `cooling.solve`, `cooling.run`), native uncertainty/sensitivity studies
+//! (`cooling.study project :source "study.fsim" [:hash "…"] [:budget N]`), and
+//! the canonical study driver on any `.fsim` study file (`study.run
+//! "study.fsim" [:hash "…"] [:budget N]`, e.g. the 2-D marquee). Native study
+//! assets resolve against the study source; its sampling seed is distinct from
+//! the physical project seed, while `study.run` requires the program seed to
+//! equal the study file's `seeds.root` and leaves budgets to the study driver.
+//! Budget stops retain the study run ID for ordinary `study --resume`;
+//! whole-program resume is not implemented. The catalog's physics operators
+//! (`flux.*`, `ascent.*`, …) are admitted by fs-ir but have no stage binding
+//! here and refuse as not executable. Project and study files are re-read by
+//! each stage driver exactly as the CLI verbs read them; `:hash` pins are
+//! checked once during binding, not atomically with subsequent file reads.
+//! Per-step wall admission is not aggregate program wall-time metering.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -61,6 +67,9 @@ use fs_ir::admission::{AdmissionContext, RegimePolicy, Severity, admit};
 use fs_ir::ast::{CountUnit, Node, NodeKind};
 use fs_ir::study::Study;
 
+#[path = "frankenscript/native_study.rs"]
+mod native_study;
+
 use crate::cards::CardPackKind;
 use crate::{
     CommandOutput, DIAGNOSTIC_SCHEMA, Diagnostic, ImportCommand, ImportPolicy, MAX_PROJECT_BYTES,
@@ -69,11 +78,12 @@ use crate::{
 };
 
 /// Verbs with a stage binding, in catalog order.
-pub const EXECUTABLE_VERBS: [&str; 5] = [
+pub const EXECUTABLE_VERBS: [&str; 6] = [
     "cooling.project",
     "cooling.import",
     "cooling.solve",
     "cooling.run",
+    "cooling.study",
     "study.run",
 ];
 
@@ -92,6 +102,7 @@ pub(crate) fn is_program(path: &Path) -> bool {
 /// One bound, not yet executed step.
 #[derive(Debug)]
 enum Step {
+    Study(native_study::StudyStep),
     Import(ImportCommand),
     Solve {
         project: PathBuf,
@@ -101,7 +112,7 @@ enum Step {
         project: PathBuf,
         cards: Vec<(CardPackKind, PathBuf)>,
     },
-    Study {
+    StudyFile {
         path: PathBuf,
         budget: Option<String>,
     },
@@ -110,10 +121,11 @@ enum Step {
 impl Step {
     const fn verb(&self) -> &'static str {
         match self {
+            Self::Study(_) => "cooling.study",
             Self::Import(_) => "cooling.import",
             Self::Solve { .. } => "cooling.solve",
             Self::Run { .. } => "cooling.run",
-            Self::Study { .. } => "study.run",
+            Self::StudyFile { .. } => "study.run",
         }
     }
 }
@@ -226,6 +238,7 @@ struct Binder<'p> {
     base: PathBuf,
     ledger: &'p Path,
     seed: Option<u64>,
+    wall_seconds: Option<f64>,
     projects: Vec<(String, ProjectBinding)>,
     studies: Vec<ProjectBinding>,
 }
@@ -410,7 +423,7 @@ impl Binder<'_> {
             path: path.clone(),
             hash,
         });
-        Some(Step::Study { path, budget })
+        Some(Step::StudyFile { path, budget })
     }
 
     #[allow(clippy::too_many_lines)] // one keyword grammar per verb
@@ -434,6 +447,7 @@ impl Binder<'_> {
         }
         let project = self.project_operand(verb, &positional, refusals)?;
         match verb {
+            "cooling.study" => native_study::bind(self, &project, &named, refusals).map(Step::Study),
             "cooling.import" => {
                 let mut sources = None;
                 let mut unit = None;
@@ -678,6 +692,7 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             .map_or_else(PathBuf::new, Path::to_path_buf),
         ledger,
         seed: study.seed,
+        wall_seconds: study.budget.and_then(|budget| declared_budget(budget).0),
         projects: Vec::new(),
         studies: Vec::new(),
     };
@@ -805,10 +820,11 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
     let mut status = exit::SUCCESS;
     for step in &steps {
         let output = match step {
+            Step::Study(study) => study.run(ledger, mode),
             Step::Import(command) => import_path(command, mode),
             Step::Solve { project, cards } => solve_path(project, ledger, cards, mode),
             Step::Run { project, cards } => run_workflow_path(project, ledger, cards, mode),
-            Step::Study { path, budget } => {
+            Step::StudyFile { path, budget } => {
                 crate::study::study_path(path, ledger, budget.as_deref(), mode)
             }
         };
