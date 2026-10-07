@@ -22,10 +22,11 @@ use fs_cli::{CommandOutput, exit};
 use fs_exec::CancelGate;
 use fs_geom::Point3;
 use fs_io::stl::read_stl;
+use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, EnergyConfig, EnergySolution, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow,
-    SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
-    fv_natural_convection, simple_flow, solve_energy,
+    ChtError, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties, FvBoundary,
+    FvBuoyancyConfig, FvFlow, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel,
+    VoxelDomain, fv_natural_convection, simple_flow, solve_energy,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -36,7 +37,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model, radiation, or temperature-dependent properties; power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials, solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nopening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials, solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -279,6 +280,10 @@ enum FaceRule {
         velocity: [f64; 3],
         temperature: f64,
     },
+    Fan {
+        curve: FanCurve,
+        temperature: f64,
+    },
     Opening {
         ambient: f64,
     },
@@ -442,6 +447,33 @@ impl Scene {
                     velocity: vec3(rule, "velocity_m_s", &at)?,
                     temperature: number(rule, "temperature_k", &at)?,
                 },
+                Some("fan") => {
+                    let points = field(rule, "curve", &at)?
+                        .as_array()
+                        .ok_or_else(|| {
+                            bad(format!(
+                                "{at}.curve must be [[flow_m3_s, pressure_pa], ...]"
+                            ))
+                        })?
+                        .iter()
+                        .map(|point| {
+                            point
+                                .as_array()
+                                .filter(|pair| pair.len() == 2)
+                                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                                .ok_or_else(|| {
+                                    bad(format!(
+                                        "{at}.curve entries must be [flow_m3_s, pressure_pa]"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    FaceRule::Fan {
+                        curve: FanCurve::new(&points)
+                            .map_err(|e| bad(format!("{at}.curve: {e}")))?,
+                        temperature: number(rule, "temperature_k", &at)?,
+                    }
+                }
                 Some("opening") => FaceRule::Opening {
                     ambient: number(rule, "ambient_k", &at)?,
                 },
@@ -467,7 +499,7 @@ impl Scene {
                 }
                 _ => {
                     return Err(bad(format!(
-                        "{at}.type must be inlet, opening, symmetry, or wall"
+                        "{at}.type must be inlet, fan, opening, symmetry, or wall"
                     )));
                 }
             };
@@ -528,14 +560,35 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
     })
     .map_err(|e| solver_failure(&e))?;
-    let flow_faces = scene.faces.map(|rule| match rule {
+    let fans: Vec<usize> = (0..6)
+        .filter(|&side| matches!(scene.faces[side], FaceRule::Fan { .. }))
+        .collect();
+    if fans.len() > 1 {
+        return Err(bad("at most one fan face"));
+    }
+    let flow_faces: [FvBoundary; 6] = std::array::from_fn(|side| match scene.faces[side] {
         FaceRule::Inlet { velocity, .. } => FvBoundary::Inlet { velocity },
+        FaceRule::Fan { curve, .. } => {
+            // Initial guess: half the free delivery through the whole face.
+            let axis = side / 2;
+            let area: f64 = (0..3)
+                .filter(|&a| a != axis)
+                .map(|a| scene.dims[a] as f64 * scene.dx)
+                .product();
+            let free_delivery = -curve.pressure(0.0) / curve.slope(0.0);
+            let speed = 0.5 * free_delivery.max(0.0) / area;
+            let mut velocity = [0.0; 3];
+            velocity[axis] = if side % 2 == 0 { speed } else { -speed };
+            FvBoundary::Inlet { velocity }
+        }
         FaceRule::Opening { .. } => FvBoundary::Outlet,
         FaceRule::Symmetry => FvBoundary::Symmetry,
         FaceRule::Wall(_) => FvBoundary::wall(),
     });
     let thermal_faces = scene.faces.map(|rule| match rule {
-        FaceRule::Inlet { temperature, .. } => ThermalFace::Inflow { temperature },
+        FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+            ThermalFace::Inflow { temperature }
+        }
         FaceRule::Opening { ambient } => ThermalFace::Outflow {
             backflow_temperature: ambient,
         },
@@ -563,6 +616,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     let mut flow_config = SimpleConfig::new(flow_faces);
     flow_config.tolerance = scene.tolerance;
     flow_config.max_iterations = scene.max_iterations;
+    flow_config.fan = fans.first().map(|&side| FanInlet {
+        face: Face3::ALL[side],
+        curve: match scene.faces[side] {
+            FaceRule::Fan { curve, .. } => curve,
+            _ => unreachable!("filtered to fan faces"),
+        },
+    });
     let started = Instant::now();
     let buoyant = scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0));
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
@@ -571,7 +631,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 .reference
                 .or_else(|| {
                     scene.faces.iter().find_map(|rule| match rule {
-                        FaceRule::Inlet { temperature, .. } => Some(*temperature),
+                        FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+                            Some(*temperature)
+                        }
                         FaceRule::Opening { ambient } => Some(*ambient),
                         _ => None,
                     })
@@ -679,6 +741,15 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         if let Some(couplings) = couplings {
             let _ = write!(out, ",\"energy_couplings\":{couplings}");
         }
+        if let Some((q, dp, mismatch)) = r.fan {
+            let _ = write!(
+                out,
+                ",\"fan_flow_m3_s\":{},\"fan_pressure_pa\":{},\"fan_residual\":{}",
+                num(q)?,
+                num(dp)?,
+                num(mismatch)?
+            );
+        }
         let _ = write!(
             out,
             "}},\"energy\":{{\"iterations\":{},\"relative_residual\":{},\"source_w\":{},\"boundary_outflow_w\":{},\"advective_outflow_w\":{},\"balance_relative_residual\":{},\"max_cell_peclet\":{}}}",
@@ -746,6 +817,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             r.outflow_m3_s,
             b.relative_residual
         );
+        if let Some((q, dp, _)) = r.fan {
+            let _ = writeln!(out, "fan_flow_m3_s={q:e}\nfan_pressure_pa={dp}");
+        }
         for (name, cells, max, mean) in &material_rows {
             let _ = writeln!(
                 out,

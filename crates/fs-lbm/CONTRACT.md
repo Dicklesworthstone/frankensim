@@ -941,9 +941,20 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
   at the velocities entering the iteration. Inner solves only reduce their
   entry residuals (by `momentum_tolerance`, default 0.1, and
   `pressure_tolerance`, default 0.01), so a converged report never rests on a
-  skipped inner solve; one tight final correction (1e-12) then hands the
-  energy equation a projected flux field. Budget exhaustion refuses as
-  `FlowNotSteady`.
+  skipped inner solve; one tight final correction (1e-8 of the converged
+  imbalance) then hands the energy equation a projected flux field. Budget
+  exhaustion refuses as `FlowNotSteady`; non-finite velocities or pressures
+  after any momentum solve or correction refuse as `FlowDiverged` before they
+  reach an incomplete factorization.
+- `SimpleConfig::fan` puts a piecewise-linear `FanCurve` (static pressure rise
+  against flow) on one `Inlet` face: the face's uniform normal inflow is the
+  operating point where the curve meets the mean pressure of the fluid layer
+  behind the face (fan pulling from ambient at pressure zero). The delivery
+  moves by secant steps on settled flows only (the inlet-layer pressure just
+  after an inflow change is a pressure-correction transient; a per-sweep
+  update was measured to oscillate with growing amplitude), and the fan
+  mismatch joins the momentum residual. The report carries the operating
+  point and mismatch.
 
 | Fixture | Reference | Measured |
 |---|---|---|
@@ -952,6 +963,7 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Square duct (quarter, symmetry), half-side 4 and 8 cells | Darcy f Re = 56.91 (Shah & London) | 53.749, 56.069 (error ratio 3.8); Richardson 56.843 (0.12 %) |
 | Aspect-0.5 duct, 8 x 16, Re 10, same thermal problem as the LBM rung | analytic developed profile and its Nu | profile within 0.4 %; local Nu 3.5078 vs 3.5005 (0.2 %); dp/dx -2.98 % vs f Re = 62.19 |
 | Block two cells upstream of the outlet (backflow -0.099 m/s through the outlet plane) | convergence; relaxation independence | converged to 1e-10; alpha 0.5 vs 0.8 velocities within 2.6e-10 |
+| Channel driven by a linear fan curve (3 Pa shut-off, 2.5e-3 m^3/s free delivery), operating mid-curve | the operating point is on the curve AND on the system curve (a fixed-velocity solve at the solved flow) | Q = 1.6917e-3 m^3/s at 0.96997 Pa; curve mismatch 6e-10; fixed-velocity inlet pressure equal to 1e-6 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
 
 ### Finite-volume natural convection (`fv_natural_convection`)

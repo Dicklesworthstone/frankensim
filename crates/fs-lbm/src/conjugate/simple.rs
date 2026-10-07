@@ -87,6 +87,85 @@ impl FvBoundary {
     }
 }
 
+/// Piecewise-linear fan characteristic: static pressure rise (Pa) against
+/// volume flow (m^3/s), 2 to 8 points with strictly increasing flow and
+/// non-increasing pressure; linear extrapolation beyond the ends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FanCurve {
+    points: [(f64, f64); 8],
+    len: usize,
+}
+
+impl FanCurve {
+    /// Admit a characteristic.
+    ///
+    /// # Errors
+    /// [`ChtError::InvalidInput`] for fewer than 2 or more than 8 points,
+    /// non-finite values, negative or non-increasing flows, or a rising
+    /// pressure.
+    pub fn new(points: &[(f64, f64)]) -> Result<Self, ChtError> {
+        let refuse = |reason: &str| ChtError::InvalidInput {
+            field: "fan.curve",
+            reason: reason.to_string(),
+        };
+        if !(2..=8).contains(&points.len()) {
+            return Err(refuse("needs 2 to 8 (flow, pressure) points"));
+        }
+        for (i, &(q, p)) in points.iter().enumerate() {
+            if !(q.is_finite() && p.is_finite()) || q < 0.0 {
+                return Err(refuse(
+                    "flows must be finite and non-negative, pressures finite",
+                ));
+            }
+            if i > 0 && (q <= points[i - 1].0 || p > points[i - 1].1) {
+                return Err(refuse("flow must increase and pressure must not rise"));
+            }
+        }
+        let mut stored = [(0.0, 0.0); 8];
+        stored[..points.len()].copy_from_slice(points);
+        Ok(Self {
+            points: stored,
+            len: points.len(),
+        })
+    }
+
+    fn segment(&self, q: f64) -> ((f64, f64), (f64, f64)) {
+        let pts = &self.points[..self.len];
+        let i = pts[1..self.len - 1]
+            .iter()
+            .take_while(|(qi, _)| *qi <= q)
+            .count();
+        (pts[i], pts[i + 1])
+    }
+
+    /// Static pressure rise at flow `q`, Pa.
+    #[must_use]
+    pub fn pressure(&self, q: f64) -> f64 {
+        let ((q0, p0), (q1, p1)) = self.segment(q);
+        p0 + (p1 - p0) * (q - q0) / (q1 - q0)
+    }
+
+    /// `d(pressure)/dq` on the segment containing `q` (non-positive).
+    #[must_use]
+    pub fn slope(&self, q: f64) -> f64 {
+        let ((q0, p0), (q1, p1)) = self.segment(q);
+        (p1 - p0) / (q1 - q0)
+    }
+}
+
+/// A fan on one inlet face: the face's uniform normal inflow velocity is
+/// solved for so that the mean pressure of the fluid layer behind the face
+/// equals the fan's static pressure rise from ambient (pressure zero) at
+/// the delivered flow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FanInlet {
+    /// The face; its rule must be [`FvBoundary::Inlet`] (the declared
+    /// velocity is the initial guess and fixes the direction).
+    pub face: Face3,
+    /// The characteristic.
+    pub curve: FanCurve,
+}
+
 /// SIMPLEC controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimpleConfig {
@@ -106,6 +185,8 @@ pub struct SimpleConfig {
     /// residual (the correction starts from zero, so this is its residual
     /// relative to the mass imbalance it corrects).
     pub pressure_tolerance: f64,
+    /// Optional fan on one inlet face (operating point solved).
+    pub fan: Option<FanInlet>,
 }
 
 impl SimpleConfig {
@@ -120,6 +201,7 @@ impl SimpleConfig {
             tolerance: 1e-6,
             momentum_tolerance: 1e-1,
             pressure_tolerance: 1e-2,
+            fan: None,
         }
     }
 }
@@ -148,6 +230,10 @@ pub struct SimpleReport {
     pub momentum_krylov_iterations: usize,
     /// Total Krylov iterations of the pressure-correction solves.
     pub pressure_krylov_iterations: usize,
+    /// Fan operating point `(flow m^3/s, static pressure rise Pa, relative
+    /// mismatch between the curve and the mean inlet-layer pressure)`, when a
+    /// fan is declared.
+    pub fan: Option<(f64, f64, f64)>,
 }
 
 /// Steady finite-volume flow.
@@ -239,6 +325,27 @@ pub(super) struct Solver<'a> {
     pressure_krylov: usize,
     /// Body force per cell, N/m^3 (empty: none).
     force: Vec<[f64; 3]>,
+    /// Face rules in force (a fan updates its inlet velocity).
+    faces: [FvBoundary; 6],
+    /// Fan state, when declared.
+    fan: Option<FanState>,
+    /// SIMPLEC iterations taken.
+    sweeps: usize,
+}
+
+/// Fan operating-point state.
+#[derive(Debug, Clone)]
+struct FanState {
+    side: usize,
+    curve: FanCurve,
+    /// Open (fluid) area of the fan face, m^2.
+    area: f64,
+    /// Fluid cells behind the face.
+    cells: Vec<usize>,
+    residual: f64,
+    flow: f64,
+    /// The previous settled `(flow, mean inlet pressure)`, for the secant.
+    previous: Option<(f64, f64)>,
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -328,7 +435,100 @@ impl<'a> Solver<'a> {
             momentum_krylov: 0,
             pressure_krylov: 0,
             force: Vec::new(),
+            faces: config.faces,
+            sweeps: 0,
+            fan: config.fan.map(|fan| {
+                let side = fan.face as usize;
+                let axis = side / 2;
+                let cells: Vec<usize> = (0..domain.cell_count())
+                    .filter(|&c| domain.is_fluid(c) && domain.neighbor(c, side).is_none())
+                    .collect();
+                let area = domain.dx() * domain.dx() * cells.len() as f64;
+                let speed = match config.faces[side] {
+                    FvBoundary::Inlet { velocity } => velocity[axis].abs(),
+                    _ => 0.0,
+                };
+                FanState {
+                    side,
+                    curve: fan.curve,
+                    area,
+                    cells,
+                    // Unmeasured: a full mismatch until the first settled
+                    // state (finite, so the divergence guard does not trip).
+                    residual: 1.0,
+                    flow: speed * area,
+                    previous: None,
+                }
+            }),
         }
+    }
+
+    /// Set the uniform normal inflow speed of inlet face `side`.
+    fn set_inlet_speed(&mut self, side: usize, speed: f64) {
+        let axis = side / 2;
+        let inward = if side % 2 == 0 { 1.0 } else { -1.0 };
+        if let FvBoundary::Inlet { velocity } = &mut self.faces[side] {
+            velocity[axis] = inward * speed;
+        }
+        let along = if side % 2 == 0 { 0 } else { self.n[axis] };
+        for index in 0..self.comps[axis].kind.len() {
+            let f = self.comps[axis].coords(index);
+            if f[axis] != along || !matches!(self.comps[axis].kind[index], Kind::Fixed(_)) {
+                continue;
+            }
+            let mut cell = f;
+            if along != 0 {
+                cell[axis] -= 1;
+            }
+            if self.domain.is_fluid(cell_of(self.n, cell)) {
+                self.comps[axis].kind[index] = Kind::Fixed(inward * speed);
+                self.vel[axis][index] = inward * speed;
+            }
+        }
+    }
+
+    /// Secant step of the fan operating point, taken only on a settled
+    /// flow: the mean inlet-layer pressure just after an inflow change is
+    /// dominated by the pressure-correction transient, so the flow at the
+    /// current delivery must first converge to a gate that tightens with the
+    /// fan mismatch (finally the solver tolerance). The system-curve slope is
+    /// the secant through the last two settled states (`p / Q` at the
+    /// first). A passing mismatch leaves the delivery unchanged.
+    fn update_fan(&mut self, mass: f64, momentum: f64) {
+        let tolerance = self.config.tolerance;
+        let Some(fan) = self.fan.as_mut() else {
+            return;
+        };
+        let gate = tolerance.max(1e-3 * fan.residual.min(1.0));
+        if mass > gate || momentum > gate {
+            return;
+        }
+        let mean = fan.cells.iter().map(|&c| self.pressure[c]).sum::<f64>()
+            / fan.cells.len().max(1) as f64;
+        let mismatch = fan.curve.pressure(fan.flow) - mean;
+        let scale = fan
+            .curve
+            .pressure(0.0)
+            .abs()
+            .max(mean.abs())
+            .max(f64::MIN_POSITIVE);
+        fan.residual = mismatch.abs() / scale;
+        if fan.residual <= tolerance {
+            return;
+        }
+        let system = match fan.previous {
+            Some((q, p)) if (fan.flow - q).abs() > f64::EPSILON * fan.flow => {
+                (mean - p) / (fan.flow - q)
+            }
+            _ => mean / fan.flow.max(f64::MIN_POSITIVE),
+        }
+        .max(0.0);
+        fan.previous = Some((fan.flow, mean));
+        let step = mismatch / (system - fan.curve.slope(fan.flow)).max(f64::MIN_POSITIVE);
+        // Never stop the fan outright: a zero delivery has no system slope.
+        fan.flow = (fan.flow + step).max(1e-3 * fan.flow);
+        let (side, speed) = (fan.side, fan.flow / fan.area.max(f64::MIN_POSITIVE));
+        self.set_inlet_speed(side, speed);
     }
 
     /// Replace the per-cell body force (N/m^3; zero in solids).
@@ -341,21 +541,38 @@ impl<'a> Solver<'a> {
     /// correction. Returns `(mass_residual, momentum_residual)` of the
     /// velocities entering it (see the module docs).
     pub(super) fn sweep(&mut self, gate: &CancelGate) -> Result<(f64, f64), ChtError> {
+        self.sweeps += 1;
         let mut steady = 0.0f64;
         for a in 0..3 {
             steady = steady.max(self.momentum(a, gate)?);
+            self.guard_finite()?;
         }
         let imbalance = self.correct(self.config.pressure_tolerance, gate)?;
+        self.guard_finite()?;
+        // The fan residual joins the momentum residual: the operating point
+        // is part of the steady state.
         let largest_velocity = self
             .vel
             .iter()
             .flat_map(|v| v.iter())
             .fold(0.0f64, |m, v| m.max(v.abs()))
             .max(f64::MIN_POSITIVE);
-        Ok((
-            imbalance / (self.rho * self.area * largest_velocity),
-            steady,
-        ))
+        let mass = imbalance / (self.rho * self.area * largest_velocity);
+        self.update_fan(mass, steady);
+        let fan = self.fan.as_ref().map_or(0.0, |fan| fan.residual);
+        Ok((mass, steady.max(fan)))
+    }
+
+    /// A diverging iteration refuses here, before non-finite coefficients
+    /// reach an incomplete factorization.
+    fn guard_finite(&self) -> Result<(), ChtError> {
+        let finite = self.vel.iter().all(|v| v.iter().all(|u| u.is_finite()))
+            && self.pressure.iter().all(|p| p.is_finite());
+        if finite {
+            Ok(())
+        } else {
+            Err(ChtError::FlowDiverged { step: self.sweeps })
+        }
     }
 
     /// The current face fluxes.
@@ -475,7 +692,7 @@ impl<'a> Solver<'a> {
                         f[d] == 0
                     };
                     if outside {
-                        match self.config.faces[2 * d + usize::from(plus)] {
+                        match self.faces[2 * d + usize::from(plus)] {
                             FvBoundary::Wall { velocity } => {
                                 a_p += 2.0 * diff;
                                 rhs = (2.0 * diff).mul_add(velocity[a], rhs);
@@ -780,6 +997,14 @@ pub(super) fn admit(
             FvBoundary::Symmetry | FvBoundary::Outlet => {}
         }
     }
+    if let Some(fan) = config.fan
+        && !matches!(config.faces[fan.face as usize], FvBoundary::Inlet { .. })
+    {
+        return Err(ChtError::InvalidInput {
+            field: "simple.fan",
+            reason: format!("the fan face {:?} must be declared an Inlet", fan.face),
+        });
+    }
     if domain.fluid_count() == 0 {
         return Err(ChtError::InvalidDomain {
             reason: "no fluid cell".into(),
@@ -801,7 +1026,7 @@ impl Solver<'_> {
         // the residual divergence the loose inner solves leave (its size is
         // bounded by the converged imbalance, so the flow is unchanged to
         // tolerance).
-        self.correct(1e-12, gate)?;
+        self.correct(1e-8, gate)?;
         let domain = self.domain;
         let field = self.field();
         let mut velocity_m_s = vec![[0.0f64; 3]; domain.cell_count()];
@@ -824,7 +1049,7 @@ impl Solver<'_> {
         let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
         for face in Face3::ALL {
             let net = field.boundary_outflow(domain, face);
-            match self.config.faces[face as usize] {
+            match self.faces[face as usize] {
                 FvBoundary::Inlet { .. } => inflow -= net,
                 // Openings pass flow both ways: count each direction.
                 FvBoundary::Outlet => {
@@ -852,6 +1077,10 @@ impl Solver<'_> {
             max_cell_reynolds,
             momentum_krylov_iterations: self.momentum_krylov,
             pressure_krylov_iterations: self.pressure_krylov,
+            fan: self
+                .fan
+                .as_ref()
+                .map(|fan| (fan.flow, fan.curve.pressure(fan.flow), fan.residual)),
         };
         Ok(FvFlow {
             field,

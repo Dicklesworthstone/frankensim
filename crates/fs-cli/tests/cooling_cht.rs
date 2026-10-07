@@ -62,9 +62,15 @@ fn forced_convection_scene_closes_energy_through_the_binary() {
     let power = f(&result, &["energy", "source_w"]);
     assert!((power - 0.1).abs() < 1e-12);
     let leaving = f(&result, &["energy", "boundary_outflow_w"]);
-    assert!((leaving - power).abs() < 1e-9 * power, "{leaving} vs {power}");
+    assert!(
+        (leaving - power).abs() < 1e-9 * power,
+        "{leaving} vs {power}"
+    );
     let advected = f(&result, &["energy", "advective_outflow_w"]);
-    assert!(advected > 0.999 * power && advected <= leaving, "{advected}");
+    assert!(
+        advected > 0.999 * power && advected <= leaving,
+        "{advected}"
+    );
     assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
     let (inflow, outflow) = (
         f(&result, &["flow", "inflow_m3_s"]),
@@ -184,11 +190,36 @@ fn stl_solids_voxelize_by_winding_number_with_scale_and_offset() {
     let (code, result, stderr) = run(&scratch("cube.json", scene));
     assert_eq!(code, 0, "{stderr}");
     let materials = result.get("materials").and_then(J::as_array).unwrap();
-    assert_eq!(materials[0].path(&["cells"]).and_then(J::as_f64), Some(64.0));
+    assert_eq!(
+        materials[0].path(&["cells"]).and_then(J::as_f64),
+        Some(64.0)
+    );
     let sources = result.get("sources").and_then(J::as_array).unwrap();
     assert_eq!(sources[0].path(&["cells"]).and_then(J::as_f64), Some(64.0));
     assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
     // No flow anywhere: the power leaves through the cold wall.
     assert!((f(&result, &["energy", "boundary_outflow_w"]) - 0.01).abs() < 1e-11);
     assert!(f(&result, &["max_solid_temperature_k"]) > 300.0);
+}
+
+#[test]
+fn fan_face_finds_its_operating_point_on_the_curve() {
+    // The duct scene driven by a fan curve instead of a fixed velocity: the
+    // reported operating point lies on the curve and the delivered flow is
+    // the inflow.
+    let scene = DUCT.replace(
+        r#""x-": {"type": "inlet", "velocity_m_s": [0.1, 0.0, 0.0], "temperature_k": 300.0}"#,
+        r#""x-": {"type": "fan", "curve": [[0.0, 0.05], [4e-6, 0.0]], "temperature_k": 300.0}"#,
+    );
+    assert_ne!(scene, DUCT);
+    let (code, result, stderr) = run(&scratch("fan.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    let q = f(&result, &["flow", "fan_flow_m3_s"]);
+    let dp = f(&result, &["flow", "fan_pressure_pa"]);
+    assert!(q > 0.0 && q < 4e-6, "{q}");
+    // Linear curve: dp = 0.05 (1 - q / 4e-6).
+    assert!((dp - 0.05 * (1.0 - q / 4e-6)).abs() < 1e-12, "{dp}");
+    assert!(f(&result, &["flow", "fan_residual"]) < 1e-6);
+    assert!((f(&result, &["flow", "inflow_m3_s"]) - q).abs() < 1e-12 * q);
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
 }

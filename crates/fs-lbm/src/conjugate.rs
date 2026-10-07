@@ -102,7 +102,7 @@ pub use flow::{
     ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
-pub use simple::{FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
+pub use simple::{FanCurve, FanInlet, FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
@@ -227,7 +227,7 @@ impl core::fmt::Display for ChtError {
                 tolerance,
             } => write!(
                 f,
-                "LBM flow not steady after {steps} steps (relative change {last_change:e} > {tolerance:e})"
+                "flow not steady after {steps} steps/iterations (residual or change {last_change:e} > {tolerance:e})"
             ),
             Self::SolverNotConverged {
                 system,

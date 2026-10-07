@@ -16,10 +16,11 @@
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    FvBoundary, FvBuoyancyConfig, LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial,
-    ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, fv_natural_convection,
-    lbm_duct_flow, march_energy, natural_convection, simple_flow, solve_energy,
+    BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FanCurve, FanInlet, FlowFace,
+    FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig, LbmCollisionChoice, LbmFlowConfig,
+    SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain,
+    fv_natural_convection, lbm_duct_flow, march_energy, natural_convection, simple_flow,
+    solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1528,4 +1529,73 @@ fn fv_open_chimney_approaches_the_elenbaas_developed_limit() {
         long > 0.98,
         "long channel far from the developed limit: {long}"
     );
+}
+
+#[test]
+fn simplec_fan_inlet_settles_at_the_fan_and_system_curve_intersection() {
+    // A channel driven by a linear fan curve (3 Pa shut-off, free delivery
+    // at 2.5e-3 m^3/s) from ambient, operating mid-curve: the solved operating
+    // point lies on the fan curve, and a fixed-velocity solve at the solved
+    // flow reproduces the same inlet-layer pressure, so it is the
+    // intersection with the channel's own system curve.
+    let gate = CancelGate::new();
+    let n = 8;
+    let dx = 1.0 / n as f64;
+    let domain = VoxelDomain::new(6 * n, n, 1, dx).unwrap();
+    let faces = [
+        FvBoundary::Inlet {
+            velocity: [0.1, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ];
+    let curve = FanCurve::new(&[(0.0, 3.0), (2.5e-3, 0.0)]).unwrap();
+    let mut config = SimpleConfig::new(faces);
+    config.tolerance = 1e-9;
+    config.fan = Some(FanInlet {
+        face: Face3::XMin,
+        curve,
+    });
+    let fan_run = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let (flow, pressure, residual) = fan_run.report.fan.unwrap();
+    let inlet_layer = fan_run.mean_pressure(&domain, 0, 0).unwrap();
+    eprintln!(
+        "fan: Q {flow:.6e} dp {pressure:.6} inlet layer {inlet_layer:.6} residual {residual:.2e} iterations {}",
+        fan_run.report.iterations
+    );
+    assert!(residual < 1e-9);
+    assert!((pressure - curve.pressure(flow)).abs() < 1e-12);
+    assert!((inlet_layer - pressure).abs() < 1e-8 * pressure);
+    assert!((fan_run.report.inflow_m3_s - flow).abs() < 1e-12 * flow);
+    // The same channel at the solved flow, prescribed: same inlet pressure.
+    let speed = flow / (n as f64 * dx * dx);
+    let mut fixed = SimpleConfig::new(faces);
+    fixed.faces[0] = FvBoundary::Inlet {
+        velocity: [speed, 0.0, 0.0],
+    };
+    fixed.tolerance = 1e-9;
+    let fixed_run = simple_flow(&domain, &unit_fluid(), &fixed, &gate).unwrap();
+    let system = fixed_run.mean_pressure(&domain, 0, 0).unwrap();
+    eprintln!("system curve at the solved flow: {system:.6} Pa");
+    assert!(
+        (system - pressure).abs() < 1e-6 * pressure,
+        "{system} vs {pressure}"
+    );
+    // A non-inlet fan face refuses.
+    let mut wrong = config;
+    wrong.fan = Some(FanInlet {
+        face: Face3::XMax,
+        curve,
+    });
+    assert!(matches!(
+        simple_flow(&domain, &unit_fluid(), &wrong, &gate),
+        Err(ChtError::InvalidInput {
+            field: "simple.fan",
+            ..
+        })
+    ));
+    assert!(FanCurve::new(&[(0.0, 10.0), (1.0, 20.0)]).is_err());
 }

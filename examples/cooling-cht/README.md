@@ -44,7 +44,11 @@ Examples:
   open at the bottom and top, cooled by natural convection only.
 - `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
   (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
-  at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins.
+  at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins, at
+  0.1 m/s (duct Reynolds number about 250). At 0.5 m/s (about 1250) the
+  flow behind the blunt body does not settle (measured at 4 mm voxels: the
+  SIMPLEC residuals cycle around 1e-2) and the run refuses as not steady or
+  diverged: a steady laminar answer is not claimed there.
 
 Results are Estimated numerical evidence at one resolution: no turbulence
 model, radiation, or temperature-dependent properties; staircase geometry;
