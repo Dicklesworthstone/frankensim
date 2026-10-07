@@ -37,12 +37,20 @@
 //!
 //! # No-claim boundaries
 //!
-//! v0 binds the cooling project pipeline only (`cooling.project`,
-//! `cooling.import`, `cooling.solve`, `cooling.run`); the catalog's physics
+//! v0 binds the cooling project pipeline (`cooling.project`, `cooling.import`,
+//! `cooling.solve`, `cooling.run`) and native uncertainty/sensitivity studies
+//! (`cooling.study project :source "study.fsim" [:hash "…"] [:budget N]).
+//! Study assets resolve against the study source; its sampling seed is distinct
+//! from the physical project seed. Budget stops retain the native study run ID
+//! for ordinary `study --resume`; whole-program resume is not implemented.
+//! The catalog's physics
 //! operators (`flux.*`, `ascent.*`, …) are admitted by fs-ir but have no stage
 //! binding here and refuse as not executable. The project file is re-read by
 //! each stage driver exactly as the `.fsim` verbs read it; the `:hash` pin is
-//! checked once before execution.
+//! checked once before execution. Native study pins hash the canonical study
+//! source with BLAKE3 and are also checked during binding, not atomically with
+//! subsequent file reads. Per-step wall admission is not aggregate program
+//! wall-time metering.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -52,6 +60,9 @@ use fs_ir::admission::{AdmissionContext, RegimePolicy, Severity, admit};
 use fs_ir::ast::{CountUnit, Node, NodeKind};
 use fs_ir::study::Study;
 
+#[path = "frankenscript/native_study.rs"]
+mod native_study;
+
 use crate::cards::CardPackKind;
 use crate::{
     CommandOutput, DIAGNOSTIC_SCHEMA, Diagnostic, ImportCommand, ImportPolicy, MAX_PROJECT_BYTES,
@@ -60,11 +71,12 @@ use crate::{
 };
 
 /// Verbs with a stage binding, in catalog order.
-pub const EXECUTABLE_VERBS: [&str; 4] = [
+pub const EXECUTABLE_VERBS: [&str; 5] = [
     "cooling.project",
     "cooling.import",
     "cooling.solve",
     "cooling.run",
+    "cooling.study",
 ];
 
 const LENGTH: fs_qty::Dims = fs_qty::Dims([1, 0, 0, 0, 0, 0]);
@@ -82,6 +94,7 @@ pub(crate) fn is_program(path: &Path) -> bool {
 /// One bound, not yet executed step.
 #[derive(Debug)]
 enum Step {
+    Study(native_study::StudyStep),
     Import(ImportCommand),
     Solve {
         project: PathBuf,
@@ -96,6 +109,7 @@ enum Step {
 impl Step {
     const fn verb(&self) -> &'static str {
         match self {
+            Self::Study(_) => "cooling.study",
             Self::Import(_) => "cooling.import",
             Self::Solve { .. } => "cooling.solve",
             Self::Run { .. } => "cooling.run",
@@ -210,6 +224,7 @@ fn count_of(node: &Node) -> Option<u64> {
 struct Binder<'p> {
     base: PathBuf,
     ledger: &'p Path,
+    wall_seconds: Option<f64>,
     projects: Vec<(String, ProjectBinding)>,
 }
 
@@ -302,6 +317,7 @@ impl Binder<'_> {
         let (positional, named) = keywords(items, refusals, verb)?;
         let project = self.project_operand(verb, &positional, refusals)?;
         match verb {
+            "cooling.study" => native_study::bind(self, &project, &named, refusals).map(Step::Study),
             "cooling.import" => {
                 let mut sources = None;
                 let mut unit = None;
@@ -545,6 +561,7 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             .parent()
             .map_or_else(PathBuf::new, Path::to_path_buf),
         ledger,
+        wall_seconds: study.budget.and_then(|budget| declared_budget(budget).0),
         projects: Vec::new(),
     };
     for (name, value) in &study.lets {
@@ -671,6 +688,7 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
     let mut status = exit::SUCCESS;
     for step in &steps {
         let output = match step {
+            Step::Study(study) => study.run(ledger, mode),
             Step::Import(command) => import_path(command, mode),
             Step::Solve { project, cards } => solve_path(project, ledger, cards, mode),
             Step::Run { project, cards } => run_workflow_path(project, ledger, cards, mode),
