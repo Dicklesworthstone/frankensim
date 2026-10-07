@@ -93,11 +93,16 @@ fn programs_preserve_native_study_identities_samples_and_estimates() {
             "script", fs_cli::exit::SUCCESS);
         assert_eq!(result.str_field("status"), Some("completed"));
         let native = child(&result);
-        assert_eq!(native.str_field("run"), direct.str_field("run"));
+        // Receipt pointers include elapsed wall charges; physical model and
+        // report identities, not separately timed invocation pointers, match.
+        for field in ["study_id", "model"] {
+            assert_eq!(native.get("receipt").unwrap().str_field(field),
+                direct.get("receipt").unwrap().str_field(field));
+        }
         let actual = f.report("script", native);
         assert_eq!(actual, f.report("direct", &direct), "programs must execute the same native experiment");
         let report = J::parse(std::str::from_utf8(&actual).unwrap()).unwrap();
-        assert_eq!(report.f64_field("seed"), Some(29.0), "do not replace sampling seed with physical seed 7");
+        assert_eq!(report.str_field("seed"), Some("29"), "do not replace sampling seed with physical seed 7");
     }
 }
 
@@ -164,4 +169,24 @@ fn physical_refusal_remains_a_failed_native_step_not_a_completed_program() {
     let report = J::parse(std::str::from_utf8(&report).unwrap()).unwrap();
     assert!(report.get("observations").unwrap().as_array().unwrap().is_empty());
     assert_eq!(report.f64_field("evaluations_attempted"), Some(1.0));
+}
+
+#[test]
+fn missing_or_invalid_late_study_assets_refuse_before_any_program_step() {
+    let prefix = "(cooling.import project :sources (\"assets/plate.stl\") :unit \"m\" :max-hole-edges 0)\n";
+    let step = "(cooling.study project :source \"assets/study.fsim\" :budget 0)";
+    for missing in ["missing.stl", "missing.fsmcdpk"] {
+        let source = if missing.ends_with(".stl") {
+            SOURCE.replace("plate.stl", missing)
+        } else { SOURCE.replace("aa6061.fsmcdpk", missing) };
+        let f = Fixture::new(&source);
+        let (_, error) = f.run(&program(&format!("{prefix}{step}")), "missing", fs_cli::exit::REFUSED);
+        assert!(error.contains(missing), "{error}");
+        assert!(!f.ledger("missing").exists(), "preparation must precede even an otherwise valid import");
+    }
+    let f = Fixture::new(SOURCE);
+    std::fs::write(f.assets.join("aa6061.fsmcdpk"), b"invalid normalized card pack").unwrap();
+    let (_, error) = f.run(&program(&format!("{prefix}{step}")), "bad-card", fs_cli::exit::REFUSED);
+    assert!(error.contains("frankenscript-native-study"), "{error}");
+    assert!(!f.ledger("bad-card").exists());
 }

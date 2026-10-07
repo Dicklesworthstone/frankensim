@@ -54,9 +54,13 @@
 //! Budget stops retain the study run ID for ordinary `study --resume`;
 //! whole-program resume is not implemented. The catalog's physics operators
 //! (`flux.*`, `ascent.*`, …) are admitted by fs-ir but have no stage binding
-//! here and refuse as not executable. Project and study files are re-read by
-//! each stage driver exactly as the CLI verbs read them; `:hash` pins are
-//! checked once during binding, not atomically with subsequent file reads.
+//! here and refuse as not executable. `cooling.study` captures its admitted
+//! study, project, geometry and card bytes during binding and executes that
+//! snapshot without reopening inputs. Repeated source paths share the first
+//! snapshot and recheck their pins; distinct snapshots share one quarter of
+//! the declared program memory, capped at 256 MiB of retained input bytes.
+//! This is not a peak-RSS bound or an atomic multi-file filesystem snapshot.
+//! Other stage drivers still reread their files after binding-time pin checks.
 //! Per-step wall admission is not aggregate program wall-time metering.
 
 use std::fmt::Write as _;
@@ -239,6 +243,7 @@ struct Binder<'p> {
     ledger: &'p Path,
     seed: Option<u64>,
     wall_seconds: Option<f64>,
+    native_studies: native_study::SnapshotCache,
     projects: Vec<(String, ProjectBinding)>,
     studies: Vec<ProjectBinding>,
 }
@@ -695,6 +700,8 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
         ledger,
         seed: study.seed,
         wall_seconds: study.budget.and_then(|budget| declared_budget(budget).0),
+        native_studies: native_study::SnapshotCache::new(
+            study.budget.and_then(|budget| declared_budget(budget).1)),
         projects: Vec::new(),
         studies: Vec::new(),
     };

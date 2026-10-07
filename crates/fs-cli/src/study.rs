@@ -13,6 +13,7 @@ mod elasticity;
 mod thermal;
 #[path = "study_uncertainty.rs"]
 mod uncertainty;
+pub(crate) use uncertainty::{PreparedStudy, StudyPins};
 
 /// Shared retained-study receipt envelope. Numerical producer identity remains
 /// an explicit `driver` field inside every receipt.
