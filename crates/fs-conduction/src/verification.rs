@@ -31,6 +31,9 @@ use fs_verify::tet::{AffineSourceTetProblem, BoundaryCondition, BoundaryFace, Co
     affine_source_mean_bound};
 pub use fs_verify::tet::{FluxBudget, TetError};
 
+/// Bounds for explicitly selected component volumes on the original full model.
+pub mod region;
+
 mod contact;
 pub use contact::{bound_temperature_mean_with_contacts, solve_with_contact_mean_bound};
 

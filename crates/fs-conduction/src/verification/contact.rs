@@ -5,7 +5,7 @@
 use super::*;
 use crate::{InterfaceSurface, ThermalInterfaces};
 
-fn admit_contacts(
+pub(super) fn admit_contacts(
     cx: &Cx<'_>, problem: ConductionProblem<'_>, surfaces: &[InterfaceSurface], flux: FluxBudget,
 ) -> Result<(Admitted, ThermalInterfaces)> {
     poll(cx)?;

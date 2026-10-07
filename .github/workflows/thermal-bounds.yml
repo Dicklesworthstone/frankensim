@@ -29,7 +29,8 @@ jobs:
           cp -r crates/fs-verify/src/tet "$scratch/tet"
           cp crates/fs-verify/tests/affine_source.rs "$scratch/affine_source.rs"
           cp crates/fs-verify/tests/contact_bounds.rs "$scratch/contact_bounds.rs"
-          printf '#![forbid(unsafe_code)]\nextern crate self as fs_verify;\npub mod interval;\npub mod tet;\nmod affine_source;\nmod contact_bounds;\n' > "$scratch/check.rs"
+          cp crates/fs-verify/tests/region_mean.rs "$scratch/region_mean.rs"
+          printf '#![forbid(unsafe_code)]\nextern crate self as fs_verify;\npub mod interval;\npub mod tet;\nmod affine_source;\nmod contact_bounds;\nmod region_mean;\n' > "$scratch/check.rs"
           rustc --edition=2024 --cfg 'feature="certified-speculation"' --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
           "$scratch/flux-tests"
       - name: Materialize pinned dependencies
@@ -53,11 +54,11 @@ jobs:
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::
-          cargo test --release -p fs-verify --features certified-speculation --test affine_source --test contact_bounds
+          cargo test --release -p fs-verify --features certified-speculation --test affine_source --test contact_bounds --test region_mean
       - name: Test real conduction primal and dual consumers
         run: |
           cargo test --release -p fs-verify --features thermal-conduction --lib conduction::
-          cargo test --release -p fs-conduction --features thermal-verification --test contact_mean_bound
+          cargo test --release -p fs-conduction --features thermal-verification --test contact_mean_bound --test region_mean_bound
       - name: Execute mean-temperature comparison
         run: |
           cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
