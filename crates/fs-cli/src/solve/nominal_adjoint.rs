@@ -8,6 +8,8 @@
 //! adds named contact-resistance controls; choose one report, not both.
 //! `temperature-max-boundary-adjoint` instead adds prescribed-temperature
 //! controls through the complete lift, without changing legacy report bytes.
+//! `temperature-max-contact-boundary-adjoint` requests BOTH control families
+//! from that same solve/dual; it does not request two independent analyses.
 //!
 //! Reuse production adjoints, contact operators and complete boundary feedback.
 //! Only contractions of native input laws live here; no perturbed primal or
@@ -36,6 +38,7 @@ mod radiative_feedback;
 mod surface_power;
 
 const OUTPUT: &str = "temperature-max-adjoint";
+const COMBINED_OUTPUT: &str = "temperature-max-contact-boundary-adjoint";
 const MAX_PARAMETERS: usize = 256;
 const SCOPE: &str = "Estimated derivative of a selected hottest nodal temperature on the final accepted native mesh. Fixed geometry and matching contact; the hydraulic operating point is fixed except for the explicitly admitted fan-speed control. Power rows differentiate declared pre-duty watts: volume sources retain regional nodal mixing, while surface sources retain their inward P1 face load and actual patch-area normalization. Smooth heterogeneous k(T) uses the full nonsymmetric material Jacobian; material slope discontinuities and validity endpoints refuse. Constant-conductivity solids and nonradiating linear solid/air models retain their existing linear analysis. Natural-convection and radiation modes include smooth k(T) and complete area-mean feedback. Coupled nonlinear-solid/air and radiation/air modes retain the full material, consistent radiative secant, weighted reference and stream-wise air Jacobian together. Only original convective heat enters the air law. Every nonlinear mode checks the complete constitutive primal residual at the unchanged field, not just the last frozen outer iterate, and supplies no inverse or gradient-error certificate. Emissivity is fixed at the selected card query; its row is a local coefficient partial, not a card-selection or temperature-dependent-emissivity derivative. Not a unique maximum derivative at a tie, a continuum/shape derivative, experimental validation, or a parameter-uncertainty bound. Independent air-inlet derivatives include upstream segments at fixed flow and transport properties. Independent single/series/parallel fan-bank speed derivatives use native quadratic vent/leakage losses, each member's hydraulic response and fan affinity, include all branch capacity and smooth-card convection changes, and differentiate each absolute speed ratio, not its logarithm or a common system speed. This is a nominal local model derivative, not a derivative of interval root-bracket endpoints or pressure-tolerance uncertainty. Conductivity-multiplier rows differentiate a shared dimensionless scale s on each region's whole effective conductivity tensor/curve K(T), evaluated at s=1; they retain the complete thermal dual and prescribed-temperature lift. They are not absolute scalar-conductivity, tensor-entry, card-selection, heat-capacity or material-uncertainty derivatives, and do not modify or validate the selected material claim. Nonsmooth fan-curve knots, nonunique parallel fan inverses, card regime boundaries, natural convection combined with airflow and Dirichlet-temperature derivatives are not supplied.";
 
@@ -93,9 +96,9 @@ pub(super) fn requested(spec: &ProjectSpec) -> Result<bool, SolveRefusal> {
     let rows = spec.outputs.as_deref().unwrap_or(&[]);
     let mut found = false;
     for row in rows.iter().filter(|row| row.name == OUTPUT || row.name == contact_controls::OUTPUT
-        || row.name == prescribed_controls::OUTPUT) {
+        || row.name == prescribed_controls::OUTPUT || row.name == COMBINED_OUTPUT) {
         if found || row.kind != "report" {
-            return Err(bad("choose exactly one report: temperature-max-adjoint, temperature-max-contact-adjoint or temperature-max-boundary-adjoint"));
+            return Err(bad("choose exactly one report: temperature-max-adjoint, temperature-max-contact-adjoint, temperature-max-boundary-adjoint or temperature-max-contact-boundary-adjoint"));
         }
         found = true;
     }
@@ -124,9 +127,12 @@ pub(super) fn extract(
 ) -> Result<String, SolveRefusal> {
     poll(cx)?;
     admit_state_laws(spec)?;
-    let contact_requested = contact_controls::requested(spec);
-    let boundary_requested = prescribed_controls::requested(spec);
-    let output = if contact_requested { contact_controls::OUTPUT }
+    let combined = spec.outputs.as_deref().unwrap_or(&[]).iter()
+        .any(|row| row.name == COMBINED_OUTPUT);
+    let contact_requested = combined || contact_controls::requested(spec);
+    let boundary_requested = combined || prescribed_controls::requested(spec);
+    let output = if combined { COMBINED_OUTPUT }
+        else if contact_requested { contact_controls::OUTPUT }
         else if boundary_requested { prescribed_controls::OUTPUT } else { OUTPUT };
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
@@ -313,7 +319,10 @@ pub(super) fn extract(
     }
     let gap = second.map(|value| number(temperature[selected] - value)).transpose()?
         .unwrap_or_else(|| "null".into());
-    let scope = if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
+    let scope = if combined { format!("{} {} {}",
+            SCOPE.replace(" and Dirichlet-temperature derivatives", ""),
+            contact_controls::SCOPE, prescribed_controls::SCOPE) }
+        else if contact_requested { format!("{SCOPE} {}", contact_controls::SCOPE) }
         else if boundary_requested { format!("{} {}",
             SCOPE.replace(" and Dirichlet-temperature derivatives", ""), prescribed_controls::SCOPE) }
         else { SCOPE.to_string() };
@@ -478,5 +487,26 @@ mod admission_tests {
             });
             assert!(requested(&duplicate).is_err());
         }
+    }
+
+    #[test]
+    fn combined_request_is_one_goal_and_preserves_duplicate_refusals() {
+        let mut spec = fs_project::parse_sexpr_migrating(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../examples/contact-pair/contact-pair.fsim"
+        ))).unwrap().decoded.spec;
+        let request = fs_project::spec::OutputRequest {
+            name: COMBINED_OUTPUT.into(), kind: "report".into(), region: None,
+        };
+        spec.outputs.get_or_insert_with(Vec::new).push(request.clone());
+        assert!(requested(&spec).unwrap());
+        for other in [OUTPUT, contact_controls::OUTPUT, prescribed_controls::OUTPUT, COMBINED_OUTPUT] {
+            let mut duplicate = spec.clone();
+            duplicate.outputs.as_mut().unwrap().push(fs_project::spec::OutputRequest {
+                name: other.into(), ..request.clone()
+            });
+            assert!(requested(&duplicate).is_err(), "{other}");
+        }
+        spec.outputs.as_mut().unwrap().last_mut().unwrap().kind = "scalar".into();
+        assert!(requested(&spec).is_err());
     }
 }

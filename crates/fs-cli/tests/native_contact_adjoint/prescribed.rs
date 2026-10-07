@@ -129,3 +129,6 @@ fn native_cooled_walls_keep_inward_heat_and_complete_boundary_sensitivities() {
         }
     }
 }
+
+#[path = "combined.rs"]
+mod combined;
