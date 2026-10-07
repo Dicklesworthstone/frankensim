@@ -518,6 +518,15 @@ fn fin_count_study_ranks_variants_and_records_refusals() {
         result.path(&["best", "index"]).and_then(J::as_f64),
         Some(1.0)
     );
+    // One thread or several: the same report, bit for bit.
+    let serial = FIN_STUDY.replace(
+        r#""objective": {"minimize": "source:chip"}"#,
+        r#""objective": {"minimize": "source:chip"}, "parallelism": 1"#,
+    );
+    let (code, one, stderr) = run(&scratch("fin-study-serial.json", &serial));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(one.path(&["threads"]).and_then(J::as_f64), Some(1.0));
+    assert_eq!(one.get("evaluations"), result.get("evaluations"));
     // An unreachable constraint leaves no feasible variant.
     let constrained = FIN_STUDY.replace(
         r#""objective": {"minimize": "source:chip"}"#,

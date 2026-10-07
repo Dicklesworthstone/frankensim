@@ -102,7 +102,9 @@ Scene (`frankensim.cooling-cht.v1`):
   `internal_fan:<name>`, `fan_flow_m3_s`, `inflow_m3_s`. Refused variants
   are listed with their refusal and never ranked; the result
   (`frankensim.cooling-cht.study.v1`) lists every evaluation and the best.
-  A grid search: no optimality claim between grid points.
+  Variants are solved on `parallelism` threads (default: the available
+  cores); the report is identical for any thread count. A grid search: no
+  optimality claim between grid points.
 - Optional `components`: JEDEC two-resistor compact models (`name`,
   `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
   `junction_to_board_k_w`). The box blocks flow; the junction reaches the

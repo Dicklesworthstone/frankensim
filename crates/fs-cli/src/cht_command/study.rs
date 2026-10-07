@@ -128,10 +128,14 @@ fn known_quantity(name: &str) -> bool {
         )
 }
 
+/// An evaluation's objective and constraint quantities, or its refusal
+/// `(code, message)`.
+type Outcome = std::result::Result<(f64, Vec<Option<f64>>), (String, String)>;
+
 /// One evaluated variant.
 struct Evaluation {
     values: Vec<J>,
-    outcome: std::result::Result<(f64, Vec<Option<f64>>), (String, String)>,
+    outcome: Outcome,
 }
 
 impl Evaluation {
@@ -237,8 +241,8 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
     if let J::Object(entries) = &mut template {
         entries.retain(|(key, _)| key != "study");
     }
-    let started = Instant::now();
-    let mut results: Vec<Evaluation> = Vec::with_capacity(evaluations);
+    // Every variant is built (and its paths checked) before any is solved.
+    let mut variants = Vec::with_capacity(evaluations);
     for index in 0..evaluations {
         // Mixed-radix digits, the first parameter slowest.
         let mut rest = index;
@@ -261,7 +265,10 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
                 &format!("study.parameters.{}", parameter.name),
             )?;
         }
-        let outcome = Scene::from_root(&variant, base)
+        variants.push((variant, values));
+    }
+    let evaluate = |variant: &J| {
+        Scene::from_root(variant, base)
             .and_then(|scene| execute_within_budget(&scene, true))
             .and_then(|text| {
                 J::parse(text.trim()).map_err(|e| bad(format!("unreadable result: {e:?}")))
@@ -281,9 +288,50 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
                         .map(|b| quantity(&result, &b.quantity))
                         .collect(),
                 ))
-            });
-        results.push(Evaluation { values, outcome });
+            })
+    };
+    // Variants are independent: solve them on up to `parallelism` threads
+    // (default: the available cores), each result kept at its index, so the
+    // report is the same for any thread count.
+    let workers = match study.f64_field("parallelism") {
+        Some(n) if n >= 1.0 && n.fract() == 0.0 => n as usize,
+        Some(_) => return Err(bad("study.parallelism must be a whole number >= 1")),
+        None => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
     }
+    .min(evaluations)
+    .max(1);
+    let started = Instant::now();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<Outcome>>> = (0..evaluations)
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((variant, _)) = variants.get(index) else {
+                        break;
+                    };
+                    let outcome = evaluate(variant);
+                    *slots[index]
+                        .lock()
+                        .expect("no worker panics holding a slot") = Some(outcome);
+                }
+            });
+        }
+    });
+    let results: Vec<Evaluation> = variants
+        .into_iter()
+        .zip(slots)
+        .map(|((_, values), slot)| Evaluation {
+            values,
+            outcome: slot
+                .into_inner()
+                .expect("no worker panics holding a slot")
+                .expect("every index evaluated"),
+        })
+        .collect();
     let best = results
         .iter()
         .enumerate()
@@ -294,7 +342,7 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
     let names: Vec<&str> = parameters.iter().map(|p| p.name.as_str()).collect();
     if json_mode {
         let mut out = format!(
-            "{{\"schema\":{},\"status\":\"completed\",\"objective\":{{\"minimize\":{}}},\"parameters\":[{}],\"evaluations\":[",
+            "{{\"schema\":{},\"status\":\"completed\",\"threads\":{workers},\"objective\":{{\"minimize\":{}}},\"parameters\":[{}],\"evaluations\":[",
             quote(STUDY_SCHEMA),
             quote(&objective),
             names.iter().map(|n| quote(n)).collect::<Vec<_>>().join(",")
