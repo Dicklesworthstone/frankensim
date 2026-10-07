@@ -76,7 +76,9 @@ impl VoxelDomain {
         for (axis, list) in widths.iter().enumerate() {
             if let Some(w) = list.iter().find(|w| !(w.is_finite() && **w > 0.0)) {
                 return Err(ChtError::InvalidDomain {
-                    reason: format!("axis {axis}: cell widths must be finite and positive, got {w}"),
+                    reason: format!(
+                        "axis {axis}: cell widths must be finite and positive, got {w}"
+                    ),
                 });
             }
         }

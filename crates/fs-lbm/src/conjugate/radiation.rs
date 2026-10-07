@@ -198,7 +198,14 @@ fn march(
         };
         cell[axis] += step[axis];
         if cell[axis] >= 0 && cell[axis] < dims[axis] as i64 {
-            t_max[axis] = exit_time(domain, axis, cell[axis], step[axis], origin[axis], dir[axis]);
+            t_max[axis] = exit_time(
+                domain,
+                axis,
+                cell[axis],
+                step[axis],
+                origin[axis],
+                dir[axis],
+            );
         }
         if cell[axis] < 0 || cell[axis] >= dims[axis] as i64 {
             let side = 2 * axis + usize::from(step[axis] > 0);
@@ -429,7 +436,14 @@ fn trace(
         let point = [0, 1, 2].map(|a| t.mul_add(dir[a], origin[a]));
         cell[axis] += step[axis];
         if cell[axis] >= 0 && cell[axis] < dims[axis] as i64 {
-            t_max[axis] = exit_time(domain, axis, cell[axis], step[axis], origin[axis], dir[axis]);
+            t_max[axis] = exit_time(
+                domain,
+                axis,
+                cell[axis],
+                step[axis],
+                origin[axis],
+                dir[axis],
+            );
         }
         if cell[axis] < 0 || cell[axis] >= dims[axis] as i64 {
             let side = 2 * axis + usize::from(step[axis] > 0);

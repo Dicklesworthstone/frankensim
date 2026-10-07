@@ -1069,7 +1069,9 @@ impl<'a> Solver<'a> {
         // is part of the steady state.
         let largest_flux = (0..3)
             .flat_map(|a| (0..self.vel[a].len()).map(move |i| (a, i)))
-            .fold(0.0f64, |m, (a, i)| m.max((self.vel[a][i] * self.comp_face_area(a, i)).abs()))
+            .fold(0.0f64, |m, (a, i)| {
+                m.max((self.vel[a][i] * self.comp_face_area(a, i)).abs())
+            })
             .max(f64::MIN_POSITIVE);
         let mass = imbalance / (self.rho * largest_flux);
         self.update_fan(mass, steady);
@@ -1487,7 +1489,8 @@ impl<'a> Solver<'a> {
                     }
                     Kind::Outlet(_) => {
                         // u' = 2 d p'_inside against the ghost pressure.
-                        diag += 2.0 * self.rho * self.domain.face_area(c, axis) * self.d[axis][face];
+                        diag +=
+                            2.0 * self.rho * self.domain.face_area(c, axis) * self.d[axis][face];
                         drains[row] = true;
                     }
                     Kind::Fixed(_) => {}
@@ -1768,11 +1771,10 @@ impl Solver<'_> {
                         + self.vel[a][self.cell_face(a, at, true)]);
             }
             let speed = fs_math::det::sqrt(slot.iter().map(|v| v * v).sum::<f64>());
-            max_cell_reynolds =
-                max_cell_reynolds.max(
-                    speed * domain.widths(c).iter().fold(0.0f64, |m, w| m.max(*w))
-                        / fluid.kinematic_viscosity_m2_s,
-                );
+            max_cell_reynolds = max_cell_reynolds.max(
+                speed * domain.widths(c).iter().fold(0.0f64, |m, w| m.max(*w))
+                    / fluid.kinematic_viscosity_m2_s,
+            );
         }
         let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
         for face in Face3::ALL {

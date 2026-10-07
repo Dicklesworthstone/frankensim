@@ -117,7 +117,11 @@ impl CompactComponent {
         let axis = self.board_face as usize / 2;
         (0..3)
             .filter(|&a| a != axis)
-            .map(|a| (self.lo[a]..self.hi[a]).map(|i| domain.width(a, i)).sum::<f64>())
+            .map(|a| {
+                (self.lo[a]..self.hi[a])
+                    .map(|i| domain.width(a, i))
+                    .sum::<f64>()
+            })
             .product()
     }
 }
