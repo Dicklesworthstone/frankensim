@@ -16,11 +16,11 @@
 use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FanCurve, FanInlet, FlowFace,
-    FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig, LbmCollisionChoice, LbmFlowConfig,
-    SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain,
-    fv_natural_convection, lbm_duct_flow, march_energy, natural_convection, simple_flow,
-    solve_energy,
+    BuoyancyConfig, ChtError, ContactResistance, ConvectionScheme, EnergyConfig, FanCurve,
+    FanInlet, FlowFace, FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig,
+    LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
+    TransientConfig, Voxel, VoxelDomain, fv_natural_convection, lbm_duct_flow, march_energy,
+    natural_convection, simple_flow, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1598,4 +1598,114 @@ fn simplec_fan_inlet_settles_at_the_fan_and_system_curve_intersection() {
         })
     ));
     assert!(FanCurve::new(&[(0.0, 10.0), (1.0, 20.0)]).is_err());
+}
+
+/// Steady conduction along `axis` through a 12-cell bar between faces held
+/// at 1 K and 0 K (other faces adiabatic): the heat rate.
+fn bar_heat(
+    solids: &[SolidMaterial],
+    material_of: impl Fn(usize) -> u16,
+    axis: usize,
+    contacts: Vec<ContactResistance>,
+) -> (f64, Vec<f64>) {
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let mut dims = [2, 2, 2];
+    dims[axis] = 12;
+    let domain = VoxelDomain::from_fn(dims[0], dims[1], dims[2], dx, |p| {
+        Voxel::Solid(material_of((p[axis] / dx) as usize))
+    })
+    .unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[2 * axis] = ThermalFace::Temperature(1.0);
+    faces[2 * axis + 1] = ThermalFace::Temperature(0.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.contacts = contacts;
+    let solution = solve_energy(
+        &domain,
+        &unit_fluid(),
+        solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    let heat = solution.report.balance.boundary_outflow_w;
+    let profile = (0..12)
+        .map(|i| {
+            let mut at = [0usize; 3];
+            at[axis] = i;
+            solution.temperature[domain.index(at[0], at[1], at[2])]
+        })
+        .collect();
+    (heat, profile)
+}
+
+#[test]
+fn orthotropic_conductivity_and_contact_resistance_are_exact_in_series() {
+    // G1: piecewise-constant conductivity and interface resistances are
+    // exact series resistances in this finite-volume operator, so a bar's
+    // heat rate is the closed form to round-off.
+    let dx = 1e-3;
+    // A laminate with k = (30, 30, 0.3) in series with an isotropic k = 3
+    // solid, six cells each: the interface temperature depends on the
+    // laminate's conductivity ALONG the bar, in-plane (x) or through the
+    // board (z).
+    let half = 6.0 * dx;
+    let stack = [
+        SolidMaterial::new("pcb", 1.0).with_orthotropic([30.0, 30.0, 0.3]),
+        SolidMaterial::new("iso", 3.0),
+    ];
+    for (axis, k_axis) in [(0usize, 30.0), (2, 0.3)] {
+        let (heat, profile) = bar_heat(&stack, |i| u16::from(i >= 6), axis, Vec::new());
+        assert!(heat.abs() < 1e-12, "net heat must vanish: {heat}");
+        let q = 1.0 / (half / k_axis + half / 3.0);
+        for (i, t) in profile.iter().enumerate() {
+            let x = (i as f64 + 0.5) * dx;
+            let r = if i < 6 {
+                x / k_axis
+            } else {
+                half / k_axis + (x - half) / 3.0
+            };
+            assert!(
+                (t - (1.0 - q * r)).abs() < 1e-9,
+                "axis {axis} cell {i}: {t}"
+            );
+        }
+    }
+    // Two materials (k 10 | k 2, six cells each) with a 1e-4 m^2K/W joint.
+    let pair = [SolidMaterial::new("a", 10.0), SolidMaterial::new("b", 2.0)];
+    let split = |i: usize| u16::from(i >= 6);
+    let resistance = 1e-4;
+    let (_, profile) = bar_heat(
+        &pair,
+        split,
+        0,
+        vec![ContactResistance {
+            materials: (0, 1),
+            resistance_m2_k_w: resistance,
+        }],
+    );
+    let total = half / 10.0 + resistance + half / 2.0;
+    let q = 1.0 / total; // W/m^2
+    // Cell centres: T(x) on each side of the joint is linear in the series
+    // resistance from the hot face.
+    for (i, t) in profile.iter().enumerate() {
+        let x = (i as f64 + 0.5) * dx;
+        let r = if i < 6 {
+            x / 10.0
+        } else {
+            half / 10.0 + resistance + (x - half) / 2.0
+        };
+        let exact = 1.0 - q * r;
+        assert!((t - exact).abs() < 1e-9, "cell {i}: {t} vs {exact}");
+    }
+    // The joint's temperature step is q R'' (cells 5 | 6 straddle it).
+    let jump = (profile[5] - profile[6]) - q * (0.5 * dx / 10.0 + 0.5 * dx / 2.0);
+    assert!(
+        (jump - q * resistance).abs() < 1e-9,
+        "{jump} vs {}",
+        q * resistance
+    );
 }

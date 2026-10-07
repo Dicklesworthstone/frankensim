@@ -966,6 +966,23 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 | Channel driven by a linear fan curve (3 Pa shut-off, 2.5e-3 m^3/s free delivery), operating mid-curve | the operating point is on the curve AND on the system curve (a fixed-velocity solve at the solved flow) | Q = 1.6917e-3 m^3/s at 0.96997 Pa; curve mismatch 6e-10; fixed-velocity inlet pressure equal to 1e-6 |
 | Refusals | outward inlet, wall with normal velocity, alpha = 1, budget, all-solid domain, cancellation | structured errors |
 
+### Orthotropic solids and contact resistance
+
+`SolidMaterial::with_orthotropic([k_x, k_y, k_z])` declares grid-aligned
+principal conductivities (a PCB laminate: about 30 W/(m K) in-plane, 0.3
+through the board); each face uses the conductivity along its normal
+axis. `ThermalSetup::contacts` lists `ContactResistance { materials,
+resistance_m2_k_w }` between two distinct solid materials (a thermal
+interface material, a bonded or pressed joint), added in series on every
+face the two materials share: the face conductance is
+`A / (dx/2 / k_P + R'' + dx/2 / k_N)`, exact for piecewise-constant
+properties. `EnergySolution::conductivity` reports the per-axis values.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
+| k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
+
 ### Finite-volume natural convection (`fv_natural_convection`)
 
 Steady Boussinesq natural (or mixed) convection on the SIMPLEC flow and the

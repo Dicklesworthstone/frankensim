@@ -223,3 +223,44 @@ fn fan_face_finds_its_operating_point_on_the_curve() {
     assert!((f(&result, &["flow", "inflow_m3_s"]) - q).abs() < 1e-12 * q);
     assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
 }
+
+#[test]
+fn orthotropic_board_and_interface_resistance_reach_the_solver() {
+    // A die (k 150) on a laminate (k 30 in-plane, 0.3 through) with a
+    // 2e-4 m^2K/W interface, cooled from below: the joint and the weak
+    // through-board conduction both raise the die temperature, and the
+    // contact can only make it hotter.
+    let base = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.008, 0.008, 0.004], "voxel_m": 0.001,
+ "materials": [
+  {"name": "pcb", "conductivity_w_m_k": [30.0, 30.0, 0.3]},
+  {"name": "die", "conductivity_w_m_k": 150.0}
+ ],
+ "solids": [
+  {"material": "pcb", "min_m": [0.0, 0.0, 0.0], "max_m": [0.008, 0.008, 0.002]},
+  {"material": "die", "min_m": [0.003, 0.003, 0.002], "max_m": [0.005, 0.005, 0.003]}
+ ],
+ CONTACTS
+ "sources": [{"name": "die", "power_w": 0.05, "min_m": [0.003, 0.003, 0.002], "max_m": [0.005, 0.005, 0.003]}],
+ "faces": {"z-": {"type": "wall", "temperature_k": 300.0}}
+}"#;
+    let solve = |contacts: &str, name: &str| {
+        let (code, result, stderr) = run(&scratch(name, &base.replace("CONTACTS", contacts)));
+        assert_eq!(code, 0, "{stderr}");
+        assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+        f(&result, &["max_solid_temperature_k"])
+    };
+    let bonded = solve("", "board-bonded.json");
+    let joined = solve(
+        r#""contacts": [{"between": ["die", "pcb"], "resistance_m2_k_w": 2e-4}],"#,
+        "board-joint.json",
+    );
+    // All 0.05 W crossing the 4 mm^2 joint would add exactly
+    // q'' R'' = 2.5 K; the still air around the die offers a parallel path
+    // into the board surface, so the rise is bounded by that and measured
+    // at 1.91 K.
+    assert!(bonded > 302.0, "{bonded}");
+    let rise = joined - bonded;
+    assert!(rise > 1.5 && rise < 2.5, "{bonded} -> {joined}");
+}

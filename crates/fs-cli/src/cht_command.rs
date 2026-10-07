@@ -24,9 +24,9 @@ use fs_geom::Point3;
 use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties, FvBoundary,
-    FvBuoyancyConfig, FvFlow, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel,
-    VoxelDomain, fv_natural_convection, simple_flow, solve_energy,
+    ChtError, ContactResistance, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties,
+    FvBoundary, FvBuoyancyConfig, FvFlow, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
+    Voxel, VoxelDomain, fv_natural_convection, simple_flow, solve_energy,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -37,7 +37,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model, radiation, or temperature-dependent properties; power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials, solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -296,6 +296,7 @@ struct Scene {
     dx: f64,
     fluid: FluidProperties,
     materials: Vec<SolidMaterial>,
+    contacts: Vec<ContactResistance>,
     solids: Vec<(u16, Shape)>,
     sources: Vec<Source>,
     faces: [FaceRule; 6],
@@ -376,13 +377,58 @@ impl Scene {
                 return Err(bad(format!("{at}: duplicate material name {name}")));
             }
             names.push(name);
-            materials.push(SolidMaterial::new(
-                name,
-                number(item, "conductivity_w_m_k", &at)?,
-            ));
+            // A number (isotropic) or [k_x, k_y, k_z] (orthotropic along the
+            // grid axes, e.g. a PCB laminate).
+            let material = match item.get("conductivity_w_m_k").and_then(J::as_array) {
+                Some(_) => {
+                    let k = vec3(item, "conductivity_w_m_k", &at)?;
+                    SolidMaterial::new(name, (k[0] * k[1] * k[2]).cbrt()).with_orthotropic(k)
+                }
+                None => SolidMaterial::new(name, number(item, "conductivity_w_m_k", &at)?),
+            };
+            materials.push(material);
         }
         if materials.len() > usize::from(u16::MAX) {
             return Err(bad("at most 65535 materials"));
+        }
+        let mut contacts = Vec::new();
+        for (i, item) in root
+            .get("contacts")
+            .and_then(J::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+        {
+            let at = format!("contacts[{i}]");
+            let pair = item
+                .get("between")
+                .and_then(J::as_array)
+                .filter(|pair| pair.len() == 2)
+                .ok_or_else(|| bad(format!("{at}.between must name two materials")))?;
+            let mut index = [0u16; 2];
+            for (slot, entry) in index.iter_mut().zip(pair) {
+                let name = entry
+                    .as_str()
+                    .ok_or_else(|| bad(format!("{at}.between entries must be material names")))?;
+                *slot = names
+                    .iter()
+                    .position(|n| *n == name)
+                    .and_then(|p| u16::try_from(p).ok())
+                    .ok_or_else(|| bad(format!("{at}: unknown material {name}")))?;
+            }
+            if index[0] == index[1] {
+                return Err(bad(format!(
+                    "{at}: a contact joins two different materials"
+                )));
+            }
+            let resistance = number(item, "resistance_m2_k_w", &at)?;
+            if resistance < 0.0 {
+                return Err(bad(format!("{at}.resistance_m2_k_w must be non-negative")));
+            }
+            contacts.push(ContactResistance {
+                materials: (index[0], index[1]),
+                resistance_m2_k_w: resistance,
+            });
         }
         let mut solids = Vec::new();
         for (i, item) in root
@@ -534,6 +580,7 @@ impl Scene {
             dx,
             fluid,
             materials,
+            contacts,
             solids,
             sources,
             faces,
@@ -596,6 +643,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         FaceRule::Wall(thermal) => thermal,
     });
     let mut setup = ThermalSetup::new(thermal_faces);
+    setup.contacts.clone_from(&scene.contacts);
     let mut source_cells = Vec::with_capacity(scene.sources.len());
     for source in &scene.sources {
         let count = setup.add_uniform_power(&domain, source.power_w, |p| {

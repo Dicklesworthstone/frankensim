@@ -16,7 +16,11 @@ Scene (`frankensim.cooling-cht.v1`):
   (deterministically, whatever the decimal rounding).
 - `fluid`: `"dry-air-300k"` (default) or explicit `density_kg_m3`,
   `specific_heat_j_kg_k`, `conductivity_w_m_k`, `kinematic_viscosity_m2_s`.
-- `materials`: `name`, `conductivity_w_m_k`.
+- `materials`: `name`, `conductivity_w_m_k` (a number, or `[k_x, k_y, k_z]`
+  for grid-aligned orthotropic solids such as PCB laminates).
+- `contacts` (optional): `between` (two material names) and
+  `resistance_m2_k_w`, a per-area interface resistance (thermal interface
+  material, bonded or pressed joint) on every face the two materials share.
 - `solids`: `material` plus either a box (`min_m`, `max_m`) or a closed STL
   mesh (`stl`, a path relative to the scene file; optional `scale` and
   `offset_m`, placing `world = scale * stl + offset`). Mesh occupancy is the
@@ -49,6 +53,11 @@ Examples:
   flow behind the blunt body does not settle (measured at 4 mm voxels: the
   SIMPLEC residuals cycle around 1e-2) and the run refuses as not steady or
   diverged: a steady laminar answer is not claimed there.
+  Measured at 0.1 m/s (debug build, 262 s): 82 SIMPLEC iterations, junction
+  323.43 K for the 3 W die, energy balance 6e-11. At 2 mm voxels the
+  voxelized body holds 4.80e-5 m^3 of the STL's 5.28e-5 m^3 (its 5 mm base
+  top lies on a voxel centre and falls outside under the tie rule): refine
+  `voxel_m` before reading temperatures to better than that geometry.
 
 Results are Estimated numerical evidence at one resolution: no turbulence
 model, radiation, or temperature-dependent properties; staircase geometry;

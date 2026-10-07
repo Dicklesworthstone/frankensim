@@ -71,6 +71,20 @@ pub struct ThermalSetup {
     /// Cells held at a prescribed temperature (cell index, K). Their implied
     /// heat injection is reported in [`EnergyBalance::fixed_cell_injection_w`].
     pub fixed_temperature: Vec<(usize, f64)>,
+    /// Thermal contact (interface) resistances between pairs of solid
+    /// materials, in series on every face the two materials share.
+    pub contacts: Vec<ContactResistance>,
+}
+
+/// Per-area thermal resistance of the interface between two solid
+/// materials (a thermal interface material, a bonded joint, a pressed
+/// contact), `R'' = dT / q''` in m^2 K / W.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactResistance {
+    /// The two material indices into the `solids` slice (distinct).
+    pub materials: (u16, u16),
+    /// Per-area resistance, m^2 K / W (non-negative).
+    pub resistance_m2_k_w: f64,
 }
 
 impl ThermalSetup {
@@ -81,6 +95,7 @@ impl ThermalSetup {
             faces,
             power_w: Vec::new(),
             fixed_temperature: Vec::new(),
+            contacts: Vec::new(),
         }
     }
 
@@ -197,8 +212,8 @@ pub struct EnergyReport {
 pub struct EnergySolution {
     /// Temperature per cell, K.
     pub temperature: Vec<f64>,
-    /// Conductivity per cell used by the solve, W/(m K).
-    pub conductivity: Vec<f64>,
+    /// Conductivity per cell along x, y, z used by the solve, W/(m K).
+    pub conductivity: Vec<[f64; 3]>,
     /// Solve evidence.
     pub report: EnergyReport,
 }
@@ -256,7 +271,8 @@ impl EnergySolution {
                 if let Some(n) = domain.neighbor(c, f)
                     && domain.is_fluid(n)
                 {
-                    let (kc, kn) = (self.conductivity[c], self.conductivity[n]);
+                    let axis = f / 2;
+                    let (kc, kn) = (self.conductivity[c][axis], self.conductivity[n][axis]);
                     let d = dx * 2.0 * kc * kn / (kc + kn);
                     total += d * (self.temperature[c] - self.temperature[n]);
                 }
@@ -287,12 +303,31 @@ struct Context<'a> {
     domain: &'a VoxelDomain,
     flow: &'a FlowField,
     faces: [ThermalFace; 6],
-    k: Vec<f64>,
+    /// Conductivity along x, y, z per cell.
+    k: Vec<[f64; 3]>,
+    /// Contact resistances keyed by the ordered material pair.
+    contacts: Vec<((u16, u16), f64)>,
     rho_c: f64,
     scheme: ConvectionScheme,
 }
 
 impl Context<'_> {
+    fn contact(&self, c: usize, n: usize) -> f64 {
+        if self.contacts.is_empty() {
+            return 0.0;
+        }
+        match (self.domain.voxel_at(c), self.domain.voxel_at(n)) {
+            (Voxel::Solid(a), Voxel::Solid(b)) if a != b => {
+                let key = (a.min(b), a.max(b));
+                self.contacts
+                    .iter()
+                    .find(|(pair, _)| *pair == key)
+                    .map_or(0.0, |(_, r)| *r)
+            }
+            _ => 0.0,
+        }
+    }
+
     fn weight(&self, peclet: f64) -> f64 {
         match self.scheme {
             ConvectionScheme::Upwind => 1.0,
@@ -308,10 +343,13 @@ impl Context<'_> {
         let dx = self.domain.dx();
         let area = dx * dx;
         let flux = self.rho_c * self.flow.outward(self.domain, c, f);
-        let kc = self.k[c];
+        let kc = self.k[c][f / 2];
         if let Some(n) = self.domain.neighbor(c, f) {
-            let kn = self.k[n];
-            let d = dx * 2.0 * kc * kn / (kc + kn);
+            let kn = self.k[n][f / 2];
+            // Series resistance of the two half cells and any contact
+            // between their materials: exact for piecewise-constant k.
+            let contact = self.contact(c, n);
+            let d = area / (0.5 * dx / kc + contact + 0.5 * dx / kn);
             let a = d.mul_add(self.weight(flux / d), (-flux).max(0.0));
             return FaceTerm {
                 diag: a + flux,
@@ -438,6 +476,9 @@ pub(crate) fn solve_energy_inner(
     fluid.validate()?;
     for solid in solids {
         finite_positive("solid.conductivity_w_m_k", solid.conductivity_w_m_k)?;
+        for k in solid.axis_conductivity() {
+            finite_positive("solid.orthotropic_w_m_k", k)?;
+        }
     }
     domain.check_materials(solids.len())?;
     if flow.dims() != domain.dims() {
@@ -506,17 +547,41 @@ pub(crate) fn solve_energy_inner(
             }
         }
     }
-    let k: Vec<f64> = (0..cells)
+    let k: Vec<[f64; 3]> = (0..cells)
         .map(|c| match domain.voxel_at(c) {
-            Voxel::Fluid => fluid.conductivity_w_m_k,
-            Voxel::Solid(m) => solids[usize::from(m)].conductivity_w_m_k,
+            Voxel::Fluid => [fluid.conductivity_w_m_k; 3],
+            Voxel::Solid(m) => solids[usize::from(m)].axis_conductivity(),
         })
         .collect();
+    let mut contacts = Vec::with_capacity(setup.contacts.len());
+    for contact in &setup.contacts {
+        let (a, b) = contact.materials;
+        if a == b || usize::from(a.max(b)) >= solids.len() {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.contacts",
+                reason: format!(
+                    "contact between materials {a} and {b} needs two distinct declared solids"
+                ),
+            });
+        }
+        finite(
+            "thermal.contacts.resistance_m2_k_w",
+            contact.resistance_m2_k_w,
+        )?;
+        if contact.resistance_m2_k_w < 0.0 {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.contacts.resistance_m2_k_w",
+                reason: "must be non-negative".into(),
+            });
+        }
+        contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
+    }
     let ctx = Context {
         domain,
         flow,
         faces: setup.faces,
         k,
+        contacts,
         rho_c: fluid.volumetric_heat_capacity(),
         scheme: config.scheme,
     };
@@ -558,7 +623,7 @@ pub(crate) fn solve_energy_inner(
             if let Some((n, a)) = term.off {
                 coo.push(c, n, -a);
                 if domain.is_fluid(c) && domain.is_fluid(n) {
-                    let d = domain.dx() * ctx.k[c];
+                    let d = domain.dx() * ctx.k[c][f / 2];
                     let flux = ctx.rho_c * flow.outward(domain, c, f);
                     max_cell_peclet = max_cell_peclet.max(flux.abs() / d);
                 }

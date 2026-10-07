@@ -94,7 +94,7 @@ pub use buoyant::{
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
-    ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution, ThermalFace,
+    ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution, ThermalFace,
     ThermalSetup, solve_energy,
 };
 pub use flow::{
