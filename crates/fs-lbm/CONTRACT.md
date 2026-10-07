@@ -1165,6 +1165,36 @@ conductivity" }`). Face conductances stay harmonic in the cell values.
 |---|---|---|
 | Slab, `k = 1 + (T - 300)/100`, faces 400 K / 300 K, 10 and 20 cells | Kirchhoff transform: `int k dT` linear in x | max error 0.229 K -> 0.063 K of a 100 K span: order 1.86 |
 
+### DC Joule heating (`solve_electric`, `solve_electrothermal`)
+
+Solids may conduct electricity (`ElectricSetup::conductors`, per
+material: `rho(T) = rho_0 (1 + alpha (T - T_ref))`). Electrodes are boxes
+of cells treated as ideal equipotentials, held at a voltage or carrying a
+declared total current (at least one voltage electrode is the reference).
+The potential solves the current balance on every conductor cell with
+`G_f = A_f / (rho_P w_P/2 + rho_N w_N/2)` between conductor cells and
+`A_f / (rho_P w_P/2)` to an electrode surface (AMG-preconditioned CG, ILU
+BiCGStab fallback); fluid, insulators and the domain boundary carry no
+current. Each face dissipates `G_f dphi^2`, split by half resistance, so
+the Joule heat equals the electrodes' `sum V I` (discrete Tellegen) to
+solver precision. `solve_electrothermal` adds the Joule heat to the
+sources and iterates potential and temperature (resistivity at the
+previous pass) until the largest change is 1e-9 of the span; 200 passes
+refuse as `SolverNotConverged { system: "electrothermal (thermal
+runaway?)" }`, the answer for a current-driven conductor past runaway.
+Refusals: no voltage electrode, overlapping or touching electrodes, a
+current electrode with no conducting path to a voltage electrode, a
+non-positive resistivity at the solved temperature.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| 10 mm x 1 mm^2 bar, rho 1e-6 ohm m, 10 mV, ends held at 300 K by copper electrodes | `I = V A / (rho L)` = 1 A; uniform 1e6 W/m^3; peak `300 + q L^2 / (8 k)` | 1.000000000000001 A; Joule = delivered = 0.0100000000 W; peak 301.250000005 K |
+| Same bar current-driven, `alpha` 3.9e-3, `m L / 2 = 0.5`, 10/20/40 cells | `theta = (cos(m (x - L/2)) / cos(m L/2) - 1) / alpha` | peak errors 3.33e-2, 8.32e-3, 2.08e-3 K: order 2.00; 11 passes; delivered = Joule to 1e-9 |
+| Same, 3.5 x the current (`m L / 2 = 1.75 > pi / 2`) | no steady state | refused (electrothermal) |
+
+No-claims: DC only (no skin effect, inductance or capacitance); ohmic,
+isotropic conductors; no electrical contact resistance; ideal electrodes.
+
 ### Two-resistor compact components (`CompactComponent`)
 
 `ThermalSetup::compact_components` holds JEDEC two-resistor models

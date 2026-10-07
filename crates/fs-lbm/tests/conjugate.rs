@@ -17,13 +17,15 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, CompactComponent, ContactResistance, ConvectionScheme, EnergyConfig,
-    FacePatch, FanCurve, FanInlet, FlowFace, FlowField, FlowResistance, FluidProperties,
-    FvBoundary, FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig, RadiationConfig,
-    STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TimeScheme,
-    TransientConfig, Turbulence, UnsteadyConfig, UnsteadyFlow, Voxel, VoxelDomain, escape_factors,
-    fv_natural_convection, lbm_duct_flow, march_conjugate, march_energy, natural_convection,
-    simple_flow, simple_unsteady, solve_energy, solve_energy_radiating,
+    BuoyancyConfig, ChtError, CompactComponent, Conductor, ContactResistance, ConvectionScheme,
+    ElectricSetup, ElectricSolution, Electrode, ElectrodeDrive, ElectrothermalReport, EnergyConfig,
+    EnergySolution, FacePatch, FanCurve, FanInlet, FlowFace, FlowField, FlowResistance,
+    FluidProperties, FvBoundary, FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig,
+    RadiationConfig, STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
+    TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, UnsteadyFlow, Voxel, VoxelDomain,
+    escape_factors, fv_natural_convection, lbm_duct_flow, march_conjugate, march_energy,
+    natural_convection, simple_flow, simple_unsteady, solve_electric, solve_electrothermal,
+    solve_energy, solve_energy_radiating,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -2585,6 +2587,224 @@ fn radiating_plate_march_follows_its_linearized_recursion() {
     );
     assert!((settled.temperature[plate] - exact).abs() < 1e-5);
     assert!((last.radiated_w - power).abs() < 1e-6 * power);
+}
+
+/// A 10 mm bar of `n` conductor cells (1 mm^2 section, `rho_0` 1e-6 ohm m, k 10)
+/// between two one-cell copper electrodes (k 1e9: the bar ends sit at the
+/// 300 K held on the domain's x faces), with `drive` on the x- electrode
+/// and 0 V on the x+ one.
+fn joule_bar(
+    n: usize,
+    alpha: f64,
+    drive: ElectrodeDrive,
+) -> Result<
+    (
+        VoxelDomain,
+        EnergySolution,
+        ElectricSolution,
+        ElectrothermalReport,
+    ),
+    ChtError,
+> {
+    let gate = CancelGate::new();
+    let dx = 1e-3 * 10.0 / n as f64;
+    // Refined along the bar only: the 1 mm^2 cross-section stays.
+    let domain = VoxelDomain::graded_from_fn([vec![dx; n + 2], vec![1e-3], vec![1e-3]], |p| {
+        Voxel::Solid(u16::from(p[0] < dx || p[0] > (n as f64 + 1.0) * dx))
+    })
+    .unwrap();
+    let solids = [
+        SolidMaterial::new("bar", 10.0),
+        SolidMaterial::new("copper", 1e9),
+    ];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(300.0);
+    faces[1] = ThermalFace::Temperature(300.0);
+    let electric = ElectricSetup {
+        conductors: vec![Some(
+            Conductor::new(1e-6).with_temperature_coefficient(alpha, 300.0),
+        )],
+        electrodes: vec![
+            Electrode {
+                lo: [0, 0, 0],
+                hi: [1, 1, 1],
+                drive,
+            },
+            Electrode {
+                lo: [n + 1, 0, 0],
+                hi: [n + 2, 1, 1],
+                drive: ElectrodeDrive::Voltage(0.0),
+            },
+        ],
+    };
+    let flow = FlowField::quiescent(&domain);
+    let (energy, field, report) = solve_electrothermal(
+        &domain,
+        &electric,
+        &ThermalSetup::new(faces),
+        |setup| {
+            solve_energy(
+                &domain,
+                &unit_fluid(),
+                &solids,
+                &flow,
+                setup,
+                &EnergyConfig {
+                    tolerance: 1e-12,
+                    ..EnergyConfig::default()
+                },
+                &gate,
+            )
+        },
+        &gate,
+    )?;
+    Ok((domain, energy, field, report))
+}
+
+#[test]
+fn joule_heated_bar_obeys_ohm_tellegen_and_the_exact_parabola() {
+    // 10 mm of 1 mm^2 bar at 1e-6 ohm m: R = 0.01 ohm, so 10 mV drives 1 A
+    // and dissipates 10 mW uniformly (1e6 W/m^3). Held at 300 K at both
+    // ends, the peak is 300 + q L^2 / (8 k) = 301.25 K; the cell-centred
+    // scheme reproduces that peak exactly for an even cell count (its
+    // half-cell end defect shifts every cell by q h^2 / (8 k), which the
+    // peak cells' own offset from the centre cancels).
+    let (domain, energy, field, report) =
+        joule_bar(10, 0.0, ElectrodeDrive::Voltage(0.01)).unwrap();
+    assert_eq!(report.passes, 1);
+    let current = field.electrodes[0].current_a;
+    eprintln!(
+        "I {current:.15} A, joule {:.15} W, delivered {:.15} W",
+        field.total_joule_w, field.delivered_w
+    );
+    assert!((current - 1.0).abs() < 1e-12, "{current}");
+    assert!((field.electrodes[1].current_a + 1.0).abs() < 1e-12);
+    assert!((field.total_joule_w - 0.01).abs() < 1e-14);
+    assert!((field.delivered_w - field.total_joule_w).abs() < 1e-15);
+    for x in 1..=10 {
+        let c = domain.index(x, 0, 0);
+        assert!((field.joule_w[c] - 1e-3).abs() < 1e-15, "{x}");
+        let linear = 0.01 * (10.5 - x as f64) / 10.0;
+        assert!((field.potential_v[c] - linear).abs() < 1e-15, "{x}");
+    }
+    let peak = energy.temperature[domain.index(5, 0, 0)];
+    eprintln!("peak {peak:.12} K");
+    assert!((peak - 301.25).abs() < 1e-7, "{peak}");
+    assert!((energy.report.balance.source_w - 0.01).abs() < 1e-15);
+}
+
+#[test]
+fn temperature_dependent_resistivity_follows_the_cosine_solution() {
+    // Current-driven, rho = rho_0 (1 + alpha (T - 300)): with theta = T -
+    // 300 the bar obeys k theta'' + J^2 rho_0 (1 + alpha theta) = 0, so
+    // theta = (cos(m (x - L/2)) / cos(m L / 2) - 1) / alpha with
+    // m^2 = J^2 rho_0 alpha / k. m L / 2 = 0.5 heats the middle by
+    // (1 / cos 0.5 - 1) / alpha; the fixed point converges at second order
+    // in the grid, and the electrodes deliver exactly the Joule heat.
+    let alpha = 3.9e-3;
+    let (length, area, k, rho0): (f64, f64, f64, f64) = (1e-2, 1e-6, 10.0, 1e-6);
+    let m = 1.0 / length;
+    let current = area * (m * m * k / (rho0 * alpha)).sqrt();
+    let exact = 300.0 + (1.0 / 0.5f64.cos() - 1.0) / alpha;
+    let mut errors = Vec::new();
+    for n in [10usize, 20, 40] {
+        let (domain, energy, field, report) =
+            joule_bar(n, alpha, ElectrodeDrive::Current(current)).unwrap();
+        // Even n: the two middle cells straddle the centre.
+        let peak = energy.temperature[domain.index(n / 2, 0, 0)];
+        eprintln!(
+            "n {n}: peak {peak:.9} K (exact {exact:.9}), passes {}, joule {:.12} W, delivered {:.12} W",
+            report.passes, field.total_joule_w, field.delivered_w
+        );
+        assert!(report.passes > 2);
+        assert!((field.electrodes[0].current_a - current).abs() < 1e-9 * current);
+        assert!(
+            (field.delivered_w - field.total_joule_w).abs() < 1e-9 * field.total_joule_w,
+            "{} vs {}",
+            field.delivered_w,
+            field.total_joule_w
+        );
+        // The heat the solve released is the Joule heat it was given.
+        let balance = energy.report.balance;
+        assert!((balance.source_w - field.total_joule_w).abs() < 1e-12);
+        errors.push((peak - exact).abs());
+    }
+    let orders: Vec<f64> = errors.windows(2).map(|e| (e[0] / e[1]).log2()).collect();
+    eprintln!("errors {errors:?}, orders {orders:?}");
+    assert!(orders.iter().all(|p| (p - 2.0).abs() < 0.2), "{orders:?}");
+    // Past m L / 2 = pi / 2 there is no steady state: refused.
+    let runaway = joule_bar(10, alpha, ElectrodeDrive::Current(3.5 * current));
+    assert!(
+        matches!(
+            runaway,
+            Err(ChtError::SolverNotConverged { system, .. }) if system.starts_with("electrothermal")
+        ),
+        "{runaway:?}"
+    );
+}
+
+#[test]
+fn electric_refusals_are_structured() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::from_fn(6, 1, 1, 1e-3, |_| Voxel::Solid(0)).unwrap();
+    let box_at = |x: usize, drive| Electrode {
+        lo: [x, 0, 0],
+        hi: [x + 1, 1, 1],
+        drive,
+    };
+    let setup = |electrodes| ElectricSetup {
+        conductors: vec![Some(Conductor::new(1e-6))],
+        electrodes,
+    };
+    let refused = |electrodes: Vec<Electrode>| {
+        matches!(
+            solve_electric(&domain, &setup(electrodes), None, &gate),
+            Err(ChtError::InvalidInput { .. })
+        )
+    };
+    // No voltage reference.
+    assert!(refused(vec![box_at(0, ElectrodeDrive::Current(1.0))]));
+    // Touching electrodes short.
+    assert!(refused(vec![
+        box_at(0, ElectrodeDrive::Voltage(1.0)),
+        box_at(1, ElectrodeDrive::Voltage(0.0)),
+    ]));
+    // Overlap, and a box leaving the domain.
+    assert!(refused(vec![
+        box_at(0, ElectrodeDrive::Voltage(1.0)),
+        box_at(0, ElectrodeDrive::Voltage(0.0)),
+    ]));
+    assert!(refused(vec![box_at(6, ElectrodeDrive::Voltage(0.0))]));
+    // A current electrode cut off from the reference by an insulator.
+    let split = VoxelDomain::from_fn(6, 1, 1, 1e-3, |p| {
+        Voxel::Solid(u16::from(p[0] > 2e-3 && p[0] < 3e-3))
+    })
+    .unwrap();
+    let insulated = ElectricSetup {
+        conductors: vec![Some(Conductor::new(1e-6)), None],
+        electrodes: vec![
+            box_at(0, ElectrodeDrive::Voltage(0.0)),
+            box_at(5, ElectrodeDrive::Current(1.0)),
+        ],
+    };
+    assert!(matches!(
+        solve_electric(&split, &insulated, None, &gate),
+        Err(ChtError::InvalidInput { .. })
+    ));
+    // Negative resistivity at the given temperature.
+    let cold = ElectricSetup {
+        conductors: vec![Some(
+            Conductor::new(1e-6).with_temperature_coefficient(0.01, 300.0),
+        )],
+        electrodes: vec![
+            box_at(0, ElectrodeDrive::Voltage(1.0)),
+            box_at(5, ElectrodeDrive::Voltage(0.0)),
+        ],
+    };
+    assert!(matches!(
+        solve_electric(&domain, &cold, Some(&[100.0; 6]), &gate),
+        Err(ChtError::InvalidInput { .. })
+    ));
 }
 
 #[test]

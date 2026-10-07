@@ -84,6 +84,7 @@ use crate::d3q19::Face3;
 
 mod buoyant;
 mod domain;
+mod electric;
 mod energy;
 mod flow;
 mod krylov;
@@ -98,6 +99,10 @@ pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
+pub use electric::{
+    Conductor, ElectricSetup, ElectricSolution, Electrode, ElectrodeDrive, ElectrodeSolution,
+    ElectrothermalReport, solve_electric, solve_electrothermal,
+};
 pub use energy::{
     CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
     EnergyReport, EnergySolution, JunctionSolution, ThermalFace, ThermalSetup, solve_energy,
