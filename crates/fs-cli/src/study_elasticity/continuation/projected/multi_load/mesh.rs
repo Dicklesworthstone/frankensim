@@ -185,4 +185,5 @@ pub(super) fn validate_terminal(history: &History, policy: &Controls, status: &s
 }
 
 #[cfg(test)]
+#[path = "mesh/tests.rs"]
 mod tests;
