@@ -2,6 +2,9 @@
 //! A declared radiative reservoir is not an alias of the fluid ambient.
 use super::{ProjectSpec, PropagatedTerm, SolveRefusal, conduction_error};
 
+mod joint;
+pub(super) use joint::{MAX_CORNERS, account_joint_design};
+
 /// Replace only the fluid temperatures covered by the ambient envelope.
 /// Reservoirs, prescribed solid temperatures, material query temperatures,
 /// cards, geometry and all other inputs retain their original declarations.
