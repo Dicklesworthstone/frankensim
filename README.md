@@ -311,7 +311,9 @@ retained receipts. `run` also executes FrankenScript programs (`*.fs`,
 L.db` admits the study through fs-ir, binds its `cooling.import` /
 `cooling.solve` / `cooling.run` verbs to these same stage drivers, and
 reproduces the `.fsim` command sequence's run id, report hash and package root
-exactly; any other operator refuses as not executable before a ledger opens. A project that omits `cooling.conduction` refuses at
+exactly; `examples/marquee/bracket-2d.fs` drives the 2-D marquee through
+`study.run`; any other operator refuses as not executable before a ledger
+opens. A project that omits `cooling.conduction` refuses at
 conduction by name (`cli-solve-conduction-undeclared`); one that omits a
 `temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated;
 its verdict stays indeterminate while any budget term is NO-DATA. A project

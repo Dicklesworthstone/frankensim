@@ -28,6 +28,12 @@
 //!   (let project (cooling.project "heatsink-fan.fsim" :hash "…"))
 //!   (cooling.import project :sources ("heatsink.stl") :unit "m" :max-hole-edges 0)
 //!   (cooling.run project :materials ("aa6061.fsmcdpk")))
+//!
+//! (study "marquee-bracket-2d-journey-b"
+//!   (seed 0x539) (versions (constellation :lock "2026-07"))
+//!   (budget (wall 300s) (mem 512MiB))
+//!   (capability :cores 1 :mem 512MiB :wall 300s :ops (study.*))
+//!   (study.run "bracket-2d.fsim" :hash "…"))
 //! ```
 //!
 //! Paths resolve against the program file's directory. The study seed must
@@ -37,12 +43,15 @@
 //!
 //! # No-claim boundaries
 //!
-//! v0 binds the cooling project pipeline only (`cooling.project`,
-//! `cooling.import`, `cooling.solve`, `cooling.run`); the catalog's physics
-//! operators (`flux.*`, `ascent.*`, …) are admitted by fs-ir but have no stage
-//! binding here and refuse as not executable. The project file is re-read by
-//! each stage driver exactly as the `.fsim` verbs read it; the `:hash` pin is
-//! checked once before execution.
+//! v0 binds the cooling project pipeline (`cooling.project`,
+//! `cooling.import`, `cooling.solve`, `cooling.run`) and the canonical study
+//! driver (`study.run` on a `.fsim` study, e.g. the 2-D marquee); the
+//! catalog's physics operators (`flux.*`, `ascent.*`, …) are admitted by fs-ir
+//! but have no stage binding here and refuse as not executable. Project and
+//! study files are re-read by each stage driver exactly as the CLI verbs read
+//! them; `:hash` pins are checked once before execution. `study.run` checks
+//! the seed against the study file but not its budgets (the study driver
+//! enforces its own).
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -60,11 +69,12 @@ use crate::{
 };
 
 /// Verbs with a stage binding, in catalog order.
-pub const EXECUTABLE_VERBS: [&str; 4] = [
+pub const EXECUTABLE_VERBS: [&str; 5] = [
     "cooling.project",
     "cooling.import",
     "cooling.solve",
     "cooling.run",
+    "study.run",
 ];
 
 const LENGTH: fs_qty::Dims = fs_qty::Dims([1, 0, 0, 0, 0, 0]);
@@ -91,6 +101,10 @@ enum Step {
         project: PathBuf,
         cards: Vec<(CardPackKind, PathBuf)>,
     },
+    Study {
+        path: PathBuf,
+        budget: Option<String>,
+    },
 }
 
 impl Step {
@@ -99,6 +113,7 @@ impl Step {
             Self::Import(_) => "cooling.import",
             Self::Solve { .. } => "cooling.solve",
             Self::Run { .. } => "cooling.run",
+            Self::Study { .. } => "study.run",
         }
     }
 }
@@ -210,7 +225,9 @@ fn count_of(node: &Node) -> Option<u64> {
 struct Binder<'p> {
     base: PathBuf,
     ledger: &'p Path,
+    seed: Option<u64>,
     projects: Vec<(String, ProjectBinding)>,
+    studies: Vec<ProjectBinding>,
 }
 
 impl Binder<'_> {
@@ -284,6 +301,118 @@ impl Binder<'_> {
         Some(cards)
     }
 
+    /// `(study.run "study.fsim" [:budget <n>] [:hash "<blake3 of bytes>"])`:
+    /// the canonical `frankensim study` driver on a study file whose root
+    /// seed must equal the program's.
+    fn bind_study(
+        &mut self,
+        positional: &[&Node],
+        named: &[(&str, &Node)],
+        refusals: &mut Refusals,
+    ) -> Option<Step> {
+        let path = match positional {
+            [only] => string_of(only),
+            _ => None,
+        };
+        let mut budget = None;
+        let mut pin = None;
+        for (key, value) in named {
+            match (*key, &value.kind) {
+                ("budget", NodeKind::Int(n)) if *n > 0 => budget = Some(n.to_string()),
+                ("budget", NodeKind::Str(text)) => budget = Some(text.clone()),
+                ("hash", NodeKind::Str(text)) => pin = Some(text.as_str()),
+                _ => {
+                    refusals.push(
+                        "frankenscript-argument",
+                        format!("`study.run` keyword :{key} is not admitted here"),
+                        "use :budget <positive integer> and :hash \"<study hash>\"",
+                    );
+                    return None;
+                }
+            }
+        }
+        let Some(path) = path else {
+            refusals.push(
+                "frankenscript-argument",
+                "`study.run` takes one study path string",
+                "write (study.run \"study.fsim\")",
+            );
+            return None;
+        };
+        let path = self.resolve(path);
+        if path.extension().and_then(|e| e.to_str()) != Some("fsim") {
+            refusals.push(
+                "frankenscript-argument",
+                format!(
+                    "`study.run` binds canonical .fsim studies only, not `{}`",
+                    path.display()
+                ),
+                "run JSON studies with `frankensim study` directly",
+            );
+            return None;
+        }
+        let bytes = match std::fs::metadata(&path).and_then(|m| {
+            if m.len() > MAX_PROJECT_BYTES {
+                Err(std::io::Error::other("study exceeds the project size cap"))
+            } else {
+                std::fs::read(&path)
+            }
+        }) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                refusals.push(
+                    "frankenscript-input",
+                    format!("cannot read study `{}`: {error}", path.display()),
+                    "provide a readable .fsim study next to the program",
+                );
+                return None;
+            }
+        };
+        let hash = fs_blake3::hash_bytes(&bytes).to_hex();
+        if let Some(pin) = pin
+            && pin != hash
+        {
+            refusals.push(
+                "frankenscript-study-hash",
+                format!(
+                    "study `{}` hashes to {hash}, not the pinned {pin}",
+                    path.display()
+                ),
+                "re-pin :hash after reviewing the study change, or restore the pinned study",
+            );
+        }
+        let root_seed = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| fs_ir::sexpr::parse(text).ok())
+            .and_then(|node| {
+                node.items()?
+                    .iter()
+                    .find(|clause| clause.head() == Some("seeds"))
+                    .and_then(|seeds| {
+                        let items = seeds.items()?;
+                        let at = items
+                            .iter()
+                            .position(|i| matches!(&i.kind, NodeKind::Keyword(k) if k == "root"))?;
+                        items.get(at + 1).and_then(count_of)
+                    })
+            });
+        if root_seed.is_none() || root_seed != self.seed {
+            refusals.push(
+                "frankenscript-explicit-seed",
+                format!(
+                    "the study seed {:?} differs from the study file's seeds.root {root_seed:?}",
+                    self.seed
+                ),
+                "state the study file's root seed in (seed …) so the program records the seed it runs",
+            );
+        }
+        self.studies.push(ProjectBinding {
+            path: path.clone(),
+            hash,
+        });
+        Some(Step::Study { path, budget })
+    }
+
     #[allow(clippy::too_many_lines)] // one keyword grammar per verb
     fn bind(&mut self, clause: &Node, refusals: &mut Refusals) -> Option<Step> {
         let verb = clause.head().unwrap_or("");
@@ -300,6 +429,9 @@ impl Binder<'_> {
             return None;
         }
         let (positional, named) = keywords(items, refusals, verb)?;
+        if verb == "study.run" {
+            return self.bind_study(&positional, &named, refusals);
+        }
         let project = self.project_operand(verb, &positional, refusals)?;
         match verb {
             "cooling.import" => {
@@ -545,7 +677,9 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             .parent()
             .map_or_else(PathBuf::new, Path::to_path_buf),
         ledger,
+        seed: study.seed,
         projects: Vec::new(),
+        studies: Vec::new(),
     };
     for (name, value) in &study.lets {
         if value.head() != Some("cooling.project") {
@@ -674,6 +808,9 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
             Step::Import(command) => import_path(command, mode),
             Step::Solve { project, cards } => solve_path(project, ledger, cards, mode),
             Step::Run { project, cards } => run_workflow_path(project, ledger, cards, mode),
+            Step::Study { path, budget } => {
+                crate::study::study_path(path, ledger, budget.as_deref(), mode)
+            }
         };
         stderr.push_str(&output.stderr);
         records.push((step.verb(), output.exit_code, output.stdout));
@@ -708,6 +845,17 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
                 push_json_string(&mut out, &binding.hash);
                 out.push('}');
             }
+            out.push_str("],\"studies\":[");
+            for (index, binding) in binder.studies.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str("{\"path\":");
+                push_json_string(&mut out, &binding.path.to_string_lossy());
+                out.push_str(",\"hash\":");
+                push_json_string(&mut out, &binding.hash);
+                out.push('}');
+            }
             out.push_str("],\"steps\":[");
             for (index, (verb, code, result)) in records.iter().enumerate() {
                 if index > 0 {
@@ -735,6 +883,14 @@ pub(crate) fn run_program_path(program: &Path, ledger: &Path, mode: OutputMode) 
                     out,
                     "project={} path={} hash={}",
                     escape_text(name),
+                    escape_text(&binding.path.to_string_lossy()),
+                    binding.hash
+                );
+            }
+            for binding in &binder.studies {
+                let _ = writeln!(
+                    out,
+                    "study_file={} hash={}",
                     escape_text(&binding.path.to_string_lossy()),
                     binding.hash
                 );

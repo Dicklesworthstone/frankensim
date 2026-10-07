@@ -2313,3 +2313,87 @@ fn frankenscript_json_twin_is_the_same_program() {
         sexpr_out.stderr
     );
 }
+
+/// Remove the values of `keys` (string or number) from a JSON line so two
+/// receipts can be compared modulo their volatile fields.
+fn without_volatile(record: &str, keys: &[&str]) -> String {
+    let mut out = record.trim().to_string();
+    for key in keys {
+        let needle = format!("\"{key}\":");
+        while let Some(start) = out.find(&needle) {
+            let value = start + needle.len();
+            let end = if out[value..].starts_with('"') {
+                value + 1 + out[value + 1..].find('"').expect("closed string") + 1
+            } else {
+                value
+                    + out[value..]
+                        .find([',', '}'])
+                        .expect("number is followed by a delimiter")
+            };
+            out.replace_range(start..end, &format!("\"{key}#\":0"));
+        }
+    }
+    out
+}
+
+#[test]
+fn g1_frankenscript_study_program_matches_the_study_verb() {
+    // Journey B through a program: `study.run` binds the canonical study
+    // driver. On the reduced marquee fixture (as in study_checkpoint_cli) the
+    // program's step result equals `frankensim study` on the same file in
+    // every receipt field except wall seconds, the ledger predecessor and the
+    // run id that chains through them.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fsim"))
+        .expect("tracked marquee study is readable");
+    let dir = scratch("frankenscript-study");
+    let study = dir.join("study.fsim");
+    std::fs::write(
+        &study,
+        fixture
+            .replace(":mesh-level 5", ":mesh-level 2")
+            .replace(":max-iterations 32", ":max-iterations 3")
+            .replace(":steps 32", ":steps 3")
+            .replace(":move-cells 0.35", ":move-cells 0.05")
+            .replace(":nucleation-period 4", ":nucleation-period 0"),
+    )
+    .expect("study writes");
+    let tracked = std::fs::read_to_string(root.join("examples/marquee/bracket-2d.fs"))
+        .expect("tracked program is readable");
+    let pin_start = tracked
+        .find(":hash \"")
+        .expect("tracked program pins its study")
+        + 7;
+    let pin = &tracked[pin_start..pin_start + 64];
+    let program = dir.join("study.fs");
+    std::fs::write(
+        &program,
+        tracked
+            .replace("\"bracket-2d.fsim\"", "\"study.fsim\"")
+            .replace(&format!(" :hash \"{pin}\""), ""),
+    )
+    .expect("program writes");
+    let executed = run(args(&[
+        "--json",
+        "run",
+        program.to_string_lossy().as_ref(),
+        dir.join("program.db").to_string_lossy().as_ref(),
+    ]));
+    let direct = run(args(&[
+        "--json",
+        "study",
+        study.to_string_lossy().as_ref(),
+        dir.join("direct.db").to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(executed.exit_code, direct.exit_code, "{}", executed.stderr);
+    assert!(executed.stdout.contains("\"verb\":\"study.run\""));
+    let volatile = ["consumed_wall_s", "predecessor", "run", "run_id"];
+    let step = without_volatile(&direct.stdout, &volatile);
+    assert!(step.contains("\"study_id\":"), "{step}");
+    assert!(
+        without_volatile(&executed.stdout, &volatile).contains(&step),
+        "program step differs from the study verb:\n{}\n{}",
+        executed.stdout,
+        direct.stdout
+    );
+}
