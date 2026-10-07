@@ -7,7 +7,7 @@
 //! An existing P1 field can also be bounded without running another primal solve.
 //!
 //! Admitted class: linear SPD tensor conductivity (possibly assigned per element),
-//! element-constant sources, face-constant Neumann flux and Robin coefficient,
+//! piecewise-affine sources, face-constant Neumann flux and Robin coefficient,
 //! and affine Dirichlet/reference data. Unsupported inputs refuse before solves;
 //! no averaging, tensor isotropization or frozen nonlinear coefficient can mint
 //! a bound. Bounded-temperature material tables refuse because this adapter has
@@ -27,8 +27,8 @@ use crate::{
 };
 use fs_exec::Cx;
 
-use fs_verify::conduction::bound_mean_temperature;
-use fs_verify::tet::{BoundaryCondition, BoundaryFace, ConductivityTensor, TensorTetProblem};
+use fs_verify::tet::{AffineSourceTetProblem, BoundaryCondition, BoundaryFace, ConductivityTensor,
+    affine_source_mean_bound};
 pub use fs_verify::tet::{FluxBudget, TetError};
 
 /// Solvers retain their own tolerances; these are not substituted for an error bound.
@@ -87,12 +87,12 @@ fn unsupported(what: &'static str) -> ConductionBoundError {
 struct Admitted {
     tets: Vec<[usize; 4]>,
     conductivity: Vec<ConductivityTensor>,
-    source: Vec<f64>,
+    source: Vec<[f64; 4]>,
     boundary: Vec<BoundaryFace>,
 }
 impl Admitted {
-    fn problem<'a>(&'a self, vertices: &'a [[f64; 3]]) -> TensorTetProblem<'a> {
-        TensorTetProblem {
+    fn problem<'a>(&'a self, vertices: &'a [[f64; 3]]) -> AffineSourceTetProblem<'a> {
+        AffineSourceTetProblem {
             vertices,
             tets: &self.tets,
             conductivity: &self.conductivity,
@@ -145,14 +145,11 @@ fn admit(cx: &Cx<'_>, problem: ConductionProblem<'_>, budget: FluxBudget) -> Res
         let tensor = model.tensor_at(0.0)?;
         let vertices = tet.map(|i| i as usize);
         let values = vertices.map(|i| problem.source.at(i));
-        if values.iter().any(|&v| v != values[0]) {
-            return Err(unsupported(
-                "nonconstant element source requires a data-oscillation or higher-order flux term",
-            ));
-        }
+        // Preserve the same nodal P1 source used by assembly. The verifier's
+        // zero-normal local lifting includes its within-cell variation exactly.
         tets.push(vertices);
         conductivity.push(tensor);
-        source.push(values[0]);
+        source.push(values);
     }
     let mut boundary = Vec::with_capacity(mesh.boundary().len());
     for (slot, face) in mesh.boundary().iter().enumerate() {
@@ -278,14 +275,14 @@ fn bound_field(
         dual_config,
     )?;
     poll(cx)?;
-    Ok(bound_mean_temperature(
+    let bound = affine_source_mean_bound(
         &admitted.problem(problem.mesh.positions()),
         temperature,
-        dual,
-        |solution| &solution.temperature,
+        &dual.temperature,
         flux,
         || cx.checkpoint().is_ok(),
-    )?)
+    )?;
+    Ok(MeanFieldBound { dual, bound })
 }
 
 /// Bound a supplied P1 temperature field without repeating its primal solve.
@@ -293,7 +290,9 @@ fn bound_field(
 /// correction and equilibrated majorant include its remaining algebraic error.
 /// Length, finite values and the exact Dirichlet trace are checked before the
 /// dual solve. The caller binds the nominal problem, not a trusted solve report.
-/// No mesh, contact, nonlinear or uncertainty assumption is relaxed.
+/// Uniform and nodal P1 source fields are retained without averaging; their
+/// exact source-dual integral enters the residual correction. No mesh, contact,
+/// nonlinear or uncertainty assumption is relaxed.
 pub fn bound_temperature_mean(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,

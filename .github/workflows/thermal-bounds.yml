@@ -27,8 +27,9 @@ jobs:
           sed '/^#\[cfg(test)\]/,$d' crates/fs-verify/src/interval.rs > "$scratch/interval.rs"
           cp crates/fs-verify/src/tet.rs "$scratch/tet.rs"
           cp -r crates/fs-verify/src/tet "$scratch/tet"
-          printf '#![forbid(unsafe_code)]\npub mod interval;\npub mod tet;\n' > "$scratch/check.rs"
-          rustc --edition=2024 --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
+          cp crates/fs-verify/tests/affine_source.rs "$scratch/affine_source.rs"
+          printf '#![forbid(unsafe_code)]\nextern crate self as fs_verify;\npub mod interval;\npub mod tet;\nmod affine_source;\n' > "$scratch/check.rs"
+          rustc --edition=2024 --cfg 'feature="certified-speculation"' --test -O "$scratch/check.rs" -o "$scratch/flux-tests"
           "$scratch/flux-tests"
       - name: Materialize pinned dependencies
         run: |
@@ -51,8 +52,11 @@ jobs:
       - name: Test tetrahedral energy and goal bounds in the workspace
         run: |
           cargo test --release -p fs-verify --features certified-speculation --lib tet::
+          cargo test --release -p fs-verify --features certified-speculation --test affine_source
       - name: Test real conduction primal and dual consumers
         run: |
           cargo test --release -p fs-verify --features thermal-conduction --lib conduction::
       - name: Execute mean-temperature comparison
-        run: cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
+        run: |
+          cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- 4 2.0
+          cargo run --release -p fs-verify --features thermal-conduction --example conduction_mean -- --affine 4 0.0 24.0 4.0 2.0 1.0

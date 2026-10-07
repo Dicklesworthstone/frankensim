@@ -240,7 +240,7 @@ fn robin_only_problem_preserves_reference_and_dual_trace_terms() {
 }
 
 #[test]
-fn unsupported_source_and_work_budget_refuse_before_solving() {
+fn nodal_source_is_bound_and_work_budget_still_refuses_before_solving() {
     with_cx(|cx| {
         let mesh = mesh(2);
         let boundary = ends(&mesh, 300.0, 300.0);
@@ -253,15 +253,107 @@ fn unsupported_source_and_work_budget_refuse_before_solving() {
             element_materials: None,
             source: &source,
         };
-        assert!(matches!(
-            solve_with_mean_bound(cx, problem, config()),
-            Err(ConductionBoundError::Verification(TetError::Unsupported(_)))
-        ));
+        let result = solve_with_mean_bound(cx, problem, config()).unwrap();
+        contains(&result, 300.125); // exact source 1+x gives a rise of 1/8
+        let original = fs_conduction::solve(cx, problem, config().primal).unwrap();
+        assert_eq!(result.primal.temperature, original.temperature);
+        // Verification has not replaced or projected the input source.
+        for (i, p) in mesh.positions().iter().enumerate() {
+            assert_eq!(source.at(i), 1.0 + p[0]);
+        }
         let mut budget = config();
         budget.flux.max_cells = 1;
         assert!(matches!(
             solve_with_mean_bound(cx, problem, budget),
             Err(ConductionBoundError::Verification(TetError::Budget))
         ));
+    });
+}
+
+#[test]
+fn actual_affine_source_primal_and_dual_enclose_cubic_mean_with_mixed_boundaries() {
+    with_cx(|cx| {
+        for robin in [false, true] {
+            let mesh = mesh(2);
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .region("left", |f| on_box_face(f.centroid[0], 0.0),
+                    ThermalBc::dirichlet(300.0).unwrap()).unwrap()
+                .region("right", |f| on_box_face(f.centroid[0], 1.0),
+                    if robin { ThermalBc::robin(4.0, 298.0).unwrap() }
+                    else { ThermalBc::dirichlet(300.0).unwrap() }).unwrap()
+                .adiabatic_remainder().finish().unwrap();
+            let material = ConductivityModel::constant_tensor(
+                [[4.0,0.0,0.0],[0.0,2.0,0.5],[0.0,0.5,1.0]]).unwrap();
+            let source = ScalarField::Nodal(mesh.positions().iter().map(|p| 24.0*p[0]).collect());
+            let before = source.clone();
+            let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, element_materials: None, source: &source };
+            // T=300+x-x^3, -div(K grad T)=24*x, true mean=300.25 K.
+            let result = solve_with_mean_bound(cx, problem, config()).unwrap();
+            contains(&result, 300.25);
+            let direct = fs_conduction::solve(cx, problem, config().primal).unwrap();
+            assert_eq!(result.primal.temperature, direct.temperature);
+            let reused = fs_conduction::verification::bound_temperature_mean(cx, problem,
+                &direct.temperature, config().dual, FluxBudget::default()).unwrap();
+            assert_eq!(reused.bound.enclosure, result.bound.enclosure);
+            assert_eq!(reused.dual.temperature, result.dual.temperature);
+            assert_eq!(source, before);
+            assert!(result.primal.temperature.iter().any(|t| *t > 300.0));
+            for &(v, _) in boundary.dirichlet() { assert_eq!(result.dual.temperature[v], 0.0); }
+        }
+    });
+}
+
+#[test]
+fn unfinished_affine_source_field_retains_its_error_and_actual_residual_correction() {
+    with_cx(|cx| {
+        let mesh = mesh(2);
+        let boundary = ends(&mesh, 300.0, 300.0);
+        let material = ConductivityModel::isotropic_declared(1.0).unwrap();
+        let source = ScalarField::Nodal(mesh.positions().iter().map(|p| 6.0*p[0]).collect());
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, element_materials: None, source: &source };
+        let candidate = vec![300.0; mesh.vertex_count()];
+        let result = fs_conduction::verification::bound_temperature_mean(cx, problem,
+            &candidate, config().dual, FluxBudget::default()).unwrap();
+        let bounds = result.bound.enclosure;
+        assert!(bounds.lo <= 300.25 && 300.25 <= bounds.hi);
+        assert!(result.bound.candidate_mean.lo <= 300.0 && result.bound.candidate_mean.hi >= 300.0);
+        assert!(result.bound.integral.residual_correction.lo > 0.0);
+        assert!(result.bound.integral.primal.energy_error_upper > 0.0);
+        assert_eq!(candidate, vec![300.0; mesh.vertex_count()]);
+        // A nodal representation of a uniform source retains the old result.
+        let uniform = ScalarField::Uniform(2.0);
+        let constant_nodes = ScalarField::Nodal(vec![2.0; mesh.vertex_count()]);
+        let a = solve_with_mean_bound(cx, ConductionProblem { source: &uniform, ..problem }, config()).unwrap();
+        let b = solve_with_mean_bound(cx, ConductionProblem { source: &constant_nodes, ..problem }, config()).unwrap();
+        assert_eq!(a.primal.temperature, b.primal.temperature);
+        assert_eq!(a.dual.temperature, b.dual.temperature);
+        assert_eq!(a.bound.enclosure, b.bound.enclosure);
+    });
+}
+
+#[test]
+fn affine_source_support_does_not_relax_nonconstant_boundary_or_bad_field_refusals() {
+    with_cx(|cx| {
+        let mesh = mesh(2);
+        let material = ConductivityModel::isotropic_declared(1.0).unwrap();
+        let source = ScalarField::Nodal(mesh.positions().iter().map(|p| 6.0*p[0]).collect());
+        let variable_h = ScalarField::Nodal(mesh.positions().iter().map(|p| 1.0+p[1]).collect());
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region("ambient", |_| true, ThermalBc::Robin {
+                htc: variable_h, t_ref: ScalarField::Uniform(300.0) }).unwrap().finish().unwrap();
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, element_materials: None, source: &source };
+        assert!(matches!(solve_with_mean_bound(cx, problem, config()),
+            Err(ConductionBoundError::Verification(TetError::Unsupported(_)))));
+        let fixed = ends(&mesh, 300.0, 300.0);
+        let malformed = ScalarField::Nodal(vec![1.0]);
+        assert!(matches!(solve_with_mean_bound(cx, ConductionProblem {
+            boundary: &fixed, source: &malformed, ..problem }, config()),
+            Err(ConductionBoundError::Conduction(_))));
+        assert!(fs_conduction::verification::bound_temperature_mean(cx,
+            ConductionProblem { boundary: &fixed, ..problem }, &vec![299.0; mesh.vertex_count()],
+            config().dual, FluxBudget::default()).is_err());
     });
 }

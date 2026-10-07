@@ -70,13 +70,58 @@ algebraic and discretization errors remain covered. `tet::mean_bound` uses a
 unit-source dual and divides by outward geometric volume only at the end.
 The tensor counterparts retain these same functional and residual semantics.
 
+## Affine heat sources without changing the PDE
+
+The native APIs above also accept `ScalarField::Nodal`: the original four
+source values on each tetrahedron go to `AffineSourceTetProblem`, not a cell
+average. Constant rows retain the original verifier arithmetic. The existing
+example accepts an explicit source ramp without changing its original invocation:
+
+```sh
+cargo run -p fs-verify --features thermal-conduction --example conduction_mean -- \
+  --affine 4 0.0 24.0 4.0 2.0 1.0
+cargo test -p fs-verify --features certified-speculation --test affine_source
+```
+
+Here `f(x)=24*x` W/m^3 and `kx=4` W/(m K), so the exact nominal slab solution
+is `T(x)=300+x-x^3` K, whose volume mean is `300.25` K. The example emits both
+source endpoints and the actual solver/verifier results; it does not precompute
+an enclosure. For endpoints f0,f1, its analytical reference is
+`300+(f0+f1)/(24*kx)`. Numerical equality of that mean with an averaged-source
+problem does NOT make their temperature fields or error bounds interchangeable.
+
+The extension uses the existing conservative face-flux construction for the
+exact cell mean and adds the local polynomial
+
+```text
+b = (1/4) sum_i f_i * lambda_i * (x - vertex_i).
+div(b) = f - mean(f),    b dot n = 0 on every face.
+```
+
+Thus the full flux equilibrates the actual affine source. Its normal continuity
+and every Neumann/Robin trace are unchanged. The energy defect is degree four
+and is integrated by outward simplex moments, including full tensor-inverse
+cross terms. The goal correction uses the exact P1-source/P1-dual product;
+using separate averages would shift the interval center. No data-oscillation
+term is silently discarded and no auxiliary PDE solve is introduced.
+
+Regression controls include a zero-mean nonzero source whose averaged substitute
+has zero forcing, tensor cross terms, manufactured cubic mean/energy bounds,
+source-order changes, native primal/dual parity, retained incomplete fields,
+constant-source compatibility and original boundary refusals. The authoring
+environment had no Rust toolchain: these native tests remain unverified there.
+Independent polynomial/quadrature checks are not native execution or an
+interval-rounding proof. The existing thermal workflow runs the numerical
+sources and integration regressions, then the actual FEM consumer when its
+original dependency bootstrap succeeds.
+
 ## Boundaries
 
 Global mesh non-overlap and fidelity to a CAD surface are caller obligations;
 local incidence/orientation checks are not a global geometry certificate.
 The conduction adapter refuses nonlinear k(T), bounded material-temperature
-validity without a range proof, nonconstant element source, nonconstant Neumann
-normal trace and nonconstant face h. It never averages those inputs into a
+validity without a range proof, nonconstant Neumann normal trace and
+nonconstant face h. It never averages those inputs into a
 different PDE. Exact tensor symmetry is required; an approximately symmetric
 material tensor is not silently repaired. Matching/mortar contact, nonlinear
 radiation, material uncertainty and model discrepancy are outside this increment.
