@@ -808,8 +808,13 @@ electronics cooling (the wedge's second physics after steady conduction).
   velocity inlet on `x-min`, pressure outlet on `x-max`,
   no-slip elsewhere and on solid voxels; derives `nu_lat`/`tau` from the
   declared physical state and refuses (`LatticeResolution`, with the voxel
-  size that would admit it) below `min_tau`; `Auto` collision is BGK for
-  `tau >= 0.55`, else central-moment relaxation (higher moments rate 1).
+  size that would admit it) below `min_tau`; `Auto` collision is BGK (on
+  the plate-fin heatsink at `tau = 0.519` the central-moment operator
+  diverged at step 85 while BGK stayed bounded, so `Auto` never switches to
+  it). A lattice that leaves its physical regime refuses (`FlowDiverged`)
+  instead of panicking: `BoundaryGrid3::step_pooled` checks the density of
+  every open-face source cell on the unpublished state
+  (`BoundaryStepError3::Unphysical`).
   The steady criterion is the relative L2 change of the cell MASS flux
   `rho u` between checks. Mass flux, not velocity, feeds the projection:
   the weakly compressible lattice conserves `rho u` per layer (measured
@@ -885,8 +890,9 @@ pseudo-time iterate. A lattice speed above `max_lattice_speed` refuses as
 | de Vahl Davis cavity, Ra = 1e3, Pr = 0.71, 16 x 16 (periodic z) | Nu = 1.118 | 1.1127 (0.5 %); remaining-change estimates 8e-7 / 2.8e-7; coupling residual 3.5e-7 K |
 | Conducting block heated in a cold enclosure | balance and buoyancy response | balance closes to 1e-9 W; peak rise 0.3621 K -> 0.3546 K as beta x5 |
 
-Release lane (`--ignored`): de Vahl Davis Ra = 1e4 and 1e5 on 32 x 32,
-gated at 5 % against 2.243 and 4.519.
+Release lane (`--ignored`, executed) on 32 x 32: Ra = 1e4 (tau 0.8) Nu
+2.2308 vs 2.243 (-0.55 %, 3120 steps); Ra = 1e5 (tau 0.56) Nu 4.4087 vs
+4.519 (-2.4 %, 12880 steps); gated at 5 %.
 
 ### Invariants
 
@@ -912,9 +918,21 @@ gated at 5 % against 2.243 and 4.519.
 | Metamorphic: wall `k` x10 under a hot spot | peak must fall | 309.70 K -> 304.40 K |
 | Refusals | closed-face flow, no anchor, unknown material, lattice resolution, non-tile dims, cancellation | structured errors |
 
-Release lane (`--ignored`): simultaneously developing duct at Pr = 0.72 on
-two LBM rungs against the `fs-convection` Shah–London Table 52 card; the
-measured discrepancy band is printed per rung and gated at 10 %.
+Release lane (`--ignored`, executed): simultaneously developing duct at
+Pr = 0.72, Re ~ 49.5, BGK, against the `fs-convection` Shah–London Table 52
+card (`convection.rectangular-duct-laminar-cwt-developing-pr072`):
+
+| Rung | Gz | Nu_m (LBM + FV) | Card | Discrepancy |
+|---|---|---|---|---|
+| 12 x 24 x 40 | 14.165 | 4.6521 | 4.4457 | +4.64 % |
+| 16 x 32 x 56 | 13.590 | 4.6060 | 4.4118 | +4.40 % |
+
+The measured band (positive, shrinking with refinement) is the Level-B
+cross-code evidence for that card at this Péclet number (36), where axial
+conduction toward the Dirichlet inlet — absent from the boundary-layer
+table — raises the entrance heat transfer. Gated at 10 %. At Re = 100 with
+the central-moment operator the same duct diverged; it now refuses as
+`FlowDiverged` instead of panicking.
 
 ### No-claim boundaries (conjugate)
 

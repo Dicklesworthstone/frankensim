@@ -17,8 +17,8 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel, VoxelDomain, lbm_duct_flow,
-    natural_convection, solve_energy,
+    LbmCollisionChoice, LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel,
+    VoxelDomain, lbm_duct_flow, natural_convection, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -628,6 +628,7 @@ fn developing_duct_rung(b: usize, nx: usize, re_nominal: f64) -> (f64, f64, f64)
         inlet_velocity_m_s: re_nominal / dh,
         lattice_inlet_velocity: 0.05,
         steady_tolerance: 1e-7,
+        collision: LbmCollisionChoice::Bgk,
         ..LbmFlowConfig::default()
     };
     let lbm = lbm_duct_flow(&domain, &fluid, &config, &gate).unwrap();
@@ -667,8 +668,8 @@ fn developing_duct_rung(b: usize, nx: usize, re_nominal: f64) -> (f64, f64, f64)
 fn developing_duct_matches_shah_london_table_52_card() {
     use fs_convection::{CorrelationId, CorrelationInputs, evaluate};
     let mut rows = Vec::new();
-    for (b, nx) in [(12usize, 60usize), (16, 80)] {
-        let (gz, nu, re) = developing_duct_rung(b, nx, 100.0);
+    for (b, nx) in [(12usize, 40usize), (16, 56)] {
+        let (gz, nu, re) = developing_duct_rung(b, nx, 50.0);
         let length_ratio = re * 0.72 / gz;
         let card = evaluate(
             CorrelationId::RectangularDuctLaminarCwtDevelopingPr072,
@@ -700,6 +701,7 @@ fn developing_duct_matches_shah_london_table_52_card() {
 fn de_vahl_davis(
     n: usize,
     rayleigh: f64,
+    tau: f64,
     tolerance: f64,
 ) -> (f64, fs_lbm::conjugate::NaturalConvectionReport) {
     let gate = CancelGate::new();
@@ -722,7 +724,7 @@ fn de_vahl_davis(
         gravity_m_s2: [0.0, -g, 0.0],
         expansion_per_k: beta,
         reference_temperature_k: 0.5,
-        tau: 0.8,
+        tau,
         periodic: [false, false, true],
         steady_tolerance: tolerance,
         ..BuoyancyConfig::default()
@@ -754,7 +756,7 @@ fn de_vahl_davis(
 
 #[test]
 fn natural_convection_cavity_matches_de_vahl_davis_at_ra_1e3() {
-    let (nu, report) = de_vahl_davis(16, 1e3, 1e-6);
+    let (nu, report) = de_vahl_davis(16, 1e3, 0.8, 1e-6);
     eprintln!("de Vahl Davis Ra=1e3 n=16: Nu = {nu:.4} (reference 1.118); {report:?}");
     assert!(report.coupling_residual_k < 1e-3, "{report:?}");
     assert!((nu - 1.118).abs() / 1.118 < 0.03, "Nu {nu}");
@@ -831,8 +833,9 @@ fn heated_block_enclosure_closes_energy_and_responds_to_buoyancy() {
 #[test]
 #[ignore = "release-scale G2: de Vahl Davis Ra = 1e4 and 1e5 on 32 x 32 (minutes)"]
 fn natural_convection_cavity_matches_de_vahl_davis_release() {
-    for (ra, reference) in [(1e4, 2.243), (1e5, 4.519)] {
-        let (nu, report) = de_vahl_davis(32, ra, 1e-7);
+    // Lower viscosity at Ra = 1e5 keeps the buoyant lattice speed small.
+    for (ra, reference, tau) in [(1e4, 2.243, 0.8), (1e5, 4.519, 0.56)] {
+        let (nu, report) = de_vahl_davis(32, ra, tau, 1e-7);
         eprintln!(
             "de Vahl Davis Ra={ra:e} n=32: Nu = {nu:.4} (reference {reference}); steps {}",
             report.steps

@@ -388,6 +388,9 @@ pub struct BoundaryGrid3 {
     /// (flat index `tile * TILE_CELLS + lane`). `None` leaves every result
     /// bit-identical to the uniform-force grid.
     force_field: Option<Vec<[f64; 3]>>,
+    /// Flat indices of the interior cells the open-face reconstruction reads
+    /// (cached on first pooled step; topology is immutable by then).
+    open_sources: Option<Vec<usize>>,
 }
 
 /// Lattice tiles per pooled kernel tile (512 cells).
@@ -408,6 +411,12 @@ pub enum BoundaryStepError3 {
     },
     /// Pool-level refusal (worker fault or admission), rendered.
     Pool(String),
+    /// A cell the open-face reconstruction reads would carry a non-positive
+    /// or non-finite density: the lattice left its physical regime.
+    Unphysical {
+        /// Cell coordinates.
+        cell: [usize; 3],
+    },
 }
 
 impl core::fmt::Display for BoundaryStepError3 {
@@ -418,6 +427,12 @@ impl core::fmt::Display for BoundaryStepError3 {
                 write!(f, "D3Q19 collision refused at cell {cell:?}: {source:?}")
             }
             Self::Pool(detail) => write!(f, "pooled D3Q19 step refused by the pool: {detail}"),
+            Self::Unphysical { cell } => {
+                write!(
+                    f,
+                    "D3Q19 open-face source cell {cell:?} lost positive finite density"
+                )
+            }
         }
     }
 }
@@ -527,6 +542,7 @@ impl BoundaryGrid3 {
             pull: Vec::new(),
             next: None,
             force_field: None,
+            open_sources: None,
         };
         let (wall_masks, open_masks, stationary_masks) = grid.compile_link_masks(&grid.solid);
         grid.link_masks = wall_masks;
@@ -886,6 +902,23 @@ impl BoundaryGrid3 {
             self.next = Some(next);
             return Err(error);
         }
+        // The open-face reconstruction asserts a positive density at its
+        // source cells; check them on the unpublished state so a lattice
+        // that left its physical regime refuses instead of panicking.
+        if self.open_sources.is_none() {
+            self.open_sources = Some(self.compile_open_sources());
+        }
+        if let Some(sources) = &self.open_sources {
+            for &flat in sources {
+                let (tile, lane) = (flat / TILE_CELLS, flat % TILE_CELLS);
+                let rho = (0..Q3).map(|q| next[q][tile].0[lane]).sum::<f64>();
+                if !(rho.is_finite() && rho > 0.0) {
+                    let cell = self.coords(tile, lane);
+                    self.next = Some(next);
+                    return Err(BoundaryStepError3::Unphysical { cell });
+                }
+            }
+        }
         core::mem::swap(&mut self.f, &mut next);
         self.next = Some(next);
         self.apply_open_boundaries();
@@ -1025,6 +1058,30 @@ impl BoundaryGrid3 {
             }
         }
         pull
+    }
+
+    fn compile_open_sources(&self) -> Vec<usize> {
+        let mut sources = Vec::new();
+        for face in Face3::ALL {
+            if !self.boundaries.face(face).is_open() {
+                continue;
+            }
+            for z in 0..self.nz {
+                for y in 0..self.ny {
+                    for x in 0..self.nx {
+                        if self.on_face(x, y, z, face)
+                            && !self.is_solid(x, y, z)
+                            && self.open_link_mask(x, y, z) != 0
+                        {
+                            let [ix, iy, iz] = Self::interior_neighbor(x, y, z, face);
+                            let (tile, lane) = self.addr(ix, iy, iz);
+                            sources.push(tile * TILE_CELLS + lane);
+                        }
+                    }
+                }
+            }
+        }
+        sources
     }
 
     fn apply_open_boundaries(&mut self) {

@@ -334,7 +334,8 @@ pub fn natural_convection(
                 grid.step_pooled(parked, gate)
                     .map_err(|error| match error {
                         BoundaryStepError3::Cancelled => ChtError::Cancelled,
-                        BoundaryStepError3::Collision { .. } => {
+                        BoundaryStepError3::Collision { .. }
+                        | BoundaryStepError3::Unphysical { .. } => {
                             ChtError::FlowDiverged { step: steps }
                         }
                         BoundaryStepError3::Pool(detail) => ChtError::Executor { detail },

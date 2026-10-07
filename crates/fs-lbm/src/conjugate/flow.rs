@@ -438,9 +438,10 @@ pub(crate) fn scale_rows(coo: &Coo, b: &mut [f64]) -> fs_sparse::Csr {
 /// Collision operator selection for [`lbm_duct_flow`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LbmCollisionChoice {
-    /// BGK when `tau >= 0.55`, otherwise the central-moment operator with
-    /// higher-order moments relaxed to equilibrium (rate one), which is the
-    /// more robust choice near `tau = 1/2`.
+    /// BGK. Measured on the plate-fin heatsink example at `tau = 0.519`:
+    /// the central-moment operator diverged at step 85 while BGK stayed
+    /// bounded through 2500 steps, so `Auto` does not switch operators
+    /// near `tau = 1/2`; `min_tau` is the admission floor instead.
     #[default]
     Auto,
     /// Single-relaxation-time BGK.
@@ -657,9 +658,8 @@ pub fn lbm_duct_flow(
         });
     }
     let bgk = match config.collision {
-        LbmCollisionChoice::Bgk => true,
+        LbmCollisionChoice::Bgk | LbmCollisionChoice::Auto => true,
         LbmCollisionChoice::CentralMoment => false,
-        LbmCollisionChoice::Auto => tau >= 0.55,
     };
     let collision = if bgk {
         CollisionModel3::Bgk { tau }
@@ -742,7 +742,8 @@ pub fn lbm_duct_flow(
                 grid.step_pooled(parked, gate)
                     .map_err(|error| match error {
                         BoundaryStepError3::Cancelled => ChtError::Cancelled,
-                        BoundaryStepError3::Collision { .. } => {
+                        BoundaryStepError3::Collision { .. }
+                        | BoundaryStepError3::Unphysical { .. } => {
                             ChtError::FlowDiverged { step: steps }
                         }
                         BoundaryStepError3::Pool(detail) => ChtError::Executor { detail },
