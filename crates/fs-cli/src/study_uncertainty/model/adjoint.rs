@@ -4,6 +4,7 @@
 use super::*;
 use fs_project::uncertainty::{Target, UniformParameter};
 
+#[path = "adjoint/output.rs"]
 mod output;
 
 const OUTPUT: &str = "temperature-max-adjoint";

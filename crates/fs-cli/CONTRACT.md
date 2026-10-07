@@ -270,6 +270,39 @@ refusals retain all evidence available at the refusal stage and finish one
 terminal error operation. Project-admission, resource-envelope, and
 pre-cancellation failures occur before ledger side effects.
 
+### FrankenScript executor v0 (`run <program.fs|program.fs.json> <ledger>`)
+
+`run` routes an operand named `*.fs` (s-expression) or `*.fs.json`
+(canonical JSON) to `frankenscript::run_program_path` (bead
+rc-root-q61wp.38). The executor parses the program, admits it through
+`fs_ir::admission::admit` (the only authority for units, budgets, capability
+grants and the explicit pillars), re-recognizes the LOWERED canonical program
+as a `Study`, and binds every clause statically before anything runs:
+
+- `(let <name> (cooling.project "p.fsim" [:hash "<project hash>"]))` binds a
+  project; the hash pin, when present, must equal the project's canonical
+  hash, the study seed must equal the project's `seeds.root`, and a declared
+  `(budget (wall …) (mem …))` must cover the project's solve-time and memory
+  budgets.
+- `(cooling.import <project> :sources ("…") :unit "…" :max-hole-edges <n>)`
+  (or `:step-root <id> :target-h <length>`), `(cooling.solve <project>
+  [:materials (…)] [:interfaces (…)])` and `(cooling.run <project> …)` call
+  the same stage drivers as the `import`, `solve` and `run` verbs, in program
+  order; the first non-success step stops the program.
+- Any other verb or `let` binding refuses as `frankenscript-not-executable`
+  ("not executable: verb X has no stage binding"); argument errors refuse as
+  `frankenscript-argument`. Admission findings render as `admission-<check>`
+  diagnostics (warnings on stderr with `"severity":"warn"`). Every refusal
+  happens before a ledger is opened.
+
+Paths resolve against the program's directory; card packs come from the
+program (a `--materials`/`--interfaces` flag on a program `run` is a usage
+error). The result record carries the study name, the program hash
+(`hash_domain("frankensim.frankenscript.program.v0", lowered canonical)`),
+each bound project's path and hash, and every executed step's own result
+record. `examples/heatsink-fan/heatsink-fan.fs` is the tracked Journey A
+program.
+
 ### Solve orchestration
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
@@ -1093,7 +1126,11 @@ No feature flags. Runtime dependencies remain Franken-only.
 
 ## Conformance tests
 
-`tests/cli.rs` covers the grammar and all v0 verbs, stable exit classes,
+`tests/cli.rs` covers the grammar and all v0 verbs, the FrankenScript
+executor (the tracked Journey A program reproduces the `.fsim` verbs' run id,
+report content hash and package root exactly; unit-error, unbound-verb, seed,
+hash-pin and capability falsifiers refuse without opening the ledger; the
+JSON twin admits to the same identity), stable exit classes,
 strict validation success, structural findings with fixes, noncanonical input
 refusal, JSON escaping/line discipline, import-policy conflict/numeric
 refusals, routing of both admitted import policy shapes into bounded project
@@ -1165,6 +1202,11 @@ publication.
 
 ## No-claim boundaries
 
+- FrankenScript executor v0 binds only the cooling project pipeline
+  (`EXECUTABLE_VERBS`); the fs-ir catalog's physics operators (`flux.*`,
+  `ascent.*`, …) admit but do not execute. Each stage driver re-reads the
+  project file exactly as the `.fsim` verbs do; the `:hash` pin is checked
+  once, before execution. Journey B (`study`) has no program binding yet.
 - `validate` proves only canonical structural and dimensional admissibility.
   It does not prove referenced artifacts or material cards exist, a requested
   capability is installed, the project is solvable, or any physical model is

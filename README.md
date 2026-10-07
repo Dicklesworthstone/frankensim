@@ -306,7 +306,12 @@ fan network through an `fs-convection` card with domain gating), a
 requirement-checked QoI with an explicit eight-term uncertainty budget, and a
 report stage that seals an HTML report, its JSON twin and a format-9 evidence
 package in the ledger. `report`, `package` and `run` are projections of those
-retained receipts. A project that omits `cooling.conduction` refuses at
+retained receipts. `run` also executes FrankenScript programs (`*.fs`,
+`*.fs.json`): `frankensim --json run examples/heatsink-fan/heatsink-fan.fs
+L.db` admits the study through fs-ir, binds its `cooling.import` /
+`cooling.solve` / `cooling.run` verbs to these same stage drivers, and
+reproduces the `.fsim` command sequence's run id, report hash and package root
+exactly; any other operator refuses as not executable before a ledger opens. A project that omits `cooling.conduction` refuses at
 conduction by name (`cli-solve-conduction-undeclared`); one that omits a
 `temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated;
 its verdict stays indeterminate while any budget term is NO-DATA. A project
@@ -1586,7 +1591,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Capability | Current state |
 |------------|---------------|
 | Stable public API | Not promised yet; contracts exist, but APIs may still change |
-| End-user CLI/application | A source-built CLI, not a packaged application. `solve`/`run` execute seven stages (import-verify through report) on declared `.fsim` projects; the QoI verdict is Estimated and remains indeterminate while any of its eight budget terms is NO-DATA. `study` runs the scalar thermal and 2-D elasticity studies. `cooling-network*` are experimental JSON workflows on hand-authored tet solids without geometry import or a ledger |
+| End-user CLI/application | A source-built CLI, not a packaged application. `solve`/`run` execute seven stages (import-verify through report) on declared `.fsim` projects, and `run` executes FrankenScript `cooling.*` programs through the same stages; the QoI verdict is Estimated and remains indeterminate while any of its eight budget terms is NO-DATA. `study` runs the scalar thermal and 2-D elasticity studies. `cooling-network*` are experimental JSON workflows on hand-authored tet solids without geometry import or a ledger |
 | crates.io distribution | Not published |
 | GitHub Actions | Not authoritative for this repo; use DSR |
 | Full multiphysics solver suite | Not complete in the current workspace. The only production-grade 3-D solver is steady conduction; the nonlinear solid and fluid solvers are 2-D on fixture meshes. Retired from v1 by owner decision on 2026-09-01 (bead frankensim-rc-root-q61wp.25), each retained as an `[M]` deferred epic: IGA Kirchhoff–Love shells (.40), turbulence on a mesh (.41), compressible flow (.42), FMM-accelerated VPM (.43). No field-level FSI or transient multiphysics exists; the conduction ↔ 1-D air-path exchange is steady |

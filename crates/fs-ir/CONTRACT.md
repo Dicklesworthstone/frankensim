@@ -1853,9 +1853,12 @@ program bytes, never on prose.
 
 ### No-claim boundaries (IR conformance)
 
-- fs-ir has no general study executor: kernels execute in the case (the
-  domain crate's own runner); this slice makes ADMISSION and IDENTITY
-  real, not execution.
+- fs-ir itself has no general study executor: kernels execute in the case
+  (the domain crate's own runner); this slice makes ADMISSION and IDENTITY
+  real, not execution. Program execution lives above fs-ir in fs-cli's
+  FrankenScript executor v0 (`frankensim run <program.fs> <ledger>`), which
+  admits through this crate and binds only the `cooling.*` project-pipeline
+  verbs; every other admitted operator refuses there as not executable.
 - Artifact comparison is content-address equality; numeric-tolerance
   comparison happens inside kernels, with the tolerance model recorded.
 - Golden-ledger unification IS claimed (slice 2): `run_ir_suite_ledgered`
