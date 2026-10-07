@@ -91,6 +91,14 @@ pub fn march_energy(
 ) -> Result<TransientSolution, ChtError> {
     fluid.validate()?;
     finite_positive("transient.time_step_s", config.time_step_s)?;
+    if !setup.compact_components.is_empty() {
+        // A two-resistor model has no heat capacity: it is a steady model.
+        return Err(ChtError::InvalidInput {
+            field: "thermal.compact_components",
+            reason: "two-resistor compact models are steady; the transient march refuses them"
+                .into(),
+        });
+    }
     let cells = domain.cell_count();
     if initial_temperature.len() != cells {
         return Err(ChtError::InvalidInput {

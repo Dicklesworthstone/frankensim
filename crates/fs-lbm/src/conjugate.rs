@@ -98,8 +98,8 @@ pub use buoyant::{
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
-    CellSink, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport,
-    EnergySolution, ThermalFace, ThermalSetup, solve_energy,
+    CellSink, CompactComponent, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig,
+    EnergyReport, EnergySolution, JunctionSolution, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,

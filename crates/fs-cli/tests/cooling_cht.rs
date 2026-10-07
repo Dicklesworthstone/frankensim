@@ -316,6 +316,44 @@ fn internal_fan_and_grille_set_the_channel_operating_point() {
 }
 
 #[test]
+fn two_resistor_component_on_a_board_reports_its_junction() {
+    // A 4 x 1 x 4 mm package (board side y-) on an unheated aluminium strip
+    // in the duct: heat leaves through both resistors, they add up to its
+    // power, and the energy closes through the binary.
+    let scene = DUCT
+        .replace(
+            r#""max_m": [0.008, 0.002, 0.004]}],"#,
+            r#""max_m": [0.008, 0.001, 0.004]}],
+ "components": [{"name": "u1", "min_m": [0.004, 0.001, 0.0], "max_m": [0.008, 0.002, 0.004],
+   "board_side": "y-", "power_w": 0.05, "junction_to_case_k_w": 40.0, "junction_to_board_k_w": 15.0}],"#,
+        )
+        .replace(
+            r#" "sources": [{"name": "chip", "power_w": 0.1, "min_m": [0.004, 0.0, 0.0], "max_m": [0.008, 0.001, 0.004]}],
+"#,
+            "",
+        );
+    assert_ne!(scene, DUCT);
+    assert!(!scene.contains("\"chip\""));
+    let (code, result, stderr) = run(&scratch("component.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    let parts = result.get("components").and_then(J::as_array).unwrap();
+    assert_eq!(parts[0].str_field("name"), Some("u1"));
+    let tj = parts[0]
+        .path(&["junction_temperature_k"])
+        .and_then(J::as_f64)
+        .unwrap();
+    let case = parts[0].path(&["case_w"]).and_then(J::as_f64).unwrap();
+    let board = parts[0].path(&["board_w"]).and_then(J::as_f64).unwrap();
+    assert!((case + board - 0.05).abs() < 1e-9, "{case} + {board}");
+    assert!(case > 0.0 && board > 0.0, "{case} {board}");
+    assert!((f(&result, &["energy", "source_w"]) - 0.05).abs() < 1e-12);
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+    // The collapsed package cells report the junction temperature.
+    assert!(f(&result, &["max_solid_temperature_k"]) >= tj - 1e-9);
+    assert!(tj > 300.0, "{tj}");
+}
+
+#[test]
 fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     // A die (k 150) on a laminate (k 30 in-plane, 0.3 through) with a
     // 2e-4 m^2K/W interface, cooled from below: the joint and the weak

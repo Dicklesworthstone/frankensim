@@ -17,9 +17,9 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::turbulence::{eddy_viscosity_ratio, law_of_the_wall_ratios, wall_distance};
 use fs_lbm::conjugate::{
-    BuoyancyConfig, ChtError, ContactResistance, ConvectionScheme, EnergyConfig, FacePatch,
-    FanCurve, FanInlet, FlowFace, FlowField, FlowResistance, FluidProperties, FvBoundary,
-    FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig, RadiationConfig,
+    BuoyancyConfig, ChtError, CompactComponent, ContactResistance, ConvectionScheme, EnergyConfig,
+    FacePatch, FanCurve, FanInlet, FlowFace, FlowField, FlowResistance, FluidProperties,
+    FvBoundary, FvBuoyancyConfig, InternalFan, LbmCollisionChoice, LbmFlowConfig, RadiationConfig,
     STEFAN_BOLTZMANN, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
     Turbulence, Voxel, VoxelDomain, escape_factors, fv_natural_convection, lbm_duct_flow,
     march_energy, natural_convection, simple_flow, solve_energy, solve_energy_radiating,
@@ -80,6 +80,108 @@ fn composite_slab_conduction_is_exact() {
     let balance = solution.report.balance;
     assert!(balance.boundary_outflow_w.abs() < 1e-12, "{balance:?}");
     assert!(balance.relative_residual < 1e-12, "{balance:?}");
+}
+
+#[test]
+fn two_resistor_component_matches_its_network() {
+    // A 4 x 4 x 2-cell compact component between two k = 5 slabs (2 cells
+    // each) held at 300 K below and 310 K above: the junction sees two paths,
+    // R_b = R_jb + 2 dx / (k A) and R_t = R_jc + 2 dx / (k A), exactly.
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(4, 4, 6, dx, |p| {
+        Voxel::Solid(u16::from(p[2] > 2.0 * dx && p[2] < 4.0 * dx))
+    })
+    .unwrap();
+    let solids = [
+        SolidMaterial::new("slab", 5.0),
+        SolidMaterial::new("package", 1.0),
+    ];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[4] = ThermalFace::Temperature(300.0);
+    faces[5] = ThermalFace::Temperature(310.0);
+    let mut setup = ThermalSetup::new(faces);
+    let (power, r_jc, r_jb) = (1.0, 50.0, 20.0);
+    setup.compact_components.push(CompactComponent {
+        lo: [0, 0, 2],
+        hi: [4, 4, 4],
+        board_face: Face3::ZMin,
+        power_w: power,
+        junction_to_case_k_w: r_jc,
+        junction_to_board_k_w: r_jb,
+    });
+    let solve = |setup: &ThermalSetup| {
+        solve_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            setup,
+            &EnergyConfig::default(),
+            &gate,
+        )
+    };
+    let solution = solve(&setup).unwrap();
+    let area = 16.0 * dx * dx;
+    let slabs = 2.0 * dx / (5.0 * area);
+    let (r_b, r_t) = (r_jb + slabs, r_jc + slabs);
+    let exact = (power + 300.0 / r_b + 310.0 / r_t) / (1.0 / r_b + 1.0 / r_t);
+    let junction = &solution.junctions[0];
+    assert!(
+        (junction.temperature_k - exact).abs() < 1e-9,
+        "{} vs {exact}",
+        junction.temperature_k
+    );
+    assert!((junction.board_w - (exact - 300.0) / r_b).abs() < 1e-9);
+    assert!((junction.case_w - (exact - 310.0) / r_t).abs() < 1e-9);
+    assert!((junction.case_w + junction.board_w - power).abs() < 1e-12);
+    // The collapsed cells report the junction; the balance closes.
+    assert!((solution.temperature[domain.index(2, 2, 3)] - exact).abs() < 1e-9);
+    assert!((solution.report.balance.source_w - power).abs() < 1e-15);
+    // Solver-limited: the Dirichlet terms dwarf the 1 W source.
+    assert!(
+        solution.report.balance.relative_residual < 1e-10,
+        "{:?}",
+        solution.report.balance
+    );
+    assert_eq!(solution.report.unknowns, domain.cell_count() + 1);
+    // Refusals: the board face on the domain boundary, power inside the box,
+    // a transient march.
+    let mut on_boundary = setup.clone();
+    on_boundary.compact_components[0].lo = [0, 0, 0];
+    on_boundary.compact_components[0].hi = [4, 4, 2];
+    let mut powered = setup.clone();
+    powered.add_uniform_power(&domain, 0.5, |p| p[2] > 2.0 * dx && p[2] < 4.0 * dx);
+    for bad in [on_boundary, powered] {
+        assert!(matches!(
+            solve(&bad),
+            Err(ChtError::InvalidInput {
+                field: "thermal.compact_components",
+                ..
+            })
+        ));
+    }
+    assert!(matches!(
+        march_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            &setup,
+            &vec![300.0; domain.cell_count()],
+            |_| 1.0,
+            &TransientConfig {
+                time_step_s: 1.0,
+                steps: 1,
+                energy: EnergyConfig::default(),
+            },
+            &gate,
+        ),
+        Err(ChtError::InvalidInput {
+            field: "thermal.compact_components",
+            ..
+        })
+    ));
 }
 
 /// Parallel plates of gap `h` resolved by `n` cells, analytic Poiseuille

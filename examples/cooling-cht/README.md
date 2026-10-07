@@ -63,6 +63,25 @@ Scene (`frankensim.cooling-cht.v1`):
   transitional or turbulent fan-driven flow; the result then reports
   `flow.max_eddy_viscosity_ratio`), `limits.wall_seconds`.
 
+- Optional `internal_fans`: `name`, `axis` (`"x"`, `"y"`, `"z"`), `at_m` (a
+  voxel face plane strictly inside the domain), `direction` (`"+"` or
+  `"-"`), `min_m`/`max_m` (the transverse extent; the entries along `axis`
+  are ignored), and `curve`. The pressure rises across the plane by the
+  curve's value at the flow through it; the result lists each fan's
+  operating point under `flow.internal_fans`.
+- Optional `resistances`: `{"type": "grille", axis, at_m, min_m, max_m,
+  loss_coefficient | free_area_ratio}` (pressure drop `1/2 rho K |u| u`;
+  a free-area ratio uses Idelchik's thin perforated plate) or
+  `{"type": "porous", min_m, max_m, permeability_m2, inertial_per_m}`
+  (Darcy-Forchheimer, scalar or per axis; a missing permeability means no
+  viscous term). Grilles on a vent sit one voxel inside the open face.
+- Optional `components`: JEDEC two-resistor compact models (`name`,
+  `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
+  `junction_to_board_k_w`). The box blocks flow; the junction reaches the
+  case top and the board only through the two resistors (sides adiabatic),
+  and the result reports `components[].junction_temperature_k`, `case_w`
+  and `board_w`. Steady scenes only.
+
 Examples:
 
 - `heatsink-duct.json`: the ducted plate-fin heatsink of
@@ -75,6 +94,14 @@ Examples:
   (peak 0.15 m/s), 0.5 W chip at 332.21 K (64 K/W), all heat leaving by
   advection through the top opening (balance 2e-12). This scene declares
   no emissivity; adding one enables radiation through the openings.
+- `fan-enclosure.json`: a 100 x 60 x 30 mm electronics enclosure at 2.5 mm
+  voxels: a 50 % perforated vent grille behind the open x- face, an axial
+  fan (40 Pa shut-off, 6 l/s free delivery) in an ABS baffle, an orthotropic
+  FR4 board with a 3 W and a 2 W package, a porous card array, an open
+  exhaust, and LVEL turbulence. Measured (debug build, 529 s): 420 SIMPLEC
+  iterations, fan operating point 3.65e-3 m^3/s at 19.6 Pa (on its curve),
+  peak eddy viscosity 86 x molecular, packages at 394.3 K and 372.5 K,
+  energy balance 9e-14.
 - `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
   (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
   at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins, at

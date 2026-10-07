@@ -24,11 +24,11 @@ use fs_geom::Point3;
 use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
-    ChtError, ContactResistance, EnergyConfig, EnergySolution, FacePatch, FanCurve, FanInlet,
-    FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow, InternalFan,
-    RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
-    Turbulence, Voxel, VoxelDomain, fv_natural_convection, march_energy, simple_flow, solve_energy,
-    solve_energy_radiating,
+    ChtError, CompactComponent, ContactResistance, EnergyConfig, EnergySolution, FacePatch,
+    FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig, FvFlow,
+    InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
+    TransientConfig, Turbulence, Voxel, VoxelDomain, fv_natural_convection, march_energy,
+    simple_flow, solve_energy, solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -39,7 +39,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only as gray diffuse emission from exposed solid faces to the surroundings seen through openings, inlets and fans (Monte Carlo escape factors; no surface-to-surface exchange or wall re-radiation); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -416,6 +416,8 @@ struct Scene {
     internal_fans: Vec<(String, InternalFan)>,
     /// Grilles and porous blocks.
     resistances: Vec<FlowResistance>,
+    /// Named two-resistor compact components.
+    components: Vec<(String, CompactComponent)>,
     max_iterations: usize,
     wall_seconds: f64,
     transient: Option<Transient>,
@@ -502,6 +504,9 @@ impl Transient {
 }
 
 const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
+/// The hidden material of two-resistor component boxes (they block flow;
+/// their conduction is the compact model's).
+const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
     #[allow(clippy::too_many_lines)] // one schema, field by field
@@ -569,6 +574,9 @@ impl Scene {
                 .ok_or_else(|| bad(format!("{at}.name is required")))?;
             if names.contains(&name) {
                 return Err(bad(format!("{at}: duplicate material name {name}")));
+            }
+            if name == COMPACT_MATERIAL {
+                return Err(bad(format!("{at}: {COMPACT_MATERIAL} is reserved")));
             }
             names.push(name);
             // A number (isotropic) or [k_x, k_y, k_z] (orthotropic along the
@@ -655,6 +663,47 @@ impl Scene {
                 Shape::Box(Aabb::parse(item, &at)?)
             };
             solids.push((u16::try_from(index).expect("bounded above"), shape));
+        }
+        // Two-resistor components: voxelized after (over) the declared
+        // solids with the hidden compact material.
+        let mut components = Vec::new();
+        let component_items = array_of(&root, "components")?;
+        if !component_items.is_empty() {
+            let index = u16::try_from(materials.len()).map_err(|_| bad("too many materials"))?;
+            materials.push(SolidMaterial::new(COMPACT_MATERIAL, 1.0));
+            emissivities.push(0.0);
+            for (i, item) in component_items.iter().enumerate() {
+                let at = format!("components[{i}]");
+                let region = Aabb::parse(item, &at)?;
+                let (lo, hi) = cell_box(&region, dx, dims, &at)?;
+                let board_face = item
+                    .str_field("board_side")
+                    .and_then(|key| FACE_KEYS.iter().position(|k| *k == key))
+                    .map(|side| Face3::ALL[side])
+                    .ok_or_else(|| {
+                        bad(format!("{at}.board_side must be x-, x+, y-, y+, z- or z+"))
+                    })?;
+                let power_w = number(item, "power_w", &at)?;
+                let case = number(item, "junction_to_case_k_w", &at)?;
+                let board = number(item, "junction_to_board_k_w", &at)?;
+                if power_w < 0.0 || !(case > 0.0) || !(board > 0.0) {
+                    return Err(bad(format!(
+                        "{at}: power_w must be non-negative and both resistances positive"
+                    )));
+                }
+                solids.push((index, Shape::Box(region)));
+                components.push((
+                    item.str_field("name").unwrap_or("component").to_string(),
+                    CompactComponent {
+                        lo,
+                        hi,
+                        board_face,
+                        power_w,
+                        junction_to_case_k_w: case,
+                        junction_to_board_k_w: board,
+                    },
+                ));
+            }
         }
         let mut sources = Vec::new();
         for (i, item) in root
@@ -843,6 +892,7 @@ impl Scene {
             turbulence,
             internal_fans,
             resistances,
+            components,
             max_iterations: max_iterations as usize,
             wall_seconds,
             transient: root.get("transient").map(Transient::parse).transpose()?,
@@ -919,6 +969,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     });
     let mut setup = ThermalSetup::new(thermal_faces);
     setup.contacts.clone_from(&scene.contacts);
+    setup.compact_components = scene.components.iter().map(|(_, part)| *part).collect();
     let mut source_cells = Vec::with_capacity(scene.sources.len());
     for source in &scene.sources {
         let count = setup.add_uniform_power(&domain, source.power_w, |p| {
@@ -1086,6 +1137,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     // Per-material and per-source temperatures.
     let mut material_rows = Vec::new();
     for (index, material) in scene.materials.iter().enumerate() {
+        if material.label == COMPACT_MATERIAL {
+            continue;
+        }
         let cells: Vec<usize> = (0..domain.cell_count())
             .filter(|&c| domain.voxel_at(c) == Voxel::Solid(u16::try_from(index).expect("bounded")))
             .collect();
@@ -1244,6 +1298,26 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             );
         }
         out.push(']');
+        if !scene.components.is_empty() {
+            out.push_str(",\"components\":[");
+            for (i, ((name, part), junction)) in
+                scene.components.iter().zip(&energy.junctions).enumerate()
+            {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "{{\"name\":{},\"power_w\":{},\"junction_temperature_k\":{},\"case_w\":{},\"board_w\":{}}}",
+                    quote(name),
+                    num(part.power_w)?,
+                    num(junction.temperature_k)?,
+                    num(junction.case_w)?,
+                    num(junction.board_w)?
+                );
+            }
+            out.push(']');
+        }
         if let Some(march) = &march {
             // At most ~200 records: every k-th step and the last.
             let every = march.records.len().div_ceil(200).max(1);
@@ -1344,6 +1418,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let _ = writeln!(
                 out,
                 "source={name} power_w={power} cells={cells} max_temperature_k={max:.4}"
+            );
+        }
+        for ((name, part), junction) in scene.components.iter().zip(&energy.junctions) {
+            let _ = writeln!(
+                out,
+                "component={name} power_w={} junction_temperature_k={:.4} case_w={:.6} board_w={:.6}",
+                part.power_w, junction.temperature_k, junction.case_w, junction.board_w
             );
         }
         if let Some((t, at)) = hottest {

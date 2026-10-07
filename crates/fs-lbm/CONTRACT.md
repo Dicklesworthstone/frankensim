@@ -1074,6 +1074,33 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 | Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
 | k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
 
+### Two-resistor compact components (`CompactComponent`)
+
+`ThermalSetup::compact_components` holds JEDEC two-resistor models
+(JESD15-3), the standard board-level representation of a package from its
+datasheet `R_jc` and `R_jb`: the component's box of solid cells blocks flow
+like any solid, but its interior is collapsed. One extra unknown per
+component, the junction, receives the power and reaches every cell beyond
+the case-top face through `R_jc` and every cell beyond the board face
+through `R_jb`. Each resistor is split over its face in proportion to area
+and placed in series with the outside cell's half width:
+`G = 1 / (R A_face / A_cell + dx / (2 k A_cell))`. The sides are
+adiabatic; the box cells report the junction temperature through identity
+rows. `EnergySolution::junctions` gives the junction temperature and the
+case and board heats; `solid_to_fluid_heat_w` counts the case links into
+fluid instead of the collapsed cells. Refusals: a box that holds fluid,
+overlaps or sits on another component, or puts its case or board face on
+the domain boundary; power, sinks or fixed temperatures inside a box; any
+transient march (the model has no heat capacity).
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| 4 x 4 x 2-cell component (R_jc 50, R_jb 20 K/W, 1 W) between k = 5 slabs held at 300 K / 310 K | two-path network `R_b = R_jb + 2 dx/(kA)`, `R_t = R_jc + 2 dx/(kA)` | junction temperature and both resistor heats within 1e-9; balance 8e-12 |
+
+No-claims: the two-resistor model's own limits (boundary-condition
+dependence of a 2R reduction, no spreading inside the package, adiabatic
+sides); steady only.
+
 ### Surface radiation to the surroundings (`radiation`)
 
 `solve_energy_radiating` (and `FvBuoyancyConfig::radiation` inside the
