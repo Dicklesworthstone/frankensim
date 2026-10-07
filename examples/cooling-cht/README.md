@@ -17,7 +17,16 @@ Scene (`frankensim.cooling-cht.v1`):
 - `fluid`: `"dry-air-300k"` (default) or explicit `density_kg_m3`,
   `specific_heat_j_kg_k`, `conductivity_w_m_k`, `kinematic_viscosity_m2_s`.
 - `materials`: `name`, `conductivity_w_m_k` (a number, or `[k_x, k_y, k_z]`
-  for grid-aligned orthotropic solids such as PCB laminates).
+  for grid-aligned orthotropic solids such as PCB laminates), optional
+  `emissivity` (0 to 1; any non-zero value enables radiation) and
+  `volumetric_heat_capacity_j_m3_k` (transients).
+- Radiation: exposed solid faces emit `eps sigma F A (T^4 - T_amb^4)` to the
+  surroundings seen through openings, inlets and fans (at their
+  temperatures); walls are opaque. Escape factors `F` come from
+  deterministic Monte Carlo rays (optional `radiation`: `rays_per_face`,
+  default 256, and `seed`). Surface-to-surface exchange is not modelled.
+  The result reports `radiation.radiated_w` and the energy balance's
+  `sink_outflow_w`. Transients refuse radiation.
 - `contacts` (optional): `between` (two material names) and
   `resistance_m2_k_w`, a per-area interface resistance (thermal interface
   material, bonded or pressed joint) on every face the two materials share.
@@ -61,8 +70,8 @@ Examples:
   natural convection only, at 2 mm voxels. Measured (debug build, 315 s):
   181 energy couplings, 905 SIMPLEC sweeps, induced draft 2.23e-5 m^3/s
   (peak 0.15 m/s), 0.5 W chip at 332.21 K (64 K/W), all heat leaving by
-  advection through the top opening (balance 2e-12). No radiation is
-  modelled, which matters for natural convection.
+  advection through the top opening (balance 2e-12). This scene declares
+  no emissivity; adding one enables radiation through the openings.
 - `stl-heatsink-duct.json`: the Journey A body `../heatsink-fan/heatsink.stl`
   (80 x 60 mm base, four 6 mm fins) in a 100 mm duct along its fin channels
   at 2 mm voxels, with a 3 W, 20 x 20 mm die under the middle fins, at

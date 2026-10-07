@@ -25,9 +25,9 @@ use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     ChtError, ContactResistance, EnergyConfig, EnergySolution, FanCurve, FanInlet, FluidProperties,
-    FvBoundary, FvBuoyancyConfig, FvFlow, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
-    TransientConfig, Voxel, VoxelDomain, fv_natural_convection, march_energy, simple_flow,
-    solve_energy,
+    FvBoundary, FvBuoyancyConfig, FvFlow, RadiationConfig, SimpleConfig, SolidMaterial,
+    ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, fv_natural_convection,
+    march_energy, simple_flow, solve_energy, solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -37,8 +37,8 @@ const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model, radiation, or temperature-dependent properties; power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. Optional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const NO_CLAIM: &str = "steady laminar constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; no turbulence model or temperature-dependent properties; radiation only as gray diffuse emission from exposed solid faces to the surroundings seen through openings, inlets and fans (Monte Carlo escape factors; no surface-to-surface exchange or wall re-radiation); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -308,6 +308,11 @@ struct Scene {
     max_iterations: usize,
     wall_seconds: f64,
     transient: Option<Transient>,
+    /// Emissivity per material (all zero: no radiation).
+    emissivity: Vec<f64>,
+    /// Rays per exposed face and stream seed of the radiation estimate.
+    rays_per_face: usize,
+    ray_seed: u64,
 }
 
 /// A backward-Euler march of the energy equation over the converged steady
@@ -438,6 +443,7 @@ impl Scene {
             }
         };
         let mut materials = Vec::new();
+        let mut emissivities = Vec::new();
         let mut names = Vec::new();
         for (i, item) in root
             .get("materials")
@@ -467,6 +473,11 @@ impl Scene {
                 Some(rho_c) => material.with_heat_capacity(rho_c),
                 None => material,
             };
+            let emissivity = optional_number(item, "emissivity", &at)?.unwrap_or(0.0);
+            if !(0.0..=1.0).contains(&emissivity) {
+                return Err(bad(format!("{at}.emissivity must lie in [0, 1]")));
+            }
+            emissivities.push(emissivity);
             materials.push(material);
         }
         if materials.len() > usize::from(u16::MAX) {
@@ -672,6 +683,25 @@ impl Scene {
             max_iterations: max_iterations as usize,
             wall_seconds,
             transient: root.get("transient").map(Transient::parse).transpose()?,
+            emissivity: emissivities,
+            rays_per_face: match root.get("radiation") {
+                Some(r) => {
+                    let rays = optional_number(r, "rays_per_face", "radiation")?.unwrap_or(256.0);
+                    if !(1.0..=65536.0).contains(&rays) || rays.fract() != 0.0 {
+                        return Err(bad(
+                            "radiation.rays_per_face must be a whole number in 1..=65536",
+                        ));
+                    }
+                    rays as usize
+                }
+                None => 256,
+            },
+            ray_seed: match root.get("radiation") {
+                Some(r) => {
+                    optional_number(r, "seed", "radiation")?.map_or(0x5EED_0FA1, |v| v as u64)
+                }
+                None => 0x5EED_0FA1,
+            },
         })
     }
 }
@@ -753,6 +783,27 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             _ => unreachable!("filtered to fan faces"),
         },
     });
+    // Surface radiation: openings, inlets and fans are the surroundings at
+    // their temperatures; walls and symmetry planes are opaque.
+    let radiation = scene.emissivity.iter().any(|e| *e > 0.0).then(|| {
+        let surroundings = scene.faces.map(|rule| match rule {
+            FaceRule::Inlet { temperature, .. } | FaceRule::Fan { temperature, .. } => {
+                Some(temperature)
+            }
+            FaceRule::Opening { ambient } => Some(ambient),
+            FaceRule::Symmetry | FaceRule::Wall(_) => None,
+        });
+        let mut config = RadiationConfig::new(scene.emissivity.clone(), surroundings);
+        config.rays_per_face = scene.rays_per_face;
+        config.seed = scene.ray_seed;
+        config
+    });
+    if radiation.is_some() && scene.transient.is_some() {
+        return Err(bad(
+            "transient marches do not carry radiation; drop the transient block or the emissivities",
+        ));
+    }
+    let mut radiated: Option<(f64, usize, usize)> = None;
     let started = Instant::now();
     let buoyant = scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0));
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
@@ -774,6 +825,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let expansion = scene.expansion.unwrap_or(1.0 / reference);
             let mut config = FvBuoyancyConfig::new(gravity, expansion, reference, flow_config);
             config.max_couplings = scene.max_iterations;
+            config.radiation.clone_from(&radiation);
             let run = fv_natural_convection(
                 &domain,
                 &scene.fluid,
@@ -783,20 +835,40 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 gate,
             )
             .map_err(|e| solver_failure(&e))?;
+            if let Some(w) = run.report.radiated_w {
+                radiated = Some((w, run.report.couplings, 0));
+            }
             (run.flow, run.energy, Some(run.report.couplings))
         } else {
             let flow = simple_flow(&domain, &scene.fluid, &flow_config, gate)
                 .map_err(|e| solver_failure(&e))?;
-            let energy = solve_energy(
-                &domain,
-                &scene.fluid,
-                &scene.materials,
-                &flow.field,
-                &setup,
-                &EnergyConfig::default(),
-                gate,
-            )
-            .map_err(|e| solver_failure(&e))?;
+            let energy = match &radiation {
+                Some(config) => {
+                    let (energy, report) = solve_energy_radiating(
+                        &domain,
+                        &scene.fluid,
+                        &scene.materials,
+                        &flow.field,
+                        &setup,
+                        &EnergyConfig::default(),
+                        config,
+                        gate,
+                    )
+                    .map_err(|e| solver_failure(&e))?;
+                    radiated = Some((report.radiated_w, report.iterations, report.exposed_faces));
+                    energy
+                }
+                None => solve_energy(
+                    &domain,
+                    &scene.fluid,
+                    &scene.materials,
+                    &flow.field,
+                    &setup,
+                    &EnergyConfig::default(),
+                    gate,
+                )
+                .map_err(|e| solver_failure(&e))?,
+            };
             (flow, energy, None)
         };
     // Optional transient march over the converged (forced) flow.
@@ -923,15 +995,24 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         }
         let _ = write!(
             out,
-            "}},\"energy\":{{\"iterations\":{},\"relative_residual\":{},\"source_w\":{},\"boundary_outflow_w\":{},\"advective_outflow_w\":{},\"balance_relative_residual\":{},\"max_cell_peclet\":{}}}",
+            "}},\"energy\":{{\"iterations\":{},\"relative_residual\":{},\"source_w\":{},\"boundary_outflow_w\":{},\"advective_outflow_w\":{},\"sink_outflow_w\":{},\"balance_relative_residual\":{},\"max_cell_peclet\":{}}}",
             energy.report.iterations,
             num(energy.report.relative_residual)?,
             num(b.source_w)?,
             num(b.boundary_outflow_w)?,
             num(b.advective_outflow_w)?,
+            num(b.sink_outflow_w)?,
             num(b.relative_residual)?,
             num(energy.report.max_cell_peclet)?
         );
+        if let Some((w, iterations, faces)) = radiated {
+            let _ = write!(
+                out,
+                ",\"radiation\":{{\"radiated_w\":{},\"iterations\":{iterations},\"exposed_faces\":{faces},\"rays_per_face\":{}}}",
+                num(w)?,
+                scene.rays_per_face
+            );
+        }
         out.push_str(",\"materials\":[");
         for (i, (name, cells, max, mean)) in material_rows.iter().enumerate() {
             if i > 0 {

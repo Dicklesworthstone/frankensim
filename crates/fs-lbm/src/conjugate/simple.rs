@@ -277,16 +277,6 @@ enum Kind {
     Outlet(usize),
 }
 
-impl Kind {
-    /// Momentum row of a solved face.
-    const fn row(self) -> Option<usize> {
-        match self {
-            Self::Unknown(row) | Self::Outlet(row) => Some(row),
-            Self::Fixed(_) => None,
-        }
-    }
-}
-
 /// Face lattice of one velocity component.
 #[derive(Debug, Clone)]
 struct Component {

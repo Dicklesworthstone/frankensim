@@ -18,9 +18,10 @@ use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, ContactResistance, ConvectionScheme, EnergyConfig, FanCurve,
     FanInlet, FlowFace, FlowField, FluidProperties, FvBoundary, FvBuoyancyConfig,
-    LbmCollisionChoice, LbmFlowConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
-    TransientConfig, Voxel, VoxelDomain, fv_natural_convection, lbm_duct_flow, march_energy,
-    natural_convection, simple_flow, solve_energy,
+    LbmCollisionChoice, LbmFlowConfig, RadiationConfig, STEFAN_BOLTZMANN, SimpleConfig,
+    SolidMaterial, ThermalFace, ThermalSetup, TransientConfig, Voxel, VoxelDomain, escape_factors,
+    fv_natural_convection, lbm_duct_flow, march_energy, natural_convection, simple_flow,
+    solve_energy, solve_energy_radiating,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -1708,4 +1709,125 @@ fn orthotropic_conductivity_and_contact_resistance_are_exact_in_series() {
         "{jump} vs {}",
         q * resistance
     );
+}
+
+#[test]
+fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
+    // A slab filling the floor of a box whose other five faces are
+    // surroundings at 300 K sees them with escape factor exactly one, so
+    // with air made non-conducting its steady temperature is
+    // (P / (eps sigma A) + T_amb^4)^(1/4) in closed form.
+    let gate = CancelGate::new();
+    let (n, dx) = (6usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        if p[2] < dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let solids = [SolidMaterial::new("plate", 200.0)];
+    // Only the top face anchors the (non-conducting) air; the plate's edges
+    // touch the side faces, which must not conduct its heat away.
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[5] = ThermalFace::Temperature(300.0);
+    let mut setup = ThermalSetup::new(faces);
+    let power = 5.0;
+    setup.add_uniform_power(&domain, power, |p| p[2] < dx);
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    let radiation = RadiationConfig::new(vec![0.9], surroundings);
+    let exposed = escape_factors(&domain, &solids, &radiation, &gate).unwrap();
+    assert_eq!(exposed.len(), n * n);
+    assert!(
+        exposed
+            .iter()
+            .all(|f| f.escape == 1.0 && f.surroundings_k == 300.0)
+    );
+    let (solution, report) = solve_energy_radiating(
+        &domain,
+        &fluid,
+        &solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let area = (n * n) as f64 * dx * dx;
+    let exact = (power / (0.9 * STEFAN_BOLTZMANN * area) + 300f64.powi(4)).powf(0.25);
+    let plate = solution.temperature[domain.index(2, 3, 0)];
+    eprintln!("plate {plate:.9} K exact {exact:.9} K, {report:?}");
+    assert!((plate - exact).abs() < 1e-6, "{plate} vs {exact}");
+    assert!((report.radiated_w - power).abs() < 1e-6 * power);
+    assert!(solution.report.balance.relative_residual < 1e-9);
+    assert!((solution.report.balance.sink_outflow_w - power).abs() < 1e-6 * power);
+}
+
+#[test]
+fn parallel_plate_escape_matches_the_analytic_view_factor() {
+    // Two directly opposed 8 x 8 plates four cells apart, open on all four
+    // sides: the lower plate's mean escape factor is 1 - F_12, with F_12 the
+    // closed-form view factor between aligned parallel rectangles
+    // (Incropera, Table 13.2; X = Y = a / c = 2 gives 0.4152).
+    let gate = CancelGate::new();
+    let dx = 1e-3;
+    let domain = VoxelDomain::from_fn(8, 8, 6, dx, |p| {
+        if p[2] < dx || p[2] > 5.0 * dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    surroundings[5] = None;
+    let mut radiation = RadiationConfig::new(vec![1.0], surroundings);
+    radiation.rays_per_face = 4096;
+    let exposed = escape_factors(
+        &domain,
+        &[SolidMaterial::new("plate", 1.0)],
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let lower: Vec<f64> = exposed
+        .iter()
+        .filter(|f| domain.coords(f.cell)[2] == 0)
+        .map(|f| f.escape)
+        .collect();
+    assert_eq!(lower.len(), 64);
+    let mean = lower.iter().sum::<f64>() / 64.0;
+    let x: f64 = 2.0;
+    let (x2, y) = (x * x, x);
+    let f12 = 2.0 / (std::f64::consts::PI * x * y)
+        * ((((1.0 + x2) * (1.0 + y * y)) / (1.0 + x2 + y * y))
+            .sqrt()
+            .ln()
+            + x * (1.0 + y * y).sqrt() * (x / (1.0 + y * y).sqrt()).atan()
+            + y * (1.0 + x2).sqrt() * (y / (1.0 + x2).sqrt()).atan()
+            - x * x.atan()
+            - y * y.atan());
+    eprintln!(
+        "mean escape {mean:.5}, analytic 1 - F12 = {:.5} (F12 {f12:.5})",
+        1.0 - f12
+    );
+    // 64 x 4096 rays: standard error ~1e-3.
+    assert!((mean - (1.0 - f12)).abs() < 5e-3, "{mean} vs {}", 1.0 - f12);
+    // Deterministic streams: a rerun is bit-identical.
+    let again = escape_factors(
+        &domain,
+        &[SolidMaterial::new("plate", 1.0)],
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(exposed, again);
 }

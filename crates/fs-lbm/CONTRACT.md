@@ -983,6 +983,32 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 | Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
 | k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
 
+### Surface radiation to the surroundings (`radiation`)
+
+`solve_energy_radiating` (and `FvBuoyancyConfig::radiation` inside the
+natural-convection coupling) adds gray diffuse emission from every solid
+voxel face that borders fluid, `q = eps sigma F A (T^4 - T_amb^4)`, to the
+surroundings seen through declared domain faces (`RadiationConfig::
+surroundings_k`; openings and inlets, typically). The escape factor `F` is
+a Monte Carlo estimate: `rays_per_face` cosine-weighted rays per face,
+marched voxel by voxel (Amanatides–Woo), with counter-based streams keyed by
+`(seed, cell, face, ray)`, so estimates are bit-reproducible and carry the
+standard error `sqrt(F (1 - F) / rays)`. The energy equation takes `q` as a
+cell sink Newton-linearized about the previous iterate
+(`ThermalSetup::cell_sinks`, reported in `EnergyBalance::sink_outflow_w`),
+starting from the linearization about the surroundings temperature.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Slab filling a box floor, five faces surroundings at 300 K, non-conducting air, 5 W | `F = 1` exactly; `T = (P / (eps sigma A) + T_amb^4)^(1/4)` | every escape factor 1.0; 433.501645484 K vs 433.501645484 K; 5.000000000 W radiated; 6 Newton iterations |
+| Two opposed 8 x 8 plates four cells apart, sides open | `1 - F_12`, `F_12` the closed-form aligned-rectangle view factor (X = Y = 2: 0.41525) | mean escape 0.58231 vs 0.58475 with 64 x 4096 rays; reruns bit-identical |
+
+No-claims: surface-to-surface exchange (fin to fin, solid to a warm wall)
+and wall re-radiation are not modelled: a ray hitting a solid or an opaque
+face is simply not escaping, exact when the obstructing surfaces are at the
+emitter's temperature. Transparent air, gray diffuse opaque surfaces,
+Monte Carlo escape factors.
+
 ### Finite-volume natural convection (`fv_natural_convection`)
 
 Steady Boussinesq natural (or mixed) convection on the SIMPLEC flow and the
@@ -1100,8 +1126,9 @@ the central-moment operator the same duct diverged; it now refuses as
   through `lbm_duct_flow` or `simple_flow`, Boussinesq natural convection in
   closed enclosures through `natural_convection` and in closed or open
   domains through `fv_natural_convection`; no open-boundary LBM natural
-  convection, turbulence model, radiation, or temperature-dependent
-  properties. A natural-convection run that does not settle (for example
+  convection, turbulence model, or temperature-dependent properties;
+  radiation only as surface emission to the surroundings (no
+  surface-to-surface exchange). A natural-convection run that does not settle (for example
   above the transition Rayleigh number) refuses as `FlowNotSteady`.
 - Staircase voxel geometry at the declared `dx`; one run makes no
   mesh-convergence claim. Power-law convection is first order where the

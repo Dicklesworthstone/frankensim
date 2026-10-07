@@ -30,11 +30,12 @@ use fs_exec::CancelGate;
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
 use super::flow::FlowField;
+use super::radiation::{RadiationConfig, escape_factors, radiated_power, radiative_sinks};
 use super::simple::{FvFlow, SimpleConfig, Solver, admit};
 use super::{ChtError, finite, finite_positive, poll};
 
 /// Boussinesq coupling controls.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FvBuoyancyConfig {
     /// Gravitational acceleration vector, m/s^2.
     pub gravity_m_s2: [f64; 3],
@@ -53,6 +54,10 @@ pub struct FvBuoyancyConfig {
     /// Largest temperature change of one energy re-solve over the
     /// temperature span, at convergence.
     pub temperature_tolerance: f64,
+    /// Optional surface radiation to the surroundings (each coupling's
+    /// energy solve carries the sinks linearized about the current
+    /// temperature, so the coupling criterion also converges radiation).
+    pub radiation: Option<RadiationConfig>,
 }
 
 impl FvBuoyancyConfig {
@@ -74,6 +79,7 @@ impl FvBuoyancyConfig {
             sweeps_per_coupling: 5,
             max_couplings: 4000,
             temperature_tolerance: 1e-7,
+            radiation: None,
         }
     }
 }
@@ -92,6 +98,9 @@ pub struct FvNaturalConvectionReport {
     /// Largest temperature change of the last energy re-solve over the
     /// temperature span.
     pub temperature_change: f64,
+    /// Net heat radiated to the surroundings at the returned temperatures,
+    /// W, when radiation is declared.
+    pub radiated_w: Option<f64>,
 }
 
 /// Steady natural convection: flow, temperature and evidence.
@@ -164,6 +173,18 @@ pub fn fv_natural_convection(
             reason: "must be at least one".into(),
         });
     }
+    let exposed = match &config.radiation {
+        Some(radiation) => Some(escape_factors(domain, solids, radiation, gate)?),
+        None => None,
+    };
+    let with_radiation = |temperature: &[f64]| {
+        let mut step = setup.clone();
+        if let Some(faces) = &exposed {
+            step.cell_sinks
+                .extend(radiative_sinks(domain, faces, temperature));
+        }
+        step
+    };
     let mut solver = Solver::new(domain, fluid, &config.flow);
     // Seed the coupling with conduction through still fluid, the openings
     // held at their ambient temperature: a uniform reference field would
@@ -208,7 +229,7 @@ pub fn fv_natural_convection(
             fluid,
             solids,
             &solver.field(),
-            setup,
+            &with_radiation(&temperature),
             &config.energy,
             gate,
         )?;
@@ -248,10 +269,13 @@ pub fn fv_natural_convection(
         fluid,
         solids,
         &flow.field,
-        setup,
+        &with_radiation(&temperature),
         &config.energy,
         gate,
     )?;
+    let radiated_w = exposed
+        .as_ref()
+        .map(|faces| radiated_power(domain, faces, &energy.temperature));
     Ok(FvNaturalConvection {
         flow,
         energy,
@@ -261,6 +285,7 @@ pub fn fv_natural_convection(
             mass_residual: residuals.0,
             momentum_residual: residuals.1,
             temperature_change,
+            radiated_w,
         },
     })
 }

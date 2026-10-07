@@ -323,3 +323,68 @@ fn transient_march_warms_toward_the_steady_junction_and_closes_energy() {
             .contains("heat capacity")
     );
 }
+
+#[test]
+fn emissive_block_in_a_vented_column_runs_cooler_and_closes_with_radiation() {
+    // A heated block in a column open at both ends, cooled by natural
+    // convection: declaring an emissivity adds radiation to the
+    // surroundings through the openings, which can only cool it, and the
+    // radiated power is the energy balance's sink line.
+    let scene = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.006, 0.006, 0.016], "voxel_m": 0.001,
+ "materials": [{"name": "aluminium", "conductivity_w_m_k": 167.0, "emissivity": EPS}],
+ "solids": [{"material": "aluminium", "min_m": [0.002, 0.002, 0.006], "max_m": [0.004, 0.004, 0.010]}],
+ "sources": [{"name": "block", "power_w": 0.05, "min_m": [0.002, 0.002, 0.006], "max_m": [0.004, 0.004, 0.010]}],
+ "faces": {
+  "z-": {"type": "opening", "ambient_k": 300.0},
+  "z+": {"type": "opening", "ambient_k": 300.0}
+ },
+ "gravity_m_s2": [0.0, 0.0, -9.81],
+ "radiation": {"rays_per_face": 512},
+ "solver": {"tolerance": 1e-7}
+}"#;
+    let solve = |eps: &str, name: &str| {
+        let (code, result, stderr) = run(&scratch(name, &scene.replace("EPS", eps)));
+        assert_eq!(code, 0, "{stderr}");
+        assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+        result
+    };
+    let dark = solve("0.0", "column-dark.json");
+    let grey = solve("0.9", "column-grey.json");
+    assert!(dark.get("radiation").is_none());
+    let (t_dark, t_grey) = (
+        f(&dark, &["max_solid_temperature_k"]),
+        f(&grey, &["max_solid_temperature_k"]),
+    );
+    assert!(
+        t_grey < t_dark - 0.1,
+        "radiation must cool: {t_dark} -> {t_grey}"
+    );
+    let radiated = f(&grey, &["radiation", "radiated_w"]);
+    let sink = f(&grey, &["energy", "sink_outflow_w"]);
+    assert!(radiated > 0.0 && radiated < 0.05, "{radiated}");
+    assert!(
+        (radiated - sink).abs() < 1e-6 * 0.05,
+        "{radiated} vs {sink}"
+    );
+    // Everything generated leaves by advection, conduction or radiation.
+    let leaving = f(&grey, &["energy", "boundary_outflow_w"]) + sink;
+    assert!((leaving - 0.05).abs() < 1e-9, "{leaving}");
+    // A transient with radiation refuses rather than dropping it.
+    let forced_transient = scene
+        .replace("EPS", "0.9")
+        .replace(r#""gravity_m_s2": [0.0, 0.0, -9.81],"#, "")
+        .replace(
+            r#""solver": {"tolerance": 1e-7}"#,
+            r#""solver": {"tolerance": 1e-7}, "transient": {"time_step_s": 1.0, "steps": 2}"#,
+        );
+    let (code, diagnostic, _) = run(&scratch("rad-transient.json", &forced_transient));
+    assert_eq!(code, 4);
+    assert!(
+        diagnostic
+            .str_field("message")
+            .unwrap()
+            .contains("radiation")
+    );
+}

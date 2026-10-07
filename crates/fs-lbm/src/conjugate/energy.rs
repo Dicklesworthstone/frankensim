@@ -74,6 +74,21 @@ pub struct ThermalSetup {
     /// Thermal contact (interface) resistances between pairs of solid
     /// materials, in series on every face the two materials share.
     pub contacts: Vec<ContactResistance>,
+    /// Linear exchanges `G (T_cell - T_sink)` leaving individual cells (a
+    /// linearized radiation exchange, a compact thermal model's link).
+    pub cell_sinks: Vec<CellSink>,
+}
+
+/// A linear heat path from one cell to a fixed temperature: the heat
+/// leaving the cell is `conductance_w_k * (T_cell - temperature_k)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellSink {
+    /// Cell index.
+    pub cell: usize,
+    /// Conductance, W/K (non-negative).
+    pub conductance_w_k: f64,
+    /// Sink temperature, K.
+    pub temperature_k: f64,
 }
 
 /// Per-area thermal resistance of the interface between two solid
@@ -96,6 +111,7 @@ impl ThermalSetup {
             power_w: Vec::new(),
             fixed_temperature: Vec::new(),
             contacts: Vec::new(),
+            cell_sinks: Vec::new(),
         }
     }
 
@@ -182,7 +198,9 @@ pub struct EnergyBalance {
     /// enthalpy referenced to 0 K, which is exact because net boundary
     /// mass flow vanishes).
     pub advective_outflow_w: f64,
-    /// `source + fixed - outflow`.
+    /// Heat leaving through cell sinks (`ThermalSetup::cell_sinks`).
+    pub sink_outflow_w: f64,
+    /// `source + fixed - outflow - sink`.
     pub residual_w: f64,
     /// `|residual| / (|source| + |fixed| + sum |boundary flux|)`.
     pub relative_residual: f64,
@@ -599,6 +617,28 @@ pub(crate) fn solve_energy_inner(
     // The box grid is face-connected, so one anchor anywhere makes the
     // operator nonsingular; without one the problem is pure Neumann.
     let mut anchored = !setup.fixed_temperature.is_empty();
+    // Sinks per cell, validated once.
+    let mut sinks: Vec<(f64, f64)> = vec![(0.0, 0.0); cells];
+    for sink in &setup.cell_sinks {
+        if sink.cell >= cells {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.cell_sinks",
+                reason: format!("cell {} is outside the domain", sink.cell),
+            });
+        }
+        finite("thermal.cell_sinks.conductance_w_k", sink.conductance_w_k)?;
+        finite("thermal.cell_sinks.temperature_k", sink.temperature_k)?;
+        if sink.conductance_w_k < 0.0 {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.cell_sinks.conductance_w_k",
+                reason: "must be non-negative".into(),
+            });
+        }
+        let slot = &mut sinks[sink.cell];
+        slot.0 += sink.conductance_w_k;
+        slot.1 = sink.conductance_w_k.mul_add(sink.temperature_k, slot.1);
+        anchored |= sink.conductance_w_k > 0.0;
+    }
     for c in 0..cells {
         if c.is_multiple_of(4096) {
             super::poll(gate)?;
@@ -615,6 +655,9 @@ pub(crate) fn solve_energy_inner(
             ),
             None => (0.0, source(c)),
         };
+        // Cell sinks: G (T - T_sink) leaves the cell.
+        diag += sinks[c].0;
+        rhs += sinks[c].1;
         for f in 0..6 {
             let term = ctx.term(c, f);
             diag += term.diag;
@@ -679,8 +722,14 @@ pub(crate) fn solve_energy_inner(
         let off = term.off.map_or(0.0, |(n, a)| a * temperature[n]);
         term.diag.mul_add(temperature[c], -off) - term.rhs
     };
+    let mut sink_w = 0.0f64;
     for c in 0..cells {
+        let sink = sinks[c].0.mul_add(temperature[c], -sinks[c].1);
+        sink_w += sink;
+        scale += sink.abs();
         if fixed[c].is_some() {
+            // A fixed cell also feeds its own sinks.
+            fixed_w += sink;
             for f in 0..6 {
                 let term = ctx.term(c, f);
                 fixed_w += flux_of(&term, c);
@@ -711,12 +760,13 @@ pub(crate) fn solve_energy_inner(
         }
     }
     scale += fixed_w.abs();
-    let residual_w = source_w + fixed_w - out_w;
+    let residual_w = source_w + fixed_w - out_w - sink_w;
     let balance = EnergyBalance {
         source_w,
         fixed_cell_injection_w: fixed_w,
         boundary_outflow_w: out_w,
         advective_outflow_w: adv_w,
+        sink_outflow_w: sink_w,
         residual_w,
         relative_residual: if scale > 0.0 {
             residual_w.abs() / scale

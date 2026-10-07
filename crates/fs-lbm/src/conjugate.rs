@@ -86,6 +86,7 @@ mod energy;
 mod flow;
 mod krylov;
 mod natural;
+mod radiation;
 mod simple;
 mod transient;
 
@@ -94,14 +95,18 @@ pub use buoyant::{
 };
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
-    ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport, EnergySolution, ThermalFace,
-    ThermalSetup, solve_energy,
+    CellSink, ContactResistance, ConvectionScheme, EnergyBalance, EnergyConfig, EnergyReport,
+    EnergySolution, ThermalFace, ThermalSetup, solve_energy,
 };
 pub use flow::{
     FlowFace, FlowField, LbmCollisionChoice, LbmFlow, LbmFlowConfig, LbmFlowReport,
     ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
+pub use radiation::{
+    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, escape_factors,
+    radiated_power, radiative_sinks, solve_energy_radiating,
+};
 pub use simple::{FanCurve, FanInlet, FvBoundary, FvFlow, SimpleConfig, SimpleReport, simple_flow};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
