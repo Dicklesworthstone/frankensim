@@ -39,6 +39,7 @@ use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, ThermalSetup};
+use super::flow::FlowField;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{TransientRecord, energy_step, heat_capacity};
 use super::turbulence::TURBULENT_PRANDTL;
@@ -106,6 +107,11 @@ pub struct UnsteadyFlow {
     pub records: Vec<FlowStepRecord>,
     /// Cell velocity averaged over the steps from `average_from_step`, m/s.
     pub mean_velocity_m_s: Vec<[f64; 3]>,
+    /// Face fluxes averaged over the same steps: divergence-free like every
+    /// step's (an average of projected fields), so the steady energy
+    /// equation may run on it (neglecting the unsteady correlation
+    /// `<u' T'>`).
+    pub mean_field: FlowField,
     /// Steps in the average.
     pub averaged_steps: usize,
 }
@@ -204,6 +210,7 @@ struct Marcher<'a> {
     unsteady: &'a UnsteadyConfig,
     records: Vec<FlowStepRecord>,
     mean: Vec<[f64; 3]>,
+    mean_flux: Option<[Vec<f64>; 3]>,
     averaged: usize,
     sweeps: usize,
     residuals: (f64, f64),
@@ -225,6 +232,7 @@ impl<'a> Marcher<'a> {
             unsteady,
             records: Vec::with_capacity(unsteady.steps),
             mean: vec![[0.0; 3]; domain.cell_count()],
+            mean_flux: None,
             averaged: 0,
             sweeps: 0,
             residuals: (f64::INFINITY, f64::INFINITY),
@@ -257,6 +265,18 @@ impl<'a> Marcher<'a> {
         }
         if averaging {
             self.averaged += 1;
+            let field = self.solver.field();
+            let faces = field.face_arrays();
+            match &mut self.mean_flux {
+                Some(sum) => {
+                    for (total, now) in sum.iter_mut().zip(faces) {
+                        for (t, q) in total.iter_mut().zip(now) {
+                            *t += q;
+                        }
+                    }
+                }
+                None => self.mean_flux = Some(faces.map(<[f64]>::to_vec)),
+            }
         }
         self.records.push(FlowStepRecord {
             time_s: step as f64 * self.unsteady.time_step_s,
@@ -277,6 +297,15 @@ impl<'a> Marcher<'a> {
         let mean_velocity_m_s = self.mean.iter().map(|v| v.map(|x| x * scale)).collect();
         let averaged_steps = self.averaged;
         let records = self.records;
+        let mean_field = match self.mean_flux {
+            Some([fx, fy, fz]) => FlowField::from_face_arrays(
+                self.domain,
+                fx.into_iter().map(|q| q * scale).collect(),
+                fy.into_iter().map(|q| q * scale).collect(),
+                fz.into_iter().map(|q| q * scale).collect(),
+            ),
+            None => self.solver.field(),
+        };
         let flow = self
             .solver
             .finish(fluid, self.sweeps, self.residuals, gate)?;
@@ -284,6 +313,7 @@ impl<'a> Marcher<'a> {
             flow,
             records,
             mean_velocity_m_s,
+            mean_field,
             averaged_steps,
         })
     }

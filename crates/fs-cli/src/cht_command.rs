@@ -29,8 +29,8 @@ use fs_lbm::conjugate::{
     FacePatch, FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig,
     FvFlow, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace, ThermalSetup,
     TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
-    fv_natural_convection, march_conjugate, march_energy, simple_flow, solve_energy,
-    solve_energy_radiating,
+    fv_natural_convection, march_conjugate, march_energy, simple_flow, simple_unsteady,
+    solve_energy, solve_energy_radiating,
 };
 use fs_rep_mesh::{Soup, WindingOctree, winding_exact};
 use json::JsonValue as J;
@@ -41,7 +41,7 @@ const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
 const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -540,6 +540,9 @@ struct UnsteadyOptions {
     inner_tolerance: f64,
     /// `(time s, inlet velocity scale)`, like the power schedule.
     inlet_schedule: Vec<(f64, f64)>,
+    /// `energy: "steady-on-mean-flow"`: march the flow only, then solve the
+    /// steady energy equation on its time-averaged fluxes.
+    mean_flow_energy: bool,
 }
 
 /// A piecewise-linear `[[time_s, scale], ...]` schedule (increasing times).
@@ -624,11 +627,21 @@ impl Transient {
                         "transient.inner_iterations must be a whole number >= 1 and inner_tolerance positive",
                     ));
                 }
+                let mean_flow_energy = match value.str_field("energy") {
+                    None | Some("march") => false,
+                    Some("steady-on-mean-flow") => true,
+                    Some(other) => {
+                        return Err(bad(format!(
+                            "transient.energy must be \"march\" or \"steady-on-mean-flow\", not {other}"
+                        )));
+                    }
+                };
                 Some(UnsteadyOptions {
                     scheme,
                     inner_iterations: inner as usize,
                     inner_tolerance: tolerance,
                     inlet_schedule: parse_schedule(value.get("inlet_schedule"), "inlet_schedule")?,
+                    mean_flow_energy,
                 })
             }
             Some(other) => {
@@ -1398,13 +1411,20 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         config.patch_size = scene.patch_size;
         config
     });
-    if radiation.is_some() && scene.transient.is_some() {
+    // Steady energy on the time-averaged flow of an unsteady march.
+    let mean_flow = scene
+        .transient
+        .as_ref()
+        .and_then(|t| t.unsteady.as_ref().map(|o| (t, o)))
+        .filter(|(_, o)| o.mean_flow_energy);
+    if radiation.is_some() && scene.transient.is_some() && mean_flow.is_none() {
         return Err(bad(
             "transient marches do not carry radiation; drop the transient block or the emissivities",
         ));
     }
     if let Some(transient) = &scene.transient
         && let Some(options) = &transient.unsteady
+        && !options.mean_flow_energy
     {
         return execute_unsteady(
             scene,
@@ -1417,6 +1437,12 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         );
     }
     let mut radiated: Option<(f64, usize, usize)> = None;
+    let mut averaged_steps: Option<usize> = None;
+    if mean_flow.is_some() && scene.gravity.is_some_and(|g| g.iter().any(|v| *v != 0.0)) {
+        return Err(bad(
+            "steady-on-mean-flow energy needs a forced flow: a buoyant flow depends on the temperature it would freeze",
+        ));
+    }
     let started = Instant::now();
     let buoyant = scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0));
     let (flow, energy, couplings): (FvFlow, EnergySolution, Option<usize>) =
@@ -1453,8 +1479,31 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             }
             (run.flow, run.energy, Some(run.report.couplings))
         } else {
-            let flow = simple_flow(&domain, &scene.fluid, &flow_config, gate)
-                .map_err(|e| solver_failure(&e))?;
+            let flow = match mean_flow {
+                Some((transient, options)) => {
+                    let mut unsteady = UnsteadyConfig::new(transient.time_step_s, transient.steps);
+                    unsteady.scheme = options.scheme;
+                    unsteady.inner_iterations = options.inner_iterations;
+                    unsteady.inner_tolerance = options.inner_tolerance;
+                    let run = simple_unsteady(
+                        &domain,
+                        &scene.fluid,
+                        &flow_config,
+                        &unsteady,
+                        |t| interpolate(&options.inlet_schedule, t),
+                        gate,
+                    )
+                    .map_err(|e| solver_failure(&e))?;
+                    averaged_steps = Some(run.averaged_steps);
+                    FvFlow {
+                        field: run.mean_field,
+                        velocity_m_s: run.mean_velocity_m_s,
+                        ..run.flow
+                    }
+                }
+                None => simple_flow(&domain, &scene.fluid, &flow_config, gate)
+                    .map_err(|e| solver_failure(&e))?,
+            };
             if scene.turbulence != Turbulence::Laminar {
                 setup.eddy_conductivity_w_m_k = flow.eddy_conductivity(&scene.fluid);
             }
@@ -1490,6 +1539,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     // Optional transient march over the converged (forced) flow.
     let march = match (&scene.transient, couplings) {
         (None, _) => None,
+        (Some(_), _) if mean_flow.is_some() => None,
         (Some(_), Some(_)) => {
             return Err(bad(
                 "transient runs freeze the flow; a buoyant scene's flow depends on temperature",
@@ -1585,6 +1635,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     };
     let solver_name = if couplings.is_some() {
         "fv-simplec-boussinesq"
+    } else if averaged_steps.is_some() {
+        "fv-simplec-unsteady-mean-flow"
     } else {
         "fv-simplec"
     };
@@ -1619,6 +1671,9 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         }
         if let Some(couplings) = couplings {
             let _ = write!(out, ",\"energy_couplings\":{couplings}");
+        }
+        if let Some(steps) = averaged_steps {
+            let _ = write!(out, ",\"averaged_steps\":{steps}");
         }
         if let Some((q, dp, mismatch)) = r.fan {
             let _ = write!(

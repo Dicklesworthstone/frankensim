@@ -1069,7 +1069,11 @@ pressure correction leaves its fluxes divergence-free. Inlets follow an
 `inlet_schedule(t)` (ramps, fan start-up); a face fan's operating-point
 iteration is steady and refuses (internal fans march). Records carry the
 sweeps, residuals, a probe velocity and the kinetic energy per step, plus a
-time-averaged velocity over a declared window. `march_conjugate` advances
+time-averaged velocity and time-averaged face fluxes (`mean_field`,
+divergence-free as an average of projected fields) over a declared window;
+the steady energy equation may run on `mean_field` when the flow's time
+scales are far below the solids' thermal ones (no-claim: that neglects the
+unsteady correlation `<u' T'>`). `march_conjugate` advances
 flow and energy together: each step's flow (with the Boussinesq force of
 the previous step's temperature when declared, and LVEL's eddy
 conductivity), then the backward-Euler energy step of `march_energy` on

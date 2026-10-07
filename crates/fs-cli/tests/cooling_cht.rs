@@ -446,6 +446,32 @@ fn unsteady_march_ramps_the_duct_flow_and_closes_every_step() {
 }
 
 #[test]
+fn steady_energy_on_the_mean_flow_matches_a_settled_flow() {
+    // A flow that settles: the time average over 1..2 s of the started duct
+    // is its steady flow, so the steady energy on that mean flow must give
+    // the steady scene's chip temperature.
+    let (code, steady, stderr) = run(&scratch("duct-steady-ref.json", DUCT));
+    assert_eq!(code, 0, "{stderr}");
+    let scene = DUCT.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8},
+ "transient": {"time_step_s": 0.1, "steps": 20, "flow": "unsteady",
+   "energy": "steady-on-mean-flow", "inner_tolerance": 1e-9}"#,
+    );
+    assert_ne!(scene, DUCT);
+    let (code, mean, stderr) = run(&scratch("duct-mean-flow.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(mean.str_field("solver"), Some("fv-simplec-unsteady-mean-flow"));
+    assert_eq!(mean.path(&["flow", "averaged_steps"]).and_then(J::as_f64), Some(10.0));
+    assert!(f(&mean, &["energy", "balance_relative_residual"]) < 1e-9);
+    let (a, b) = (
+        f(&steady, &["max_solid_temperature_k"]),
+        f(&mean, &["max_solid_temperature_k"]),
+    );
+    assert!((a - b).abs() < 1e-4 * (a - 300.0), "steady {a} vs mean-flow {b}");
+}
+
+#[test]
 fn unsteady_buoyant_column_starts_its_own_draft() {
     // The heated-wall chimney from rest: buoyancy starts the draft without
     // any inlet, and the march reports it.

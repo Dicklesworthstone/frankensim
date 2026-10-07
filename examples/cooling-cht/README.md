@@ -66,7 +66,13 @@ Scene (`frankensim.cooling-cht.v1`):
   instead of refused. The unsteady result reports the march: steps and
   sweeps, final kinetic energy and flows, per-step records, the peak and
   final solid temperatures, and per source the final and time-averaged
-  (second half) maxima. Frozen-flow transients still refuse buoyant scenes.
+  (second half) maxima. With `"energy": "steady-on-mean-flow"` the march
+  carries the flow only, and the steady energy equation (with any
+  radiation) runs on its time-averaged fluxes (second half of the march):
+  the practical answer for a wake that never settles while the solids'
+  thermal time constants are minutes. That neglects the unsteady
+  correlation `<u' T'>` and needs a forced flow (buoyant scenes refuse).
+  Frozen-flow transients still refuse buoyant scenes.
 - Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
   `reference_temperature_k` (default: the first inlet or opening
   temperature), `solver.tolerance`, `solver.max_iterations`,

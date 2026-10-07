@@ -102,6 +102,12 @@ impl FlowField {
         }
     }
 
+    /// The x, y and z face-flux arrays, m^3/s (the layout of
+    /// [`Self::from_face_arrays`]).
+    pub(crate) fn face_arrays(&self) -> [&[f64]; 3] {
+        [&self.fx, &self.fy, &self.fz]
+    }
+
     /// Sample a face-normal velocity (m/s) at every face centre that carries
     /// flow: interior faces between two fluid cells, and boundary faces of
     /// fluid cells on [`FlowFace::Fixed`] / [`FlowFace::Free`] domain
