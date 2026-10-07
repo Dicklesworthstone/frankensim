@@ -11,6 +11,7 @@ use fs_matdb::{ClaimSelection, ClaimSet, EnvelopeAnswer, PropertySupportError, Q
 use fs_qty::{Dims, QtyAny};
 use crate::{InterfaceState, ProjectError};
 
+pub mod band;
 mod sensitivity;
 pub use sensitivity::{StateSensitivity, continuous_coordinate, resistance_sensitivity};
 
