@@ -248,7 +248,6 @@ impl<'a> Marcher<'a> {
         self.solver.project(gate)?;
         self.sweeps += inner;
         self.residuals = residuals;
-        let volume = self.domain.dx().powi(3);
         let mut kinetic = 0.0;
         let averaging = step >= self.unsteady.average_from_step;
         for c in 0..self.domain.cell_count() {
@@ -256,7 +255,8 @@ impl<'a> Marcher<'a> {
                 continue;
             }
             let v = self.solver.cell_velocity(c);
-            kinetic += 0.5 * self.rho * volume * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            kinetic +=
+                0.5 * self.rho * self.domain.volume(c) * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             if averaging {
                 for a in 0..3 {
                     self.mean[c][a] += v[a];

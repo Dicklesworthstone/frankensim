@@ -157,7 +157,6 @@ pub(crate) fn heat_capacity(
     fluid: &FluidProperties,
     solids: &[SolidMaterial],
 ) -> Result<Vec<f64>, ChtError> {
-    let volume = domain.dx() * domain.dx() * domain.dx();
     (0..domain.cell_count())
         .map(|c| {
             let rho_c = match domain.voxel_at(c) {
@@ -174,7 +173,7 @@ pub(crate) fn heat_capacity(
                     value
                 }
             };
-            Ok(rho_c * volume)
+            Ok(rho_c * domain.volume(c))
         })
         .collect()
 }

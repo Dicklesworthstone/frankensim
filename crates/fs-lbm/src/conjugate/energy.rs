@@ -4,7 +4,8 @@
 //! Every face contributes one outward total energy flux written as
 //! `J = d T_P - a T_N - r` (Patankar, *Numerical Heat Transfer and Fluid
 //! Flow*, 1980, §5.2–5.4): for an interior face with outward heat-capacity
-//! flux `F = rho c_p Q` and diffusive conductance `D = A k_h / dx`,
+//! flux `F = rho c_p Q` and diffusive conductance `D = A k_h / dx` (on a
+//! graded grid `dx` is the centre distance and `k_h` weights the half widths),
 //! `a = D A(|F|/D) + max(-F, 0)` and `d = a + F`; the two sides of one face
 //! therefore carry equal and opposite `J` for ANY temperatures, so the global
 //! energy balance telescopes exactly. `k_h = 2 k_P k_N / (k_P + k_N)` is the
@@ -112,11 +113,11 @@ pub struct CompactComponent {
 
 impl CompactComponent {
     /// Area of the case-top (= board) face, m^2.
-    fn face_area(&self, dx: f64) -> f64 {
+    fn face_area(&self, domain: &VoxelDomain) -> f64 {
         let axis = self.board_face as usize / 2;
         (0..3)
             .filter(|&a| a != axis)
-            .map(|a| (self.hi[a] - self.lo[a]) as f64 * dx)
+            .map(|a| (self.lo[a]..self.hi[a]).map(|i| domain.width(a, i)).sum::<f64>())
             .product()
     }
 }
@@ -175,8 +176,8 @@ impl ThermalSetup {
         }
     }
 
-    /// Spread `total_w` uniformly over the cells whose centre satisfies
-    /// `inside`; returns the number of heated cells.
+    /// Spread `total_w` uniformly (by volume) over the cells whose centre
+    /// satisfies `inside`; returns the number of heated cells.
     ///
     /// # Panics
     /// If `power_w` is non-empty with the wrong length.
@@ -200,10 +201,11 @@ impl ThermalSetup {
                 inside(domain.center(x, y, z))
             })
             .collect();
-        if !cells.is_empty() {
-            let each = total_w / cells.len() as f64;
-            for c in &cells {
-                self.power_w[*c] += each;
+        // By volume: uniform power density on a graded grid as well.
+        let volume: f64 = cells.iter().map(|&c| domain.volume(c)).sum();
+        if volume > 0.0 {
+            for &c in &cells {
+                self.power_w[c] += total_w * domain.volume(c) / volume;
             }
         }
         cells.len()
@@ -341,7 +343,6 @@ impl EnergySolution {
     /// fluid/solid face, W.
     #[must_use]
     pub fn solid_to_fluid_heat_w(&self, domain: &VoxelDomain) -> f64 {
-        let dx = domain.dx();
         let mut total = 0.0;
         // A collapsed component cell holds its junction's temperature and
         // reaches its neighbours only through the junction's links.
@@ -368,7 +369,8 @@ impl EnergySolution {
                 {
                     let axis = f / 2;
                     let (kc, kn) = (self.conductivity[c][axis], self.conductivity[n][axis]);
-                    let d = dx * 2.0 * kc * kn / (kc + kn);
+                    let d = domain.face_area(c, axis)
+                        / (0.5 * domain.widths(c)[axis] / kc + 0.5 * domain.widths(n)[axis] / kn);
                     total += d * (self.temperature[c] - self.temperature[n]);
                 }
             }
@@ -435,8 +437,9 @@ impl Context<'_> {
     }
 
     fn term(&self, c: usize, f: usize) -> FaceTerm {
-        let dx = self.domain.dx();
-        let area = dx * dx;
+        let axis = f / 2;
+        let area = self.domain.face_area(c, axis);
+        let half_c = 0.5 * self.domain.widths(c)[axis];
         let flux = self.rho_c * self.flow.outward(self.domain, c, f);
         let kc = self.k[c][f / 2];
         if let Some(n) = self.domain.neighbor(c, f) {
@@ -444,7 +447,8 @@ impl Context<'_> {
             // Series resistance of the two half cells and any contact
             // between their materials: exact for piecewise-constant k.
             let contact = self.contact(c, n);
-            let d = area / (0.5 * dx / kc + contact + 0.5 * dx / kn);
+            let half_n = 0.5 * self.domain.widths(n)[axis];
+            let d = area / (half_c / kc + contact + half_n / kn);
             let a = d.mul_add(self.weight(flux / d), (-flux).max(0.0));
             return FaceTerm {
                 diag: a + flux,
@@ -454,7 +458,7 @@ impl Context<'_> {
             };
         }
         let solid = !self.domain.is_fluid(c);
-        let half = 2.0 * dx * kc; // A k / (dx/2)
+        let half = area * kc / half_c; // A k / (w/2)
         match self.faces[f] {
             ThermalFace::Adiabatic => FaceTerm {
                 diag: 0.0,
@@ -475,7 +479,7 @@ impl Context<'_> {
                 advective: Advective::None,
             },
             ThermalFace::Convective { h, ambient } => {
-                let u = area / (1.0 / h + 0.5 * dx / kc);
+                let u = area / (1.0 / h + half_c / kc);
                 FaceTerm {
                     diag: u,
                     off: None,
@@ -781,7 +785,10 @@ pub(crate) fn solve_energy_inner(
             if let Some((n, a)) = term.off {
                 coo.push(c, n, -a);
                 if domain.is_fluid(c) && domain.is_fluid(n) {
-                    let d = domain.dx() * ctx.k[c][f / 2];
+                    // A k / (centre distance).
+                    let axis = f / 2;
+                    let d = domain.face_area(c, axis) * ctx.k[c][axis]
+                        / (0.5 * (domain.widths(c)[axis] + domain.widths(n)[axis]));
                     let flux = ctx.rho_c * flow.outward(domain, c, f);
                     max_cell_peclet = max_cell_peclet.max(flux.abs() / d);
                 }
@@ -1017,15 +1024,13 @@ impl Compact {
                 }
             }
         }
-        let dx = domain.dx();
-        let face_area = dx * dx;
         let mut links = Vec::with_capacity(parts.len());
         let mut by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
             std::collections::BTreeMap::new();
         for (i, part) in parts.iter().enumerate() {
             let board = part.board_face as usize;
             let axis = board / 2;
-            let area = part.face_area(dx);
+            let area = part.face_area(domain);
             let mut list = Vec::new();
             for z in part.lo[2]..part.hi[2] {
                 for y in part.lo[1]..part.hi[1] {
@@ -1053,9 +1058,11 @@ impl Compact {
                                 Some(m) => {
                                     // The resistor's area share in series
                                     // with the outside cell's half width.
+                                    let face_area = domain.face_area(m, axis);
                                     let g = 1.0
                                         / (resistance * area / face_area
-                                            + 0.5 * dx / (k[m][axis] * face_area));
+                                            + 0.5 * domain.widths(m)[axis]
+                                                / (k[m][axis] * face_area));
                                     list.push((m, g, f == board));
                                     by_cell.entry(m).or_default().push((i, g));
                                 }

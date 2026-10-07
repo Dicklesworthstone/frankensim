@@ -200,27 +200,99 @@ fn per_axis(object: &J, key: &str, at: &str, default: f64) -> Result<[f64; 3]> {
     }
 }
 
-/// Cells of each axis whose (tie-shifted) centres lie in `[min, max)`.
-fn cell_span(min: f64, max: f64, dx: f64, cells: usize) -> (usize, usize) {
-    let tie = 1e-6 * dx;
-    let first = |edge: f64| {
-        (0..cells)
-            .find(|&i| (i as f64 + 0.5).mul_add(dx, tie) >= edge)
-            .unwrap_or(cells)
-    };
-    (first(min), first(max))
+/// The scene's Cartesian grid: uniform (`voxel_m`) or graded per axis
+/// (`grid` zones).
+#[derive(Debug, Clone)]
+struct Grid {
+    widths: [Vec<f64>; 3],
+    faces: [Vec<f64>; 3],
+    centres: [Vec<f64>; 3],
+    /// The uniform spacing, when uniform.
+    uniform: Option<f64>,
+    min_width: f64,
 }
 
-/// Cell ranges `lo..hi` of a box (each non-empty) in a `dims` grid.
-fn cell_box(
-    region: &Aabb,
-    dx: f64,
-    dims: [usize; 3],
-    at: &str,
-) -> Result<([usize; 3], [usize; 3])> {
+impl Grid {
+    fn from_widths(widths: [Vec<f64>; 3]) -> Self {
+        let faces = widths.clone().map(|list| {
+            let mut faces = vec![0.0];
+            for w in list {
+                faces.push(faces.last().copied().unwrap_or(0.0) + w);
+            }
+            faces
+        });
+        let centres = faces
+            .clone()
+            .map(|f| f.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect());
+        let first = widths[0][0];
+        let uniform = widths
+            .iter()
+            .all(|list| list.iter().all(|w| *w == first))
+            .then_some(first);
+        let min_width = widths
+            .iter()
+            .flatten()
+            .fold(f64::INFINITY, |m, w| m.min(*w));
+        Self {
+            widths,
+            faces,
+            centres,
+            uniform,
+            min_width,
+        }
+    }
+
+    fn dims(&self) -> [usize; 3] {
+        [0, 1, 2].map(|a| self.widths[a].len())
+    }
+
+    fn length(&self, axis: usize) -> f64 {
+        *self.faces[axis].last().expect("non-empty axis")
+    }
+
+    /// Cells of `axis` whose tie-shifted centres lie in `[min, max)`.
+    fn span(&self, axis: usize, min: f64, max: f64) -> (usize, usize) {
+        let tie = 1e-6 * self.min_width;
+        let centres = &self.centres[axis];
+        let first = |edge: f64| centres.partition_point(|c| c + tie < edge);
+        (first(min), first(max))
+    }
+
+    /// The face plane of `axis` at coordinate `at` (within 1e-6 of the
+    /// smallest width).
+    fn plane(&self, axis: usize, at: f64) -> Option<usize> {
+        let faces = &self.faces[axis];
+        let i = faces.partition_point(|f| *f < at - 1e-6 * self.min_width);
+        (i < faces.len() && (faces[i] - at).abs() <= 1e-6 * self.min_width).then_some(i)
+    }
+
+    /// The cell of `axis` containing coordinate `v`.
+    fn locate(&self, axis: usize, v: f64) -> usize {
+        self.faces[axis]
+            .partition_point(|f| *f <= v)
+            .clamp(1, self.widths[axis].len())
+            - 1
+    }
+
+    fn domain(
+        &self,
+        occupancy: impl FnMut([f64; 3]) -> Voxel,
+    ) -> std::result::Result<VoxelDomain, ChtError> {
+        match self.uniform {
+            Some(dx) => {
+                let [nx, ny, nz] = self.dims();
+                VoxelDomain::from_fn(nx, ny, nz, dx, occupancy)
+            }
+            None => VoxelDomain::graded_from_fn(self.widths.clone(), occupancy),
+        }
+    }
+}
+
+/// Cell ranges `lo..hi` of a box (each non-empty) in the grid.
+fn cell_box(region: &Aabb, grid: &Grid, at: &str) -> Result<([usize; 3], [usize; 3])> {
     let (mut lo, mut hi) = ([0; 3], [0; 3]);
     for a in 0..3 {
-        (lo[a], hi[a]) = cell_span(region.min[a], region.max[a], dx, dims[a]);
+        (lo[a], hi[a]) = grid.span(a, region.min[a], region.max[a]);
         if lo[a] >= hi[a] {
             return Err(bad(format!(
                 "{at}: the box covers no voxel centre on axis {a}"
@@ -233,29 +305,31 @@ fn cell_box(
 /// An interior face patch: `axis` ("x", "y", "z"), the plane `at_m` (on a
 /// voxel face strictly inside the domain), and the transverse extent of the
 /// box `min_m`/`max_m` (its entries along `axis` are ignored).
-fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch> {
+fn face_patch(item: &J, grid: &Grid, at: &str) -> Result<FacePatch> {
+    let dims = grid.dims();
     let axis = match item.str_field("axis") {
         Some("x") => 0,
         Some("y") => 1,
         Some("z") => 2,
         _ => return Err(bad(format!("{at}.axis must be \"x\", \"y\" or \"z\""))),
     };
-    let plane = number(item, "at_m", at)? / dx;
-    let index = plane.round();
-    if (plane - index).abs() > 1e-6 || index < 1.0 || index >= dims[axis] as f64 {
-        return Err(bad(format!(
-            "{at}.at_m must lie on a voxel face strictly inside the domain"
-        )));
-    }
+    let index = grid
+        .plane(axis, number(item, "at_m", at)?)
+        .filter(|&i| i >= 1 && i < dims[axis])
+        .ok_or_else(|| {
+            bad(format!(
+                "{at}.at_m must lie on a voxel face strictly inside the domain"
+            ))
+        })?;
     let mut min = vec3(item, "min_m", at)?;
     let mut max = vec3(item, "max_m", at)?;
     // The normal extent is irrelevant: give the box one full cell there.
     min[axis] = 0.0;
-    max[axis] = dx;
-    let (lo, hi) = cell_box(&Aabb { min, max }, dx, dims, at)?;
+    max[axis] = grid.faces[axis][1];
+    let (lo, hi) = cell_box(&Aabb { min, max }, grid, at)?;
     Ok(FacePatch {
         axis,
-        index: index as usize,
+        index,
         lo,
         hi,
     })
@@ -267,7 +341,7 @@ fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch
 /// across the other horizontal axis (the outer fins flush with the base
 /// edges). Every fin must cover voxel centres and every gap must keep a
 /// fluid voxel, so a design the grid cannot represent refuses.
-fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<Vec<Aabb>> {
+fn plate_fin_heatsink(item: &J, grid: &Grid, at: &str) -> Result<Vec<Aabb>> {
     let origin = vec3(item, "base_min_m", at)?;
     let size = vec3(item, "base_size_m", at)?;
     let count = number(item, "fin_count", at)?;
@@ -317,17 +391,17 @@ fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<V
         max[across] = start + thickness;
         min[2] = origin[2] + size[2];
         max[2] = min[2] + height;
-        let (lo, hi) = cell_span(min[across], max[across], dx, dims[across]);
+        let (lo, hi) = grid.span(across, min[across], max[across]);
         if lo >= hi {
             return Err(bad(format!(
-                "{at}: fin {i} ({thickness} m) covers no voxel centre at voxel_m {dx}"
+                "{at}: fin {i} ({thickness} m) covers no voxel centre on this grid"
             )));
         }
         if let Some(end) = previous_end {
-            let (gap_lo, gap_hi) = cell_span(end, start, dx, dims[across]);
+            let (gap_lo, gap_hi) = grid.span(across, end, start);
             if gap_lo >= gap_hi {
                 return Err(bad(format!(
-                    "{at}: the gap before fin {i} holds no fluid voxel at voxel_m {dx} (fins merge)"
+                    "{at}: the gap before fin {i} holds no fluid voxel on this grid (fins merge)"
                 )));
             }
         }
@@ -335,6 +409,56 @@ fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<V
         parts.push(Aabb { min, max });
     }
     Ok(parts)
+}
+
+/// A graded grid: per axis (`x`, `y`, `z`) a list of zones `{"to_m",
+/// "voxel_m"}` from the previous zone's end (0 first), each a whole number
+/// of uniform cells.
+fn parse_grid(value: &J) -> Result<Grid> {
+    let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+    for (a, key) in ["x", "y", "z"].iter().enumerate() {
+        let at = format!("grid.{key}");
+        let zones = value
+            .get(key)
+            .and_then(J::as_array)
+            .filter(|z| !z.is_empty())
+            .ok_or_else(|| {
+                bad(format!(
+                    "{at} must be a non-empty array of {{to_m, voxel_m}} zones"
+                ))
+            })?;
+        let mut from = 0.0f64;
+        for (i, zone) in zones.iter().enumerate() {
+            let zat = format!("{at}[{i}]");
+            let to = number(zone, "to_m", &zat)?;
+            let voxel = number(zone, "voxel_m", &zat)?;
+            if !(to > from) || !(voxel > 0.0) {
+                return Err(bad(format!(
+                    "{zat}: to_m must increase and voxel_m be positive"
+                )));
+            }
+            let cells = (to - from) / voxel;
+            let rounded = cells.round();
+            if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
+                return Err(bad(format!(
+                    "{zat}: the zone {from}..{to} m is not a whole number of {voxel} m voxels"
+                )));
+            }
+            let width = (to - from) / rounded;
+            widths[a].extend(std::iter::repeat_n(width, rounded as usize));
+            from = to;
+        }
+    }
+    if widths.iter().map(Vec::len).product::<usize>() > MAX_CELLS {
+        return Err(Failure {
+            code: "cooling-cht-budget",
+            message: format!(
+                "{} cells exceed the {MAX_CELLS}-cell cap",
+                widths.iter().map(Vec::len).product::<usize>()
+            ),
+        });
+    }
+    Ok(Grid::from_widths(widths))
 }
 
 /// An axis-aligned box `[min, max)` in metres.
@@ -487,8 +611,9 @@ enum FaceRule {
 }
 
 struct Scene {
-    dims: [usize; 3],
+    /// The smallest cell width (the uniform spacing on a uniform grid).
     dx: f64,
+    grid: Grid,
     fluid: FluidProperties,
     materials: Vec<SolidMaterial>,
     contacts: Vec<ContactResistance>,
@@ -676,23 +801,38 @@ impl Scene {
         if root.str_field("schema") != Some(SCHEMA) {
             return Err(bad(format!("schema must be {SCHEMA}")));
         }
-        let dx = number(&root, "voxel_m", "scene")?;
-        if dx <= 0.0 {
-            return Err(bad("scene.voxel_m must be positive"));
-        }
-        let size = vec3(&root, "size_m", "scene")?;
-        let mut dims = [0usize; 3];
-        for a in 0..3 {
-            let cells = size[a] / dx;
-            let rounded = cells.round();
-            if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
-                return Err(bad(format!(
-                    "scene.size_m[{a}] = {} is not a whole number of {dx} m voxels",
-                    size[a]
-                )));
+        let grid = match root.get("grid") {
+            Some(zones) => {
+                if root.get("voxel_m").is_some() {
+                    return Err(bad(
+                        "declare either voxel_m (uniform) or grid (graded), not both",
+                    ));
+                }
+                parse_grid(zones)?
             }
-            dims[a] = rounded as usize;
-        }
+            None => {
+                let dx = number(&root, "voxel_m", "scene")?;
+                if dx <= 0.0 {
+                    return Err(bad("scene.voxel_m must be positive"));
+                }
+                let size = vec3(&root, "size_m", "scene")?;
+                let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+                for a in 0..3 {
+                    let cells = size[a] / dx;
+                    let rounded = cells.round();
+                    if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
+                        return Err(bad(format!(
+                            "scene.size_m[{a}] = {} is not a whole number of {dx} m voxels",
+                            size[a]
+                        )));
+                    }
+                    widths[a] = vec![dx; rounded as usize];
+                }
+                Grid::from_widths(widths)
+            }
+        };
+        let dims = grid.dims();
+        let dx = grid.min_width;
         if dims.iter().product::<usize>() > MAX_CELLS {
             return Err(Failure {
                 code: "cooling-cht-budget",
@@ -820,7 +960,7 @@ impl Scene {
                 .ok_or_else(|| bad(format!("{at}: unknown material {material}")))?;
             let material = u16::try_from(index).expect("bounded above");
             if let Some(heatsink) = item.get("heatsink") {
-                for part in plate_fin_heatsink(heatsink, dx, dims, &format!("{at}.heatsink"))? {
+                for part in plate_fin_heatsink(heatsink, &grid, &format!("{at}.heatsink"))? {
                     solids.push((material, Shape::Box(part)));
                 }
                 continue;
@@ -843,7 +983,7 @@ impl Scene {
             for (i, item) in component_items.iter().enumerate() {
                 let at = format!("components[{i}]");
                 let region = Aabb::parse(item, &at)?;
-                let (lo, hi) = cell_box(&region, dx, dims, &at)?;
+                let (lo, hi) = cell_box(&region, &grid, &at)?;
                 let board_face = item
                     .str_field("board_side")
                     .and_then(|key| FACE_KEYS.iter().position(|k| *k == key))
@@ -977,7 +1117,7 @@ impl Scene {
         let mut internal_fans = Vec::new();
         for (i, item) in array_of(&root, "internal_fans")?.iter().enumerate() {
             let at = format!("internal_fans[{i}]");
-            let patch = face_patch(item, dx, dims, &at)?;
+            let patch = face_patch(item, &grid, &at)?;
             let blows_positive = match item.str_field("direction") {
                 Some("+") => true,
                 Some("-") => false,
@@ -1012,12 +1152,12 @@ impl Scene {
                         }
                     };
                     FlowResistance::Planar {
-                        patch: face_patch(item, dx, dims, &at)?,
+                        patch: face_patch(item, &grid, &at)?,
                         loss_coefficient: loss,
                     }
                 }
                 Some("porous") => {
-                    let (lo, hi) = cell_box(&Aabb::parse(item, &at)?, dx, dims, &at)?;
+                    let (lo, hi) = cell_box(&Aabb::parse(item, &at)?, &grid, &at)?;
                     let permeability_m2 = per_axis(item, "permeability_m2", &at, f64::INFINITY)?;
                     let inertial_per_m = per_axis(item, "inertial_per_m", &at, 0.0)?;
                     if permeability_m2.iter().any(|k| !(*k > 0.0))
@@ -1045,8 +1185,8 @@ impl Scene {
             return Err(bad("limits.wall_seconds must be positive"));
         }
         Ok(Self {
-            dims,
             dx,
+            grid,
             fluid,
             materials,
             contacts,
@@ -1222,12 +1362,13 @@ fn execute_unsteady(
     };
     if json_mode {
         let mut out = format!(
-            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{}",
+            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{},\"graded\":{}",
             quote(RESULT_SCHEMA),
             quote(solver_name),
             domain.cell_count(),
             domain.fluid_count(),
-            num(scene.dx)?
+            num(scene.dx)?,
+            scene.grid.uniform.is_none()
         );
         let _ = write!(
             out,
@@ -1315,17 +1456,18 @@ fn execute_unsteady(
 
 #[allow(clippy::too_many_lines)] // build, solve, and one linear report
 fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> {
-    let [nx, ny, nz] = scene.dims;
     let tie = 1e-6 * scene.dx;
-    let domain = VoxelDomain::from_fn(nx, ny, nz, scene.dx, |p| {
-        scene
-            .solids
-            .iter()
-            .rev()
-            .find(|(_, shape)| shape.contains(probe(p, tie)))
-            .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
-    })
-    .map_err(|e| solver_failure(&e))?;
+    let domain = scene
+        .grid
+        .domain(|p| {
+            scene
+                .solids
+                .iter()
+                .rev()
+                .find(|(_, shape)| shape.contains(probe(p, tie)))
+                .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
+        })
+        .map_err(|e| solver_failure(&e))?;
     let fans: Vec<usize> = (0..6)
         .filter(|&side| matches!(scene.faces[side], FaceRule::Fan { .. }))
         .collect();
@@ -1339,7 +1481,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let axis = side / 2;
             let area: f64 = (0..3)
                 .filter(|&a| a != axis)
-                .map(|a| scene.dims[a] as f64 * scene.dx)
+                .map(|a| scene.grid.length(a))
                 .product();
             let free_delivery = -curve.pressure(0.0) / curve.slope(0.0);
             let speed = 0.5 * free_delivery.max(0.0) / area;
@@ -1369,8 +1511,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         let count = setup.add_uniform_power(&domain, source.power_w, |p| {
             source.region.contains(probe(p, tie))
                 && !domain.is_fluid({
-                    let cell = |v: f64| (v / scene.dx).floor() as usize;
-                    domain.index(cell(p[0]), cell(p[1]), cell(p[2]))
+                    let cell = |a: usize| scene.grid.locate(a, p[a]);
+                    domain.index(cell(0), cell(1), cell(2))
                 })
         });
         if count == 0 {
@@ -1642,12 +1784,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     };
     if json_mode {
         let mut out = format!(
-            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{}",
+            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{},\"graded\":{}",
             quote(RESULT_SCHEMA),
             quote(solver_name),
             domain.cell_count(),
             domain.fluid_count(),
-            num(scene.dx)?
+            num(scene.dx)?,
+            scene.grid.uniform.is_none()
         );
         let _ = write!(
             out,

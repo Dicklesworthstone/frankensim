@@ -109,6 +109,40 @@ fn natural_convection_scene_draws_air_through_its_openings() {
 }
 
 #[test]
+fn graded_grid_refines_the_block_and_closes_energy() {
+    // The duct on a graded grid (0.5 mm around the block and near the
+    // floor, 1 mm elsewhere): it solves, reports the grid as graded,
+    // carries the declared inflow, closes energy, and lands near the
+    // uniform 1 mm answer.
+    let graded = DUCT.replace(
+        r#""size_m": [0.012, 0.004, 0.004], "voxel_m": 0.001,"#,
+        r#""grid": {
+  "x": [{"to_m": 0.003, "voxel_m": 0.001}, {"to_m": 0.009, "voxel_m": 0.0005}, {"to_m": 0.012, "voxel_m": 0.001}],
+  "y": [{"to_m": 0.003, "voxel_m": 0.0005}, {"to_m": 0.004, "voxel_m": 0.001}],
+  "z": [{"to_m": 0.004, "voxel_m": 0.001}]},"#,
+    );
+    assert_ne!(graded, DUCT);
+    let (code, uniform, stderr) = run(&scratch("duct-uniform-ref.json", DUCT));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, result, stderr) = run(&scratch("duct-graded.json", &graded));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.get("graded"), Some(&J::Bool(true)));
+    assert_eq!(uniform.get("graded"), Some(&J::Bool(false)));
+    assert!((f(&result, &["flow", "inflow_m3_s"]) - 0.1 * 16e-6).abs() < 1e-15);
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+    assert!((f(&result, &["energy", "source_w"]) - 0.1).abs() < 1e-12);
+    let (a, b) = (
+        f(&uniform, &["max_solid_temperature_k"]),
+        f(&result, &["max_solid_temperature_k"]),
+    );
+    assert!((a - b).abs() < 0.25 * (a - 300.0), "uniform {a} vs graded {b}");
+    // Both spacing declarations at once refuse.
+    let both = graded.replace(r#""grid": {"#, r#""voxel_m": 0.001, "grid": {"#);
+    let (code, diagnostic, _) = run(&scratch("duct-both.json", &both));
+    assert_eq!(code, 4, "{diagnostic:?}");
+}
+
+#[test]
 fn malformed_scenes_refuse_with_structured_codes() {
     let cases = [
         (DUCT.replace("cooling-cht.v1", "cooling-cht.v9"), "schema"),

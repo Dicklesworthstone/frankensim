@@ -111,6 +111,12 @@ Scene (`frankensim.cooling-cht.v1`):
   Variants are solved on `parallelism` threads (default: the available
   cores); the report is identical for any thread count. A grid search: no
   optimality claim between grid points.
+- Instead of `size_m` + `voxel_m`, a graded grid: `"grid": {"x": [{"to_m",
+  "voxel_m"}, ...], "y": [...], "z": [...]}`, each zone a whole number of
+  uniform cells from the previous zone's end (0 first), so fine voxels go
+  only where features and boundary layers need them. Box, plane and
+  source positions use the actual cell centres and faces; the result
+  reports `graded` and `voxel_m` as the smallest width.
 - Optional `components`: JEDEC two-resistor compact models (`name`,
   `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
   `junction_to_board_k_w`). The box blocks flow; the junction reaches the

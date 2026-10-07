@@ -4,7 +4,7 @@
 //! # Model
 //!
 //! Every solid voxel face that borders a fluid voxel is an emitting patch of
-//! area `dx^2` with the emissivity of its material. Its escape factor `F` is
+//! its own area with the emissivity of its material. Its escape factor `F` is
 //! the fraction of its diffuse (cosine-weighted) hemisphere that leaves the
 //! domain through a face declared as surroundings (an opening or inlet,
 //! typically) without first hitting a solid voxel or a non-surroundings
@@ -159,6 +159,14 @@ fn unit(x: u64) -> f64 {
     (x >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
+/// Ray parameter at which a ray from `origin` along `dir` leaves cell index
+/// `i` across its face in the `step` direction on `axis` (non-uniform
+/// Amanatides–Woo: each boundary from its own face coordinate).
+fn exit_time(domain: &VoxelDomain, axis: usize, i: i64, step: i64, origin: f64, dir: f64) -> f64 {
+    let face = if step > 0 { i as usize + 1 } else { i as usize };
+    (domain.face_coord(axis, face) - origin) / dir
+}
+
 /// March one ray from `origin` (inside fluid cell `start`) along `dir`;
 /// returns the surroundings temperature if it leaves through a
 /// surroundings face before hitting a solid or an opaque face.
@@ -169,21 +177,14 @@ fn march(
     origin: [f64; 3],
     dir: [f64; 3],
 ) -> Option<f64> {
-    let dx = domain.dx();
     let dims = domain.dims();
     let mut cell = start.map(|v| v as i64);
     let mut t_max = [f64::INFINITY; 3];
-    let mut t_delta = [f64::INFINITY; 3];
     let mut step = [0i64; 3];
     for a in 0..3 {
-        if dir[a] > 0.0 {
-            step[a] = 1;
-            t_max[a] = ((cell[a] + 1) as f64 * dx - origin[a]) / dir[a];
-            t_delta[a] = dx / dir[a];
-        } else if dir[a] < 0.0 {
-            step[a] = -1;
-            t_max[a] = (cell[a] as f64 * dx - origin[a]) / dir[a];
-            t_delta[a] = -dx / dir[a];
+        if dir[a] != 0.0 {
+            step[a] = if dir[a] > 0.0 { 1 } else { -1 };
+            t_max[a] = exit_time(domain, a, cell[a], step[a], origin[a], dir[a]);
         }
     }
     let budget = 3 * (dims[0] + dims[1] + dims[2]) + 8;
@@ -196,7 +197,9 @@ fn march(
             2
         };
         cell[axis] += step[axis];
-        t_max[axis] += t_delta[axis];
+        if cell[axis] >= 0 && cell[axis] < dims[axis] as i64 {
+            t_max[axis] = exit_time(domain, axis, cell[axis], step[axis], origin[axis], dir[axis]);
+        }
         if cell[axis] < 0 || cell[axis] >= dims[axis] as i64 {
             let side = 2 * axis + usize::from(step[axis] > 0);
             return surroundings[side];
@@ -260,7 +263,6 @@ pub fn escape_factors(
     gate: &CancelGate,
 ) -> Result<Vec<ExposedFace>, ChtError> {
     admit_radiation(solids, config)?;
-    let dx = domain.dx();
     let mut out = Vec::new();
     for c in 0..domain.cell_count() {
         if c.is_multiple_of(1024) {
@@ -285,10 +287,11 @@ pub fn escape_factors(
             let sign = if face % 2 == 1 { 1.0 } else { -1.0 };
             let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
             let plane = if face % 2 == 1 {
-                (at[axis] + 1) as f64 * dx
+                domain.face_coord(axis, at[axis] + 1)
             } else {
-                at[axis] as f64 * dx
+                domain.face_coord(axis, at[axis])
             };
+            let nudge = 1e-9 * domain.width(axis, at[axis]);
             let start = domain.coords(n);
             let (mut escaped, mut ambient_sum) = (0usize, 0.0f64);
             let stream = config
@@ -311,9 +314,9 @@ pub fn escape_factors(
                 dir[v] = radius * phi.sin();
                 // Uniform origin on the face, nudged into the fluid cell.
                 let mut origin = [0.0; 3];
-                origin[axis] = sign.mul_add(1e-9 * dx, plane);
-                origin[u] = (at[u] as f64 + r3) * dx;
-                origin[v] = (at[v] as f64 + r4) * dx;
+                origin[axis] = sign.mul_add(nudge, plane);
+                origin[u] = r3.mul_add(domain.width(u, at[u]), domain.face_coord(u, at[u]));
+                origin[v] = r4.mul_add(domain.width(v, at[v]), domain.face_coord(v, at[v]));
                 if let Some(t) = march(domain, &config.surroundings_k, start, origin, dir) {
                     escaped += 1;
                     ambient_sum += t;
@@ -343,11 +346,11 @@ pub fn radiative_sinks(
     faces: &[ExposedFace],
     temperature: &[f64],
 ) -> Vec<CellSink> {
-    let area = domain.dx() * domain.dx();
     faces
         .iter()
         .map(|f| {
             let (t, ta) = (temperature[f.cell].max(1.0), f.surroundings_k);
+            let area = domain.face_area(f.cell, f.face / 2);
             let scale = f.emissivity * STEFAN_BOLTZMANN * f.escape * area;
             let slope = 4.0 * scale * t * t * t;
             let q = scale * (t.powi(4) - ta.powi(4));
@@ -363,11 +366,11 @@ pub fn radiative_sinks(
 /// Net radiated power at `temperature` by the nonlinear law, W.
 #[must_use]
 pub fn radiated_power(domain: &VoxelDomain, faces: &[ExposedFace], temperature: &[f64]) -> f64 {
-    let area = domain.dx() * domain.dx();
     faces
         .iter()
         .map(|f| {
             let (t, ta) = (temperature[f.cell], f.surroundings_k);
+            let area = domain.face_area(f.cell, f.face / 2);
             f.emissivity * STEFAN_BOLTZMANN * f.escape * area * (t.powi(4) - ta.powi(4))
         })
         .sum()
@@ -402,21 +405,14 @@ fn trace(
     origin: [f64; 3],
     dir: [f64; 3],
 ) -> Hit {
-    let dx = domain.dx();
     let dims = domain.dims();
     let mut cell = start.map(|v| v as i64);
     let mut t_max = [f64::INFINITY; 3];
-    let mut t_delta = [f64::INFINITY; 3];
     let mut step = [0i64; 3];
     for a in 0..3 {
-        if dir[a] > 0.0 {
-            step[a] = 1;
-            t_max[a] = ((cell[a] + 1) as f64 * dx - origin[a]) / dir[a];
-            t_delta[a] = dx / dir[a];
-        } else if dir[a] < 0.0 {
-            step[a] = -1;
-            t_max[a] = (cell[a] as f64 * dx - origin[a]) / dir[a];
-            t_delta[a] = -dx / dir[a];
+        if dir[a] != 0.0 {
+            step[a] = if dir[a] > 0.0 { 1 } else { -1 };
+            t_max[a] = exit_time(domain, a, cell[a], step[a], origin[a], dir[a]);
         }
     }
     let budget = 3 * (dims[0] + dims[1] + dims[2]) + 8;
@@ -432,7 +428,9 @@ fn trace(
         let t = t_max[axis];
         let point = [0, 1, 2].map(|a| t.mul_add(dir[a], origin[a]));
         cell[axis] += step[axis];
-        t_max[axis] += t_delta[axis];
+        if cell[axis] >= 0 && cell[axis] < dims[axis] as i64 {
+            t_max[axis] = exit_time(domain, axis, cell[axis], step[axis], origin[axis], dir[axis]);
+        }
         if cell[axis] < 0 || cell[axis] >= dims[axis] as i64 {
             let side = 2 * axis + usize::from(step[axis] > 0);
             return match surroundings[side] {
@@ -476,15 +474,16 @@ pub struct SurfaceExchange {
     faces: Vec<(usize, usize, usize)>,
     /// Per patch: emissivity.
     emissivity: Vec<f64>,
-    /// Per patch: faces.
-    members: Vec<usize>,
+    /// Per patch: area, m^2.
+    patch_area: Vec<f64>,
     /// Per patch: reciprocal exchange fractions `F_ij` to other patches.
     exchange: Vec<Vec<(usize, f64)>>,
     /// Per patch: self-view fraction `F_ii`.
     self_view: Vec<f64>,
     /// Per patch: escaping fraction `F_is` and `F_is <sigma T_s^4>`, W/m^2.
     escape: Vec<(f64, f64)>,
-    face_area: f64,
+    /// Area of each emitting face (as `faces`), m^2.
+    face_areas: Vec<f64>,
     /// Rays traced.
     rays: usize,
 }
@@ -509,7 +508,7 @@ impl SurfaceExchange {
                 reason: "patch_size and max_bounces must be at least one".into(),
             });
         }
-        let dx = domain.dx();
+        let nudge = 1e-9 * domain.min_width();
         // Emitting faces, keyed by material, orientation, plane and tile.
         let mut keyed: Vec<([usize; 5], usize, usize, f64)> = Vec::new();
         for c in 0..domain.cell_count() {
@@ -545,14 +544,17 @@ impl SurfaceExchange {
         }
         keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         let mut faces = Vec::with_capacity(keyed.len());
-        let (mut emissivity, mut members) = (Vec::new(), Vec::new());
+        let mut face_areas = Vec::with_capacity(keyed.len());
+        let (mut emissivity, mut patch_area) = (Vec::new(), Vec::new());
         for (i, &(key, cell, face, eps)) in keyed.iter().enumerate() {
             if i == 0 || keyed[i - 1].0 != key {
                 emissivity.push(eps);
-                members.push(0usize);
+                patch_area.push(0.0f64);
             }
             let patch = emissivity.len() - 1;
-            members[patch] += 1;
+            let area = domain.face_area(cell, face / 2);
+            patch_area[patch] += area;
+            face_areas.push(area);
             faces.push((cell, face, patch));
         }
         let patches = emissivity.len();
@@ -582,9 +584,9 @@ impl SurfaceExchange {
             let sign = if face % 2 == 1 { 1.0 } else { -1.0 };
             let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
             let plane = if face % 2 == 1 {
-                (at[axis] + 1) as f64 * dx
+                domain.face_coord(axis, at[axis] + 1)
             } else {
-                at[axis] as f64 * dx
+                domain.face_coord(axis, at[axis])
             };
             let first = domain.coords(domain.neighbor(c, face).expect("borders fluid"));
             let stream = config
@@ -596,9 +598,9 @@ impl SurfaceExchange {
                 let draw = |k: u64| unit(splitmix(base ^ k));
                 let mut dir = cosine_direction(axis, sign, draw(1), draw(2));
                 let mut origin = [0.0; 3];
-                origin[axis] = sign.mul_add(1e-9 * dx, plane);
-                origin[u] = (at[u] as f64 + draw(3)) * dx;
-                origin[v] = (at[v] as f64 + draw(4)) * dx;
+                origin[axis] = sign.mul_add(nudge, plane);
+                origin[u] = draw(3).mul_add(domain.width(u, at[u]), domain.face_coord(u, at[u]));
+                origin[v] = draw(4).mul_add(domain.width(v, at[v]), domain.face_coord(v, at[v]));
                 let mut start = first;
                 for bounce in 0..config.max_bounces {
                     // A reflector re-emits about its inward normal.
@@ -637,7 +639,7 @@ impl SurfaceExchange {
                     let k = 8 + 2 * bounce as u64;
                     dir = cosine_direction(normal_axis, normal, draw(k), draw(k + 1));
                     origin = point;
-                    origin[normal_axis] = normal.mul_add(1e-9 * dx, point[normal_axis]);
+                    origin[normal_axis] = normal.mul_add(nudge, point[normal_axis]);
                     start = from;
                 }
                 // Lost rays and exhausted bounces return to the emitter (no
@@ -651,8 +653,7 @@ impl SurfaceExchange {
         // iteration d <- sqrt(d r / (S d))). Averaging alone breaks the row
         // sums, and clipping the resulting negative self-views biased a
         // black-enclosure test by 1 % in T^4.
-        let face_area = dx * dx;
-        let area: Vec<f64> = members.iter().map(|&m| m as f64 * face_area).collect();
+        let area = patch_area.clone();
         let raw = |i: usize, j: usize| {
             hits[i]
                 .get(&j)
@@ -728,11 +729,11 @@ impl SurfaceExchange {
         Ok(Self {
             faces,
             emissivity,
-            members,
+            patch_area,
             exchange,
             self_view,
             escape,
-            face_area,
+            face_areas,
             rays: traced.iter().sum(),
         })
     }
@@ -752,12 +753,12 @@ impl SurfaceExchange {
     /// Area-mean `sigma T^4` of each patch's faces, W/m^2.
     fn blackbody(&self, temperature: &[f64]) -> Vec<f64> {
         let mut sum = vec![0.0; self.patches()];
-        for &(cell, _, patch) in &self.faces {
-            sum[patch] += STEFAN_BOLTZMANN * temperature[cell].powi(4);
+        for (&(cell, _, patch), area) in self.faces.iter().zip(&self.face_areas) {
+            sum[patch] += area * STEFAN_BOLTZMANN * temperature[cell].powi(4);
         }
         sum.iter()
-            .zip(&self.members)
-            .map(|(s, &m)| s / m as f64)
+            .zip(&self.patch_area)
+            .map(|(s, a)| s / a)
             .collect()
     }
 
@@ -800,9 +801,10 @@ impl SurfaceExchange {
     pub fn sinks(&self, temperature: &[f64], irradiation: &[f64]) -> Vec<CellSink> {
         self.faces
             .iter()
-            .map(|&(cell, _, patch)| {
+            .zip(&self.face_areas)
+            .map(|(&(cell, _, patch), face_area)| {
                 let t = temperature[cell].max(1.0);
-                let eps_a = self.emissivity[patch] * self.face_area;
+                let eps_a = self.emissivity[patch] * face_area;
                 let slope = 4.0 * eps_a * STEFAN_BOLTZMANN * t * t * t;
                 let q = eps_a * STEFAN_BOLTZMANN.mul_add(t.powi(4), -irradiation[patch]);
                 CellSink {
@@ -824,7 +826,7 @@ impl SurfaceExchange {
             .map(|i| {
                 let eps = self.emissivity[i];
                 let radiosity = (1.0 - eps).mul_add(irradiation[i], eps * e[i]);
-                let area = self.members[i] as f64 * self.face_area;
+                let area = self.patch_area[i];
                 area * self.escape[i].0.mul_add(radiosity, -self.escape[i].1)
             })
             .sum()
@@ -836,9 +838,10 @@ impl SurfaceExchange {
     pub fn net_emission(&self, temperature: &[f64], irradiation: &[f64]) -> f64 {
         self.faces
             .iter()
-            .map(|&(cell, _, patch)| {
+            .zip(&self.face_areas)
+            .map(|(&(cell, _, patch), area)| {
                 self.emissivity[patch]
-                    * self.face_area
+                    * area
                     * STEFAN_BOLTZMANN.mul_add(temperature[cell].powi(4), -irradiation[patch])
             })
             .sum()

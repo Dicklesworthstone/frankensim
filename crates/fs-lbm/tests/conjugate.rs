@@ -185,6 +185,193 @@ fn two_resistor_component_matches_its_network() {
     ));
 }
 
+/// Cell widths of a smooth wall-clustering map of `[0, h]` into `n` cells:
+/// `y = h (xi - a sin(2 pi xi) / (2 pi))` with `a = 0.5` (walls three
+/// times finer than the centre).
+fn clustered(n: usize, h: f64) -> Vec<f64> {
+    let map = |xi: f64| h * (xi - 0.5 * (std::f64::consts::TAU * xi).sin() / std::f64::consts::TAU);
+    (0..n)
+        .map(|i| map((i + 1) as f64 / n as f64) - map(i as f64 / n as f64))
+        .collect()
+}
+
+#[test]
+fn graded_composite_slab_is_exact() {
+    // Piecewise-constant k on arbitrary widths: the series profile is exact.
+    let gate = CancelGate::new();
+    let widths = vec![0.01, 0.03, 0.005, 0.02, 0.012, 0.03, 0.008, 0.015];
+    let interface = widths[..4].iter().sum::<f64>();
+    let length: f64 = widths.iter().sum();
+    let domain = VoxelDomain::graded_from_fn([widths.clone(), vec![0.02], vec![0.02]], |p| {
+        Voxel::Solid(u16::from(p[0] > interface))
+    })
+    .unwrap();
+    assert!(!domain.is_uniform());
+    let solids = [
+        SolidMaterial::new("k1", 1.0),
+        SolidMaterial::new("k10", 10.0),
+    ];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(400.0);
+    faces[1] = ThermalFace::Temperature(300.0);
+    let solution = solve_energy(
+        &domain,
+        &unit_fluid(),
+        &solids,
+        &FlowField::quiescent(&domain),
+        &ThermalSetup::new(faces),
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    let q = 100.0 / (interface / 1.0 + (length - interface) / 10.0);
+    for x in 0..widths.len() {
+        let xc = domain.center(x, 0, 0)[0];
+        let exact = if xc < interface {
+            400.0 - q * xc
+        } else {
+            400.0 - q * interface - q * (xc - interface) / 10.0
+        };
+        let t = solution.temperature[domain.index(x, 0, 0)];
+        assert!((t - exact).abs() < 1e-9, "x={x}: {t} vs {exact}");
+    }
+    assert!(solution.report.balance.relative_residual < 1e-12);
+}
+
+#[test]
+fn graded_poiseuille_converges_at_second_order() {
+    // G1 on a smoothly wall-clustered grid: dp/dx -> 12 mu U / H^2.
+    let gradient = |n: usize| {
+        let gate = CancelGate::new();
+        let dx = 1.0 / n as f64;
+        let domain = VoxelDomain::graded([vec![dx; 6 * n], clustered(n, 1.0), vec![dx]]).unwrap();
+        let mut config = SimpleConfig::new([
+            FvBoundary::Inlet {
+                velocity: [1.0, 0.0, 0.0],
+            },
+            FvBoundary::Outlet,
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::Symmetry,
+            FvBoundary::Symmetry,
+        ]);
+        config.tolerance = 1e-9;
+        let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+        assert!((flow.report.outflow_m3_s - flow.report.inflow_m3_s).abs() < 1e-12);
+        let (a, b) = (3 * n, 5 * n);
+        (flow.mean_pressure(&domain, 0, a).unwrap() - flow.mean_pressure(&domain, 0, b).unwrap())
+            / ((b - a) as f64 * dx)
+    };
+    let errors: Vec<f64> = [4usize, 8, 16]
+        .iter()
+        .map(|&n| (gradient(n) - 12.0).abs())
+        .collect();
+    let order = (errors[1] / errors[2]).log2();
+    eprintln!("graded poiseuille errors {errors:?}, order {order:.3}");
+    // Measured errors 1.682, 0.488, 0.127 (order 1.94; Richardson limit
+    // within 0.007 of 12). The centre cells are 1.5x the uniform width, so
+    // the error constant exceeds the uniform grid's (0.093 at n = 16).
+    assert!((order - 2.0).abs() < 0.3, "order {order}");
+    assert!(errors[2] < 0.15, "{errors:?}");
+}
+
+#[test]
+fn graded_porous_block_and_wall_distance_are_exact() {
+    // Porous block on graded x: the staggered volumes telescope to the block
+    // length exactly. Wall distance on a graded column: each centre's y.
+    let gate = CancelGate::new();
+    let widths: Vec<f64> = (0..30).map(|i| 1.0 + 0.5 * ((i * 7) % 5) as f64).collect();
+    let domain = VoxelDomain::graded([widths.clone(), vec![1.0; 4], vec![1.0]]).unwrap();
+    let mut config = SimpleConfig::new([
+        FvBoundary::Inlet {
+            velocity: [0.4, 0.0, 0.0],
+        },
+        FvBoundary::Outlet,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    config.tolerance = 1e-10;
+    let (kappa, c) = (2.0, 3.0);
+    config.resistances.push(FlowResistance::Volume {
+        lo: [10, 0, 0],
+        hi: [20, 4, 1],
+        permeability_m2: [kappa, f64::INFINITY, f64::INFINITY],
+        inertial_per_m: [c, 0.0, 0.0],
+    });
+    let flow = simple_flow(&domain, &unit_fluid(), &config, &gate).unwrap();
+    let length: f64 = widths[10..20].iter().sum();
+    let expected = (0.4 / kappa + 0.5 * c * 0.4 * 0.4) * length;
+    let drop =
+        flow.mean_pressure(&domain, 0, 9).unwrap() - flow.mean_pressure(&domain, 0, 20).unwrap();
+    assert!(
+        (drop - expected).abs() < 1e-8 * expected,
+        "{drop} vs {expected}"
+    );
+    let column = VoxelDomain::graded([vec![1.0], clustered(12, 1.0), vec![1.0]]).unwrap();
+    let distance = wall_distance(&column, [false, false, true, false, false, false]);
+    for y in 0..12 {
+        let centre = column.center(0, y, 0)[1];
+        assert!(
+            (distance[column.index(0, y, 0)] - centre).abs() < 1e-14,
+            "y={y}: {} vs {centre}",
+            distance[column.index(0, y, 0)]
+        );
+    }
+}
+
+#[test]
+fn graded_exposed_plate_radiates_by_its_total_area() {
+    // The exposed-plate fixture on graded x/y widths: every escape factor is
+    // still one, and the plate sheds P through its total area.
+    let gate = CancelGate::new();
+    let widths = vec![0.004, 0.01, 0.016, 0.01, 0.006, 0.014];
+    let domain =
+        VoxelDomain::graded_from_fn([widths.clone(), widths.clone(), vec![0.01; 6]], |p| {
+            if p[2] < 0.01 {
+                Voxel::Solid(0)
+            } else {
+                Voxel::Fluid
+            }
+        })
+        .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let solids = [SolidMaterial::new("plate", 200.0)];
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[5] = ThermalFace::Temperature(300.0);
+    let mut setup = ThermalSetup::new(faces);
+    setup.add_uniform_power(&domain, 5.0, |p| p[2] < 0.01);
+    let mut surroundings = [Some(300.0); 6];
+    surroundings[4] = None;
+    let radiation = RadiationConfig::new(vec![0.9], surroundings);
+    let (solution, report) = solve_energy_radiating(
+        &domain,
+        &fluid,
+        &solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let area = 0.06f64 * 0.06;
+    let exact = (5.0 / (0.9 * STEFAN_BOLTZMANN * area) + 300f64.powi(4)).powf(0.25);
+    let plate = solution.temperature[domain.index(2, 2, 0)];
+    // Uniform power density in a k = 200 plate: isothermal to well within
+    // the band.
+    assert!((plate - exact).abs() < 0.05, "{plate} vs {exact}");
+    assert!(
+        (report.radiated_w - 5.0).abs() < 1e-6,
+        "{}",
+        report.radiated_w
+    );
+}
+
 /// Parallel plates of gap `h` resolved by `n` cells, analytic Poiseuille
 /// profile with mean velocity giving `pe_dh = U D_h / alpha`.
 fn plates(n: usize, pe_dh: f64, length_gaps: usize) -> (VoxelDomain, FlowField, f64) {
@@ -2527,8 +2714,8 @@ fn wall_distance_measures_to_walls_and_solids_only() {
     // Next to the solid voxel: half a cell from its face.
     assert!((distance[domain.index(4, 3, 0)] - 0.5 * dx).abs() < 1e-15);
     assert_eq!(distance[domain.index(5, 3, 0)], 0.0);
-    // Diagonal neighbour of the solid: centre distance sqrt(2) less half.
-    let diagonal = (2f64.sqrt() - 0.5) * dx;
+    // Diagonal neighbour of the solid: to its corner, sqrt(1/2) dx.
+    let diagonal = 0.5f64.sqrt() * dx;
     assert!((distance[domain.index(4, 2, 0)] - diagonal).abs() < 1e-15);
 }
 

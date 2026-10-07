@@ -75,7 +75,7 @@ impl FlowField {
         let [nx, ny, nz] = domain.dims();
         Self {
             dims: [nx, ny, nz],
-            dx: domain.dx(),
+            dx: domain.min_width(),
             fx: vec![0.0; (nx + 1) * ny * nz],
             fy: vec![0.0; nx * (ny + 1) * nz],
             fz: vec![0.0; nx * ny * (nz + 1)],
@@ -95,7 +95,7 @@ impl FlowField {
         debug_assert_eq!(fz.len(), nx * ny * (nz + 1));
         Self {
             dims: [nx, ny, nz],
-            dx: domain.dx(),
+            dx: domain.min_width(),
             fx,
             fy,
             fz,
@@ -123,7 +123,6 @@ impl FlowField {
         mut velocity: impl FnMut(usize, [f64; 3]) -> f64,
     ) -> Result<Self, ChtError> {
         let mut field = Self::quiescent(domain);
-        let area = domain.dx() * domain.dx();
         for c in 0..domain.cell_count() {
             if !domain.is_fluid(c) {
                 continue;
@@ -140,11 +139,11 @@ impl FlowField {
                 let axis = f / 2;
                 let mut centre = domain.center(x, y, z);
                 let half = if f % 2 == 1 { 0.5 } else { -0.5 };
-                centre[axis] += half * domain.dx();
+                centre[axis] += half * domain.widths(c)[axis];
                 let u = velocity(axis, centre);
                 finite("flow.face_velocity", u)?;
                 let (slot, _) = field.slot(domain, c, f);
-                *field.face_mut(axis, slot) = u * area;
+                *field.face_mut(axis, slot) = u * domain.face_area(c, axis);
             }
         }
         Ok(field)
@@ -178,8 +177,9 @@ impl FlowField {
             });
         }
         finite_positive("flow.projection_tolerance", tolerance)?;
+        let dx = domain.require_uniform("the cell-velocity projection")?;
         let mut field = Self::quiescent(domain);
-        let area = domain.dx() * domain.dx();
+        let area = dx * dx;
         for c in 0..domain.cell_count() {
             if !domain.is_fluid(c) {
                 continue;
@@ -610,6 +610,7 @@ pub fn lbm_duct_flow(
     config: &LbmFlowConfig,
     gate: &CancelGate,
 ) -> Result<LbmFlow, ChtError> {
+    domain.require_uniform("the lattice-Boltzmann duct flow")?;
     fluid.validate()?;
     finite_positive("lbm.inlet_velocity_m_s", config.inlet_velocity_m_s)?;
     finite_positive("lbm.lattice_inlet_velocity", config.lattice_inlet_velocity)?;

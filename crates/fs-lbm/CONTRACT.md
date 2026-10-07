@@ -1090,6 +1090,41 @@ An impulsively started flow (inlet on at t = 0 over fluid at rest) is
 non-smooth initial data: BDF2 measured order 1.35 at t = 0.04 there;
 smooth starts (`inlet_schedule`) recover second order.
 
+### Graded grids (`VoxelDomain::graded`)
+
+A domain may declare its cell widths per axis (a non-uniform Cartesian
+grid: fine around small features and boundary layers, coarse elsewhere, the
+electronics-cooling grid). Every finite-volume path generalizes:
+
+- energy: face conductance `A / (w_P/(2 k_P) + R'' + w_N/(2 k_N))` with the
+  cell's own face area and half widths; boundary half cells `A k / (w/2)`;
+  heat capacity `rho c V_c`; sources by volume (`add_uniform_power`);
+- SIMPLEC (MAC): each face velocity's control volume spans the two adjacent
+  centres (`(w_- + w_+)/2` long, the face's area across); its transverse
+  sides take area-weighted fluxes from the two half cells, diffusion uses
+  node-to-node distances (half the row width to a wall), and body forces,
+  porous terms and the time derivative weight the two half cells by width;
+  fluxes, mass residuals and the pressure correction use each face's area;
+- radiation: rays cross non-uniform cell boundaries (each exit time from its
+  own face coordinate); escape and exchange use each face's area;
+- LVEL wall distance: an exact separable feature transform over the cell
+  centres gives each cell's nearest seed, and the distance is to that
+  seed's box (exact for axis-aligned walls; at a solid corner the corner
+  distance, not the earlier centre distance less half a voxel).
+
+The lattice-Boltzmann paths (`lbm_duct_flow`, `natural_convection`, the
+cell-velocity projection) need uniform voxels and refuse a graded domain;
+`VoxelDomain::dx` is NaN there so any uniform-spacing assumption fails
+loudly.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Two-material slab on 8 arbitrary widths (5 to 30 mm) | exact series profile | every cell within 1e-9 K |
+| Plane Poiseuille on a smooth wall-clustered map (walls 3x finer), n = 4, 8, 16 | 12 mu U / H^2 | errors 1.682, 0.488, 0.127: order 1.94 |
+| 10-cell porous block on graded x | `(mu U / kappa + rho C U^2 / 2) L` | within 1e-8 |
+| Wall distance on a clustered column | each centre's distance to the wall | within 1e-14 |
+| Exposed plate on graded x/y | `F = 1`, total-area Stefan–Boltzmann law | 5 W radiated to 1e-6; temperature within 0.05 K |
+
 ### Orthotropic solids and contact resistance
 
 `SolidMaterial::with_orthotropic([k_x, k_y, k_z])` declares grid-aligned
