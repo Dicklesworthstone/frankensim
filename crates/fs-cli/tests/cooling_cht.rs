@@ -52,6 +52,136 @@ const DUCT: &str = r#"{
 }"#;
 
 #[test]
+fn radiating_transient_settles_on_the_steady_radiating_solution() {
+    // The duct scene with an emissive heatsink: the frozen-flow march
+    // carries radiation through the inlet and opening, and a long march
+    // settles on the steady radiating solve's temperature and radiated
+    // power.
+    let scene = DUCT
+        .replace(
+            r#""conductivity_w_m_k": 167.0}"#,
+            r#""conductivity_w_m_k": 167.0, "volumetric_heat_capacity_j_m3_k": 2.4e6, "emissivity": 0.9}"#,
+        )
+        .replace(
+            r#""solver": {"tolerance": 1e-8}"#,
+            r#""solver": {"tolerance": 1e-8}, "transient": {"time_step_s": 2.0, "steps": 400}"#,
+        );
+    let (code, result, stderr) = run(&scratch("rad-warm.json", &scene));
+    assert_eq!(code, 0, "{stderr}");
+    let steady = f(&result, &["max_solid_temperature_k"]);
+    let steady_radiated = f(&result, &["radiation", "radiated_w"]);
+    let last = f(&result, &["transient", "final_max_solid_temperature_k"]);
+    assert!(
+        (last - steady).abs() < 1e-3 * (steady - 300.0),
+        "{last} vs steady {steady}"
+    );
+    let closure = f(&result, &["transient", "worst_step_closure_j"]);
+    assert!(closure < 1e-6 * 0.2, "{closure}");
+    let records = result
+        .path(&["transient", "records"])
+        .and_then(J::as_array)
+        .unwrap();
+    let radiated = records
+        .last()
+        .and_then(|r| r.path(&["radiated_w"]))
+        .and_then(J::as_f64)
+        .unwrap();
+    assert!(steady_radiated > 0.0, "{steady_radiated}");
+    assert!(
+        (radiated - steady_radiated).abs() < 1e-3 * steady_radiated,
+        "{radiated} vs steady {steady_radiated}"
+    );
+}
+
+const CORNER_PLATE: &str = r#"{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.008, 0.008, 0.004], "voxel_m": 0.002,
+ "fluid": {"density_kg_m3": 1.0, "specific_heat_j_kg_k": 1000.0,
+           "conductivity_w_m_k": 1e-12, "kinematic_viscosity_m2_s": 1e-5},
+ "materials": [{"name": "plate", "conductivity_w_m_k": 10.0}],
+ "solids": [{"material": "plate", "min_m": [0.0, 0.0, 0.0], "max_m": [0.008, 0.008, 0.002]}],
+ "sources": [{"name": "corner", "power_w": 0.05, "min_m": [0.006, 0.006, 0.0], "max_m": [0.008, 0.008, 0.002]}],
+ "faces": {"x-": {"type": "wall", "temperature_k": 300.0}},
+ "grid_convergence": {"splits": [1, 2, 3]}
+}"#;
+
+#[test]
+fn grid_convergence_reports_the_observed_order_and_band() {
+    // A plate heated in the corner farthest from its cold edge (the air
+    // above it insulating): pure conduction, so the three grids (4, 8 and
+    // 12 cells across) converge monotonically at second order and the
+    // fine answer carries a GCI band that contains the extrapolation
+    // (measured: 303.4112, 303.4496, 303.4576 K; order 1.80; extrapolated
+    // 303.4650 K; GCI 0.0093 K).
+    let (code, result, stderr) = run(&scratch("convergence.json", CORNER_PLATE));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        result.str_field("schema"),
+        Some("frankensim.cooling-cht.convergence.v1")
+    );
+    let levels = result.get("levels").and_then(J::as_array).unwrap();
+    let cells: Vec<f64> = levels
+        .iter()
+        .map(|l| l.path(&["cells"]).and_then(J::as_f64).unwrap())
+        .collect();
+    assert_eq!(cells, [32.0, 256.0, 864.0]);
+    let quantities = result.get("quantities").and_then(J::as_array).unwrap();
+    let hottest = quantities
+        .iter()
+        .find(|q| q.str_field("name") == Some("max_solid_temperature_k"))
+        .unwrap();
+    let values: Vec<f64> = hottest
+        .path(&["values"])
+        .and_then(J::as_array)
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let order = f(hottest, &["observed_order"]);
+    let extrapolated = f(hottest, &["extrapolated"]);
+    let gci = f(hottest, &["gci"]);
+    eprintln!("values {values:?} order {order} extrapolated {extrapolated} gci {gci}");
+    assert_eq!(hottest.str_field("convergence"), Some("monotone"));
+    assert!((order - 2.0).abs() < 0.3, "observed order {order}");
+    assert!(
+        (extrapolated - values[2]).abs() < gci,
+        "{extrapolated} {gci}"
+    );
+    // The fine level's own result rides along, and is the third value.
+    assert_eq!(
+        f(&result, &["fine_result", "max_solid_temperature_k"]),
+        values[2]
+    );
+    assert!(
+        quantities
+            .iter()
+            .any(|q| q.str_field("name") == Some("source:corner"))
+    );
+    // Malformed splits and a study alongside refuse.
+    for (name, scene) in [
+        (
+            "splits-order.json",
+            CORNER_PLATE.replace("[1, 2, 3]", "[2, 1, 3]"),
+        ),
+        (
+            "splits-count.json",
+            CORNER_PLATE.replace("[1, 2, 3]", "[1, 2]"),
+        ),
+        (
+            "with-study.json",
+            CORNER_PLATE.replace(
+                r#""grid_convergence""#,
+                r#""study": {"parameters": [{"name": "p", "path": ["sources", 0, "power_w"], "values": [0.05]}], "objective": {"minimize": "max_solid_temperature_k"}}, "grid_convergence""#,
+            ),
+        ),
+    ] {
+        let (code, diagnostic, _) = run(&scratch(name, &scene));
+        assert_eq!(code, 4, "{name}");
+        assert!(diagnostic.str_field("message").is_some());
+    }
+}
+
+#[test]
 fn forced_convection_scene_closes_energy_through_the_binary() {
     let (code, result, stderr) = run(&scratch("duct.json", DUCT));
     assert_eq!(code, 0, "{stderr}");
@@ -106,6 +236,129 @@ fn natural_convection_scene_draws_air_through_its_openings() {
     assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
     // The heated wall's heat leaves by advection through the top opening.
     assert!(f(&result, &["energy", "advective_outflow_w"]) > 0.0);
+}
+
+#[test]
+fn graded_grid_refines_the_block_and_closes_energy() {
+    // The duct on a graded grid (0.5 mm around the block and near the
+    // floor, 1 mm elsewhere): it solves, reports the grid as graded,
+    // carries the declared inflow, closes energy, and lands near the
+    // uniform 1 mm answer.
+    let graded = DUCT.replace(
+        r#""size_m": [0.012, 0.004, 0.004], "voxel_m": 0.001,"#,
+        r#""grid": {
+  "x": [{"to_m": 0.003, "voxel_m": 0.001}, {"to_m": 0.009, "voxel_m": 0.0005}, {"to_m": 0.012, "voxel_m": 0.001}],
+  "y": [{"to_m": 0.003, "voxel_m": 0.0005}, {"to_m": 0.004, "voxel_m": 0.001}],
+  "z": [{"to_m": 0.004, "voxel_m": 0.001}]},"#,
+    );
+    assert_ne!(graded, DUCT);
+    let (code, uniform, stderr) = run(&scratch("duct-uniform-ref.json", DUCT));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, result, stderr) = run(&scratch("duct-graded.json", &graded));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.get("graded"), Some(&J::Bool(true)));
+    assert_eq!(uniform.get("graded"), Some(&J::Bool(false)));
+    assert!((f(&result, &["flow", "inflow_m3_s"]) - 0.1 * 16e-6).abs() < 1e-15);
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+    assert!((f(&result, &["energy", "source_w"]) - 0.1).abs() < 1e-12);
+    let (a, b) = (
+        f(&uniform, &["max_solid_temperature_k"]),
+        f(&result, &["max_solid_temperature_k"]),
+    );
+    assert!(
+        (a - b).abs() < 0.25 * (a - 300.0),
+        "uniform {a} vs graded {b}"
+    );
+    // The refine-box form: 1 mm coarse, 0.5 mm in the block's slabs
+    // (x 3..9 mm, y 0..3 mm, all of z): 18 x 7 x 8 cells.
+    let refined = DUCT.replace(
+        r#""voxel_m": 0.001,"#,
+        r#""grid": {"voxel_m": 0.001, "refine": [
+   {"min_m": [0.003, 0.0, 0.0], "max_m": [0.009, 0.003, 0.004], "voxel_m": 0.0005}]},"#,
+    );
+    assert_ne!(refined, DUCT);
+    let (code, result, stderr) = run(&scratch("duct-refined.json", &refined));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.path(&["cells"]).and_then(J::as_f64), Some(1008.0));
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
+    // Both spacing declarations at once refuse.
+    let both = graded.replace(r#""grid": {"#, r#""voxel_m": 0.001, "grid": {"#);
+    let (code, diagnostic, _) = run(&scratch("duct-both.json", &both));
+    assert_eq!(code, 4, "{diagnostic:?}");
+}
+
+#[test]
+fn probes_and_vtk_export_report_the_fields() {
+    // A probe in the heated block and one in the inlet air, and the fields
+    // written as a VTK rectilinear grid next to the scene.
+    let scene = DUCT.replace(
+        r#""solver": {"tolerance": 1e-8}"#,
+        r#""solver": {"tolerance": 1e-8},
+ "probes": [{"name": "chip", "at_m": [0.006, 0.0005, 0.002]},
+            {"name": "inlet-air", "at_m": [0.0005, 0.003, 0.002]}],
+ "output": {"vtk": "duct-fields.vtr"}"#,
+    );
+    assert_ne!(scene, DUCT);
+    let path = scratch("duct-probes.json", &scene);
+    let (code, result, stderr) = run(&path);
+    assert_eq!(code, 0, "{stderr}");
+    let probes = result.get("probes").and_then(J::as_array).unwrap();
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0].get("solid"), Some(&J::Bool(true)));
+    assert_eq!(probes[1].get("solid"), Some(&J::Bool(false)));
+    let chip = probes[0]
+        .path(&["temperature_k"])
+        .and_then(J::as_f64)
+        .unwrap();
+    let air = probes[1]
+        .path(&["temperature_k"])
+        .and_then(J::as_f64)
+        .unwrap();
+    assert!(chip > air && air >= 300.0 - 1e-9, "{chip} {air}");
+    let inflow_speed = probes[1]
+        .path(&["velocity_m_s"])
+        .and_then(J::as_array)
+        .unwrap()[0]
+        .as_f64()
+        .unwrap();
+    assert!(inflow_speed > 0.0);
+    let vtk = std::fs::read_to_string(path.with_file_name("duct-fields.vtr")).unwrap();
+    assert!(vtk.contains("<RectilinearGrid WholeExtent=\"0 12 0 4 0 4\">"));
+    for name in ["temperature_k", "velocity_m_s", "pressure_pa", "material"] {
+        assert!(vtk.contains(&format!("Name=\"{name}\"")), "{name}");
+    }
+    // 192 cells of temperature after its header line.
+    let block: Vec<&str> = vtk
+        .split("Name=\"temperature_k\" format=\"ascii\">\n")
+        .nth(1)
+        .unwrap()
+        .split("</DataArray>")
+        .next()
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(block.len(), 192);
+}
+
+#[test]
+fn falling_conductivity_table_runs_the_chip_hotter() {
+    // An aluminium whose conductivity falls steeply with temperature runs
+    // hotter than the constant-k part, and the energy still closes.
+    let table = DUCT.replace(
+        r#""conductivity_w_m_k": 167.0}"#,
+        r#""conductivity_w_m_k": 167.0, "conductivity_table": [[300.0, 167.0], [400.0, 0.5]]}"#,
+    );
+    assert_ne!(table, DUCT);
+    let (code, constant, stderr) = run(&scratch("duct-k-constant.json", DUCT));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, varying, stderr) = run(&scratch("duct-k-table.json", &table));
+    assert_eq!(code, 0, "{stderr}");
+    let (a, b) = (
+        f(&constant, &["max_solid_temperature_k"]),
+        f(&varying, &["max_solid_temperature_k"]),
+    );
+    assert!(b > a, "constant {a} vs k(T) {b}");
+    assert!(f(&varying, &["energy", "balance_relative_residual"]) < 1e-9);
 }
 
 #[test]
@@ -246,10 +499,16 @@ fn lvel_turbulence_adds_eddy_viscosity_and_cools_the_chip() {
     assert_ne!(lvel, fast);
     let (code, laminar, stderr) = run(&scratch("duct-laminar.json", &fast));
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(laminar.path(&["flow", "turbulence"]).and_then(J::as_str), Some("laminar"));
+    assert_eq!(
+        laminar.path(&["flow", "turbulence"]).and_then(J::as_str),
+        Some("laminar")
+    );
     let (code, turbulent, stderr) = run(&scratch("duct-lvel.json", &lvel));
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(turbulent.path(&["flow", "turbulence"]).and_then(J::as_str), Some("lvel"));
+    assert_eq!(
+        turbulent.path(&["flow", "turbulence"]).and_then(J::as_str),
+        Some("lvel")
+    );
     let ratio = f(&turbulent, &["flow", "max_eddy_viscosity_ratio"]);
     assert!(ratio > 0.0, "{ratio}");
     assert!(f(&turbulent, &["energy", "balance_relative_residual"]) < 1e-9);
@@ -441,7 +700,12 @@ fn unsteady_march_ramps_the_duct_flow_and_closes_every_step() {
         .unwrap();
     assert_eq!(records.len(), 12);
     // The kinetic energy grows with the ramp and then holds.
-    let ke = |i: usize| records[i].path(&["kinetic_energy_j"]).and_then(J::as_f64).unwrap();
+    let ke = |i: usize| {
+        records[i]
+            .path(&["kinetic_energy_j"])
+            .and_then(J::as_f64)
+            .unwrap()
+    };
     assert!(ke(0) < ke(3) && (ke(11) - ke(10)).abs() < 1e-6 * ke(11));
 }
 
@@ -461,14 +725,23 @@ fn steady_energy_on_the_mean_flow_matches_a_settled_flow() {
     assert_ne!(scene, DUCT);
     let (code, mean, stderr) = run(&scratch("duct-mean-flow.json", &scene));
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(mean.str_field("solver"), Some("fv-simplec-unsteady-mean-flow"));
-    assert_eq!(mean.path(&["flow", "averaged_steps"]).and_then(J::as_f64), Some(10.0));
+    assert_eq!(
+        mean.str_field("solver"),
+        Some("fv-simplec-unsteady-mean-flow")
+    );
+    assert_eq!(
+        mean.path(&["flow", "averaged_steps"]).and_then(J::as_f64),
+        Some(10.0)
+    );
     assert!(f(&mean, &["energy", "balance_relative_residual"]) < 1e-9);
     let (a, b) = (
         f(&steady, &["max_solid_temperature_k"]),
         f(&mean, &["max_solid_temperature_k"]),
     );
-    assert!((a - b).abs() < 1e-4 * (a - 300.0), "steady {a} vs mean-flow {b}");
+    assert!(
+        (a - b).abs() < 1e-4 * (a - 300.0),
+        "steady {a} vs mean-flow {b}"
+    );
 }
 
 #[test]
@@ -716,20 +989,31 @@ fn emissive_block_in_a_vented_column_runs_cooler_and_closes_with_radiation() {
     // Everything generated leaves by advection, conduction or radiation.
     let leaving = f(&grey, &["energy", "boundary_outflow_w"]) + sink;
     assert!((leaving - 0.05).abs() < 1e-9, "{leaving}");
-    // A transient with radiation refuses rather than dropping it.
-    let forced_transient = scene
-        .replace("EPS", "0.9")
-        .replace(r#""gravity_m_s2": [0.0, 0.0, -9.81],"#, "")
+    // The buoyant march from rest carries the same radiation: every step
+    // closes with the radiated power inside its outflow.
+    let marched = scene
+        .replace(
+            r#""emissivity": EPS}"#,
+            r#""emissivity": 0.9, "volumetric_heat_capacity_j_m3_k": 2.4e6}"#,
+        )
         .replace(
             r#""solver": {"tolerance": 1e-7}"#,
-            r#""solver": {"tolerance": 1e-7}, "transient": {"time_step_s": 1.0, "steps": 2}"#,
+            r#""solver": {"tolerance": 1e-7}, "transient": {"time_step_s": 0.5, "steps": 4, "flow": "unsteady", "inner_tolerance": 1e-8}"#,
         );
-    let (code, diagnostic, _) = run(&scratch("rad-transient.json", &forced_transient));
-    assert_eq!(code, 4);
+    let (code, result, stderr) = run(&scratch("rad-unsteady.json", &marched));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-9);
+    let records = result
+        .path(&["transient", "records"])
+        .and_then(J::as_array)
+        .unwrap();
+    let radiated: Vec<f64> = records
+        .iter()
+        .map(|r| r.path(&["radiated_w"]).and_then(J::as_f64).unwrap())
+        .collect();
+    // The block warms from 300 K, so it radiates more every step.
     assert!(
-        diagnostic
-            .str_field("message")
-            .unwrap()
-            .contains("radiation")
+        radiated[0] > 0.0 && radiated.windows(2).all(|w| w[1] > w[0]),
+        "{radiated:?}"
     );
 }

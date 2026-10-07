@@ -903,13 +903,22 @@ sources `power_w * power_schedule(t)`, and per-step records of the peak
 (solid) temperature and an energy closure computed two independent ways
 (stored-energy change vs `dt (source - boundary outflow)`). Unconditionally
 stable for the M-matrix, so electronics-scale conductivity and capacity
-contrasts impose no step limit; first order in time.
+contrasts impose no step limit; first order in time. Declared radiation
+(`Some(&RadiationConfig)`, escape or surface exchange) enters each step as
+sinks Newton-linearized about the previous step's temperature, implicit in
+each face's own emission with the irradiation lagged one step; the
+records carry the power radiated to the surroundings
+(`TransientRecord::radiated_w`) and the closure counts it in the outflow.
+`march_conjugate` takes the same argument.
 
 | Fixture | Reference | Measured |
 |---|---|---|
 | Near-isothermal cube (Biot 4e-7) cooled by convective faces, 100 steps of tau/50 | backward-Euler recursion of the lumped ODE | 0.1380329637 vs 0.1380329672 |
 | Same, dt halved | continuous exponential | error 2.698e-3 -> 1.351e-3 (ratio 2.00) |
 | Heated plate under channel flow, 400 steps from cold | steady solve; energy budget | stored 2.616326564 J = net input; worst step closure 4e-12 J; within 2.5e-9 K of steady |
+| Radiating floor plate (the Stefan–Boltzmann fixture with `rho c` 2.4e6), 30 steps to t = 1800 s | linearized backward-Euler recursion `T+ = T + dt (P - q(T)) / (C + dt q'(T))` | 379.460985216 vs 379.460985226 K; every step closes to 1e-8 of its input |
+| Same, 15 vs 30 steps | RK4 solution of `C dT/dt = P - eps sigma A (T^4 - T_amb^4)` | error 1.095 -> 0.565 K (ratio 1.94) |
+| Same, 200 steps of 600 s | closed-form steady state | 433.501643767 vs 433.501645484 K; 4.9999999 of 5 W radiated |
 
 ### Steady finite-volume flow (`simple_flow`)
 
@@ -1090,6 +1099,41 @@ An impulsively started flow (inlet on at t = 0 over fluid at rest) is
 non-smooth initial data: BDF2 measured order 1.35 at t = 0.04 there;
 smooth starts (`inlet_schedule`) recover second order.
 
+### Graded grids (`VoxelDomain::graded`)
+
+A domain may declare its cell widths per axis (a non-uniform Cartesian
+grid: fine around small features and boundary layers, coarse elsewhere, the
+electronics-cooling grid). Every finite-volume path generalizes:
+
+- energy: face conductance `A / (w_P/(2 k_P) + R'' + w_N/(2 k_N))` with the
+  cell's own face area and half widths; boundary half cells `A k / (w/2)`;
+  heat capacity `rho c V_c`; sources by volume (`add_uniform_power`);
+- SIMPLEC (MAC): each face velocity's control volume spans the two adjacent
+  centres (`(w_- + w_+)/2` long, the face's area across); its transverse
+  sides take area-weighted fluxes from the two half cells, diffusion uses
+  node-to-node distances (half the row width to a wall), and body forces,
+  porous terms and the time derivative weight the two half cells by width;
+  fluxes, mass residuals and the pressure correction use each face's area;
+- radiation: rays cross non-uniform cell boundaries (each exit time from its
+  own face coordinate); escape and exchange use each face's area;
+- LVEL wall distance: an exact separable feature transform over the cell
+  centres gives each cell's nearest seed, and the distance is to that
+  seed's box (exact for axis-aligned walls; at a solid corner the corner
+  distance, not the earlier centre distance less half a voxel).
+
+The lattice-Boltzmann paths (`lbm_duct_flow`, `natural_convection`, the
+cell-velocity projection) need uniform voxels and refuse a graded domain;
+`VoxelDomain::dx` is NaN there so any uniform-spacing assumption fails
+loudly.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Two-material slab on 8 arbitrary widths (5 to 30 mm) | exact series profile | every cell within 1e-9 K |
+| Plane Poiseuille on a smooth wall-clustered map (walls 3x finer), n = 4, 8, 16 | 12 mu U / H^2 | errors 1.682, 0.488, 0.127: order 1.94 |
+| 10-cell porous block on graded x | `(mu U / kappa + rho C U^2 / 2) L` | within 1e-8 |
+| Wall distance on a clustered column | each centre's distance to the wall | within 1e-14 |
+| Exposed plate on graded x/y | `F = 1`, total-area Stefan–Boltzmann law | 5 W radiated to 1e-6; temperature within 0.05 K |
+
 ### Orthotropic solids and contact resistance
 
 `SolidMaterial::with_orthotropic([k_x, k_y, k_z])` declares grid-aligned
@@ -1106,6 +1150,20 @@ properties. `EnergySolution::conductivity` reports the per-axis values.
 |---|---|---|
 | Laminate (30, 30, 0.3) in series with k = 3, along x and along z | exact series profile | every cell within 1e-9 K |
 | k 10 / k 2 bar with a 1e-4 m^2K/W joint | exact series profile; temperature step q'' R'' | every cell within 1e-9 K; step exact to 1e-9 |
+
+### Temperature-dependent conductivity (`SolidMaterial::conductivity_table`)
+
+A solid may declare `k(T)` as a piecewise-linear table; every axis
+conductivity scales by `k(T) / conductivity_w_m_k` at the cell's
+temperature. The energy solve (steady, and each transient step) iterates
+Picard passes, each evaluating `k` at the previous pass and warm-starting
+the Krylov solve, until the largest temperature change is below 1e-10 of
+the span (200 passes, else `SolverNotConverged { system: "energy
+conductivity" }`). Face conductances stay harmonic in the cell values.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Slab, `k = 1 + (T - 300)/100`, faces 400 K / 300 K, 10 and 20 cells | Kirchhoff transform: `int k dT` linear in x | max error 0.229 K -> 0.063 K of a 100 K span: order 1.86 |
 
 ### Two-resistor compact components (`CompactComponent`)
 

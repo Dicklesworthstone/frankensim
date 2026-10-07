@@ -79,11 +79,87 @@ fn set_at(node: &mut J, path: &[Step], value: J, at: &str) -> Result<()> {
     set_at(child, rest, value, at)
 }
 
+/// Worker threads for `jobs` independent solves: the block's
+/// `parallelism` (a whole number >= 1), else the available cores.
+pub(super) fn workers(block: &J, at: &str, jobs: usize) -> Result<usize> {
+    let declared = match block.f64_field("parallelism") {
+        Some(n) if n >= 1.0 && n.fract() == 0.0 => n as usize,
+        Some(_) => return Err(bad(format!("{at}.parallelism must be a whole number >= 1"))),
+        None => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+    };
+    Ok(declared.min(jobs).max(1))
+}
+
+/// `evaluate` every job on up to `workers` threads, each result kept at
+/// its job's index, so the output is the same for any thread count.
+pub(super) fn parallel_map<T: Sync, R: Send>(
+    jobs: &[T],
+    workers: usize,
+    evaluate: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers.max(1) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(job) = jobs.get(index) else {
+                        break;
+                    };
+                    let result = evaluate(job);
+                    *slots[index]
+                        .lock()
+                        .expect("no worker panics holding a slot") = Some(result);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .expect("no worker panics holding a slot")
+                .expect("every index evaluated")
+        })
+        .collect()
+}
+
+/// Every named quantity `result` reports, in report order: the hottest
+/// solid, each source and component, each internal fan, and the fan-face
+/// flow when there is one.
+pub(super) fn quantity_names(result: &J) -> Vec<String> {
+    let names = |list: Option<&J>, prefix: &str| -> Vec<String> {
+        list.and_then(J::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.str_field("name"))
+                    .map(|name| format!("{prefix}{name}"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out = vec!["max_solid_temperature_k".to_string()];
+    out.extend(names(result.get("sources"), "source:"));
+    out.extend(names(result.get("components"), "component:"));
+    out.extend(names(
+        result.path(&["flow", "internal_fans"]),
+        "internal_fan:",
+    ));
+    if result.path(&["flow", "fan_flow_m3_s"]).is_some() {
+        out.push("fan_flow_m3_s".to_string());
+    }
+    out.retain(|name| quantity(result, name).is_some_and(f64::is_finite));
+    out
+}
+
 /// A named result quantity: `max_solid_temperature_k`, `fan_flow_m3_s`,
 /// `inflow_m3_s`, `source:<name>` (its peak temperature),
 /// `component:<name>` (its junction temperature), or
 /// `internal_fan:<name>` (its flow).
-fn quantity(result: &J, name: &str) -> Option<f64> {
+pub(super) fn quantity(result: &J, name: &str) -> Option<f64> {
     let named = |list: &str, key: &str, field: &str| {
         result
             .get(list)
@@ -151,7 +227,7 @@ impl Evaluation {
     }
 }
 
-fn json_text(value: &J) -> String {
+pub(super) fn json_text(value: &J) -> String {
     match value {
         J::Null => "null".into(),
         J::Bool(flag) => flag.to_string(),
@@ -239,7 +315,8 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
     // The base scene without its study block.
     let mut template = root.clone();
     if let J::Object(entries) = &mut template {
-        entries.retain(|(key, _)| key != "study");
+        // Variants write no field files (parallel variants would share one).
+        entries.retain(|(key, _)| key != "study" && key != "output");
     }
     // Every variant is built (and its paths checked) before any is solved.
     let mut variants = Vec::with_capacity(evaluations);
@@ -290,47 +367,14 @@ pub(super) fn run(root: &J, base: &std::path::Path, json_mode: bool) -> Result<S
                 ))
             })
     };
-    // Variants are independent: solve them on up to `parallelism` threads
-    // (default: the available cores), each result kept at its index, so the
-    // report is the same for any thread count.
-    let workers = match study.f64_field("parallelism") {
-        Some(n) if n >= 1.0 && n.fract() == 0.0 => n as usize,
-        Some(_) => return Err(bad("study.parallelism must be a whole number >= 1")),
-        None => std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
-    }
-    .min(evaluations)
-    .max(1);
+    // Variants are independent: solve them in parallel.
+    let workers = workers(study, "study", evaluations)?;
     let started = Instant::now();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let slots: Vec<std::sync::Mutex<Option<Outcome>>> = (0..evaluations)
-        .map(|_| std::sync::Mutex::new(None))
-        .collect();
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((variant, _)) = variants.get(index) else {
-                        break;
-                    };
-                    let outcome = evaluate(variant);
-                    *slots[index]
-                        .lock()
-                        .expect("no worker panics holding a slot") = Some(outcome);
-                }
-            });
-        }
-    });
+    let outcomes = parallel_map(&variants, workers, |(variant, _)| evaluate(variant));
     let results: Vec<Evaluation> = variants
         .into_iter()
-        .zip(slots)
-        .map(|((_, values), slot)| Evaluation {
-            values,
-            outcome: slot
-                .into_inner()
-                .expect("no worker panics holding a slot")
-                .expect("every index evaluated"),
-        })
+        .zip(outcomes)
+        .map(|((_, values), outcome)| Evaluation { values, outcome })
         .collect();
     let best = results
         .iter()

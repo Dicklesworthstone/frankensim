@@ -8,6 +8,7 @@
 //! declared) and the conservative conjugate energy equation over fluid and
 //! solid cells (fs-lbm `conjugate`).
 
+mod convergence;
 #[path = "json_read.rs"]
 #[allow(dead_code)]
 mod json;
@@ -40,8 +41,8 @@ const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); temperature dependence only through declared solid conductivity tables (fluid properties constant); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\nA grid_convergence block {splits: [a, b, c]} solves the scene with every\ncell split a, b and c ways per axis and reports each quantity's observed\norder, Richardson extrapolation and GCI band.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -200,27 +201,99 @@ fn per_axis(object: &J, key: &str, at: &str, default: f64) -> Result<[f64; 3]> {
     }
 }
 
-/// Cells of each axis whose (tie-shifted) centres lie in `[min, max)`.
-fn cell_span(min: f64, max: f64, dx: f64, cells: usize) -> (usize, usize) {
-    let tie = 1e-6 * dx;
-    let first = |edge: f64| {
-        (0..cells)
-            .find(|&i| (i as f64 + 0.5).mul_add(dx, tie) >= edge)
-            .unwrap_or(cells)
-    };
-    (first(min), first(max))
+/// The scene's Cartesian grid: uniform (`voxel_m`) or graded per axis
+/// (`grid` zones).
+#[derive(Debug, Clone)]
+struct Grid {
+    widths: [Vec<f64>; 3],
+    faces: [Vec<f64>; 3],
+    centres: [Vec<f64>; 3],
+    /// The uniform spacing, when uniform.
+    uniform: Option<f64>,
+    min_width: f64,
 }
 
-/// Cell ranges `lo..hi` of a box (each non-empty) in a `dims` grid.
-fn cell_box(
-    region: &Aabb,
-    dx: f64,
-    dims: [usize; 3],
-    at: &str,
-) -> Result<([usize; 3], [usize; 3])> {
+impl Grid {
+    fn from_widths(widths: [Vec<f64>; 3]) -> Self {
+        let faces = widths.clone().map(|list| {
+            let mut faces = vec![0.0];
+            for w in list {
+                faces.push(faces.last().copied().unwrap_or(0.0) + w);
+            }
+            faces
+        });
+        let centres = faces
+            .clone()
+            .map(|f| f.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect());
+        let first = widths[0][0];
+        let uniform = widths
+            .iter()
+            .all(|list| list.iter().all(|w| *w == first))
+            .then_some(first);
+        let min_width = widths
+            .iter()
+            .flatten()
+            .fold(f64::INFINITY, |m, w| m.min(*w));
+        Self {
+            widths,
+            faces,
+            centres,
+            uniform,
+            min_width,
+        }
+    }
+
+    fn dims(&self) -> [usize; 3] {
+        [0, 1, 2].map(|a| self.widths[a].len())
+    }
+
+    fn length(&self, axis: usize) -> f64 {
+        *self.faces[axis].last().expect("non-empty axis")
+    }
+
+    /// Cells of `axis` whose tie-shifted centres lie in `[min, max)`.
+    fn span(&self, axis: usize, min: f64, max: f64) -> (usize, usize) {
+        let tie = 1e-6 * self.min_width;
+        let centres = &self.centres[axis];
+        let first = |edge: f64| centres.partition_point(|c| c + tie < edge);
+        (first(min), first(max))
+    }
+
+    /// The face plane of `axis` at coordinate `at` (within 1e-6 of the
+    /// smallest width).
+    fn plane(&self, axis: usize, at: f64) -> Option<usize> {
+        let faces = &self.faces[axis];
+        let i = faces.partition_point(|f| *f < at - 1e-6 * self.min_width);
+        (i < faces.len() && (faces[i] - at).abs() <= 1e-6 * self.min_width).then_some(i)
+    }
+
+    /// The cell of `axis` containing coordinate `v`.
+    fn locate(&self, axis: usize, v: f64) -> usize {
+        self.faces[axis]
+            .partition_point(|f| *f <= v)
+            .clamp(1, self.widths[axis].len())
+            - 1
+    }
+
+    fn domain(
+        &self,
+        occupancy: impl FnMut([f64; 3]) -> Voxel,
+    ) -> std::result::Result<VoxelDomain, ChtError> {
+        match self.uniform {
+            Some(dx) => {
+                let [nx, ny, nz] = self.dims();
+                VoxelDomain::from_fn(nx, ny, nz, dx, occupancy)
+            }
+            None => VoxelDomain::graded_from_fn(self.widths.clone(), occupancy),
+        }
+    }
+}
+
+/// Cell ranges `lo..hi` of a box (each non-empty) in the grid.
+fn cell_box(region: &Aabb, grid: &Grid, at: &str) -> Result<([usize; 3], [usize; 3])> {
     let (mut lo, mut hi) = ([0; 3], [0; 3]);
     for a in 0..3 {
-        (lo[a], hi[a]) = cell_span(region.min[a], region.max[a], dx, dims[a]);
+        (lo[a], hi[a]) = grid.span(a, region.min[a], region.max[a]);
         if lo[a] >= hi[a] {
             return Err(bad(format!(
                 "{at}: the box covers no voxel centre on axis {a}"
@@ -233,29 +306,31 @@ fn cell_box(
 /// An interior face patch: `axis` ("x", "y", "z"), the plane `at_m` (on a
 /// voxel face strictly inside the domain), and the transverse extent of the
 /// box `min_m`/`max_m` (its entries along `axis` are ignored).
-fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch> {
+fn face_patch(item: &J, grid: &Grid, at: &str) -> Result<FacePatch> {
+    let dims = grid.dims();
     let axis = match item.str_field("axis") {
         Some("x") => 0,
         Some("y") => 1,
         Some("z") => 2,
         _ => return Err(bad(format!("{at}.axis must be \"x\", \"y\" or \"z\""))),
     };
-    let plane = number(item, "at_m", at)? / dx;
-    let index = plane.round();
-    if (plane - index).abs() > 1e-6 || index < 1.0 || index >= dims[axis] as f64 {
-        return Err(bad(format!(
-            "{at}.at_m must lie on a voxel face strictly inside the domain"
-        )));
-    }
+    let index = grid
+        .plane(axis, number(item, "at_m", at)?)
+        .filter(|&i| i >= 1 && i < dims[axis])
+        .ok_or_else(|| {
+            bad(format!(
+                "{at}.at_m must lie on a voxel face strictly inside the domain"
+            ))
+        })?;
     let mut min = vec3(item, "min_m", at)?;
     let mut max = vec3(item, "max_m", at)?;
     // The normal extent is irrelevant: give the box one full cell there.
     min[axis] = 0.0;
-    max[axis] = dx;
-    let (lo, hi) = cell_box(&Aabb { min, max }, dx, dims, at)?;
+    max[axis] = grid.faces[axis][1];
+    let (lo, hi) = cell_box(&Aabb { min, max }, grid, at)?;
     Ok(FacePatch {
         axis,
-        index: index as usize,
+        index,
         lo,
         hi,
     })
@@ -267,7 +342,7 @@ fn face_patch(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<FacePatch
 /// across the other horizontal axis (the outer fins flush with the base
 /// edges). Every fin must cover voxel centres and every gap must keep a
 /// fluid voxel, so a design the grid cannot represent refuses.
-fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<Vec<Aabb>> {
+fn plate_fin_heatsink(item: &J, grid: &Grid, at: &str) -> Result<Vec<Aabb>> {
     let origin = vec3(item, "base_min_m", at)?;
     let size = vec3(item, "base_size_m", at)?;
     let count = number(item, "fin_count", at)?;
@@ -317,17 +392,17 @@ fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<V
         max[across] = start + thickness;
         min[2] = origin[2] + size[2];
         max[2] = min[2] + height;
-        let (lo, hi) = cell_span(min[across], max[across], dx, dims[across]);
+        let (lo, hi) = grid.span(across, min[across], max[across]);
         if lo >= hi {
             return Err(bad(format!(
-                "{at}: fin {i} ({thickness} m) covers no voxel centre at voxel_m {dx}"
+                "{at}: fin {i} ({thickness} m) covers no voxel centre on this grid"
             )));
         }
         if let Some(end) = previous_end {
-            let (gap_lo, gap_hi) = cell_span(end, start, dx, dims[across]);
+            let (gap_lo, gap_hi) = grid.span(across, end, start);
             if gap_lo >= gap_hi {
                 return Err(bad(format!(
-                    "{at}: the gap before fin {i} holds no fluid voxel at voxel_m {dx} (fins merge)"
+                    "{at}: the gap before fin {i} holds no fluid voxel on this grid (fins merge)"
                 )));
             }
         }
@@ -335,6 +410,117 @@ fn plate_fin_heatsink(item: &J, dx: f64, dims: [usize; 3], at: &str) -> Result<V
         parts.push(Aabb { min, max });
     }
     Ok(parts)
+}
+
+/// A graded grid: per axis (`x`, `y`, `z`) a list of zones `{"to_m",
+/// "voxel_m"}` from the previous zone's end (0 first), each a whole number
+/// of uniform cells.
+fn parse_grid(value: &J, root: &J) -> Result<Grid> {
+    if value.get("voxel_m").is_some() {
+        return parse_refined_grid(value, root);
+    }
+    let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+    for (a, key) in ["x", "y", "z"].iter().enumerate() {
+        let at = format!("grid.{key}");
+        let zones = value
+            .get(key)
+            .and_then(J::as_array)
+            .filter(|z| !z.is_empty())
+            .ok_or_else(|| {
+                bad(format!(
+                    "{at} must be a non-empty array of {{to_m, voxel_m}} zones"
+                ))
+            })?;
+        let mut from = 0.0f64;
+        for (i, zone) in zones.iter().enumerate() {
+            let zat = format!("{at}[{i}]");
+            let to = number(zone, "to_m", &zat)?;
+            let voxel = number(zone, "voxel_m", &zat)?;
+            if !(to > from) || !(voxel > 0.0) {
+                return Err(bad(format!(
+                    "{zat}: to_m must increase and voxel_m be positive"
+                )));
+            }
+            let cells = (to - from) / voxel;
+            let rounded = cells.round();
+            if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
+                return Err(bad(format!(
+                    "{zat}: the zone {from}..{to} m is not a whole number of {voxel} m voxels"
+                )));
+            }
+            let width = (to - from) / rounded;
+            widths[a].extend(std::iter::repeat_n(width, rounded as usize));
+            from = to;
+        }
+    }
+    if widths.iter().map(Vec::len).product::<usize>() > MAX_CELLS {
+        return Err(Failure {
+            code: "cooling-cht-budget",
+            message: format!(
+                "{} cells exceed the {MAX_CELLS}-cell cap",
+                widths.iter().map(Vec::len).product::<usize>()
+            ),
+        });
+    }
+    Ok(Grid::from_widths(widths))
+}
+
+/// A refined grid: `size_m` at the scene root, a coarse `voxel_m`, and
+/// `refine` boxes `{"min_m", "max_m", "voxel_m"}`. Each axis breaks at the
+/// domain ends and every box edge; an interval takes the finest spacing of
+/// the boxes covering it on that axis (the coarse one otherwise), rounded
+/// up to whole cells. A Cartesian grid refines whole planes: a box refines
+/// its slab on each axis.
+fn parse_refined_grid(value: &J, root: &J) -> Result<Grid> {
+    let size = vec3(root, "size_m", "scene")?;
+    let coarse = number(value, "voxel_m", "grid")?;
+    if !(coarse > 0.0) || size.iter().any(|l| !(*l > 0.0)) {
+        return Err(bad("grid.voxel_m and size_m must be positive"));
+    }
+    let mut boxes = Vec::new();
+    for (i, item) in array_of(value, "refine")?.iter().enumerate() {
+        let at = format!("grid.refine[{i}]");
+        let region = Aabb::parse(item, &at)?;
+        let voxel = number(item, "voxel_m", &at)?;
+        if !(voxel > 0.0) {
+            return Err(bad(format!("{at}.voxel_m must be positive")));
+        }
+        boxes.push((region, voxel));
+    }
+    let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+    for a in 0..3 {
+        let mut cuts = vec![0.0, size[a]];
+        for (region, _) in &boxes {
+            for v in [region.min[a], region.max[a]] {
+                if v > 0.0 && v < size[a] {
+                    cuts.push(v);
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|x, y| (*x - *y).abs() <= 1e-12 * size[a]);
+        for pair in cuts.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            let middle = 0.5 * (from + to);
+            let spacing = boxes
+                .iter()
+                .filter(|(r, _)| r.min[a] <= middle && middle < r.max[a])
+                .map(|(_, v)| *v)
+                .fold(coarse, f64::min);
+            let cells = ((to - from) / spacing * (1.0 - 1e-9)).ceil().max(1.0);
+            widths[a].extend(std::iter::repeat_n((to - from) / cells, cells as usize));
+        }
+    }
+    if widths.iter().map(Vec::len).product::<usize>() > MAX_CELLS {
+        return Err(Failure {
+            code: "cooling-cht-budget",
+            message: format!(
+                "{} cells exceed the {MAX_CELLS}-cell cap",
+                widths.iter().map(Vec::len).product::<usize>()
+            ),
+        });
+    }
+    Ok(Grid::from_widths(widths))
 }
 
 /// An axis-aligned box `[min, max)` in metres.
@@ -487,8 +673,9 @@ enum FaceRule {
 }
 
 struct Scene {
-    dims: [usize; 3],
+    /// The smallest cell width (the uniform spacing on a uniform grid).
     dx: f64,
+    grid: Grid,
     fluid: FluidProperties,
     materials: Vec<SolidMaterial>,
     contacts: Vec<ContactResistance>,
@@ -518,6 +705,11 @@ struct Scene {
     /// Rays per exposed face and stream seed of the radiation estimate.
     rays_per_face: usize,
     ray_seed: u64,
+    /// `output.vtk`: a VTK rectilinear-grid file of the fields, resolved
+    /// against the scene's directory.
+    vtk: Option<std::path::PathBuf>,
+    /// Named probe points, metres.
+    probes: Vec<(String, [f64; 3])>,
 }
 
 /// A backward-Euler march of the energy equation over the converged steady
@@ -670,29 +862,60 @@ const FACE_KEYS: [&str; 6] = ["x-", "x+", "y-", "y+", "z-", "z+"];
 const COMPACT_MATERIAL: &str = "compact-model";
 
 impl Scene {
-    #[allow(clippy::too_many_lines)] // one schema, field by field
     fn from_root(root: &J, base: &std::path::Path) -> Result<Self> {
+        Self::from_root_split(root, base, 1)
+    }
+
+    /// The scene on its declared grid with every cell split into `split`
+    /// equal parts per axis (a systematic refinement: box-aligned geometry
+    /// is identical on every split).
+    #[allow(clippy::too_many_lines)] // one schema, field by field
+    fn from_root_split(root: &J, base: &std::path::Path, split: usize) -> Result<Self> {
         let root = root.clone();
         if root.str_field("schema") != Some(SCHEMA) {
             return Err(bad(format!("schema must be {SCHEMA}")));
         }
-        let dx = number(&root, "voxel_m", "scene")?;
-        if dx <= 0.0 {
-            return Err(bad("scene.voxel_m must be positive"));
-        }
-        let size = vec3(&root, "size_m", "scene")?;
-        let mut dims = [0usize; 3];
-        for a in 0..3 {
-            let cells = size[a] / dx;
-            let rounded = cells.round();
-            if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
-                return Err(bad(format!(
-                    "scene.size_m[{a}] = {} is not a whole number of {dx} m voxels",
-                    size[a]
-                )));
+        let grid = match root.get("grid") {
+            Some(zones) => {
+                if root.get("voxel_m").is_some() {
+                    return Err(bad(
+                        "declare either voxel_m (uniform) or grid (graded), not both",
+                    ));
+                }
+                parse_grid(zones, &root)?
             }
-            dims[a] = rounded as usize;
-        }
+            None => {
+                let dx = number(&root, "voxel_m", "scene")?;
+                if dx <= 0.0 {
+                    return Err(bad("scene.voxel_m must be positive"));
+                }
+                let size = vec3(&root, "size_m", "scene")?;
+                let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+                for a in 0..3 {
+                    let cells = size[a] / dx;
+                    let rounded = cells.round();
+                    if rounded < 1.0 || (cells - rounded).abs() > 1e-6 * rounded.max(1.0) {
+                        return Err(bad(format!(
+                            "scene.size_m[{a}] = {} is not a whole number of {dx} m voxels",
+                            size[a]
+                        )));
+                    }
+                    widths[a] = vec![dx; rounded as usize];
+                }
+                Grid::from_widths(widths)
+            }
+        };
+        let grid = if split > 1 {
+            Grid::from_widths(grid.widths.map(|list| {
+                list.iter()
+                    .flat_map(|w| std::iter::repeat_n(w / split as f64, split))
+                    .collect()
+            }))
+        } else {
+            grid
+        };
+        let dims = grid.dims();
+        let dx = grid.min_width;
         if dims.iter().product::<usize>() > MAX_CELLS {
             return Err(Failure {
                 code: "cooling-cht-budget",
@@ -752,6 +975,40 @@ impl Scene {
             let material = match optional_number(item, "volumetric_heat_capacity_j_m3_k", &at)? {
                 Some(rho_c) => material.with_heat_capacity(rho_c),
                 None => material,
+            };
+            // Optional k(T): [[T K, k W/(m K)], ...], scaling every axis.
+            let material = match item.get("conductivity_table") {
+                None => material,
+                Some(table) => {
+                    let points = table
+                        .as_array()
+                        .filter(|points| !points.is_empty())
+                        .ok_or_else(|| {
+                            bad(format!(
+                                "{at}.conductivity_table must be [[temperature_k, k], ...]"
+                            ))
+                        })?
+                        .iter()
+                        .map(|point| {
+                            point
+                                .as_array()
+                                .filter(|pair| pair.len() == 2)
+                                .and_then(|pair| Some((pair[0].as_f64()?, pair[1].as_f64()?)))
+                                .filter(|&(t, k)| t.is_finite() && k.is_finite() && k > 0.0)
+                                .ok_or_else(|| {
+                                    bad(format!(
+                                        "{at}.conductivity_table entries must be [temperature_k, k > 0]"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    if points.windows(2).any(|w| w[1].0 <= w[0].0) {
+                        return Err(bad(format!(
+                            "{at}.conductivity_table temperatures must increase"
+                        )));
+                    }
+                    material.with_conductivity_table(&points)
+                }
             };
             let emissivity = optional_number(item, "emissivity", &at)?.unwrap_or(0.0);
             if !(0.0..=1.0).contains(&emissivity) {
@@ -820,7 +1077,7 @@ impl Scene {
                 .ok_or_else(|| bad(format!("{at}: unknown material {material}")))?;
             let material = u16::try_from(index).expect("bounded above");
             if let Some(heatsink) = item.get("heatsink") {
-                for part in plate_fin_heatsink(heatsink, dx, dims, &format!("{at}.heatsink"))? {
+                for part in plate_fin_heatsink(heatsink, &grid, &format!("{at}.heatsink"))? {
                     solids.push((material, Shape::Box(part)));
                 }
                 continue;
@@ -843,7 +1100,7 @@ impl Scene {
             for (i, item) in component_items.iter().enumerate() {
                 let at = format!("components[{i}]");
                 let region = Aabb::parse(item, &at)?;
-                let (lo, hi) = cell_box(&region, dx, dims, &at)?;
+                let (lo, hi) = cell_box(&region, &grid, &at)?;
                 let board_face = item
                     .str_field("board_side")
                     .and_then(|key| FACE_KEYS.iter().position(|k| *k == key))
@@ -977,7 +1234,7 @@ impl Scene {
         let mut internal_fans = Vec::new();
         for (i, item) in array_of(&root, "internal_fans")?.iter().enumerate() {
             let at = format!("internal_fans[{i}]");
-            let patch = face_patch(item, dx, dims, &at)?;
+            let patch = face_patch(item, &grid, &at)?;
             let blows_positive = match item.str_field("direction") {
                 Some("+") => true,
                 Some("-") => false,
@@ -1012,12 +1269,12 @@ impl Scene {
                         }
                     };
                     FlowResistance::Planar {
-                        patch: face_patch(item, dx, dims, &at)?,
+                        patch: face_patch(item, &grid, &at)?,
                         loss_coefficient: loss,
                     }
                 }
                 Some("porous") => {
-                    let (lo, hi) = cell_box(&Aabb::parse(item, &at)?, dx, dims, &at)?;
+                    let (lo, hi) = cell_box(&Aabb::parse(item, &at)?, &grid, &at)?;
                     let permeability_m2 = per_axis(item, "permeability_m2", &at, f64::INFINITY)?;
                     let inertial_per_m = per_axis(item, "inertial_per_m", &at, 0.0)?;
                     if permeability_m2.iter().any(|k| !(*k > 0.0))
@@ -1044,9 +1301,10 @@ impl Scene {
         if !(wall_seconds > 0.0) {
             return Err(bad("limits.wall_seconds must be positive"));
         }
+        let lengths = [0, 1, 2].map(|a| grid.length(a));
         Ok(Self {
-            dims,
             dx,
+            grid,
             fluid,
             materials,
             contacts,
@@ -1105,20 +1363,143 @@ impl Scene {
                 }
                 None => 0x5EED_0FA1,
             },
+            vtk: match root.get("output").map(|o| o.get("vtk")) {
+                None | Some(None) => None,
+                Some(Some(J::Str(name))) if name.ends_with(".vtr") => Some(base.join(name)),
+                Some(Some(_)) => return Err(bad("output.vtk must be a file name ending in .vtr")),
+            },
+            probes: {
+                let mut probes = Vec::new();
+                for (i, item) in array_of(&root, "probes")?.iter().enumerate() {
+                    let at = format!("probes[{i}]");
+                    let point = vec3(item, "at_m", &at)?;
+                    if (0..3).any(|a| point[a] < 0.0 || point[a] > lengths[a]) {
+                        return Err(bad(format!("{at}.at_m lies outside the domain")));
+                    }
+                    probes.push((item.str_field("name").unwrap_or("probe").to_string(), point));
+                }
+                probes
+            },
         })
     }
+}
+
+/// Write the fields as a VTK XML rectilinear grid (ASCII; cell data on the
+/// actual face coordinates, so graded grids keep their geometry): cell
+/// temperature, velocity, pressure, and the solid material (0 for fluid,
+/// material index + 1 otherwise).
+fn write_vtk(
+    path: &std::path::Path,
+    domain: &VoxelDomain,
+    grid: &Grid,
+    temperature: &[f64],
+    velocity: &[[f64; 3]],
+    pressure: &[f64],
+) -> Result<()> {
+    let [nx, ny, nz] = grid.dims();
+    let mut out = String::with_capacity(64 * domain.cell_count());
+    let _ = writeln!(
+        out,
+        "<?xml version=\"1.0\"?>\n<VTKFile type=\"RectilinearGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n<RectilinearGrid WholeExtent=\"0 {nx} 0 {ny} 0 {nz}\">\n<Piece Extent=\"0 {nx} 0 {ny} 0 {nz}\">\n<CellData Scalars=\"temperature_k\" Vectors=\"velocity_m_s\">"
+    );
+    out.push_str("<DataArray type=\"Float64\" Name=\"temperature_k\" format=\"ascii\">\n");
+    for t in temperature {
+        let _ = writeln!(out, "{t}");
+    }
+    out.push_str("</DataArray>\n<DataArray type=\"Float64\" Name=\"velocity_m_s\" NumberOfComponents=\"3\" format=\"ascii\">\n");
+    for v in velocity {
+        let _ = writeln!(out, "{} {} {}", v[0], v[1], v[2]);
+    }
+    out.push_str(
+        "</DataArray>\n<DataArray type=\"Float64\" Name=\"pressure_pa\" format=\"ascii\">\n",
+    );
+    for p in pressure {
+        let _ = writeln!(out, "{p}");
+    }
+    out.push_str("</DataArray>\n<DataArray type=\"Int32\" Name=\"material\" format=\"ascii\">\n");
+    for c in 0..domain.cell_count() {
+        let id = match domain.voxel_at(c) {
+            Voxel::Fluid => 0,
+            Voxel::Solid(m) => i32::from(m) + 1,
+        };
+        let _ = writeln!(out, "{id}");
+    }
+    out.push_str("</DataArray>\n</CellData>\n<Coordinates>\n");
+    for (axis, name) in ["x", "y", "z"].iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "<DataArray type=\"Float64\" Name=\"{name}\" format=\"ascii\">"
+        );
+        for f in &grid.faces[axis] {
+            let _ = writeln!(out, "{f}");
+        }
+        out.push_str("</DataArray>\n");
+    }
+    out.push_str("</Coordinates>\n</Piece>\n</RectilinearGrid>\n</VTKFile>\n");
+    std::fs::write(path, out).map_err(|e| Failure {
+        code: "cooling-cht-output",
+        message: format!("cannot write {}: {e}", path.display()),
+    })
+}
+
+/// Probe readings: `(name, temperature K, velocity m/s, solid)`.
+fn read_probes(
+    scene: &Scene,
+    domain: &VoxelDomain,
+    temperature: &[f64],
+    velocity: &[[f64; 3]],
+) -> Vec<(String, f64, [f64; 3], bool)> {
+    scene
+        .probes
+        .iter()
+        .map(|(name, point)| {
+            let at = [0, 1, 2].map(|a| scene.grid.locate(a, point[a]));
+            let c = domain.index(at[0], at[1], at[2]);
+            (
+                name.clone(),
+                temperature[c],
+                velocity[c],
+                !domain.is_fluid(c),
+            )
+        })
+        .collect()
+}
+
+/// The probe readings as a JSON array member (`""` without probes).
+fn probes_json(readings: &[(String, f64, [f64; 3], bool)]) -> Result<String> {
+    if readings.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::from(",\"probes\":[");
+    for (i, (name, t, v, solid)) in readings.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"name\":{},\"temperature_k\":{},\"velocity_m_s\":[{},{},{}],\"solid\":{solid}}}",
+            quote(name),
+            num(*t)?,
+            num(v[0])?,
+            num(v[1])?,
+            num(v[2])?
+        );
+    }
+    out.push(']');
+    Ok(out)
 }
 
 /// The unsteady march (`transient.flow: "unsteady"`): flow and energy
 /// advance together, so there is no steady solution to report; the result
 /// carries the march's closure, peak and final temperatures instead.
-#[allow(clippy::too_many_lines)] // solve and one linear report
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // solve and one linear report
 fn execute_unsteady(
     scene: &Scene,
     domain: &VoxelDomain,
     setup: &ThermalSetup,
     flow_config: &SimpleConfig,
     (transient, options): (&Transient, &UnsteadyOptions),
+    radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
     json_mode: bool,
 ) -> Result<String> {
@@ -1163,6 +1544,7 @@ fn execute_unsteady(
         |t| interpolate(&options.inlet_schedule, t),
         |t| transient.scale(t),
         &EnergyConfig::default(),
+        radiation,
         gate,
     )
     .map_err(|e| solver_failure(&e))?;
@@ -1222,12 +1604,13 @@ fn execute_unsteady(
     };
     if json_mode {
         let mut out = format!(
-            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{}",
+            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{},\"graded\":{}",
             quote(RESULT_SCHEMA),
             quote(solver_name),
             domain.cell_count(),
             domain.fluid_count(),
-            num(scene.dx)?
+            num(scene.dx)?,
+            scene.grid.uniform.is_none()
         );
         let _ = write!(
             out,
@@ -1262,10 +1645,11 @@ fn execute_unsteady(
             first = false;
             let _ = write!(
                 out,
-                "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"kinetic_energy_j\":{},\"sweeps\":{}}}",
+                "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"kinetic_energy_j\":{},\"radiated_w\":{},\"sweeps\":{}}}",
                 num(record.time_s)?,
                 num_or_null(record.max_solid_temperature_k),
                 num(step.kinetic_energy_j)?,
+                num(record.radiated_w)?,
                 step.inner_iterations
             );
         }
@@ -1315,17 +1699,18 @@ fn execute_unsteady(
 
 #[allow(clippy::too_many_lines)] // build, solve, and one linear report
 fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> {
-    let [nx, ny, nz] = scene.dims;
     let tie = 1e-6 * scene.dx;
-    let domain = VoxelDomain::from_fn(nx, ny, nz, scene.dx, |p| {
-        scene
-            .solids
-            .iter()
-            .rev()
-            .find(|(_, shape)| shape.contains(probe(p, tie)))
-            .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
-    })
-    .map_err(|e| solver_failure(&e))?;
+    let domain = scene
+        .grid
+        .domain(|p| {
+            scene
+                .solids
+                .iter()
+                .rev()
+                .find(|(_, shape)| shape.contains(probe(p, tie)))
+                .map_or(Voxel::Fluid, |(material, _)| Voxel::Solid(*material))
+        })
+        .map_err(|e| solver_failure(&e))?;
     let fans: Vec<usize> = (0..6)
         .filter(|&side| matches!(scene.faces[side], FaceRule::Fan { .. }))
         .collect();
@@ -1339,7 +1724,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let axis = side / 2;
             let area: f64 = (0..3)
                 .filter(|&a| a != axis)
-                .map(|a| scene.dims[a] as f64 * scene.dx)
+                .map(|a| scene.grid.length(a))
                 .product();
             let free_delivery = -curve.pressure(0.0) / curve.slope(0.0);
             let speed = 0.5 * free_delivery.max(0.0) / area;
@@ -1369,8 +1754,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         let count = setup.add_uniform_power(&domain, source.power_w, |p| {
             source.region.contains(probe(p, tie))
                 && !domain.is_fluid({
-                    let cell = |v: f64| (v / scene.dx).floor() as usize;
-                    domain.index(cell(p[0]), cell(p[1]), cell(p[2]))
+                    let cell = |a: usize| scene.grid.locate(a, p[a]);
+                    domain.index(cell(0), cell(1), cell(2))
                 })
         });
         if count == 0 {
@@ -1417,11 +1802,6 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         .as_ref()
         .and_then(|t| t.unsteady.as_ref().map(|o| (t, o)))
         .filter(|(_, o)| o.mean_flow_energy);
-    if radiation.is_some() && scene.transient.is_some() && mean_flow.is_none() {
-        return Err(bad(
-            "transient marches do not carry radiation; drop the transient block or the emissivities",
-        ));
-    }
     if let Some(transient) = &scene.transient
         && let Some(options) = &transient.unsteady
         && !options.mean_flow_energy
@@ -1432,6 +1812,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             &setup,
             &flow_config,
             (transient, options),
+            radiation.as_ref(),
             gate,
             json_mode,
         );
@@ -1572,6 +1953,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 &vec![initial; domain.cell_count()],
                 |t| transient.scale(t),
                 &config,
+                radiation.as_ref(),
                 gate,
             )
             .map_err(|e| solver_failure(&e))?;
@@ -1580,6 +1962,17 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     };
     let wall_s = started.elapsed().as_secs_f64();
     let temperature = &energy.temperature;
+    let probes = read_probes(scene, &domain, temperature, &flow.velocity_m_s);
+    if let Some(path) = &scene.vtk {
+        write_vtk(
+            path,
+            &domain,
+            &scene.grid,
+            temperature,
+            &flow.velocity_m_s,
+            &flow.pressure_pa,
+        )?;
+    }
     // Per-material and per-source temperatures.
     let mut material_rows = Vec::new();
     for (index, material) in scene.materials.iter().enumerate() {
@@ -1642,12 +2035,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
     };
     if json_mode {
         let mut out = format!(
-            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{}",
+            "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{},\"graded\":{}",
             quote(RESULT_SCHEMA),
             quote(solver_name),
             domain.cell_count(),
             domain.fluid_count(),
-            num(scene.dx)?
+            num(scene.dx)?,
+            scene.grid.uniform.is_none()
         );
         let _ = write!(
             out,
@@ -1798,11 +2192,12 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 first = false;
                 let _ = write!(
                     out,
-                    "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"source_j\":{},\"stored_j\":{}}}",
+                    "{{\"time_s\":{},\"max_solid_temperature_k\":{},\"source_j\":{},\"stored_j\":{},\"radiated_w\":{}}}",
                     num(record.time_s)?,
                     num(record.max_solid_temperature_k)?,
                     num(record.source_j)?,
-                    num(record.stored_energy_change_j)?
+                    num(record.stored_energy_change_j)?,
+                    num(record.radiated_w)?
                 );
             }
             out.push_str("]}");
@@ -1816,6 +2211,10 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 num(at[1])?,
                 num(at[2])?
             );
+        }
+        out.push_str(&probes_json(&probes)?);
+        if let Some(path) = &scene.vtk {
+            let _ = write!(out, ",\"vtk\":{}", quote(&path.display().to_string()));
         }
         let _ = writeln!(
             out,
@@ -1884,6 +2283,13 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 out,
                 "max_solid_temperature_k={t:.4} at_m=({:.6},{:.6},{:.6})",
                 at[0], at[1], at[2]
+            );
+        }
+        for (name, t, v, _) in &probes {
+            let _ = writeln!(
+                out,
+                "probe={name} temperature_k={t:.4} velocity_m_s=({:e},{:e},{:e})",
+                v[0], v[1], v[2]
             );
         }
         let _ = writeln!(
@@ -1975,8 +2381,14 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
             );
         }
     };
-    let result = if root.get("study").is_some() {
+    let result = if root.get("study").is_some() && root.get("grid_convergence").is_some() {
+        Err(bad(
+            "declare either a study or a grid_convergence block, not both",
+        ))
+    } else if root.get("study").is_some() {
         study::run(&root, &base, json_mode)
+    } else if root.get("grid_convergence").is_some() {
+        convergence::run(&root, &base, json_mode)
     } else {
         match Scene::from_root(&root, &base) {
             Ok(scene) => execute_within_budget(&scene, json_mode),

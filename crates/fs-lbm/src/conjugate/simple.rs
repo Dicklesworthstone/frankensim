@@ -462,14 +462,16 @@ impl FvFlow {
     /// Mean pressure over the fluid cells of layer `index` along `axis`, Pa.
     #[must_use]
     pub fn mean_pressure(&self, domain: &VoxelDomain, axis: usize, index: usize) -> Option<f64> {
-        let (mut sum, mut count) = (0.0f64, 0usize);
+        // Area-weighted over the layer's fluid cells (graded grids).
+        let (mut sum, mut area) = (0.0f64, 0.0f64);
         for c in 0..domain.cell_count() {
             if domain.is_fluid(c) && domain.coords(c)[axis] == index {
-                sum += self.pressure_pa[c];
-                count += 1;
+                let a = domain.face_area(c, axis);
+                sum = a.mul_add(self.pressure_pa[c], sum);
+                area += a;
             }
         }
-        (count > 0).then(|| sum / count as f64)
+        (area > 0.0).then(|| sum / area)
     }
 }
 
@@ -511,7 +513,6 @@ pub(super) struct Solver<'a> {
     n: [usize; 3],
     rho: f64,
     mu: f64,
-    area: f64,
     comps: [Component; 3],
     /// Face velocities per component, m/s.
     vel: [Vec<f64>; 3],
@@ -569,6 +570,8 @@ struct InternalFanState {
     /// +1 blowing toward +axis, -1 toward -axis.
     sign: f64,
     faces: Vec<usize>,
+    /// Area of each face, m^2.
+    face_areas: Vec<f64>,
     /// Open area of the patch, m^2.
     area: f64,
     curve: FanCurve,
@@ -732,16 +735,20 @@ impl<'a> Solver<'a> {
             .iter()
             .map(|fan| {
                 let comp = &comps[fan.patch.axis];
-                let faces: Vec<usize> = fan
-                    .patch
-                    .open_faces(domain)
-                    .into_iter()
-                    .map(|f| comp.index(f))
+                let open = fan.patch.open_faces(domain);
+                let face_areas: Vec<f64> = open
+                    .iter()
+                    .map(|f| {
+                        let (u, w) = ((fan.patch.axis + 1) % 3, (fan.patch.axis + 2) % 3);
+                        domain.width(u, f[u]) * domain.width(w, f[w])
+                    })
                     .collect();
+                let faces: Vec<usize> = open.into_iter().map(|f| comp.index(f)).collect();
                 InternalFanState {
                     axis: fan.patch.axis,
                     sign: if fan.blows_positive { 1.0 } else { -1.0 },
-                    area: domain.dx() * domain.dx() * faces.len() as f64,
+                    area: face_areas.iter().sum(),
+                    face_areas,
                     faces,
                     curve: fan.curve,
                     flow: 0.0,
@@ -756,7 +763,6 @@ impl<'a> Solver<'a> {
             n,
             rho: fluid.density_kg_m3,
             mu: fluid.density_kg_m3 * fluid.kinematic_viscosity_m2_s,
-            area: domain.dx() * domain.dx(),
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
@@ -808,7 +814,7 @@ impl<'a> Solver<'a> {
                 let cells: Vec<usize> = (0..domain.cell_count())
                     .filter(|&c| domain.is_fluid(c) && domain.neighbor(c, side).is_none())
                     .collect();
-                let area = domain.dx() * domain.dx() * cells.len() as f64;
+                let area = cells.iter().map(|&c| domain.face_area(c, axis)).sum();
                 let speed = match config.faces[side] {
                     FvBoundary::Inlet { velocity } => velocity[axis].abs(),
                     _ => 0.0,
@@ -997,8 +1003,14 @@ impl<'a> Solver<'a> {
         if mass > gate || momentum > gate {
             return;
         }
-        let mean = fan.cells.iter().map(|&c| self.pressure[c]).sum::<f64>()
-            / fan.cells.len().max(1) as f64;
+        // Area-weighted mean pressure of the layer behind the fan face.
+        let axis = fan.side / 2;
+        let mean = fan
+            .cells
+            .iter()
+            .map(|&c| self.pressure[c] * self.domain.face_area(c, axis))
+            .sum::<f64>()
+            / fan.area.max(f64::MIN_POSITIVE);
         let mismatch = fan.curve.pressure(fan.flow) - mean;
         let scale = fan
             .curve
@@ -1038,8 +1050,13 @@ impl<'a> Solver<'a> {
         self.sweeps += 1;
         self.update_turbulence();
         for fan in &mut self.internal_fans {
-            let sum: f64 = fan.faces.iter().map(|&f| self.vel[fan.axis][f]).sum();
-            fan.flow = fan.sign * self.area * sum;
+            let sum: f64 = fan
+                .faces
+                .iter()
+                .zip(&fan.face_areas)
+                .map(|(&f, area)| self.vel[fan.axis][f] * area)
+                .sum();
+            fan.flow = fan.sign * sum;
             fan.rise = fan.curve.pressure(fan.flow);
             fan.slope = fan.curve.slope(fan.flow);
         }
@@ -1052,13 +1069,13 @@ impl<'a> Solver<'a> {
         self.guard_finite()?;
         // The fan residual joins the momentum residual: the operating point
         // is part of the steady state.
-        let largest_velocity = self
-            .vel
-            .iter()
-            .flat_map(|v| v.iter())
-            .fold(0.0f64, |m, v| m.max(v.abs()))
+        let largest_flux = (0..3)
+            .flat_map(|a| (0..self.vel[a].len()).map(move |i| (a, i)))
+            .fold(0.0f64, |m, (a, i)| {
+                m.max((self.vel[a][i] * self.comp_face_area(a, i)).abs())
+            })
             .max(f64::MIN_POSITIVE);
-        let mass = imbalance / (self.rho * self.area * largest_velocity);
+        let mass = imbalance / (self.rho * largest_flux);
         self.update_fan(mass, steady);
         let fan = self.fan.as_ref().map_or(0.0, |fan| fan.residual);
         Ok((mass, steady.max(fan)))
@@ -1116,12 +1133,21 @@ impl<'a> Solver<'a> {
 
     /// The current face fluxes.
     pub(super) fn field(&self) -> FlowField {
-        let area = self.area;
-        let [fx, fy, fz] = self
-            .vel
-            .clone()
-            .map(|v| v.into_iter().map(|u| u * area).collect::<Vec<f64>>());
+        let [fx, fy, fz] = [0, 1, 2].map(|a| {
+            self.vel[a]
+                .iter()
+                .enumerate()
+                .map(|(i, u)| u * self.comp_face_area(a, i))
+                .collect::<Vec<f64>>()
+        });
         FlowField::from_face_arrays(self.domain, fx, fy, fz)
+    }
+
+    /// Area of face `index` of component `a`, m^2.
+    fn comp_face_area(&self, a: usize, index: usize) -> f64 {
+        let f = self.comps[a].coords(index);
+        let (u, w) = ((a + 1) % 3, (a + 2) % 3);
+        self.domain.width(u, f[u]) * self.domain.width(w, f[w])
     }
 
     fn weight(&self, peclet: f64) -> f64 {
@@ -1155,12 +1181,12 @@ impl<'a> Solver<'a> {
             return Ok(0.0);
         }
         let alpha = self.config.velocity_relaxation;
-        let dx = self.domain.dx();
-        let conductance = self.area / dx;
+        let width = |axis: usize, i: usize| self.domain.width(axis, i);
         let mut coo = Coo::new(rows, rows);
         let mut b = vec![0.0f64; rows];
         let mut a_p_relaxed = vec![0.0f64; rows];
         let mut neighbour_sum = vec![0.0f64; rows];
+        let mut areas = vec![0.0f64; rows];
         for (row, &index) in comp.unknowns.iter().enumerate() {
             if row % 4096 == 0 {
                 poll(gate)?;
@@ -1180,6 +1206,13 @@ impl<'a> Solver<'a> {
                 (None, Some(p)) => (p, p),
                 (None, None) => unreachable!("every face touches a cell"),
             };
+            // Staggered control volume: the face's area across, from the
+            // minus to the plus cell centre along (an outlet's mirrored twin
+            // repeats the inside cell's width).
+            let face_area = width((a + 1) % 3, f[(a + 1) % 3]) * width((a + 2) % 3, f[(a + 2) % 3]);
+            let (w_minus, w_plus) = (width(a, minus_cell[a]), width(a, plus_cell[a]));
+            let length = 0.5 * (w_minus + w_plus);
+            areas[row] = face_area;
             let mut sum_nb = 0.0f64;
             let mut a_p = 0.0f64;
             let mut rhs = 0.0f64;
@@ -1193,7 +1226,7 @@ impl<'a> Solver<'a> {
                         if beyond {
                             // Outlet: the mirrored outside centre moves with
                             // the face itself, so only the flux remains.
-                            net_out += s * self.rho * self.area * self.vel[a][index];
+                            net_out += s * self.rho * face_area * self.vel[a][index];
                             continue;
                         }
                         let nf = {
@@ -1206,10 +1239,11 @@ impl<'a> Solver<'a> {
                             comp.index(g)
                         };
                         let flux =
-                            s * self.rho * self.area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
+                            s * self.rho * face_area * 0.5 * (self.vel[a][index] + self.vel[a][nf]);
                         net_out += flux;
-                        let diff =
-                            conductance * self.mu_eff(if plus { plus_cell } else { minus_cell });
+                        // Diffusion across the cell between the two faces.
+                        let side_cell = if plus { plus_cell } else { minus_cell };
+                        let diff = self.mu_eff(side_cell) * face_area / width(a, side_cell[a]);
                         let coef = diff.mul_add(self.weight(flux / diff), (-flux).max(0.0));
                         match comp.kind[nf] {
                             Kind::Unknown(col) | Kind::Outlet(col) => {
@@ -1221,28 +1255,42 @@ impl<'a> Solver<'a> {
                         a_p += coef;
                         continue;
                     }
-                    // Transverse side at the edge shared with the next row.
+                    // Transverse side at the edge shared with the next row:
+                    // half of it beside each cell, area-weighted.
+                    let third = 3 - a - d;
+                    let w3 = width(third, f[third]);
+                    let side_area = length * w3;
                     let edge_flux = {
                         let vm = self.vel[d][self.cell_face(d, minus_cell, plus)];
                         let vp = self.vel[d][self.cell_face(d, plus_cell, plus)];
-                        s * self.rho * self.area * 0.5 * (vm + vp)
+                        s * self.rho * w3 * (0.5 * w_minus).mul_add(vm, 0.5 * w_plus * vp)
                     };
                     let outside = if plus {
                         f[d] + 1 >= self.n[d]
                     } else {
                         f[d] == 0
                     };
-                    let diff = conductance * self.edge_mu(minus_cell, plus_cell, d, plus);
+                    // Node-to-node distance across the edge (to a wall: the
+                    // half row width).
+                    let row_width = width(d, f[d]);
+                    let distance = if outside {
+                        row_width
+                    } else {
+                        let next = if plus { f[d] + 1 } else { f[d] - 1 };
+                        0.5 * (row_width + width(d, next))
+                    };
+                    let diff = self.edge_mu(minus_cell, plus_cell, d, plus) * side_area / distance;
+                    let wall_conductance = side_area / row_width;
                     if outside {
                         match self.faces[2 * d + usize::from(plus)] {
                             FvBoundary::Wall { velocity } => {
-                                let wall = conductance * self.wall_mu(minus_cell, plus_cell);
+                                let wall = wall_conductance * self.wall_mu(minus_cell, plus_cell);
                                 a_p += 2.0 * wall;
                                 rhs = (2.0 * wall).mul_add(velocity[a], rhs);
                             }
                             FvBoundary::Symmetry => {}
                             FvBoundary::Inlet { velocity } => {
-                                let flux = s * self.rho * self.area * velocity[d];
+                                let flux = s * self.rho * side_area * velocity[d];
                                 net_out += flux;
                                 let coef = (2.0 * diff)
                                     .mul_add(self.weight(flux / (2.0 * diff)), (-flux).max(0.0));
@@ -1280,7 +1328,7 @@ impl<'a> Solver<'a> {
                         // inflow through the edge brings zero momentum.
                         _ => {
                             net_out += edge_flux;
-                            let wall = conductance * self.wall_mu(minus_cell, plus_cell);
+                            let wall = wall_conductance * self.wall_mu(minus_cell, plus_cell);
                             a_p += 2.0f64.mul_add(wall, (-edge_flux).max(0.0));
                         }
                     }
@@ -1291,20 +1339,20 @@ impl<'a> Solver<'a> {
             let u_old = self.vel[a][index];
             if let Some(&loss) = self.planar_loss[a].get(index) {
                 // 1/2 rho K |u| u across the face (Picard in |u|).
-                a_p += 0.5 * self.rho * loss * u_old.abs() * self.area;
+                a_p += 0.5 * self.rho * loss * u_old.abs() * face_area;
             }
             if !self.porous.is_empty() {
-                // Half of the staggered volume lies in each adjacent cell.
+                // Half of each adjacent cell lies in the staggered volume.
                 let (m, p) = (
                     self.porous[cell_of(self.n, minus_cell)][a],
                     self.porous[cell_of(self.n, plus_cell)][a],
                 );
-                let per_volume = (0.5 * (m.1 + p.1)).mul_add(u_old.abs(), 0.5 * (m.0 + p.0));
-                a_p += per_volume * self.area * dx;
+                let coef = |c: (f64, f64)| c.1.mul_add(u_old.abs(), c.0);
+                a_p += face_area * (0.5 * w_minus).mul_add(coef(m), 0.5 * w_plus * coef(p));
             }
             if let Some(time) = &self.time {
-                // rho V du/dt over the cell-sized staggered volume.
-                let c = self.rho * self.area * dx / time.dt;
+                // rho V du/dt over the staggered volume.
+                let c = self.rho * face_area * length / time.dt;
                 match (time.scheme, &time.older) {
                     (TimeScheme::Bdf2, Some(older)) => {
                         a_p += 1.5 * c;
@@ -1327,9 +1375,9 @@ impl<'a> Solver<'a> {
                 // S(u) = s A dp(Q0) + A slope A_fan (u - u0); exact at the
                 // fixed point, and the stiffness damps the fan-system loop.
                 let fan = &self.internal_fans[i];
-                let stiffness = -fan.slope * fan.area * self.area;
+                let stiffness = -fan.slope * fan.area * face_area;
                 a_p += stiffness;
-                rhs += (fan.sign * self.area).mul_add(fan.rise, stiffness * u_old);
+                rhs += (fan.sign * face_area).mul_add(fan.rise, stiffness * u_old);
             }
             // Interior faces separate two fluid cells; an outlet face sees
             // the ghost pressure -p_inside (boundary pressure zero).
@@ -1341,14 +1389,15 @@ impl<'a> Solver<'a> {
                         - self.pressure[cell_of(self.n, plus_cell)]
                 }
             };
-            rhs = self.area.mul_add(drop, rhs);
+            rhs = face_area.mul_add(drop, rhs);
             if !self.force.is_empty() {
-                // Cell-sized staggered volume: half in each adjacent cell
+                // Half of each adjacent cell lies in the staggered volume
                 // (an outlet face's mirrored twin repeats the inside cell).
-                let mean = 0.5
-                    * (self.force[cell_of(self.n, minus_cell)][a]
-                        + self.force[cell_of(self.n, plus_cell)][a]);
-                rhs = (self.area * dx).mul_add(mean, rhs);
+                let (fm, fp) = (
+                    self.force[cell_of(self.n, minus_cell)][a],
+                    self.force[cell_of(self.n, plus_cell)][a],
+                );
+                rhs = face_area.mul_add((0.5 * w_minus).mul_add(fm, 0.5 * w_plus * fp), rhs);
             }
             let relaxed = a_p / alpha;
             rhs = ((1.0 - alpha) * relaxed).mul_add(self.vel[a][index], rhs);
@@ -1380,14 +1429,26 @@ impl<'a> Solver<'a> {
         };
         // Inner solves reduce the entry residual by `momentum_tolerance`.
         let inner = (self.config.momentum_tolerance * steady).max(1e-15);
+        // The relaxed momentum operator is a strictly diagonally dominant
+        // M-matrix for finite coefficients, so a non-finite residual or an
+        // incomplete-factorization breakdown means the iteration diverged.
+        if !steady.is_finite() {
+            return Err(ChtError::FlowDiverged { step: self.sweeps });
+        }
         if steady > 1e-15 {
-            let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)?;
+            let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)
+                .map_err(|error| match error {
+                    ChtError::PreconditionerBreakdown { .. } => {
+                        ChtError::FlowDiverged { step: self.sweeps }
+                    }
+                    other => other,
+                })?;
             self.momentum_krylov += outcome.iterations;
         }
         for (row, &index) in self.comps[a].unknowns.iter().enumerate() {
             self.vel[a][index] = x[row];
             self.d[a][index] =
-                self.area / (a_p_relaxed[row] - neighbour_sum[row]).max(f64::MIN_POSITIVE);
+                areas[row] / (a_p_relaxed[row] - neighbour_sum[row]).max(f64::MIN_POSITIVE);
         }
         Ok(steady)
     }
@@ -1397,7 +1458,7 @@ impl<'a> Solver<'a> {
         let axis = side / 2;
         let plus = side % 2 == 1;
         let v = self.vel[axis][self.cell_face(axis, c, plus)];
-        (if plus { v } else { -v }) * self.rho * self.area
+        (if plus { v } else { -v }) * self.rho * self.domain.face_area(cell_of(self.n, c), axis)
     }
 
     /// Pressure correction solved to `tolerance` (relative to the imbalance
@@ -1430,7 +1491,7 @@ impl<'a> Solver<'a> {
                 let face = self.cell_face(axis, at, plus);
                 match self.comps[axis].kind[face] {
                     Kind::Unknown(_) => {
-                        let coef = self.rho * self.area * self.d[axis][face];
+                        let coef = self.rho * self.domain.face_area(c, axis) * self.d[axis][face];
                         diag += coef;
                         let mut nc = at;
                         if plus {
@@ -1442,7 +1503,8 @@ impl<'a> Solver<'a> {
                     }
                     Kind::Outlet(_) => {
                         // u' = 2 d p'_inside against the ghost pressure.
-                        diag += 2.0 * self.rho * self.area * self.d[axis][face];
+                        diag +=
+                            2.0 * self.rho * self.domain.face_area(c, axis) * self.d[axis][face];
                         drains[row] = true;
                     }
                     Kind::Fixed(_) => {}
@@ -1491,7 +1553,14 @@ impl<'a> Solver<'a> {
             }
         }
         for &row in &pins {
-            coo.push(row, row, self.rho * self.area * self.domain.dx() / self.mu);
+            // Any positive scale pins the component (its correction is a
+            // free constant); the cell's own A dx / nu keeps it conditioned.
+            let c = cells[row];
+            coo.push(
+                row,
+                row,
+                self.rho * self.domain.face_area(c, 0) * self.domain.widths(c)[0] / self.mu,
+            );
         }
         let mut correction = vec![0.0f64; rows];
         if b.iter().any(|v| *v != 0.0) {
@@ -1716,8 +1785,10 @@ impl Solver<'_> {
                         + self.vel[a][self.cell_face(a, at, true)]);
             }
             let speed = fs_math::det::sqrt(slot.iter().map(|v| v * v).sum::<f64>());
-            max_cell_reynolds =
-                max_cell_reynolds.max(speed * domain.dx() / fluid.kinematic_viscosity_m2_s);
+            max_cell_reynolds = max_cell_reynolds.max(
+                speed * domain.widths(c).iter().fold(0.0f64, |m, w| m.max(*w))
+                    / fluid.kinematic_viscosity_m2_s,
+            );
         }
         let (mut inflow, mut outflow) = (0.0f64, 0.0f64);
         for face in Face3::ALL {
@@ -1758,8 +1829,13 @@ impl Solver<'_> {
                 .internal_fans
                 .iter()
                 .map(|fan| {
-                    let sum: f64 = fan.faces.iter().map(|&f| self.vel[fan.axis][f]).sum();
-                    let flow = fan.sign * self.area * sum;
+                    let sum: f64 = fan
+                        .faces
+                        .iter()
+                        .zip(&fan.face_areas)
+                        .map(|(&f, area)| self.vel[fan.axis][f] * area)
+                        .sum();
+                    let flow = fan.sign * sum;
                     (flow, fan.curve.pressure(flow))
                 })
                 .collect(),

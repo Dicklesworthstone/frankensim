@@ -40,6 +40,7 @@ use fs_exec::CancelGate;
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, ThermalSetup};
 use super::flow::FlowField;
+use super::radiation::{RadiationConfig, Radiators};
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{TransientRecord, energy_step, heat_capacity};
 use super::turbulence::TURBULENT_PRANDTL;
@@ -248,7 +249,6 @@ impl<'a> Marcher<'a> {
         self.solver.project(gate)?;
         self.sweeps += inner;
         self.residuals = residuals;
-        let volume = self.domain.dx().powi(3);
         let mut kinetic = 0.0;
         let averaging = step >= self.unsteady.average_from_step;
         for c in 0..self.domain.cell_count() {
@@ -256,7 +256,8 @@ impl<'a> Marcher<'a> {
                 continue;
             }
             let v = self.solver.cell_velocity(c);
-            kinetic += 0.5 * self.rho * volume * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            kinetic +=
+                0.5 * self.rho * self.domain.volume(c) * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             if averaging {
                 for a in 0..3 {
                     self.mean[c][a] += v[a];
@@ -353,7 +354,8 @@ pub fn simple_unsteady(
 
 /// March flow and energy together from rest and `initial_temperature`;
 /// inlets follow `inlet_schedule(t)` and sources `power_schedule(t)`;
-/// buoyancy (when declared) follows the previous step's temperature.
+/// buoyancy (when declared) follows the previous step's temperature, and
+/// radiation (when declared) enters as sinks linearized about it.
 ///
 /// # Errors
 /// The refusals of [`simple_unsteady`] and [`super::march_energy`]
@@ -372,6 +374,7 @@ pub fn march_conjugate(
     inlet_schedule: impl Fn(f64) -> f64,
     power_schedule: impl Fn(f64) -> f64,
     energy: &EnergyConfig,
+    radiation: Option<&RadiationConfig>,
     gate: &CancelGate,
 ) -> Result<ConjugateMarch, ChtError> {
     admit(domain, fluid, config)?;
@@ -410,6 +413,10 @@ pub fn march_conjugate(
     let capacity = heat_capacity(domain, fluid, solids)?;
     let storage: Vec<f64> = capacity.iter().map(|c| c / unsteady.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));
+    let radiators = match radiation {
+        Some(r) => Some(Radiators::build(domain, solids, r, gate)?),
+        None => None,
+    };
     let mut marcher = Marcher::new(domain, fluid, config, unsteady);
     let mut temperature = initial_temperature.to_vec();
     let mut mean_temperature = vec![0.0; cells];
@@ -441,6 +448,12 @@ pub fn march_conjugate(
                 *out = base * scale;
             }
         }
+        if let Some(radiators) = &radiators {
+            stepped.cell_sinks.clone_from(&setup.cell_sinks);
+            stepped
+                .cell_sinks
+                .extend(radiators.sinks(domain, &temperature));
+        }
         if config.turbulence != Turbulence::Laminar {
             stepped.eddy_conductivity_w_m_k = marcher
                 .solver
@@ -449,7 +462,7 @@ pub fn march_conjugate(
                 .map(|nu_t| fluid.volumetric_heat_capacity() * nu_t / TURBULENT_PRANDTL)
                 .collect();
         }
-        let (next, record) = energy_step(
+        let (next, mut record) = energy_step(
             domain,
             fluid,
             solids,
@@ -461,6 +474,9 @@ pub fn march_conjugate(
             (time_s, unsteady.time_step_s, solids_present),
             gate,
         )?;
+        if let Some(radiators) = &radiators {
+            record.radiated_w = radiators.radiated(domain, &next);
+        }
         energy_records.push(record);
         temperature = next;
         if step >= unsteady.average_from_step {

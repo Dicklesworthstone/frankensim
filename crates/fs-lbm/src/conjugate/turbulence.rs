@@ -29,11 +29,12 @@
 //! `Re_L -> 0`. The energy equation takes the turbulent conductivity
 //! `rho c_p nu_t / Pr_t` (`Pr_t = 0.9`).
 //!
-//! The wall distance is the exact Euclidean distance from each fluid voxel
-//! centre to the nearest solid voxel or wall-type domain face, from the
-//! separable linear-time transform of Felzenszwalb & Huttenlocher (Theory of
-//! Computing 8, 2012) on a grid padded by one ghost layer behind each wall
-//! face.
+//! The wall distance runs from each fluid voxel centre to the box of the
+//! nearest solid voxel or wall-type domain face (exact for axis-aligned
+//! walls), the nearest seed from the separable linear-time feature
+//! transform of Felzenszwalb & Huttenlocher (Theory of Computing 8, 2012) on
+//! the cell centres of a uniform or graded grid padded by one ghost layer
+//! behind each wall face.
 //!
 //! # No-claim boundaries
 //!
@@ -108,11 +109,22 @@ pub fn eddy_viscosity_ratio(reynolds: f64) -> f64 {
     law_of_the_wall_ratios(reynolds).0
 }
 
-/// One-dimensional squared Euclidean distance transform (Felzenszwalb &
-/// Huttenlocher): `out[q] = min_p ((q - p)^2 + f[p])` over finite `f[p]`
-/// (all infinite gives infinity). `v` and `z` are scratch of length
-/// `f.len()` and `f.len() + 1`.
-fn edt_1d(f: &[f64], out: &mut [f64], v: &mut [usize], z: &mut [f64]) {
+/// One-dimensional squared Euclidean distance transform with features
+/// (Felzenszwalb & Huttenlocher, on arbitrary sample positions `x`):
+/// `out[q] = min_p ((x_q - x_p)^2 + f[p])` over finite `f[p]`, and
+/// `feature_out[q] = feature[p]` of the minimizing `p` (all infinite gives
+/// infinity). `v` and `z` are scratch of length `f.len()` and
+/// `f.len() + 1`.
+#[allow(clippy::too_many_arguments)] // the transform's inputs and scratch
+fn edt_1d(
+    x: &[f64],
+    f: &[f64],
+    feature: &[[usize; 3]],
+    out: &mut [f64],
+    feature_out: &mut [[usize; 3]],
+    v: &mut [usize],
+    z: &mut [f64],
+) {
     let n = f.len();
     // Lower envelope of the parabolas rooted at finite samples.
     let mut k: Option<usize> = None;
@@ -120,7 +132,7 @@ fn edt_1d(f: &[f64], out: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         if !f[q].is_finite() {
             continue;
         }
-        let fq = f[q] + (q * q) as f64;
+        let fq = x[q].mul_add(x[q], f[q]);
         loop {
             match k {
                 None => {
@@ -132,7 +144,7 @@ fn edt_1d(f: &[f64], out: &mut [f64], v: &mut [usize], z: &mut [f64]) {
                 }
                 Some(top) => {
                     let p = v[top];
-                    let s = (fq - (f[p] + (p * p) as f64)) / (2.0 * (q - p) as f64);
+                    let s = (fq - x[p].mul_add(x[p], f[p])) / (2.0 * (x[q] - x[p]));
                     if s <= z[top] {
                         k = top.checked_sub(1);
                         continue;
@@ -152,27 +164,49 @@ fn edt_1d(f: &[f64], out: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         return;
     }
     let mut j = 0usize;
-    for (q, slot) in out.iter_mut().enumerate().take(n) {
-        while z[j + 1] < q as f64 {
+    for q in 0..n {
+        while z[j + 1] < x[q] {
             j += 1;
         }
         let p = v[j];
-        let d = q as f64 - p as f64;
-        *slot = d.mul_add(d, f[p]);
+        let d = x[q] - x[p];
+        out[q] = d.mul_add(d, f[p]);
+        feature_out[q] = feature[p];
     }
 }
 
 /// Distance (m) from each fluid cell centre to the nearest wall: a solid
-/// voxel's face or a domain face whose `wall[face]` is true (openings,
-/// inlets and symmetry planes are not walls). Solid cells get zero.
+/// voxel or a domain face whose `wall[face]` is true (openings, inlets and
+/// symmetry planes are not walls). The nearest seed cell comes from an
+/// exact separable feature transform over the cell centres (uniform or
+/// graded), with one ghost layer behind each wall face; the distance is
+/// then to that seed cell's box (exact for axis-aligned walls), at least
+/// half the cell's smallest width. Solid cells get zero.
 #[must_use]
+#[allow(clippy::too_many_lines)] // padding, three passes, box distances
 pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
     let [nx, ny, nz] = domain.dims();
+    let n = [nx, ny, nz];
     // Padded grid: one ghost layer on every side; ghost cells are seeds on
-    // wall faces, far away otherwise.
+    // wall faces, far away otherwise. Ghost centres mirror the edge cells.
     let dims = [nx + 2, ny + 2, nz + 2];
     let index = |x: usize, y: usize, z: usize| (z * dims[1] + y) * dims[0] + x;
+    let width = |a: usize, i: usize| domain.width(a, i.clamp(1, n[a]) - 1);
+    let position: [Vec<f64>; 3] = [0, 1, 2].map(|a| {
+        (0..dims[a])
+            .map(|i| {
+                if i == 0 {
+                    domain.face_coord(a, 0) - 0.5 * domain.width(a, 0)
+                } else if i == dims[a] - 1 {
+                    domain.face_coord(a, n[a]) + 0.5 * domain.width(a, n[a] - 1)
+                } else {
+                    0.5 * (domain.face_coord(a, i - 1) + domain.face_coord(a, i))
+                }
+            })
+            .collect()
+    });
     let mut grid = vec![f64::INFINITY; dims[0] * dims[1] * dims[2]];
+    let mut feature = vec![[0usize; 3]; grid.len()];
     for z in 0..dims[2] {
         for y in 0..dims[1] {
             for x in 0..dims[0] {
@@ -206,13 +240,15 @@ pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
                 };
                 if seed {
                     grid[index(x, y, z)] = 0.0;
+                    feature[index(x, y, z)] = [x, y, z];
                 }
             }
         }
     }
-    // Separable transform along x, then y, then z (squared voxel units).
+    // Separable transform along x, then y, then z (squared metres).
     let longest = dims[0].max(dims[1]).max(dims[2]);
     let (mut f, mut out) = (vec![0.0; longest], vec![0.0; longest]);
+    let (mut feat, mut feat_out) = (vec![[0usize; 3]; longest], vec![[0usize; 3]; longest]);
     let (mut v, mut zz) = (vec![0usize; longest], vec![0.0; longest + 2]);
     for axis in 0..3 {
         let len = dims[axis];
@@ -228,32 +264,49 @@ pub fn wall_distance(domain: &VoxelDomain, wall: [bool; 6]) -> Vec<f64> {
                 };
                 for i in 0..len {
                     f[i] = grid[at(i)];
+                    feat[i] = feature[at(i)];
                 }
                 if f[..len].iter().all(|x| x.is_infinite()) {
                     continue;
                 }
-                edt_1d(&f[..len], &mut out[..len], &mut v, &mut zz);
+                edt_1d(
+                    &position[axis],
+                    &f[..len],
+                    &feat[..len],
+                    &mut out[..len],
+                    &mut feat_out[..len],
+                    &mut v,
+                    &mut zz,
+                );
                 for i in 0..len {
                     grid[at(i)] = out[i];
+                    feature[at(i)] = feat_out[i];
                 }
             }
         }
     }
-    let dx = domain.dx();
     (0..domain.cell_count())
         .map(|c| {
             if !domain.is_fluid(c) {
                 return 0.0;
             }
             let [x, y, z] = domain.coords(c);
-            // Centre-to-seed-centre distance less half a voxel: the distance
-            // to the seed's facing surface (exact for axis-aligned walls).
-            let d = grid[index(x + 1, y + 1, z + 1)];
-            if d.is_finite() {
-                (d.sqrt() - 0.5).max(0.5) * dx
-            } else {
-                f64::INFINITY
+            let cell = index(x + 1, y + 1, z + 1);
+            if !grid[cell].is_finite() {
+                return f64::INFINITY;
             }
+            // Distance from this centre to the nearest seed's box.
+            let seed = feature[cell];
+            let own = domain.widths(c);
+            let mut squared = 0.0;
+            for a in 0..3 {
+                let gap = ((position[a][[x, y, z][a] + 1] - position[a][seed[a]]).abs()
+                    - 0.5 * width(a, seed[a]))
+                .max(0.0);
+                squared = gap.mul_add(gap, squared);
+            }
+            let floor = 0.5 * own.iter().fold(f64::INFINITY, |m, w| m.min(*w));
+            squared.sqrt().max(floor)
         })
         .collect()
 }

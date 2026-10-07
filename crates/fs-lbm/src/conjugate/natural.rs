@@ -156,6 +156,7 @@ pub fn natural_convection(
     config: &BuoyancyConfig,
     gate: &CancelGate,
 ) -> Result<NaturalConvection, ChtError> {
+    domain.require_uniform("the lattice-Boltzmann natural convection")?;
     fluid.validate()?;
     for g in config.gravity_m_s2 {
         finite("buoyancy.gravity_m_s2", g)?;

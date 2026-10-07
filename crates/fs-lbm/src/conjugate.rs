@@ -167,7 +167,7 @@ pub enum ChtError {
         /// Human-readable remedy.
         remedy: String,
     },
-    /// The LBM state became non-finite.
+    /// The flow state (LBM or finite-volume) became non-finite.
     FlowDiverged {
         /// Step at which the non-finite state was observed.
         step: usize,
@@ -236,7 +236,7 @@ impl core::fmt::Display for ChtError {
                 f,
                 "lattice cannot represent the flow: tau = {tau}, cell Reynolds = {cell_reynolds}; {remedy}"
             ),
-            Self::FlowDiverged { step } => write!(f, "LBM flow became non-finite at step {step}"),
+            Self::FlowDiverged { step } => write!(f, "flow became non-finite at step {step}"),
             Self::FlowNotSteady {
                 steps,
                 last_change,

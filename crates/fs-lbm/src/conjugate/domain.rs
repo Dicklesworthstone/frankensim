@@ -1,6 +1,9 @@
 //! Voxel domain, fluid properties, and solid materials for the conjugate
-//! pipeline. Cell `(x, y, z)` occupies `[x dx, (x+1) dx] x [y dx, (y+1) dx] x
-//! [z dx, (z+1) dx]` metres and has linear index `(z ny + y) nx + x`.
+//! pipeline. Cell `(x, y, z)` has linear index `(z ny + y) nx + x` and
+//! occupies `[X_x, X_(x+1)] x [Y_y, Y_(y+1)] x [Z_z, Z_(z+1)]` metres, where
+//! the face coordinates are `i dx` on a uniform domain and declared per axis
+//! on a graded one ([`VoxelDomain::graded`]: a non-uniform Cartesian grid,
+//! fine where the geometry or the boundary layers need it).
 
 use super::{ChtError, finite_positive};
 
@@ -14,13 +17,17 @@ pub enum Voxel {
     Solid(u16),
 }
 
-/// Uniform Cartesian voxel domain.
+/// Cartesian voxel domain, uniform or graded per axis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoxelDomain {
     nx: usize,
     ny: usize,
     nz: usize,
+    /// Uniform spacing (NaN on a graded domain).
     dx: f64,
+    /// Face coordinates per axis (`n + 1` each, increasing from 0) on a
+    /// graded domain; `None` when uniform.
+    faces: Option<Box<[Vec<f64>; 3]>>,
     voxels: Vec<Voxel>,
 }
 
@@ -52,8 +59,134 @@ impl VoxelDomain {
             ny,
             nz,
             dx,
+            faces: None,
             voxels: vec![Voxel::Fluid; cells],
         })
+    }
+
+    /// An all-fluid graded domain from its cell widths along each axis
+    /// (metres; faces start at 0). Equal widths along every axis give the
+    /// uniform domain.
+    ///
+    /// # Errors
+    /// [`ChtError::InvalidDomain`] for an empty axis, a non-finite or
+    /// non-positive width, or an overflowing cell count.
+    pub fn graded(widths: [Vec<f64>; 3]) -> Result<Self, ChtError> {
+        let dims = [widths[0].len(), widths[1].len(), widths[2].len()];
+        for (axis, list) in widths.iter().enumerate() {
+            if let Some(w) = list.iter().find(|w| !(w.is_finite() && **w > 0.0)) {
+                return Err(ChtError::InvalidDomain {
+                    reason: format!(
+                        "axis {axis}: cell widths must be finite and positive, got {w}"
+                    ),
+                });
+            }
+        }
+        let first = widths[0].first().copied().unwrap_or(1.0);
+        let uniform = widths.iter().all(|list| list.iter().all(|w| *w == first));
+        let mut domain = Self::new(dims[0], dims[1], dims[2], first)?;
+        if !uniform {
+            domain.dx = f64::NAN;
+            domain.faces = Some(Box::new(widths.map(|list| {
+                let mut faces = Vec::with_capacity(list.len() + 1);
+                faces.push(0.0);
+                for w in list {
+                    faces.push(faces.last().copied().unwrap_or(0.0) + w);
+                }
+                faces
+            })));
+        }
+        Ok(domain)
+    }
+
+    /// A graded domain whose occupancy is sampled at every cell centre.
+    ///
+    /// # Errors
+    /// As [`VoxelDomain::graded`].
+    pub fn graded_from_fn(
+        widths: [Vec<f64>; 3],
+        mut occupancy: impl FnMut([f64; 3]) -> Voxel,
+    ) -> Result<Self, ChtError> {
+        let mut domain = Self::graded(widths)?;
+        for c in 0..domain.cell_count() {
+            let [x, y, z] = domain.coords(c);
+            domain.voxels[c] = occupancy(domain.center(x, y, z));
+        }
+        Ok(domain)
+    }
+
+    /// Whether every cell is the same cube.
+    #[must_use]
+    pub fn is_uniform(&self) -> bool {
+        self.faces.is_none()
+    }
+
+    /// The uniform spacing, or a refusal naming `what` needs it (the
+    /// lattice-Boltzmann paths).
+    pub(crate) fn require_uniform(&self, what: &str) -> Result<f64, ChtError> {
+        if self.is_uniform() {
+            Ok(self.dx)
+        } else {
+            Err(ChtError::InvalidDomain {
+                reason: format!("{what} needs a uniform voxel grid; this domain is graded"),
+            })
+        }
+    }
+
+    /// Width of cell index `i` along `axis`, metres.
+    #[inline]
+    #[must_use]
+    pub fn width(&self, axis: usize, i: usize) -> f64 {
+        match &self.faces {
+            None => self.dx,
+            Some(faces) => faces[axis][i + 1] - faces[axis][i],
+        }
+    }
+
+    /// Coordinate of face plane `i` (`0..=n`) along `axis`, metres.
+    #[inline]
+    #[must_use]
+    pub fn face_coord(&self, axis: usize, i: usize) -> f64 {
+        match &self.faces {
+            None => i as f64 * self.dx,
+            Some(faces) => faces[axis][i],
+        }
+    }
+
+    /// Widths of cell `c` along x, y, z, metres.
+    #[inline]
+    #[must_use]
+    pub fn widths(&self, c: usize) -> [f64; 3] {
+        let at = self.coords(c);
+        [0, 1, 2].map(|a| self.width(a, at[a]))
+    }
+
+    /// Area of cell `c`'s faces normal to `axis`, m^2.
+    #[inline]
+    #[must_use]
+    pub fn face_area(&self, c: usize, axis: usize) -> f64 {
+        let w = self.widths(c);
+        w[(axis + 1) % 3] * w[(axis + 2) % 3]
+    }
+
+    /// Volume of cell `c`, m^3.
+    #[inline]
+    #[must_use]
+    pub fn volume(&self, c: usize) -> f64 {
+        let w = self.widths(c);
+        w[0] * w[1] * w[2]
+    }
+
+    /// Smallest cell width over the domain, metres.
+    #[must_use]
+    pub fn min_width(&self) -> f64 {
+        match &self.faces {
+            None => self.dx,
+            Some(faces) => faces
+                .iter()
+                .flat_map(|f| f.windows(2).map(|w| w[1] - w[0]))
+                .fold(f64::INFINITY, f64::min),
+        }
     }
 
     /// A domain whose occupancy is sampled at every cell centre (metres).
@@ -85,7 +218,9 @@ impl VoxelDomain {
         [self.nx, self.ny, self.nz]
     }
 
-    /// Cell edge length, metres.
+    /// Cell edge length of a uniform domain, metres (NaN on a graded one:
+    /// geometry there goes through [`Self::width`] and its relatives, so a
+    /// spacing assumption that slipped through fails loudly).
     #[must_use]
     pub const fn dx(&self) -> f64 {
         self.dx
@@ -173,11 +308,17 @@ impl VoxelDomain {
     /// Cell-centre coordinates in metres.
     #[must_use]
     pub fn center(&self, x: usize, y: usize, z: usize) -> [f64; 3] {
-        [
-            (x as f64 + 0.5) * self.dx,
-            (y as f64 + 0.5) * self.dx,
-            (z as f64 + 0.5) * self.dx,
-        ]
+        match &self.faces {
+            None => [
+                (x as f64 + 0.5) * self.dx,
+                (y as f64 + 0.5) * self.dx,
+                (z as f64 + 0.5) * self.dx,
+            ],
+            Some(faces) => {
+                let at = [x, y, z];
+                [0, 1, 2].map(|a| 0.5 * (faces[a][at[a]] + faces[a][at[a] + 1]))
+            }
+        }
     }
 
     /// Neighbour of `c` across local face `face` (0..6 in [`super::Face3::ALL`]
@@ -279,6 +420,11 @@ pub struct SolidMaterial {
     /// Volumetric heat capacity `rho c`, J/(m^3 K). Required only by
     /// transient marches; steady solves never read it.
     pub volumetric_heat_capacity_j_m3_k: Option<f64>,
+    /// Temperature dependence `[(T K, k W/(m K)), ...]` (empty: constant):
+    /// piecewise linear in T, constant beyond the ends, scaling every axis
+    /// conductivity by `k(T) / conductivity_w_m_k` at each cell's
+    /// temperature (the energy solve iterates to consistency).
+    pub conductivity_table: Vec<(f64, f64)>,
 }
 
 impl SolidMaterial {
@@ -290,7 +436,35 @@ impl SolidMaterial {
             conductivity_w_m_k,
             orthotropic_w_m_k: None,
             volumetric_heat_capacity_j_m3_k: None,
+            conductivity_table: Vec::new(),
         }
+    }
+
+    /// Declare a temperature-dependent conductivity `[(T K, k W/(m K)), ...]`
+    /// (see [`Self::conductivity_table`]).
+    #[must_use]
+    pub fn with_conductivity_table(mut self, points: &[(f64, f64)]) -> Self {
+        self.conductivity_table = points.to_vec();
+        self
+    }
+
+    /// `k(T) / conductivity_w_m_k`: the factor scaling every axis
+    /// conductivity at temperature `t` (1 without a table).
+    #[must_use]
+    pub fn conductivity_factor(&self, t: f64) -> f64 {
+        let table = &self.conductivity_table;
+        let Some(&(t0, k0)) = table.first() else {
+            return 1.0;
+        };
+        let k = if t <= t0 {
+            k0
+        } else {
+            table.windows(2).find(|w| t <= w[1].0).map_or_else(
+                || table[table.len() - 1].1,
+                |w| w[0].1 + (w[1].1 - w[0].1) * (t - w[0].0) / (w[1].0 - w[0].0),
+            )
+        };
+        k / self.conductivity_w_m_k
     }
 
     /// Declare grid-aligned principal conductivities `[k_x, k_y, k_z]`,

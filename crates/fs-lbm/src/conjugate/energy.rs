@@ -4,7 +4,8 @@
 //! Every face contributes one outward total energy flux written as
 //! `J = d T_P - a T_N - r` (Patankar, *Numerical Heat Transfer and Fluid
 //! Flow*, 1980, §5.2–5.4): for an interior face with outward heat-capacity
-//! flux `F = rho c_p Q` and diffusive conductance `D = A k_h / dx`,
+//! flux `F = rho c_p Q` and diffusive conductance `D = A k_h / dx` (on a
+//! graded grid `dx` is the centre distance and `k_h` weights the half widths),
 //! `a = D A(|F|/D) + max(-F, 0)` and `d = a + F`; the two sides of one face
 //! therefore carry equal and opposite `J` for ANY temperatures, so the global
 //! energy balance telescopes exactly. `k_h = 2 k_P k_N / (k_P + k_N)` is the
@@ -112,11 +113,15 @@ pub struct CompactComponent {
 
 impl CompactComponent {
     /// Area of the case-top (= board) face, m^2.
-    fn face_area(&self, dx: f64) -> f64 {
+    fn face_area(&self, domain: &VoxelDomain) -> f64 {
         let axis = self.board_face as usize / 2;
         (0..3)
             .filter(|&a| a != axis)
-            .map(|a| (self.hi[a] - self.lo[a]) as f64 * dx)
+            .map(|a| {
+                (self.lo[a]..self.hi[a])
+                    .map(|i| domain.width(a, i))
+                    .sum::<f64>()
+            })
             .product()
     }
 }
@@ -175,8 +180,8 @@ impl ThermalSetup {
         }
     }
 
-    /// Spread `total_w` uniformly over the cells whose centre satisfies
-    /// `inside`; returns the number of heated cells.
+    /// Spread `total_w` uniformly (by volume) over the cells whose centre
+    /// satisfies `inside`; returns the number of heated cells.
     ///
     /// # Panics
     /// If `power_w` is non-empty with the wrong length.
@@ -200,10 +205,11 @@ impl ThermalSetup {
                 inside(domain.center(x, y, z))
             })
             .collect();
-        if !cells.is_empty() {
-            let each = total_w / cells.len() as f64;
-            for c in &cells {
-                self.power_w[*c] += each;
+        // By volume: uniform power density on a graded grid as well.
+        let volume: f64 = cells.iter().map(|&c| domain.volume(c)).sum();
+        if volume > 0.0 {
+            for &c in &cells {
+                self.power_w[c] += total_w * domain.volume(c) / volume;
             }
         }
         cells.len()
@@ -341,7 +347,6 @@ impl EnergySolution {
     /// fluid/solid face, W.
     #[must_use]
     pub fn solid_to_fluid_heat_w(&self, domain: &VoxelDomain) -> f64 {
-        let dx = domain.dx();
         let mut total = 0.0;
         // A collapsed component cell holds its junction's temperature and
         // reaches its neighbours only through the junction's links.
@@ -368,7 +373,8 @@ impl EnergySolution {
                 {
                     let axis = f / 2;
                     let (kc, kn) = (self.conductivity[c][axis], self.conductivity[n][axis]);
-                    let d = dx * 2.0 * kc * kn / (kc + kn);
+                    let d = domain.face_area(c, axis)
+                        / (0.5 * domain.widths(c)[axis] / kc + 0.5 * domain.widths(n)[axis] / kn);
                     total += d * (self.temperature[c] - self.temperature[n]);
                 }
             }
@@ -435,8 +441,9 @@ impl Context<'_> {
     }
 
     fn term(&self, c: usize, f: usize) -> FaceTerm {
-        let dx = self.domain.dx();
-        let area = dx * dx;
+        let axis = f / 2;
+        let area = self.domain.face_area(c, axis);
+        let half_c = 0.5 * self.domain.widths(c)[axis];
         let flux = self.rho_c * self.flow.outward(self.domain, c, f);
         let kc = self.k[c][f / 2];
         if let Some(n) = self.domain.neighbor(c, f) {
@@ -444,7 +451,8 @@ impl Context<'_> {
             // Series resistance of the two half cells and any contact
             // between their materials: exact for piecewise-constant k.
             let contact = self.contact(c, n);
-            let d = area / (0.5 * dx / kc + contact + 0.5 * dx / kn);
+            let half_n = 0.5 * self.domain.widths(n)[axis];
+            let d = area / (half_c / kc + contact + half_n / kn);
             let a = d.mul_add(self.weight(flux / d), (-flux).max(0.0));
             return FaceTerm {
                 diag: a + flux,
@@ -454,7 +462,7 @@ impl Context<'_> {
             };
         }
         let solid = !self.domain.is_fluid(c);
-        let half = 2.0 * dx * kc; // A k / (dx/2)
+        let half = area * kc / half_c; // A k / (w/2)
         match self.faces[f] {
             ThermalFace::Adiabatic => FaceTerm {
                 diag: 0.0,
@@ -475,7 +483,7 @@ impl Context<'_> {
                 advective: Advective::None,
             },
             ThermalFace::Convective { h, ambient } => {
-                let u = area / (1.0 / h + 0.5 * dx / kc);
+                let u = area / (1.0 / h + half_c / kc);
                 FaceTerm {
                     diag: u,
                     off: None,
@@ -557,7 +565,11 @@ pub(crate) struct PseudoStep<'a> {
     pub previous: &'a [f64],
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+/// The energy solve, iterated to a consistent temperature field when a solid
+/// declares a temperature-dependent conductivity (Picard: each pass
+/// evaluates every solid cell's `k(T)` at the previous pass's temperature,
+/// until the largest change is below 1e-10 of the temperature span).
+#[allow(clippy::too_many_arguments)] // physics inputs + step state
 pub(crate) fn solve_energy_inner(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -566,6 +578,108 @@ pub(crate) fn solve_energy_inner(
     setup: &ThermalSetup,
     config: &EnergyConfig,
     step: Option<&PseudoStep<'_>>,
+    gate: &CancelGate,
+) -> Result<EnergySolution, ChtError> {
+    if solids.iter().all(|s| s.conductivity_table.is_empty()) {
+        return solve_energy_once(domain, fluid, solids, flow, setup, config, step, None, gate);
+    }
+    for solid in solids {
+        for (i, &(t, k)) in solid.conductivity_table.iter().enumerate() {
+            finite("solid.conductivity_table.temperature", t)?;
+            finite_positive("solid.conductivity_table.conductivity", k)?;
+            if i > 0 && t <= solid.conductivity_table[i - 1].0 {
+                return Err(ChtError::InvalidInput {
+                    field: "solid.conductivity_table",
+                    reason: format!("temperatures must increase ({})", solid.label),
+                });
+            }
+        }
+    }
+    domain.check_materials(solids.len())?;
+    let scales = |temperature: &[f64]| -> Vec<f64> {
+        (0..domain.cell_count())
+            .map(|c| match domain.voxel_at(c) {
+                Voxel::Fluid => 1.0,
+                Voxel::Solid(m) => solids[usize::from(m)].conductivity_factor(temperature[c]),
+            })
+            .collect()
+    };
+    // First pass: every solid at its table's value for the first declared
+    // face, fixed or step temperature (or its reference conductivity).
+    let start = match step {
+        Some(step) => scales(step.previous),
+        None => {
+            let reference = setup.faces.iter().find_map(|rule| match *rule {
+                ThermalFace::Temperature(t) | ThermalFace::Inflow { temperature: t } => Some(t),
+                ThermalFace::Convective { ambient, .. } => Some(ambient),
+                _ => None,
+            });
+            match reference {
+                Some(t) => scales(&vec![t; domain.cell_count()]),
+                None => vec![1.0; domain.cell_count()],
+            }
+        }
+    };
+    let mut solution = solve_energy_once(
+        domain,
+        fluid,
+        solids,
+        flow,
+        setup,
+        config,
+        step,
+        Some((&start, None)),
+        gate,
+    )?;
+    for _ in 0..200 {
+        super::poll(gate)?;
+        let next = solve_energy_once(
+            domain,
+            fluid,
+            solids,
+            flow,
+            setup,
+            config,
+            step,
+            Some((&scales(&solution.temperature), Some(&solution.temperature))),
+            gate,
+        )?;
+        let (lo, hi) = next
+            .temperature
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+                (lo.min(*t), hi.max(*t))
+            });
+        let change = next
+            .temperature
+            .iter()
+            .zip(&solution.temperature)
+            .fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
+        solution = next;
+        if change <= 1e-10 * (hi - lo).max(1e-12) {
+            return Ok(solution);
+        }
+    }
+    Err(ChtError::SolverNotConverged {
+        system: "energy conductivity",
+        iterations: 200,
+        relative_residual: f64::NAN,
+        tolerance: 1e-10,
+    })
+}
+
+/// One linear energy solve; `nonlinear` carries per-cell solid conductivity
+/// factors and an optional warm start (the previous Picard pass).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // admission, assembly, solve, balance
+fn solve_energy_once(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    solids: &[SolidMaterial],
+    flow: &FlowField,
+    setup: &ThermalSetup,
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    nonlinear: Option<(&[f64], Option<&[f64]>)>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
     fluid.validate()?;
@@ -666,7 +780,12 @@ pub(crate) fn solve_energy_inner(
     let k: Vec<[f64; 3]> = (0..cells)
         .map(|c| match domain.voxel_at(c) {
             Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
-            Voxel::Solid(m) => solids[usize::from(m)].axis_conductivity(),
+            Voxel::Solid(m) => {
+                let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
+                solids[usize::from(m)]
+                    .axis_conductivity()
+                    .map(|k| k * scale)
+            }
         })
         .collect();
     let mut contacts = Vec::with_capacity(setup.contacts.len());
@@ -781,7 +900,10 @@ pub(crate) fn solve_energy_inner(
             if let Some((n, a)) = term.off {
                 coo.push(c, n, -a);
                 if domain.is_fluid(c) && domain.is_fluid(n) {
-                    let d = domain.dx() * ctx.k[c][f / 2];
+                    // A k / (centre distance).
+                    let axis = f / 2;
+                    let d = domain.face_area(c, axis) * ctx.k[c][axis]
+                        / (0.5 * (domain.widths(c)[axis] + domain.widths(n)[axis]));
                     let flux = ctx.rho_c * flow.outward(domain, c, f);
                     max_cell_peclet = max_cell_peclet.max(flux.abs() / d);
                 }
@@ -827,8 +949,19 @@ pub(crate) fn solve_energy_inner(
         })
         .or_else(|| setup.fixed_temperature.first().map(|&(_, t)| t))
         .unwrap_or(0.0);
-    let mut temperature = match step {
-        Some(step) => {
+    let warm = nonlinear.and_then(|(_, warm)| warm);
+    let mut temperature = match (warm, step) {
+        (Some(previous), _) => {
+            let mut start = previous.to_vec();
+            start.extend(
+                setup
+                    .compact_components
+                    .iter()
+                    .map(|part| previous[domain.index(part.lo[0], part.lo[1], part.lo[2])]),
+            );
+            start
+        }
+        (None, Some(step)) => {
             let mut warm = step.previous.to_vec();
             warm.extend(
                 setup
@@ -838,7 +971,7 @@ pub(crate) fn solve_energy_inner(
             );
             warm
         }
-        None => vec![guess; unknowns],
+        (None, None) => vec![guess; unknowns],
     };
     let outcome = bicgstab_ilu0(
         "energy",
@@ -1017,15 +1150,13 @@ impl Compact {
                 }
             }
         }
-        let dx = domain.dx();
-        let face_area = dx * dx;
         let mut links = Vec::with_capacity(parts.len());
         let mut by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
             std::collections::BTreeMap::new();
         for (i, part) in parts.iter().enumerate() {
             let board = part.board_face as usize;
             let axis = board / 2;
-            let area = part.face_area(dx);
+            let area = part.face_area(domain);
             let mut list = Vec::new();
             for z in part.lo[2]..part.hi[2] {
                 for y in part.lo[1]..part.hi[1] {
@@ -1053,9 +1184,11 @@ impl Compact {
                                 Some(m) => {
                                     // The resistor's area share in series
                                     // with the outside cell's half width.
+                                    let face_area = domain.face_area(m, axis);
                                     let g = 1.0
                                         / (resistance * area / face_area
-                                            + 0.5 * dx / (k[m][axis] * face_area));
+                                            + 0.5 * domain.widths(m)[axis]
+                                                / (k[m][axis] * face_area));
                                     list.push((m, g, f == board));
                                     by_cell.entry(m).or_default().push((i, g));
                                 }

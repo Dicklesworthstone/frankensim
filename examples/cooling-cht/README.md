@@ -30,7 +30,9 @@ Scene (`frankensim.cooling-cht.v1`):
   `patch_size`, default 4 faces, and `surface_exchange`, default true;
   false keeps only the escape to the surroundings). The result reports
   `radiation.radiated_w` (to the surroundings) and the energy balance's
-  `sink_outflow_w`. Transients refuse radiation.
+  `sink_outflow_w`. Transient marches (frozen or unsteady flow) carry the
+  radiation too, Newton-linearized about each previous step, and report
+  `radiated_w` per record.
 - `contacts` (optional): `between` (two material names) and
   `resistance_m2_k_w`, a per-area interface resistance (thermal interface
   material, bonded or pressed joint) on every face the two materials share.
@@ -111,6 +113,43 @@ Scene (`frankensim.cooling-cht.v1`):
   Variants are solved on `parallelism` threads (default: the available
   cores); the report is identical for any thread count. A grid search: no
   optimality claim between grid points.
+- Optional `grid_convergence`: `{"splits": [a, b, c]}` (three increasing
+  whole numbers up to 16) solves the scene three times with every cell of
+  its grid (uniform or graded) split into `a`, `b`, `c` equal parts per
+  axis, in parallel (`parallelism`), and reports for every quantity above
+  the three values, the convergence behaviour (`monotone`, `oscillatory`,
+  `divergent`, `converged`, `indeterminate`), Celik's observed order (an
+  iteration when the two ratios differ), the Richardson extrapolation and
+  the fine-grid convergence index `GCI = 1.25 |phi_fine - phi_medium| /
+  (r^p - 1)` in the quantity's units, with the order capped at 2 (result
+  schema `frankensim.cooling-cht.convergence.v1`, the finest level's full
+  result under `fine_result`; field files come from the finest level).
+  The band is asymptotic, not a bound, and only monotone quantities get
+  one; geometry off the declared grid (STL solids) re-staircases between
+  levels. `[1, 2, 3]` costs 1 + 8 + 27 times the base grid.
+- Instead of `size_m` + `voxel_m`, a graded grid: `"grid": {"x": [{"to_m",
+  "voxel_m"}, ...], "y": [...], "z": [...]}`, each zone a whole number of
+  uniform cells from the previous zone's end (0 first), so fine voxels go
+  only where features and boundary layers need them. Box, plane and
+  source positions use the actual cell centres and faces; the result
+  reports `graded` and `voxel_m` as the smallest width. Shorter: keep
+  `size_m` and declare `"grid": {"voxel_m": coarse, "refine": [{"min_m",
+  "max_m", "voxel_m"}, ...]}`; each axis then takes the finest spacing of
+  the refine boxes covering each interval (a Cartesian grid refines whole
+  slabs, so a box refines its slab on every axis).
+- A material may declare `conductivity_table`: `[[temperature_k, k], ...]`
+  (piecewise linear, constant beyond the ends). Every axis conductivity of
+  that material scales by `k(T) / conductivity_w_m_k` at each cell's
+  temperature, and the energy solve iterates to a consistent field
+  (silicon's conductivity falls by about a third between 300 and 400 K).
+- Optional `probes`: `[{"name", "at_m": [x, y, z]}, ...]` report the
+  temperature, velocity and fluid/solid state of the cell containing each
+  point (`probes` in the result).
+- Optional `output`: `{"vtk": "fields.vtr"}` writes the cell temperature,
+  velocity, pressure and material as a VTK XML rectilinear grid next to
+  the scene (on the actual face coordinates, so graded grids open as
+  graded in ParaView and other VTK readers); the result names the file.
+  Studies write no field files.
 - Optional `components`: JEDEC two-resistor compact models (`name`,
   `min_m`/`max_m`, `board_side`, `power_w`, `junction_to_case_k_w`,
   `junction_to_board_k_w`). The box blocks flow; the junction reaches the
@@ -150,6 +189,15 @@ Examples:
   voxelized body holds 4.80e-5 m^3 of the STL's 5.28e-5 m^3 (its 5 mm base
   top lies on a voxel centre and falls outside under the tie rule): refine
   `voxel_m` before reading temperatures to better than that geometry.
+- `stl-heatsink-unsteady.json`: the same body at 0.5 m/s, the case the
+  steady solver refuses (its wake never settles), marched instead: 100
+  BDF2 steps of 20 ms from rest (`"flow": "unsteady"`) with the steady
+  energy on the flow averaged over the last 50 steps (`"energy":
+  "steady-on-mean-flow"`), at 4 mm voxels. Measured (debug build, 469 s):
+  1324 sweeps in all, inflow 1.638e-3 m^3/s, die at 311.40 K for 3 W from
+  293.15 K air, energy balance 5e-13. Coarse geometry and the neglected
+  `<u' T'>` correlation bound what this shows: a usable mean answer where
+  the steady path has none, not a validated temperature.
 
 Results are Estimated numerical evidence at one resolution: turbulence only
 through the algebraic LVEL closure (its friction runs 13-16 % above
