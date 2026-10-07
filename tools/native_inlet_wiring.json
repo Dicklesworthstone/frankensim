@@ -1,76 +1,43 @@
 {
-  "crates/fs-project/src/bind.rs": {
-    "git_blob": "8d610a347b36b4051a92d46d6b155ae69d2ae1f2",
-    "edits": [
-      {
-        "old": "    /// The validity axis queried (v1 resolves over temperature only).\n",
-        "new": "    /// Temperature axis. Interface queries additionally carry the explicit\n    /// manufactured joint coordinates and require support over their bands.\n"
-      },
-      {
-        "old": "            Some(binding.state.render()),\n",
-        "new": "            Some(&binding.state),\n"
-      },
-      {
-        "old": "    declared_interface_state: Option<String>,\n    range: &RequiredRange,\n",
-        "new": "    declared_interface_state: Option<&crate::spec::InterfaceState>,\n    range: &RequiredRange,\n"
-      },
-      {
-        "old": "            resolution, &target, claims, &card_hex, range, pin, axis, property,\n",
-        "new": "            resolution, &target, claims, &card_hex, range, pin, axis, property, declared_interface_state,\n"
-      },
-      {
-        "old": "            declared_interface_state,\n            range_lo: range.lo,\n",
-        "new": "            declared_interface_state: declared_interface_state.map(crate::spec::InterfaceState::render),\n            range_lo: range.lo,\n"
-      },
-      {
-        "old": "    property: &RequiredProperty,\n) -> Option<ResolvedProperty> {\n",
-        "new": "    property: &RequiredProperty,\n    state: Option<&crate::spec::InterfaceState>,\n) -> Option<ResolvedProperty> {\n"
-      },
-      {
-        "old": "    } = query_range(resolution, target, claims, axis, range, pin, property)?;\n",
-        "new": "    } = query_range(resolution, target, claims, axis, range, pin, property, state)?;\n"
-      },
-      {
-        "old": "    property: &RequiredProperty,\n) -> Option<EnvelopeAnswer> {\n",
-        "new": "    property: &RequiredProperty,\n    state: Option<&crate::spec::InterfaceState>,\n) -> Option<EnvelopeAnswer> {\n"
-      },
-      {
-        "old": "    let answer = claims.query_envelope(&property.property, &lower, &upper, selection);\n",
-        "new": "    let answer = match state {\n        Some(state) => crate::interface_state::query_envelope(\n            claims, &property.property, state, axis, range.lo, range.hi, selection),\n        None => claims.query_envelope(&property.property, &lower, &upper, selection),\n    };\n"
-      },
-      {
-        "old": "the card's claims depend on an axis this resolution does not query (v1 queries temperature only); bind a card parameterized by temperature alone",
-        "new": "the card requires an axis or descriptor absent from this query; use exact native temperature and manufactured-joint coordinate names without inferred aliases"
-      },
-      {
-        "old": "which do not cover [{lower}, {upper}] K",
-        "new": "which do not cover [{lower}, {upper}] in that axis's coherent units"
-      }
-    ]
-  },
   "crates/fs-cli/src/solve.rs": {
-    "git_blob": "492b171b319401f11ef8618fe698e63dbd5e530b",
+    "git_blob": "5940ba5e41bff80ab2408bdc116d3d622791eec1",
     "edits": [
       {
-        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 43;\n",
-        "new": "/// Version 44 queries contact resistance at the declared manufactured joint\n/// state and requires full temperature/state-band support on the same card.\npub const SOLVE_DRIVER_VERSION: u32 = 44;\n"
+        "old": "use crate::import::{explicits, json_string};\n",
+        "new": "use crate::import::{explicits, json_string};\n\nmod input_propagation;\n"
       },
       {
-        "old": "        let interior_varies = match &claim.value {\n            fs_matdb::PropertyValue::Curve { knots, .. } => knots.iter().any(|(t, value)| {\n                (binding.range_lo..=binding.range_hi).contains(t)\n                    && value.to_bits() != property.value_lo.to_bits()\n            }),\n            fs_matdb::PropertyValue::Scalar { .. } => false,\n        };\n",
-        "new": "        let interior_varies = match &claim.value {\n            fs_matdb::PropertyValue::Curve { abscissa, knots, .. }\n                if abscissa == &requirements.temperature_axis => knots.iter().any(|(t, value)| {\n                    (binding.range_lo..=binding.range_hi).contains(t)\n                        && value.to_bits() != property.value_lo.to_bits()\n                }),\n            // A manufactured-state curve is evaluated at one fixed state.\n            // Pressure/thickness knots are not temperatures, even if their\n            // numerical coordinates happen to lie in the temperature range.\n            _ => false,\n        };\n"
+        "old": "pub const SOLVE_DRIVER_VERSION: u32 = 44;\n",
+        "new": "/// Version 45 preserves independent radiative reservoirs in ambient sweeps\n/// and retains refused joint input corners as unmeasured rather than zero.\npub const SOLVE_DRIVER_VERSION: u32 = 45;\n"
       },
       {
-        "old": "        let point = QueryPoint::new()\n            .with(requirements.temperature_axis.clone(), binding.range_lo)\n            .map_err(|error| {\n                conduction_error(\n                    \"cli-solve-conduction-interface-card\",\n                    format!(\"interface `{name}` query point refused: {error}\"),\n                    \"repair the admitted temperature range\",\n                )\n            })?;\n",
-        "new": "        let declared = spec.interface_cards.as_deref().unwrap_or(&[]).iter()\n            .find(|row| row.interface == name)\n            .ok_or_else(|| conduction_error(\n                \"cli-solve-conduction-interface-card\",\n                format!(\"resolved interface `{name}` has no original manufactured state\"),\n                \"preserve the original interface binding through thermal lowering\",\n            ))?;\n        let point = fs_project::interface_state::query_point(\n            &declared.state, &requirements.temperature_axis, binding.range_lo,\n            fs_project::interface_state::StatePoint::Nominal,\n        ).map_err(|error| conduction_error(\n            \"cli-solve-conduction-interface-card\",\n            format!(\"interface `{name}` query point refused: {}\", error.detail),\n            \"repair the admitted temperature range or manufactured joint state\",\n        ))?;\n"
+        "old": "/// Set every inlet, fluid-reference and radiative-reservoir temperature to\n/// `temperature_k`: all of them are the declared ambient.\nfn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {\n    let mut perturbed = spec.clone();\n    if let Some(setup) = perturbed.cooling.as_mut().and_then(|cooling| cooling.conduction.as_mut()) {\n        if let Some(radiation) = setup.radiation.as_mut() {\n            for surface in &mut radiation.surfaces {\n                surface.reservoir_temperature.value = temperature_k;\n            }\n        }\n        for boundary in &mut setup.boundaries {\n            match &mut boundary.condition {\n                ThermalBoundaryCondition::Convection { reference_temperature, .. } => {\n                    reference_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::AirflowConvection { inlet_temperature, .. } => {\n                    inlet_temperature.value = temperature_k;\n                }\n                ThermalBoundaryCondition::NaturalConvection { ambient_temperature, .. } => {\n                    ambient_temperature.value = temperature_k;\n                }\n                _ => {}\n            }\n        }\n    }\n    perturbed\n}\n",
+        "new": "/// Vary only fluid temperatures under the declared ambient envelope.\n/// A radiative reservoir is independently declared, even when numerically equal\n/// to the nominal fluid ambient; no thermal or probabilistic coupling is inferred.\nfn with_inlet_temperature(spec: &ProjectSpec, temperature_k: f64) -> ProjectSpec {\n    input_propagation::with_fluid_temperature(spec, temperature_k)\n}\n"
+      },
+      {
+        "old": "    let mut interaction_excess_k = 0.0;\n    if let (Some(bc), Some(mf), Some(rel), Some(&(temperature, factor, _))) = (\n        boundary.half_width(),\n        model_form.half_width(),\n        allowance,\n        boundary_points.iter().max_by(|a, b| a.2.total_cmp(&b.2)),\n    ) {\n        let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);\n        if let Ok((_, joint)) = vertex(\"joint worst corner\".to_string(), &project, 1.0 - rel)? {\n            interaction_excess_k = ((joint - nominal).abs() - (bc + mf)).max(0.0);\n        }\n    }\n    let boundary = match boundary {\n        PropagatedTerm::Measured { half_width_k, method, detail, vertices } if interaction_excess_k > 0.0 => {\n            PropagatedTerm::Measured {\n                half_width_k: half_width_k + interaction_excess_k,\n                method,\n                detail: format!(\"{detail}; includes {interaction_excess_k} K joint-corner interaction excess\"),\n                vertices,\n            }\n        }\n        other => other,\n    };\n",
+        "new": "    let (boundary, interaction_excess_k) = if let (Some(_), Some(mf), Some(rel), Some(&(temperature, factor, _))) = (\n        boundary.half_width(),\n        model_form.half_width(),\n        allowance,\n        boundary_points.iter().max_by(|a, b| a.2.total_cmp(&b.2)),\n    ) {\n        let project = with_fan_pressure_scale(&with_inlet_temperature(&base, temperature), factor);\n        // Cancellation/work exhaustion still propagate through `?`. A physical\n        // refusal is not evidence of zero interaction between successful singles.\n        let joint = vertex(\"joint worst corner\".to_string(), &project, 1.0 - rel)?;\n        input_propagation::account_joint_corner(boundary, mf, nominal, joint)?\n    } else {\n        (boundary, 0.0)\n    };\n"
+      },
+      {
+        "old": "the boundary vertices move inlet, fluid-reference and declared radiative-reservoir temperatures together",
+        "new": "the boundary vertices move only fluid inlet/reference temperatures; independently declared radiative reservoirs stay fixed and require explicitly declared study inputs to vary"
+      },
+      {
+        "old": "monotone response per input is assumed, one joint corner is checked",
+        "new": "monotone response per input is assumed, one joint corner is checked when individual terms are measurable and a refused joint corner leaves the boundary contribution unmeasured"
+      },
+      {
+        "old": "inlet, fluid-reference and radiative-reservoir temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared)",
+        "new": "fluid inlet/reference temperature over the declared ambient envelope [{lo}, {hi}] K crossed with the declared fan-curve pressure tolerance of {tolerance} (0 when none is declared); independently declared radiative reservoirs remain fixed"
       }
     ]
   },
-  "crates/fs-cli/tests/native_contact_adjoint.rs": {
-    "git_blob": "8fa0b60238f2e1e2c9bca7b9e5e5f5f3f71e9a31",
+  "crates/fs-cli/tests/native_uncertainty/nominal_adjoint/radiative_feedback.rs": {
+    "git_blob": "0aabb141166c8b7345b0c0ddb391b2e47f446994",
     "edits": [
       {
-        "old": "#[path = \"native_contact_adjoint/prescribed.rs\"]\nmod prescribed;\n",
-        "new": "#[path = \"native_contact_adjoint/prescribed.rs\"]\nmod prescribed;\n#[path = \"native_contact_adjoint/state_query.rs\"]\nmod state_query;\n"
+        "old": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n",
+        "new": "#[path = \"boundary_temperatures.rs\"]\nmod boundary_temperatures;\n\n#[path = \"ambient_envelope.rs\"]\nmod ambient_envelope;\n"
       }
     ]
   }
