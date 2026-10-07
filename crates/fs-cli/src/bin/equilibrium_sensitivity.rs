@@ -7,12 +7,16 @@ use fs_couple::render::schedule::force::coupled::equilibrium::sensitivity::objec
 use fs_exec::CancelGate;
 use std::{collections::BTreeMap, fmt::Write as _, io::Read};
 
+#[path = "equilibrium_sensitivity/selection.rs"]
+mod selection;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-const USAGE: &str = "equilibrium_sensitivity MODEL.performance DESIGN.fit --rank-relative-tolerance R --max-observations N --max-adjoints N --point-x NAME VALUE...";
+const USAGE: &str = "equilibrium_sensitivity MODEL.performance DESIGN.fit --rank-relative-tolerance R --max-observations N --max-adjoints N --point-x NAME VALUE... [--select-cases K --design-ridge R --max-design-factorizations N]";
 const SCOPE: &str = "Local numerical information of weighted displacement observations in declared dimensionless design coordinates; no global/structural identifiability, calibrated noise, covariance, posterior, physical validation or active-constraint identifiability certificate. Gram analysis squares conditioning; ambiguous numerical ranks remain null";
 struct Options {
     model: String, design: String, relative: f64, maximum_rows: usize, maximum_adjoints: usize,
     point: BTreeMap<String, f64>,
+    selection: Option<selection::Options>,
 }
 fn finite(s: &str) -> Result<f64> {
     Ok(s.parse::<f64>().ok().filter(|x| x.is_finite()).ok_or("expected a finite number")?)
@@ -20,6 +24,7 @@ fn finite(s: &str) -> Result<f64> {
 fn options(args: &[String]) -> Result<Options> {
     if args.len() < 2 || args.len() > 1024 { return Err(USAGE.into()); }
     let mut point = BTreeMap::new(); let mut relative = None; let mut rows = None; let mut adjoints = None;
+    let mut select = None; let mut ridge = None; let mut factorizations = None;
     let mut i = 2;
     while i < args.len() {
         let flag = args[i].as_str(); i += 1;
@@ -34,6 +39,9 @@ fn options(args: &[String]) -> Result<Options> {
             "--rank-relative-tolerance" if relative.is_none() => relative = Some(finite(value)?),
             "--max-observations" if rows.is_none() => rows = Some(value.parse::<usize>()?),
             "--max-adjoints" if adjoints.is_none() => adjoints = Some(value.parse::<usize>()?),
+            "--select-cases" if select.is_none() => select = Some(value.parse::<usize>()?),
+            "--design-ridge" if ridge.is_none() => ridge = Some(finite(value)?),
+            "--max-design-factorizations" if factorizations.is_none() => factorizations = Some(value.parse::<usize>()?),
             _ => return Err(format!("unknown or duplicate option {flag}").into()),
         }
     }
@@ -43,7 +51,12 @@ fn options(args: &[String]) -> Result<Options> {
     let maximum_rows = rows.ok_or("--max-observations is required")?;
     let maximum_adjoints = adjoints.ok_or("--max-adjoints is required")?;
     ObservationControl::new(maximum_rows, maximum_adjoints)?;
-    Ok(Options { model: args[0].clone(), design: args[1].clone(), relative, maximum_rows, maximum_adjoints, point })
+    let selection = match (select, ridge, factorizations) {
+        (None, None, None) => None,
+        (Some(count), Some(ridge), Some(factorizations)) => Some(selection::Options::new(count, ridge, factorizations)?),
+        _ => return Err("--select-cases, --design-ridge and --max-design-factorizations must be declared together".into()),
+    };
+    Ok(Options { model: args[0].clone(), design: args[1].clone(), relative, maximum_rows, maximum_adjoints, point, selection })
 }
 fn read(path: &str, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -120,12 +133,19 @@ fn run() -> Result<()> {
     if options.point.len() != p.variables().len() { return Err("declare --point-x for EVERY design variable".into()); }
     let point: Vec<f64> = p.variables().iter().map(|v| options.point.get(&v.name).copied()
         .ok_or_else(|| format!("missing point coordinate {}", v.name))).collect::<std::result::Result<_,_>>()?;
+    if let Some(selection) = options.selection { selection.admit(p)?; }
     let mut work = DesignControl::new(1, p.load_cases().len());
     let mut observations = ObservationControl::new(options.maximum_rows, options.maximum_adjoints)?;
     let data = p.evaluate_observations(&point, &mut work, &mut observations, &gate)
         .map_err(|e| format!("{e}; attempted {} cases and {} observation adjoints", work.work().case_solves, observations.adjoints_attempted()))?;
     let information = data.information(options.relative, &gate)?;
-    println!("{}", output(&loaded, &data, &information, &work, &observations));
+    let mut json = output(&loaded, &data, &information, &work, &observations);
+    if let Some(selection) = options.selection {
+        let selected = selection::run(&loaded, &data, selection, &gate)?;
+        json.pop(); // append only after a complete selection; legacy output is unchanged
+        write!(&mut json, ",\"experiment_selection\":{selected}}}").expect("String write");
+    }
+    println!("{json}");
     Ok(())
 }
 fn main() { if let Err(error) = run() { eprintln!("equilibrium_sensitivity refused: {error}"); std::process::exit(1); } }

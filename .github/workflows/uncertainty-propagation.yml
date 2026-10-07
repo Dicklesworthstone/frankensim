@@ -4,6 +4,10 @@ on:
     branches: [main]
     paths:
       - 'crates/fs-uq/**'
+      - 'crates/fs-cli/src/bin/equilibrium_sensitivity*'
+      - 'crates/fs-cli/src/bin/equilibrium_sensitivity/**'
+      - 'crates/fs-cli/tests/equilibrium*selection.rs'
+      - 'examples/equilibrium-uncertainty/experiment-candidates.fit'
       - 'crates/fs-project/src/uncertainty*'
       - 'crates/fs-project/src/uncertainty/**'
       - 'crates/fs-cli/src/study_uncertainty*'
@@ -61,6 +65,10 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test complete-experiment information selection
+        run: cargo test --release -p fs-uq --test experimental_design
+      - name: Test physical experiment selection and legacy sensitivity output
+        run: cargo test --release -p fs-cli --bin equilibrium_sensitivity --test equilibrium_experiment_selection --test equilibrium_sensitivity
       - name: Test QMC propagation and durable recovery
         run: cargo test --release -p fs-uq --lib product_ && cargo test --release -p fs-uq --test product_qmc --test product_sensitivity
       - name: Test native cooling QMC recovery
