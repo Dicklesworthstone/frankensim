@@ -271,15 +271,26 @@ pub struct SolidMaterial {
     pub label: String,
     /// Thermal conductivity, W/(m K).
     pub conductivity_w_m_k: f64,
+    /// Volumetric heat capacity `rho c`, J/(m^3 K). Required only by
+    /// transient marches; steady solves never read it.
+    pub volumetric_heat_capacity_j_m3_k: Option<f64>,
 }
 
 impl SolidMaterial {
-    /// A labelled isotropic solid.
+    /// A labelled isotropic solid without a declared heat capacity.
     #[must_use]
     pub fn new(label: impl Into<String>, conductivity_w_m_k: f64) -> Self {
         Self {
             label: label.into(),
             conductivity_w_m_k,
+            volumetric_heat_capacity_j_m3_k: None,
         }
+    }
+
+    /// Declare the volumetric heat capacity `rho c`, J/(m^3 K).
+    #[must_use]
+    pub fn with_heat_capacity(mut self, volumetric_heat_capacity_j_m3_k: f64) -> Self {
+        self.volumetric_heat_capacity_j_m3_k = Some(volumetric_heat_capacity_j_m3_k);
+        self
     }
 }

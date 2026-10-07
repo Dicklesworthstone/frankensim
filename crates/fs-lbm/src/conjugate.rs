@@ -81,6 +81,7 @@ mod energy;
 mod flow;
 mod krylov;
 mod natural;
+mod transient;
 
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use energy::{
@@ -92,6 +93,7 @@ pub use flow::{
     ProjectionReport, lbm_duct_flow,
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
+pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 
 /// Semantics version of the conjugate pipeline: covers voxel indexing, face
 /// flux layout, projection, energy discretization, solver policy, and the

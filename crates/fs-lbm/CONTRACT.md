@@ -894,6 +894,47 @@ Release lane (`--ignored`, executed) on 32 x 32: Ra = 1e4 (tau 0.8) Nu
 2.2308 vs 2.243 (-0.55 %, 3120 steps); Ra = 1e5 (tau 0.56) Nu 4.4087 vs
 4.519 (-2.4 %, 12880 steps); gated at 5 %.
 
+### Transient conjugate conduction (`march_energy`)
+
+Backward-Euler steps of `C dT/dt + A T = b(t)` over a FROZEN flow field
+(forced convection), with `C = (rho c) V` from the fluid and each solid's
+declared `SolidMaterial::with_heat_capacity` (a solid without one refuses),
+sources `power_w * power_schedule(t)`, and per-step records of the peak
+(solid) temperature and an energy closure computed two independent ways
+(stored-energy change vs `dt (source - boundary outflow)`). Unconditionally
+stable for the M-matrix, so electronics-scale conductivity and capacity
+contrasts impose no step limit; first order in time.
+
+| Fixture | Reference | Measured |
+|---|---|---|
+| Near-isothermal cube (Biot 4e-7) cooled by convective faces, 100 steps of tau/50 | backward-Euler recursion of the lumped ODE | 0.1380329637 vs 0.1380329672 |
+| Same, dt halved | continuous exponential | error 2.698e-3 -> 1.351e-3 (ratio 2.00) |
+| Heated plate under channel flow, 400 steps from cold | steady solve; energy budget | stored 2.616326564 J = net input; worst step closure 4e-12 J; within 2.5e-9 K of steady |
+
+### Worked example (`examples/heatsink_cht.rs`)
+
+`cargo run --release -p fs-lbm --example heatsink_cht [U] [u_lat]
+[auto|bgk|central] [max_steps]`: a ducted aluminium plate-fin heatsink
+(30 mm long, five 1 mm fins 10 mm tall at 4 mm pitch on a 2 mm base, 2 W
+chip under the fins) in a 60 x 20 x 14 mm duct at 0.5 mm voxels, air at 300 K
+and 0.25 m/s. Executed 2026-10-07 on a 4-core host (release, lto off):
+
+| Quantity | Value |
+|---|---|
+| Lattice | 134 400 cells, tau 0.5191 (BGK), 45 000 steps, 755 s |
+| Realized / nominal inflow | 7.306e-5 / 7.000e-5 m^3/s |
+| Pressure drop | 0.621 Pa |
+| Energy solve | 158 BiCGStab iterations, 2.8 s, balance closure 6.8e-12 |
+| Junction temperature | 335.31 K (thermal resistance 17.66 K/W) |
+| Outlet bulk temperature | 323.41 K (= inlet + 2 W / (rho c_p Q)) |
+| Effective film coefficient | 23.2 W/m^2K over 3.78e-3 m^2 wetted area |
+
+Estimated numerical evidence at one resolution. The peak lattice speed in
+the fin gaps reached 0.163 (Mach ~0.28): compressibility error is O(Ma^2)
+there, so treat the pressure drop as indicative; a lower lattice velocity
+(second argument) trades runtime for that error. No experimental
+validation is claimed.
+
 ### Invariants
 
 - Discrete conservation: the two sides of every interior face carry equal

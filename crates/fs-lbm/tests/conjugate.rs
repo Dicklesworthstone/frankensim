@@ -17,8 +17,8 @@ use fs_exec::CancelGate;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     BuoyancyConfig, ChtError, ConvectionScheme, EnergyConfig, FlowFace, FlowField, FluidProperties,
-    LbmCollisionChoice, LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, Voxel,
-    VoxelDomain, lbm_duct_flow, natural_convection, solve_energy,
+    LbmCollisionChoice, LbmFlowConfig, SolidMaterial, ThermalFace, ThermalSetup, TransientConfig,
+    Voxel, VoxelDomain, lbm_duct_flow, march_energy, natural_convection, solve_energy,
 };
 
 const OPEN_X: [FlowFace; 6] = [
@@ -845,4 +845,181 @@ fn natural_convection_cavity_matches_de_vahl_davis_release() {
             "Ra {ra}: Nu {nu}"
         );
     }
+}
+
+#[test]
+fn transient_lumped_cube_follows_backward_euler_and_the_exponential() {
+    // A near-isothermal solid (Biot ~ 4e-7) cooled through convective faces:
+    // the discrete answer is the backward-Euler recursion of the lumped ODE
+    // exactly, and the continuous exponential to O(dt).
+    let gate = CancelGate::new();
+    let dx = 0.01;
+    let domain = VoxelDomain::from_fn(4, 4, 4, dx, |_| Voxel::Solid(0)).unwrap();
+    let (h, k, rho_c) = (10.0, 1e6, 1e3);
+    let solids = [SolidMaterial::new("block", k).with_heat_capacity(rho_c)];
+    let setup = ThermalSetup::new([ThermalFace::Convective { h, ambient: 0.0 }; 6]);
+    let face = dx * dx / (1.0 / h + 0.5 * dx / k);
+    let conductance = 6.0 * 16.0 * face;
+    let capacity = rho_c * 64.0 * dx * dx * dx;
+    let tau = capacity / conductance;
+    let dt = tau / 50.0;
+    let steps = 100;
+    let run = |dt: f64, steps: usize| {
+        march_energy(
+            &domain,
+            &unit_fluid(),
+            &solids,
+            &FlowField::quiescent(&domain),
+            &setup,
+            &vec![1.0; domain.cell_count()],
+            |_| 1.0,
+            &TransientConfig {
+                time_step_s: dt,
+                steps,
+                energy: EnergyConfig {
+                    // k = 1e6 against a 10 W/m^2K film is conditioned near
+                    // the double-precision floor (~5e-11 residual).
+                    tolerance: 1e-10,
+                    ..EnergyConfig::default()
+                },
+            },
+            &gate,
+        )
+        .unwrap()
+    };
+    let coarse = run(dt, steps);
+    let recursion = (1.0 / (1.0 + dt / tau)).powi(steps as i32);
+    let t_end = coarse.temperature[0];
+    println!(
+        "lumped cube: T(2 tau) = {t_end:.10}, BE recursion {recursion:.10}, exp {:.10}",
+        (-2.0f64).exp()
+    );
+    assert!((t_end - recursion).abs() < 1e-6 * recursion);
+    for record in &coarse.records {
+        assert!(record.closure_j.abs() < 1e-7 * record.stored_energy_change_j.abs());
+    }
+    // Halving dt halves the distance to the continuous solution.
+    let fine = run(dt / 2.0, 2 * steps);
+    let (e1, e2) = (
+        (t_end - (-2.0f64).exp()).abs(),
+        (fine.temperature[0] - (-2.0f64).exp()).abs(),
+    );
+    println!("time error: dt {e1:.3e}, dt/2 {e2:.3e}");
+    assert!((e1 / e2 - 2.0).abs() < 0.1, "first-order ratio {}", e1 / e2);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // fixture, march, steady reference, refusal
+fn transient_heated_channel_closes_energy_and_settles_to_the_steady_solution() {
+    let gate = CancelGate::new();
+    let n = 8;
+    let dx = 1.0 / n as f64;
+    let domain = VoxelDomain::from_fn(48, 1, n + 2, dx, |p| {
+        if p[2] < 2.0 * dx {
+            Voxel::Solid(0)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let flow = FlowField::from_face_velocity(&domain, OPEN_X, |axis, p| {
+        let zeta = p[2] - 2.0 * dx;
+        if axis == 0 && (0.0..=1.0).contains(&zeta) {
+            60.0 * zeta * (1.0 - zeta)
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 0.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 0.0,
+    };
+    let mut setup = ThermalSetup::new(faces);
+    setup.add_uniform_power(&domain, 2.0, |p| p[2] < dx && (1.0..3.0).contains(&p[0]));
+    let solids = [SolidMaterial::new("plate", 20.0).with_heat_capacity(5.0)];
+    let steady = solve_energy(
+        &domain,
+        &unit_fluid(),
+        &solids,
+        &flow,
+        &setup,
+        &EnergyConfig::default(),
+        &gate,
+    )
+    .unwrap();
+    let march = march_energy(
+        &domain,
+        &unit_fluid(),
+        &solids,
+        &flow,
+        &setup,
+        &vec![0.0; domain.cell_count()],
+        |_| 1.0,
+        &TransientConfig {
+            time_step_s: 0.05,
+            steps: 400,
+            energy: EnergyConfig::default(),
+        },
+        &gate,
+    )
+    .unwrap();
+    let stored: f64 = march.records.iter().map(|r| r.stored_energy_change_j).sum();
+    let net: f64 = march
+        .records
+        .iter()
+        .map(|r| r.source_j - r.boundary_outflow_j)
+        .sum();
+    let worst = march
+        .records
+        .iter()
+        .map(|r| r.closure_j.abs())
+        .fold(0.0, f64::max);
+    let gap = march
+        .temperature
+        .iter()
+        .zip(&steady.temperature)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    let peak = steady.temperature.iter().copied().fold(0.0, f64::max);
+    println!(
+        "channel: stored {stored:.9} J vs net {net:.9} J, worst step closure {worst:.2e} J, |T(20 s) - T_steady| = {gap:.2e} K of {peak:.4}"
+    );
+    assert!((stored - net).abs() < 1e-9 * stored.abs());
+    assert!(gap < 1e-3 * peak, "not settled: {gap}");
+    // Heating from cold is monotone in the peak solid temperature.
+    assert!(
+        march
+            .records
+            .windows(2)
+            .all(|w| w[1].max_solid_temperature_k >= w[0].max_solid_temperature_k - 1e-12)
+    );
+    // A solid without heat capacity refuses.
+    let err = march_energy(
+        &domain,
+        &unit_fluid(),
+        &[SolidMaterial::new("plate", 20.0)],
+        &flow,
+        &setup,
+        &vec![0.0; domain.cell_count()],
+        |_| 1.0,
+        &TransientConfig {
+            time_step_s: 0.05,
+            steps: 1,
+            energy: EnergyConfig::default(),
+        },
+        &gate,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ChtError::InvalidInput {
+                field: "solid.volumetric_heat_capacity_j_m3_k",
+                ..
+            }
+        ),
+        "{err}"
+    );
 }
