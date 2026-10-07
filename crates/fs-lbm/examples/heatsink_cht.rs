@@ -33,16 +33,25 @@ use fs_lbm::conjugate::{
 
 const MM: f64 = 1e-3;
 
+/// `[lo, hi)` in millimetres for a voxel centre, with both edges shifted
+/// down by a nanometre: an edge exactly on a centre (fin faces at 1 mm
+/// voxels) then takes the voxel at `lo` and leaves the one at `hi` instead of
+/// whichever way the decimal coordinates round.
+fn within(v: f64, lo_mm: f64, hi_mm: f64) -> bool {
+    let tie = 1e-9;
+    v >= lo_mm * MM - tie && v < hi_mm * MM - tie
+}
+
 fn heatsink(p: [f64; 3]) -> Voxel {
     let [x, y, z] = p;
-    let in_sink_x = (10.0 * MM..40.0 * MM).contains(&x);
-    let base = in_sink_x && z < 2.0 * MM;
-    // Fin k occupies y in [1.5 + 4k, 2.5 + 4k] mm.
+    let in_sink_x = within(x, 10.0, 40.0);
+    let base = in_sink_x && within(z, -1.0, 2.0);
+    // Fin k occupies y in [1.5 + 4k, 2.5 + 4k) mm.
     let fin = in_sink_x
-        && (2.0 * MM..12.0 * MM).contains(&z)
+        && within(z, 2.0, 12.0)
         && (0..5).any(|k| {
-            let y0 = (1.5 + 4.0 * f64::from(k)) * MM;
-            (y0..y0 + MM).contains(&y)
+            let y0 = 1.5 + 4.0 * f64::from(k);
+            within(y, y0, y0 + 1.0)
         });
     if base || fin {
         Voxel::Solid(0)
@@ -193,7 +202,7 @@ fn main() {
     let mut setup = ThermalSetup::new(faces);
     let chip_w = 2.0;
     let chip = setup.add_uniform_power(&domain, chip_w, |p| {
-        p[2] < dx && (20.0 * MM..30.0 * MM).contains(&p[0]) && (5.0 * MM..15.0 * MM).contains(&p[1])
+        p[2] < dx && within(p[0], 20.0, 30.0) && within(p[1], 5.0, 15.0)
     });
     let started = std::time::Instant::now();
     let energy = solve_energy(

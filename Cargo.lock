@@ -1168,6 +1168,7 @@ dependencies = [
  "fs-io",
  "fs-ir",
  "fs-ivl",
+ "fs-lbm",
  "fs-ledger",
  "fs-marquee",
  "fs-matdb",

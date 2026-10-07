@@ -1,0 +1,44 @@
+# cooling-cht: voxel conjugate heat transfer from a JSON scene
+
+`frankensim [--json] cooling-cht <scene.json>` solves steady laminar airflow
+by finite-volume SIMPLEC on a voxel grid (forced convection, or natural and
+mixed convection with the Boussinesq force when `gravity_m_s2` is declared)
+and one conservative energy equation over fluid and solid cells. It reports
+per-material and per-source temperatures, the hottest solid voxel, flow and
+energy residuals, and the energy balance.
+
+Scene (`frankensim.cooling-cht.v1`):
+
+- `size_m`, `voxel_m`: the box domain; each size must be a whole number of
+  voxels. Voxel centres decide occupancy: a box `[min_m, max_m)` takes the
+  voxels whose centres it contains, and an edge lying exactly on a voxel
+  centre takes the voxel at its min edge and leaves the one at its max edge
+  (deterministically, whatever the decimal rounding).
+- `fluid`: `"dry-air-300k"` (default) or explicit `density_kg_m3`,
+  `specific_heat_j_kg_k`, `conductivity_w_m_k`, `kinematic_viscosity_m2_s`.
+- `materials`: `name`, `conductivity_w_m_k`.
+- `solids`: `material`, `min_m`, `max_m` boxes; later boxes override earlier.
+- `sources`: `name`, `power_w`, `min_m`, `max_m`; the power is spread
+  uniformly over the solid voxels whose centres the box covers.
+- `faces` (`x-`, `x+`, `y-`, `y+`, `z-`, `z+`; missing faces are adiabatic
+  walls): `inlet` (`velocity_m_s`, `temperature_k`), `opening` (`ambient_k`;
+  pressure zero, flow in either direction), `symmetry`, or `wall`
+  (adiabatic, or one of `temperature_k`, `heat_flux_w_m2` into the domain,
+  `htc_w_m2_k` with `ambient_k`).
+- Optional `gravity_m_s2`, `expansion_per_k` (default `1 / T_ref`),
+  `reference_temperature_k` (default: the first inlet or opening
+  temperature), `solver.tolerance`, `solver.max_iterations`,
+  `limits.wall_seconds`.
+
+Examples:
+
+- `heatsink-duct.json`: the ducted plate-fin heatsink of
+  `crates/fs-lbm/examples/heatsink_cht.rs` at 1 mm voxels (2 W chip,
+  0.25 m/s air at 300 K).
+- `vented-heatsink-natural.json`: a vertical plate-fin heatsink in a column
+  open at the bottom and top, cooled by natural convection only.
+
+Results are Estimated numerical evidence at one resolution: no turbulence
+model, radiation, or temperature-dependent properties; staircase geometry;
+not a ledger-backed `.fsim` run. Refine `voxel_m` to measure resolution
+sensitivity.

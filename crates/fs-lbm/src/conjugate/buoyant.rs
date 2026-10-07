@@ -9,7 +9,8 @@
 //! The momentum equations carry the Boussinesq body force
 //! `f = -rho beta (T - T_ref) g` on fluid cells, with pressure measured from
 //! the reference hydrostatic state, so an opening at pressure zero is ambient
-//! at `T_ref`. Each coupling runs `sweeps_per_coupling` SIMPLEC iterations
+//! at `T_ref`. The coupling starts from conduction through still fluid with
+//! the openings held at their ambient temperature. Each coupling runs `sweeps_per_coupling` SIMPLEC iterations
 //! under the current force, then re-solves the energy equation on the
 //! current fluxes. Convergence requires, at the same coupling, the SIMPLEC
 //! mass and momentum residuals below `flow.tolerance` and the largest
@@ -27,7 +28,8 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
-use super::energy::{EnergyConfig, EnergySolution, ThermalSetup, solve_energy};
+use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
+use super::flow::FlowField;
 use super::simple::{FvFlow, SimpleConfig, Solver, admit};
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -163,7 +165,29 @@ pub fn fv_natural_convection(
         });
     }
     let mut solver = Solver::new(domain, fluid, &config.flow);
-    let mut temperature = vec![config.reference_temperature_k; domain.cell_count()];
+    // Seed the coupling with conduction through still fluid, the openings
+    // held at their ambient temperature: a uniform reference field would
+    // carry no buoyancy, hence no flow, and openings without flow anchor no
+    // temperature.
+    let mut seed = setup.clone();
+    for face in &mut seed.faces {
+        if let ThermalFace::Outflow {
+            backflow_temperature,
+        } = *face
+        {
+            *face = ThermalFace::Temperature(backflow_temperature);
+        }
+    }
+    let mut temperature = solve_energy(
+        domain,
+        fluid,
+        solids,
+        &FlowField::quiescent(domain),
+        &seed,
+        &config.energy,
+        gate,
+    )?
+    .temperature;
     let mut residuals = (f64::INFINITY, f64::INFINITY);
     let mut temperature_change = f64::INFINITY;
     let (mut couplings, mut sweeps) = (0usize, 0usize);

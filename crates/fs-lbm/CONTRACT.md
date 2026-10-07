@@ -962,7 +962,10 @@ faces are pressure openings that pass flow both ways (paired with
 `ThermalFace::Outflow { backflow_temperature }` for the ambient), with
 pressure measured from the reference hydrostatic state. The momentum source
 is `-rho beta (T - T_ref) g` on fluid cells (cell-sized staggered volumes
-average the two adjacent cells). Each coupling runs `sweeps_per_coupling`
+average the two adjacent cells). The coupling starts from conduction
+through still fluid with the openings held at ambient (a uniform reference
+field carries no buoyancy, and openings without flow anchor no temperature).
+Each coupling runs `sweeps_per_coupling`
 SIMPLEC iterations under the current force, then re-solves energy on the
 current fluxes; convergence needs the SIMPLEC residuals below
 `flow.tolerance` AND the energy re-solve's largest temperature change below
@@ -999,20 +1002,22 @@ and 0.25 m/s. Executed 2026-10-07 on a 4-core host (release, lto off):
 | Outlet bulk temperature | 323.41 K (= inlet + 2 W / (rho c_p Q)) |
 | Effective film coefficient | 23.2 W/m^2K over 3.78e-3 m^2 wetted area |
 
-The same case with the SIMPLEC flow (`fv`), executed 2026-10-07:
+The same case with the SIMPLEC flow, executed 2026-10-07 through
+`frankensim cooling-cht examples/cooling-cht/heatsink-duct.json` (debug
+build):
 
-| Quantity | FV, 1 mm voxels (16 800 cells, debug build) |
+| Quantity | FV, 1 mm voxels (16 800 cells) |
 |---|---|
-| Flow | 74 SIMPLEC iterations, mass residual 3.7e-7, momentum residual 9.0e-7, max cell Re 41, 88.7 s |
+| Flow | 76 SIMPLEC iterations, mass residual 2.6e-7, momentum residual 9.4e-7, max cell Re 39, 89 s |
 | Inflow / outflow | 7.000e-5 / 7.000e-5 m^3/s (divergence 3e-22) |
-| Pressure drop | 0.415 Pa |
-| Junction temperature | 335.29 K (17.65 K/W) |
-| Outlet bulk temperature | 324.43 K |
-| Effective film coefficient | 23.6 W/m^2K |
+| Energy | 61 BiCGStab iterations; 2 W in, 2 W advected out; balance 8e-13 |
+| Junction temperature | 334.98 K (17.49 K/W) |
 
-The FV junction temperature at 1 mm agrees with the LBM run at 0.5 mm to
-0.02 K; the pressure drops differ (0.415 vs 0.621 Pa), consistent with the
-LBM run's compressibility caveat below and the coarser FV voxels.
+The FV junction at 1 mm sits 0.33 K below the 0.5 mm LBM run. At 1 mm
+the fin faces fall exactly on voxel centres; the example and the
+`cooling-cht` scene parser now resolve such ties deterministically (the
+voxel at a box's min edge is in, the one at its max edge is out), and an
+earlier 1 mm run that let rounding decide carried one fin two voxels thick.
 
 Estimated numerical evidence at one resolution. The peak lattice speed in
 the fin gaps reached 0.163 (Mach ~0.28): compressibility error is O(Ma^2)

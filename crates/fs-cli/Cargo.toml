@@ -30,6 +30,7 @@ fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
 fs-ir = { path = "../fs-ir" }
 fs-ivl = { path = "../fs-ivl", optional = true }
+fs-lbm = { path = "../fs-lbm" }
 fs-ledger = { path = "../fs-ledger" }
 fs-marquee = { path = "../fs-marquee" }
 fs-matdb = { path = "../fs-matdb" }
