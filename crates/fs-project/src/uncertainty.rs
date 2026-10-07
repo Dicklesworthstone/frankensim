@@ -24,6 +24,7 @@ use fs_qty::{Dims, QtyAny};
 use crate::{ConsequenceClass, DecisionGate, ProjectError, ProjectSpec,
     RequirementDirection, ThermalBoundaryCondition};
 
+mod contact_inputs;
 pub mod mean_control;
 pub use mean_control::MeanControlPolicy;
 
@@ -58,9 +59,28 @@ pub enum Target {
     /// Absolute prescribed temperature of one uniform Dirichlet boundary.
     /// This is a solid-boundary value, not an ambient-fluid temperature.
     FixedTemperature,
+    /// Nominal dry-contact clamping pressure; the manufacturing band is retained.
+    ContactPressure,
+    /// Nominal TIM or adhesive thickness, not a change to the material card.
+    ContactThickness,
+    /// Nominal fluid-filled joint separation.
+    ContactGap,
+    /// Nominal bolted-joint torque; bolt count and pattern remain fixed.
+    ContactTorque,
 }
 
 impl Target {
+    /// Exact source coordinate for continuous manufactured-joint inputs.
+    #[must_use]
+    pub const fn contact_axis(self) -> Option<&'static str> {
+        match self {
+            Self::ContactPressure => Some("normal_pressure"),
+            Self::ContactThickness => Some("thickness"),
+            Self::ContactGap => Some("gap"),
+            Self::ContactTorque => Some("torque"),
+            _ => None,
+        }
+    }
     /// Coherent parameter unit used by the sampler and report.
     #[must_use]
     pub const fn unit(self) -> &'static str {
@@ -72,6 +92,9 @@ impl Target {
             | Self::FixedTemperature => "K",
             Self::HeatFlux => "W/m^2",
             Self::FanSpeedRatio => "1",
+            Self::ContactPressure => "Pa",
+            Self::ContactThickness | Self::ContactGap => "m",
+            Self::ContactTorque => "N*m",
         }
     }
     fn dims(self) -> Dims {
@@ -84,6 +107,9 @@ impl Target {
             | Self::FixedTemperature => dims::TEMPERATURE,
             Self::HeatFlux => dims::HEAT_FLUX,
             Self::FanSpeedRatio => Dims::NONE,
+            Self::ContactPressure => dims::PRESSURE,
+            Self::ContactThickness | Self::ContactGap => dims::LENGTH,
+            Self::ContactTorque => Dims([2, 1, -2, 0, 0, 0]),
         }
     }
 }
@@ -97,6 +123,7 @@ pub struct UniformParameter {
     pub target: Target,
     /// Region, boundary target, air branch, fan bank, or radiating-surface name
     /// according to `target`; a radiating surface is not its geometric target.
+    /// Contact inputs name the exact interface-card binding.
     pub entity: String,
     /// Closed distribution support in coherent SI units; equality is deterministic.
     pub low: f64,
@@ -362,6 +389,10 @@ impl UncertaintyStudy {
                     "natural-convection-ambient" => Target::NaturalConvectionAmbient,
                     "radiation-reservoir-temperature" => Target::RadiationReservoirTemperature,
                     "fixed-temperature" => Target::FixedTemperature,
+                    "contact-pressure" => Target::ContactPressure,
+                    "contact-thickness" => Target::ContactThickness,
+                    "contact-gap" => Target::ContactGap,
+                    "contact-torque" => Target::ContactTorque,
                     _ => return Err(error("unsupported random project field")),
                 },
                 _ => return Err(error("parameter target must be a symbol")),
@@ -377,7 +408,8 @@ impl UncertaintyStudy {
                 || (matches!(target, Target::ConvectionCoefficient | Target::ConvectionTemperature
                     | Target::AirInletTemperature | Target::FanSpeedRatio
                     | Target::NaturalConvectionAmbient | Target::RadiationReservoirTemperature
-                    | Target::FixedTemperature) && low <= 0.0) {
+                    | Target::FixedTemperature) && low <= 0.0)
+                || (target.contact_axis().is_some() && low <= 0.0) {
                 return Err(error("invalid probability support for the physical target"));
             }
             parameters.push(UniformParameter { name, target, entity, low, high });
@@ -518,6 +550,9 @@ fn validate_project(project: &ProjectSpec) -> Result<()> {
     else { Ok(()) }
 }
 fn apply(project: &mut ProjectSpec, parameter: &UniformParameter, value: f64) -> Result<()> {
+    if parameter.target.contact_axis().is_some() {
+        return contact_inputs::apply(project, parameter, value);
+    }
     let mut matches = 0;
     if parameter.target == Target::Power {
         for row in project.power.as_mut().ok_or_else(|| error("missing power map"))? {
