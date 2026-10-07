@@ -31,6 +31,9 @@ use fs_verify::tet::{AffineSourceTetProblem, BoundaryCondition, BoundaryFace, Co
     affine_source_mean_bound};
 pub use fs_verify::tet::{FluxBudget, TetError};
 
+mod contact;
+pub use contact::{bound_temperature_mean_with_contacts, solve_with_contact_mean_bound};
+
 /// Solvers retain their own tolerances; these are not substituted for an error bound.
 #[derive(Debug, Clone, Default)]
 pub struct MeanSolveConfig {
@@ -244,6 +247,7 @@ fn bound_field(
     temperature: &[f64],
     dual_config: SolveConfig,
     flux: FluxBudget,
+    interfaces: Option<&crate::ThermalInterfaces>,
 ) -> Result<MeanFieldBound> {
     poll(cx)?;
     if temperature.len() != problem.mesh.vertex_count() {
@@ -265,15 +269,15 @@ fn bound_field(
     }
     let boundary = dual_boundary(cx, problem)?;
     let unit_source = ScalarField::Uniform(1.0);
-    let dual = crate::solve(
-        cx,
-        ConductionProblem {
-            boundary: &boundary,
-            source: &unit_source,
-            ..problem
-        },
-        dual_config,
-    )?;
+    let dual_problem = ConductionProblem {
+        boundary: &boundary,
+        source: &unit_source,
+        ..problem
+    };
+    let dual = match interfaces {
+        Some(interfaces) => crate::solve_with_interfaces(cx, dual_problem, interfaces, dual_config)?,
+        None => crate::solve(cx, dual_problem, dual_config)?,
+    };
     poll(cx)?;
     let bound = affine_source_mean_bound(
         &admitted.problem(problem.mesh.positions()),
@@ -301,7 +305,7 @@ pub fn bound_temperature_mean(
     flux: FluxBudget,
 ) -> Result<MeanFieldBound> {
     let admitted = admit(cx, problem, flux)?;
-    bound_field(cx, problem, &admitted, temperature, dual_config, flux)
+    bound_field(cx, problem, &admitted, temperature, dual_config, flux, None)
 }
 
 /// Solve the original thermal problem and its unit-volume-source adjoint, then
@@ -326,6 +330,7 @@ pub fn solve_with_mean_bound(
         &primal.temperature,
         config.dual,
         config.flux,
+        None,
     )?;
     Ok(MeanTemperatureSolution {
         primal,

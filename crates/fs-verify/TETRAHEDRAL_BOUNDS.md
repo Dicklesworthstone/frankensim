@@ -1,7 +1,7 @@
 # Tetrahedral thermal bounds
 
 This is the linear, averaged-functional increment of q61wp.11 / sj31i.25.
-It does not close their nonlinear, contact, point-maximum or product-report scope.
+It does not close their nonlinear, nonmatching-contact, point-maximum or product-report scope.
 The existing 1D speculation APIs and their evidence authorities are unchanged.
 
 ## Real consumer
@@ -115,6 +115,64 @@ interval-rounding proof. The existing thermal workflow runs the numerical
 sources and integration regressions, then the actual FEM consumer when its
 original dependency bootstrap succeeds.
 
+## Finite thermal resistance with independent traces
+
+Under the same `fs-conduction/thermal-verification` feature, use the original
+`InterfaceSurface` declarations with the native consumer:
+
+```rust
+use fs_conduction::verification::{
+    solve_with_contact_mean_bound, bound_temperature_mean_with_contacts,
+};
+
+// cx, problem, surfaces and config are the original native inputs.
+let solved = solve_with_contact_mean_bound(cx, problem, &surfaces, config.clone())?;
+let reused = bound_temperature_mean_with_contacts(
+    cx, problem, &surfaces, &solved.primal.temperature, config.dual, config.flux,
+)?;
+```
+
+The second API performs only the dual solve. It also accepts unfinished primal
+fields, retaining their algebraic and interface error instead of inventing a
+converged primal report. Both APIs reuse the original contact binder and FEM
+solver. Uniform and mapped positive area-specific resistances stay attached to
+their declared face pairs. Independent side-A/side-B temperatures are not welded.
+Missing coincident contact pairs, duplicate ownership and external conditions
+on contact faces retain the original native refusals.
+
+The scalar, tensor and affine-source verifier APIs accept reciprocal
+`BoundaryCondition::Contact { partner, resistance }` declarations on exact
+matching triangles. Opposite outward normals and separate vertex identities
+are mandatory. Each pair becomes one edge of the existing conservation graph:
+a solid may be anchored solely through contact to another anchored solid.
+A contact never acts as an external reservoir or anchoring condition by itself.
+
+For resistance R and candidate v, the squared majorant additionally contains
+`integral (R*q.n - jump(v))^2/R`, once per physical interface. This controls the
+error norm's `integral jump(u-v)^2/R` term. The complete dual has the same
+contact operator, and its residual correction includes
+`-integral jump(v)*jump(z)/R`. The affine-source lifting has zero normal trace
+and therefore preserves the common contact flux. Omitting either interface term
+can invalidate a bound even when both volume fields are individually affine.
+
+An analytical two-slab control has lengths 1 m each, unit area, conductivities
+2 and 1 W/(m K), R=0.5 m^2 K/W, and outer temperatures 400 and 300 K. Its flux
+is 50 W/m^2; interface temperatures are 375 and 350 K, and the volume mean is
+356.25 K. An additional control insulates and heats the left slab, leaving
+contact as its only thermal path to the cold support. These references are
+not reports of native test execution.
+
+```sh
+cargo test -p fs-verify --features certified-speculation --test contact_bounds
+cargo test -p fs-conduction --features thermal-verification --test contact_mean_bound
+```
+
+Six verifier and four native-consumer regressions are supplied. Native tests,
+compilation, rustfmt and Clippy remain unverified in the authoring environment;
+independent Python transmission identities do not execute Rust or interval
+rounding. The existing thermal workflow includes both targets. No new sampler,
+physics solver, runtime dependency, product output schema or authority is added.
+
 ## Boundaries
 
 Global mesh non-overlap and fidelity to a CAD surface are caller obligations;
@@ -123,7 +181,7 @@ The conduction adapter refuses nonlinear k(T), bounded material-temperature
 validity without a range proof, nonconstant Neumann normal trace and
 nonconstant face h. It never averages those inputs into a
 different PDE. Exact tensor symmetry is required; an approximately symmetric
-material tensor is not silently repaired. Matching/mortar contact, nonlinear
+material tensor is not silently repaired. Nonmatching/mortar contact, nonlinear
 radiation, material uncertainty and model discrepancy are outside this increment.
 A mean bound does not imply a maximum-temperature bound or a safety decision.
 No capability level, persisted verifier authority or evidence colour is promoted.
