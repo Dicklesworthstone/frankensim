@@ -116,7 +116,11 @@ Scene (`frankensim.cooling-cht.v1`):
   uniform cells from the previous zone's end (0 first), so fine voxels go
   only where features and boundary layers need them. Box, plane and
   source positions use the actual cell centres and faces; the result
-  reports `graded` and `voxel_m` as the smallest width.
+  reports `graded` and `voxel_m` as the smallest width. Shorter: keep
+  `size_m` and declare `"grid": {"voxel_m": coarse, "refine": [{"min_m",
+  "max_m", "voxel_m"}, ...]}`; each axis then takes the finest spacing of
+  the refine boxes covering each interval (a Cartesian grid refines whole
+  slabs, so a box refines its slab on every axis).
 - A material may declare `conductivity_table`: `[[temperature_k, k], ...]`
   (piecewise linear, constant beyond the ends). Every axis conductivity of
   that material scales by `k(T) / conductivity_w_m_k` at each cell's

@@ -462,14 +462,16 @@ impl FvFlow {
     /// Mean pressure over the fluid cells of layer `index` along `axis`, Pa.
     #[must_use]
     pub fn mean_pressure(&self, domain: &VoxelDomain, axis: usize, index: usize) -> Option<f64> {
-        let (mut sum, mut count) = (0.0f64, 0usize);
+        // Area-weighted over the layer's fluid cells (graded grids).
+        let (mut sum, mut area) = (0.0f64, 0.0f64);
         for c in 0..domain.cell_count() {
             if domain.is_fluid(c) && domain.coords(c)[axis] == index {
-                sum += self.pressure_pa[c];
-                count += 1;
+                let a = domain.face_area(c, axis);
+                sum = a.mul_add(self.pressure_pa[c], sum);
+                area += a;
             }
         }
-        (count > 0).then(|| sum / count as f64)
+        (area > 0.0).then(|| sum / area)
     }
 }
 
@@ -1427,8 +1429,20 @@ impl<'a> Solver<'a> {
         };
         // Inner solves reduce the entry residual by `momentum_tolerance`.
         let inner = (self.config.momentum_tolerance * steady).max(1e-15);
+        // The relaxed momentum operator is a strictly diagonally dominant
+        // M-matrix for finite coefficients, so a non-finite residual or an
+        // incomplete-factorization breakdown means the iteration diverged.
+        if !steady.is_finite() {
+            return Err(ChtError::FlowDiverged { step: self.sweeps });
+        }
         if steady > 1e-15 {
-            let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)?;
+            let outcome = bicgstab_ilu0("momentum", &matrix, &b, &mut x, inner, 20_000, gate)
+                .map_err(|error| match error {
+                    ChtError::PreconditionerBreakdown { .. } => {
+                        ChtError::FlowDiverged { step: self.sweeps }
+                    }
+                    other => other,
+                })?;
             self.momentum_krylov += outcome.iterations;
         }
         for (row, &index) in self.comps[a].unknowns.iter().enumerate() {

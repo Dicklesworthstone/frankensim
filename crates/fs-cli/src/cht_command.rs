@@ -414,7 +414,10 @@ fn plate_fin_heatsink(item: &J, grid: &Grid, at: &str) -> Result<Vec<Aabb>> {
 /// A graded grid: per axis (`x`, `y`, `z`) a list of zones `{"to_m",
 /// "voxel_m"}` from the previous zone's end (0 first), each a whole number
 /// of uniform cells.
-fn parse_grid(value: &J) -> Result<Grid> {
+fn parse_grid(value: &J, root: &J) -> Result<Grid> {
+    if value.get("voxel_m").is_some() {
+        return parse_refined_grid(value, root);
+    }
     let mut widths = [Vec::new(), Vec::new(), Vec::new()];
     for (a, key) in ["x", "y", "z"].iter().enumerate() {
         let at = format!("grid.{key}");
@@ -447,6 +450,64 @@ fn parse_grid(value: &J) -> Result<Grid> {
             let width = (to - from) / rounded;
             widths[a].extend(std::iter::repeat_n(width, rounded as usize));
             from = to;
+        }
+    }
+    if widths.iter().map(Vec::len).product::<usize>() > MAX_CELLS {
+        return Err(Failure {
+            code: "cooling-cht-budget",
+            message: format!(
+                "{} cells exceed the {MAX_CELLS}-cell cap",
+                widths.iter().map(Vec::len).product::<usize>()
+            ),
+        });
+    }
+    Ok(Grid::from_widths(widths))
+}
+
+/// A refined grid: `size_m` at the scene root, a coarse `voxel_m`, and
+/// `refine` boxes `{"min_m", "max_m", "voxel_m"}`. Each axis breaks at the
+/// domain ends and every box edge; an interval takes the finest spacing of
+/// the boxes covering it on that axis (the coarse one otherwise), rounded
+/// up to whole cells. A Cartesian grid refines whole planes: a box refines
+/// its slab on each axis.
+fn parse_refined_grid(value: &J, root: &J) -> Result<Grid> {
+    let size = vec3(root, "size_m", "scene")?;
+    let coarse = number(value, "voxel_m", "grid")?;
+    if !(coarse > 0.0) || size.iter().any(|l| !(*l > 0.0)) {
+        return Err(bad("grid.voxel_m and size_m must be positive"));
+    }
+    let mut boxes = Vec::new();
+    for (i, item) in array_of(value, "refine")?.iter().enumerate() {
+        let at = format!("grid.refine[{i}]");
+        let region = Aabb::parse(item, &at)?;
+        let voxel = number(item, "voxel_m", &at)?;
+        if !(voxel > 0.0) {
+            return Err(bad(format!("{at}.voxel_m must be positive")));
+        }
+        boxes.push((region, voxel));
+    }
+    let mut widths = [Vec::new(), Vec::new(), Vec::new()];
+    for a in 0..3 {
+        let mut cuts = vec![0.0, size[a]];
+        for (region, _) in &boxes {
+            for v in [region.min[a], region.max[a]] {
+                if v > 0.0 && v < size[a] {
+                    cuts.push(v);
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|x, y| (*x - *y).abs() <= 1e-12 * size[a]);
+        for pair in cuts.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            let middle = 0.5 * (from + to);
+            let spacing = boxes
+                .iter()
+                .filter(|(r, _)| r.min[a] <= middle && middle < r.max[a])
+                .map(|(_, v)| *v)
+                .fold(coarse, f64::min);
+            let cells = ((to - from) / spacing * (1.0 - 1e-9)).ceil().max(1.0);
+            widths[a].extend(std::iter::repeat_n((to - from) / cells, cells as usize));
         }
     }
     if widths.iter().map(Vec::len).product::<usize>() > MAX_CELLS {
@@ -813,7 +874,7 @@ impl Scene {
                         "declare either voxel_m (uniform) or grid (graded), not both",
                     ));
                 }
-                parse_grid(zones)?
+                parse_grid(zones, &root)?
             }
             None => {
                 let dx = number(&root, "voxel_m", "scene")?;

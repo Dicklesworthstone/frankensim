@@ -136,6 +136,18 @@ fn graded_grid_refines_the_block_and_closes_energy() {
         f(&result, &["max_solid_temperature_k"]),
     );
     assert!((a - b).abs() < 0.25 * (a - 300.0), "uniform {a} vs graded {b}");
+    // The refine-box form: 1 mm coarse, 0.5 mm in the block's slabs
+    // (x 3..9 mm, y 0..3 mm, all of z): 18 x 7 x 8 cells.
+    let refined = DUCT.replace(
+        r#""voxel_m": 0.001,"#,
+        r#""grid": {"voxel_m": 0.001, "refine": [
+   {"min_m": [0.003, 0.0, 0.0], "max_m": [0.009, 0.003, 0.004], "voxel_m": 0.0005}]},"#,
+    );
+    assert_ne!(refined, DUCT);
+    let (code, result, stderr) = run(&scratch("duct-refined.json", &refined));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(result.path(&["cells"]).and_then(J::as_f64), Some(1008.0));
+    assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-9);
     // Both spacing declarations at once refuse.
     let both = graded.replace(r#""grid": {"#, r#""voxel_m": 0.001, "grid": {"#);
     let (code, diagnostic, _) = run(&scratch("duct-both.json", &both));
