@@ -66,7 +66,8 @@ pub struct RequiredProperty {
 /// material and interface card must answer, over which axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingRequirements {
-    /// The validity axis queried (v1 resolves over temperature only).
+    /// Temperature axis. Interface queries additionally carry the explicit
+    /// manufactured joint coordinates and require support over their bands.
     pub temperature_axis: String,
     /// Properties every region's material card must answer.
     pub material_properties: Vec<RequiredProperty>,
@@ -803,7 +804,7 @@ fn resolve_interface_bindings(
             card_identity,
             binding.card.clone(),
             binding.source.clone(),
-            Some(binding.state.render()),
+            Some(&binding.state),
             &range,
             pin,
             &requirements.temperature_axis,
@@ -882,7 +883,7 @@ fn resolve_card_properties(
     card_identity: String,
     card_hex: String,
     declared_source: String,
-    declared_interface_state: Option<String>,
+    declared_interface_state: Option<&crate::spec::InterfaceState>,
     range: &RequiredRange,
     pin: Option<ClaimId>,
     axis: &str,
@@ -903,7 +904,7 @@ fn resolve_card_properties(
     let mut clean = true;
     for property in properties {
         match resolve_property(
-            resolution, &target, claims, &card_hex, range, pin, axis, property,
+            resolution, &target, claims, &card_hex, range, pin, axis, property, declared_interface_state,
         ) {
             Some(row) => resolved.push(row),
             None => clean = false,
@@ -915,7 +916,7 @@ fn resolve_card_properties(
             card: card_hex,
             card_identity,
             declared_source,
-            declared_interface_state,
+            declared_interface_state: declared_interface_state.map(crate::spec::InterfaceState::render),
             range_lo: range.lo,
             range_hi: range.hi,
             pinned_claim: pin.map(|claim| claim.0.to_hex()),
@@ -933,11 +934,12 @@ fn resolve_property(
     pin: Option<ClaimId>,
     axis: &str,
     property: &RequiredProperty,
+    state: Option<&crate::spec::InterfaceState>,
 ) -> Option<ResolvedProperty> {
     let EnvelopeAnswer {
         lower: low,
         upper: high,
-    } = query_range(resolution, target, claims, axis, range, pin, property)?;
+    } = query_range(resolution, target, claims, axis, range, pin, property, state)?;
     let sample = &low.evidence.value;
     if sample.dims != property.dims {
         resolution.violations.push(violation(
@@ -1017,6 +1019,7 @@ fn query_range(
     range: &RequiredRange,
     pin: Option<ClaimId>,
     property: &RequiredProperty,
+    state: Option<&crate::spec::InterfaceState>,
 ) -> Option<EnvelopeAnswer> {
     let corners = QueryPoint::new().with(axis, range.lo).and_then(|lower| {
         QueryPoint::new()
@@ -1041,7 +1044,11 @@ fn query_range(
         ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
         ClaimSelection::Pinned,
     );
-    let answer = claims.query_envelope(&property.property, &lower, &upper, selection);
+    let answer = match state {
+        Some(state) => crate::interface_state::query_envelope(
+            claims, &property.property, state, axis, range.lo, range.hi, selection),
+        None => claims.query_envelope(&property.property, &lower, &upper, selection),
+    };
     match answer {
         Ok(answer) => Some(answer),
         Err(error) => {
@@ -1075,7 +1082,7 @@ fn query_range(
                 } => violation(
                     "project-binding-domain-uncovered",
                     format!(
-                        "{}: `{}` claim {} has only exact samples on {axis}, which do not cover [{lower}, {upper}] K",
+                        "{}: `{}` claim {} has only exact samples on {axis}, which do not cover [{lower}, {upper}] in that axis's coherent units",
                         target.describe(),
                         property.property,
                         claim.0.to_hex()
@@ -1149,7 +1156,7 @@ fn query_violation(
         MatDbError::MissingQueryAxis { .. } => violation(
             "project-binding-axis",
             context,
-            "the card's claims depend on an axis this resolution does not query (v1 queries temperature only); bind a card parameterized by temperature alone",
+            "the card requires an axis or descriptor absent from this query; use exact native temperature and manufactured-joint coordinate names without inferred aliases",
         ),
         _ => violation(
             "project-binding-query",
