@@ -459,13 +459,10 @@ impl SolidMaterial {
         let k = if t <= t0 {
             k0
         } else {
-            table
-                .windows(2)
-                .find(|w| t <= w[1].0)
-                .map_or_else(
-                    || table[table.len() - 1].1,
-                    |w| w[0].1 + (w[1].1 - w[0].1) * (t - w[0].0) / (w[1].0 - w[0].0),
-                )
+            table.windows(2).find(|w| t <= w[1].0).map_or_else(
+                || table[table.len() - 1].1,
+                |w| w[0].1 + (w[1].1 - w[0].1) * (t - w[0].0) / (w[1].0 - w[0].0),
+            )
         };
         k / self.conductivity_w_m_k
     }

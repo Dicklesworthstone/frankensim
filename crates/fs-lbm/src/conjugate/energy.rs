@@ -620,8 +620,17 @@ pub(crate) fn solve_energy_inner(
             }
         }
     };
-    let mut solution =
-        solve_energy_once(domain, fluid, solids, flow, setup, config, step, Some((&start, None)), gate)?;
+    let mut solution = solve_energy_once(
+        domain,
+        fluid,
+        solids,
+        flow,
+        setup,
+        config,
+        step,
+        Some((&start, None)),
+        gate,
+    )?;
     for _ in 0..200 {
         super::poll(gate)?;
         let next = solve_energy_once(
@@ -638,7 +647,9 @@ pub(crate) fn solve_energy_inner(
         let (lo, hi) = next
             .temperature
             .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| (lo.min(*t), hi.max(*t)));
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+                (lo.min(*t), hi.max(*t))
+            });
         let change = next
             .temperature
             .iter()
@@ -771,7 +782,9 @@ fn solve_energy_once(
             Voxel::Fluid => [fluid.conductivity_w_m_k + eddy(c); 3],
             Voxel::Solid(m) => {
                 let scale = nonlinear.map_or(1.0, |(scales, _)| scales[c]);
-                solids[usize::from(m)].axis_conductivity().map(|k| k * scale)
+                solids[usize::from(m)]
+                    .axis_conductivity()
+                    .map(|k| k * scale)
             }
         })
         .collect();
