@@ -1,6 +1,9 @@
 //! Exercise the real native import, card, nonlinear solve and receipt path.
 use super::*;
 
+#[path = "natural_budget.rs"]
+mod natural_budget;
+
 #[test]
 fn native_natural_adjoint_preserves_the_primal_and_matches_physical_controls() {
     let mut fixture = Fixture::new();

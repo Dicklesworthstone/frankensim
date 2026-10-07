@@ -87,6 +87,7 @@ fn scaled_receipt_distinguishes_applied_htc_from_the_unmodified_card() {
 fn adaptive_admission_cannot_freeze_the_law() {
     let mut spec = project();
     let setup = spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap();
+    assert_eq!(super::super::coolest_declared_temperature(setup), Some(300.0));
     assert!(admit_fidelity(&spec, setup).is_ok());
     spec.solver.as_mut().unwrap().fidelity = "ladder".into();
     assert!(admit_fidelity(&spec, spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()).is_ok());
@@ -101,6 +102,7 @@ fn adaptive_admission_cannot_freeze_the_law() {
         temperature: fs_qty::QtyAny::new(280.0, fs_project::spec::dims::TEMPERATURE),
     };
     setup.boundaries.push(cold);
+    assert_eq!(super::super::coolest_declared_temperature(setup), Some(280.0));
     // Unrelated affine adaptive projects keep their existing admission.
     setup.boundaries.remove(0);
     assert!(admit_fidelity(&spec, spec.cooling.as_ref().unwrap().conduction.as_ref().unwrap()).is_ok());
