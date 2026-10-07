@@ -11,6 +11,9 @@ use fs_matdb::{ClaimSelection, ClaimSet, EnvelopeAnswer, PropertySupportError, Q
 use fs_qty::{Dims, QtyAny};
 use crate::{InterfaceState, ProjectError};
 
+mod sensitivity;
+pub use sensitivity::{StateSensitivity, continuous_coordinate, resistance_sensitivity};
+
 fn invalid(detail: impl Into<String>) -> ProjectError {
     ProjectError { code: "project-interface-query", detail: detail.into(),
         hint: "provide a positive finite joint-state band in coherent SI and a card qualified on the exact declared coordinate names".into() }
