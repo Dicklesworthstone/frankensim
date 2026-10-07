@@ -20,12 +20,16 @@ Scene (`frankensim.cooling-cht.v1`):
   for grid-aligned orthotropic solids such as PCB laminates), optional
   `emissivity` (0 to 1; any non-zero value enables radiation) and
   `volumetric_heat_capacity_j_m3_k` (transients).
-- Radiation: exposed solid faces emit `eps sigma F A (T^4 - T_amb^4)` to the
-  surroundings seen through openings, inlets and fans (at their
-  temperatures); walls are opaque. Escape factors `F` come from
-  deterministic Monte Carlo rays (optional `radiation`: `rays_per_face`,
-  default 256, and `seed`). Surface-to-surface exchange is not modelled.
-  The result reports `radiation.radiated_w` and the energy balance's
+- Radiation: exposed faces of emissive solids exchange gray diffuse
+  radiation with each other and with the surroundings seen through
+  openings, inlets and fans (at their temperatures); domain walls and
+  non-emitting solids reflect perfectly, so a sealed box radiates from its
+  hot parts to its emissive walls (model enclosure walls as emissive solid
+  boxes). Exchange factors come from deterministic Monte Carlo rays on face
+  patches (optional `radiation`: `rays_per_face`, default 256, `seed`,
+  `patch_size`, default 4 faces, and `surface_exchange`, default true;
+  false keeps only the escape to the surroundings). The result reports
+  `radiation.radiated_w` (to the surroundings) and the energy balance's
   `sink_outflow_w`. Transients refuse radiation.
 - `contacts` (optional): `between` (two material names) and
   `resistance_m2_k_w`, a per-area interface resistance (thermal interface

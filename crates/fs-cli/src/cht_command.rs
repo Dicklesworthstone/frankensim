@@ -38,8 +38,8 @@ const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only as gray diffuse emission from exposed solid faces to the surroundings seen through openings, inlets and fans (Monte Carlo escape factors; no surface-to-surface exchange or wall re-radiation); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
-const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation to the surroundings seen through openings, inlets and\nfans (escape factors by ray tracing; radiation {rays_per_face, seed}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
+const NO_CLAIM: &str = "steady constant-property flow on a staircase voxel grid at one declared resolution (no mesh-convergence claim); Boussinesq buoyancy only when gravity is declared; turbulence only through the optional LVEL algebraic eddy viscosity (no transport, separation or transition physics); no temperature-dependent properties; radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k; pressure zero, flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and the board through\nthe two resistors (steady scenes only).\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (materials then need\nvolumetric_heat_capacity_j_m3_k). Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
 
@@ -423,6 +423,10 @@ struct Scene {
     transient: Option<Transient>,
     /// Emissivity per material (all zero: no radiation).
     emissivity: Vec<f64>,
+    /// Surface-to-surface exchange (else escape to the surroundings only)
+    /// and its patch tile edge, in faces.
+    surface_exchange: bool,
+    patch_size: usize,
     /// Rays per exposed face and stream seed of the radiation estimate.
     rays_per_face: usize,
     ray_seed: u64,
@@ -897,6 +901,28 @@ impl Scene {
             wall_seconds,
             transient: root.get("transient").map(Transient::parse).transpose()?,
             emissivity: emissivities,
+            surface_exchange: match root
+                .get("radiation")
+                .and_then(|r| r.get("surface_exchange"))
+            {
+                None => true,
+                Some(value) => match value {
+                    J::Bool(flag) => *flag,
+                    _ => return Err(bad("radiation.surface_exchange must be true or false")),
+                },
+            },
+            patch_size: match root.get("radiation") {
+                Some(r) => {
+                    let size = optional_number(r, "patch_size", "radiation")?.unwrap_or(4.0);
+                    if !(1.0..=1024.0).contains(&size) || size.fract() != 0.0 {
+                        return Err(bad(
+                            "radiation.patch_size must be a whole number in 1..=1024",
+                        ));
+                    }
+                    size as usize
+                }
+                None => 4,
+            },
             rays_per_face: match root.get("radiation") {
                 Some(r) => {
                     let rays = optional_number(r, "rays_per_face", "radiation")?.unwrap_or(256.0);
@@ -1013,6 +1039,8 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         let mut config = RadiationConfig::new(scene.emissivity.clone(), surroundings);
         config.rays_per_face = scene.rays_per_face;
         config.seed = scene.ray_seed;
+        config.surface_exchange = scene.surface_exchange;
+        config.patch_size = scene.patch_size;
         config
     });
     if radiation.is_some() && scene.transient.is_some() {
@@ -1266,9 +1294,10 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         if let Some((w, iterations, faces)) = radiated {
             let _ = write!(
                 out,
-                ",\"radiation\":{{\"radiated_w\":{},\"iterations\":{iterations},\"exposed_faces\":{faces},\"rays_per_face\":{}}}",
+                ",\"radiation\":{{\"radiated_w\":{},\"iterations\":{iterations},\"exposed_faces\":{faces},\"rays_per_face\":{},\"surface_exchange\":{}}}",
                 num(w)?,
-                scene.rays_per_face
+                scene.rays_per_face,
+                scene.surface_exchange
             );
         }
         out.push_str(",\"materials\":[");

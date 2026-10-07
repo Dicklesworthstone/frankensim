@@ -32,7 +32,7 @@ use fs_exec::CancelGate;
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
 use super::energy::{EnergyConfig, EnergySolution, ThermalFace, ThermalSetup, solve_energy};
 use super::flow::FlowField;
-use super::radiation::{RadiationConfig, escape_factors, radiated_power, radiative_sinks};
+use super::radiation::{RadiationConfig, Radiators};
 use super::simple::{FvFlow, SimpleConfig, Solver, Turbulence, admit};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
@@ -177,16 +177,15 @@ pub fn fv_natural_convection(
         });
     }
     let exposed = match &config.radiation {
-        Some(radiation) => Some(escape_factors(domain, solids, radiation, gate)?),
+        Some(radiation) => Some(Radiators::build(domain, solids, radiation, gate)?),
         None => None,
     };
     // Each energy solve carries the current radiative sinks and, with a
     // turbulence closure, the current eddy conductivity.
     let energy_setup = |temperature: &[f64], eddy_viscosity: &[f64]| {
         let mut step = setup.clone();
-        if let Some(faces) = &exposed {
-            step.cell_sinks
-                .extend(radiative_sinks(domain, faces, temperature));
+        if let Some(radiators) = &exposed {
+            step.cell_sinks.extend(radiators.sinks(domain, temperature));
         }
         if config.flow.turbulence != Turbulence::Laminar {
             step.eddy_conductivity_w_m_k = eddy_viscosity
@@ -286,7 +285,7 @@ pub fn fv_natural_convection(
     )?;
     let radiated_w = exposed
         .as_ref()
-        .map(|faces| radiated_power(domain, faces, &energy.temperature));
+        .map(|radiators| radiators.radiated(domain, &energy.temperature));
     Ok(FvNaturalConvection {
         flow,
         energy,

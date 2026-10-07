@@ -107,8 +107,8 @@ pub use flow::{
 };
 pub use natural::{BuoyancyConfig, NaturalConvection, NaturalConvectionReport, natural_convection};
 pub use radiation::{
-    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, escape_factors,
-    radiated_power, radiative_sinks, solve_energy_radiating,
+    ExposedFace, RadiationConfig, RadiationReport, STEFAN_BOLTZMANN, SurfaceExchange,
+    escape_factors, radiated_power, radiative_sinks, solve_energy_radiating,
 };
 pub use simple::{
     AMG_REBUILD_SWEEPS, FacePatch, FanCurve, FanInlet, FlowResistance, FvBoundary, FvFlow,

@@ -354,6 +354,58 @@ fn two_resistor_component_on_a_board_reports_its_junction() {
 }
 
 #[test]
+fn sealed_box_radiates_from_the_block_to_its_walls() {
+    // A heated block inside a sealed box whose 2 mm walls are an emissive
+    // solid held at 300 K from outside: no opening, so only surface-to-
+    // surface exchange can carry radiation, and it must cool the block.
+    let scene = |emissivity: f64| {
+        format!(
+            r#"{{
+ "schema": "frankensim.cooling-cht.v1",
+ "size_m": [0.02, 0.02, 0.02], "voxel_m": 0.002,
+ "materials": [
+  {{"name": "wall", "conductivity_w_m_k": 200.0, "emissivity": 0.9}},
+  {{"name": "block", "conductivity_w_m_k": 50.0, "emissivity": {emissivity}}}
+ ],
+ "solids": [
+  {{"material": "wall", "min_m": [0.0, 0.0, 0.0], "max_m": [0.002, 0.02, 0.02]}},
+  {{"material": "wall", "min_m": [0.018, 0.0, 0.0], "max_m": [0.02, 0.02, 0.02]}},
+  {{"material": "wall", "min_m": [0.0, 0.0, 0.0], "max_m": [0.02, 0.002, 0.02]}},
+  {{"material": "wall", "min_m": [0.0, 0.018, 0.0], "max_m": [0.02, 0.02, 0.02]}},
+  {{"material": "wall", "min_m": [0.0, 0.0, 0.0], "max_m": [0.02, 0.02, 0.002]}},
+  {{"material": "wall", "min_m": [0.0, 0.0, 0.018], "max_m": [0.02, 0.02, 0.02]}},
+  {{"material": "block", "min_m": [0.008, 0.008, 0.008], "max_m": [0.012, 0.012, 0.012]}}
+ ],
+ "sources": [{{"name": "block", "power_w": 0.2, "min_m": [0.008, 0.008, 0.008], "max_m": [0.012, 0.012, 0.012]}}],
+ "faces": {{
+  "x-": {{"type": "wall", "temperature_k": 300.0}}, "x+": {{"type": "wall", "temperature_k": 300.0}},
+  "y-": {{"type": "wall", "temperature_k": 300.0}}, "y+": {{"type": "wall", "temperature_k": 300.0}},
+  "z-": {{"type": "wall", "temperature_k": 300.0}}, "z+": {{"type": "wall", "temperature_k": 300.0}}
+ }},
+ "radiation": {{"rays_per_face": 512}}
+}}"#
+        )
+    };
+    let (code, dark, stderr) = run(&scratch("sealed-dark.json", &scene(0.0)));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, bright, stderr) = run(&scratch("sealed-bright.json", &scene(0.9)));
+    assert_eq!(code, 0, "{stderr}");
+    let (hot, cool) = (
+        f(&dark, &["max_solid_temperature_k"]),
+        f(&bright, &["max_solid_temperature_k"]),
+    );
+    assert!(cool < hot - 1.0, "radiating {cool} vs dark {hot}");
+    // Sealed: nothing reaches surroundings; the walls take it all.
+    assert!(f(&bright, &["radiation", "radiated_w"]).abs() < 1e-9);
+    assert_eq!(
+        bright.path(&["radiation", "surface_exchange"]),
+        Some(&J::Bool(true))
+    );
+    assert!(f(&bright, &["energy", "balance_relative_residual"]) < 1e-9);
+    assert!((f(&bright, &["energy", "boundary_outflow_w"]) - 0.2).abs() < 1e-6);
+}
+
+#[test]
 fn orthotropic_board_and_interface_resistance_reach_the_solver() {
     // A die (k 150) on a laminate (k 30 in-plane, 0.3 through) with a
     // 2e-4 m^2K/W interface, cooled from below: the joint and the weak

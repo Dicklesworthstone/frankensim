@@ -2052,6 +2052,92 @@ fn exposed_plate_radiates_by_the_stefan_boltzmann_law() {
 }
 
 #[test]
+fn sealed_enclosure_exchanges_by_the_two_surface_formula() {
+    // A convex 2 x 2 x 2-cell cube (eps 0.8, 1 W) inside a sealed shell
+    // (eps 0.5) held near 300 K, air made non-conducting: every ray from the
+    // cube is absorbed or reflected by the shell, so the gray two-surface
+    // enclosure law holds,
+    // P = sigma A1 (T1^4 - T2^4) / (1/eps1 + (A1/A2) (1/eps2 - 1)),
+    // exactly for a black shell and up to the shell's radiosity
+    // non-uniformity otherwise. Measured: black shell 1.5e-11, eps2 0.5
+    // 2.3e-6 (relative, in T1). The escape-only model sees no surroundings
+    // and radiates nothing.
+    let gate = CancelGate::new();
+    let (n, dx) = (8usize, 1e-2);
+    let domain = VoxelDomain::from_fn(n, n, n, dx, |p| {
+        let cell = p.map(|v| (v / dx).floor() as usize);
+        if cell.iter().any(|&c| c == 0 || c == n - 1) {
+            Voxel::Solid(0)
+        } else if cell.iter().all(|&c| (3..5).contains(&c)) {
+            Voxel::Solid(1)
+        } else {
+            Voxel::Fluid
+        }
+    })
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-12,
+        ..unit_fluid()
+    };
+    let solids = [
+        SolidMaterial::new("shell", 1e3),
+        SolidMaterial::new("cube", 1e4),
+    ];
+    let mut setup = ThermalSetup::new([ThermalFace::Temperature(300.0); 6]);
+    let power = 1.0;
+    setup.add_uniform_power(&domain, power, |p| {
+        p.iter().all(|&v| v > 3.0 * dx && v < 5.0 * dx)
+    });
+    let (eps1, eps2) = (0.8, 0.5);
+    let mut radiation = RadiationConfig::new(vec![eps2, eps1], [None; 6]);
+    radiation.rays_per_face = 1024;
+    let (solution, report) = solve_energy_radiating(
+        &domain,
+        &fluid,
+        &solids,
+        &FlowField::quiescent(&domain),
+        &setup,
+        &EnergyConfig::default(),
+        &radiation,
+        &gate,
+    )
+    .unwrap();
+    let cube = solution.temperature[domain.index(3, 3, 3)];
+    let shell = solution.temperature[domain.index(1, 0, 1)];
+    let (a1, a2) = (24.0 * dx * dx, 216.0 * dx * dx);
+    let resistance = 1.0 / eps1 + (a1 / a2) * (1.0 / eps2 - 1.0);
+    let exact = (power * resistance / (STEFAN_BOLTZMANN * a1) + shell.powi(4)).powf(0.25);
+    eprintln!(
+        "sealed enclosure: cube {cube:.6} K exact {exact:.6} K ({:+.2e}), shell {shell:.6}, patches {}, iterations {}",
+        cube / exact - 1.0,
+        report.patches,
+        report.iterations
+    );
+    assert!((cube / exact - 1.0).abs() < 1e-5, "{cube} vs {exact}");
+    assert!(
+        report.radiated_w.abs() < 1e-12,
+        "sealed: {}",
+        report.radiated_w
+    );
+    // The heat crosses the gap by radiation and leaves through the shell.
+    let balance = solution.report.balance;
+    assert!(
+        (balance.boundary_outflow_w - power).abs() < 1e-6 * power,
+        "{balance:?}"
+    );
+    assert!(balance.sink_outflow_w.abs() < 1e-6 * power, "{balance:?}");
+    // Without exchange there is no radiative path: the cube can only heat up
+    // until the (refused) Picard budget, or radiate nothing.
+    let mut escape_only = radiation.clone();
+    escape_only.surface_exchange = false;
+    assert!(
+        escape_factors(&domain, &solids, &escape_only, &gate)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn parallel_plate_escape_matches_the_analytic_view_factor() {
     // Two directly opposed 8 x 8 plates four cells apart, open on all four
     // sides: the lower plate's mean escape factor is 1 - F_12, with F_12 the

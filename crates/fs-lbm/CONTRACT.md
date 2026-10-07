@@ -1121,11 +1121,31 @@ starting from the linearization about the surroundings temperature.
 | Slab filling a box floor, five faces surroundings at 300 K, non-conducting air, 5 W | `F = 1` exactly; `T = (P / (eps sigma A) + T_amb^4)^(1/4)` | every escape factor 1.0; 433.501645484 K vs 433.501645484 K; 5.000000000 W radiated; 6 Newton iterations |
 | Two opposed 8 x 8 plates four cells apart, sides open | `1 - F_12`, `F_12` the closed-form aligned-rectangle view factor (X = Y = 2: 0.41525) | mean escape 0.58231 vs 0.58475 with 64 x 4096 rays; reruns bit-identical |
 
-No-claims: surface-to-surface exchange (fin to fin, solid to a warm wall)
-and wall re-radiation are not modelled: a ray hitting a solid or an opaque
-face is simply not escaping, exact when the obstructing surfaces are at the
-emitter's temperature. Transparent air, gray diffuse opaque surfaces,
-Monte Carlo escape factors.
+Surface-to-surface exchange (`RadiationConfig::surface_exchange`, the
+default; `SurfaceExchange`): the emitting faces are grouped into planar
+tiles of up to `patch_size x patch_size` faces of one material and
+orientation, and every ray ends where it is absorbed, on a patch or in the
+surroundings; non-emitting solids and opaque domain faces reflect it
+diffusely (re-radiating surfaces, at most `max_bounces` times). The Monte
+Carlo exchange `A_i F_ij` is averaged with `A_j F_ji` and then balanced
+symmetrically (`G = D S D`, symmetric Sinkhorn) so the factors are
+reciprocal AND every row sums to the emitter's own absorbed share:
+pairwise averaging alone broke the row sums, and clipping the negative
+self-views it produced biased the black-shell fixture below by 1 % in
+`T^4`. Patch irradiation solves the gray radiosity system by Gauss–Seidel;
+each face loses `eps A (sigma T^4 - H)`, Newton-linearized in its own
+temperature with `H` lagged. The net heat the surfaces lose equals what the
+surroundings receive (zero in a sealed box). The escape-only model remains
+available (`surface_exchange: false`); `fv_natural_convection` uses either.
+
+| Fixture (S2S) | Reference | Measured |
+|---|---|---|
+| Convex 2 x 2 x 2-cell cube (eps 0.8, 1 W) in a sealed 8^3 shell at 300 K, non-conducting air, 1024 rays per face, 48 patches | two-surface enclosure `P = sigma A1 (T1^4 - T2^4) / (1/eps1 + (A1/A2)(1/eps2 - 1))` | black shell: 1.5e-11 relative in T1; eps2 = 0.5: 2.3e-6 (the formula's uniform-radiosity assumption); radiated to surroundings 0 |
+
+No-claims: one irradiation per patch tile; opaque domain faces and
+non-emitting solids reflect perfectly (declare radiating enclosure walls as
+emissive solid cells); transparent air; gray diffuse opaque surfaces;
+Monte Carlo factors.
 
 ### Finite-volume natural convection (`fv_natural_convection`)
 
@@ -1152,9 +1172,9 @@ fluxes. This closes the LBM path's "closed enclosures only" boundary.
 | Same, Ra 1e4 | Nu = 2.243 | 2.2671 (1.1 %), 36 couplings |
 | Open vertical channel (chimney), isothermal plates 8 cells apart, Ra_b = 20, openings top and bottom | fully developed Elenbaas limit g beta dT b^3 / (12 nu) of the discrete stencil ((n^2 + 2) / n^2 x the continuum) | 0.9795 (L/b = 10), 0.9931 (L/b = 30): approaches from below; energy closure 1e-9; induced in/outflow equal to 1e-12 |
 
-No-claims: steady laminar Boussinesq only (an unsteady configuration refuses
-as `FlowNotSteady` rather than returning a time average), no radiation; the
-SIMPLEC no-claims apply.
+No-claims: steady Boussinesq only (an unsteady configuration refuses
+as `FlowNotSteady` rather than returning a time average); radiation only
+through `FvBuoyancyConfig::radiation`; the SIMPLEC no-claims apply.
 
 ### Worked example (`examples/heatsink_cht.rs`)
 
@@ -1262,8 +1282,8 @@ the central-moment operator the same duct diverged; it now refuses as
   domains through `fv_natural_convection`; turbulence only through the
   algebraic LVEL closure of the FV path; no open-boundary LBM natural
   convection or temperature-dependent properties;
-  radiation only as surface emission to the surroundings (no
-  surface-to-surface exchange). A natural-convection run that does not settle (for example
+  radiation only between gray diffuse surface patches and to the
+  surroundings (no participating media). A natural-convection run that does not settle (for example
   above the transition Rayleigh number) refuses as `FlowNotSteady`.
 - Staircase voxel geometry at the declared `dx`; one run makes no
   mesh-convergence claim. Power-law convection is first order where the
