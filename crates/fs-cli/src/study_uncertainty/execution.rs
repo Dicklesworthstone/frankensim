@@ -24,8 +24,21 @@ fn layout(model: &Model) -> Option<QmcConfig> {
     })
 }
 
+// Driver 44 atomically connects manufactured-state card queries to native
+// binding and the contact operator. An older driver must not silently sample
+// pressure/thickness while still solving a temperature-only contact law.
+fn admit_contact_inputs(model: &Model) -> Result<()> {
+    if crate::SOLVE_DRIVER_VERSION < 44 && model.bound.study().parameters().iter()
+        .any(|p| p.target.contact_axis().is_some()) {
+        return Err(fail("cli-uncertainty-contact-driver",
+            "contact-state uncertainty requires native joint-state lowering (solve driver 44 or newer)"));
+    }
+    Ok(())
+}
+
 impl Execution {
     pub(super) fn new(model: &Model) -> Result<Self> {
+        admit_contact_inputs(model)?;
         let plan = plan(model);
         if model.bound.study().sobol_sensitivity() {
             return SobolExecution::new(&plan).map(Self::SobolSensitivity)
@@ -42,6 +55,7 @@ impl Execution {
     }
 
     pub(super) fn restore(model: &Model, bytes: &[u8]) -> Result<Self> {
+        admit_contact_inputs(model)?;
         let plan = plan(model);
         if model.bound.study().sobol_sensitivity() {
             return SobolExecution::restore(&plan, model.identity(), bytes).map(Self::SobolSensitivity)

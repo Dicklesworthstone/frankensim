@@ -9,6 +9,11 @@ const CONTACT: &str = "temperature-max-contact-adjoint";
 /// output declarations remain unchanged. Repeating the choice is idempotent.
 pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter]) -> Result<()> {
     let boundary = parameters.iter().any(|p| p.target == Target::FixedTemperature && p.low != p.high);
+    let contact = parameters.iter().any(|p| p.target.contact_axis().is_some() && p.low != p.high);
+    if boundary && contact {
+        return Err(invalid("joint-state and fixed-temperature nominal controls need mutually exclusive native reports; use explicit coordinate-secant calibration for this combination"));
+    }
+    let desired = if contact { CONTACT } else if boundary { BOUNDARY } else { OUTPUT };
     let outputs = spec.outputs.get_or_insert_with(Vec::new);
     let requests: Vec<_> = outputs.iter().enumerate()
         .filter(|(_, row)| matches!(row.name.as_str(), OUTPUT | BOUNDARY | CONTACT))
@@ -20,9 +25,12 @@ pub(super) fn configure(spec: &mut ProjectSpec, parameters: &[UniformParameter])
         if boundary && outputs[i].name == CONTACT {
             return Err(invalid("fixed-temperature calibration needs temperature-max-boundary-adjoint, not the mutually exclusive contact report"));
         }
-        if boundary { outputs[i].name = BOUNDARY.into(); }
+        if contact && outputs[i].name == BOUNDARY {
+            return Err(invalid("joint-state calibration needs the contact report, not the mutually exclusive boundary report"));
+        }
+        if boundary || contact { outputs[i].name = desired.into(); }
     } else {
-        outputs.push(OutputRequest { name: if boundary { BOUNDARY } else { OUTPUT }.into(),
+        outputs.push(OutputRequest { name: desired.into(),
             kind: "report".into(), region: None });
     }
     Ok(())
@@ -80,5 +88,27 @@ mod tests {
         let mut project = base();
         project.outputs.as_mut().unwrap().push(OutputRequest { kind: "scalar".into(), ..request(BOUNDARY) });
         assert!(configure(&mut project, &[]).is_err());
+    }
+    #[test]
+    fn joint_calibration_selects_contact_only_and_preserves_physical_inputs() {
+        let contact = UniformParameter { name:"clamp".into(),entity:"cold-hot-joint".into(),
+            target:Target::ContactPressure,low:500000.0,high:1500000.0 };
+        for existing in [None,Some(OUTPUT),Some(CONTACT)] {
+            let mut project=base();
+            if let Some(name)=existing {project.outputs.as_mut().unwrap().push(request(name));}
+            let mut expected=project.clone();
+            if existing.is_some() {expected.outputs.as_mut().unwrap().last_mut().unwrap().name=CONTACT.into();}
+            else {expected.outputs.as_mut().unwrap().push(request(CONTACT));}
+            configure(&mut project,std::slice::from_ref(&contact)).unwrap();
+            assert_eq!(project,expected);
+            configure(&mut project,std::slice::from_ref(&contact)).unwrap();
+            assert_eq!(project,expected);
+        }
+        let mut project=base();let before=project.clone();
+        assert!(configure(&mut project,&[contact.clone(),parameter(false)]).is_err());
+        assert_eq!(project,before);
+        let mut constant=contact;constant.high=constant.low;
+        configure(&mut project,&[constant]).unwrap();
+        assert_eq!(project.outputs.unwrap().last().unwrap().name,OUTPUT);
     }
 }

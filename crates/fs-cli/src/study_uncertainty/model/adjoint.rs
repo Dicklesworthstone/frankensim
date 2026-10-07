@@ -6,6 +6,8 @@ use fs_project::uncertainty::{Target, UniformParameter};
 
 #[path = "adjoint/output.rs"]
 mod output;
+#[path = "adjoint/contact.rs"]
+mod contact;
 
 const OUTPUT: &str = "temperature-max-adjoint";
 
@@ -48,7 +50,9 @@ impl Model {
         let report = receipt.get("nominal_adjoint")
             .ok_or_else(|| invalid("nominal calibration did not produce its requested adjoint"))?;
         let region = &self.bound.base().requirements.as_ref().expect("bound requirement")[0].region;
-        coefficients(report, self.bound.study().parameters(), sample.value_k, region)
+        let mut gradient = coefficients(report, self.bound.study().parameters(), sample.value_k, region)?;
+        contact::convert(self, sample, report, &mut gradient)?;
+        Ok(gradient)
     }
 }
 
@@ -63,6 +67,10 @@ fn target_name(target: Target) -> &'static str {
         Target::FixedTemperature => "fixed-temperature",
         Target::NaturalConvectionAmbient => "natural-convection-ambient",
         Target::RadiationReservoirTemperature => "radiation-reservoir-temperature",
+        // These rows are normalized resistance controls until contact::convert
+        // contracts them with the actual card response at the sampled mean.
+        Target::ContactPressure | Target::ContactThickness | Target::ContactGap
+        | Target::ContactTorque => "contact-resistance-multiplier",
     }
 }
 
@@ -80,7 +88,8 @@ fn coefficients(report: &J, parameters: &[UniformParameter], nominal: f64, regio
         if p.low == p.high { return Ok(0.0); }
         let matches: Vec<_> = rows.iter().filter(|row| row.str_field("target") == Some(target_name(p.target))
             && row.str_field("entity") == Some(p.entity.as_str())).collect();
-        if matches.len() != 1 || matches[0].str_field("parameter_unit") != Some(p.target.unit()) {
+        let unit = if p.target.contact_axis().is_some() { "1" } else { p.target.unit() };
+        if matches.len() != 1 || matches[0].str_field("parameter_unit") != Some(unit) {
             return Err(invalid(format!("nominal adjoint has missing, ambiguous or wrong-unit derivative for {}", p.name)));
         }
         matches[0].f64_field("derivative").filter(|v| v.is_finite())
