@@ -16,6 +16,45 @@
 //!
 //! Deterministic for a fixed build and ISA; exact residual accounting uses
 //! `fs-ivl` expansions and `fs-math` error-free transforms.
+//!
+//! ## Multivariate proof-carrying optimization (plan §9.8)
+//!
+//! - [`mpoly`]: multivariate polynomials over `f64` ([`MPoly`]) and over
+//!   outward-rounded intervals ([`IPoly`]), graded monomial bases, and
+//!   interval-enclosed Lie derivatives.
+//! - [`sdp`]: an in-house primal–dual interior-point solver (HKM direction,
+//!   Mehrotra predictor–corrector) for block SDPs with free variables.
+//! - [`program`]: SOS programs — scalar / free-polynomial / SOS decisions and
+//!   polynomial identities — lowered to the block SDP, with a CENTRED solve
+//!   that maximizes a uniform Gram margin for certification.
+//! - [`verify`]: the theorem-maker. Residuals are enclosed with interval
+//!   arithmetic and absorbed into a slack Gram matrix; positive definiteness
+//!   is proved by the interval Cholesky method (Alefeld–Mayer). The SDP is
+//!   untrusted: a wrong numerical answer can only produce a refusal.
+//! - [`global`]: Lasserre/Putinar relaxations returning a certified
+//!   enclosure `lower ≤ min p ≤ upper` with moment-based minimizer
+//!   extraction.
+//! - [`roa`]: SOS Lyapunov certificates of regions of attraction for
+//!   polynomial dynamics — "stable" as a proven set.
+
+mod dense;
+pub mod global;
+pub mod mpoly;
+pub mod program;
+pub mod roa;
+pub mod sdp;
+pub mod verify;
+
+pub use global::{GlobalBound, GlobalError, GlobalOptions, minimize};
+pub use mpoly::{IPoly, MPoly, Monomial, lie_derivative, monomials_in_degree_range};
+pub use program::{
+    Decision, DecisionId, DecisionKind, DecisionValue, Identity, SosError, SosProgram, SosSolution,
+};
+pub use roa::{
+    RoaCertificate, RoaError, RoaOptions, certify_roa, certify_roa_with, solve_lyapunov,
+};
+pub use sdp::{SdpError, SdpProblem, SdpRow, SdpSettings, SdpSolution, SdpStatus};
+pub use verify::{Certificate, VerifyError, interval_cholesky_pd, verify};
 
 /// A univariate polynomial, coefficients ascending (`coeffs[i]` multiplies `xⁱ`).
 #[derive(Debug, Clone, PartialEq)]
